@@ -1081,4 +1081,18 @@ TEST_F(JsonFamilyTest, Set) {
   EXPECT_EQ(resp, R"([{"a":2,"b":8,"c":[1,2,3]}])");
 }
 
+TEST_F(JsonFamilyTest, MSet) {
+  string json = R"(
+    {"a":{"a":1, "b":2, "c":3}}
+  )";
+
+  auto resp = Run({"JSON.MSET", "j1", "$"});
+  EXPECT_THAT(resp, ErrArg("wrong number"));
+  resp = Run({"JSON.MSET", "j1", "$", json, "j3", "$"});
+  EXPECT_THAT(resp, ErrArg("wrong number"));
+
+  resp = Run({"JSON.MSET", "j1", "$", json, "j3", "$", json});
+  EXPECT_EQ(resp, "OK");
+}
+
 }  // namespace dfly

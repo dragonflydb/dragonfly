@@ -208,8 +208,8 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShar
     shard_index[sid].key_step = key_index.step;
 
     add(sid, i);
-    DCHECK_LE(key_index.step, 2u);
-    if (key_index.step == 2) {  // Handle value associated with preceding key.
+    // Handle values associated with preceding key.
+    for (unsigned j = 1; j < key_index.step; ++j) {
       add(sid, ++i);
     }
   }
@@ -333,8 +333,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 
   shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
-  DCHECK(key_index.step == 1 || key_index.step == 2);
-  DCHECK(key_index.step != 2 || (full_args_.size() % 2) == 0);
+  DCHECK_EQ(full_args_.size() % key_index.step, 0u);
 
   // Safe, because flow below is not preemptive.
   auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());
@@ -1578,7 +1577,15 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     } else {
       key_index.end = last > 0 ? last : (int(args.size()) + last + 1);
     }
-    key_index.step = cid->opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1;
+    if (cid->opt_mask() & CO::INTERLEAVED_KEYS) {
+      if (cid->name() == "JSON.MSET") {
+        key_index.step = 3;
+      } else {
+        key_index.step = 2;
+      }
+    } else {
+      key_index.step = 1;
+    }
 
     if (cid->opt_mask() & CO::STORE_LAST_KEY) {
       string_view name{cid->name()};
