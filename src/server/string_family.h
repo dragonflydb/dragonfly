@@ -76,6 +76,10 @@ class SetCmd {
   void AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
               std::string_view key, std::string_view value);
 
+  // Called at the end of AddNew of SetExisting
+  void PostEdit(const SetParams& params, std::string_view key, std::string_view value,
+                PrimeValue* pv);
+
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
 
   OpStatus CachePrevIfNeeded(const SetParams& params, DbSlice::Iterator it);

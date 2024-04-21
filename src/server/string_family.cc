@@ -631,15 +631,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   // overwrite existing entry.
   prime_value.SetString(value);
 
-  // Currently we always offload
-  if (shard->tiered_storage_v2()) {
-    shard->tiered_storage_v2()->Stash(key, &it->second);
-  }
-
-  if (manual_journal_ && op_args_.shard->journal()) {
-    RecordJournal(params, key, value);
-  }
-
+  PostEdit(params, key, value, &prime_value);
   return OpStatus::OK;
 }
 
@@ -665,9 +657,16 @@ void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpI
     it->first.SetSticky(true);
   }
 
+  PostEdit(params, key, value, &it->second);
+}
+
+void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string_view value,
+                      PrimeValue* pv) {
+  EngineShard* shard = op_args_.shard;
+
   // Currently we always offload
-  if (shard->tiered_storage_v2()) {
-    shard->tiered_storage_v2()->Stash(key, &it->second);
+  if (auto* ts = shard->tiered_storage_v2(); ts && ts->ShouldStash(*pv)) {
+    ts->Stash(key, pv);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
