@@ -991,8 +991,6 @@ void SMove(CmdArgList args, ConnectionContext* cntx) {
   string_view member = ArgS(args, 2);
 
   Mover mover{src, dest, member, true};
-  cntx->transaction->Schedule();
-
   mover.Find(cntx->transaction);
 
   OpResult<unsigned> result = mover.Commit(cntx->transaction);
@@ -1149,7 +1147,6 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
     return OpStatus::OK;
   };
 
-  cntx->transaction->Schedule();
   cntx->transaction->Execute(std::move(diff_cb), false);
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
@@ -1290,7 +1287,6 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
     return OpStatus::OK;
   };
 
-  cntx->transaction->Schedule();
   cntx->transaction->Execute(std::move(inter_cb), false);
 
   OpResult<SvArray> result = InterResultVec(result_set, inter_shard_cnt.load(memory_order_relaxed));
@@ -1378,7 +1374,6 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
     return OpStatus::OK;
   };
 
-  cntx->transaction->Schedule();
   cntx->transaction->Execute(std::move(union_cb), false);
 
   ResultSetView unionset = UnionResultVec(result_set);

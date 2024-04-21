@@ -96,7 +96,6 @@ TEST_F(BlockingControllerTest, Timeout) {
   bool blocked;
   bool paused;
 
-  trans_->Schedule();
   auto cb = [&](Transaction* t, EngineShard* shard) { return trans_->GetShardArgs(0); };
 
   facade::OpStatus status = trans_->WaitOnWatch(

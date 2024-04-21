@@ -1313,7 +1313,6 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool skip_exist_des
     return result;
   }
 
-  transaction->Schedule();
   unsigned shard_count = shard_set->size();
   Renamer renamer{Shard(key[0], shard_count)};
 

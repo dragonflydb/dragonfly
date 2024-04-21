@@ -722,7 +722,6 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
     };
     result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   } else {
-    cntx->transaction->Schedule();
     result = MoveTwoShards(cntx->transaction, src, dest, src_dir, dest_dir, true);
   }
 
@@ -833,8 +832,6 @@ BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir
 OpResult<string> BPopPusher::Run(ConnectionContext* cntx, unsigned limit_ms) {
   time_point tp =
       limit_ms ? chrono::steady_clock::now() + chrono::milliseconds(limit_ms) : time_point::max();
-
-  cntx->transaction->Schedule();
 
   if (cntx->transaction->GetUniqueShardCnt() == 1) {
     return RunSingle(cntx, tp);

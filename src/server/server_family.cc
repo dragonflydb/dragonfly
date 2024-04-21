@@ -1425,8 +1425,6 @@ bool ServerFamily::TEST_IsSaving() const {
 error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   VLOG(1) << "Drakarys";
 
-  transaction->Schedule();  // TODO: to convert to ScheduleSingleHop ?
-
   transaction->Execute(
       [db_ind](Transaction* t, EngineShard* shard) {
         shard->db_slice().FlushDb(db_ind);

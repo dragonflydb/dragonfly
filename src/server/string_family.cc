@@ -1243,8 +1243,6 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
 void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
 
-  transaction->Schedule();
-
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {

@@ -1158,7 +1158,6 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
     return OpStatus::OK;
   };
 
-  cntx->transaction->Schedule();
   cntx->transaction->Execute(std::move(shard_bitop), false);  // we still have more work to do
   // All result from each shard
   const auto joined_results = CombineResultOp(result_set, op);

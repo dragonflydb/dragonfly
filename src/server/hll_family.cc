@@ -263,7 +263,6 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
   };
 
   Transaction* trans = cntx->transaction;
-  trans->Schedule();
   trans->Execute(std::move(cb), false);
 
   if (!success) {
