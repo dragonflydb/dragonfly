@@ -123,6 +123,9 @@ ABSL_FLAG(bool, s3_ec2_metadata, false,
 ABSL_FLAG(bool, s3_sign_payload, true,
           "whether to sign the s3 request payload when uploading snapshots");
 
+ABSL_FLAG(bool, info_replication_valkey_compatible, false,
+          "when true - output valkey compatible values for info-replication");
+
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
@@ -2156,7 +2159,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       }
       append("master_replid", master_replid_);
     } else {
-      append("role", "replica");
+      append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
       // The replica pointer can still be mutated even while master=true,
       // we don't want to drop the replica object in this fiber
@@ -2634,13 +2637,14 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
   } else {
     unique_lock lk{replicaof_mu_};
     rb->StartArray(4 + cluster_replicas_.size() * 3);
-    rb->SendBulkString("replica");
+    rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
     auto send_replica_info = [rb](Replica::Info rinfo) {
       rb->SendBulkString(rinfo.host);
       rb->SendBulkString(absl::StrCat(rinfo.port));
       if (rinfo.full_sync_done) {
-        rb->SendBulkString("stable_sync");
+        rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "online"
+                                                                             : "stable_sync");
       } else if (rinfo.full_sync_in_progress) {
         rb->SendBulkString("full_sync");
       } else if (rinfo.master_link_established) {
