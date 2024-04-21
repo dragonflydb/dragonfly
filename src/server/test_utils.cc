@@ -81,7 +81,6 @@ void TransactionSuspension::Start() {
   auto st = transaction_->InitByArgs(0, {});
   CHECK_EQ(st, OpStatus::OK);
 
-  transaction_->Schedule();
   transaction_->Execute([](Transaction* t, EngineShard* shard) { return OpStatus::OK; }, false);
 }
 

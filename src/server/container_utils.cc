@@ -272,7 +272,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     else
       result = res.status();
   } else {
-    trans->Schedule();
     result = FindFirstNonEmpty(trans, req_obj_type);
   }
 

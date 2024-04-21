@@ -441,8 +441,6 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  cntx->transaction->Schedule();
-
   // Check if index already exists
   atomic_uint exists_cnt = 0;
   cntx->transaction->Execute(

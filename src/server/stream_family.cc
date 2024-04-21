@@ -3045,7 +3045,7 @@ void XReadGeneric(CmdArgList args, bool read_group, ConnectionContext* cntx) {
     res_pairs[sid] = OpGetGroupConsumerPairs(s_args, t->GetOpArgs(shard), gc_opts);
     return OpStatus::OK;
   };
-  cntx->transaction->Schedule();
+
   if (opts->read_group) {
     // If the command is `XReadGroup`, we need to get
     // the (group, consumer) pairs for each key.

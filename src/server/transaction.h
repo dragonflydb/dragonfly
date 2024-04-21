@@ -43,10 +43,6 @@ using facade::OpStatus;
 // The shards to run on are determined by the keys of the underlying command.
 // Global transactions run on all shards.
 //
-// Use ScheduleSingleHop() if only a single hop is needed.
-// Otherwise, schedule the transaction with Schedule() and run successive hops
-// with Execute().
-//
 // 1. Multi transactions
 //
 // Multi transactions are handled by a single transaction, which exposes the same interface for
@@ -183,11 +179,6 @@ class Transaction {
 
   // Map arg_index from GetShardArgs slice to index in original command slice from InitByArgs.
   size_t ReverseArgIndex(ShardId shard_id, size_t arg_index) const;
-
-  // Schedule transaction.
-  // Usually used for multi hop transactions like RENAME or BLPOP.
-  // For single hop transactions use ScheduleSingleHop instead.
-  void Schedule();
 
   // Execute transaction hop. If conclude is true, it is removed from the pending queue.
   void Execute(RunnableType cb, bool conclude);
@@ -500,7 +491,6 @@ class Transaction {
   // "Launder" keys by filtering uniques and replacing pointers with same lifetime as transaction.
   void LaunderKeyStorage(CmdArgVec* keys);
 
-  // Generic schedule used from Schedule() and ScheduleSingleHop() on slow path.
   void ScheduleInternal();
 
   // Schedule on shards transaction queue. Returns true if scheduled successfully,

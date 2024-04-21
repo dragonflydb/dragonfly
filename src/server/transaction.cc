@@ -834,10 +834,6 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
   return local_result_;
 }
 
-void Transaction::Schedule() {
-  // no-op
-}
-
 // Runs in coordinator thread.
 void Transaction::Execute(RunnableType cb, bool conclude) {
   if (multi_ && multi_->role == SQUASHED_STUB) {

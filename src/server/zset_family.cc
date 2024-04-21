@@ -1207,8 +1207,6 @@ void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) 
     return OpStatus::OK;
   };
 
-  cntx->transaction->Schedule();
-
   // For commands not storing computed result, this should be
   // the last transaction hop (e.g. ZUNION)
   cntx->transaction->Execute(std::move(cb), !store);
@@ -2014,7 +2012,6 @@ void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
     return OpStatus::OK;
   };
 
-  cntx->transaction->Schedule();
   cntx->transaction->Execute(std::move(cb), false);
 
   OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
@@ -2814,7 +2811,7 @@ void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, s
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   ShardId from_shard = Shard(key, shard_set->size());
-  cntx->transaction->Schedule();
+
   if (!member.empty()) {
     // get shape.xy from member
     OpResult<double> member_score;
