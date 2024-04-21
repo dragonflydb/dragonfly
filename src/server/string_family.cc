@@ -177,45 +177,6 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
   return ExtendExisting(op_args, it_res->it, key, val, prepend);
 }
 
-OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_hit = false,
-                              const DbSlice::ExpireParams& exp_params = {}) {
-  auto res = op_args.shard->db_slice().FindAndFetchMutable(op_args.db_cntx, key);
-  res.post_updater.Run();
-
-  if (!IsValid(res.it))
-    return OpStatus::KEY_NOTFOUND;
-
-  if (res.it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
-
-  const PrimeValue& pv = res.it->second;
-
-  if (del_hit) {
-    string key_bearer = GetString(pv);
-
-    DVLOG(1) << "Del: " << key;
-    auto& db_slice = op_args.shard->db_slice();
-
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, res.it));
-
-    return key_bearer;
-  }
-
-  /*Get value before expire*/
-  string ret_val = GetString(pv);
-
-  if (exp_params.IsDefined()) {
-    DVLOG(1) << "Expire: " << key;
-    auto& db_slice = op_args.shard->db_slice();
-    OpStatus status =
-        db_slice.UpdateExpire(op_args.db_cntx, res.it, res.exp_it, exp_params).status();
-    if (status != OpStatus::OK)
-      return status;
-  }
-
-  return ret_val;
-}
-
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
   auto& db_slice = op_args.shard->db_slice();
 
@@ -876,8 +837,8 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
       return it_res.status();
 
     auto value = StringValue::Read(key, it_res->it->second, es);
+    it_res->post_updater.Run();  // Run manually before delete
     es->db_slice().Del(tx->GetDbIndex(), it_res->it);
-    it_res->post_updater.Cancel();
     return value;
   };
 
@@ -941,6 +902,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
   }
 }
 
+// With tieringV2 support
 void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
@@ -984,12 +946,23 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringValue> {
     auto op_args = t->GetOpArgs(shard);
-    auto result = OpMutableGet(op_args, key, false, exp_params);
+
+    auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
+    if (!it_res)
+      return it_res.status();
+
+    StringValue value = StringValue::Read(key, it_res->it->second, shard);
+
+    if (exp_params.IsDefined()) {
+      it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
+      RETURN_ON_BAD_STATUS(op_args.shard->db_slice().UpdateExpire(op_args.db_cntx, it_res->it,
+                                                                  it_res->exp_it, exp_params));
+    }
 
     // Replicate GETEX as PEXPIREAT or PERSIST
-    if (result.ok() && shard->journal()) {
+    if (shard->journal()) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
       } else {
@@ -999,25 +972,10 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
       }
     }
 
-    return result;
+    return value;
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
-
-  OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (result)
-    return rb->SendBulkString(*result);
-
-  switch (result.status()) {
-    case OpStatus::WRONG_TYPE:
-      rb->SendError(kWrongTypeErr);
-      break;
-    default:
-      DVLOG(1) << "GET " << key << " nil";
-      rb->SendNull();
-  }
+  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
