@@ -70,7 +70,7 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
 }  // namespace
 
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
-                 std::optional<SlotRange> slot_range)
+                 std::optional<cluster::SlotRange> slot_range)
     : ProtocolClient(std::move(host), port), service_(*se), id_{id}, slot_range_(slot_range) {
   proactor_ = ProactorBase::me();
 }

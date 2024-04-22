@@ -9,7 +9,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "generic_family.h"
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -60,8 +60,8 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
 
   stats.AddTypeMemoryUsage(type, size);
 
-  if (ClusterConfig::IsEnabled()) {
-    db->slots_stats[ClusterConfig::KeySlot(key)].memory_bytes += size;
+  if (cluster::IsClusterEnabled()) {
+    db->slots_stats[cluster::ClusterKeySlot(key)].memory_bytes += size;
   }
 }
 
@@ -204,7 +204,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     // log the evicted keys to journal.
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       ArgSlice delete_args(&key, 1);
-      journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1, ClusterConfig::KeySlot(key),
+      journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1, cluster::ClusterKeySlot(key),
                            make_pair("DEL", delete_args), false);
     }
 
@@ -301,7 +301,7 @@ auto DbSlice::GetStats() const -> Stats {
   return s;
 }
 
-SlotStats DbSlice::GetSlotStats(SlotId sid) const {
+SlotStats DbSlice::GetSlotStats(cluster::SlotId sid) const {
   CHECK(db_arr_[0]);
   return db_arr_[0]->slots_stats[sid];
 }
@@ -528,8 +528,8 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
-      if (ClusterConfig::IsEnabled()) {
-        db.slots_stats[ClusterConfig::KeySlot(key)].total_reads++;
+      if (cluster::IsClusterEnabled()) {
+        db.slots_stats[cluster::ClusterKeySlot(key)].total_reads++;
       }
       break;
   }
@@ -661,8 +661,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   events_.garbage_checked += evp.checked();
 
   memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
-  if (ClusterConfig::IsEnabled()) {
-    SlotId sid = ClusterConfig::KeySlot(key);
+  if (cluster::IsClusterEnabled()) {
+    cluster::SlotId sid = cluster::ClusterKeySlot(key);
     db.slots_stats[sid].key_count += 1;
   }
 
@@ -703,7 +703,7 @@ bool DbSlice::Del(DbIndex db_ind, Iterator it) {
   return true;
 }
 
-void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
+void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlotsFb
   // was made. Therefore we delete slots entries with version < next_version
@@ -712,7 +712,7 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   std::string tmp;
   auto del_entry_cb = [&](PrimeTable::iterator it) {
     std::string_view key = it->first.GetSlice(&tmp);
-    SlotId sid = ClusterConfig::KeySlot(key);
+    cluster::SlotId sid = cluster::ClusterKeySlot(key);
     if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
       PerformDeletion(Iterator::FromPrime(it), db_arr_[0].get());
     }
@@ -765,8 +765,8 @@ void DbSlice::FlushSlotsFb(const SlotSet& slot_ids) {
   etl.DecommitMemory(ServerState::kDataHeap);
 }
 
-void DbSlice::FlushSlots(SlotRanges slot_ranges) {
-  SlotSet slot_set(slot_ranges);
+void DbSlice::FlushSlots(cluster::SlotRanges slot_ranges) {
+  cluster::SlotSet slot_set(slot_ranges);
   InvalidateSlotWatches(slot_set);
   fb2::Fiber("flush_slots", [this, slot_set = std::move(slot_set)]() mutable {
     FlushSlotsFb(slot_set);
@@ -1075,8 +1075,8 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
 
   ++events_.update;
 
-  if (ClusterConfig::IsEnabled()) {
-    db.slots_stats[ClusterConfig::KeySlot(key)].total_writes += 1;
+  if (cluster::IsClusterEnabled()) {
+    db.slots_stats[cluster::ClusterKeySlot(key)].total_writes += 1;
   }
 
   SendInvalidationTrackingMessage(key);
@@ -1333,7 +1333,7 @@ finish:
   if (auto journal = owner_->journal(); journal) {
     for (string_view key : keys_to_journal) {
       ArgSlice delete_args(&key, 1);
-      journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, ClusterConfig::KeySlot(key),
+      journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, cluster::ClusterKeySlot(key),
                            make_pair("DEL", delete_args), false);
     }
   }
@@ -1466,9 +1466,9 @@ void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
   }
 }
 
-void DbSlice::InvalidateSlotWatches(const SlotSet& slot_ids) {
+void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
   for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
-    SlotId sid = ClusterConfig::KeySlot(key);
+    cluster::SlotId sid = cluster::ClusterKeySlot(key);
     if (!slot_ids.Contains(sid)) {
       continue;
     }
@@ -1583,8 +1583,8 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
     --stats.listpack_blob_cnt;
   }
 
-  if (ClusterConfig::IsEnabled()) {
-    SlotId sid = ClusterConfig::KeySlot(del_it.key());
+  if (cluster::IsClusterEnabled()) {
+    cluster::SlotId sid = cluster::ClusterKeySlot(del_it.key());
     table->slots_stats[sid].key_count -= 1;
   }
 

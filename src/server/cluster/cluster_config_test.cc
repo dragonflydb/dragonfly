@@ -16,7 +16,7 @@ using namespace std;
 using namespace testing;
 using Node = dfly::ClusterNodeInfo;
 
-namespace dfly {
+namespace dfly::cluster {
 
 MATCHER_P(NodeMatches, expected, "") {
   return arg.id == expected.id && arg.ip == expected.ip && arg.port == expected.port;
@@ -558,4 +558,4 @@ TEST_F(ClusterConfigTest, InvalidConfigMigrationsWithoutIP) {
   EXPECT_EQ(config, nullptr);
 }
 
-}  // namespace dfly
+}  // namespace dfly::cluster

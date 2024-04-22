@@ -35,7 +35,7 @@ class Journal {
   LSN GetLsn() const;
 
   void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                   std::optional<SlotId> slot, Entry::Payload payload, bool await);
+                   std::optional<cluster::SlotId> slot, Entry::Payload payload, bool await);
 
  private:
   mutable util::fb2::Mutex state_mu_;

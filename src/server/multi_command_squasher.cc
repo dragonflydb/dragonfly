@@ -53,7 +53,7 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(
-    ShardId sid, optional<SlotId> slot_id) {
+    ShardId sid, optional<cluster::SlotId> slot_id) {
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
@@ -89,7 +89,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   // Check if all commands belong to one shard
   bool found_more = false;
-  UniqueSlotChecker slot_checker;
+  cluster::UniqueSlotChecker slot_checker;
   ShardId last_sid = kInvalidSid;
   IterateKeys(args, *keys, [&last_sid, &found_more, &slot_checker](MutableSlice key) {
     if (found_more)

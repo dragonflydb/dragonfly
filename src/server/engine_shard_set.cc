@@ -17,7 +17,7 @@ extern "C" {
 #include "base/logging.h"
 #include "io/proc_reader.h"
 #include "server/blocking_controller.h"
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -865,7 +865,7 @@ void EngineShardSet::TEST_EnableCacheMode() {
 }
 
 ShardId Shard(string_view v, ShardId shard_num) {
-  if (ClusterConfig::IsShardedByTag()) {
+  if (cluster::IsClusterShardedByTag()) {
     v = LockTagOptions::instance().Tag(v);
   }
 

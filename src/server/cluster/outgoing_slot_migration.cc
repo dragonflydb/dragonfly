@@ -23,7 +23,7 @@ using namespace std;
 using namespace facade;
 using namespace util;
 
-namespace dfly {
+namespace dfly::cluster {
 
 class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  public:
@@ -221,4 +221,4 @@ std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
   return {};
 }
 
-}  // namespace dfly
+}  // namespace dfly::cluster

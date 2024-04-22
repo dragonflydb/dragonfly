@@ -7,9 +7,9 @@
 #include <optional>
 #include <string_view>
 
-#include "server/cluster/slot_set.h"
+#include "server/cluster/cluster_defs.h"
 
-namespace dfly {
+namespace dfly::cluster {
 
 // A simple utility class that "aggregates" SlotId-s and can tell whether all inputs were the same.
 // Only works when cluster is enabled.
@@ -24,4 +24,4 @@ class UniqueSlotChecker {
   std::optional<SlotId> slot_id_;
 };
 
-}  // namespace dfly
+}  // namespace dfly::cluster

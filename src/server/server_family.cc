@@ -549,13 +549,13 @@ std::string_view GetOSString() {
 }
 
 string_view GetRedisMode() {
-  return ClusterConfig::IsEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
+  return cluster::IsClusterEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
 }
 
 struct ReplicaOfArgs {
   string host;
   uint16_t port;
-  std::optional<SlotRange> slot_range;
+  std::optional<cluster::SlotRange> slot_range;
   static optional<ReplicaOfArgs> FromCmdArgs(CmdArgList args, ConnectionContext* cntx);
   bool IsReplicaOfNoOne() const {
     return port == 0;
@@ -588,8 +588,8 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionCo
       return nullopt;
     }
     if (parser.HasNext()) {
-      auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
-      replicaof_args.slot_range = SlotRange{slot_start, slot_end};
+      auto [slot_start, slot_end] = parser.Next<cluster::SlotId, cluster::SlotId>();
+      replicaof_args.slot_range = cluster::SlotRange{slot_start, slot_end};
       if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
         cntx->SendError("Invalid slot range");
         return nullopt;
@@ -2258,7 +2258,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 #endif
 
   if (should_enter("CLUSTER")) {
-    append("cluster_enabled", ClusterConfig::IsEnabledOrEmulated());
+    append("cluster_enabled", cluster::IsClusterEnabledOrEmulated());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->SendVerbatimString(info);

@@ -18,7 +18,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -269,7 +269,7 @@ void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {
 void RecordExpiry(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
-  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, ClusterConfig::KeySlot(key),
+  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, cluster::ClusterKeySlot(key),
                        make_pair("DEL", ArgSlice{key}), false);
 }
 

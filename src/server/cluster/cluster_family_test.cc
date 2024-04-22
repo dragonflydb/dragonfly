@@ -18,7 +18,7 @@
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 
-namespace dfly {
+namespace dfly::cluster {
 namespace {
 
 using namespace std;
@@ -395,7 +395,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   absl::InsecureBitGen eng;
   while (true) {
     string random_key = GetRandomHex(eng, 40);
-    SlotId slot = ClusterConfig::KeySlot(random_key);
+    SlotId slot = ClusterKeySlot(random_key);
     if (slot > 10'000) {
       continue;
     }
@@ -407,7 +407,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
 
   while (true) {
     string random_key = GetRandomHex(eng, 40);
-    SlotId slot = ClusterConfig::KeySlot(random_key);
+    SlotId slot = ClusterKeySlot(random_key);
     if (slot <= 10'000) {
       continue;
     }
@@ -429,7 +429,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
   ConfigSingleNodeCluster(GetMyId());
 
   constexpr string_view kKey = "some-key";
-  const SlotId slot = ClusterConfig::KeySlot(kKey);
+  const SlotId slot = ClusterKeySlot(kKey);
   EXPECT_NE(slot, 0) << "We need to choose another key";
 
   const string value(1'000, '#');  // Long string - to use heap
@@ -740,4 +740,4 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {
 }
 
 }  // namespace
-}  // namespace dfly
+}  // namespace dfly::cluster

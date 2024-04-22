@@ -67,7 +67,7 @@ void JournalExecutor::FlushAll() {
   Execute(cmd);
 }
 
-void JournalExecutor::FlushSlots(const SlotRange& slot_range) {
+void JournalExecutor::FlushSlots(const cluster::SlotRange& slot_range) {
   auto cmd = BuildFromParts("DFLYCLUSTER", "FLUSHSLOTS", slot_range.start, slot_range.end);
   Execute(cmd);
 }

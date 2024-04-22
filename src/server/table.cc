@@ -6,7 +6,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/server_state.h"
 
 ABSL_FLAG(bool, enable_top_keys_tracking, false,
@@ -86,8 +86,8 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
       mcflag(0, detail::ExpireTablePolicy{}, mr),
       top_keys({.enabled = absl::GetFlag(FLAGS_enable_top_keys_tracking)}),
       index(db_index) {
-  if (ClusterConfig::IsEnabled()) {
-    slots_stats.resize(ClusterConfig::kMaxSlotNum + 1);
+  if (cluster::IsClusterEnabled()) {
+    slots_stats.resize(cluster::kMaxSlotNum + 1);
   }
   thread_index = ServerState::tlocal()->thread_index();
 }
