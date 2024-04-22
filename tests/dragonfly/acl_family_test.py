@@ -341,7 +341,7 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     assert "user default on nopass +@ALL +ALL ~*" in result
 
     result = await client.execute_command("ACL DELUSER shahar")
-    assert result == b"OK"
+    assert result == 1
 
     result = await client.execute_command("ACL SAVE")
 
