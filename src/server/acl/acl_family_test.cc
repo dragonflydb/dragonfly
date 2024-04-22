@@ -245,7 +245,7 @@ TEST_F(AclFamilyTest, TestCat) {
 TEST_F(AclFamilyTest, TestGetUser) {
   TestInitAclFam();
   auto resp = Run({"ACL", "GETUSER", "kostas"});
-  EXPECT_THAT(resp, ErrArg("ERR User: kostas does not exists!"));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"ACL", "GETUSER", "default"});
   const auto& vec = resp.GetVec();

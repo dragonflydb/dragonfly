@@ -473,8 +473,8 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
   if (!registry.contains(username)) {
-    auto error = absl::StrCat("User: ", username, " does not exists!");
-    cntx->SendError(error);
+    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendNull();
     return;
   }
   auto& user = registry.find(username)->second;
@@ -571,7 +571,8 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto msg = absl::StrCat("This user has no permissions to run the '", command, "' command");
-  cntx->SendSimpleString(msg);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendBulkString(msg);
 }
 
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
