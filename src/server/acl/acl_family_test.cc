@@ -64,10 +64,10 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl deluser' command"));
 
   resp = Run({"ACL", "DELUSER", "default"});
-  EXPECT_THAT(resp, ErrArg("ERR The'default' user cannot be removed"));
+  EXPECT_THAT(resp, ErrArg("ERR The 'default' user cannot be removed"));
 
   resp = Run({"ACL", "DELUSER", "NOTEXISTS"});
-  EXPECT_THAT(resp, ErrArg("ERR User NOTEXISTS does not exist"));
+  EXPECT_THAT(resp.GetInt(), 0);
 
   resp = Run({"ACL", "SETUSER", "kostas", "ON"});
   EXPECT_THAT(resp, "OK");
@@ -76,7 +76,10 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl deluser' command"));
 
   resp = Run({"ACL", "DELUSER", "kostas"});
-  EXPECT_THAT(resp, "OK");
+  EXPECT_THAT(resp.GetInt(), 1);
+
+  resp = Run({"ACL", "DELUSER", "kostas"});
+  EXPECT_THAT(resp.GetInt(), 0);
 
   resp = Run({"ACL", "LIST"});
   EXPECT_THAT(resp.GetString(), "user default on nopass +@ALL +ALL ~*");
@@ -134,7 +137,7 @@ TEST_F(AclFamilyTest, AclWhoAmI) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "WHOAMI"});
-  EXPECT_THAT(resp, "User is kostas");
+  EXPECT_THAT(resp, "kostas");
 }
 
 TEST_F(AclFamilyTest, TestAllCategories) {
@@ -158,7 +161,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
-      EXPECT_THAT(resp, "OK");
+      EXPECT_THAT(resp.GetInt(), 1);
     }
   }
 
@@ -205,7 +208,7 @@ TEST_F(AclFamilyTest, TestAllCommands) {
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
-      EXPECT_THAT(resp, "OK");
+      EXPECT_THAT(resp.GetInt(), 1);
     }
   }
 }
@@ -242,7 +245,7 @@ TEST_F(AclFamilyTest, TestCat) {
 TEST_F(AclFamilyTest, TestGetUser) {
   TestInitAclFam();
   auto resp = Run({"ACL", "GETUSER", "kostas"});
-  EXPECT_THAT(resp, ErrArg("ERR User: kostas does not exists!"));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"ACL", "GETUSER", "default"});
   const auto& vec = resp.GetVec();
@@ -278,10 +281,10 @@ TEST_F(AclFamilyTest, TestDryRun) {
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl dryrun' command"));
 
   resp = Run({"ACL", "DRYRUN", "kostas", "more"});
-  EXPECT_THAT(resp, ErrArg("ERR User: kostas does not exists!"));
+  EXPECT_THAT(resp, ErrArg("ERR User 'kostas' not found"));
 
   resp = Run({"ACL", "DRYRUN", "default", "nope"});
-  EXPECT_THAT(resp, ErrArg("ERR Command: NOPE does not exists!"));
+  EXPECT_THAT(resp, ErrArg("ERR Command 'NOPE' not found"));
 
   resp = Run({"ACL", "DRYRUN", "default", "SET"});
   EXPECT_THAT(resp, "OK");
@@ -293,7 +296,7 @@ TEST_F(AclFamilyTest, TestDryRun) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "DRYRUN", "kostas", "SET"});
-  EXPECT_THAT(resp, ErrArg("ERR User: kostas is not allowed to execute command: SET"));
+  EXPECT_THAT(resp, "This user has no permissions to run the 'SET' command");
 }
 
 TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {
@@ -350,7 +353,7 @@ TEST_F(AclFamilyTestRename, AclRename) {
   EXPECT_THAT(resp.GetString(), "OK");
 
   resp = Run({"ROCKS", "DELUSER", "billy"});
-  EXPECT_THAT(resp.GetString(), "OK");
+  EXPECT_THAT(resp.GetInt(), 1);
 }
 
 TEST_F(AclFamilyTest, TestKeys) {
