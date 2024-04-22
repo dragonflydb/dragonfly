@@ -12,12 +12,14 @@
 #include <chrono>
 #include <cstdint>
 #include <tuple>
+#include <variant>
 
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
+#include "facade/reply_builder.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
@@ -173,45 +175,6 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
   }
 
   return ExtendExisting(op_args, it_res->it, key, val, prepend);
-}
-
-OpResult<string> OpMutableGet(const OpArgs& op_args, string_view key, bool del_hit = false,
-                              const DbSlice::ExpireParams& exp_params = {}) {
-  auto res = op_args.shard->db_slice().FindAndFetchMutable(op_args.db_cntx, key);
-  res.post_updater.Run();
-
-  if (!IsValid(res.it))
-    return OpStatus::KEY_NOTFOUND;
-
-  if (res.it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
-
-  const PrimeValue& pv = res.it->second;
-
-  if (del_hit) {
-    string key_bearer = GetString(pv);
-
-    DVLOG(1) << "Del: " << key;
-    auto& db_slice = op_args.shard->db_slice();
-
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, res.it));
-
-    return key_bearer;
-  }
-
-  /*Get value before expire*/
-  string ret_val = GetString(pv);
-
-  if (exp_params.IsDefined()) {
-    DVLOG(1) << "Expire: " << key;
-    auto& db_slice = op_args.shard->db_slice();
-    OpStatus status =
-        db_slice.UpdateExpire(op_args.db_cntx, res.it, res.exp_it, exp_params).status();
-    if (status != OpStatus::OK)
-      return status;
-  }
-
-  return ret_val;
 }
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
@@ -501,29 +464,53 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   return response;
 }
 
-// Either string or future from tiered storage
-struct StringValue {
-  StringValue() : v_{} {
-  }
-  StringValue(std::string s) : v_{std::move(s)} {
-  }
-  StringValue(util::fb2::Future<std::string> f) : v_{std::move(f)} {
+// Helper for building replies for strings
+struct StringReplies {
+  StringReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
+    DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
   }
 
-  std::string Get() && {
-    DCHECK(!holds_alternative<monostate>(v_));
-
-    auto prev = exchange(v_, monostate{});
-    if (holds_alternative<string>(prev))
-      return std::move(std::get<string>(prev));
-    return std::get<util::fb2::Future<std::string>>(prev).get();
+  void Send(OpResult<StringValue>&& res) const {
+    switch (res.status()) {
+      case OpStatus::OK:
+        return Send(std::move(res.value()));
+      case OpStatus::WRONG_TYPE:
+        return rb->SendError(kWrongTypeErr);
+      default:
+        rb->SendNull();
+    }
   }
 
- private:
-  std::variant<std::monostate, std::string, util::fb2::Future<std::string>> v_;
+  void Send(StringValue&& val) const {
+    if (val.IsEmpty()) {
+      rb->SendNull();
+    } else {
+      rb->SendBulkString(std::move(val).Get());
+    }
+  }
+
+  RedisReplyBuilder* rb;
 };
 
 }  // namespace
+
+StringValue StringValue::Read(string_view key, const PrimeValue& pv, EngineShard* es) {
+  return pv.IsExternal() ? StringValue{es->tiered_storage_v2()->Read(key, pv)}
+                         : StringValue(GetString(pv));
+}
+
+string StringValue::Get() && {
+  DCHECK(!holds_alternative<monostate>(v_));
+
+  auto prev = exchange(v_, monostate{});
+  if (holds_alternative<string>(prev))
+    return std::move(std::get<string>(prev));
+  return std::get<util::fb2::Future<std::string>>(prev).get();
+}
+
+bool StringValue::IsEmpty() const {
+  return holds_alternative<monostate>(v_);
+}
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
   auto& db_slice = op_args_.shard->db_slice();
@@ -597,14 +584,15 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   prime_value.SetFlag(params.memcache_flags != 0);
   db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
 
-  // overwrite existing entry.
-  prime_value.SetString(value);
-  DCHECK(!prime_value.HasIoPending());
-
-  if (manual_journal_ && op_args_.shard->journal()) {
-    RecordJournal(params, key, value);
+  // If value is external, mark it as deleted
+  if (prime_value.IsExternal() || prime_value.HasIoPending()) {
+    shard->tiered_storage_v2()->Delete(key, &prime_value);
   }
 
+  // overwrite existing entry.
+  prime_value.SetString(value);
+
+  PostEdit(params, key, value, &prime_value);
   return OpStatus::OK;
 }
 
@@ -630,14 +618,16 @@ void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpI
     it->first.SetSticky(true);
   }
 
-  if (shard->tiered_storage() &&
-      TieredStorage::EligibleForOffload(value.size())) {  // external storage enabled.
-    shard->tiered_storage()->ScheduleOffloadWithThrottle(op_args_.db_cntx.db_index, it.GetInnerIt(),
-                                                         key);
-  }
+  PostEdit(params, key, value, &it->second);
+}
 
-  if (shard->tiered_storage_v2()) {  // external storage enabled
-    shard->tiered_storage_v2()->Stash(key, &it->second);
+void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string_view value,
+                      PrimeValue* pv) {
+  EngineShard* shard = op_args_.shard;
+
+  // Currently we always offload
+  if (auto* ts = shard->tiered_storage_v2(); ts && ts->ShouldStash(*pv)) {
+    ts->Stash(key, pv);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -676,7 +666,7 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  *params.prev_val = GetString(it->second);
+  *params.prev_val = StringValue::Read(it.key(), it->second, EngineShard::tlocal());
   return OpStatus::OK;
 }
 
@@ -691,6 +681,7 @@ OpStatus SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams, s
   });
 }
 
+// With tieringV2 support
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
 
@@ -766,7 +757,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     return builder->SendError(kSyntaxErr);
   }
 
-  optional<string> prev;
+  StringValue prev;
   if (sparams.flags & SetCmd::SET_GET)
     sparams.prev_val = &prev;
 
@@ -777,14 +768,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    // When SET_GET is used, the reply is not affected by whether anything was set.
-    if (prev.has_value()) {
-      rb->SendBulkString(*prev);
-    } else {
-      rb->SendNull();
-    }
-    return;
+    return StringReplies{cntx->reply_builder()}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OK) {
@@ -832,88 +816,94 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
 }
 
+// With tieringV2 support
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
     auto it_res = es->db_slice().FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
-    if (const PrimeValue& pv = (*it_res)->second; pv.IsExternal()) {
-      return {es->tiered_storage_v2()->Read(key, pv)};
-    } else {
-      std::string buf;
-      pv.GetString(&buf);
-      return {std::move(buf)};
-    }
+    return StringValue::Read(key, (*it_res)->second, es);
   };
 
-  auto res = cntx->transaction->ScheduleSingleHopT(cb);
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  switch (res.status()) {
-    case OpStatus::OK:
-      rb->SendBulkString(std::move(res.value()).Get());
-      break;
-    case OpStatus::WRONG_TYPE:
-      rb->SendError(kWrongTypeErr);
-      break;
-    default:
-      rb->SendNull();
-  }
+  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
+// With tieringV2 support
 void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
+  auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
+    auto it_res = es->db_slice().FindMutable(tx->GetDbContext(), key, OBJ_STRING);
+    if (!it_res.ok())
+      return it_res.status();
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    bool run_del = true;
-    return OpMutableGet(t->GetOpArgs(shard), key, run_del);
+    auto value = StringValue::Read(key, it_res->it->second, es);
+    it_res->post_updater.Run();  // Run manually before delete
+    es->db_slice().Del(tx->GetDbIndex(), it_res->it);
+    return value;
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
-
-  Transaction* trans = cntx->transaction;
-  OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (result) {
-    DVLOG(1) << "GET " << trans->DebugId() << ": " << key << " " << result.value();
-    rb->SendBulkString(*result);
-  } else {
-    switch (result.status()) {
-      case OpStatus::WRONG_TYPE:
-        rb->SendError(kWrongTypeErr);
-        break;
-      default:
-        DVLOG(1) << "GET " << key << " nil";
-        rb->SendNull();
-    }
-  }
+  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
+// With tieringV2 support
 void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
-  std::optional<string> prev_val;
 
+  StringValue prev;
   SetCmd::SetParams sparams;
-  sparams.prev_val = &prev_val;
-  OpStatus status = SetGeneric(cntx, sparams, key, value);
+  sparams.prev_val = &prev;
 
-  if (status != OpStatus::OK) {
-    cntx->SendError(status);
-    return;
+  if (OpStatus status = SetGeneric(cntx, sparams, key, value); status != OpStatus::OK) {
+    return cntx->SendError(status);
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (prev_val) {
-    rb->SendBulkString(*prev_val);
-    return;
-  }
-
-  return rb->SendNull();
+  StringReplies{cntx->reply_builder()}.Send(std::move(prev));
 }
 
+void StringFamily::Append(CmdArgList args, ConnectionContext* cntx) {
+  ExtendGeneric(args, false, cntx);
+}
+
+void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
+  ExtendGeneric(args, true, cntx);
+}
+
+void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view sval = ArgS(args, 1);
+  VLOG(2) << "ExtendGeneric(" << key << ", " << sval << ")";
+
+  if (cntx->protocol() == Protocol::REDIS) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return ExtendOrSet(t->GetOpArgs(shard), key, sval, prepend);
+    };
+
+    OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+    if (!result)
+      return cntx->SendError(result.status());
+    else
+      return cntx->SendLong(result.value());
+  } else {
+    // Memcached skips if key is missing
+    DCHECK(cntx->protocol() == Protocol::MEMCACHE);
+
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return ExtendOrSkip(t->GetOpArgs(shard), key, sval, prepend);
+    };
+
+    OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+    SinkReplyBuilder* builder = cntx->reply_builder();
+
+    if (result.value_or(false)) {
+      return builder->SendStored();
+    }
+
+    builder->SendSetSkipped();
+  }
+}
+
+// With tieringV2 support
 void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
@@ -957,12 +947,23 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringValue> {
     auto op_args = t->GetOpArgs(shard);
-    auto result = OpMutableGet(op_args, key, false, exp_params);
+
+    auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
+    if (!it_res)
+      return it_res.status();
+
+    StringValue value = StringValue::Read(key, it_res->it->second, shard);
+
+    if (exp_params.IsDefined()) {
+      it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
+      RETURN_ON_BAD_STATUS(op_args.shard->db_slice().UpdateExpire(op_args.db_cntx, it_res->it,
+                                                                  it_res->exp_it, exp_params));
+    }
 
     // Replicate GETEX as PEXPIREAT or PERSIST
-    if (result.ok() && shard->journal()) {
+    if (shard->journal()) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
       } else {
@@ -972,25 +973,10 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
       }
     }
 
-    return result;
+    return value;
   };
 
-  DVLOG(1) << "Before Get::ScheduleSingleHopT " << key;
-
-  OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (result)
-    return rb->SendBulkString(*result);
-
-  switch (result.status()) {
-    case OpStatus::WRONG_TYPE:
-      rb->SendError(kWrongTypeErr);
-      break;
-    default:
-      DVLOG(1) << "GET " << key << " nil";
-      rb->SendNull();
-  }
+  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
@@ -1053,14 +1039,6 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
   return IncrByGeneric(key, -val, cntx);
 }
 
-void StringFamily::Append(CmdArgList args, ConnectionContext* cntx) {
-  ExtendGeneric(std::move(args), false, cntx);
-}
-
-void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
-  ExtendGeneric(std::move(args), true, cntx);
-}
-
 void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext* cntx) {
   bool skip_on_missing = cntx->protocol() == Protocol::MEMCACHE;
 
@@ -1091,38 +1069,6 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
       reinterpret_cast<RedisReplyBuilder*>(builder)->SendError(result.status());
       break;
   }
-}
-
-void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
-  VLOG(2) << "ExtendGeneric(" << key << ", " << sval << ")";
-
-  if (cntx->protocol() == Protocol::REDIS) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSet(t->GetOpArgs(shard), key, sval, prepend);
-    };
-
-    OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-    if (!result)
-      return cntx->SendError(result.status());
-    else
-      return cntx->SendLong(result.value());
-  }
-  DCHECK(cntx->protocol() == Protocol::MEMCACHE);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return ExtendOrSkip(t->GetOpArgs(shard), key, sval, prepend);
-  };
-
-  OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  SinkReplyBuilder* builder = cntx->reply_builder();
-
-  if (result.value_or(false)) {
-    return builder->SendStored();
-  }
-
-  builder->SendSetSkipped();
 }
 
 /// (P)SETEX key seconds value

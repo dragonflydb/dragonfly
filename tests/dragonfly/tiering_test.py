@@ -32,9 +32,6 @@ async def test_tiering_simple(async_client: aioredis.Redis):
         assert len(await async_client.execute_command("GET", key)) == 3000
     assert (await async_client.info("TIERED_V2"))["tiered_v2_total_fetches"] == 100
 
-    # Store again
-    await async_client.eval(fill_script, 0)
-
     # Wait to be deleted
     with async_timeout.timeout(1):
         while (await async_client.info("TIERED_V2"))["tiered_v2_allocated_bytes"] > 0:

@@ -7,6 +7,7 @@
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "util/fibers/future.h"
 #include "util/proactor_pool.h"
 
 namespace dfly {
@@ -15,6 +16,28 @@ class ConnectionContext;
 class CommandRegistry;
 using facade::OpResult;
 using facade::OpStatus;
+
+// Stores a string, the pending result of a tiered read or nothing
+struct StringValue {
+  StringValue() : v_{} {
+  }
+  StringValue(std::string s) : v_{std::move(s)} {
+  }
+  StringValue(util::fb2::Future<std::string> f) : v_{std::move(f)} {
+  }
+
+  // Get and consume value. If backed by a future, blocks until resolved.
+  std::string Get() &&;
+
+  // If no value is stored
+  bool IsEmpty() const;
+
+  // Read string from prime value - either from memory or issue tiered storage read
+  static StringValue Read(std::string_view key, const PrimeValue& pv, EngineShard* es);
+
+ private:
+  std::variant<std::monostate, std::string, util::fb2::Future<std::string>> v_;
+};
 
 // Helper for performing SET operations with various options
 class SetCmd {
@@ -36,8 +59,8 @@ class SetCmd {
   struct SetParams {
     uint16_t flags = SET_ALWAYS;
     uint16_t memcache_flags = 0;
-    uint64_t expire_after_ms = 0;  // Relative value based on now. 0 means no expiration.
-    std::optional<std::string>* prev_val = nullptr;  // If set, previous value is stored at pointer
+    uint64_t expire_after_ms = 0;     // Relative value based on now. 0 means no expiration.
+    StringValue* prev_val = nullptr;  // If set, previous value is stored at pointer
 
     constexpr bool IsConditionalSet() const {
       return flags & SET_IF_NOTEXIST || flags & SET_IF_EXISTS;
@@ -52,6 +75,10 @@ class SetCmd {
 
   void AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
               std::string_view key, std::string_view value);
+
+  // Called at the end of AddNew of SetExisting
+  void PostEdit(const SetParams& params, std::string_view key, std::string_view value,
+                PrimeValue* pv);
 
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
 

@@ -28,7 +28,10 @@ class SmallBins;
 class TieredStorageV2 {
   class ShardOpManager;
 
-  const static size_t kMinValueSize = tiering::kPageSize / 2;
+  const static size_t kMinValueSize = 64;
+
+  // Min sizes of values taking up full page on their own
+  const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
  public:
   explicit TieredStorageV2(DbSlice* db_slice);
@@ -48,6 +51,9 @@ class TieredStorageV2 {
 
   // Delete value. Must either have pending IO or be offloaded (of external type)
   void Delete(std::string_view key, PrimeValue* value);
+
+  // Returns if a value should be stashed
+  bool ShouldStash(const PrimeValue& pv);
 
   TieredStatsV2 GetStats() const;
 

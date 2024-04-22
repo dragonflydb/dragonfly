@@ -807,14 +807,17 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
       pv->SetIoPending(false);
   }
 
-  // Find entry by key and store it's up-to-date value in place of external segment
-  void SetInMemory(std::string_view key, std::string_view value) {
-    if (auto pv = Find(key); pv) {
+  // Find entry by key and store it's up-to-date value in place of external segment.
+  // Returns false if the value is outdated, true otherwise
+  bool SetInMemory(std::string_view key, std::string_view value, tiering::DiskSegment segment) {
+    if (auto pv = Find(key); pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
       pv->Reset();  // TODO: account for memory
       pv->SetString(value);
 
       stats_.total_fetches++;
+      return true;
     }
+    return false;
   }
 
   void ReportStashed(EntryId id, tiering::DiskSegment segment) override {
@@ -833,10 +836,11 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     if (!cache_fetched_)
       return;
 
-    SetInMemory(get<string_view>(id), value);
+    if (!SetInMemory(get<string_view>(id), value, segment))
+      return;
 
     // Delete value
-    if (segment.length >= TieredStorageV2::kMinValueSize) {
+    if (segment.length >= TieredStorageV2::kMinOccupancySize) {
       Delete(segment);
     } else {
       if (auto bin_segment = ts_->bins_->Delete(segment); bin_segment)
@@ -887,11 +891,13 @@ util::fb2::Future<std::string> TieredStorageV2::Read(string_view key, const Prim
 }
 
 void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
+  DCHECK(!value->IsExternal() && !value->HasIoPending());
+
   string buf;
   string_view value_sv = value->GetSlice(&buf);
   value->SetIoPending(true);
 
-  if (value->Size() >= kMinValueSize) {
+  if (value->Size() >= kMinOccupancySize) {
     if (auto ec = op_manager_->Stash(key, value_sv); ec)
       value->SetIoPending(false);
   } else if (auto bin = bins_->Stash(key, value_sv); bin) {
@@ -904,18 +910,25 @@ void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
 void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
   if (value->IsExternal()) {
     tiering::DiskSegment segment = value->GetExternalSlice();
-    if (segment.length >= kMinValueSize) {
+    if (segment.length >= kMinOccupancySize) {
       op_manager_->Delete(segment);
     } else if (auto bin = bins_->Delete(segment); bin) {
       op_manager_->Delete(*bin);
     }
+    value->Reset();
   } else {
-    if (value->Size() >= kMinValueSize) {
+    DCHECK(value->HasIoPending());
+    if (value->Size() >= kMinOccupancySize) {
       op_manager_->Delete(key);
     } else if (auto bin = bins_->Delete(key); bin) {
       op_manager_->Delete(*bin);
     }
+    value->SetIoPending(false);
   }
+}
+
+bool TieredStorageV2::ShouldStash(const PrimeValue& pv) {
+  return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize;
 }
 
 TieredStatsV2 TieredStorageV2::GetStats() const {
