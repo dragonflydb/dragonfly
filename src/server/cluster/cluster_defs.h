@@ -76,11 +76,10 @@ enum class MigrationState : uint8_t {
   C_CONNECTING,
   C_SYNC,
   C_FINISHED,
-  C_CANCELLED,
   C_MAX_INVALID = std::numeric_limits<uint8_t>::max()
 };
 
-SlotId ClusterKeySlot(std::string_view key);
+SlotId KeySlot(std::string_view key);
 
 void InitializeCluster();
 bool IsClusterEnabled();

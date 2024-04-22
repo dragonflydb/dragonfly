@@ -717,7 +717,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
       // <key_prefix>:<from+total_count+num_of_keys-1> and continue until num_of_keys are added.
 
       // Add keys only in slot range.
-      cluster::SlotId sid = cluster::ClusterKeySlot(key);
+      cluster::SlotId sid = cluster::KeySlot(key);
       if (sid < options.slot_range->start || sid > options.slot_range->end) {
         ++index;
         continue;

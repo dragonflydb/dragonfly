@@ -47,7 +47,7 @@ bool IsClusterEmulated() {
   return cluster_mode == ClusterMode::kEmulatedCluster;
 }
 
-SlotId ClusterKeySlot(std::string_view key) {
+SlotId KeySlot(std::string_view key) {
   string_view tag = LockTagOptions::instance().Tag(key);
   return crc16(tag.data(), tag.length()) & kMaxSlotNum;
 }

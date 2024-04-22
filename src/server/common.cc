@@ -269,7 +269,7 @@ void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {
 void RecordExpiry(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
-  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, cluster::ClusterKeySlot(key),
+  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, cluster::KeySlot(key),
                        make_pair("DEL", ArgSlice{key}), false);
 }
 

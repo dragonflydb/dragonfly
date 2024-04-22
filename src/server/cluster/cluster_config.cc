@@ -1,14 +1,12 @@
+#include "cluster_config.h"
+
 #include <absl/container/flat_hash_set.h>
 
 #include <jsoncons/json.hpp>
 #include <optional>
-#include <shared_mutex>
 #include <string_view>
 
-//#include "absl/strings/match.h"
-#include "base/flags.h"
 #include "base/logging.h"
-#include "cluster_config.h"
 #include "core/json/json_object.h"
 
 using namespace std;
@@ -311,7 +309,7 @@ bool ClusterConfig::IsMySlot(SlotId id) const {
 }
 
 bool ClusterConfig::IsMySlot(std::string_view key) const {
-  return IsMySlot(ClusterKeySlot(key));
+  return IsMySlot(KeySlot(key));
 }
 
 ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {

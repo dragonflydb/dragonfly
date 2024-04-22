@@ -11,7 +11,7 @@ void UniqueSlotChecker::Add(std::string_view key) {
     return;
   }
 
-  Add(ClusterKeySlot(key));
+  Add(KeySlot(key));
 }
 
 void UniqueSlotChecker::Add(SlotId slot_id) {

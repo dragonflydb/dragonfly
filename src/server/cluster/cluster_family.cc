@@ -354,7 +354,7 @@ void ClusterFamily::KeySlot(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(WrongNumArgsError("CLUSTER KEYSLOT"));
   }
 
-  SlotId id = ClusterKeySlot(ArgS(args, 1));
+  SlotId id = cluster::KeySlot(ArgS(args, 1));
   return cntx->SendLong(id);
 }
 
@@ -657,8 +657,6 @@ static string_view StateToStr(MigrationState state) {
       return "SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
-    case MigrationState::C_CANCELLED:
-      return "CANCELLED"sv;
     case MigrationState::C_MAX_INVALID:
       break;
   }

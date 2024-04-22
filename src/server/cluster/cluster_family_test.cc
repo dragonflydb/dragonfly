@@ -395,7 +395,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
   absl::InsecureBitGen eng;
   while (true) {
     string random_key = GetRandomHex(eng, 40);
-    SlotId slot = ClusterKeySlot(random_key);
+    SlotId slot = KeySlot(random_key);
     if (slot > 10'000) {
       continue;
     }
@@ -407,7 +407,7 @@ TEST_F(ClusterFamilyTest, ClusterConfigFullMultipleInstances) {
 
   while (true) {
     string random_key = GetRandomHex(eng, 40);
-    SlotId slot = ClusterKeySlot(random_key);
+    SlotId slot = KeySlot(random_key);
     if (slot <= 10'000) {
       continue;
     }
@@ -429,7 +429,7 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
   ConfigSingleNodeCluster(GetMyId());
 
   constexpr string_view kKey = "some-key";
-  const SlotId slot = ClusterKeySlot(kKey);
+  const SlotId slot = KeySlot(kKey);
   EXPECT_NE(slot, 0) << "We need to choose another key";
 
   const string value(1'000, '#');  // Long string - to use heap

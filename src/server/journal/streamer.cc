@@ -130,7 +130,7 @@ bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
 }
 
 bool RestoreStreamer::ShouldWrite(std::string_view key) const {
-  return ShouldWrite(cluster::ClusterKeySlot(key));
+  return ShouldWrite(cluster::KeySlot(key));
 }
 
 bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
