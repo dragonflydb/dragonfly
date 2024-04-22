@@ -34,6 +34,9 @@ class OpManager {
   // Schedule read for offloaded entry that will resolve the future
   util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment);
 
+  // Modify offloaded entry, does not change stored value, but affects succeeding reads
+  void Modify(EntryId id, DiskSegment segment, std::function<void(std::string*)> modf);
+
   // Delete entry with pending io
   void Delete(EntryId id);
 
@@ -48,9 +51,13 @@ class OpManager {
   virtual void ReportStashed(EntryId id, DiskSegment segment) = 0;
 
   // Report that an entry was successfully fetched
-  virtual void ReportFetched(EntryId id, std::string_view value, DiskSegment segment) = 0;
+  virtual void ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
+                             bool modified) = 0;
 
  protected:
+  using EntryAction =
+      std::variant<util::fb2::Future<std::string>, std::function<void(std::string*)>>;
+
   // Describes pending futures for a single entry
   struct EntryOps {
     EntryOps(OwnedEntryId id, DiskSegment segment) : id{std::move(id)}, segment{segment} {
@@ -58,7 +65,7 @@ class OpManager {
 
     OwnedEntryId id;
     DiskSegment segment;
-    absl::InlinedVector<util::fb2::Future<std::string>, 1> futures;
+    absl::InlinedVector<EntryAction, 1> actions;
   };
 
   // Describes an ongoing read operation for a fixed segment

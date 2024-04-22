@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/strings/str_cat.h"
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
 #include "server/tiering/test_common.h"
@@ -30,11 +31,12 @@ struct OpManagerTest : PoolTestBase, OpManager {
     EXPECT_EQ(unlink("op_manager_test_backing"), 0);
   }
 
-  void ReportStashed(EntryId id, DiskSegment segment) {
+  void ReportStashed(EntryId id, DiskSegment segment) override {
     stashed_[id] = segment;
   }
 
-  void ReportFetched(EntryId id, std::string_view value, DiskSegment segment) {
+  void ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
+                     bool modified) override {
     fetched_[id] = value;
   }
 
@@ -112,6 +114,32 @@ TEST_F(OpManagerTest, ReadSamePageDifferentOffsets) {
 
     for (size_t i = 0; i < 100; i++)
       EXPECT_EQ(futures[i].Get(), std::to_string(i));
+
+    Close();
+  });
+}
+
+TEST_F(OpManagerTest, Modify) {
+  pp_->at(0)->Await([this] {
+    Open();
+
+    Stash(0u, "D");
+    while (stashed_.empty())
+      util::ThisFiber::SleepFor(1ms);
+
+    // Atomically issue sequence of modify-read operations
+    std::vector<util::fb2::Future<std::string>> futures;
+    for (size_t i = 0; i < 10; i++) {
+      Modify(0u, stashed_[0u], [i](std::string* v) { absl::StrAppend(v, i); });
+      futures.emplace_back(Read(0u, stashed_[0u]));
+    }
+
+    // Expect futures to resolve with correct values
+    std::string expected = "D";
+    for (size_t i = 0; i < futures.size(); i++) {
+      absl::StrAppend(&expected, i);
+      EXPECT_EQ(futures[i].get(), expected);
+    }
 
     Close();
   });

@@ -830,14 +830,14 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  void ReportFetched(EntryId id, std::string_view value, tiering::DiskSegment segment) override {
+  void ReportFetched(EntryId id, std::string_view value, tiering::DiskSegment segment,
+                     bool modified) override {
     DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
 
-    if (!cache_fetched_)
+    if (!modified && !cache_fetched_)
       return;
 
-    if (!SetInMemory(get<string_view>(id), value, segment))
-      return;
+    SetInMemory(get<string_view>(id), value, segment);
 
     // Delete value
     if (segment.length >= TieredStorageV2::kMinOccupancySize) {

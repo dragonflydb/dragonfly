@@ -4,10 +4,13 @@
 
 #include "server/tiering/op_manager.h"
 
+#include <variant>
+
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "io/io.h"
 #include "server/tiering/common.h"
+#include "util/fibers/future.h"
 
 namespace dfly::tiering {
 
@@ -34,8 +37,14 @@ void OpManager::Close() {
 }
 
 util::fb2::Future<std::string> OpManager::Read(EntryId id, DiskSegment segment) {
+  util::fb2::Future<std::string> future;
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
-  return PrepareRead(segment.FillPages()).ForId(id, segment).futures.emplace_back();
+  PrepareRead(segment.FillPages()).ForId(id, segment).actions.emplace_back(future);
+  return future;
+}
+
+void OpManager::Modify(EntryId id, DiskSegment segment, std::function<void(std::string*)> modf) {
+  PrepareRead(segment.FillPages()).ForId(id, segment).actions.emplace_back(std::move(modf));
 }
 
 void OpManager::Delete(EntryId id) {
@@ -94,13 +103,22 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
 void OpManager::ProcessRead(size_t offset, std::string_view value) {
   ReadOp* info = &pending_reads_.at(offset);
 
+  std::string key_value;
+
+  Overloaded action_resolver{
+      [&key_value](util::fb2::Future<std::string>& fut) { fut.Resolve(key_value); },
+      [&key_value](std::function<void(std::string*)>& modf) { modf(&key_value); }};
+
   for (auto& ko : info->key_ops) {
-    auto key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+    key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+    bool modified = false;
 
-    for (auto& fut : ko.futures)
-      fut.Resolve(std::string{key_value});
+    for (auto& action : ko.actions) {
+      std::visit(action_resolver, action);
+      modified |= std::holds_alternative<std::function<void(std::string*)>>(action);
+    }
 
-    ReportFetched(Borrowed(ko.id), key_value, ko.segment);
+    ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified);
   }
 
   if (info->delete_requested)
