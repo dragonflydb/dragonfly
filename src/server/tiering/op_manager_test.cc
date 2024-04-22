@@ -58,7 +58,7 @@ TEST_F(OpManagerTest, SimpleStashesWithReads) {
     for (unsigned i = 0; i < 100; i++) {
       EXPECT_GE(stashed_[i].offset, i > 0);
       EXPECT_EQ(stashed_[i].length, 10 + (i > 9));
-      EXPECT_EQ(Read(i, stashed_[i]).get(), absl::StrCat("VALUE", i, "real"));
+      EXPECT_EQ(Read(i, stashed_[i]).Get(), absl::StrCat("VALUE", i, "real"));
       EXPECT_EQ(fetched_.extract(i).mapped(), absl::StrCat("VALUE", i, "real"));
     }
 
@@ -80,7 +80,7 @@ TEST_F(OpManagerTest, DeleteAfterReads) {
     Delete(stashed_[0u]);
 
     for (auto& fut : reads)
-      EXPECT_EQ(fut.get(), "DATA");
+      EXPECT_EQ(fut.Get(), "DATA");
 
     Close();
   });
@@ -111,7 +111,7 @@ TEST_F(OpManagerTest, ReadSamePageDifferentOffsets) {
       futures.emplace_back(Read(absl::StrCat("k", i), number_segments[i]));
 
     for (size_t i = 0; i < 100; i++)
-      EXPECT_EQ(futures[i].get(), std::to_string(i));
+      EXPECT_EQ(futures[i].Get(), std::to_string(i));
 
     Close();
   });
