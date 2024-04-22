@@ -11,63 +11,10 @@
 #include "src/server/cluster/slot_set.h"
 #include "src/server/common.h"
 
-namespace dfly {
-
-// MigrationState constants are ordered in state changing order
-enum class MigrationState : uint8_t {
-  C_NO_STATE,
-  C_CONNECTING,
-  C_SYNC,
-  C_FINISHED,
-  C_CANCELLED,
-  C_MAX_INVALID = std::numeric_limits<uint8_t>::max()
-};
-
-struct ClusterNodeInfo {
-  std::string id;
-  std::string ip;
-  uint16_t port = 0;
-};
-
-struct MigrationInfo {
-  std::vector<SlotRange> slot_ranges;
-  std::string node_id;
-  std::string ip;
-  uint16_t port = 0;
-
-  bool operator==(const MigrationInfo& r) const {
-    return ip == r.ip && port == r.port && slot_ranges == r.slot_ranges && node_id == r.node_id;
-  }
-};
-
-struct ClusterShardInfo {
-  SlotRanges slot_ranges;
-  ClusterNodeInfo master;
-  std::vector<ClusterNodeInfo> replicas;
-  std::vector<MigrationInfo> migrations;
-};
-
-using ClusterShardInfos = std::vector<ClusterShardInfo>;
+namespace dfly::cluster {
 
 class ClusterConfig {
  public:
-  static constexpr SlotId kMaxSlotNum = 0x3FFF;
-  static constexpr SlotId kInvalidSlotId = kMaxSlotNum + 1;
-
-  static SlotId KeySlot(std::string_view key);
-
-  static void Initialize();
-  static bool IsEnabled();
-  static bool IsEmulated();
-
-  static bool IsEnabledOrEmulated() {
-    return IsEnabled() || IsEmulated();
-  }
-
-  static bool IsShardedByTag() {
-    return IsEnabledOrEmulated() || LockTagOptions::instance().enabled;
-  }
-
   // Returns an instance with `config` if it is valid.
   // Returns heap-allocated object as it is too big for a stack frame.
   static std::shared_ptr<ClusterConfig> CreateFromConfig(std::string_view my_id,
@@ -119,4 +66,4 @@ class ClusterConfig {
   std::vector<MigrationInfo> my_incoming_migrations_;
 };
 
-}  // namespace dfly
+}  // namespace dfly::cluster

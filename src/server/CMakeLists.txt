@@ -52,7 +52,7 @@ add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc channel_store.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
             cluster/cluster_family.cc cluster/incoming_slot_migration.cc
-            cluster/outgoing_slot_migration.cc
+            cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc)
 

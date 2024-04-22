@@ -575,7 +575,8 @@ void TxTable(const http::QueryArgs& args, HttpContext* send) {
   send->Invoke(std::move(resp));
 }
 
-void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send, ClusterFamily* cluster) {
+void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
+                     cluster::ClusterFamily* cluster_family) {
   http::StringResponse resp = http::MakeStringResponse(h2::status::ok);
   resp.body() = R"(
 <html>
@@ -616,19 +617,19 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send, ClusterFami
 
   auto print_kb = [&](string_view k, bool v) { print_kv(k, v ? "True" : "False"); };
 
-  print_kv("Mode", ClusterConfig::IsEmulated()  ? "Emulated"
-                   : ClusterConfig::IsEnabled() ? "Enabled"
-                                                : "Disabled");
+  print_kv("Mode", cluster::IsClusterEmulated()  ? "Emulated"
+                   : cluster::IsClusterEnabled() ? "Enabled"
+                                                 : "Disabled");
 
-  if (ClusterConfig::IsEnabledOrEmulated()) {
+  if (cluster::IsClusterEnabledOrEmulated()) {
     print_kb("Lock on hashtags", LockTagOptions::instance().enabled);
   }
 
-  if (ClusterConfig::IsEnabled()) {
-    if (cluster->cluster_config() == nullptr) {
+  if (cluster::IsClusterEnabled()) {
+    if (cluster_family->cluster_config() == nullptr) {
       resp.body() += "<h2>Not yet configured.</h2>\n";
     } else {
-      auto config = cluster->cluster_config()->GetConfig();
+      auto config = cluster_family->cluster_config()->GetConfig();
       for (const auto& shard : config) {
         resp.body() += "<div class='master'>\n";
         resp.body() += "<h3>Master</h3>\n";
@@ -922,12 +923,12 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   const auto& key_index = *key_index_res;
-  optional<SlotId> keys_slot;
+  optional<cluster::SlotId> keys_slot;
   bool cross_slot = false;
   // Iterate keys and check to which slot they belong.
   for (unsigned i = key_index.start; i < key_index.end; i += key_index.step) {
     string_view key = ArgS(args, i);
-    SlotId slot = ClusterConfig::KeySlot(key);
+    cluster::SlotId slot = cluster::KeySlot(key);
     if (keys_slot && slot != *keys_slot) {
       cross_slot = true;  // keys belong to different slots
       break;
@@ -941,14 +942,14 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   // Check keys slot is in my ownership
-  const ClusterConfig* cluster_config = cluster_family_.cluster_config();
+  const cluster::ClusterConfig* cluster_config = cluster_family_.cluster_config();
   if (cluster_config == nullptr) {
     return ErrorReply{kClusterNotConfigured};
   }
 
   if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
-    ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(*keys_slot);
+    cluster::ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(*keys_slot);
     return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
   }
 
@@ -1094,7 +1095,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
 
-  if (ClusterConfig::IsEnabled()) {
+  if (cluster::IsClusterEnabled()) {
     if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;
   }
@@ -1897,7 +1898,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   optional<ShardId> sid;
 
-  UniqueSlotChecker slot_checker;
+  cluster::UniqueSlotChecker slot_checker;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
     slot_checker.Add(key);

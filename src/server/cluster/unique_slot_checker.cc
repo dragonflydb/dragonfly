@@ -1,21 +1,21 @@
 #include "server/cluster/unique_slot_checker.h"
 
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
 
 using namespace std;
 
-namespace dfly {
+namespace dfly::cluster {
 
 void UniqueSlotChecker::Add(std::string_view key) {
-  if (!ClusterConfig::IsEnabled()) {
+  if (!IsClusterEnabled()) {
     return;
   }
 
-  Add(ClusterConfig::KeySlot(key));
+  Add(KeySlot(key));
 }
 
 void UniqueSlotChecker::Add(SlotId slot_id) {
-  if (!ClusterConfig::IsEnabled()) {
+  if (!IsClusterEnabled()) {
     return;
   }
 
@@ -25,16 +25,16 @@ void UniqueSlotChecker::Add(SlotId slot_id) {
   }
 
   if (*slot_id_ != slot_id) {
-    slot_id_ = ClusterConfig::kInvalidSlotId;
+    slot_id_ = kInvalidSlotId;
   }
 }
 
 optional<SlotId> UniqueSlotChecker::GetUniqueSlotId() const {
-  if (slot_id_.has_value() && *slot_id_ == ClusterConfig::kInvalidSlotId) {
+  if (slot_id_.has_value() && *slot_id_ == kInvalidSlotId) {
     return nullopt;
   }
 
   return slot_id_;
 }
 
-}  // namespace dfly
+}  // namespace dfly::cluster

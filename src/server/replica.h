@@ -12,7 +12,7 @@
 #include "base/io_buf.h"
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
-#include "server/cluster/slot_set.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/common.h"
 #include "server/journal/tx_executor.h"
 #include "server/journal/types.h"
@@ -55,7 +55,7 @@ class Replica : ProtocolClient {
 
  public:
   Replica(std::string master_host, uint16_t port, Service* se, std::string_view id,
-          std::optional<SlotRange> slot_range);
+          std::optional<cluster::SlotRange> slot_range);
   ~Replica();
 
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
@@ -173,7 +173,7 @@ class Replica : ProtocolClient {
   bool is_paused_ = false;
   std::string id_;
 
-  std::optional<SlotRange> slot_range_;
+  std::optional<cluster::SlotRange> slot_range_;
 };
 
 // This class implements a single shard replication flow from a Dragonfly master instance.

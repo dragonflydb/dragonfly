@@ -4,7 +4,7 @@
 
 #include "server/journal/types.h"
 
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
 
 namespace dfly::journal {
 

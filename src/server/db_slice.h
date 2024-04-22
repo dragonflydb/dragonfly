@@ -229,7 +229,7 @@ class DbSlice {
   Stats GetStats() const;
 
   // Returns slot statistics for db 0.
-  SlotStats GetSlotStats(SlotId sid) const;
+  SlotStats GetSlotStats(cluster::SlotId sid) const;
 
   void UpdateExpireBase(uint64_t now, unsigned generation) {
     expire_base_[generation & 1] = now;
@@ -349,7 +349,7 @@ class DbSlice {
   void FlushDb(DbIndex db_ind);
 
   // Flushes the data of given slot ranges.
-  void FlushSlots(SlotRanges slot_ranges);
+  void FlushSlots(cluster::SlotRanges slot_ranges);
 
   EngineShard* shard_owner() const {
     return owner_;
@@ -487,14 +487,14 @@ class DbSlice {
                                                 PrimeValue obj, uint64_t expire_at_ms,
                                                 bool force_update);
 
-  void FlushSlotsFb(const SlotSet& slot_ids);
+  void FlushSlotsFb(const cluster::SlotSet& slot_ids);
   void FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
   void InvalidateDbWatches(DbIndex db_indx);
 
   // Invalidate all watched keys for given slots. Used on FlushSlots.
-  void InvalidateSlotWatches(const SlotSet& slot_ids);
+  void InvalidateSlotWatches(const cluster::SlotSet& slot_ids);
 
   void PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table);
 

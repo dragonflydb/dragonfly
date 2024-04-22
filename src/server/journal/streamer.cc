@@ -7,7 +7,7 @@
 #include <absl/functional/bind_front.h>
 
 #include "base/logging.h"
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
 
 namespace dfly {
 using namespace util;
@@ -60,7 +60,7 @@ void JournalStreamer::WriterFb(io::Sink* dest) {
   }
 }
 
-RestoreStreamer::RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal,
+RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
                                  Context* cntx)
     : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
@@ -130,10 +130,10 @@ bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
 }
 
 bool RestoreStreamer::ShouldWrite(std::string_view key) const {
-  return ShouldWrite(ClusterConfig::KeySlot(key));
+  return ShouldWrite(cluster::KeySlot(key));
 }
 
-bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
+bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 

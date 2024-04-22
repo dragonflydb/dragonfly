@@ -181,7 +181,7 @@ class Service : public facade::ServiceInterface {
   acl::UserRegistry user_registry_;
   acl::AclFamily acl_family_;
   ServerFamily server_family_;
-  ClusterFamily cluster_family_;
+  cluster::ClusterFamily cluster_family_;
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 
