@@ -67,7 +67,7 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, ErrArg("ERR The 'default' user cannot be removed"));
 
   resp = Run({"ACL", "DELUSER", "NOTEXISTS"});
-  EXPECT_THAT(resp, ErrArg("ERR User NOTEXISTS does not exist"));
+  EXPECT_THAT(resp.GetIn(), 0);
 
   resp = Run({"ACL", "SETUSER", "kostas", "ON"});
   EXPECT_THAT(resp, "OK");
@@ -161,7 +161,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
-      EXPECT_THAT(resp, "OK");
+      EXPECT_THAT(resp.GetInt(), 1);
     }
   }
 
@@ -208,7 +208,7 @@ TEST_F(AclFamilyTest, TestAllCommands) {
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
-      EXPECT_THAT(resp, "OK");
+      EXPECT_THAT(resp.GetInt(), 1);
     }
   }
 }
@@ -281,10 +281,10 @@ TEST_F(AclFamilyTest, TestDryRun) {
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl dryrun' command"));
 
   resp = Run({"ACL", "DRYRUN", "kostas", "more"});
-  EXPECT_THAT(resp, ErrArg("ERR User: kostas does not exists!"));
+  EXPECT_THAT(resp, ErrArg("ERR User 'kostas' not found"));
 
   resp = Run({"ACL", "DRYRUN", "default", "nope"});
-  EXPECT_THAT(resp, ErrArg("ERR Command: NOPE does not exists!"));
+  EXPECT_THAT(resp, ErrArg("ERR Command 'NOPE' not found"));
 
   resp = Run({"ACL", "DRYRUN", "default", "SET"});
   EXPECT_THAT(resp, "OK");
@@ -296,7 +296,7 @@ TEST_F(AclFamilyTest, TestDryRun) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "DRYRUN", "kostas", "SET"});
-  EXPECT_THAT(resp, ErrArg("ERR User: kostas is not allowed to execute command: SET"));
+  EXPECT_THAT(resp, "This user has no permissions to run the 'SET' command");
 }
 
 TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {
@@ -353,7 +353,7 @@ TEST_F(AclFamilyTestRename, AclRename) {
   EXPECT_THAT(resp.GetString(), "OK");
 
   resp = Run({"ROCKS", "DELUSER", "billy"});
-  EXPECT_THAT(resp.GetString(), "OK");
+  EXPECT_THAT(resp.GetInt(), 1);
 }
 
 TEST_F(AclFamilyTest, TestKeys) {

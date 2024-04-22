@@ -547,7 +547,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
   if (!registry.contains(username)) {
-    auto error = absl::StrCat("User: ", username, " does not exists!");
+    auto error = absl::StrCat("User '", username, "' not found");
     cntx->SendError(error);
     return;
   }
@@ -556,7 +556,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   auto command = facade::ArgS(args, 1);
   auto* cid = cmd_registry_->Find(command);
   if (!cid) {
-    auto error = absl::StrCat("Command: ", command, " does not exists!");
+    auto error = absl::StrCat("Command '", command, "' not found");
     cntx->SendError(error);
     return;
   }
@@ -570,8 +570,8 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  auto error = absl::StrCat("User: ", username, " is not allowed to execute command: ", command);
-  cntx->SendError(error);
+  auto msg = absl::StrCat("This user has no permissions to run the '", command, "' command");
+  cntx->SendBulkString(msg);
 }
 
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
