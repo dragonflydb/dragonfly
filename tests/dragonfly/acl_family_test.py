@@ -327,7 +327,7 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     df = df_local_factory.create(aclfile=acl)
 
     df.start()
-    client = aioredis.Redis(port=df.port)
+    client = df.client()
 
     await client.execute_command("ACL SETUSER roy ON >mypass +@STRING +HSET")
     await client.execute_command("ACL SETUSER shahar >mypass +@SET")
@@ -341,7 +341,7 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     assert "user default on nopass +@ALL +ALL ~*" in result
 
     result = await client.execute_command("ACL DELUSER shahar")
-    assert result == b"OK"
+    assert result == 1
 
     result = await client.execute_command("ACL SAVE")
 
