@@ -138,7 +138,7 @@ TEST_F(OpManagerTest, Modify) {
     std::string expected = "D";
     for (size_t i = 0; i < futures.size(); i++) {
       absl::StrAppend(&expected, i);
-      EXPECT_EQ(futures[i].get(), expected);
+      EXPECT_EQ(futures[i].Get(), expected);
     }
 
     Close();

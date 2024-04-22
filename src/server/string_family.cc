@@ -14,6 +14,7 @@
 #include <tuple>
 #include <variant>
 
+#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
@@ -146,25 +147,6 @@ size_t ExtendExisting(const OpArgs& op_args, DbSlice::Iterator it, string_view k
   it->second.SetString(new_val);
 
   return new_val.size();
-}
-
-// Returns the length of the extended string. if prepend is false - appends the val.
-OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_view val,
-                               bool prepend) {
-  auto* shard = op_args.shard;
-  auto& db_slice = shard->db_slice();
-  auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
-  RETURN_ON_BAD_STATUS(op_res);
-  auto& add_res = *op_res;
-  if (add_res.is_new) {
-    add_res.it->second.SetString(val);
-    return val.size();
-  }
-
-  if (add_res.it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
-
-  return ExtendExisting(op_args, add_res.it, key, val, prepend);
 }
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
@@ -875,15 +857,40 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
   VLOG(2) << "ExtendGeneric(" << key << ", " << sval << ")";
 
   if (cntx->protocol() == Protocol::REDIS) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSet(t->GetOpArgs(shard), key, sval, prepend);
+    auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<variant<StringValue, size_t>> {
+      auto it_res = shard->db_slice().AddOrFind(t->GetDbContext(), key);
+      RETURN_ON_BAD_STATUS(it_res);
+
+      if (it_res->is_new) {
+        it_res->it->second.SetString(sval);
+        return {it_res->it->second.Size()};
+      }
+
+      if (it_res->it->second.ObjType() != OBJ_STRING)
+        return OpStatus::WRONG_TYPE;
+
+      if (PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
+        shard->tiered_storage_v2()->Modify(key, pv, [sval = string{sval}, prepend](std::string* v) {
+          *v = prepend ? absl::StrCat(sval, *v) : absl::StrCat(*v, sval);
+        });
+        return {StringValue::Read(key, pv, shard)};
+      } else {
+        // todo: automate this?
+        if (pv.HasIoPending())
+          shard->tiered_storage_v2()->Delete(key, &pv);
+        return {ExtendExisting(t->GetOpArgs(shard), it_res->it, key, sval, prepend)};
+      }
     };
 
-    OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-    if (!result)
-      return cntx->SendError(result.status());
+    auto res = cntx->transaction->ScheduleSingleHopT(cb);
+    if (!res)
+      return cntx->SendError(res.status());
+
+    if (holds_alternative<StringValue>(res.value()))
+      cntx->SendLong(std::get<StringValue>(std::move(res.value())).Get().length());
     else
-      return cntx->SendLong(result.value());
+      cntx->SendLong(std::get<size_t>(res.value()));
+
   } else {
     // Memcached skips if key is missing
     DCHECK(cntx->protocol() == Protocol::MEMCACHE);

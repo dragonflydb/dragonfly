@@ -927,6 +927,12 @@ void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
   }
 }
 
+void TieredStorageV2::Modify(std::string_view key, const PrimeValue& pv,
+                             std::function<void(std::string*)> modf) {
+  DCHECK(pv.IsExternal());
+  op_manager_->Modify(key, pv.GetExternalSlice(), modf);
+}
+
 bool TieredStorageV2::ShouldStash(const PrimeValue& pv) {
   return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize;
 }

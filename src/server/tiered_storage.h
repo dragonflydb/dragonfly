@@ -52,6 +52,9 @@ class TieredStorageV2 {
   // Delete value. Must either have pending IO or be offloaded (of external type)
   void Delete(std::string_view key, PrimeValue* value);
 
+  // Enqueue modification function for execution after all pending reads, but before all following
+  void Modify(std::string_view key, const PrimeValue& pv, std::function<void(std::string*)> modf);
+
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv);
 
