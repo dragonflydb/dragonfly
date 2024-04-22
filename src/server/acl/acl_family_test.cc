@@ -67,7 +67,7 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, ErrArg("ERR The 'default' user cannot be removed"));
 
   resp = Run({"ACL", "DELUSER", "NOTEXISTS"});
-  EXPECT_THAT(resp.GetIn(), 0);
+  EXPECT_THAT(resp.GetInt(), 0);
 
   resp = Run({"ACL", "SETUSER", "kostas", "ON"});
   EXPECT_THAT(resp, "OK");
