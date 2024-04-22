@@ -14,7 +14,7 @@
 
 using namespace std;
 using namespace testing;
-using Node = dfly::ClusterNodeInfo;
+using Node = dfly::cluster::ClusterNodeInfo;
 
 namespace dfly::cluster {
 
