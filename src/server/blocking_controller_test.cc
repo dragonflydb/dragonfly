@@ -44,7 +44,7 @@ class BlockingControllerTest : public Test {
 void BlockingControllerTest::SetUp() {
   pp_.reset(fb2::Pool::Epoll(kNumThreads));
   pp_->Run();
-  pp_->Await([](unsigned index, ProactorBase* p) {
+  pp_->AwaitBrief([](unsigned index, ProactorBase* p) {
     ServerState::Init(index, kNumThreads, nullptr);
     if (facade::tl_facade_stats == nullptr) {
       facade::tl_facade_stats = new facade::FacadeStats;

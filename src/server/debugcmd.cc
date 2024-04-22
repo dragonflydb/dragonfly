@@ -560,9 +560,8 @@ void DebugCmd::Load(string_view filename) {
     path = dir_path;
   }
 
-  auto fut_ec = sf_.Load(path.generic_string());
-  if (fut_ec.valid()) {
-    GenericError ec = fut_ec.get();
+  if (auto fut_ec = sf_.Load(path.generic_string()); fut_ec) {
+    GenericError ec = fut_ec->Get();
     if (ec) {
       string msg = ec.Format();
       LOG(WARNING) << "Could not load file " << msg;

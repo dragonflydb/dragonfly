@@ -855,7 +855,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   }
 
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
-  pp_.Await([&](uint32_t index, ProactorBase* pb) {
+  pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
     ServerState::Init(index, shard_num, &user_registry_);
   });
@@ -873,7 +873,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   server_family_.Init(acceptor, std::move(listeners));
 
   ChannelStore* cs = new ChannelStore{};
-  pp_.Await(
+  pp_.AwaitBrief(
       [cs](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->UpdateChannelStore(cs); });
 }
 

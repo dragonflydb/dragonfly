@@ -58,7 +58,7 @@ class OpManager {
 
     OwnedEntryId id;
     DiskSegment segment;
-    absl::InlinedVector<util::fb2::Promise<std::string>, 1> futures;
+    absl::InlinedVector<util::fb2::Future<std::string>, 1> futures;
   };
 
   // Describes an ongoing read operation for a fixed segment

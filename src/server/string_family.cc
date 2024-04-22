@@ -505,7 +505,7 @@ string StringValue::Get() && {
   auto prev = exchange(v_, monostate{});
   if (holds_alternative<string>(prev))
     return std::move(std::get<string>(prev));
-  return std::get<util::fb2::Future<std::string>>(prev).get();
+  return std::get<util::fb2::Future<std::string>>(prev).Get();
 }
 
 bool StringValue::IsEmpty() const {

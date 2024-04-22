@@ -277,8 +277,8 @@ template <typename T> void UpdateMax(T* maxv, T current) {
 }
 
 void SetMasterFlagOnAllThreads(bool is_master) {
-  auto cb = [is_master](auto* pb) { ServerState::tlocal()->is_master = is_master; };
-  shard_set->pool()->Await(cb);
+  auto cb = [is_master](unsigned, auto*) { ServerState::tlocal()->is_master = is_master; };
+  shard_set->pool()->AwaitBrief(cb);
 }
 
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {
@@ -616,7 +616,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, facade
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
-  shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
+  shard_set->pool()->AwaitBrief([&tracker, pause_state](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
     // it's impossible to deadlock on waiting for a command that will be paused.
     tracker.TrackOnThread();
@@ -628,7 +628,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, facade
   const absl::Duration kDispatchTimeout = absl::Seconds(1);
   if (!tracker.Wait(kDispatchTimeout)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
-    shard_set->pool()->Await([pause_state](util::ProactorBase* pb) {
+    shard_set->pool()->AwaitBrief([pause_state](unsigned, util::ProactorBase*) {
       ServerState::tlocal()->SetPauseState(pause_state, false);
     });
     return std::nullopt;
@@ -821,8 +821,9 @@ void ServerFamily::JoinSnapshotSchedule() {
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
-  if (load_result_.valid())
-    load_result_.wait();
+  if (load_result_) {
+    std::exchange(load_result_, std::nullopt)->Get();
+  }
 
   JoinSnapshotSchedule();
 
@@ -864,14 +865,14 @@ struct AggregateLoadResult {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
+std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& load_path) {
   auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
-    fb2::Promise<GenericError> ec_promise;
-    ec_promise.set_value(paths_result.error());
-    return ec_promise.get_future();
+    fb2::Future<GenericError> future;
+    future.Resolve(paths_result.error());
+    return future;
   }
 
   std::vector<std::string> paths = *paths_result;
@@ -913,12 +914,11 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  fb2::Promise<GenericError> ec_promise;
-  fb2::Future<GenericError> ec_future = ec_promise.get_future();
+  fb2::Future<GenericError> future;
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
-                          ec_promise = std::move(ec_promise)]() mutable {
+                          future]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
@@ -932,11 +932,11 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
     LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    ec_promise.set_value(*(aggregated_result->first_error));
+    future.Resolve(*(aggregated_result->first_error));
   };
   pool.GetNextProactor()->Dispatch(std::move(load_join_fiber));
 
-  return ec_future;
+  return future;
 }
 
 void ServerFamily::SnapshotScheduling() {
@@ -1784,29 +1784,30 @@ static void MergeDbSliceStats(const DbSlice::Stats& src, Metrics* dest) {
 }
 
 void ServerFamily::ResetStat() {
-  shard_set->pool()->Await([registry = service_.mutable_registry(), this](unsigned index, auto*) {
-    registry->ResetCallStats(index);
-    SinkReplyBuilder::ResetThreadLocalStats();
-    auto& stats = tl_facade_stats->conn_stats;
-    stats.command_cnt = 0;
-    stats.pipelined_cmd_cnt = 0;
+  shard_set->pool()->AwaitBrief(
+      [registry = service_.mutable_registry(), this](unsigned index, auto*) {
+        registry->ResetCallStats(index);
+        SinkReplyBuilder::ResetThreadLocalStats();
+        auto& stats = tl_facade_stats->conn_stats;
+        stats.command_cnt = 0;
+        stats.pipelined_cmd_cnt = 0;
 
-    EngineShard* shard = EngineShard::tlocal();
-    shard->db_slice().ResetEvents();
-    tl_facade_stats->conn_stats.conn_received_cnt = 0;
-    tl_facade_stats->conn_stats.pipelined_cmd_cnt = 0;
-    tl_facade_stats->conn_stats.command_cnt = 0;
-    tl_facade_stats->conn_stats.io_read_cnt = 0;
-    tl_facade_stats->conn_stats.io_read_bytes = 0;
+        EngineShard* shard = EngineShard::tlocal();
+        shard->db_slice().ResetEvents();
+        tl_facade_stats->conn_stats.conn_received_cnt = 0;
+        tl_facade_stats->conn_stats.pipelined_cmd_cnt = 0;
+        tl_facade_stats->conn_stats.command_cnt = 0;
+        tl_facade_stats->conn_stats.io_read_cnt = 0;
+        tl_facade_stats->conn_stats.io_read_bytes = 0;
 
-    tl_facade_stats->reply_stats.io_write_bytes = 0;
-    tl_facade_stats->reply_stats.io_write_cnt = 0;
-    tl_facade_stats->reply_stats.send_stats = {};
-    tl_facade_stats->reply_stats.script_error_count = 0;
-    tl_facade_stats->reply_stats.err_count.clear();
+        tl_facade_stats->reply_stats.io_write_bytes = 0;
+        tl_facade_stats->reply_stats.io_write_cnt = 0;
+        tl_facade_stats->reply_stats.send_stats = {};
+        tl_facade_stats->reply_stats.script_error_count = 0;
+        tl_facade_stats->reply_stats.err_count.clear();
 
-    service_.mutable_registry()->ResetCallStats(index);
-  });
+        service_.mutable_registry()->ResetCallStats(index);
+      });
 }
 
 Metrics ServerFamily::GetMetrics() const {

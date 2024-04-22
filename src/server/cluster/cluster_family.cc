@@ -658,7 +658,7 @@ static string_view StateToStr(MigrationState state) {
 static uint64_t GetKeyCount(const SlotRanges& slots) {
   atomic_uint64_t keys = 0;
 
-  shard_set->pool()->Await([&](auto*) {
+  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
     EngineShard* shard = EngineShard::tlocal();
     if (shard == nullptr)
       return;
