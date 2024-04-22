@@ -571,7 +571,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto msg = absl::StrCat("This user has no permissions to run the '", command, "' command");
-  cntx->SendBulkString(msg);
+  cntx->SendSimpleString(msg);
 }
 
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);
