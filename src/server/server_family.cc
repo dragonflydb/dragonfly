@@ -277,8 +277,8 @@ template <typename T> void UpdateMax(T* maxv, T current) {
 }
 
 void SetMasterFlagOnAllThreads(bool is_master) {
-  auto cb = [is_master](auto* pb) { ServerState::tlocal()->is_master = is_master; };
-  shard_set->pool()->Await(cb);
+  auto cb = [is_master](unsigned, auto*) { ServerState::tlocal()->is_master = is_master; };
+  shard_set->pool()->AwaitBrief(cb);
 }
 
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {
@@ -616,7 +616,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, facade
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
-  shard_set->pool()->Await([&tracker, pause_state](util::ProactorBase* pb) {
+  shard_set->pool()->AwaitBrief([&tracker, pause_state](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
     // it's impossible to deadlock on waiting for a command that will be paused.
     tracker.TrackOnThread();
@@ -628,7 +628,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, facade
   const absl::Duration kDispatchTimeout = absl::Seconds(1);
   if (!tracker.Wait(kDispatchTimeout)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
-    shard_set->pool()->Await([pause_state](util::ProactorBase* pb) {
+    shard_set->pool()->AwaitBrief([pause_state](unsigned, util::ProactorBase*) {
       ServerState::tlocal()->SetPauseState(pause_state, false);
     });
     return std::nullopt;
@@ -1784,29 +1784,30 @@ static void MergeDbSliceStats(const DbSlice::Stats& src, Metrics* dest) {
 }
 
 void ServerFamily::ResetStat() {
-  shard_set->pool()->Await([registry = service_.mutable_registry(), this](unsigned index, auto*) {
-    registry->ResetCallStats(index);
-    SinkReplyBuilder::ResetThreadLocalStats();
-    auto& stats = tl_facade_stats->conn_stats;
-    stats.command_cnt = 0;
-    stats.pipelined_cmd_cnt = 0;
+  shard_set->pool()->AwaitBrief(
+      [registry = service_.mutable_registry(), this](unsigned index, auto*) {
+        registry->ResetCallStats(index);
+        SinkReplyBuilder::ResetThreadLocalStats();
+        auto& stats = tl_facade_stats->conn_stats;
+        stats.command_cnt = 0;
+        stats.pipelined_cmd_cnt = 0;
 
-    EngineShard* shard = EngineShard::tlocal();
-    shard->db_slice().ResetEvents();
-    tl_facade_stats->conn_stats.conn_received_cnt = 0;
-    tl_facade_stats->conn_stats.pipelined_cmd_cnt = 0;
-    tl_facade_stats->conn_stats.command_cnt = 0;
-    tl_facade_stats->conn_stats.io_read_cnt = 0;
-    tl_facade_stats->conn_stats.io_read_bytes = 0;
+        EngineShard* shard = EngineShard::tlocal();
+        shard->db_slice().ResetEvents();
+        tl_facade_stats->conn_stats.conn_received_cnt = 0;
+        tl_facade_stats->conn_stats.pipelined_cmd_cnt = 0;
+        tl_facade_stats->conn_stats.command_cnt = 0;
+        tl_facade_stats->conn_stats.io_read_cnt = 0;
+        tl_facade_stats->conn_stats.io_read_bytes = 0;
 
-    tl_facade_stats->reply_stats.io_write_bytes = 0;
-    tl_facade_stats->reply_stats.io_write_cnt = 0;
-    tl_facade_stats->reply_stats.send_stats = {};
-    tl_facade_stats->reply_stats.script_error_count = 0;
-    tl_facade_stats->reply_stats.err_count.clear();
+        tl_facade_stats->reply_stats.io_write_bytes = 0;
+        tl_facade_stats->reply_stats.io_write_cnt = 0;
+        tl_facade_stats->reply_stats.send_stats = {};
+        tl_facade_stats->reply_stats.script_error_count = 0;
+        tl_facade_stats->reply_stats.err_count.clear();
 
-    service_.mutable_registry()->ResetCallStats(index);
-  });
+        service_.mutable_registry()->ResetCallStats(index);
+      });
 }
 
 Metrics ServerFamily::GetMetrics() const {

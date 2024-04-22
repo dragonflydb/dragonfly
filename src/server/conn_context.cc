@@ -114,8 +114,8 @@ void ConnectionContext::ChangeMonitor(bool start) {
     my_monitors.Remove(conn());
   }
   // Tell other threads that about the change in the number of connection that we monitor
-  shard_set->pool()->Await(
-      [start](auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
+  shard_set->pool()->AwaitBrief(
+      [start](unsigned, auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
   EnableMonitoring(start);
 }
 

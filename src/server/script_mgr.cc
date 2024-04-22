@@ -336,7 +336,7 @@ vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {
 }
 
 void ScriptMgr::UpdateScriptCaches(ScriptKey sha, ScriptParams params) const {
-  shard_set->pool()->Await([&sha, &params](auto index, auto* pb) {
+  shard_set->pool()->AwaitBrief([&sha, &params](auto index, auto* pb) {
     ServerState::tlocal()->SetScriptParams(sha, params);
   });
 }

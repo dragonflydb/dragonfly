@@ -304,8 +304,9 @@ unsigned BaseFamilyTest::NumLocked() {
 }
 
 void BaseFamilyTest::ClearMetrics() {
-  shard_set->pool()->Await(
-      [](auto*) { ServerState::tlocal()->stats = ServerState::Stats(shard_set->size()); });
+  shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+    ServerState::tlocal()->stats = ServerState::Stats(shard_set->size());
+  });
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {

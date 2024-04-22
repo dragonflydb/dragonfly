@@ -61,7 +61,7 @@ thread_local std::optional<LockTagOptions> locktag_lock_options;
 void TEST_InvalidateLockTagOptions() {
   locktag_lock_options = nullopt;  // For test main thread
   CHECK(shard_set != nullptr);
-  shard_set->pool()->Await(
+  shard_set->pool()->AwaitBrief(
       [](ShardId shard, ProactorBase* proactor) { locktag_lock_options = nullopt; });
 }
 
