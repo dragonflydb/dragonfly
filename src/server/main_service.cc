@@ -1147,9 +1147,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
-      // TODO remove this comment when we remove the acl-checker
-      // This code will allow us to transition on later versions without
-      // breaking replica/master setup with different versions of dragonfly
       auto info_ptr = server_family_.GetReplicaInfo(dfly_cntx);
       if (info_ptr) {
         info_ptr->cntx.Cancel();

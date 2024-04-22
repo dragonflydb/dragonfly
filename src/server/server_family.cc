@@ -2599,6 +2599,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       cntx->replication_flow->last_acked_lsn = ack;
       return;
     } else if (cmd == "ACL-CHECK") {
+      // TODO(kostasrim): Remove this branch 20/6/2024
       cntx->SendOk();
       return;
     } else {

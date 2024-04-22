@@ -78,7 +78,6 @@ Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
 Replica::~Replica() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
-  acl_check_fb_.JoinIfNeeded();
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -150,7 +149,6 @@ void Replica::Stop() {
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
-  acl_check_fb_.JoinIfNeeded();
 }
 
 void Replica::Pause(bool pause) {
@@ -625,8 +623,6 @@ error_code Replica::ConsumeRedisStream() {
 error_code Replica::ConsumeDflyStream() {
   // Set new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) {
-    // Trigger acl-checker
-    replica_waker_.notifyAll();
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
@@ -655,12 +651,7 @@ error_code Replica::ConsumeDflyStream() {
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
 
-  if (master_context_.version >= DflyVersion::VER3) {
-    acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
-  }
-
   JoinDflyFlows();
-  acl_check_fb_.JoinIfNeeded();
 
   last_journal_LSNs_.emplace();
   for (auto& flow : shard_flows_) {
@@ -890,55 +881,6 @@ void Replica::RedisStreamAcksFb() {
     replica_waker_.await_until(
         [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || cntx_.IsCancelled(); },
         next_ack_tp);
-  }
-}
-
-// TODO(kostasrim): Remove this on 20/6/2024
-class AclCheckerClient : public ProtocolClient {
- public:
-  AclCheckerClient(ServerContext server, Context* cntx)
-      : ProtocolClient(std::move(server)), cntx_(cntx) {
-    Connect();
-  }
-
-  void CheckAclRoundTrip() {
-    if (auto ec = SendCommandAndReadResponse(StrCat("REPLCONF acl-check ", "0")); ec) {
-      cntx_->Cancel();
-      LOG(INFO) << "Error in REPLCONF acl-check: " << ec.message();
-    } else if (!CheckRespIsSimpleReply("OK")) {
-      cntx_->Cancel();
-      LOG(INFO) << "Error: " << ToSV(LastResponseArgs().front().GetBuf());
-    }
-  }
-
- private:
-  void Connect() {
-    VLOG(1) << "Connecting with acl client";
-    auto ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, cntx_);
-    if (ec) {
-      LOG(INFO) << "Failed to connect with acl client " << ec.message();
-      cntx_->Cancel();
-    }
-    SetSocketTimeout(4000);
-  }
-
-  Context* cntx_;
-};
-
-void Replica::AclCheckFb() {
-  // We need a new client with a different socket for acl-checks
-  // instead of using the ACK's fiber. This is because acks should
-  // not be replied (which makes them unusable for periodic ACL checks).
-  // Also there are N ACK fibers per replica instance while we only need
-  // one fiber to periodically check for ACL changes. Therefore,
-  // we decouple the logic via AclCheckFb.
-  AclCheckerClient acl_client(server(), &cntx_);
-
-  while (!cntx_.IsCancelled()) {
-    acl_client.CheckAclRoundTrip();
-    // We poll for ACL changes every second
-    replica_waker_.await_until([&]() { return cntx_.IsCancelled(); },
-                               std::chrono::steady_clock::now() + std::chrono::seconds(1));
   }
 }
 
