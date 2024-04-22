@@ -821,8 +821,9 @@ void ServerFamily::JoinSnapshotSchedule() {
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
-  if (load_result_.valid())
-    load_result_.wait();
+  if (load_result_) {
+    std::exchange(load_result_, std::nullopt)->Get();
+  }
 
   JoinSnapshotSchedule();
 
@@ -864,14 +865,14 @@ struct AggregateLoadResult {
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
+std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& load_path) {
   auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
-    fb2::Promise<GenericError> ec_promise;
-    ec_promise.set_value(paths_result.error());
-    return ec_promise.get_future();
+    fb2::Future<GenericError> future;
+    future.Resolve(paths_result.error());
+    return future;
   }
 
   std::vector<std::string> paths = *paths_result;
@@ -913,12 +914,11 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
     load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
   }
 
-  fb2::Promise<GenericError> ec_promise;
-  fb2::Future<GenericError> ec_future = ec_promise.get_future();
+  fb2::Future<GenericError> future;
 
   // Run fiber that empties the channel and sets ec_promise.
   auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
-                          ec_promise = std::move(ec_promise)]() mutable {
+                          future]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
@@ -932,11 +932,11 @@ fb2::Future<GenericError> ServerFamily::Load(const std::string& load_path) {
 
     LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    ec_promise.set_value(*(aggregated_result->first_error));
+    future.Resolve(*(aggregated_result->first_error));
   };
   pool.GetNextProactor()->Dispatch(std::move(load_join_fiber));
 
-  return ec_future;
+  return future;
 }
 
 void ServerFamily::SnapshotScheduling() {

@@ -185,7 +185,7 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  util::fb2::Future<GenericError> Load(const std::string& file_name);
+  std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name);
 
   bool TEST_IsSaving() const;
 
@@ -288,7 +288,7 @@ class ServerFamily {
   void StopAllClusterReplicas();
 
   util::fb2::Fiber snapshot_schedule_fb_;
-  util::fb2::Future<GenericError> load_result_;
+  std::optional<util::fb2::Future<GenericError>> load_result_;
 
   uint32_t stats_caching_task_ = 0;
   Service& service_;

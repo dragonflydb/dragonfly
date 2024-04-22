@@ -35,7 +35,7 @@ void OpManager::Close() {
 
 util::fb2::Future<std::string> OpManager::Read(EntryId id, DiskSegment segment) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
-  return PrepareRead(segment.FillPages()).ForId(id, segment).futures.emplace_back().get_future();
+  return PrepareRead(segment.FillPages()).ForId(id, segment).futures.emplace_back();
 }
 
 void OpManager::Delete(EntryId id) {
@@ -98,7 +98,7 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
     auto key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
 
     for (auto& fut : ko.futures)
-      fut.set_value(std::string{key_value});
+      fut.Resolve(std::string{key_value});
 
     ReportFetched(Borrowed(ko.id), key_value, ko.segment);
   }
