@@ -152,7 +152,6 @@ class Replica : ProtocolClient {
   // In redis replication mode.
   util::fb2::Fiber sync_fb_;
   util::fb2::Fiber acks_fb_;
-  util::fb2::Fiber acl_check_fb_;
   util::fb2::EventCount replica_waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
