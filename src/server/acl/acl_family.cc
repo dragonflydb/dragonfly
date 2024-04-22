@@ -152,25 +152,27 @@ void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
   }
 }
 
+// Currently, Dragonfly supports only deleting one ACL user at a time.
+// If the deletion is successful, return 1, otherwise 0.
 void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
   std::string_view username = facade::ToSV(args[0]);
   if (username == "default") {
-    cntx->SendError("The'default' user cannot be removed");
+    cntx->SendError("The 'default' user cannot be removed");
     return;
   }
 
+  long deleted = 1;
   auto& registry = *registry_;
   if (!registry.RemoveUser(username)) {
-    cntx->SendError(absl::StrCat("User ", username, " does not exist"));
-    return;
+    deleted = 0;
   }
 
   EvictOpenConnectionsOnAllProactors(username);
-  cntx->SendOk();
+  cntx->SendLong(deleted);
 }
 
 void AclFamily::WhoAmI(CmdArgList args, ConnectionContext* cntx) {
-  cntx->SendSimpleString(absl::StrCat("User is ", cntx->authed_username));
+  cntx->SendSimpleString(cntx->authed_username);
 }
 
 std::string AclFamily::RegistryToString() const {

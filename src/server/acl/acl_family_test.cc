@@ -64,7 +64,7 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl deluser' command"));
 
   resp = Run({"ACL", "DELUSER", "default"});
-  EXPECT_THAT(resp, ErrArg("ERR The'default' user cannot be removed"));
+  EXPECT_THAT(resp, ErrArg("ERR The 'default' user cannot be removed"));
 
   resp = Run({"ACL", "DELUSER", "NOTEXISTS"});
   EXPECT_THAT(resp, ErrArg("ERR User NOTEXISTS does not exist"));
@@ -76,7 +76,10 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl deluser' command"));
 
   resp = Run({"ACL", "DELUSER", "kostas"});
-  EXPECT_THAT(resp, "OK");
+  EXPECT_THAT(resp.GetInt(), 1);
+
+  resp = Run({"ACL", "DELUSER", "kostas"});
+  EXPECT_THAT(resp.GetInt(), 0);
 
   resp = Run({"ACL", "LIST"});
   EXPECT_THAT(resp.GetString(), "user default on nopass +@ALL +ALL ~*");
