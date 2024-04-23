@@ -533,11 +533,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
 
-  // TODO we shouldn't provide cntx into StartSlotMigrations
-  if (!StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config), cntx)) {
-    // TODO it shouldn't be an error
-    return cntx->SendError("Can't start the migration");
-  }
+  StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config));
 
   SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
 
@@ -637,14 +633,12 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cn
   return cntx->SendOk();
 }
 
-bool ClusterFamily::StartSlotMigrations(std::vector<MigrationInfo> migrations,
-                                        ConnectionContext* cntx) {
+void ClusterFamily::StartSlotMigrations(std::vector<MigrationInfo> migrations) {
   // Add validating and error processing
   for (auto& m : migrations) {
     auto outgoing_migration = CreateOutgoingMigration(std::move(m));
-    outgoing_migration->Start(cntx);
+    outgoing_migration->Start();
   }
-  return true;
 }
 
 static string_view StateToStr(MigrationState state) {
@@ -702,19 +696,22 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
   auto append_answer = [rb, &reply](string_view direction, string_view node_id, string_view filter,
-                                    MigrationState state, const SlotRanges& slots) {
+                                    MigrationState state, const SlotRanges& slots,
+                                    string_view error) {
     if (filter.empty() || filter == node_id) {
-      reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state), " ",
-                                   "keys:", GetKeyCount(slots)));
+      error = error.empty() ? "no" : error;
+      reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
+                                   " keys:", GetKeyCount(slots), " error: ", error));
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
-    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetSlots());
+    // TODO add error status
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetSlots(), "");
   }
   for (const auto& migration : outgoing_migration_jobs_) {
     append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
-                  migration->GetSlots());
+                  migration->GetSlots(), migration->GetErrorStr());
   }
 
   if (reply.empty()) {
@@ -840,14 +837,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
 std::shared_ptr<OutgoingMigration> ClusterFamily::CreateOutgoingMigration(MigrationInfo info) {
   std::lock_guard lk(migration_mu_);
-  auto err_handler = [](const GenericError& err) {
-    LOG(INFO) << "Slot migration error: " << err.Format();
-
-    // Todo add error processing, stop migration process
-    // fb2::Fiber("stop_Migration", &ClusterFamily::StopMigration, this, sync_id).Detach();
-  };
-  auto migration =
-      make_shared<OutgoingMigration>(std::move(info), this, err_handler, server_family_);
+  auto migration = make_shared<OutgoingMigration>(std::move(info), this, server_family_);
   outgoing_migration_jobs_.emplace_back(migration);
   return migration;
 }

@@ -28,14 +28,12 @@ namespace dfly::cluster {
 class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  public:
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
-                     journal::Journal* journal, Context* cntx)
-      : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, cntx) {
-  }
-  ~SliceSlotMigration() {
-    sync_fb_.JoinIfNeeded();
+                     journal::Journal* journal)
+      : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &cntx_) {
   }
 
-  std::error_code Start(const std::string& node_id, uint32_t shard_id) {
+  // TODO use context to set error instead of returning error code
+  std::error_code Sync(const std::string& node_id, uint32_t shard_id) {
     RETURN_ON_ERR(
         ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_));
     ResetParser(/*server_mode=*/false);
@@ -46,16 +44,12 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
     LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) << ToSV(LastResponseArgs().front().GetBuf());
 
-    sync_fb_ = fb2::Fiber("slot-snapshot", [this] { streamer_.Start(Sock()); });
+    streamer_.Start(Sock());
     return {};
   }
 
   void Cancel() {
     streamer_.Cancel();
-  }
-
-  void WaitForSnapshotFinished() {
-    sync_fb_.JoinIfNeeded();
   }
 
   void Finalize() {
@@ -64,14 +58,11 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
  private:
   RestoreStreamer streamer_;
-  fb2::Fiber sync_fb_;
 };
 
-OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf,
-                                     Context::ErrHandler err_handler, ServerFamily* sf)
+OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
     : ProtocolClient(info.ip, info.port),
       migration_info_(std::move(info)),
-      cntx_(err_handler),
       slot_migrations_(shard_set->size()),
       server_family_(sf),
       cf_(cf) {
@@ -82,11 +73,14 @@ OutgoingMigration::~OutgoingMigration() {
 }
 
 void OutgoingMigration::Finish() {
-  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard)
-      slot_migrations_[shard->shard_id()]->Cancel();
-  });
-  state_.store(MigrationState::C_FINISHED);
+  std::lock_guard lk(finish_mu_);
+  if (state_.load() != MigrationState::C_FINISHED) {
+    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+      if (const auto* shard = EngineShard::tlocal(); shard)
+        slot_migrations_[shard->shard_id()]->Cancel();
+    });
+    state_.store(MigrationState::C_FINISHED);
+  }
 }
 
 MigrationState OutgoingMigration::GetState() const {
@@ -94,22 +88,55 @@ MigrationState OutgoingMigration::GetState() const {
 }
 
 void OutgoingMigration::SyncFb() {
+  state_.store(MigrationState::C_CONNECTING);
+
+  // we retry starting migration until "cancel" is happened
+  while (state_.load() != MigrationState::C_FINISHED) {
+    if (auto err = cntx_.GetError(); err) {
+      LOG(ERROR) << err.Format();
+      // if error is happened on the previous attempt we wait for some time and try again
+      ThisFiber::SleepFor(1000ms);
+    }
+
+    VLOG(1) << "Connecting to source";
+    auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
+    if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
+      cntx_.ReportError(GenericError(ec, "Couldn't connect to source."));
+      continue;
+    }
+
+    VLOG(1) << "Migration initiating";
+    ResetParser(false);
+    auto cmd = absl::StrCat("DFLYMIGRATE INIT ", cf_->MyID(), " ", slot_migrations_.size());
+    for (const auto& s : migration_info_.slot_ranges) {
+      absl::StrAppend(&cmd, " ", s.start, " ", s.end);
+    }
+
+    if (auto ec = SendCommandAndReadResponse(cmd); ec) {
+      cntx_.ReportError(GenericError(ec, "Could send INIT command."));
+      continue;
+    }
+
+    if (!CheckRespIsSimpleReply("OK")) {
+      cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
+      continue;
+    }
+    break;
+  }
+
   state_.store(MigrationState::C_SYNC);
+
   auto start_cb = [this](util::ProactorBase* pb) {
     if (auto* shard = EngineShard::tlocal(); shard) {
       server_family_->journal()->StartInThread();
       slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
-          &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal(),
-          &cntx_);
-      slot_migrations_[shard->shard_id()]->Start(cf_->MyID(), shard->shard_id());
+          &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal());
+      slot_migrations_[shard->shard_id()]->Sync(cf_->MyID(), shard->shard_id());
+      // TODO check context for error
     }
   };
 
   shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
-
-  for (auto& migration : slot_migrations_) {
-    migration->WaitForSnapshotFinished();
-  }
 
   VLOG(1) << "Migrations snapshot is finished";
 
@@ -187,38 +214,14 @@ bool OutgoingMigration::FinalyzeMigration(long attempt) {
   return false;
 }
 
-std::error_code OutgoingMigration::Start(ConnectionContext* cntx) {
-  VLOG(1) << "Starting outgoing migration";
-
-  state_.store(MigrationState::C_CONNECTING);
-
-  auto check_connection_error = [&cntx](error_code ec, const char* msg) -> error_code {
-    if (ec) {
-      cntx->SendError(absl::StrCat(msg, ec.message()));
-    }
-    return ec;
-  };
-
-  VLOG(1) << "Resolving host DNS";
-  error_code ec = ResolveHostDns();
-  RETURN_ON_ERR(check_connection_error(ec, "could not resolve host dns"));
-
-  VLOG(1) << "Connecting to source";
-  ec = ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_);
-  RETURN_ON_ERR(check_connection_error(ec, "couldn't connect to source"));
-
-  VLOG(1) << "Migration initiating";
-  ResetParser(false);
-  auto cmd = absl::StrCat("DFLYMIGRATE INIT ", cf_->MyID(), " ", slot_migrations_.size());
-  for (const auto& s : migration_info_.slot_ranges) {
-    absl::StrAppend(&cmd, " ", s.start, " ", s.end);
+void OutgoingMigration::Start() {
+  VLOG(1) << "Resolving host DNS for outgoing migration";
+  if (error_code ec = ResolveHostDns(); ec) {
+    cntx_.ReportError(GenericError(ec, "Could not resolve host dns."));
+    return;
   }
-  RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
-  LOG_IF(ERROR, !CheckRespIsSimpleReply("OK")) << facade::ToSV(LastResponseArgs().front().GetBuf());
 
   main_sync_fb_ = fb2::Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
-
-  return {};
 }
 
 }  // namespace dfly::cluster

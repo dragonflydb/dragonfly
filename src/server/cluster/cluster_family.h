@@ -82,7 +82,7 @@ class ClusterFamily {
 
   std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id);
 
-  bool StartSlotMigrations(std::vector<MigrationInfo> migrations, ConnectionContext* cntx);
+  void StartSlotMigrations(std::vector<MigrationInfo> migrations);
   void RemoveOutgoingMigrations(const std::vector<MigrationInfo>& migrations);
   void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations);
 

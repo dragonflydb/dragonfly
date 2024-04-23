@@ -362,7 +362,7 @@ class Context : protected Cancellation {
   using Cancellation::IsCancelled;
   const Cancellation* GetCancellation() const;
 
-  GenericError GetError();
+  GenericError GetError() const;
 
   // Report an error by submitting arguments for GenericError.
   // If this is the first error that occured, then the error handler is run
@@ -391,7 +391,7 @@ class Context : protected Cancellation {
 
  private:
   GenericError err_;
-  util::fb2::Mutex mu_;
+  mutable util::fb2::Mutex mu_;
 
   ErrHandler err_handler_;
   util::fb2::Fiber err_handler_fb_;
