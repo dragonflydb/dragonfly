@@ -371,8 +371,9 @@ EngineShard::~EngineShard() {
 void EngineShard::Shutdown() {
   queue_.Shutdown();
 
-  if (tiered_storage_) {
-    tiered_storage_->Shutdown();
+  if (tiered_storage_v2_) {
+    tiered_storage_v2_->Close();
+    tiered_storage_v2_.reset();
   }
 
   fiber_periodic_done_.Notify();
@@ -404,23 +405,11 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  string backing_prefix = GetFlag(FLAGS_tiered_prefix);
-  if (!backing_prefix.empty()) {
-    if (pb->GetKind() != ProactorBase::IOURING) {
-      LOG(ERROR) << "Only ioring based backing storage is supported. Exiting...";
-      exit(1);
-    }
-
-    shard_->tiered_storage_.reset(new TieredStorage(&shard_->db_slice_, max_file_size));
-    error_code ec = shard_->tiered_storage_->Open(backing_prefix);
-    CHECK(!ec) << ec.message();  // TODO
-  }
-
   if (string backing_prefix = GetFlag(FLAGS_tiered_prefix_v2); !backing_prefix.empty()) {
     LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
         << "Only ioring based backing storage is supported. Exiting...";
 
-    shard_->tiered_storage_v2_.reset(new TieredStorageV2{&shard_->db_slice_});
+    shard_->tiered_storage_v2_ = make_unique<TieredStorageV2>(&shard_->db_slice_);
     error_code ec = shard_->tiered_storage_v2_->Open(backing_prefix);
     CHECK(!ec) << ec.message();
   }
@@ -593,8 +582,7 @@ void EngineShard::Heartbeat() {
   }
 
   ssize_t eviction_redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
-  size_t tiering_redline =
-      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
+
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
@@ -614,14 +602,6 @@ void EngineShard::Heartbeat() {
     // if our budget is below the limit
     if (db_slice_.memory_budget() < eviction_redline) {
       db_slice_.FreeMemWithEvictionStep(i, eviction_redline - db_slice_.memory_budget());
-    }
-
-    if (tiered_storage_) {
-      size_t offload_bytes = 0;
-      if (UsedMemory() > tiering_redline) {
-        offload_bytes = UsedMemory() - tiering_redline;
-      }
-      db_slice_.ScheduleForOffloadStep(i, offload_bytes);
     }
   }
 

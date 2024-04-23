@@ -318,7 +318,7 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
 }
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
-  auto op_res = shard->db_slice().AddOrFindAndFetch(context_, key_);
+  auto op_res = shard->db_slice().AddOrFind(context_, key_);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -447,7 +447,7 @@ OpResult<std::string> CombineResultOp(ShardStringResults result, std::string_vie
 OpResult<std::string> RunBitOpNot(const OpArgs& op_args, string_view key) {
   EngineShard* es = op_args.shard;
   // if we found the value, just return, if not found then skip, otherwise report an error
-  auto find_res = es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  auto find_res = es->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
     return GetString(find_res.value()->second);
   } else {
@@ -468,7 +468,7 @@ OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args
 
   // collect all the value for this shard
   for (; start != end; ++start) {
-    auto find_res = es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, *start, OBJ_STRING);
+    auto find_res = es->db_slice().FindReadOnly(op_args.db_cntx, *start, OBJ_STRING);
     if (find_res) {
       values.emplace_back(GetString(find_res.value()->second));
     } else {
@@ -1244,7 +1244,7 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, ui
 
 OpResult<std::string> ReadValue(const DbContext& context, std::string_view key,
                                 EngineShard* shard) {
-  auto it_res = shard->db_slice().FindAndFetchReadOnly(context, key, OBJ_STRING);
+  auto it_res = shard->db_slice().FindReadOnly(context, key, OBJ_STRING);
   if (!it_res.ok()) {
     return it_res.status();
   }

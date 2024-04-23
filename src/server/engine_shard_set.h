@@ -12,15 +12,12 @@ extern "C" {
 #include <absl/container/flat_hash_map.h>
 #include <xxhash.h>
 
-#include "base/string_view_sso.h"
-#include "util/proactor_pool.h"
-#include "util/sliding_counter.h"
-
-//
 #include "core/mi_memory_resource.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
 #include "server/db_slice.h"
+#include "util/proactor_pool.h"
+#include "util/sliding_counter.h"
 
 namespace dfly {
 
@@ -28,7 +25,6 @@ namespace journal {
 class Journal;
 }  // namespace journal
 
-class TieredStorage;
 class TieredStorageV2;
 class ShardDocIndices;
 class BlockingController;
@@ -116,10 +112,6 @@ class EngineShard {
 
   // Returns used memory for this shard.
   size_t UsedMemory() const;
-
-  TieredStorage* tiered_storage() {
-    return tiered_storage_.get();
-  }
 
   TieredStorageV2* tiered_storage_v2() {
     return tiered_storage_v2_.get();
@@ -257,7 +249,6 @@ class EngineShard {
   util::fb2::Done fiber_periodic_done_;
 
   DefragTaskState defrag_state_;
-  std::unique_ptr<TieredStorage> tiered_storage_;
   std::unique_ptr<TieredStorageV2> tiered_storage_v2_;
   std::unique_ptr<ShardDocIndices> shard_search_indices_;
   std::unique_ptr<BlockingController> blocking_controller_;

@@ -270,22 +270,19 @@ class DbSlice {
     ExpIterator exp_it;
     AutoUpdater post_updater;
   };
+
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
-  ItAndUpdater FindAndFetchMutable(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutable(const Context& cntx, std::string_view key,
                                      unsigned req_obj_type);
-  OpResult<ItAndUpdater> FindAndFetchMutable(const Context& cntx, std::string_view key,
-                                             unsigned req_obj_type);
 
   struct ItAndExpConst {
     ConstIterator it;
     ExpConstIterator exp_it;
   };
+
   ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type) const;
-  OpResult<ConstIterator> FindAndFetchReadOnly(const Context& cntx, std::string_view key,
-                                               unsigned req_obj_type);
 
   struct AddOrFindResult {
     Iterator it;
@@ -297,7 +294,6 @@ class DbSlice {
   };
 
   OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key);
-  OpResult<AddOrFindResult> AddOrFindAndFetch(const Context& cntx, std::string_view key);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   OpResult<AddOrFindResult> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
@@ -332,15 +328,10 @@ class DbSlice {
   void ActivateDb(DbIndex db_ind);
 
   bool Del(DbIndex db_ind, Iterator it);
-  void RemoveFromTiered(Iterator it, DbIndex index);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
-  /**
-   * @brief Flushes the database of index db_ind. If kDbAll is passed then flushes all the
-   * databases.
-   *
-   */
+  // Flushes db_ind or all databases if kDbAll is passed
   void FlushDb(DbIndex db_ind);
 
   // Flushes the data of given slot ranges.
@@ -506,29 +497,23 @@ class DbSlice {
     kMutableStats,
   };
 
-  enum class LoadExternalMode {
-    kLoad,
-    kDontLoad,
-  };
   struct PrimeItAndExp {
     PrimeIterator it;
     ExpireIterator exp_it;
   };
+
   PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode,
-                                       LoadExternalMode load_mode) const;
-  OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key,
-                                              LoadExternalMode load_mode);
+                                       UpdateStatsMode stats_mode) const;
+
+  OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
-                                             std::optional<unsigned> req_obj_type,
-                                             LoadExternalMode load_mode);
+                                             std::optional<unsigned> req_obj_type);
 
   uint64_t NextVersion() {
     return version_++;
   }
-  void RemoveFromTiered(Iterator it, DbTable* table);
 
  private:
   ShardId shard_id_;

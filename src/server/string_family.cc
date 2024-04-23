@@ -11,7 +11,6 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
-#include <tuple>
 #include <variant>
 
 #include "absl/strings/str_cat.h"
@@ -49,7 +48,6 @@ using namespace facade;
 using CI = CommandId;
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
-[[maybe_unused]] constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
 size_t CopyValueToBuffer(const PrimeValue& pv, char* dest) {
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);
@@ -91,7 +89,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
     }
   }
 
-  auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
 
@@ -115,7 +113,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -161,7 +159,7 @@ size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bo
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.FindAndFetchMutable(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }
@@ -426,7 +424,7 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   size_t total_size = 0;
   unsigned index = 0;
   for (string_view key : keys) {
-    auto it_res = db_slice.FindAndFetchReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     auto& dest = iters[index++];
     if (!it_res)
       continue;
@@ -484,9 +482,8 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();
     };
-    return {shard->tiered_storage_v2()->Modify<size_t>(key, pv, modf)};
+    return {shard->tiered_storage_v2()->Modify<size_t>(key, pv, std::move(modf))};
   } else {
-    // todo: automate this?
     if (pv.HasIoPending())
       shard->tiered_storage_v2()->Delete(key, &pv);
     return {ExtendExisting(it_res->it, key, value, prepend)};
