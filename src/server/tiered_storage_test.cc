@@ -81,9 +81,13 @@ TEST_F(TieredStorageV2Test, SimpleGetSet) {
 TEST_F(TieredStorageV2Test, SimpleAppend) {
   // TODO: use pipelines to issue APPEND/GET/APPEND sequence,
   // currently it's covered only for op_manager_test
-  Run({"SET", "k0", string(3000, 'A')});
-  EXPECT_THAT(Run({"APPEND", "k0", "B"}), IntArg(3001));
-  EXPECT_EQ(Run({"GET", "k0"}), string(3000, 'A') + 'B');
+  for (size_t sleep : {0, 100, 500, 1000}) {
+    Run({"SET", "k0", string(3000, 'A')});
+    if (sleep)
+      util::ThisFiber::SleepFor(sleep * 1us);
+    EXPECT_THAT(Run({"APPEND", "k0", "B"}), IntArg(3001));
+    EXPECT_EQ(Run({"GET", "k0"}), string(3000, 'A') + 'B');
+  }
 }
 
 }  // namespace dfly
