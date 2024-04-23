@@ -2539,29 +2539,13 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   cntx->conn()->SetClientTrackingSwitch(false);
 }
 
-string Service::GetContextInfo(facade::ConnectionContext* cntx) {
-  char buf[16] = {0};
-  unsigned index = 0;
+Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) const {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
-
-  string res = absl::StrCat("db=", server_cntx->db_index());
-
-  if (server_cntx->async_dispatch)
-    buf[index++] = 'a';
-
-  if (server_cntx->conn_closing)
-    buf[index++] = 't';
-
-  if (server_cntx->conn_state.subscribe_info)
-    buf[index++] = 'P';
-
-  if (server_cntx->blocked)
-    buf[index++] = 'b';
-
-  if (index) {
-    absl::StrAppend(&res, " flags=", buf);
-  }
-  return res;
+  return {.db_index = server_cntx->db_index(),
+          .async_dispatch = server_cntx->async_dispatch,
+          .conn_closing = server_cntx->conn_closing,
+          .subscribers = bool(server_cntx->conn_state.subscribe_info),
+          .blocked = server_cntx->blocked};
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);

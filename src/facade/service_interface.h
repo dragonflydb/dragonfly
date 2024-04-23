@@ -42,7 +42,14 @@ class ServiceInterface {
   virtual void OnClose(ConnectionContext* cntx) {
   }
 
-  virtual std::string GetContextInfo(ConnectionContext* cntx) {
+  struct ContextInfo {
+    std::string Format() const;
+
+    unsigned db_index;
+    bool async_dispatch, conn_closing, subscribers, blocked;
+  };
+
+  virtual ContextInfo GetContextInfo(ConnectionContext* cntx) const {
     return {};
   }
 };
