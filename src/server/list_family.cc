@@ -416,9 +416,9 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
   //
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    DCHECK_EQ(1u, args.size());
-    bool is_dest = args.front() == dest;
-    find_res[is_dest] = Peek(t->GetOpArgs(shard), args.front(), src_dir, !is_dest);
+    DCHECK_EQ(1u, args.Size());
+    bool is_dest = args.Front() == dest;
+    find_res[is_dest] = Peek(t->GetOpArgs(shard), args.Front(), src_dir, !is_dest);
     return OpStatus::OK;
   };
 
@@ -432,7 +432,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
     // Everything is ok, lets proceed with the mutations.
     auto cb = [&](Transaction* t, EngineShard* shard) {
       auto args = t->GetShardArgs(shard->shard_id());
-      auto key = args.front();
+      auto key = args.Front();
       bool is_dest = (key == dest);
       OpArgs op_args = t->GetOpArgs(shard);
 
@@ -873,7 +873,7 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
     return op_res;
   }
 
-  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return ShardArgs{&this->pop_key_, 1}; };
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {

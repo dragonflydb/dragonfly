@@ -169,11 +169,11 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
   }
 }
 
-OpResult<vector<string>> ReadValues(const OpArgs& op_args, ArgSlice keys) {
+OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys) {
   try {
     vector<string> values;
-    for (size_t i = 0; i < keys.size(); ++i) {
-      auto it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, keys[i], OBJ_STRING);
+    for (string_view key : keys) {
+      auto it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
       if (it.ok()) {
         string hll;
         it.value()->second.GetString(&hll);
@@ -210,7 +210,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    ArgSlice shard_args = t->GetShardArgs(shard->shard_id());
+    ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
     auto result = ReadValues(t->GetOpArgs(shard), shard_args);
     if (result.ok()) {
       hlls[sid] = std::move(result.value());
@@ -252,7 +252,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
   atomic_bool success = true;
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    ArgSlice shard_args = t->GetShardArgs(shard->shard_id());
+    ShardArgs shard_args = t->GetShardArgs(shard->shard_id());
     auto result = ReadValues(t->GetOpArgs(shard), shard_args);
     if (result.ok()) {
       hlls[sid] = std::move(result.value());

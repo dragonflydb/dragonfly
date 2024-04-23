@@ -24,6 +24,7 @@
 
 namespace dfly {
 using namespace facade;
+using namespace std;
 
 namespace {
 
@@ -57,7 +58,6 @@ bool SetBitValue(uint32_t offset, bool bit_value, std::string* entry);
 std::size_t CountBitSetByByteIndices(std::string_view at, std::size_t start, std::size_t end);
 std::size_t CountBitSet(std::string_view str, int64_t start, int64_t end, bool bits);
 std::size_t CountBitSetByBitIndices(std::string_view at, std::size_t start, std::size_t end);
-OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args, ArgSlice keys);
 std::string RunBitOperationOnValues(std::string_view op, const BitsStrVec& values);
 
 // ------------------------------------------------------------------------- //
@@ -444,12 +444,9 @@ OpResult<std::string> CombineResultOp(ShardStringResults result, std::string_vie
 }
 
 // For bitop not - we cannot accumulate
-OpResult<std::string> RunBitOpNot(const OpArgs& op_args, ArgSlice keys) {
-  DCHECK(keys.size() == 1);
-
+OpResult<std::string> RunBitOpNot(const OpArgs& op_args, string_view key) {
   EngineShard* es = op_args.shard;
   // if we found the value, just return, if not found then skip, otherwise report an error
-  auto key = keys.front();
   auto find_res = es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
     return GetString(find_res.value()->second);
@@ -460,18 +457,18 @@ OpResult<std::string> RunBitOpNot(const OpArgs& op_args, ArgSlice keys) {
 
 // Read only operation where we are running the bit operation on all the
 // values that belong to same shard.
-OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args, ArgSlice keys) {
-  DCHECK(!keys.empty());
+OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args,
+                                      ShardArgs::Iterator start, ShardArgs::Iterator end) {
+  DCHECK(start != end);
   if (op == NOT_OP_NAME) {
-    return RunBitOpNot(op_args, keys);
+    return RunBitOpNot(op_args, *start);
   }
   EngineShard* es = op_args.shard;
   BitsStrVec values;
-  values.reserve(keys.size());
 
   // collect all the value for this shard
-  for (auto& key : keys) {
-    auto find_res = es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  for (; start != end; ++start) {
+    auto find_res = es->db_slice().FindAndFetchReadOnly(op_args.db_cntx, *start, OBJ_STRING);
     if (find_res) {
       values.emplace_back(GetString(find_res.value()->second));
     } else {
@@ -1143,18 +1140,18 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
   auto shard_bitop = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->GetShardArgs(shard->shard_id());
-    DCHECK(!largs.empty());
-
+    ShardArgs largs = t->GetShardArgs(shard->shard_id());
+    DCHECK(!largs.Empty());
+    ShardArgs::Iterator start = largs.begin(), end = largs.end();
     if (shard->shard_id() == dest_shard) {
-      CHECK_EQ(largs.front(), dest_key);
-      largs.remove_prefix(1);
-      if (largs.empty()) {  // no more keys to check
+      CHECK_EQ(*start, dest_key);
+      ++start;
+      if (start == end) {  // no more keys to check
         return OpStatus::OK;
       }
     }
     OpArgs op_args = t->GetOpArgs(shard);
-    result_set[shard->shard_id()] = RunBitOpOnShard(op, op_args, largs);
+    result_set[shard->shard_id()] = RunBitOpOnShard(op, op_args, start, end);
     return OpStatus::OK;
   };
 

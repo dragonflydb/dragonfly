@@ -22,6 +22,7 @@
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/table.h"
+#include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
@@ -129,8 +130,9 @@ class Transaction {
   // Runnable that is run on shards during hop executions (often named callback).
   // Callacks should return `OpStatus` which is implicitly converitble to `RunnableResult`!
   using RunnableType = absl::FunctionRef<RunnableResult(Transaction* t, EngineShard*)>;
+
   // Provides keys to block on for specific shard.
-  using WaitKeysProvider = std::function<ArgSlice(Transaction*, EngineShard* shard)>;
+  using WaitKeysProvider = std::function<ShardArgs(Transaction*, EngineShard* shard)>;
 
   // Modes in which a multi transaction can run.
   enum MultiMode {
@@ -176,7 +178,7 @@ class Transaction {
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
 
   // Get command arguments for specific shard. Called from shard thread.
-  ArgSlice GetShardArgs(ShardId sid) const;
+  ShardArgs GetShardArgs(ShardId sid) const;
 
   // Map arg_index from GetShardArgs slice to index in original command slice from InitByArgs.
   size_t ReverseArgIndex(ShardId shard_id, size_t arg_index) const;
@@ -511,12 +513,12 @@ class Transaction {
   void RunCallback(EngineShard* shard);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
-  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyChecker krc);
+  OpStatus WatchInShard(const ShardArgs& keys, EngineShard* shard, KeyReadyChecker krc);
 
   // Expire blocking transaction, unlock keys and unregister it from the blocking controller
   void ExpireBlocking(WaitKeysProvider wcb);
 
-  void ExpireShardCb(ArgSlice wkeys, EngineShard* shard);
+  void ExpireShardCb(const ShardArgs& wkeys, EngineShard* shard);
 
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
@@ -577,7 +579,6 @@ class Transaction {
     });
   }
 
- private:
   // Used for waiting for all hop callbacks to run.
   util::fb2::EmbeddedBlockingCounter run_barrier_{0};
 

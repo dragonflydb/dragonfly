@@ -281,16 +281,11 @@ class DbSlice {
     ConstIterator it;
     ExpConstIterator exp_it;
   };
-  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
+  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                       unsigned req_obj_type);
+                                       unsigned req_obj_type) const;
   OpResult<ConstIterator> FindAndFetchReadOnly(const Context& cntx, std::string_view key,
                                                unsigned req_obj_type);
-
-  // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
-  // If multiple keys are found, returns the first index in the ArgSlice.
-  OpResult<std::pair<ConstIterator, unsigned>> FindFirstReadOnly(const Context& cntx, ArgSlice args,
-                                                                 int req_obj_type);
 
   struct AddOrFindResult {
     Iterator it;
@@ -404,7 +399,7 @@ class DbSlice {
     Iterator it;
     ExpIterator exp_it;
   };
-  ItAndExp ExpireIfNeeded(const Context& cntx, Iterator it);
+  ItAndExp ExpireIfNeeded(const Context& cntx, Iterator it) const;
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -473,7 +468,9 @@ class DbSlice {
   }
 
   // Track keys for the client represented by the the weak reference to its connection.
-  void TrackKeys(const facade::Connection::WeakRef&, const ArgSlice&);
+  void TrackKey(const facade::Connection::WeakRef& conn_ref, std::string_view key) {
+    client_tracking_map_[key].insert(conn_ref);
+  }
 
   // Delete a key referred by its iterator.
   void PerformDeletion(Iterator del_it, DbTable* table);
@@ -517,10 +514,11 @@ class DbSlice {
     PrimeIterator it;
     ExpireIterator exp_it;
   };
-  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it);
+  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode, LoadExternalMode load_mode);
+                                       UpdateStatsMode stats_mode,
+                                       LoadExternalMode load_mode) const;
   OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key,
                                               LoadExternalMode load_mode);
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,

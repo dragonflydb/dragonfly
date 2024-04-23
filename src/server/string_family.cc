@@ -278,19 +278,23 @@ int64_t AbsExpiryToTtl(int64_t abs_expiry_time, bool as_milli) {
 }
 
 // Returns true if keys were set, false otherwise.
-void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
-  DCHECK(!args.empty() && args.size() % 2 == 0);
+void OpMSet(const OpArgs& op_args, const ShardArgs& args, atomic_bool* success) {
+  DCHECK(!args.Empty() && args.Size() % 2 == 0);
 
   SetCmd::SetParams params;
   SetCmd sg(op_args, false);
 
-  size_t i = 0;
-  for (; i < args.size(); i += 2) {
-    DVLOG(1) << "MSet " << args[i] << ":" << args[i + 1];
-    if (sg.Set(params, args[i], args[i + 1]) != OpStatus::OK) {  // OOM for example.
+  size_t index = 0;
+  for (auto it = args.begin(); it != args.end(); ++it) {
+    string_view key = *it;
+    ++it;
+    string_view value = *it;
+    DVLOG(1) << "MSet " << key << ":" << value;
+    if (sg.Set(params, key, value) != OpStatus::OK) {  // OOM for example.
       success->store(false);
       break;
     }
+    index += 2;
   }
 
   if (auto journal = op_args.shard->journal(); journal) {
@@ -298,14 +302,14 @@ void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
     // we replicate only what was changed.
     string_view cmd;
     ArgSlice cmd_args;
-    if (i == 0) {
+    if (index == 0) {
       // All shards must record the tx was executed for the replica to execute it, so we send a PING
       // in case nothing was changed
       cmd = "PING";
     } else {
       // journal [0, i)
       cmd = "MSET";
-      cmd_args = ArgSlice(&args[0], i);
+      cmd_args = ArgSlice(args.begin(), index);
     }
     RecordJournal(op_args, cmd, cmd_args, op_args.tx->GetUniqueShardCnt());
   }
@@ -419,27 +423,29 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 
 SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                                       EngineShard* shard) {
-  auto keys = t->GetShardArgs(shard->shard_id());
-  DCHECK(!keys.empty());
+  ShardArgs keys = t->GetShardArgs(shard->shard_id());
+  DCHECK(!keys.Empty());
 
   auto& db_slice = shard->db_slice();
 
-  SinkReplyBuilder::MGetResponse response(keys.size());
-  absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.size());
+  SinkReplyBuilder::MGetResponse response(keys.Size());
+  absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
 
   size_t total_size = 0;
-  for (size_t i = 0; i < keys.size(); ++i) {
-    auto it_res = db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
+  unsigned index = 0;
+  for (string_view key : keys) {
+    auto it_res = db_slice.FindAndFetchReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    auto& dest = iters[index++];
     if (!it_res)
       continue;
-    iters[i] = *it_res;
+    dest = *it_res;
     total_size += (*it_res)->second.Size();
   }
 
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
 
-  for (size_t i = 0; i < keys.size(); ++i) {
+  for (size_t i = 0; i < iters.size(); ++i) {
     auto it = iters[i];
     if (it.is_done())
       continue;
@@ -1139,12 +1145,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
     res.storage_list = src.storage_list;
     src.storage_list = nullptr;
 
-    ArgSlice slice = transaction->GetShardArgs(sid);
-
-    DCHECK(!slice.empty());
-    DCHECK_EQ(slice.size(), src.resp_arr.size());
-
-    for (size_t j = 0; j < slice.size(); ++j) {
+    for (size_t j = 0; j < src.resp_arr.size(); ++j) {
       if (!src.resp_arr[j])
         continue;
 
@@ -1173,7 +1174,7 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_bool success = true;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto args = t->GetShardArgs(shard->shard_id());
+    ShardArgs args = t->GetShardArgs(shard->shard_id());
     OpMSet(t->GetOpArgs(shard), args, &success);
     return OpStatus::OK;
   };
@@ -1193,8 +1194,9 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* es) {
     auto args = t->GetShardArgs(es->shard_id());
-    for (size_t i = 0; i < args.size(); i += 2) {
-      auto it = es->db_slice().FindReadOnly(t->GetDbContext(), args[i]).it;
+    for (auto arg_it = args.begin(); arg_it != args.end(); ++arg_it) {
+      auto it = es->db_slice().FindReadOnly(t->GetDbContext(), *arg_it).it;
+      ++arg_it;
       if (IsValid(it)) {
         exists.store(true, memory_order_relaxed);
         break;

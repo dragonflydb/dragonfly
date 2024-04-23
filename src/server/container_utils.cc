@@ -24,7 +24,7 @@ extern "C" {
 ABSL_FLAG(bool, singlehop_blocking, true, "Use single hop optimization for blocking commands");
 
 namespace dfly::container_utils {
-
+using namespace std;
 namespace {
 
 struct ShardFFResult {
@@ -32,16 +32,38 @@ struct ShardFFResult {
   ShardId sid = kInvalidSid;
 };
 
+// Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
+// If multiple keys are found, returns the first index in the ArgSlice.
+OpResult<std::pair<DbSlice::ConstIterator, unsigned>> FindFirstReadOnly(const DbSlice& db_slice,
+                                                                        const DbContext& cntx,
+                                                                        const ShardArgs& args,
+                                                                        int req_obj_type) {
+  DCHECK(!args.Empty());
+
+  unsigned i = 0;
+  for (string_view key : args) {
+    OpResult<DbSlice::ConstIterator> res = db_slice.FindReadOnly(cntx, key, req_obj_type);
+    if (res)
+      return make_pair(res.value(), i);
+    if (res.status() != OpStatus::KEY_NOTFOUND)
+      return res.status();
+    ++i;
+  }
+
+  VLOG(2) << "FindFirst not found";
+  return OpStatus::KEY_NOTFOUND;
+}
+
 // Find first non-empty key of a single shard transaction, pass it to `func` and return the key.
 // If no such key exists or a wrong type is found, the apropriate status is returned.
 // Optimized version of `FindFirstNonEmpty` below.
-OpResult<std::string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_type,
-                                                   BlockingResultCb func) {
+OpResult<string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_type,
+                                              BlockingResultCb func) {
   DCHECK_EQ(trans->GetUniqueShardCnt(), 1u);
-  std::string key;
+  string key;
   auto cb = [&](Transaction* t, EngineShard* shard) -> Transaction::RunnableResult {
     auto args = t->GetShardArgs(shard->shard_id());
-    auto ff_res = shard->db_slice().FindFirstReadOnly(t->GetDbContext(), args, req_obj_type);
+    auto ff_res = FindFirstReadOnly(shard->db_slice(), t->GetDbContext(), args, req_obj_type);
 
     if (ff_res == OpStatus::WRONG_TYPE)
       return OpStatus::WRONG_TYPE;
@@ -77,7 +99,7 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    auto ff_res = shard->db_slice().FindFirstReadOnly(t->GetDbContext(), args, req_obj_type);
+    auto ff_res = FindFirstReadOnly(shard->db_slice(), t->GetDbContext(), args, req_obj_type);
     if (ff_res) {
       find_res[shard->shard_id()] =
           FFResult{ff_res->first->first.AsRef(), ff_res->second, shard->shard_id()};

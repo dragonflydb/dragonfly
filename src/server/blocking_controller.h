@@ -10,6 +10,7 @@
 
 #include "base/string_view_sso.h"
 #include "server/common.h"
+#include "server/tx_base.h"
 
 namespace dfly {
 
@@ -28,7 +29,7 @@ class BlockingController {
     return awakened_transactions_;
   }
 
-  void FinalizeWatched(ArgSlice args, Transaction* tx);
+  void FinalizeWatched(const ShardArgs& args, Transaction* tx);
 
   // go over potential wakened keys, verify them and activate watch queues.
   void NotifyPending();
@@ -37,7 +38,7 @@ class BlockingController {
   // TODO: consider moving all watched functions to
   // EngineShard with separate per db map.
   //! AddWatched adds a transaction to the blocking queue.
-  void AddWatched(ArgSlice watch_keys, KeyReadyChecker krc, Transaction* me);
+  void AddWatched(const ShardArgs& watch_keys, KeyReadyChecker krc, Transaction* me);
 
   // Called from operations that create keys like lpush, rename etc.
   void AwakeWatched(DbIndex db_index, std::string_view db_key);

@@ -798,8 +798,8 @@ stream* GetReadOnlyStream(const CompactObj& cobj) {
 // Returns a map of stream to the ID of the last entry in the stream. Any
 // streams not found are omitted from the result.
 OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
-                                                        const ArgSlice& args) {
-  DCHECK(!args.empty());
+                                                        const ShardArgs& args) {
+  DCHECK(!args.Empty());
 
   auto& db_slice = op_args.shard->db_slice();
 
@@ -828,8 +828,8 @@ OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
 
 // Returns the range response for each stream on this shard in order of
 // GetShardArgs.
-vector<RecordVec> OpRead(const OpArgs& op_args, const ArgSlice& args, const ReadOpts& opts) {
-  DCHECK(!args.empty());
+vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, const ReadOpts& opts) {
+  DCHECK(!shard_args.Empty());
 
   RangeOpts range_opts;
   range_opts.count = opts.count;
@@ -838,11 +838,11 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ArgSlice& args, const Read
                                       .seq = UINT64_MAX,
                                   }};
 
-  vector<RecordVec> response(args.size());
-  for (size_t i = 0; i < args.size(); ++i) {
-    string_view key = args[i];
-
+  vector<RecordVec> response(shard_args.Size());
+  unsigned index = 0;
+  for (string_view key : shard_args) {
     auto sitem = opts.stream_ids.at(key);
+    auto& dest = response[index++];
     if (!sitem.group && opts.read_group) {
       continue;
     }
@@ -858,7 +858,7 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ArgSlice& args, const Read
     else
       range_res = OpRange(op_args, key, range_opts);
     if (range_res) {
-      response[i] = std::move(range_res.value());
+      dest = std::move(range_res.value());
     }
   }
 
@@ -1352,15 +1352,17 @@ struct GroupConsumerPairOpts {
   string_view consumer;
 };
 
-vector<GroupConsumerPair> OpGetGroupConsumerPairs(ArgSlice slice_args, const OpArgs& op_args,
+vector<GroupConsumerPair> OpGetGroupConsumerPairs(const ShardArgs& shard_args,
+                                                  const OpArgs& op_args,
                                                   const GroupConsumerPairOpts& opts) {
-  vector<GroupConsumerPair> sid_items(slice_args.size());
-
+  vector<GroupConsumerPair> sid_items(shard_args.Size());
+  unsigned index = 0;
   // get group and consumer
-  for (size_t i = 0; i < slice_args.size(); i++) {
-    string_view key = slice_args[i];
+  for (string_view key : shard_args) {
     streamCG* group = nullptr;
     streamConsumer* consumer = nullptr;
+    auto& dest = sid_items[index++];
+
     auto group_res = FindGroup(op_args, key, opts.group);
     if (!group_res) {
       continue;
@@ -1376,7 +1378,7 @@ vector<GroupConsumerPair> OpGetGroupConsumerPairs(ArgSlice slice_args, const OpA
       consumer = streamCreateConsumer(group, op_args.shard->tmp_str1, NULL, 0,
                                       SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
     }
-    sid_items[i] = {group, consumer};
+    dest = {group, consumer};
   }
   return sid_items;
 }
@@ -2988,12 +2990,7 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
 
     vector<RecordVec>& results = xread_resp[sid];
 
-    ArgSlice slice = cntx->transaction->GetShardArgs(sid);
-
-    DCHECK(!slice.empty());
-    DCHECK_EQ(slice.size(), results.size());
-
-    for (size_t i = 0; i < slice.size(); ++i) {
+    for (size_t i = 0; i < results.size(); ++i) {
       if (results[i].size() == 0) {
         continue;
       }
@@ -3039,7 +3036,7 @@ void XReadGeneric(CmdArgList args, bool read_group, ConnectionContext* cntx) {
   vector<vector<GroupConsumerPair>> res_pairs(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto sid = shard->shard_id();
-    auto s_args = t->GetShardArgs(sid);
+    ShardArgs s_args = t->GetShardArgs(sid);
     GroupConsumerPairOpts gc_opts = {opts->group_name, opts->consumer_name};
 
     res_pairs[sid] = OpGetGroupConsumerPairs(s_args, t->GetOpArgs(shard), gc_opts);
@@ -3057,11 +3054,12 @@ void XReadGeneric(CmdArgList args, bool read_group, ConnectionContext* cntx) {
       if (s_item.size() == 0) {
         continue;
       }
-      for (size_t j = 0; j < s_args.size(); j++) {
-        string_view key = s_args[j];
+      unsigned index = 0;
+      for (string_view key : s_args) {
         StreamIDsItem& item = opts->stream_ids.at(key);
-        item.consumer = s_item[j].consumer;
-        item.group = s_item[j].group;
+        item.consumer = s_item[index].consumer;
+        item.group = s_item[index].group;
+        ++index;
       }
     }
   }
