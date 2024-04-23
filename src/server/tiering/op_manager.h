@@ -50,7 +50,8 @@ class OpManager {
   // Report that a stash succeeded and the entry was stored at the provided segment
   virtual void ReportStashed(EntryId id, DiskSegment segment) = 0;
 
-  // Report that an entry was successfully fetched
+  // Report that an entry was successfully fetched.
+  // If modify is set, a modification was executed during the read and the stored value is outdated.
   virtual void ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
                              bool modified) = 0;
 

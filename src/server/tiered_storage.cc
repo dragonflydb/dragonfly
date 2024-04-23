@@ -834,6 +834,7 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
                      bool modified) override {
     DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
 
+    // Modified values are always cached and deleted
     if (!modified && !cache_fetched_)
       return;
 
@@ -930,7 +931,7 @@ void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
 void TieredStorageV2::Modify(std::string_view key, const PrimeValue& pv,
                              std::function<void(std::string*)> modf) {
   DCHECK(pv.IsExternal());
-  op_manager_->Modify(key, pv.GetExternalSlice(), modf);
+  op_manager_->Modify(key, pv.GetExternalSlice(), std::move(modf));
 }
 
 bool TieredStorageV2::ShouldStash(const PrimeValue& pv) {
