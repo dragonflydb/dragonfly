@@ -46,6 +46,11 @@ class TieredStorageV2 {
   // Read offloaded value. It must be of external type
   util::fb2::Future<std::string> Read(std::string_view key, const PrimeValue& value);
 
+  // Apply modification to offloaded value, return generic result from callback
+  template <typename T>
+  util::fb2::Future<T> Modify(std::string_view key, const PrimeValue& value,
+                              std::function<T(std::string*)> modf);
+
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
   void Stash(std::string_view key, PrimeValue* value);
 

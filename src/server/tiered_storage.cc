@@ -830,14 +830,15 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  void ReportFetched(EntryId id, std::string_view value, tiering::DiskSegment segment) override {
+  void ReportFetched(EntryId id, std::string_view value, tiering::DiskSegment segment,
+                     bool modified) override {
     DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
 
-    if (!cache_fetched_)
+    // Modified values are always cached and deleted from disk
+    if (!modified && !cache_fetched_)
       return;
 
-    if (!SetInMemory(get<string_view>(id), value, segment))
-      return;
+    SetInMemory(get<string_view>(id), value, segment);
 
     // Delete value
     if (segment.length >= TieredStorageV2::kMinOccupancySize) {
@@ -887,8 +888,29 @@ void TieredStorageV2::Close() {
 
 util::fb2::Future<std::string> TieredStorageV2::Read(string_view key, const PrimeValue& value) {
   DCHECK(value.IsExternal());
-  return op_manager_->Read(key, value.GetExternalSlice());
+  util::fb2::Future<std::string> future;
+  op_manager_->Enqueue(key, value.GetExternalSlice(), [future](std::string* value) mutable {
+    future.Resolve(*value);
+    return false;
+  });
+  return future;
 }
+
+template <typename T>
+util::fb2::Future<T> TieredStorageV2::Modify(std::string_view key, const PrimeValue& value,
+                                             std::function<T(std::string*)> modf) {
+  DCHECK(value.IsExternal());
+  util::fb2::Future<T> future;
+  auto cb = [future, modf = std::move(modf)](std::string* value) mutable {
+    future.Resolve(modf(value));
+    return true;
+  };
+  op_manager_->Enqueue(key, value.GetExternalSlice(), std::move(cb));
+  return future;
+}
+
+template util::fb2::Future<size_t> TieredStorageV2::Modify(
+    std::string_view key, const PrimeValue& value, std::function<size_t(std::string*)> modf);
 
 void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
   DCHECK(!value->IsExternal() && !value->HasIoPending());

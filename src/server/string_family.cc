@@ -14,15 +14,18 @@
 #include <tuple>
 #include <variant>
 
+#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/overloaded.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -30,6 +33,7 @@
 #include "server/table.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/future.h"
 
 ABSL_FLAG(bool, tiered_skip_prefetch, false,
           "If true, does not load offloaded string back to in-memory store during GET command."
@@ -62,6 +66,14 @@ string GetString(const PrimeValue& pv) {
   CopyValueToBuffer(pv, res.data());
 
   return res;
+}
+
+template <typename T> T GetResult(std::variant<T, util::fb2::Future<T>> v) {
+  Overloaded ov{
+      [](T&& t) { return t; },
+      [](util::fb2::Future<T>&& future) { return future.Get(); },
+  };
+  return std::visit(ov, std::move(v));
 }
 
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
@@ -133,8 +145,7 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, DbSlice::Iterator it, string_view key, string_view val,
-                      bool prepend) {
+size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bool prepend) {
   string tmp, new_val;
   string_view slice = it->second.GetSlice(&tmp);
 
@@ -148,25 +159,6 @@ size_t ExtendExisting(const OpArgs& op_args, DbSlice::Iterator it, string_view k
   return new_val.size();
 }
 
-// Returns the length of the extended string. if prepend is false - appends the val.
-OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_view val,
-                               bool prepend) {
-  auto* shard = op_args.shard;
-  auto& db_slice = shard->db_slice();
-  auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
-  RETURN_ON_BAD_STATUS(op_res);
-  auto& add_res = *op_res;
-  if (add_res.is_new) {
-    add_res.it->second.SetString(val);
-    return val.size();
-  }
-
-  if (add_res.it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
-
-  return ExtendExisting(op_args, add_res.it, key, val, prepend);
-}
-
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
   auto it_res = db_slice.FindAndFetchMutable(op_args.db_cntx, key, OBJ_STRING);
@@ -174,7 +166,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
     return false;
   }
 
-  return ExtendExisting(op_args, it_res->it, key, val, prepend);
+  return ExtendExisting(it_res->it, key, val, prepend);
 }
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
@@ -468,6 +460,37 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   }
 
   return response;
+}
+
+// Extend key with value, either prepend or append. Return size of stored string after modification
+OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_args,
+                                                              std::string_view key,
+                                                              std::string_view value,
+                                                              bool prepend) {
+  auto* shard = op_args.shard;
+  auto it_res = shard->db_slice().AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  if (it_res->is_new) {
+    it_res->it->second.SetString(value);
+    return {it_res->it->second.Size()};
+  }
+
+  if (it_res->it->second.ObjType() != OBJ_STRING)
+    return OpStatus::WRONG_TYPE;
+
+  if (PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
+    auto modf = [value = string{value}, prepend](std::string* v) {
+      *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
+      return v->size();
+    };
+    return {shard->tiered_storage_v2()->Modify<size_t>(key, pv, modf)};
+  } else {
+    // todo: automate this?
+    if (pv.HasIoPending())
+      shard->tiered_storage_v2()->Delete(key, &pv);
+    return {ExtendExisting(it_res->it, key, value, prepend)};
+  }
 }
 
 // Helper for building replies for strings
@@ -877,25 +900,24 @@ void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
-  VLOG(2) << "ExtendGeneric(" << key << ", " << sval << ")";
+  string_view value = ArgS(args, 1);
+  VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
   if (cntx->protocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSet(t->GetOpArgs(shard), key, sval, prepend);
+      return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-    if (!result)
-      return cntx->SendError(result.status());
-    else
-      return cntx->SendLong(result.value());
+    auto res = cntx->transaction->ScheduleSingleHopT(cb);
+    if (!res)
+      return cntx->SendError(res.status());
+    cntx->SendLong(GetResult(std::move(res.value())));
   } else {
     // Memcached skips if key is missing
     DCHECK(cntx->protocol() == Protocol::MEMCACHE);
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSkip(t->GetOpArgs(shard), key, sval, prepend);
+      return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
     };
 
     OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

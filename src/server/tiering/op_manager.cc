@@ -4,10 +4,13 @@
 
 #include "server/tiering/op_manager.h"
 
+#include <variant>
+
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "io/io.h"
 #include "server/tiering/common.h"
+#include "util/fibers/future.h"
 
 namespace dfly::tiering {
 
@@ -33,9 +36,9 @@ void OpManager::Close() {
   storage_.Close();
 }
 
-util::fb2::Future<std::string> OpManager::Read(EntryId id, DiskSegment segment) {
+void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
-  return PrepareRead(segment.FillPages()).ForId(id, segment).futures.emplace_back();
+  PrepareRead(segment.FillPages()).ForId(id, segment).callbacks.emplace_back(std::move(cb));
 }
 
 void OpManager::Delete(EntryId id) {
@@ -94,13 +97,16 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
 void OpManager::ProcessRead(size_t offset, std::string_view value) {
   ReadOp* info = &pending_reads_.at(offset);
 
+  std::string key_value;
   for (auto& ko : info->key_ops) {
-    auto key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+    key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
 
-    for (auto& fut : ko.futures)
-      fut.Resolve(std::string{key_value});
+    bool modified = false;
+    for (auto& cb : ko.callbacks)
+      modified |= cb(&key_value);
 
-    ReportFetched(Borrowed(ko.id), key_value, ko.segment);
+    // Report item as fetched only after all action were executed, pass whether it was modified
+    ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified);
   }
 
   if (info->delete_requested)
