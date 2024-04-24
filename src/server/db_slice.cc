@@ -29,7 +29,7 @@ ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
           "The maximum number of dashtable segments to scan in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
 
-ABSL_FLAG(double, table_growth_margin, 1.1,
+ABSL_FLAG(double, table_growth_margin, 0.4,
           "Prevents table from growing if number of free slots x average object size x this ratio "
           "is larger than memory budget.");
 
