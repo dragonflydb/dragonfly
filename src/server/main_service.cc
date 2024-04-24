@@ -1149,7 +1149,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
       auto info_ptr = server_family_.GetReplicaInfo(dfly_cntx);
       if (info_ptr) {
-        info_ptr->cntx.Cancel();
+        unsigned session_id = dfly_cntx->conn_state.replication_info.repl_session_id;
+        DCHECK(session_id);
+        server_family_.GetDflyCmd()->CancelReplication(session_id, std::move(info_ptr));
       }
       return;
     }

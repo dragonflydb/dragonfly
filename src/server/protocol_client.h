@@ -116,10 +116,6 @@ class ProtocolClient {
     return sock_.get();
   }
 
-  void SetSocketTimeout(uint32_t msec) {
-    sock_->set_timeout(msec);
-  }
-
  private:
   ServerContext server_context_;
 
