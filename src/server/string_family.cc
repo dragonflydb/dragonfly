@@ -24,6 +24,7 @@
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -134,8 +135,7 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, DbSlice::Iterator it, string_view key, string_view val,
-                      bool prepend) {
+size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bool prepend) {
   string tmp, new_val;
   string_view slice = it->second.GetSlice(&tmp);
 
@@ -156,7 +156,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
     return false;
   }
 
-  return ExtendExisting(op_args, it_res->it, key, val, prepend);
+  return ExtendExisting(it_res->it, key, val, prepend);
 }
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
@@ -444,6 +444,34 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   }
 
   return response;
+}
+
+// Extend key with value, either prepend or append. Return size of stored string after modification
+OpResult<variant<size_t, StringValue>> OpExtend(const OpArgs& op_args, std::string_view key,
+                                                std::string_view value, bool prepend) {
+  auto* shard = op_args.shard;
+  auto it_res = shard->db_slice().AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  if (it_res->is_new) {
+    it_res->it->second.SetString(value);
+    return {it_res->it->second.Size()};
+  }
+
+  if (it_res->it->second.ObjType() != OBJ_STRING)
+    return OpStatus::WRONG_TYPE;
+
+  if (PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
+    shard->tiered_storage_v2()->Modify(key, pv, [value = string{value}, prepend](std::string* v) {
+      *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
+    });
+    return {StringValue::Read(key, pv, shard)};
+  } else {
+    // todo: automate this?
+    if (pv.HasIoPending())
+      shard->tiered_storage_v2()->Delete(key, &pv);
+    return {ExtendExisting(it_res->it, key, value, prepend)};
+  }
 }
 
 // Helper for building replies for strings
@@ -853,33 +881,12 @@ void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
-  VLOG(2) << "ExtendGeneric(" << key << ", " << sval << ")";
+  string_view value = ArgS(args, 1);
+  VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
   if (cntx->protocol() == Protocol::REDIS) {
-    auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<variant<StringValue, size_t>> {
-      auto it_res = shard->db_slice().AddOrFind(t->GetDbContext(), key);
-      RETURN_ON_BAD_STATUS(it_res);
-
-      if (it_res->is_new) {
-        it_res->it->second.SetString(sval);
-        return {it_res->it->second.Size()};
-      }
-
-      if (it_res->it->second.ObjType() != OBJ_STRING)
-        return OpStatus::WRONG_TYPE;
-
-      if (PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
-        shard->tiered_storage_v2()->Modify(key, pv, [sval = string{sval}, prepend](std::string* v) {
-          *v = prepend ? absl::StrCat(sval, *v) : absl::StrCat(*v, sval);
-        });
-        return {StringValue::Read(key, pv, shard)};
-      } else {
-        // todo: automate this?
-        if (pv.HasIoPending())
-          shard->tiered_storage_v2()->Delete(key, &pv);
-        return {ExtendExisting(t->GetOpArgs(shard), it_res->it, key, sval, prepend)};
-      }
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
     auto res = cntx->transaction->ScheduleSingleHopT(cb);
@@ -896,7 +903,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
     DCHECK(cntx->protocol() == Protocol::MEMCACHE);
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSkip(t->GetOpArgs(shard), key, sval, prepend);
+      return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
     };
 
     OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
