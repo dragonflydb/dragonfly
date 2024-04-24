@@ -1127,9 +1127,25 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
-  auto& db_slice = op_args.shard->db_slice();
-  db_slice.TrackKeys(cntx->conn()->Borrow(), keys);
+OpResult<void> OpTrackKeys(const OpArgs& op_args, const facade::Connection::WeakRef& conn_ref,
+                           const ShardArgs& args) {
+  if (conn_ref.IsExpired()) {
+    DVLOG(2) << "Connection expired, exiting TrackKey function.";
+    return OpStatus::OK;
+  }
+
+  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
+           << " with thread ID: " << conn_ref.Thread();
+
+  DbSlice& db_slice = op_args.shard->db_slice();
+
+  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
+  for (auto key : args) {
+    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
+             << " into the tracking client set of key " << key;
+    db_slice.TrackKey(conn_ref, key);
+  }
+
   return OpStatus::OK;
 }
 
@@ -1236,9 +1252,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   // start tracking all the updates to the keys in this read command
   if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
       cid->IsTransactional()) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto keys = t->GetShardArgs(shard->shard_id());
-      return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
+    facade::Connection::WeakRef conn_ref = dfly_cntx->conn()->Borrow();
+    auto cb = [&, conn_ref](Transaction* t, EngineShard* shard) {
+      return OpTrackKeys(t->GetOpArgs(shard), conn_ref, t->GetShardArgs(shard->shard_id()));
     };
     dfly_cntx->transaction->Refurbish();
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
@@ -1610,7 +1626,7 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_uint32_t keys_existed = 0;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->GetShardArgs(shard->shard_id());
+    ShardArgs largs = t->GetShardArgs(shard->shard_id());
     for (auto k : largs) {
       shard->db_slice().RegisterWatchedKey(cntx->db_index(), k, &exec_info);
     }
@@ -2018,7 +2034,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
 
   atomic_uint32_t watch_exist_count{0};
   auto cb = [&watch_exist_count](Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->GetShardArgs(shard->shard_id());
+    ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), args);
     watch_exist_count.fetch_add(res.value_or(0), memory_order_relaxed);
 

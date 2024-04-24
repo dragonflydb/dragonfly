@@ -587,10 +587,10 @@ class Mover {
 };
 
 OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
-  ArgSlice largs = t->GetShardArgs(es->shard_id());
+  ShardArgs largs = t->GetShardArgs(es->shard_id());
 
   // In case both src and dest are in the same shard, largs size will be 2.
-  DCHECK_LE(largs.size(), 2u);
+  DCHECK_LE(largs.Size(), 2u);
 
   for (auto k : largs) {
     unsigned index = (k == src_) ? 0 : 1;
@@ -609,8 +609,8 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
 }
 
 OpStatus Mover::OpMutate(Transaction* t, EngineShard* es) {
-  ArgSlice largs = t->GetShardArgs(es->shard_id());
-  DCHECK_LE(largs.size(), 2u);
+  ShardArgs largs = t->GetShardArgs(es->shard_id());
+  DCHECK_LE(largs.Size(), 2u);
 
   OpArgs op_args = t->GetOpArgs(es);
   for (auto k : largs) {
@@ -655,12 +655,13 @@ OpResult<unsigned> Mover::Commit(Transaction* t) {
 }
 
 // Read-only OpUnion op on sets.
-OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice keys) {
-  DCHECK(!keys.empty());
+OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
+                            ShardArgs::Iterator end) {
+  DCHECK(start != end);
   absl::flat_hash_set<string> uniques;
 
-  for (string_view key : keys) {
-    auto find_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
+  for (; start != end; ++start) {
+    auto find_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
     if (find_res) {
       const PrimeValue& pv = find_res.value()->second;
       if (IsDenseEncoding(pv)) {
@@ -683,11 +684,12 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ArgSlice keys) {
 }
 
 // Read-only OpDiff op on sets.
-OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
-  DCHECK(!keys.empty());
-  DVLOG(1) << "OpDiff from " << keys.front();
+OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
+                           ShardArgs::Iterator end) {
+  DCHECK(start != end);
+  DVLOG(1) << "OpDiff from " << *start;
   EngineShard* es = op_args.shard;
-  auto find_res = es->db_slice().FindReadOnly(op_args.db_cntx, keys.front(), OBJ_SET);
+  auto find_res = es->db_slice().FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
 
   if (!find_res) {
     return find_res.status();
@@ -707,8 +709,8 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
 
   DCHECK(!uniques.empty());  // otherwise the key would not exist.
 
-  for (size_t i = 1; i < keys.size(); ++i) {
-    auto diff_res = es->db_slice().FindReadOnly(op_args.db_cntx, keys[i], OBJ_SET);
+  for (++start; start != end; ++start) {
+    auto diff_res = es->db_slice().FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
     if (!diff_res) {
       if (diff_res.status() == OpStatus::WRONG_TYPE) {
         return OpStatus::WRONG_TYPE;
@@ -737,15 +739,16 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ArgSlice keys) {
 
 // Read-only OpInter op on sets.
 OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_first) {
-  ArgSlice keys = t->GetShardArgs(es->shard_id());
+  ShardArgs args = t->GetShardArgs(es->shard_id());
+  auto it = args.begin();
   if (remove_first) {
-    keys.remove_prefix(1);
+    ++it;
   }
-  DCHECK(!keys.empty());
+  DCHECK(it != args.end());
 
   StringVec result;
-  if (keys.size() == 1) {
-    auto find_res = es->db_slice().FindReadOnly(t->GetDbContext(), keys.front(), OBJ_SET);
+  if (args.Size() == 1 + unsigned(remove_first)) {
+    auto find_res = es->db_slice().FindReadOnly(t->GetDbContext(), *it, OBJ_SET);
     if (!find_res)
       return find_res.status();
 
@@ -763,12 +766,13 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     return result;
   }
 
-  vector<SetType> sets(keys.size());
+  vector<SetType> sets(args.Size() - int(remove_first));
 
   OpStatus status = OpStatus::OK;
-
-  for (size_t i = 0; i < keys.size(); ++i) {
-    auto find_res = es->db_slice().FindReadOnly(t->GetDbContext(), keys[i], OBJ_SET);
+  unsigned index = 0;
+  for (; it != args.end(); ++it) {
+    auto& dest = sets[index++];
+    auto find_res = es->db_slice().FindReadOnly(t->GetDbContext(), *it, OBJ_SET);
     if (!find_res) {
       if (status == OpStatus::OK || status == OpStatus::KEY_NOTFOUND ||
           find_res.status() != OpStatus::KEY_NOTFOUND) {
@@ -778,7 +782,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
     }
     const PrimeValue& pv = find_res.value()->second;
     void* ptr = pv.RObjPtr();
-    sets[i] = make_pair(ptr, pv.Encoding());
+    dest = make_pair(ptr, pv.Encoding());
   }
 
   if (status != OpStatus::OK)
@@ -1089,12 +1093,12 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   ShardId src_shard = Shard(src_key, result_set.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->GetShardArgs(shard->shard_id());
+    ShardArgs largs = t->GetShardArgs(shard->shard_id());
     if (shard->shard_id() == src_shard) {
-      CHECK_EQ(src_key, largs.front());
-      result_set[shard->shard_id()] = OpDiff(t->GetOpArgs(shard), largs);
+      CHECK_EQ(src_key, largs.Front());
+      result_set[shard->shard_id()] = OpDiff(t->GetOpArgs(shard), largs.begin(), largs.end());
     } else {
-      result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs);
+      result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs.begin(), largs.end());
     }
 
     return OpStatus::OK;
@@ -1126,22 +1130,23 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
 
   // read-only op
   auto diff_cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->GetShardArgs(shard->shard_id());
-    DCHECK(!largs.empty());
-
+    ShardArgs largs = t->GetShardArgs(shard->shard_id());
+    OpArgs op_args = t->GetOpArgs(shard);
+    DCHECK(!largs.Empty());
+    ShardArgs::Iterator start = largs.begin();
+    ShardArgs::Iterator end = largs.end();
     if (shard->shard_id() == dest_shard) {
-      CHECK_EQ(largs.front(), dest_key);
-      largs.remove_prefix(1);
-      if (largs.empty())
+      CHECK_EQ(*start, dest_key);
+      ++start;
+      if (start == end)
         return OpStatus::OK;
     }
 
-    OpArgs op_args = t->GetOpArgs(shard);
     if (shard->shard_id() == src_shard) {
-      CHECK_EQ(src_key, largs.front());
-      result_set[shard->shard_id()] = OpDiff(op_args, largs);  // Diff
+      CHECK_EQ(src_key, *start);
+      result_set[shard->shard_id()] = OpDiff(op_args, start, end);  // Diff
     } else {
-      result_set[shard->shard_id()] = OpUnion(op_args, largs);  // Union
+      result_set[shard->shard_id()] = OpUnion(op_args, start, end);  // Union
     }
 
     return OpStatus::OK;
@@ -1276,10 +1281,10 @@ void SInterStore(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t inter_shard_cnt{0};
 
   auto inter_cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->GetShardArgs(shard->shard_id());
+    ShardArgs largs = t->GetShardArgs(shard->shard_id());
     if (shard->shard_id() == dest_shard) {
-      CHECK_EQ(largs.front(), dest_key);
-      if (largs.size() == 1)
+      CHECK_EQ(largs.Front(), dest_key);
+      if (largs.Size() == 1)
         return OpStatus::OK;
     }
     inter_shard_cnt.fetch_add(1, memory_order_relaxed);
@@ -1337,8 +1342,8 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
   ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->GetShardArgs(shard->shard_id());
-    result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs);
+    ShardArgs largs = t->GetShardArgs(shard->shard_id());
+    result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs.begin(), largs.end());
     return OpStatus::OK;
   };
 
@@ -1363,14 +1368,15 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
   ShardId dest_shard = Shard(dest_key, result_set.size());
 
   auto union_cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->GetShardArgs(shard->shard_id());
+    ShardArgs largs = t->GetShardArgs(shard->shard_id());
+    ShardArgs::Iterator start = largs.begin(), end = largs.end();
     if (shard->shard_id() == dest_shard) {
-      CHECK_EQ(largs.front(), dest_key);
-      largs.remove_prefix(1);
-      if (largs.empty())
+      CHECK_EQ(*start, dest_key);
+      ++start;
+      if (start == end)
         return OpStatus::OK;
     }
-    result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), largs);
+    result_set[shard->shard_id()] = OpUnion(t->GetOpArgs(shard), start, end);
     return OpStatus::OK;
   };
 

@@ -11,6 +11,7 @@
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
 #include "server/common.h"
+#include "server/tx_base.h"
 #include "server/version.h"
 
 namespace dfly {

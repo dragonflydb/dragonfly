@@ -1130,19 +1130,21 @@ OpResult<vector<OptLong>> OpArrIndex(const OpArgs& op_args, string_view key, Jso
 
 // Returns string vector that represents the query result of each supplied key.
 vector<OptString> OpJsonMGet(JsonPathV2 expression, const Transaction* t, EngineShard* shard) {
-  auto args = t->GetShardArgs(shard->shard_id());
-  DCHECK(!args.empty());
-  vector<OptString> response(args.size());
+  ShardArgs args = t->GetShardArgs(shard->shard_id());
+  DCHECK(!args.Empty());
+  vector<OptString> response(args.Size());
 
   auto& db_slice = shard->db_slice();
-  for (size_t i = 0; i < args.size(); ++i) {
-    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), args[i], OBJ_JSON);
+  unsigned index = 0;
+  for (string_view key : args) {
+    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_JSON);
+    auto& dest = response[index++];
     if (!it_res.ok())
       continue;
 
-    auto& dest = response[i].emplace();
+    dest.emplace();
     JsonType* json_val = it_res.value()->second.GetJson();
-    DCHECK(json_val) << "should have a valid JSON object for key " << args[i];
+    DCHECK(json_val) << "should have a valid JSON object for key " << key;
 
     vector<JsonType> query_result;
     auto cb = [&query_result](const string_view& path, const JsonType& val) {
@@ -1364,8 +1366,8 @@ void JsonFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->GetShardArgs(shard->shard_id());
-    LOG(INFO) << shard->shard_id() << " " << args;
+    ShardArgs args = t->GetShardArgs(shard->shard_id());
+    (void)args;  // TBD
     return OpStatus::OK;
   };
 
@@ -1469,12 +1471,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
       continue;
 
     vector<OptString>& res = mget_resp[sid];
-    ArgSlice slice = transaction->GetShardArgs(sid);
-
-    DCHECK(!slice.empty());
-    DCHECK_EQ(slice.size(), res.size());
-
-    for (size_t j = 0; j < slice.size(); ++j) {
+    for (size_t j = 0; j < res.size(); ++j) {
       if (!res[j])
         continue;
 

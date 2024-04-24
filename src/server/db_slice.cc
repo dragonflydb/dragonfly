@@ -411,7 +411,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   }
 }
 
-DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
+DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
   return {ConstIterator(res->it, StringOrView::FromView(key)),
@@ -419,7 +419,7 @@ DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_vi
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                       unsigned req_obj_type) {
+                                                       unsigned req_obj_type) const {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats,
                           LoadExternalMode::kDontLoad);
   if (res.ok()) {
@@ -442,7 +442,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindAndFetchReadOnly(const Context& cn
 OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std::string_view key,
                                                        std::optional<unsigned> req_obj_type,
                                                        UpdateStatsMode stats_mode,
-                                                       LoadExternalMode load_mode) {
+                                                       LoadExternalMode load_mode) const {
   if (!IsDbValid(cntx.db_index)) {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -534,24 +534,6 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       break;
   }
   return res;
-}
-
-OpResult<pair<DbSlice::ConstIterator, unsigned>> DbSlice::FindFirstReadOnly(const Context& cntx,
-                                                                            ArgSlice args,
-                                                                            int req_obj_type) {
-  DCHECK(!args.empty());
-
-  for (unsigned i = 0; i < args.size(); ++i) {
-    string_view s = args[i];
-    OpResult<ConstIterator> res = FindReadOnly(cntx, s, req_obj_type);
-    if (res)
-      return make_pair(res.value(), i);
-    if (res.status() != OpStatus::KEY_NOTFOUND)
-      return res.status();
-  }
-
-  VLOG(2) << "FindFirst " << args.front() << " not found";
-  return OpStatus::KEY_NOTFOUND;
 }
 
 OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFind(const Context& cntx, string_view key) {
@@ -1082,12 +1064,12 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
   SendInvalidationTrackingMessage(key);
 }
 
-DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) {
+DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) const {
   auto res = ExpireIfNeeded(cntx, it.GetInnerIt());
   return {.it = Iterator::FromPrime(res.it), .exp_it = ExpIterator::FromPrime(res.exp_it)};
 }
 
-DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) {
+DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
   if (!it->second.HasExpire()) {
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
@@ -1124,8 +1106,9 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
     doc_del_cb_(key, cntx, it->second);
   }
 
-  PerformDeletion(Iterator(it, StringOrView::FromView(key)),
-                  ExpIterator(expire_it, StringOrView::FromView(key)), db.get());
+  const_cast<DbSlice*>(this)->PerformDeletion(Iterator(it, StringOrView::FromView(key)),
+                                              ExpIterator(expire_it, StringOrView::FromView(key)),
+                                              db.get());
   ++events_.expired_keys;
 
   return {PrimeIterator{}, ExpireIterator{}};
@@ -1488,21 +1471,6 @@ void DbSlice::ResetUpdateEvents() {
 
 void DbSlice::ResetEvents() {
   events_ = {};
-}
-
-void DbSlice::TrackKeys(const facade::Connection::WeakRef& conn, const ArgSlice& keys) {
-  if (conn.IsExpired()) {
-    DVLOG(2) << "Connection expired, exiting TrackKey function.";
-    return;
-  }
-
-  DVLOG(2) << "Start tracking keys for client ID: " << conn.GetClientId()
-           << " with thread ID: " << conn.Thread();
-  for (auto key : keys) {
-    DVLOG(2) << "Inserting client ID " << conn.GetClientId()
-             << " into the tracking client set of key " << key;
-    client_tracking_map_[key].insert(conn);
-  }
 }
 
 void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
