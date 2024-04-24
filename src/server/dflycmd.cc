@@ -32,7 +32,7 @@
 #include "server/transaction.h"
 using namespace std;
 
-ABSL_DECLARE_FLAG(string, dir);
+ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 
 namespace dfly {
 
@@ -63,7 +63,7 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
     case DflyCmd::SyncState::FULL_SYNC:
       return "full_sync";
     case DflyCmd::SyncState::STABLE_SYNC:
-      return "stable_sync";
+      return absl::GetFlag(FLAGS_info_replication_valkey_compatible) ? "online" : "stable_sync";
     case DflyCmd::SyncState::CANCELLED:
       return "cancelled";
   }
