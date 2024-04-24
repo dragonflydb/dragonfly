@@ -166,7 +166,8 @@ void OpenTrafficLogger(string_view base_path) {
 #endif
 
   // Write version, incremental numbering :)
-  tl_traffic_logger.log_file->Write(io::Bytes{2});
+  uint8_t version[1] = {2};
+  tl_traffic_logger.log_file->Write(version);
 }
 
 void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
