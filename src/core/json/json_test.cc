@@ -2,6 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
+#include <gmock/gmock.h>
+
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <memory_resource>
@@ -12,6 +14,7 @@
 namespace dfly {
 using namespace jsoncons;
 using namespace jsoncons::literals;
+using namespace testing;
 
 class JsonTest : public ::testing::Test {
  protected:
@@ -113,6 +116,25 @@ TEST_F(JsonTest, Path) {
   auto res = jsonpath::json_query(j1, "max($.*)");
   ASSERT_TRUE(res.is_array() && res.size() == 1);
   EXPECT_EQ(2, res[0].as<int>());
+
+  called = 0;
+  json j2 = R"({"field" : [1, 2, 3, 4, 5]})"_json;
+  jsonpath::json_query(j2, "$.field[1:2]", [&](const std::string& path, const json& val) {
+    EXPECT_EQ("$['field'][1]", path);
+    ASSERT_EQ(2, val.as<int>());
+    ++called;
+  });
+  EXPECT_EQ(1, called);
+
+  std::vector<int> vals;
+  jsonpath::json_query(j2, "$.field[1:]", [&](const std::string& path, const json& val) {
+    vals.push_back(val.as<int>());
+  });
+  EXPECT_THAT(vals, ElementsAre(2, 3, 4, 5));
+
+  jsonpath::json_query(j2, "$.field[-1]", [&](const std::string& path, const json& val) {
+    EXPECT_EQ(5, val.as<int>());
+  });
 }
 
 TEST_F(JsonTest, Delete) {

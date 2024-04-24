@@ -44,7 +44,7 @@ template <bool IsConst> class JsonconsDfsItem {
   }
 
  private:
-  bool ShouldIterateAll(SegmentType type) const {
+  static bool ShouldIterateAll(SegmentType type) {
     return type == SegmentType::WILDCARD || type == SegmentType::DESCENT;
   }
 
@@ -61,6 +61,14 @@ template <bool IsConst> class JsonconsDfsItem {
       return obj().array_range().cbegin();
     } else {
       return obj().array_range().begin();
+    }
+  }
+
+  ArrayIterator ArrEnd() const {
+    if constexpr (IsConst) {
+      return obj().array_range().cend();
+    } else {
+      return obj().array_range().end();
     }
   }
 
@@ -82,7 +90,7 @@ template <bool IsConst> class JsonconsDfsItem {
   unsigned segment_step_ = 1;
 
   DepthState depth_state_;
-  std::variant<std::monostate, ObjIterator, ArrayIterator> state_;
+  std::variant<std::monostate, ObjIterator, std::pair<ArrayIterator, ArrayIterator>> state_;
 };
 
 // Traverses a json object according to the given path and calls the callback for each matching
@@ -139,12 +147,11 @@ auto JsonconsDfsItem<IsConst>::Advance(const PathSegment& segment) -> AdvanceRes
             ++it;
             return it == obj().object_range().end() ? Exhausted() : Next(it->value());
           },
-          [&](ArrayIterator& it) -> AdvanceResult {
-            if (!ShouldIterateAll(segment.type()))
+          [&](std::pair<ArrayIterator, ArrayIterator>& pair) -> AdvanceResult {
+            if (pair.first == pair.second)
               return Exhausted();
-
-            ++it;
-            return it == obj().array_range().end() ? Exhausted() : Next(*it);
+            ++pair.first;
+            return Next(*pair.first);
           },
       },
       state_);
@@ -166,19 +173,18 @@ auto JsonconsDfsItem<IsConst>::Init(const PathSegment& segment) -> AdvanceResult
       }
       break;
     }
-    case SegmentType::INDEX: {
-      unsigned index = segment.index();
+    case SegmentType::INDEX:
       if (obj().is_array()) {
-        if (index >= obj().size()) {
+        IndexExpr index = segment.index().Normalize(obj().size());
+        if (index.Empty()) {
           return nonstd::make_unexpected(OUT_OF_BOUNDS);
         }
-        auto it = ArrBegin() + index;
-        state_ = it;
-        return Next(*it);
+
+        auto start = ArrBegin() + index.first, end = ArrBegin() + index.second;
+        state_ = std::make_pair(start, end);
+        return Next(*start);
       }
       break;
-    }
-
     case SegmentType::DESCENT:
       if (segment_step_ == 1) {
         // first time, branching to return the same object but with the next segment,
@@ -202,12 +208,12 @@ auto JsonconsDfsItem<IsConst>::Init(const PathSegment& segment) -> AdvanceResult
       }
 
       if (obj().is_array()) {
-        jsoncons::range rng = obj().array_range();
-        if (rng.cbegin() == rng.cend()) {
+        auto start = ArrBegin(), end = ArrEnd();
+        if (start == end) {
           return Exhausted();
         }
-        state_ = ArrBegin();
-        return Next(*ArrBegin());
+        state_ = std::make_pair(start, end - 1);  // end is inclusive
+        return Next(*start);
       }
       break;
     }

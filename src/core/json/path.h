@@ -18,8 +18,8 @@ namespace dfly::json {
 
 enum class SegmentType {
   IDENTIFIER = 1,  // $.identifier
-  INDEX = 2,       // $.array[0]
-  WILDCARD = 3,    // $.array[*] or $.*
+  INDEX = 2,       // $.array[index_expr]
+  WILDCARD = 3,    // $.*
   DESCENT = 4,     // $..identifier
   FUNCTION = 5,    // max($.prices[*])
 };
@@ -55,6 +55,22 @@ class AggFunction {
   int valid_ = -1;
 };
 
+// Bracket index representation
+// Single index is: <I, I>, wildcard: <0, INT_MAX>,
+// [begin:end): <begin, end - 1>
+struct IndexExpr : public std::pair<int, int> {
+  bool Empty() const {
+    return first > second;
+  }
+
+  static IndexExpr All() {
+    return IndexExpr{0, INT_MAX};
+  }
+
+  using pair::pair;
+  IndexExpr Normalize(size_t array_len) const;
+};
+
 class PathSegment {
  public:
   PathSegment() : PathSegment(SegmentType::IDENTIFIER) {
@@ -64,7 +80,7 @@ class PathSegment {
       : type_(type), value_(std::move(identifier)) {
   }
 
-  PathSegment(SegmentType type, unsigned index) : type_(type), value_(index) {
+  PathSegment(SegmentType type, IndexExpr index) : type_(type), value_(index) {
   }
 
   explicit PathSegment(std::shared_ptr<AggFunction> func)
@@ -79,8 +95,8 @@ class PathSegment {
     return std::get<std::string>(value_);
   }
 
-  unsigned index() const {
-    return std::get<unsigned>(value_);
+  IndexExpr index() const {
+    return std::get<IndexExpr>(value_);
   }
 
   void Evaluate(const JsonType& json) const;
@@ -91,7 +107,7 @@ class PathSegment {
   SegmentType type_;
 
   // shared_ptr to preserve copy semantics.
-  std::variant<std::string, unsigned, std::shared_ptr<AggFunction>> value_;
+  std::variant<std::string, IndexExpr, std::shared_ptr<AggFunction>> value_;
 };
 
 using Path = std::vector<PathSegment>;

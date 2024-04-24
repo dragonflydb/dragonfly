@@ -43,21 +43,20 @@ auto FlatDfsItem::Init(const PathSegment& segment) -> AdvanceResult {
         if (index == UINT_MAX) {
           return Exhausted();
         }
-        state_ = index;
+        state_.emplace(index, index);
         return DepthState{obj().AsVector()[index], depth_state_.second + 1};
       }
       break;
     }
     case SegmentType::INDEX: {
-      unsigned index = segment.index();
-      if (obj().IsUntypedVector()) {
-        auto vec = obj().AsVector();
-        if (index >= vec.size()) {
-          return nonstd::make_unexpected(OUT_OF_BOUNDS);
-        }
-        state_ = index;
-        return Next(vec[index]);
+      auto vec = obj().AsVector();
+      IndexExpr index = segment.index().Normalize(vec.size());
+      if (index.Empty()) {
+        return make_unexpected(OUT_OF_BOUNDS);
       }
+
+      state_ = index;
+      return Next(vec[index.first]);
       break;
     }
 
@@ -78,7 +77,7 @@ auto FlatDfsItem::Init(const PathSegment& segment) -> AdvanceResult {
       if (vec.size() == 0) {
         return Exhausted();
       }
-      state_ = 0;
+      state_ = IndexExpr::All();
       return Next(vec[0]);
     } break;
 
@@ -90,18 +89,16 @@ auto FlatDfsItem::Init(const PathSegment& segment) -> AdvanceResult {
 }
 
 auto FlatDfsItem::Advance(const PathSegment& segment) -> AdvanceResult {
-  if (state_ == kInit) {
+  if (!state_) {
     return Init(segment);
   }
 
-  if (!ShouldIterateAll(segment.type()))
+  ++state_->first;
+  if (state_->Empty())
     return Exhausted();
-
-  ++state_;
   auto vec = obj().AsVector();
-  if (state_ >= vec.size())
-    return Exhausted();
-  return Next(vec[state_]);
+
+  return Next(vec[state_->first]);
 }
 
 FlatDfs FlatDfs::Traverse(absl::Span<const PathSegment> path, const flexbuffers::Reference root,
@@ -165,10 +162,12 @@ auto FlatDfs::PerformStep(const PathSegment& segment, const flexbuffers::Referen
       if (!node.IsUntypedVector())
         return make_unexpected(MISMATCH);
       auto vec = node.AsVector();
-      if (segment.index() >= vec.size()) {
+      IndexExpr index = segment.index().Normalize(vec.size());
+      if (index.Empty()) {
         return make_unexpected(OUT_OF_BOUNDS);
       }
-      DoCall(callback, nullopt, vec[segment.index()]);
+      for (; index.first <= index.second; ++index.first)
+        DoCall(callback, nullopt, vec[index.first]);
     } break;
 
     case SegmentType::DESCENT:

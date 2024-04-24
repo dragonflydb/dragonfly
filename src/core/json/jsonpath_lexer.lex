@@ -50,11 +50,12 @@
 "*"         return Parser::make_WILDCARD(loc());
 "("         return Parser::make_LPARENT(loc());
 ")"         return Parser::make_RPARENT(loc());
-[0-9]{1,9}  {
-              unsigned val;
+-?[0-9]{1,9}  {
+              int val;
               CHECK(absl::SimpleAtoi(str(), &val));
-              return Parser::make_UINT(val, loc());
+              return Parser::make_INT(val, loc());
             }
+
 \w[\w_\-]*  return Parser::make_UNQ_STR(str(), loc());
 <<EOF>>     return Parser::make_YYEOF(loc());
 .           throw Parser::syntax_error(loc(), UnknownTokenMsg());
