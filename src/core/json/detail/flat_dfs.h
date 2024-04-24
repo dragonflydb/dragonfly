@@ -33,10 +33,6 @@ class FlatDfsItem {
   }
 
  private:
-  bool ShouldIterateAll(SegmentType type) const {
-    return type == SegmentType::WILDCARD || type == SegmentType::DESCENT;
-  }
-
   ValueType obj() const {
     return depth_state_.first;
   }
@@ -55,9 +51,7 @@ class FlatDfsItem {
   unsigned segment_step_ = 1;
 
   DepthState depth_state_;
-
-  static constexpr unsigned kInit = -1;
-  unsigned state_ = kInit;
+  std::optional<IndexExpr> state_;
 };
 
 // Traverses a json object according to the given path and calls the callback for each matching

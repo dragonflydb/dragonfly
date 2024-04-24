@@ -50,6 +50,24 @@ const char* SegmentName(SegmentType type) {
   return nullptr;
 }
 
+IndexExpr IndexExpr::Normalize(size_t array_len) const {
+  if (array_len == 0)
+    return IndexExpr(1, 0);  // empty range.
+
+  IndexExpr res = *this;
+  if (res.second >= int(array_len)) {
+    res.second = array_len - 1;
+  } else if (res.second < 0) {
+    res.second = res.second % array_len;
+    DCHECK_GE(res.second, 0);
+  }
+  if (res.first < 0) {
+    res.first = res.first % array_len;
+    DCHECK_GE(res.first, 0);
+  }
+  return res;
+}
+
 void PathSegment::Evaluate(const JsonType& json) const {
   CHECK(type() == SegmentType::FUNCTION);
   AggFunction* func = std::get<shared_ptr<AggFunction>>(value_).get();
