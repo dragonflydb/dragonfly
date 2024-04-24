@@ -164,9 +164,14 @@ void OpenTrafficLogger(string_view base_path) {
 #else
   LOG(WARNING) << "Traffic logger is only supported on Linux";
 #endif
+
+  // Write version, incremental numbering :)
+  uint8_t version[1] = {2};
+  tl_traffic_logger.log_file->Write(version);
 }
 
-void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
+void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
+                ServiceInterface::ContextInfo ci) {
   string_view cmd = resp.front().GetView();
   if (absl::EqualsIgnoreCase(cmd, "debug"sv))
     return;
@@ -176,28 +181,33 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp) {
   char stack_buf[1024];
   char* next = stack_buf;
 
-  // We write id, timestamp, has_more, num_parts, part_len, part_len, part_len, ...
+  // We write id, timestamp, db_index, has_more, num_parts, part_len, part_len, part_len, ...
   // And then all the part blobs concatenated together.
   auto write_u32 = [&next](uint32_t i) {
     absl::little_endian::Store32(next, i);
     next += 4;
   };
 
+  // id
   write_u32(id);
 
+  // timestamp
   absl::little_endian::Store64(next, absl::GetCurrentTimeNanos());
   next += 8;
 
+  // db_index
+  write_u32(ci.db_index);
+
+  // has_more, num_parts
   write_u32(has_more ? 1 : 0);
   write_u32(uint32_t(resp.size()));
 
   // Grab the lock and check if the file is still open.
   lock_guard lk{tl_traffic_logger.mutex};
-
   if (!tl_traffic_logger.log_file)
     return;
 
-  // Proceed with writing the blob lengths.
+  // part_len, ...
   for (auto part : resp) {
     if (size_t(next - stack_buf + 4) > sizeof(stack_buf)) {
       if (!tl_traffic_logger.Write(string_view{stack_buf, size_t(next - stack_buf)})) {
@@ -743,7 +753,7 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
-    string cc_info = service_->GetContextInfo(cc_.get());
+    string cc_info = service_->GetContextInfo(cc_.get()).Format();
     if (cc_->reply_builder()->IsSendActive())
       phase_name = "send";
     absl::StrAppend(&after, " ", cc_info);
@@ -921,7 +931,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   }
 
   if (ec && !FiberSocketBase::IsConnClosed(ec)) {
-    string conn_info = service_->GetContextInfo(cc_.get());
+    string conn_info = service_->GetContextInfo(cc_.get()).Format();
     LOG(WARNING) << "Socket error for connection " << conn_info << " " << GetName()
                  << " during phase " << kPhaseName[phase_] << " : " << ec << " " << ec.message();
   }
@@ -983,10 +993,8 @@ Connection::ParserStatus Connection::ParseRedis(SinkReplyBuilder* orig_builder) 
 
       bool has_more = consumed < io_buf_.InputLen();
 
-      if (tl_traffic_logger.log_file) {
-        if (IsMain()) {  // log only on the main interface.
-          LogTraffic(id_, has_more, absl::MakeSpan(parse_args));
-        }
+      if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
+        LogTraffic(id_, has_more, absl::MakeSpan(parse_args), service_->GetContextInfo(cc_.get()));
       }
       DispatchCommand(has_more, dispatch_sync, dispatch_async);
     }

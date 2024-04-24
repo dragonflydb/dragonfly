@@ -21,6 +21,7 @@ var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per clie
 type RecordHeader struct {
 	Client  uint32
 	Time    uint64
+	DbIndex uint32
 	HasMore uint32
 }
 
@@ -45,8 +46,9 @@ func DetermineBaseTime(files []string) time.Time {
 
 // Handles a single connection/client
 type ClientWorker struct {
-	redis    *redis.Client
-	incoming chan Record
+	redis     *redis.Client
+	incoming  chan Record
+	processed uint
 }
 
 // Handles a single file and distributes messages to clients
@@ -62,6 +64,11 @@ type FileWorker struct {
 
 func (c ClientWorker) Run(worker *FileWorker) {
 	for msg := range c.incoming {
+		if c.processed == 0 && msg.DbIndex != 0 {
+			// There is no easy way to switch, we rely on connection pool consisting only of one connection
+			c.redis.Do(context.Background(), []interface{}{"SELECT", fmt.Sprint(msg.DbIndex)})
+		}
+
 		lag := time.Until(worker.HappensAt(time.Unix(0, int64(msg.Time))))
 		if lag < 0 {
 			atomic.AddUint64(&worker.delayed, 1)
@@ -70,6 +77,7 @@ func (c ClientWorker) Run(worker *FileWorker) {
 
 		c.redis.Do(context.Background(), msg.values...).Result()
 		atomic.AddUint64(&worker.processed, 1)
+		c.processed += 1
 	}
 	worker.clientGroup.Done()
 }

@@ -94,7 +94,8 @@ class Service : public facade::ServiceInterface {
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
   void OnClose(facade::ConnectionContext* cntx) final;
-  std::string GetContextInfo(facade::ConnectionContext* cntx) final;
+
+  Service::ContextInfo GetContextInfo(facade::ConnectionContext* cntx) const final;
 
   uint32_t shard_count() const {
     return shard_set->size();

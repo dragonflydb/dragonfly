@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
-	"errors"
 	"io"
 	"log"
 	"os"
@@ -29,25 +28,8 @@ func parseStrings(file io.Reader) (out []interface{}, err error) {
 
 	for i := range out {
 		strLen = out[i].(uint32)
-
-		if strLen == 0 {
-			err = binary.Read(file, binary.LittleEndian, &strLen)
-			if err != nil {
-				return nil, err
-			}
-
-			if strLen > 100000000 {
-				log.Printf("Bad string length %v, index %v out of %v", strLen, i, num)
-				for j := 0; j < i; j++ {
-					log.Printf("Str %v %v", j, out[j])
-				}
-				return nil, errors.New("failed to parse a string len ")
-			}
-			out[i] = kBigEmptyBytes[:strLen]
-			continue
-		}
-
 		buf := make([]byte, strLen)
+
 		_, err := io.ReadFull(file, buf)
 		if err != nil {
 			return nil, err
@@ -66,6 +48,13 @@ func parseRecords(filename string, cb func(Record) bool) error {
 	defer file.Close()
 
 	reader := bufio.NewReader(file)
+
+	var version uint8
+	binary.Read(reader, binary.LittleEndian, &version)
+	if version != 2 {
+		panic("Requires version two replayer, roll back in commits!")
+	}
+
 	recordNum := 0
 	for {
 		var rec Record
