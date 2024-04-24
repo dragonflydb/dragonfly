@@ -834,7 +834,7 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
                      bool modified) override {
     DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
 
-    // Modified values are always cached and deleted
+    // Modified values are always cached and deleted from disk
     if (!modified && !cache_fetched_)
       return;
 
@@ -888,8 +888,29 @@ void TieredStorageV2::Close() {
 
 util::fb2::Future<std::string> TieredStorageV2::Read(string_view key, const PrimeValue& value) {
   DCHECK(value.IsExternal());
-  return op_manager_->Read(key, value.GetExternalSlice());
+  util::fb2::Future<std::string> future;
+  op_manager_->Enqueue(key, value.GetExternalSlice(), [future](std::string* value) mutable {
+    future.Resolve(*value);
+    return false;
+  });
+  return future;
 }
+
+template <typename T>
+util::fb2::Future<T> TieredStorageV2::Modify(std::string_view key, const PrimeValue& value,
+                                             std::function<T(std::string*)> modf) {
+  DCHECK(value.IsExternal());
+  util::fb2::Future<T> future;
+  auto cb = [future, modf = std::move(modf)](std::string* value) mutable {
+    future.Resolve(modf(value));
+    return true;
+  };
+  op_manager_->Enqueue(key, value.GetExternalSlice(), std::move(cb));
+  return future;
+}
+
+template util::fb2::Future<size_t> TieredStorageV2::Modify(
+    std::string_view key, const PrimeValue& value, std::function<size_t(std::string*)> modf);
 
 void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
   DCHECK(!value->IsExternal() && !value->HasIoPending());
@@ -926,12 +947,6 @@ void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
     }
     value->SetIoPending(false);
   }
-}
-
-void TieredStorageV2::Modify(std::string_view key, const PrimeValue& pv,
-                             std::function<void(std::string*)> modf) {
-  DCHECK(pv.IsExternal());
-  op_manager_->Modify(key, pv.GetExternalSlice(), std::move(modf));
 }
 
 bool TieredStorageV2::ShouldStash(const PrimeValue& pv) {

@@ -24,18 +24,19 @@ class OpManager {
   // Ids can be used to track auxiliary values that don't map to real keys (like packed pages).
   using EntryId = std::variant<unsigned, std::string_view>;
   using OwnedEntryId = std::variant<unsigned, std::string>;
+  // Callback for post-read completion. Returns whether the value was modified
+  using ReadCallback = std::function<bool(std::string*)>;
 
   OpManager() = default;
+
   // Open file with underlying disk storage, must be called before use
   std::error_code Open(std::string_view file);
 
   void Close();
 
-  // Schedule read for offloaded entry that will resolve the future
-  util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment);
-
-  // Modify offloaded entry, does not change stored value, but affects succeeding reads
-  void Modify(EntryId id, DiskSegment segment, std::function<void(std::string*)> modf);
+  // Enqueue callback to be executed once value is read. Triggers read if none is pending yet for
+  // this segment
+  void Enqueue(EntryId id, DiskSegment segment, ReadCallback cb);
 
   // Delete entry with pending io
   void Delete(EntryId id);
@@ -56,9 +57,6 @@ class OpManager {
                              bool modified) = 0;
 
  protected:
-  using EntryAction =
-      std::variant<util::fb2::Future<std::string>, std::function<void(std::string*)>>;
-
   // Describes pending futures for a single entry
   struct EntryOps {
     EntryOps(OwnedEntryId id, DiskSegment segment) : id{std::move(id)}, segment{segment} {
@@ -66,7 +64,7 @@ class OpManager {
 
     OwnedEntryId id;
     DiskSegment segment;
-    absl::InlinedVector<EntryAction, 1> actions;
+    absl::InlinedVector<ReadCallback, 1> callbacks;
   };
 
   // Describes an ongoing read operation for a fixed segment

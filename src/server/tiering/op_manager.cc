@@ -36,15 +36,9 @@ void OpManager::Close() {
   storage_.Close();
 }
 
-util::fb2::Future<std::string> OpManager::Read(EntryId id, DiskSegment segment) {
-  util::fb2::Future<std::string> future;
+void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
-  PrepareRead(segment.FillPages()).ForId(id, segment).actions.emplace_back(future);
-  return future;
-}
-
-void OpManager::Modify(EntryId id, DiskSegment segment, std::function<void(std::string*)> modf) {
-  PrepareRead(segment.FillPages()).ForId(id, segment).actions.emplace_back(std::move(modf));
+  PrepareRead(segment.FillPages()).ForId(id, segment).callbacks.emplace_back(std::move(cb));
 }
 
 void OpManager::Delete(EntryId id) {
@@ -104,20 +98,14 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
   ReadOp* info = &pending_reads_.at(offset);
 
   std::string key_value;
-
-  Overloaded action_resolver{
-      [&key_value](util::fb2::Future<std::string>& fut) { fut.Resolve(key_value); },
-      [&key_value](std::function<void(std::string*)>& modf) { modf(&key_value); }};
-
   for (auto& ko : info->key_ops) {
     key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+
     bool modified = false;
+    for (auto& cb : ko.callbacks)
+      modified |= cb(&key_value);
 
-    for (auto& action : ko.actions) {
-      std::visit(action_resolver, action);
-      modified |= std::holds_alternative<std::function<void(std::string*)>>(action);
-    }
-
+    // Report item as fetched only after all action were executed, pass whether it was modified
     ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified);
   }
 

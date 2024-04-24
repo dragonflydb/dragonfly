@@ -18,6 +18,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/overloaded.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
@@ -32,6 +33,7 @@
 #include "server/table.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/future.h"
 
 ABSL_FLAG(bool, tiered_skip_prefetch, false,
           "If true, does not load offloaded string back to in-memory store during GET command."
@@ -64,6 +66,14 @@ string GetString(const PrimeValue& pv) {
   CopyValueToBuffer(pv, res.data());
 
   return res;
+}
+
+template <typename T> T GetResult(std::variant<T, util::fb2::Future<T>> v) {
+  Overloaded ov{
+      [](T&& t) { return t; },
+      [](util::fb2::Future<T>&& future) { return future.Get(); },
+  };
+  return std::visit(ov, std::move(v));
 }
 
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
@@ -447,8 +457,10 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
 }
 
 // Extend key with value, either prepend or append. Return size of stored string after modification
-OpResult<variant<size_t, StringValue>> OpExtend(const OpArgs& op_args, std::string_view key,
-                                                std::string_view value, bool prepend) {
+OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_args,
+                                                              std::string_view key,
+                                                              std::string_view value,
+                                                              bool prepend) {
   auto* shard = op_args.shard;
   auto it_res = shard->db_slice().AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(it_res);
@@ -462,10 +474,11 @@ OpResult<variant<size_t, StringValue>> OpExtend(const OpArgs& op_args, std::stri
     return OpStatus::WRONG_TYPE;
 
   if (PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
-    shard->tiered_storage_v2()->Modify(key, pv, [value = string{value}, prepend](std::string* v) {
+    auto modf = [value = string{value}, prepend](std::string* v) {
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
-    });
-    return {StringValue::Read(key, pv, shard)};
+      return v->size();
+    };
+    return {shard->tiered_storage_v2()->Modify<size_t>(key, pv, modf)};
   } else {
     // todo: automate this?
     if (pv.HasIoPending())
@@ -892,12 +905,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
     auto res = cntx->transaction->ScheduleSingleHopT(cb);
     if (!res)
       return cntx->SendError(res.status());
-
-    if (holds_alternative<StringValue>(res.value()))
-      cntx->SendLong(std::get<StringValue>(std::move(res.value())).Get().length());
-    else
-      cntx->SendLong(std::get<size_t>(res.value()));
-
+    cntx->SendLong(GetResult(std::move(res.value())));
   } else {
     // Memcached skips if key is missing
     DCHECK(cntx->protocol() == Protocol::MEMCACHE);

@@ -11,7 +11,6 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_cat.h"
 #include "server/tiering/common.h"
-#include "server/tiering/disk_storage.h"
 #include "server/tiering/test_common.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/future.h"
@@ -29,6 +28,15 @@ struct OpManagerTest : PoolTestBase, OpManager {
   void Close() {
     OpManager::Close();
     EXPECT_EQ(unlink("op_manager_test_backing"), 0);
+  }
+
+  util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment) {
+    util::fb2::Future<std::string> future;
+    Enqueue(id, segment, [future](std::string* value) mutable {
+      future.Resolve(*value);
+      return false;
+    });
+    return future;
   }
 
   void ReportStashed(EntryId id, DiskSegment segment) override {
@@ -130,7 +138,10 @@ TEST_F(OpManagerTest, Modify) {
     // Atomically issue sequence of modify-read operations
     std::vector<util::fb2::Future<std::string>> futures;
     for (size_t i = 0; i < 10; i++) {
-      Modify(0u, stashed_[0u], [i](std::string* v) { absl::StrAppend(v, i); });
+      Enqueue(0u, stashed_[0u], [i](std::string* v) {
+        absl::StrAppend(v, i);
+        return true;
+      });
       futures.emplace_back(Read(0u, stashed_[0u]));
     }
 
