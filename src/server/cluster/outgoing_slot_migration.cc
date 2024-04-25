@@ -33,19 +33,32 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   // TODO use context to set error instead of returning error code
-  std::error_code Sync(const std::string& node_id, uint32_t shard_id) {
-    RETURN_ON_ERR(
-        ConnectAndAuth(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms, &cntx_));
+  void Sync(const std::string& node_id, uint32_t shard_id) {
+    VLOG(1) << "Connecting to source node_id " << node_id << " shard_id " << shard_id;
+    auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
+    if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
+      cntx_.ReportError(GenericError(ec, "Couldn't connect to source."));
+      return;
+    }
+
     ResetParser(/*server_mode=*/false);
 
     std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", node_id, " ", shard_id);
     VLOG(1) << "cmd: " << cmd;
 
-    RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
-    LOG_IF(WARNING, !CheckRespIsSimpleReply("OK")) << ToSV(LastResponseArgs().front().GetBuf());
+    if (auto ec = SendCommandAndReadResponse(cmd); ec) {
+      cntx_.ReportError(GenericError(ec, cmd));
+      return;
+    }
+
+    if (!CheckRespIsSimpleReply("OK")) {
+      LOG(WARNING) << "Incorrect response for FLOW cmd: "
+                   << ToSV(LastResponseArgs().front().GetBuf());
+      cntx_.ReportError("Incorrect response for FLOW cmd");
+      return;
+    }
 
     streamer_.Start(Sock());
-    return {};
   }
 
   void Cancel() {
@@ -54,6 +67,10 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
   void Finalize() {
     streamer_.SendFinalize();
+  }
+
+  const dfly::GenericError GetError() const {
+    return cntx_.GetError();
   }
 
  private:
@@ -88,10 +105,9 @@ MigrationState OutgoingMigration::GetState() const {
 }
 
 void OutgoingMigration::SyncFb() {
-  state_.store(MigrationState::C_CONNECTING);
-
   // we retry starting migration until "cancel" is happened
   while (state_.load() != MigrationState::C_FINISHED) {
+    state_.store(MigrationState::C_CONNECTING);
     if (auto err = cntx_.GetError(); err) {
       LOG(ERROR) << err.Format();
       // if error is happened on the previous attempt we wait for some time and try again
@@ -121,24 +137,30 @@ void OutgoingMigration::SyncFb() {
       cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
       continue;
     }
+
+    state_.store(MigrationState::C_SYNC);
+
+    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+      if (auto* shard = EngineShard::tlocal(); shard) {
+        server_family_->journal()->StartInThread();
+        slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
+            &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal());
+        auto& migration = *slot_migrations_[shard->shard_id()];
+        migration.Sync(cf_->MyID(), shard->shard_id());
+        if (migration.GetError()) {
+          cntx_.ReportError(migration.GetError());
+          Finish();
+        }
+      }
+    });
+
+    if (cntx_.GetError()) {
+      continue;
+    }
+    VLOG(1) << "Migrations snapshot is finished";
+
     break;
   }
-
-  state_.store(MigrationState::C_SYNC);
-
-  auto start_cb = [this](util::ProactorBase* pb) {
-    if (auto* shard = EngineShard::tlocal(); shard) {
-      server_family_->journal()->StartInThread();
-      slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
-          &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal());
-      slot_migrations_[shard->shard_id()]->Sync(cf_->MyID(), shard->shard_id());
-      // TODO check context for error
-    }
-  };
-
-  shard_set->pool()->AwaitFiberOnAll(std::move(start_cb));
-
-  VLOG(1) << "Migrations snapshot is finished";
 
   // TODO implement blocking on migrated slots only
 
