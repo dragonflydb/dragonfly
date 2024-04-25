@@ -699,9 +699,9 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
                                     MigrationState state, const SlotRanges& slots,
                                     string_view error) {
     if (filter.empty() || filter == node_id) {
-      error = error.empty() ? "no" : error;
+      error = error.empty() ? "0" : error;
       reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
-                                   " keys:", GetKeyCount(slots), " error: ", error));
+                                   " keys:", GetKeyCount(slots), " errors: ", error));
     }
   };
 

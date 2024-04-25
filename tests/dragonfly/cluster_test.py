@@ -954,11 +954,11 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
     )
 
     assert await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == [
-        f"""out {node_ids[1]} SYNC keys:0"""
+        f"""out {node_ids[1]} SYNC keys:0 errors: 0"""
     ]
 
     assert await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == [
-        f"""in {node_ids[0]} SYNC keys:0"""
+        f"""in {node_ids[0]} SYNC keys:0 errors: 0"""
     ]
 
     # migration shouldn't be finished until we set the same config to target node
@@ -977,7 +977,7 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
         await asyncio.sleep(0.05)
 
     assert await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == [
-        f"""out {node_ids[1]} FINISHED keys:0"""
+        f"""out {node_ids[1]} FINISHED keys:0 errors: 0"""
     ]
 
     # remove finished migrations
