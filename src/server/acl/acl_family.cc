@@ -179,7 +179,8 @@ void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void AclFamily::WhoAmI(CmdArgList args, ConnectionContext* cntx) {
-  cntx->SendSimpleString(cntx->authed_username);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendBulkString(absl::StrCat("User is ", cntx->authed_username));
 }
 
 std::string AclFamily::RegistryToString() const {

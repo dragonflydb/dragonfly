@@ -142,7 +142,7 @@ TEST_F(AclFamilyTest, AclWhoAmI) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "WHOAMI"});
-  EXPECT_THAT(resp, "kostas");
+  EXPECT_THAT(resp, "User is kostas");
 }
 
 TEST_F(AclFamilyTest, TestAllCategories) {
