@@ -18,7 +18,7 @@ extern "C" {
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -281,11 +281,11 @@ class Renamer {
 void Renamer::Find(Transaction* t) {
   auto cb = [this](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    CHECK_EQ(1u, args.size());
+    DCHECK_EQ(1u, args.Size());
 
     FindResult* res = (shard->shard_id() == src_sid_) ? &src_res_ : &dest_res_;
 
-    res->key = args.front();
+    res->key = args.Front();
     auto& db_slice = EngineShard::tlocal()->db_slice();
     auto [it, exp_it] = db_slice.FindReadOnly(t->GetDbContext(), res->key);
 
@@ -615,6 +615,40 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
 
+OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys) {
+  DVLOG(1) << "Del: " << keys.Front();
+  auto& db_slice = op_args.shard->db_slice();
+
+  uint32_t res = 0;
+
+  for (string_view key : keys) {
+    auto fres = db_slice.FindMutable(op_args.db_cntx, key);
+    if (!IsValid(fres.it))
+      continue;
+    fres.post_updater.Run();
+    res += int(db_slice.Del(op_args.db_cntx.db_index, fres.it));
+  }
+
+  return res;
+}
+
+OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
+  DVLOG(1) << "Stick: " << keys.Front();
+
+  auto& db_slice = op_args.shard->db_slice();
+
+  uint32_t res = 0;
+  for (string_view key : keys) {
+    auto find_res = db_slice.FindMutable(op_args.db_cntx, key);
+    if (IsValid(find_res.it) && !find_res.it->first.IsSticky()) {
+      find_res.it->first.SetSticky(true);
+      ++res;
+    }
+  }
+
+  return res;
+}
+
 }  // namespace
 
 void GenericFamily::Init(util::ProactorPool* pp) {
@@ -631,7 +665,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   bool is_mc = cntx->protocol() == Protocol::MEMCACHE;
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->GetShardArgs(shard->shard_id());
+    ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = OpDel(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
@@ -683,7 +717,7 @@ void GenericFamily::Exists(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t result{0};
 
   auto cb = [&result](Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->GetShardArgs(shard->shard_id());
+    ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = OpExists(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
@@ -889,7 +923,7 @@ void GenericFamily::Stick(CmdArgList args, ConnectionContext* cntx) {
   atomic_uint32_t result{0};
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->GetShardArgs(shard->shard_id());
+    ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = OpStick(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
@@ -1231,7 +1265,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   if (!absl::SimpleAtoi(key, &index)) {
     return cntx->SendError(kInvalidDbIndErr);
   }
-  if (ClusterConfig::IsEnabled() && index != 0) {
+  if (cluster::IsClusterEnabled() && index != 0) {
     return cntx->SendError("SELECT is not allowed in cluster mode");
   }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
@@ -1373,30 +1407,13 @@ OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, stri
   return ttl_ms;
 }
 
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, ArgSlice keys) {
-  DVLOG(1) << "Del: " << keys[0];
-  auto& db_slice = op_args.shard->db_slice();
-
-  uint32_t res = 0;
-
-  for (uint32_t i = 0; i < keys.size(); ++i) {
-    auto fres = db_slice.FindMutable(op_args.db_cntx, keys[i]);
-    if (!IsValid(fres.it))
-      continue;
-    fres.post_updater.Run();
-    res += int(db_slice.Del(op_args.db_cntx.db_index, fres.it));
-  }
-
-  return res;
-}
-
-OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, ArgSlice keys) {
-  DVLOG(1) << "Exists: " << keys[0];
+OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
+  DVLOG(1) << "Exists: " << keys.Front();
   auto& db_slice = op_args.shard->db_slice();
   uint32_t res = 0;
 
-  for (uint32_t i = 0; i < keys.size(); ++i) {
-    auto find_res = db_slice.FindReadOnly(op_args.db_cntx, keys[i]);
+  for (string_view key : keys) {
+    auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key);
     res += IsValid(find_res.it);
   }
   return res;
@@ -1460,23 +1477,6 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, to_key);
   }
   return OpStatus::OK;
-}
-
-OpResult<uint32_t> GenericFamily::OpStick(const OpArgs& op_args, ArgSlice keys) {
-  DVLOG(1) << "Stick: " << keys[0];
-
-  auto& db_slice = op_args.shard->db_slice();
-
-  uint32_t res = 0;
-  for (uint32_t i = 0; i < keys.size(); ++i) {
-    auto find_res = db_slice.FindMutable(op_args.db_cntx, keys[i]);
-    if (IsValid(find_res.it) && !find_res.it->first.IsSticky()) {
-      find_res.it->first.SetSticky(true);
-      ++res;
-    }
-  }
-
-  return res;
 }
 
 // OpMove touches multiple databases (op_args.db_idx, target_db), so it assumes it runs

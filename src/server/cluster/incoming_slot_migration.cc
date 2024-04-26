@@ -11,7 +11,7 @@
 #include "server/journal/tx_executor.h"
 #include "server/main_service.h"
 
-namespace dfly {
+namespace dfly::cluster {
 
 using namespace std;
 using namespace util;
@@ -140,4 +140,4 @@ void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* sou
   shard_flows_[shard]->Start(&cntx_, source, bc_);
 }
 
-}  // namespace dfly
+}  // namespace dfly::cluster

@@ -218,7 +218,7 @@ void ChannelStoreUpdater::Apply() {
   // structs. This means that any point on the other thread is safe to update the channel store.
   // Regardless of whether we need to replace, we dispatch to make sure all
   // queued SubscribeMaps in the freelist are no longer in use.
-  shard_set->pool()->Await([](unsigned idx, util::ProactorBase*) {
+  shard_set->pool()->AwaitBrief([](unsigned idx, util::ProactorBase*) {
     ServerState::tlocal()->UpdateChannelStore(
         ChannelStore::control_block.most_recent.load(memory_order_relaxed));
   });

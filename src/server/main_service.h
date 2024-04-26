@@ -94,7 +94,8 @@ class Service : public facade::ServiceInterface {
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
   void OnClose(facade::ConnectionContext* cntx) final;
-  std::string GetContextInfo(facade::ConnectionContext* cntx) final;
+
+  Service::ContextInfo GetContextInfo(facade::ConnectionContext* cntx) const final;
 
   uint32_t shard_count() const {
     return shard_set->size();
@@ -181,7 +182,7 @@ class Service : public facade::ServiceInterface {
   acl::UserRegistry user_registry_;
   acl::AclFamily acl_family_;
   ServerFamily server_family_;
-  ClusterFamily cluster_family_;
+  cluster::ClusterFamily cluster_family_;
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
 

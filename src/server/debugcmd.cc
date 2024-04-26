@@ -560,9 +560,8 @@ void DebugCmd::Load(string_view filename) {
     path = dir_path;
   }
 
-  auto fut_ec = sf_.Load(path.generic_string());
-  if (fut_ec.valid()) {
-    GenericError ec = fut_ec.get();
+  if (auto fut_ec = sf_.Load(path.generic_string()); fut_ec) {
+    GenericError ec = fut_ec->Get();
     if (ec) {
       string msg = ec.Format();
       LOG(WARNING) << "Could not load file " << msg;
@@ -628,7 +627,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
         if (!absl::SimpleAtoi(slot_str, &slot_id)) {
           return facade::OpStatus::INVALID_INT;
         }
-        if (slot_id > ClusterConfig::kMaxSlotNum) {
+        if (slot_id > cluster::kMaxSlotNum) {
           return facade::OpStatus::INVALID_VALUE;
         }
         return slot_id;
@@ -644,8 +643,8 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
         cntx_->SendError(end.status());
         return nullopt;
       }
-      options.slot_range = SlotRange{.start = static_cast<SlotId>(start.value()),
-                                     .end = static_cast<SlotId>(end.value())};
+      options.slot_range = cluster::SlotRange{.start = static_cast<cluster::SlotId>(start.value()),
+                                              .end = static_cast<cluster::SlotId>(end.value())};
 
     } else {
       cntx_->SendError(kSyntaxErr);
@@ -717,7 +716,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
       // <key_prefix>:<from+total_count+num_of_keys-1> and continue until num_of_keys are added.
 
       // Add keys only in slot range.
-      SlotId sid = ClusterConfig::KeySlot(key);
+      cluster::SlotId sid = cluster::KeySlot(key);
       if (sid < options.slot_range->start || sid > options.slot_range->end) {
         ++index;
         continue;

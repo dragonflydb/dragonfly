@@ -575,7 +575,8 @@ void TxTable(const http::QueryArgs& args, HttpContext* send) {
   send->Invoke(std::move(resp));
 }
 
-void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send, ClusterFamily* cluster) {
+void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
+                     cluster::ClusterFamily* cluster_family) {
   http::StringResponse resp = http::MakeStringResponse(h2::status::ok);
   resp.body() = R"(
 <html>
@@ -616,19 +617,19 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send, ClusterFami
 
   auto print_kb = [&](string_view k, bool v) { print_kv(k, v ? "True" : "False"); };
 
-  print_kv("Mode", ClusterConfig::IsEmulated()  ? "Emulated"
-                   : ClusterConfig::IsEnabled() ? "Enabled"
-                                                : "Disabled");
+  print_kv("Mode", cluster::IsClusterEmulated()  ? "Emulated"
+                   : cluster::IsClusterEnabled() ? "Enabled"
+                                                 : "Disabled");
 
-  if (ClusterConfig::IsEnabledOrEmulated()) {
+  if (cluster::IsClusterEnabledOrEmulated()) {
     print_kb("Lock on hashtags", LockTagOptions::instance().enabled);
   }
 
-  if (ClusterConfig::IsEnabled()) {
-    if (cluster->cluster_config() == nullptr) {
+  if (cluster::IsClusterEnabled()) {
+    if (cluster_family->cluster_config() == nullptr) {
       resp.body() += "<h2>Not yet configured.</h2>\n";
     } else {
-      auto config = cluster->cluster_config()->GetConfig();
+      auto config = cluster_family->cluster_config()->GetConfig();
       for (const auto& shard : config) {
         resp.body() += "<div class='master'>\n";
         resp.body() += "<h3>Master</h3>\n";
@@ -855,7 +856,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   }
 
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
-  pp_.Await([&](uint32_t index, ProactorBase* pb) {
+  pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
     ServerState::Init(index, shard_num, &user_registry_);
   });
@@ -873,7 +874,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   server_family_.Init(acceptor, std::move(listeners));
 
   ChannelStore* cs = new ChannelStore{};
-  pp_.Await(
+  pp_.AwaitBrief(
       [cs](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->UpdateChannelStore(cs); });
 }
 
@@ -922,12 +923,12 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   const auto& key_index = *key_index_res;
-  optional<SlotId> keys_slot;
+  optional<cluster::SlotId> keys_slot;
   bool cross_slot = false;
   // Iterate keys and check to which slot they belong.
   for (unsigned i = key_index.start; i < key_index.end; i += key_index.step) {
     string_view key = ArgS(args, i);
-    SlotId slot = ClusterConfig::KeySlot(key);
+    cluster::SlotId slot = cluster::KeySlot(key);
     if (keys_slot && slot != *keys_slot) {
       cross_slot = true;  // keys belong to different slots
       break;
@@ -941,14 +942,14 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   // Check keys slot is in my ownership
-  const ClusterConfig* cluster_config = cluster_family_.cluster_config();
+  const cluster::ClusterConfig* cluster_config = cluster_family_.cluster_config();
   if (cluster_config == nullptr) {
     return ErrorReply{kClusterNotConfigured};
   }
 
   if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
-    ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(*keys_slot);
+    cluster::ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(*keys_slot);
     return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
   }
 
@@ -1094,7 +1095,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
 
-  if (ClusterConfig::IsEnabled()) {
+  if (cluster::IsClusterEnabled()) {
     if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;
   }
@@ -1126,9 +1127,25 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-OpResult<void> OpTrackKeys(const OpArgs& op_args, ConnectionContext* cntx, const ArgSlice& keys) {
-  auto& db_slice = op_args.shard->db_slice();
-  db_slice.TrackKeys(cntx->conn()->Borrow(), keys);
+OpResult<void> OpTrackKeys(const OpArgs& op_args, const facade::Connection::WeakRef& conn_ref,
+                           const ShardArgs& args) {
+  if (conn_ref.IsExpired()) {
+    DVLOG(2) << "Connection expired, exiting TrackKey function.";
+    return OpStatus::OK;
+  }
+
+  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
+           << " with thread ID: " << conn_ref.Thread();
+
+  DbSlice& db_slice = op_args.shard->db_slice();
+
+  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
+  for (auto key : args) {
+    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
+             << " into the tracking client set of key " << key;
+    db_slice.TrackKey(conn_ref, key);
+  }
+
   return OpStatus::OK;
 }
 
@@ -1235,9 +1252,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   // start tracking all the updates to the keys in this read command
   if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
       cid->IsTransactional()) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      auto keys = t->GetShardArgs(shard->shard_id());
-      return OpTrackKeys(t->GetOpArgs(shard), dfly_cntx, keys);
+    facade::Connection::WeakRef conn_ref = dfly_cntx->conn()->Borrow();
+    auto cb = [&, conn_ref](Transaction* t, EngineShard* shard) {
+      return OpTrackKeys(t->GetOpArgs(shard), conn_ref, t->GetShardArgs(shard->shard_id()));
     };
     dfly_cntx->transaction->Refurbish();
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
@@ -1609,7 +1626,7 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_uint32_t keys_existed = 0;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ArgSlice largs = t->GetShardArgs(shard->shard_id());
+    ShardArgs largs = t->GetShardArgs(shard->shard_id());
     for (auto k : largs) {
       shard->db_slice().RegisterWatchedKey(cntx->db_index(), k, &exec_info);
     }
@@ -1897,7 +1914,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   optional<ShardId> sid;
 
-  UniqueSlotChecker slot_checker;
+  cluster::UniqueSlotChecker slot_checker;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
     slot_checker.Add(key);
@@ -2017,7 +2034,7 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
 
   atomic_uint32_t watch_exist_count{0};
   auto cb = [&watch_exist_count](Transaction* t, EngineShard* shard) {
-    ArgSlice args = t->GetShardArgs(shard->shard_id());
+    ShardArgs args = t->GetShardArgs(shard->shard_id());
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), args);
     watch_exist_count.fetch_add(res.value_or(0), memory_order_relaxed);
 
@@ -2539,29 +2556,13 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
   cntx->conn()->SetClientTrackingSwitch(false);
 }
 
-string Service::GetContextInfo(facade::ConnectionContext* cntx) {
-  char buf[16] = {0};
-  unsigned index = 0;
+Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) const {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
-
-  string res = absl::StrCat("db=", server_cntx->db_index());
-
-  if (server_cntx->async_dispatch)
-    buf[index++] = 'a';
-
-  if (server_cntx->conn_closing)
-    buf[index++] = 't';
-
-  if (server_cntx->conn_state.subscribe_info)
-    buf[index++] = 'P';
-
-  if (server_cntx->blocked)
-    buf[index++] = 'b';
-
-  if (index) {
-    absl::StrAppend(&res, " flags=", buf);
-  }
-  return res;
+  return {.db_index = server_cntx->db_index(),
+          .async_dispatch = server_cntx->async_dispatch,
+          .conn_closing = server_cntx->conn_closing,
+          .subscribers = bool(server_cntx->conn_state.subscribe_info),
+          .blocked = server_cntx->blocked};
 }
 
 using ServiceFunc = void (Service::*)(CmdArgList, ConnectionContext* cntx);

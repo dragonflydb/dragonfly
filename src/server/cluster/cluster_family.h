@@ -15,9 +15,12 @@
 #include "server/common.h"
 
 namespace dfly {
+class ServerFamily;
 class CommandRegistry;
 class ConnectionContext;
-class ServerFamily;
+}  // namespace dfly
+
+namespace dfly::cluster {
 
 class ClusterFamily {
  public:
@@ -105,4 +108,4 @@ class ClusterFamily {
   ServerFamily* server_family_ = nullptr;
 };
 
-}  // namespace dfly
+}  // namespace dfly::cluster

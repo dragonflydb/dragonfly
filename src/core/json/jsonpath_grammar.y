@@ -57,7 +57,7 @@ using namespace std;
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
 %token <std::string> UNQ_STR "unquoted string"
-%token <unsigned>    UINT "integer"
+%token <int>  INT "integer"
 
 %nterm <std::string> identifier
 %nterm <PathSegment> bracket_index
@@ -84,8 +84,8 @@ relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
 identifier: UNQ_STR
          // | single_quoted_string | double_quoted_string
 
-bracket_index: WILDCARD { $$ = PathSegment{SegmentType::WILDCARD}; }
-              | UINT { $$ = PathSegment(SegmentType::INDEX, $1); }
+bracket_index: WILDCARD { $$ = PathSegment{SegmentType::INDEX, IndexExpr::All()}; }
+              | INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr($1, $1)); }
 
 function_expr: UNQ_STR { driver->AddFunction($1); } LPARENT ROOT relative_location RPARENT
 %%

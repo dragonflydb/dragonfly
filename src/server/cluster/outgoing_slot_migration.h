@@ -4,18 +4,18 @@
 #pragma once
 
 #include "io/io.h"
-#include "server/cluster/cluster_config.h"
-#include "server/common.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/protocol_client.h"
 
 namespace dfly {
+class DbSlice;
+class ServerFamily;
 
 namespace journal {
 class Journal;
 }
-
-class DbSlice;
-class ServerFamily;
+}  // namespace dfly
+namespace dfly::cluster {
 class ClusterFamily;
 
 // Whole outgoing slots migration manager
@@ -76,4 +76,4 @@ class OutgoingMigration : private ProtocolClient {
   std::atomic<MigrationState> state_ = MigrationState::C_NO_STATE;
 };
 
-}  // namespace dfly
+}  // namespace dfly::cluster

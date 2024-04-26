@@ -5,12 +5,15 @@
 
 #include "helio/io/io.h"
 #include "helio/util/fiber_socket_base.h"
-#include "server/cluster/cluster_config.h"
+#include "server/cluster/cluster_defs.h"
+#include "server/common.h"
 
 namespace dfly {
-class ClusterShardMigration;
-
 class Service;
+}
+
+namespace dfly::cluster {
+class ClusterShardMigration;
 
 // The main entity on the target side that manage slots migration process
 // Manage connections between the target and source node,
@@ -55,4 +58,4 @@ class IncomingSlotMigration {
   util::fb2::BlockingCounter bc_;
 };
 
-}  // namespace dfly
+}  // namespace dfly::cluster

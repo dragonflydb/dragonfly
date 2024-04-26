@@ -144,7 +144,7 @@ TEST_F(ScannerTest, Basic) {
   NEXT_TOK(DOT);
   NEXT_EQ(UNQ_STR, string, "book");
   NEXT_TOK(LBRACKET);
-  NEXT_EQ(UINT, unsigned, 0);
+  NEXT_EQ(INT, int, 0);
   NEXT_TOK(RBRACKET);
   NEXT_TOK(DOT);
   NEXT_TOK(WILDCARD);
@@ -204,9 +204,13 @@ TYPED_TEST(JsonPathTest, Parser) {
   EXPECT_THAT(path[1], SegType(SegmentType::IDENTIFIER));
   EXPECT_THAT(path[2], SegType(SegmentType::INDEX));
   EXPECT_EQ("bar", path[1].identifier());
-  EXPECT_EQ(1, path[2].index());
+  EXPECT_EQ(IndexExpr(1, 1), path[2].index());
 
   EXPECT_EQ(0, this->Parse("$.plays[*].game"));
+  EXPECT_EQ(0, this->Parse("$.bar[ -1]"));
+  path = this->driver_.TakePath();
+  EXPECT_THAT(path[1], SegType(SegmentType::INDEX));
+  EXPECT_EQ(IndexExpr(-1, -1), path[1].index());
 }
 
 TYPED_TEST(JsonPathTest, Root) {
@@ -228,8 +232,10 @@ TYPED_TEST(JsonPathTest, Functions) {
   ASSERT_EQ(4, path.size());
   EXPECT_THAT(path[0], SegType(SegmentType::FUNCTION));
   EXPECT_THAT(path[1], SegType(SegmentType::IDENTIFIER));
-  EXPECT_THAT(path[2], SegType(SegmentType::WILDCARD));
+  EXPECT_THAT(path[2], SegType(SegmentType::INDEX));
   EXPECT_THAT(path[3], SegType(SegmentType::IDENTIFIER));
+  EXPECT_EQ(IndexExpr::All(), path[2].index());
+
   TypeParam json = ValidJson<TypeParam>(R"({"plays": [{"score": 1}, {"score": 2}]})");
   int called = 0;
   EvaluatePath(path, json, [&](auto, const TypeParam& val) {
@@ -356,19 +362,60 @@ TYPED_TEST(JsonPathTest, EvalDescent) {
   ASSERT_THAT(arr, ElementsAre('a', 'o'));
 }
 
-TYPED_TEST(JsonPathTest, Wildcard) {
-  ASSERT_EQ(0, this->Parse("$[*]"));
-  Path path = this->driver_.TakePath();
-  ASSERT_EQ(1, path.size());
-  EXPECT_THAT(path[0], SegType(SegmentType::WILDCARD));
+TYPED_TEST(JsonPathTest, EvalDescent2) {
+  TypeParam json = ValidJson<TypeParam>(R"(
+    {"a":[{"val": 1}, {"val": 2}, {"val": 3}]}
+  )");
 
-  TypeParam json = ValidJson<TypeParam>(R"([1, 2, 3])");
+  ASSERT_EQ(0, this->Parse("$..val"));
+  Path path = this->driver_.TakePath();
+  vector<int> arr;
+  EvaluatePath(path, json, [&](optional<string_view> key, const TypeParam& val) {
+    arr.push_back(to_int(val));
+  });
+  ASSERT_THAT(arr, ElementsAre(1, 2, 3));
+
+  int called = 0;
+  ASSERT_EQ(0, this->Parse("$..*"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, [&](optional<string_view> key, const TypeParam& val) { ++called; });
+  EXPECT_EQ(7, called);
+
+  called = 0;
+  json = ValidJson<TypeParam>(R"(
+    {
+       "store": {
+        "nums": [
+         5
+       ]
+      }
+    }
+    )");
+  EvaluatePath(path, json, [&](optional<string_view> key, const TypeParam& val) { ++called; });
+  EXPECT_EQ(3, called);
+}
+
+TYPED_TEST(JsonPathTest, Wildcard) {
+  ASSERT_EQ(0, this->Parse("$.arr[*]"));
+  Path path = this->driver_.TakePath();
+  ASSERT_EQ(2, path.size());
+  EXPECT_THAT(path[1], SegType(SegmentType::INDEX));
+
+  TypeParam json = ValidJson<TypeParam>(R"({"arr": [1, 2, 3], "i":1})");
   vector<int> arr;
   EvaluatePath(path, json, [&](optional<string_view> key, const TypeParam& val) {
     ASSERT_FALSE(key);
     arr.push_back(to_int(val));
   });
   ASSERT_THAT(arr, ElementsAre(1, 2, 3));
+
+  ASSERT_EQ(0, this->Parse("$.i[*]"));
+  path = this->driver_.TakePath();
+  arr.clear();
+  EvaluatePath(path, json, [&](optional<string_view> key, const TypeParam& val) {
+    arr.push_back(to_int(val));
+  });
+  ASSERT_THAT(arr, ElementsAre());
 }
 
 TYPED_TEST(JsonPathTest, Mutate) {

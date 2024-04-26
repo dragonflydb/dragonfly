@@ -32,6 +32,17 @@ ABSL_FLAG(std::string, cluster_node_id, "",
 ABSL_DECLARE_FLAG(int32_t, port);
 
 namespace dfly {
+namespace acl {
+constexpr uint32_t kCluster = SLOW;
+// Reconsider to maybe more sensible defaults
+constexpr uint32_t kDflyCluster = ADMIN | SLOW;
+constexpr uint32_t kReadOnly = FAST | CONNECTION;
+constexpr uint32_t kReadWrite = FAST | CONNECTION;
+constexpr uint32_t kDflyMigrate = ADMIN | SLOW | DANGEROUS;
+}  // namespace acl
+}  // namespace dfly
+
+namespace dfly::cluster {
 namespace {
 
 using namespace std;
@@ -52,12 +63,12 @@ thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
 
-  ClusterConfig::Initialize();
+  InitializeCluster();
 
   id_ = absl::GetFlag(FLAGS_cluster_node_id);
   if (id_.empty()) {
     id_ = server_family_->master_replid();
-  } else if (ClusterConfig::IsEmulated()) {
+  } else if (IsClusterEmulated()) {
     LOG(ERROR) << "Setting --cluster_node_id in emulated mode is unsupported";
     exit(1);
   }
@@ -68,7 +79,7 @@ ClusterConfig* ClusterFamily::cluster_config() {
 }
 
 ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
-  ClusterShardInfo info{.slot_ranges = {{.start = 0, .end = ClusterConfig::kMaxSlotNum}},
+  ClusterShardInfo info{.slot_ranges = {{.start = 0, .end = kMaxSlotNum}},
                         .master = {},
                         .replicas = {},
                         .migrations = {}};
@@ -166,7 +177,7 @@ void ClusterShardsImpl(const ClusterShardInfos& config, ConnectionContext* cntx)
 }  // namespace
 
 void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
-  if (ClusterConfig::IsEmulated()) {
+  if (IsClusterEmulated()) {
     return ClusterShardsImpl({GetEmulatedShardInfo(cntx)}, cntx);
   } else if (tl_cluster_config != nullptr) {
     return ClusterShardsImpl(tl_cluster_config->GetConfig(), cntx);
@@ -210,7 +221,7 @@ void ClusterSlotsImpl(const ClusterShardInfos& config, ConnectionContext* cntx) 
 }  // namespace
 
 void ClusterFamily::ClusterSlots(ConnectionContext* cntx) {
-  if (ClusterConfig::IsEmulated()) {
+  if (IsClusterEmulated()) {
     return ClusterSlotsImpl({GetEmulatedShardInfo(cntx)}, cntx);
   } else if (tl_cluster_config != nullptr) {
     return ClusterSlotsImpl(tl_cluster_config->GetConfig(), cntx);
@@ -265,7 +276,7 @@ void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id, Connec
 }  // namespace
 
 void ClusterFamily::ClusterNodes(ConnectionContext* cntx) {
-  if (ClusterConfig::IsEmulated()) {
+  if (IsClusterEmulated()) {
     return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, id_, cntx);
   } else if (tl_cluster_config != nullptr) {
     return ClusterNodesImpl(tl_cluster_config->GetConfig(), id_, cntx);
@@ -284,7 +295,7 @@ void ClusterInfoImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
 
   // Initialize response variables to emulated mode.
   string_view state = "ok"sv;
-  SlotId slots_assigned = ClusterConfig::kMaxSlotNum + 1;
+  SlotId slots_assigned = kMaxSlotNum + 1;
   size_t known_nodes = 1;
   long epoch = 1;
   size_t cluster_size = 1;
@@ -329,7 +340,7 @@ void ClusterInfoImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
 }  // namespace
 
 void ClusterFamily::ClusterInfo(ConnectionContext* cntx) {
-  if (ClusterConfig::IsEmulated()) {
+  if (IsClusterEmulated()) {
     return ClusterInfoImpl({GetEmulatedShardInfo(cntx)}, cntx);
   } else if (tl_cluster_config != nullptr) {
     return ClusterInfoImpl(tl_cluster_config->GetConfig(), cntx);
@@ -343,7 +354,7 @@ void ClusterFamily::KeySlot(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(WrongNumArgsError("CLUSTER KEYSLOT"));
   }
 
-  SlotId id = ClusterConfig::KeySlot(ArgS(args, 1));
+  SlotId id = cluster::KeySlot(ArgS(args, 1));
   return cntx->SendLong(id);
 }
 
@@ -354,7 +365,7 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
-  if (!ClusterConfig::IsEnabledOrEmulated()) {
+  if (!IsClusterEnabledOrEmulated()) {
     return cntx->SendError(kClusterDisabled);
   }
 
@@ -376,21 +387,21 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::ReadOnly(CmdArgList args, ConnectionContext* cntx) {
-  if (!ClusterConfig::IsEmulated()) {
+  if (!IsClusterEmulated()) {
     return cntx->SendError(kClusterDisabled);
   }
   cntx->SendOk();
 }
 
 void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
-  if (!ClusterConfig::IsEmulated()) {
+  if (!IsClusterEmulated()) {
     return cntx->SendError(kClusterDisabled);
   }
   cntx->SendOk();
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
-  if (!ClusterConfig::IsEnabledOrEmulated()) {
+  if (!IsClusterEnabledOrEmulated()) {
     return cntx->SendError(kClusterDisabled);
   }
 
@@ -570,7 +581,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
   vector<std::pair<SlotId, SlotStats>> slots_stats;
   do {
     auto sid = parser.Next<uint32_t>();
-    if (sid > ClusterConfig::kMaxSlotNum)
+    if (sid > kMaxSlotNum)
       return rb->SendError("Invalid slot id");
     slots_stats.emplace_back(sid, SlotStats{});
   } while (parser.HasNext());
@@ -646,8 +657,6 @@ static string_view StateToStr(MigrationState state) {
       return "SYNC"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
-    case MigrationState::C_CANCELLED:
-      return "CANCELLED"sv;
     case MigrationState::C_MAX_INVALID:
       break;
   }
@@ -658,7 +667,7 @@ static string_view StateToStr(MigrationState state) {
 static uint64_t GetKeyCount(const SlotRanges& slots) {
   atomic_uint64_t keys = 0;
 
-  shard_set->pool()->Await([&](auto*) {
+  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
     EngineShard* shard = EngineShard::tlocal();
     if (shard == nullptr)
       return;
@@ -924,15 +933,6 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ClusterFamily::x))
 
-namespace acl {
-constexpr uint32_t kCluster = SLOW;
-// Reconsider to maybe more sensible defaults
-constexpr uint32_t kDflyCluster = ADMIN | SLOW;
-constexpr uint32_t kReadOnly = FAST | CONNECTION;
-constexpr uint32_t kReadWrite = FAST | CONNECTION;
-constexpr uint32_t kDflyMigrate = ADMIN | SLOW | DANGEROUS;
-}  // namespace acl
-
 void ClusterFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry << CI{"CLUSTER", CO::READONLY, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
@@ -945,4 +945,4 @@ void ClusterFamily::Register(CommandRegistry* registry) {
                    DflyMigrate);
 }
 
-}  // namespace dfly
+}  // namespace dfly::cluster

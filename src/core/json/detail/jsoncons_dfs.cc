@@ -13,6 +13,11 @@ namespace dfly::json::detail {
 using namespace std;
 using nonstd::make_unexpected;
 
+ostream& operator<<(ostream& os, const PathSegment& ps) {
+  os << SegmentName(ps.type());
+  return os;
+}
+
 inline bool IsRecursive(jsoncons::json_type type) {
   return type == jsoncons::json_type::object_value || type == jsoncons::json_type::array_value;
 }
@@ -36,18 +41,22 @@ Dfs Dfs::Traverse(absl::Span<const PathSegment> path, const JsonType& root, cons
     const auto& path_segment = path[segment_index];
 
     // init or advance the current object
+    DVLOG(2) << "Advance segment [" << segment_index << "] " << path_segment;
     ConstItem::AdvanceResult res = stack.back().Advance(path_segment);
     if (res && res->first != nullptr) {
       const JsonType* next = res->first;
-      DVLOG(2) << "Handling now " << next->type() << " " << next->to_string();
 
       // We descent only if next is object or an array.
       if (IsRecursive(next->type())) {
         unsigned next_seg_id = res->second;
 
         if (next_seg_id + 1 < path.size()) {
+          DVLOG(2) << "Exploring node[" << stack.size() << "] " << next->type() << " "
+                   << next->to_string();
           stack.emplace_back(next, next_seg_id);
         } else {
+          DVLOG(2) << "Terminal node[" << stack.size() << "] " << next->type() << " "
+                   << next->to_string() << ", segment:" << path[next_seg_id];
           // terminal step
           // TODO: to take into account MatchStatus
           // for `json.set foo $.a[10]` or for `json.set foo $.*.b`
@@ -120,10 +129,13 @@ auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node, const Cb
     case SegmentType::INDEX: {
       if (!node.is_array())
         return make_unexpected(MISMATCH);
-      if (segment.index() >= node.size()) {
+      IndexExpr index = segment.index().Normalize(node.size());
+      if (index.Empty()) {
         return make_unexpected(OUT_OF_BOUNDS);
       }
-      DoCall(callback, nullopt, node[segment.index()]);
+      for (; index.first <= index.second; ++index.first) {
+        DoCall(callback, nullopt, node[index.first]);
+      }
     } break;
 
     case SegmentType::DESCENT:
@@ -133,8 +145,8 @@ auto Dfs::PerformStep(const PathSegment& segment, const JsonType& node, const Cb
           DoCall(callback, k_v.key(), k_v.value());
         }
       } else if (node.is_array()) {
-        for (const auto& val : node.array_range()) {
-          DoCall(callback, nullopt, val);
+        for (const auto& item : node.array_range()) {
+          DoCall(callback, nullopt, item);
         }
       }
     } break;
@@ -161,12 +173,19 @@ auto Dfs::MutateStep(const PathSegment& segment, const MutateCallback& cb, JsonT
     case SegmentType::INDEX: {
       if (!node->is_array())
         return make_unexpected(MISMATCH);
-      if (segment.index() >= node->size()) {
+      IndexExpr index = segment.index().Normalize(node->size());
+      if (index.Empty()) {
         return make_unexpected(OUT_OF_BOUNDS);
       }
-      auto it = node->array_range().begin() + segment.index();
-      if (Mutate(cb, nullopt, &*it)) {
-        node->erase(it);
+
+      while (index.first <= index.second) {
+        auto it = node->array_range().begin() + index.first;
+        if (Mutate(cb, nullopt, &*it)) {
+          node->erase(it);
+          --index.second;
+        } else {
+          ++index.first;
+        }
       }
     } break;
 

@@ -179,7 +179,7 @@ void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void AclFamily::WhoAmI(CmdArgList args, ConnectionContext* cntx) {
-  cntx->SendSimpleString(absl::StrCat("User is ", cntx->authed_username));
+  cntx->SendSimpleString(cntx->authed_username);
 }
 
 std::string AclFamily::RegistryToString() const {
@@ -480,8 +480,8 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
   if (!registry.contains(username)) {
-    auto error = absl::StrCat("User: ", username, " does not exists!");
-    cntx->SendError(error);
+    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendNull();
     return;
   }
   auto& user = registry.find(username)->second;
@@ -554,7 +554,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
   if (!registry.contains(username)) {
-    auto error = absl::StrCat("User: ", username, " does not exists!");
+    auto error = absl::StrCat("User '", username, "' not found");
     cntx->SendError(error);
     return;
   }
@@ -563,7 +563,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   auto command = facade::ArgS(args, 1);
   auto* cid = cmd_registry_->Find(command);
   if (!cid) {
-    auto error = absl::StrCat("Command: ", command, " does not exists!");
+    auto error = absl::StrCat("Command '", command, "' not found");
     cntx->SendError(error);
     return;
   }
@@ -577,8 +577,9 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  auto error = absl::StrCat("User: ", username, " is not allowed to execute command: ", command);
-  cntx->SendError(error);
+  auto msg = absl::StrCat("This user has no permissions to run the '", command, "' command");
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendBulkString(msg);
 }
 
 using MemberFunc = void (AclFamily::*)(CmdArgList args, ConnectionContext* cntx);

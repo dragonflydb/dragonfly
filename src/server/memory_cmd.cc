@@ -138,7 +138,7 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (sub_cmd == "DECOMMIT") {
-    shard_set->pool()->Await([](auto* pb) {
+    shard_set->pool()->AwaitBrief([](unsigned, auto* pb) {
       ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                             ServerState::kGlibcmalloc);
     });
@@ -196,7 +196,7 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
     });
   }
 
-  shard_set->pool()->Await([&](unsigned index, auto*) {
+  shard_set->pool()->AwaitBrief([&](unsigned index, auto*) {
     mems[index].pipelined_bytes += tl_facade_stats->conn_stats.pipeline_cmd_cache_bytes;
     mems[index].pipelined_bytes += tl_facade_stats->conn_stats.dispatch_queue_bytes;
   });
@@ -372,7 +372,7 @@ void MemoryCmd::Track(CmdArgList args) {
     }
 
     atomic_bool error{false};
-    shard_set->pool()->Await([&](unsigned index, auto*) {
+    shard_set->pool()->AwaitBrief([&](unsigned index, auto*) {
       if (!AllocationTracker::Get().Add(tracking_info)) {
         error.store(true);
       }
@@ -392,7 +392,7 @@ void MemoryCmd::Track(CmdArgList args) {
     }
 
     atomic_bool error{false};
-    shard_set->pool()->Await([&, lo = lower_bound, hi = upper_bound](unsigned index, auto*) {
+    shard_set->pool()->AwaitBrief([&, lo = lower_bound, hi = upper_bound](unsigned index, auto*) {
       if (!AllocationTracker::Get().Remove(lo, hi)) {
         error.store(true);
       }
@@ -406,7 +406,7 @@ void MemoryCmd::Track(CmdArgList args) {
   }
 
   if (sub_cmd == "CLEAR") {
-    shard_set->pool()->Await([&](unsigned index, auto*) { AllocationTracker::Get().Clear(); });
+    shard_set->pool()->AwaitBrief([&](unsigned index, auto*) { AllocationTracker::Get().Clear(); });
     return cntx_->SendOk();
   }
 
@@ -433,7 +433,7 @@ void MemoryCmd::Track(CmdArgList args) {
     }
 
     atomic_bool found{false};
-    shard_set->pool()->Await([&](unsigned index, auto*) {
+    shard_set->pool()->AwaitBrief([&](unsigned index, auto*) {
       if (mi_heap_check_owned(mi_heap_get_backing(), (void*)ptr)) {
         found.store(true);
       }

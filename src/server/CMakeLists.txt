@@ -31,7 +31,7 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             command_registry.cc  cluster/unique_slot_checker.cc
             journal/tx_executor.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
-            server_state.cc table.cc  top_keys.cc transaction.cc
+            server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc
             )
@@ -52,7 +52,7 @@ add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc channel_store.cc
             zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc cluster/cluster_config.cc
             cluster/cluster_family.cc cluster/incoming_slot_migration.cc
-            cluster/outgoing_slot_migration.cc
+            cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc acl/helpers.cc)
 

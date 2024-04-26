@@ -139,7 +139,8 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
+Transaction::Transaction(const Transaction* parent, ShardId shard_id,
+                         std::optional<cluster::SlotId> slot_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
@@ -181,8 +182,6 @@ void Transaction::InitGlobal() {
 }
 
 void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShardCache>* out) {
-  auto args = full_args_;
-
   auto& shard_index = *out;
 
   auto add = [this, rev_mapping = key_index.has_reverse_mapping, &shard_index](uint32_t sid,
@@ -195,14 +194,14 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShar
 
   if (key_index.bonus) {
     DCHECK(key_index.step == 1);
-    string_view key = ArgS(args, *key_index.bonus);
+    string_view key = ArgS(full_args_, *key_index.bonus);
     unique_slot_checker_.Add(key);
     uint32_t sid = Shard(key, shard_data_.size());
     add(sid, *key_index.bonus);
   }
 
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = ArgS(args, i);
+    string_view key = ArgS(full_args_, i);
     unique_slot_checker_.Add(key);
     uint32_t sid = Shard(key, shard_data_.size());
     shard_index[sid].key_step = key_index.step;
@@ -277,18 +276,16 @@ void Transaction::PrepareMultiFps(CmdArgList keys) {
 
 void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
   DCHECK(!key_index.bonus);
-  DCHECK(key_index.step == 1u || key_index.step == 2u);
   DCHECK(kv_fp_.empty());
 
   // even for a single key we may have multiple arguments per key (MSET).
-  for (unsigned j = key_index.start; j < key_index.end; j++) {
+  for (unsigned j = key_index.start; j < key_index.end; j += key_index.step) {
     string_view arg = ArgS(full_args_, j);
     kv_args_.push_back(arg);
     kv_fp_.push_back(LockTag(arg).Fingerprint());
 
-    if (key_index.step == 2) {
-      kv_args_.push_back(ArgS(full_args_, ++j));
-    }
+    for (unsigned k = j + 1; k < j + key_index.step; ++k)
+      kv_args_.push_back(ArgS(full_args_, k));
   }
 
   if (key_index.has_reverse_mapping) {
@@ -317,11 +314,12 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     StoreKeysInArgs(key_index);
 
     unique_shard_cnt_ = 1;
+    string_view akey = kv_args_.front();
     if (is_stub)  // stub transactions don't migrate
-      DCHECK_EQ(unique_shard_id_, Shard(kv_args_.front(), shard_set->size()));
+      DCHECK_EQ(unique_shard_id_, Shard(akey, shard_set->size()));
     else {
-      unique_slot_checker_.Add(kv_args_.front());
-      unique_shard_id_ = Shard(kv_args_.front(), shard_set->size());
+      unique_slot_checker_.Add(akey);
+      unique_shard_id_ = Shard(akey, shard_set->size());
     }
 
     // Multi transactions that execute commands on their own (not stubs) can't shrink the backing
@@ -1008,7 +1006,7 @@ ShardId Transaction::GetUniqueShard() const {
   return unique_shard_id_;
 }
 
-optional<SlotId> Transaction::GetUniqueSlotId() const {
+optional<cluster::SlotId> Transaction::GetUniqueSlotId() const {
   return unique_slot_checker_.GetUniqueSlotId();
 }
 
@@ -1177,7 +1175,7 @@ bool Transaction::CancelShardCb(EngineShard* shard) {
 }
 
 // runs in engine-shard thread.
-ArgSlice Transaction::GetShardArgs(ShardId sid) const {
+ShardArgs Transaction::GetShardArgs(ShardId sid) const {
   DCHECK(!multi_ || multi_->role != SQUASHER);
 
   // We can read unique_shard_cnt_  only because ShardArgsInShard is called after IsArmedInShard
@@ -1187,7 +1185,7 @@ ArgSlice Transaction::GetShardArgs(ShardId sid) const {
   }
 
   const auto& sd = shard_data_[sid];
-  return ArgSlice{kv_args_.data() + sd.arg_start, sd.arg_count};
+  return ShardArgs{kv_args_.data() + sd.arg_start, sd.arg_count};
 }
 
 // from local index back to original arg index skipping the command.
@@ -1252,7 +1250,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
   return result;
 }
 
-OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyChecker krc) {
+OpStatus Transaction::WatchInShard(const ShardArgs& keys, EngineShard* shard, KeyReadyChecker krc) {
   auto& sd = shard_data_[SidToId(shard->shard_id())];
 
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
@@ -1260,12 +1258,12 @@ OpStatus Transaction::WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyCh
   sd.local_mask &= ~OUT_OF_ORDER;
 
   shard->EnsureBlockingController()->AddWatched(keys, std::move(krc), this);
-  DVLOG(2) << "WatchInShard " << DebugId() << ", first_key:" << keys.front();
+  DVLOG(2) << "WatchInShard " << DebugId() << ", first_key:" << keys.Front();
 
   return OpStatus::OK;
 }
 
-void Transaction::ExpireShardCb(ArgSlice wkeys, EngineShard* shard) {
+void Transaction::ExpireShardCb(const ShardArgs& wkeys, EngineShard* shard) {
   // Blocking transactions don't release keys when suspending, release them now.
   auto lock_args = GetLockArgs(shard->shard_id());
   shard->db_slice().Release(LockMode(), lock_args);
@@ -1368,9 +1366,9 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid, string_view 
   CHECK_EQ(sd.local_mask & AWAKED_Q, 0);
 
   // Find index of awakened key
-  auto args = GetShardArgs(sid);
-  auto it = find_if(args.begin(), args.end(), [key](auto arg) { return facade::ToSV(arg) == key; });
-  CHECK(it != args.end());
+  ShardArgs args = GetShardArgs(sid);
+  auto it = find_if(args.cbegin(), args.cend(), [key](string_view arg) { return arg == key; });
+  CHECK(it != args.cend());
 
   // Change state to awaked and store index of awakened key
   sd.local_mask &= ~SUSPENDED_Q;
@@ -1426,7 +1424,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   if (unique_shard_cnt_ == 1 || kv_args_.empty()) {
     entry_payload = make_pair(cmd, full_args_);
   } else {
-    entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()));
+    entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()).AsSlice());
   }
   LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false, true);
 }

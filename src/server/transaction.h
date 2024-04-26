@@ -22,6 +22,7 @@
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/table.h"
+#include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
@@ -129,8 +130,9 @@ class Transaction {
   // Runnable that is run on shards during hop executions (often named callback).
   // Callacks should return `OpStatus` which is implicitly converitble to `RunnableResult`!
   using RunnableType = absl::FunctionRef<RunnableResult(Transaction* t, EngineShard*)>;
+
   // Provides keys to block on for specific shard.
-  using WaitKeysProvider = std::function<ArgSlice(Transaction*, EngineShard* shard)>;
+  using WaitKeysProvider = std::function<ShardArgs(Transaction*, EngineShard* shard)>;
 
   // Modes in which a multi transaction can run.
   enum MultiMode {
@@ -169,13 +171,14 @@ class Transaction {
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
-  explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id);
+  explicit Transaction(const Transaction* parent, ShardId shard_id,
+                       std::optional<cluster::SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
 
   // Get command arguments for specific shard. Called from shard thread.
-  ArgSlice GetShardArgs(ShardId sid) const;
+  ShardArgs GetShardArgs(ShardId sid) const;
 
   // Map arg_index from GetShardArgs slice to index in original command slice from InitByArgs.
   size_t ReverseArgIndex(ShardId shard_id, size_t arg_index) const;
@@ -280,7 +283,7 @@ class Transaction {
   // This method is meaningless if GetUniqueShardCnt() != 1.
   ShardId GetUniqueShard() const;
 
-  std::optional<SlotId> GetUniqueSlotId() const;
+  std::optional<cluster::SlotId> GetUniqueSlotId() const;
 
   bool IsMulti() const {
     return bool(multi_);
@@ -510,12 +513,12 @@ class Transaction {
   void RunCallback(EngineShard* shard);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
-  OpStatus WatchInShard(ArgSlice keys, EngineShard* shard, KeyReadyChecker krc);
+  OpStatus WatchInShard(const ShardArgs& keys, EngineShard* shard, KeyReadyChecker krc);
 
   // Expire blocking transaction, unlock keys and unregister it from the blocking controller
   void ExpireBlocking(WaitKeysProvider wcb);
 
-  void ExpireShardCb(ArgSlice wkeys, EngineShard* shard);
+  void ExpireShardCb(const ShardArgs& wkeys, EngineShard* shard);
 
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
@@ -576,7 +579,6 @@ class Transaction {
     });
   }
 
- private:
   // Used for waiting for all hop callbacks to run.
   util::fb2::EmbeddedBlockingCounter run_barrier_{0};
 
@@ -616,7 +618,7 @@ class Transaction {
 
   uint32_t unique_shard_cnt_{0};          // Number of unique shards active
   ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
-  UniqueSlotChecker unique_slot_checker_;
+  cluster::UniqueSlotChecker unique_slot_checker_;
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};

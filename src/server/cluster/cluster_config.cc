@@ -1,64 +1,17 @@
-#include <optional>
-
-extern "C" {
-#include "redis/crc16.h"
-}
+#include "cluster_config.h"
 
 #include <absl/container/flat_hash_set.h>
 
 #include <jsoncons/json.hpp>
-#include <shared_mutex>
+#include <optional>
 #include <string_view>
 
-#include "absl/strings/match.h"
-#include "base/flags.h"
 #include "base/logging.h"
-#include "cluster_config.h"
 #include "core/json/json_object.h"
 
 using namespace std;
 
-ABSL_FLAG(string, cluster_mode, "", "Cluster mode supported. Default: \"\"");
-
-namespace dfly {
-namespace {
-enum class ClusterMode {
-  kUninitialized,
-  kNoCluster,
-  kEmulatedCluster,
-  kRealCluster,
-};
-
-ClusterMode cluster_mode = ClusterMode::kUninitialized;
-}  // namespace
-
-void ClusterConfig::Initialize() {
-  string cluster_mode_str = absl::GetFlag(FLAGS_cluster_mode);
-
-  if (cluster_mode_str == "emulated") {
-    cluster_mode = ClusterMode::kEmulatedCluster;
-  } else if (cluster_mode_str == "yes") {
-    cluster_mode = ClusterMode::kRealCluster;
-  } else if (cluster_mode_str.empty()) {
-    cluster_mode = ClusterMode::kNoCluster;
-  } else {
-    LOG(ERROR) << "Invalid value for flag --cluster_mode. Exiting...";
-    exit(1);
-  }
-}
-
-bool ClusterConfig::IsEnabled() {
-  return cluster_mode == ClusterMode::kRealCluster;
-}
-
-bool ClusterConfig::IsEmulated() {
-  return cluster_mode == ClusterMode::kEmulatedCluster;
-}
-
-SlotId ClusterConfig::KeySlot(string_view key) {
-  string_view tag = LockTagOptions::instance().Tag(key);
-  return crc16(tag.data(), tag.length()) & kMaxSlotNum;
-}
+namespace dfly::cluster {
 
 namespace {
 bool HasValidNodeIds(const ClusterShardInfos& new_config) {
@@ -87,7 +40,7 @@ bool HasValidNodeIds(const ClusterShardInfos& new_config) {
 
 bool IsConfigValid(const ClusterShardInfos& new_config) {
   // Make sure that all slots are set exactly once.
-  array<bool, ClusterConfig::kMaxSlotNum + 1> slots_found = {};
+  array<bool, cluster::kMaxSlotNum + 1> slots_found = {};
 
   if (!HasValidNodeIds(new_config)) {
     return false;
@@ -347,7 +300,7 @@ std::shared_ptr<ClusterConfig> ClusterConfig::CloneWithChanges(
 }
 
 bool ClusterConfig::IsMySlot(SlotId id) const {
-  if (id > ClusterConfig::kMaxSlotNum) {
+  if (id > cluster::kMaxSlotNum) {
     DCHECK(false) << "Requesting a non-existing slot id " << id;
     return false;
   }
@@ -360,7 +313,7 @@ bool ClusterConfig::IsMySlot(std::string_view key) const {
 }
 
 ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
-  CHECK_LE(id, ClusterConfig::kMaxSlotNum) << "Requesting a non-existing slot id " << id;
+  CHECK_LE(id, cluster::kMaxSlotNum) << "Requesting a non-existing slot id " << id;
 
   for (const auto& shard : config_) {
     for (const auto& range : shard.slot_ranges) {
@@ -417,4 +370,4 @@ std::vector<MigrationInfo> ClusterConfig::GetFinishedIncomingMigrations(
               : std::vector<MigrationInfo>();
 }
 
-}  // namespace dfly
+}  // namespace dfly::cluster

@@ -53,7 +53,7 @@ class JournalStreamer : protected BufferedStreamerBase {
 // Only handles relevant slots, while ignoring all others.
 class RestoreStreamer : public JournalStreamer {
  public:
-  RestoreStreamer(DbSlice* slice, SlotSet slots, journal::Journal* journal, Context* cntx);
+  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal, Context* cntx);
   ~RestoreStreamer() override;
 
   void Start(io::Sink* dest, bool send_lsn = false) override;
@@ -70,7 +70,7 @@ class RestoreStreamer : public JournalStreamer {
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
-  bool ShouldWrite(SlotId slot_id) const;
+  bool ShouldWrite(cluster::SlotId slot_id) const;
 
   // Returns whether anything was written
   bool WriteBucket(PrimeTable::bucket_iterator it);
@@ -79,7 +79,7 @@ class RestoreStreamer : public JournalStreamer {
 
   DbSlice* db_slice_;
   uint64_t snapshot_version_ = 0;
-  SlotSet my_slots_;
+  cluster::SlotSet my_slots_;
   Cancellation fiber_cancellation_;
   bool snapshot_finished_ = false;
 };

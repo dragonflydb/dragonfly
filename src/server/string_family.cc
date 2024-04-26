@@ -11,18 +11,20 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
-#include <tuple>
 #include <variant>
 
+#include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
+#include "core/overloaded.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -30,6 +32,7 @@
 #include "server/table.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/future.h"
 
 ABSL_FLAG(bool, tiered_skip_prefetch, false,
           "If true, does not load offloaded string back to in-memory store during GET command."
@@ -45,7 +48,6 @@ using namespace facade;
 using CI = CommandId;
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
-[[maybe_unused]] constexpr size_t kMinTieredLen = TieredStorage::kMinBlobLen;
 
 size_t CopyValueToBuffer(const PrimeValue& pv, char* dest) {
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);
@@ -64,6 +66,14 @@ string GetString(const PrimeValue& pv) {
   return res;
 }
 
+template <typename T> T GetResult(std::variant<T, util::fb2::Future<T>> v) {
+  Overloaded ov{
+      [](T&& t) { return t; },
+      [](util::fb2::Future<T>&& future) { return future.Get(); },
+  };
+  return std::visit(ov, std::move(v));
+}
+
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
                               string_view value) {
   VLOG(2) << "SetRange(" << key << ", " << start << ", " << value << ")";
@@ -79,7 +89,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
     }
   }
 
-  auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
+  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(op_res);
   auto& res = *op_res;
 
@@ -103,7 +113,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.FindAndFetchReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
 
@@ -133,8 +143,7 @@ OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t star
   return string(slice.substr(start, end - start + 1));
 };
 
-size_t ExtendExisting(const OpArgs& op_args, DbSlice::Iterator it, string_view key, string_view val,
-                      bool prepend) {
+size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bool prepend) {
   string tmp, new_val;
   string_view slice = it->second.GetSlice(&tmp);
 
@@ -148,33 +157,14 @@ size_t ExtendExisting(const OpArgs& op_args, DbSlice::Iterator it, string_view k
   return new_val.size();
 }
 
-// Returns the length of the extended string. if prepend is false - appends the val.
-OpResult<uint32_t> ExtendOrSet(const OpArgs& op_args, string_view key, string_view val,
-                               bool prepend) {
-  auto* shard = op_args.shard;
-  auto& db_slice = shard->db_slice();
-  auto op_res = db_slice.AddOrFindAndFetch(op_args.db_cntx, key);
-  RETURN_ON_BAD_STATUS(op_res);
-  auto& add_res = *op_res;
-  if (add_res.is_new) {
-    add_res.it->second.SetString(val);
-    return val.size();
-  }
-
-  if (add_res.it->second.ObjType() != OBJ_STRING)
-    return OpStatus::WRONG_TYPE;
-
-  return ExtendExisting(op_args, add_res.it, key, val, prepend);
-}
-
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
   auto& db_slice = op_args.shard->db_slice();
-  auto it_res = db_slice.FindAndFetchMutable(op_args.db_cntx, key, OBJ_STRING);
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
   }
 
-  return ExtendExisting(op_args, it_res->it, key, val, prepend);
+  return ExtendExisting(it_res->it, key, val, prepend);
 }
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
@@ -278,19 +268,23 @@ int64_t AbsExpiryToTtl(int64_t abs_expiry_time, bool as_milli) {
 }
 
 // Returns true if keys were set, false otherwise.
-void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
-  DCHECK(!args.empty() && args.size() % 2 == 0);
+void OpMSet(const OpArgs& op_args, const ShardArgs& args, atomic_bool* success) {
+  DCHECK(!args.Empty() && args.Size() % 2 == 0);
 
   SetCmd::SetParams params;
   SetCmd sg(op_args, false);
 
-  size_t i = 0;
-  for (; i < args.size(); i += 2) {
-    DVLOG(1) << "MSet " << args[i] << ":" << args[i + 1];
-    if (sg.Set(params, args[i], args[i + 1]) != OpStatus::OK) {  // OOM for example.
+  size_t index = 0;
+  for (auto it = args.begin(); it != args.end(); ++it) {
+    string_view key = *it;
+    ++it;
+    string_view value = *it;
+    DVLOG(1) << "MSet " << key << ":" << value;
+    if (sg.Set(params, key, value) != OpStatus::OK) {  // OOM for example.
       success->store(false);
       break;
     }
+    index += 2;
   }
 
   if (auto journal = op_args.shard->journal(); journal) {
@@ -298,14 +292,14 @@ void OpMSet(const OpArgs& op_args, ArgSlice args, atomic_bool* success) {
     // we replicate only what was changed.
     string_view cmd;
     ArgSlice cmd_args;
-    if (i == 0) {
+    if (index == 0) {
       // All shards must record the tx was executed for the replica to execute it, so we send a PING
       // in case nothing was changed
       cmd = "PING";
     } else {
       // journal [0, i)
       cmd = "MSET";
-      cmd_args = ArgSlice(&args[0], i);
+      cmd_args = ArgSlice(args.begin(), index);
     }
     RecordJournal(op_args, cmd, cmd_args, op_args.tx->GetUniqueShardCnt());
   }
@@ -419,27 +413,29 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 
 SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
                                       EngineShard* shard) {
-  auto keys = t->GetShardArgs(shard->shard_id());
-  DCHECK(!keys.empty());
+  ShardArgs keys = t->GetShardArgs(shard->shard_id());
+  DCHECK(!keys.Empty());
 
   auto& db_slice = shard->db_slice();
 
-  SinkReplyBuilder::MGetResponse response(keys.size());
-  absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.size());
+  SinkReplyBuilder::MGetResponse response(keys.Size());
+  absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
 
   size_t total_size = 0;
-  for (size_t i = 0; i < keys.size(); ++i) {
-    auto it_res = db_slice.FindAndFetchReadOnly(t->GetDbContext(), keys[i], OBJ_STRING);
+  unsigned index = 0;
+  for (string_view key : keys) {
+    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    auto& dest = iters[index++];
     if (!it_res)
       continue;
-    iters[i] = *it_res;
+    dest = *it_res;
     total_size += (*it_res)->second.Size();
   }
 
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
 
-  for (size_t i = 0; i < keys.size(); ++i) {
+  for (size_t i = 0; i < iters.size(); ++i) {
     auto it = iters[i];
     if (it.is_done())
       continue;
@@ -462,6 +458,36 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   }
 
   return response;
+}
+
+// Extend key with value, either prepend or append. Return size of stored string after modification
+OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_args,
+                                                              std::string_view key,
+                                                              std::string_view value,
+                                                              bool prepend) {
+  auto* shard = op_args.shard;
+  auto it_res = shard->db_slice().AddOrFind(op_args.db_cntx, key);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  if (it_res->is_new) {
+    it_res->it->second.SetString(value);
+    return {it_res->it->second.Size()};
+  }
+
+  if (it_res->it->second.ObjType() != OBJ_STRING)
+    return OpStatus::WRONG_TYPE;
+
+  if (PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
+    auto modf = [value = string{value}, prepend](std::string* v) {
+      *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
+      return v->size();
+    };
+    return {shard->tiered_storage_v2()->Modify<size_t>(key, pv, std::move(modf))};
+  } else {
+    if (pv.HasIoPending())
+      shard->tiered_storage_v2()->Delete(key, &pv);
+    return {ExtendExisting(it_res->it, key, value, prepend)};
+  }
 }
 
 // Helper for building replies for strings
@@ -505,7 +531,7 @@ string StringValue::Get() && {
   auto prev = exchange(v_, monostate{});
   if (holds_alternative<string>(prev))
     return std::move(std::get<string>(prev));
-  return std::get<util::fb2::Future<std::string>>(prev).get();
+  return std::get<util::fb2::Future<std::string>>(prev).Get();
 }
 
 bool StringValue::IsEmpty() const {
@@ -871,25 +897,24 @@ void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  string_view sval = ArgS(args, 1);
-  VLOG(2) << "ExtendGeneric(" << key << ", " << sval << ")";
+  string_view value = ArgS(args, 1);
+  VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
   if (cntx->protocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSet(t->GetOpArgs(shard), key, sval, prepend);
+      return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-    if (!result)
-      return cntx->SendError(result.status());
-    else
-      return cntx->SendLong(result.value());
+    auto res = cntx->transaction->ScheduleSingleHopT(cb);
+    if (!res)
+      return cntx->SendError(res.status());
+    cntx->SendLong(GetResult(std::move(res.value())));
   } else {
     // Memcached skips if key is missing
     DCHECK(cntx->protocol() == Protocol::MEMCACHE);
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSkip(t->GetOpArgs(shard), key, sval, prepend);
+      return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
     };
 
     OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1139,12 +1164,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
     res.storage_list = src.storage_list;
     src.storage_list = nullptr;
 
-    ArgSlice slice = transaction->GetShardArgs(sid);
-
-    DCHECK(!slice.empty());
-    DCHECK_EQ(slice.size(), src.resp_arr.size());
-
-    for (size_t j = 0; j < slice.size(); ++j) {
+    for (size_t j = 0; j < src.resp_arr.size(); ++j) {
       if (!src.resp_arr[j])
         continue;
 
@@ -1173,7 +1193,7 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_bool success = true;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto args = t->GetShardArgs(shard->shard_id());
+    ShardArgs args = t->GetShardArgs(shard->shard_id());
     OpMSet(t->GetOpArgs(shard), args, &success);
     return OpStatus::OK;
   };
@@ -1193,8 +1213,9 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* es) {
     auto args = t->GetShardArgs(es->shard_id());
-    for (size_t i = 0; i < args.size(); i += 2) {
-      auto it = es->db_slice().FindReadOnly(t->GetDbContext(), args[i]).it;
+    for (auto arg_it = args.begin(); arg_it != args.end(); ++arg_it) {
+      auto it = es->db_slice().FindReadOnly(t->GetDbContext(), *arg_it).it;
+      ++arg_it;
       if (IsValid(it)) {
         exists.store(true, memory_order_relaxed);
         break;

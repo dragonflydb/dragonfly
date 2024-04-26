@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "server/cluster/slot_set.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/conn_context.h"
 
 namespace dfly {
@@ -22,7 +22,7 @@ class DebugCmd {
     std::string_view type{"STRING"};
     uint32_t elements = 1;
 
-    std::optional<SlotRange> slot_range;
+    std::optional<cluster::SlotRange> slot_range;
   };
 
  public:

@@ -109,8 +109,9 @@ TEST_F(StreamFamilyTest, Range) {
 }
 
 TEST_F(StreamFamilyTest, GroupCreate) {
-  Run({"xadd", "key", "1-*", "f1", "v1"});
-  auto resp = Run({"xgroup", "create", "key", "grname", "1"});
+  auto resp = Run({"xadd", "key", "1-*", "f1", "v1"});
+  EXPECT_EQ(resp, "1-0");
+  resp = Run({"xgroup", "create", "key", "grname", "1"});
   EXPECT_EQ(resp, "OK");
   resp = Run({"xgroup", "create", "test", "test", "0"});
   EXPECT_THAT(resp, ErrArg("requires the key to exist"));

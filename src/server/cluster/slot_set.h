@@ -6,40 +6,11 @@
 
 #include <bitset>
 #include <memory>
-#include <string>
 #include <vector>
 
-#include "absl/strings/str_cat.h"
-#include "absl/strings/str_join.h"
+#include "cluster_defs.h"
 
-namespace dfly {
-
-using SlotId = uint16_t;
-
-struct SlotRange {
-  static constexpr SlotId kMaxSlotId = 0x3FFF;
-  SlotId start = 0;
-  SlotId end = 0;
-
-  bool operator==(const SlotRange& r) const {
-    return start == r.start && end == r.end;
-  }
-  bool IsValid() {
-    return start <= end && start <= kMaxSlotId && end <= kMaxSlotId;
-  }
-
-  std::string ToString() const {
-    return absl::StrCat("[", start, ", ", end, "]");
-  }
-
-  static std::string ToString(const std::vector<SlotRange>& ranges) {
-    return absl::StrJoin(ranges, ", ", [](std::string* out, SlotRange range) {
-      absl::StrAppend(out, range.ToString());
-    });
-  }
-};
-
-using SlotRanges = std::vector<SlotRange>;
+namespace dfly::cluster {
 
 class SlotSet {
  public:
@@ -117,4 +88,4 @@ class SlotSet {
   std::unique_ptr<TBitSet> slots_{std::make_unique<TBitSet>()};
 };
 
-}  // namespace dfly
+}  // namespace dfly::cluster
