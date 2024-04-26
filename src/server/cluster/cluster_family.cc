@@ -739,19 +739,6 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-std::shared_ptr<IncomingSlotMigration> ClusterFamily::CreateIncomingMigration(std::string source_id,
-                                                                              SlotRanges slots,
-                                                                              uint32_t shards_num) {
-  lock_guard lk(migration_mu_);
-  for (const auto& mj : incoming_migrations_jobs_) {
-    if (mj->GetSourceID() == source_id) {
-      return nullptr;
-    }
-  }
-  return incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
-      std::move(source_id), &server_family_->service(), std::move(slots), shards_num));
-}
-
 std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
     std::string_view source_id) {
   lock_guard lk(migration_mu_);
@@ -767,7 +754,10 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
     auto it = std::find_if(outgoing_migration_jobs_.begin(), outgoing_migration_jobs_.end(),
-                           [&m](const auto& om) { return m == om->GetMigrationInfo(); });
+                           [&m](const auto& om) {
+                             // we can have only one migration per target-source pair
+                             return m.node_id == om->GetMigrationInfo().node_id;
+                           });
     DCHECK(it != outgoing_migration_jobs_.end());
     DCHECK(it->get() != nullptr);
     OutgoingMigration& migration = *it->get();
@@ -780,43 +770,57 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
   // Flushing of removed slots is done outside this function.
 }
 
+namespace {
+// returns removed incoming migration
+std::shared_ptr<IncomingSlotMigration> RemoveIncomingMigrationImpl(
+    std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs, string source_id) {
+  auto it = std::find_if(jobs.begin(), jobs.end(), [&source_id](const auto& im) {
+    // we can have only one migration per target-source pair
+    return source_id == im->GetSourceID();
+  });
+  if (it == jobs.end()) {
+    return nullptr;
+  }
+  DCHECK(it->get() != nullptr);
+  std::shared_ptr<IncomingSlotMigration> migration = *it;
+
+  // Flush non-owned migrations
+  SlotSet migration_slots(migration->GetSlots());
+  SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
+
+  // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
+  migration->Cancel();
+
+  if (!removed.Empty()) {
+    auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
+    LOG_IF(WARNING, migration->GetState() == MigrationState::C_FINISHED)
+        << "Flushing slots of removed FINISHED migration " << migration->GetSourceID()
+        << ", slots: " << SlotRange::ToString(*removed_ranges);
+    shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
+      if (EngineShard* shard = EngineShard::tlocal(); shard) {
+        shard->db_slice().FlushSlots(*removed_ranges);
+      }
+    });
+  }
+
+  jobs.erase(it);
+  return migration;
+}
+}  // namespace
+
 void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
-    auto it = std::find_if(
-        incoming_migrations_jobs_.begin(), incoming_migrations_jobs_.end(), [&m](const auto& im) {
-          return m.node_id == im->GetSourceID() && m.slot_ranges == im->GetSlots();
-        });
-    DCHECK(it != incoming_migrations_jobs_.end());
-    DCHECK(it->get() != nullptr);
-    IncomingSlotMigration& migration = *it->get();
-
-    // Flush non-owned migrations
-    SlotSet migration_slots(migration.GetSlots());
-    SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
-
-    // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
-    migration.Cancel();
-
-    if (!removed.Empty()) {
-      auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
-      LOG_IF(WARNING, migration.GetState() == MigrationState::C_FINISHED)
-          << "Flushing slots of removed FINISHED migration " << migration.GetSourceID()
-          << ", slots: " << SlotRange::ToString(*removed_ranges);
-      shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
-        if (EngineShard* shard = EngineShard::tlocal(); shard) {
-          shard->db_slice().FlushSlots(*removed_ranges);
-        }
-      });
-    }
-
-    incoming_migrations_jobs_.erase(it);
+    auto removed_migration = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_id);
+    DCHECK(removed_migration);
+    VLOG(1) << "Migration was canceled from: " << removed_migration->GetSourceID();
   }
 }
 
 void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Create incoming migration, args: " << args;
   CmdArgParser parser{args};
+
   auto [source_id, flows_num] = parser.Next<std::string, uint32_t>();
 
   SlotRanges slots;
@@ -830,7 +834,12 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   VLOG(1) << "Init migration " << source_id;
 
-  CreateIncomingMigration(std::move(source_id), std::move(slots), flows_num);
+  lock_guard lk(migration_mu_);
+  auto removed_migration = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
+  LOG_IF(WARNING, removed_migration) << "Reinit was happen for migration from:" << source_id;
+
+  incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
+      std::move(source_id), &server_family_->service(), std::move(slots), flows_num));
 
   return cntx->SendOk();
 }

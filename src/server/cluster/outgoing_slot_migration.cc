@@ -108,8 +108,11 @@ void OutgoingMigration::SyncFb() {
   // we retry starting migration until "cancel" is happened
   while (state_.load() != MigrationState::C_FINISHED) {
     state_.store(MigrationState::C_CONNECTING);
-    if (auto err = cntx_.GetError(); err) {
-      LOG(ERROR) << err.Format();
+    last_error_ = cntx_.GetError();
+    cntx_.Reset(nullptr);
+
+    if (last_error_) {
+      LOG(ERROR) << last_error_.Format();
       // if error is happened on the previous attempt we wait for some time and try again
       ThisFiber::SleepFor(1000ms);
     }
@@ -148,30 +151,31 @@ void OutgoingMigration::SyncFb() {
         auto& migration = *slot_migrations_[shard->shard_id()];
         migration.Sync(cf_->MyID(), shard->shard_id());
         if (migration.GetError()) {
-          cntx_.ReportError(migration.GetError());
           Finish();
         }
       }
     });
 
-    if (cntx_.GetError()) {
+    if (CheckFlowsForErrors()) {
       continue;
     }
+
     VLOG(1) << "Migrations snapshot is finished";
 
+    long attempt = 0;
+    while (state_.load() != MigrationState::C_FINISHED && !FinalyzeMigration(++attempt)) {
+      // process commands that were on pause and try again
+      ThisFiber::SleepFor(500ms);
+    }
+    if (CheckFlowsForErrors()) {
+      continue;
+    }
     break;
-  }
-
-  // TODO implement blocking on migrated slots only
-
-  long attempt = 0;
-  while (state_.load() != MigrationState::C_FINISHED && !FinalyzeMigration(++attempt)) {
-    // process commands that were on pause and try again
-    ThisFiber::SleepFor(500ms);
   }
 }
 
 bool OutgoingMigration::FinalyzeMigration(long attempt) {
+  // TODO implement blocking on migrated slots only
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt = Pause(server_family_->GetNonPriviligedListeners(), nullptr,
@@ -226,13 +230,18 @@ bool OutgoingMigration::FinalyzeMigration(long attempt) {
     } while (attempt_res != attempt);
 
     Finish();
+    if (CheckFlowsForErrors()) {
+      return false;
+    }
 
     cf_->UpdateConfig(migration_info_.slot_ranges, false);
     VLOG(1) << "Config is updated for " << cf_->MyID();
     return true;
   } else {
-    // TODO implement connection issue error processing
+    // TODO add reconnecting if flows are OK
+    LOG(WARNING) << "Error during sending DFLYMIGRATE ACK: " << err.message();
   }
+
   return false;
 }
 
@@ -246,4 +255,13 @@ void OutgoingMigration::Start() {
   main_sync_fb_ = fb2::Fiber("outgoing_migration", &OutgoingMigration::SyncFb, this);
 }
 
+bool OutgoingMigration::CheckFlowsForErrors() {
+  for (const auto& flow : slot_migrations_) {
+    if (flow->GetError()) {
+      cntx_.ReportError(flow->GetError());
+      return true;
+    }
+  }
+  return false;
+}
 }  // namespace dfly::cluster

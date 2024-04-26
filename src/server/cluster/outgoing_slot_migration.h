@@ -50,7 +50,7 @@ class OutgoingMigration : private ProtocolClient {
   }
 
   const std::string GetErrorStr() const {
-    return cntx_.GetError().Format();
+    return last_error_.Format();
   }
 
   static constexpr long kInvalidAttempt = -1;
@@ -58,6 +58,9 @@ class OutgoingMigration : private ProtocolClient {
  private:
   // should be run for all shards
   void StartFlow(journal::Journal* journal, io::Sink* dest);
+
+  // if we have an error reports it into cntx_ and return true
+  bool CheckFlowsForErrors();
 
   MigrationState GetStateImpl() const;
   // SliceSlotMigration manages state and data transfering for the corresponding shard
@@ -72,6 +75,7 @@ class OutgoingMigration : private ProtocolClient {
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
   ServerFamily* server_family_;
   ClusterFamily* cf_;
+  dfly::GenericError last_error_;
 
   util::fb2::Fiber main_sync_fb_;
 

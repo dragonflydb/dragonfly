@@ -75,11 +75,6 @@ class ClusterFamily {
 
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
-  // create a IncomingSlotMigration entity which will execute migration
-  std::shared_ptr<IncomingSlotMigration> CreateIncomingMigration(std::string source_id,
-                                                                 SlotRanges slots,
-                                                                 uint32_t shards_num);
-
   std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id);
 
   void StartSlotMigrations(std::vector<MigrationInfo> migrations);
