@@ -92,4 +92,18 @@ TEST_F(TieredStorageV2Test, SimpleAppend) {
   }
 }
 
+TEST_F(TieredStorageV2Test, MultiDb) {
+  for (size_t i = 0; i < 10; i++) {
+    Run({"SELECT", absl::StrCat(i)});
+    Run({"SET", absl::StrCat("k", i), string(3000, char('A' + i))});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 10; });
+
+  for (size_t i = 0; i < 10; i++) {
+    Run({"SELECT", absl::StrCat(i)});
+    EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), string(3000, char('A' + i)));
+  }
+}
+
 }  // namespace dfly
