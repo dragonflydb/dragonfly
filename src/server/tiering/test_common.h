@@ -15,22 +15,17 @@ namespace dfly::tiering {
 
 class PoolTestBase : public testing::Test {
  protected:
-  static void SetUpTestSuite();
-  static void TearDownTestSuite();
+  void SetUp() override {
+    pp_.reset(util::fb2::Pool::IOUring(16, 2));
+    pp_->Run();
+  }
 
-  static std::unique_ptr<util::ProactorPool> pp_;
+  void TearDown() override {
+    pp_->Stop();
+    pp_.reset();
+  }
+
+  std::unique_ptr<util::ProactorPool> pp_;
 };
-
-std::unique_ptr<util::ProactorPool> PoolTestBase::pp_ = nullptr;
-
-void PoolTestBase::SetUpTestSuite() {
-  pp_.reset(util::fb2::Pool::IOUring(16, 2));
-  pp_->Run();
-}
-
-void PoolTestBase::TearDownTestSuite() {
-  pp_->Stop();
-  pp_.reset();
-}
 
 }  // namespace dfly::tiering

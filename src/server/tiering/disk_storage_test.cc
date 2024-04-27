@@ -38,6 +38,7 @@ struct DiskStorageTest : public PoolTestBase {
     auto buf = make_shared<string>(value);
     storage_->Stash(io::Buffer(*buf), [this, index, buf](DiskSegment segment, std::error_code ec) {
       EXPECT_FALSE(ec);
+      EXPECT_GT(segment.length, 0u);
       segments_[index] = segment;
       pending_ops_--;
     });

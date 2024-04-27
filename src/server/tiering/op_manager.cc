@@ -85,15 +85,11 @@ OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
 
 void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment,
                                std::error_code ec) {
-  auto it = pending_stash_ver_.find(ToOwned(id));
-  bool valid_it = it != pending_stash_ver_.end() && it->second == version;
-
-  if (valid_it) {
+  if (auto it = pending_stash_ver_.find(ToOwned(id));
+      it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
     ReportStashed(id, segment, ec);
-  }
-
-  if (segment.length > 0 && (ec || !valid_it)) {
+  } else {
     storage_.MarkAsFree(segment);
   }
 }
