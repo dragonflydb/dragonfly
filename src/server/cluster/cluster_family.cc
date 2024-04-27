@@ -649,6 +649,8 @@ static string_view StateToStr(MigrationState state) {
       return "CONNECTING"sv;
     case MigrationState::C_SYNC:
       return "SYNC"sv;
+    case MigrationState::C_ERROR:
+      return "ERROR"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
     case MigrationState::C_MAX_INVALID:

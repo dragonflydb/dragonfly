@@ -29,7 +29,7 @@ class OutgoingMigration : private ProtocolClient {
 
   // mark migration as FINISHED and cancel migration if it's not finished yet
   // can be called from any thread, but only after Start()
-  void Finish();
+  void Finish(bool is_error = false);
 
   MigrationState GetState() const;
 
@@ -67,6 +67,7 @@ class OutgoingMigration : private ProtocolClient {
   class SliceSlotMigration;
 
   void SyncFb();
+  // return true if migration is finalized even with C_ERROR state
   bool FinalyzeMigration(long attempt);
 
  private:

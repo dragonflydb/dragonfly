@@ -32,7 +32,6 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &cntx_) {
   }
 
-  // TODO use context to set error instead of returning error code
   void Sync(const std::string& node_id, uint32_t shard_id) {
     VLOG(1) << "Connecting to source node_id " << node_id << " shard_id " << shard_id;
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
@@ -89,14 +88,15 @@ OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
-void OutgoingMigration::Finish() {
+void OutgoingMigration::Finish(bool is_error) {
   std::lock_guard lk(finish_mu_);
-  if (state_.load() != MigrationState::C_FINISHED) {
+  if (state_.load() != MigrationState::C_FINISHED || state_.load() != MigrationState::C_ERROR) {
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (const auto* shard = EngineShard::tlocal(); shard)
         slot_migrations_[shard->shard_id()]->Cancel();
     });
-    state_.store(MigrationState::C_FINISHED);
+    const auto new_state = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
+    state_.store(new_state);
   }
 }
 
@@ -151,7 +151,7 @@ void OutgoingMigration::SyncFb() {
         auto& migration = *slot_migrations_[shard->shard_id()];
         migration.Sync(cf_->MyID(), shard->shard_id());
         if (migration.GetError()) {
-          Finish();
+          Finish(true);
         }
       }
     });
@@ -175,6 +175,20 @@ void OutgoingMigration::SyncFb() {
 }
 
 bool OutgoingMigration::FinalyzeMigration(long attempt) {
+  // if it's not the 1st attempt and flows are work correctly we try to reconnect and ACK one more
+  // time
+  if (attempt > 1) {
+    if (CheckFlowsForErrors()) {
+      Finish(true);
+      return true;
+    }
+    VLOG(1) << "Reconnecting to source";
+    auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
+    if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
+      cntx_.ReportError(GenericError(ec, "Couldn't connect to source."));
+      return false;
+    }
+  }
   // TODO implement blocking on migrated slots only
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
@@ -192,7 +206,6 @@ bool OutgoingMigration::FinalyzeMigration(long attempt) {
 
   auto cb = [this](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
-      // TODO add error processing to move back into STABLE_SYNC state
       VLOG(1) << "FINALIZE outgoing migration" << shard->shard_id();
       slot_migrations_[shard->shard_id()]->Finalize();
     }
@@ -206,43 +219,34 @@ bool OutgoingMigration::FinalyzeMigration(long attempt) {
   auto err = SendCommand(cmd);
   LOG_IF(WARNING, err) << err;
 
-  if (!err) {
-    long attempt_res = kInvalidAttempt;
-    do {  // we can have response from previos time so we need to read until get response for the
-          // last attempt
-      auto resp = ReadRespReply(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
-
-      if (!resp) {
-        LOG(WARNING) << resp.error();
-        // TODO implement connection issue error processing
-        return false;
-      }
-
-      if (!CheckRespFirstTypes({RespExpr::INT64})) {
-        LOG(WARNING) << "Incorrect response type: "
-                     << facade::ToSV(LastResponseArgs().front().GetBuf());
-        return false;
-      }
-      attempt_res = get<int64_t>(LastResponseArgs().front().u);
-      if (attempt_res == kInvalidAttempt) {
-        return false;
-      }
-    } while (attempt_res != attempt);
-
-    Finish();
-    if (CheckFlowsForErrors()) {
-      return false;
-    }
-
-    cf_->UpdateConfig(migration_info_.slot_ranges, false);
-    VLOG(1) << "Config is updated for " << cf_->MyID();
-    return true;
-  } else {
-    // TODO add reconnecting if flows are OK
+  if (err) {
     LOG(WARNING) << "Error during sending DFLYMIGRATE ACK: " << err.message();
+    return false;
   }
 
-  return false;
+  if (auto resp = ReadRespReply(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms)); !resp) {
+    LOG(WARNING) << resp.error();
+    return false;
+  }
+
+  if (!CheckRespFirstTypes({RespExpr::INT64})) {
+    LOG(WARNING) << "Incorrect response type: "
+                 << facade::ToSV(LastResponseArgs().front().GetBuf());
+    return false;
+  }
+
+  const auto attempt_res = get<int64_t>(LastResponseArgs().front().u);
+  if (attempt_res == kInvalidAttempt) {
+    return false;
+  }
+
+  auto is_error = CheckFlowsForErrors();
+  Finish(is_error);
+  if (!is_error) {
+    cf_->UpdateConfig(migration_info_.slot_ranges, false);
+    VLOG(1) << "Config is updated for " << cf_->MyID();
+  }
+  return true;
 }
 
 void OutgoingMigration::Start() {
