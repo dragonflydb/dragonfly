@@ -4,16 +4,61 @@
 
 #include "server/tiering/disk_storage.h"
 
+#include <absl/cleanup/cleanup.h>
+
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "server/error.h"
 #include "server/tiering/common.h"
+#include "util/fibers/uring_proactor.h"
 
 namespace dfly::tiering {
+
+using namespace ::util::fb2;
+
+namespace {
+
+UringBuf AllocateTmpBuf(size_t size) {
+  size = (size + kPageSize - 1) / kPageSize * kPageSize;
+  uint8_t* buf = new (std::align_val_t(kPageSize)) uint8_t[size];
+  return UringBuf{{buf, size}, std::nullopt};
+}
+
+void DestroyTmpBuf(UringBuf buf) {
+  DCHECK(!buf.buf_idx);
+  ::operator delete[](buf.bytes.data(), std::align_val_t(kPageSize));
+}
+
+UringBuf PrepareBuf(size_t size) {
+  DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
+  auto* up = static_cast<UringProactor*>(ProactorBase::me());
+
+  UringBuf buf;
+  if (auto borrowed = up->RequestBuffer(size); borrowed)
+    return *borrowed;
+  else
+    return AllocateTmpBuf(size);
+}
+
+void ReturnBuf(UringBuf buf) {
+  DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
+  auto* up = static_cast<UringProactor*>(ProactorBase::me());
+
+  if (buf.buf_idx)
+    up->ReturnBuffer(buf);
+  else
+    DestroyTmpBuf(buf);
+}
+
+}  // anonymous namespace
 
 std::error_code DiskStorage::Open(std::string_view path) {
   RETURN_ON_ERR(io_mgr_.Open(path));
   alloc_.AddStorage(0, io_mgr_.Span());
+
+  auto* up = static_cast<UringProactor*>(ProactorBase::me());
+  up->RegisterBuffers(512_KB);
+
   return {};
 }
 
@@ -25,14 +70,15 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
   DCHECK_GT(segment.length, 0u);
   DCHECK_EQ(segment.offset % kPageSize, 0u);
 
-  // TODO: use registered buffers (UringProactor::RegisterBuffers)
-  // TODO: Make it error safe, don't leak if cb isn't called
-  uint8_t* buf = new uint8_t[segment.length];
-  auto io_cb = [cb, buf, segment](int res) {
-    cb(std::string_view{reinterpret_cast<char*>(buf), segment.length});
-    delete[] buf;  // because std::function needs to be copyable, unique_ptr can't be used
+  UringBuf buf = PrepareBuf(segment.length);
+  auto io_cb = [cb = std::move(cb), buf, segment](int io_res) {
+    if (io_res < 0)
+      cb("", std::error_code{-io_res, std::system_category()});
+    else
+      cb(std::string_view{reinterpret_cast<char*>(buf.bytes.data()), segment.length}, {});
+    ReturnBuf(buf);
   };
-  io_mgr_.ReadAsync(segment.offset, {buf, segment.length}, std::move(io_cb));
+  io_mgr_.ReadAsync(segment.offset, buf, std::move(io_cb));
 }
 
 void DiskStorage::MarkAsFree(DiskSegment segment) {
@@ -60,16 +106,21 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
       return std::make_error_code(std::errc::file_too_large);
   }
 
-  auto io_cb = [this, cb, offset, len = bytes.size()](int io_res) {
+  UringBuf buf = PrepareBuf(bytes.size());
+  memcpy(buf.bytes.data(), bytes.data(), bytes.length());
+
+  auto io_cb = [this, cb, offset, buf, len = bytes.size()](int io_res) {
     if (io_res < 0) {
       MarkAsFree({size_t(offset), len});
-      cb({});
+      cb({}, std::error_code{-io_res, std::system_category()});
     } else {
-      cb({size_t(offset), len});
+      cb({size_t(offset), len}, {});
     }
+    ReturnBuf(buf);
   };
 
-  return io_mgr_.WriteAsync(offset, io::View(bytes), std::move(io_cb));
+  io_mgr_.WriteAsync(offset, buf, std::move(io_cb));
+  return {};
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {

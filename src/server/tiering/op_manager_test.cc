@@ -39,7 +39,8 @@ struct OpManagerTest : PoolTestBase, OpManager {
     return future;
   }
 
-  void ReportStashed(EntryId id, DiskSegment segment) override {
+  void ReportStashed(EntryId id, DiskSegment segment, std::error_code ec) override {
+    EXPECT_FALSE(ec);
     stashed_[id] = segment;
   }
 
