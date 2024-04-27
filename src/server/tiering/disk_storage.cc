@@ -4,11 +4,17 @@
 
 #include "server/tiering/disk_storage.h"
 
+#include "base/flags.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "server/error.h"
 #include "server/tiering/common.h"
 #include "util/fibers/uring_proactor.h"
+
+using namespace ::dfly::tiering::literals;
+
+ABSL_FLAG(uint64_t, registered_buffer_size, 512_KB,
+          "Size of registered buffer for IoUring fixed read/writes");
 
 namespace dfly::tiering {
 
@@ -54,8 +60,11 @@ std::error_code DiskStorage::Open(std::string_view path) {
   RETURN_ON_ERR(io_mgr_.Open(path));
   alloc_.AddStorage(0, io_mgr_.Span());
 
+  DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
   auto* up = static_cast<UringProactor*>(ProactorBase::me());
-  up->RegisterBuffers(512_KB);
+
+  if (int io_res = up->RegisterBuffers(absl::GetFlag(FLAGS_registered_buffer_size)); io_res < 0)
+    return std::error_code{-io_res, std::system_category()};
 
   return {};
 }

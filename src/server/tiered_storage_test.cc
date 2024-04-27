@@ -26,6 +26,7 @@ ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(string, tiered_prefix_v2);
 ABSL_DECLARE_FLAG(bool, tiered_storage_v2_cache_fetched);
+ABSL_DECLARE_FLAG(bool, backing_file_direct);
 
 namespace dfly {
 
@@ -44,6 +45,7 @@ class TieredStorageV2Test : public BaseFamilyTest {
     absl::SetFlag(&FLAGS_tiered_prefix, "");
     absl::SetFlag(&FLAGS_tiered_prefix_v2, "/tmp/tiered_storage_test");
     absl::SetFlag(&FLAGS_tiered_storage_v2_cache_fetched, true);
+    absl::SetFlag(&FLAGS_backing_file_direct, true);
 
     BaseFamilyTest::SetUp();
   }
