@@ -189,8 +189,10 @@ void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
     ec = op_manager_->Stash(bin->first, bin->second);
   }
 
-  if (ec)
+  if (ec) {
+    VLOG(1) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
+  }
 }
 void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
   if (value->IsExternal()) {
