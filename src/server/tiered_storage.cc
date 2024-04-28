@@ -82,10 +82,12 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   }
 
   void ReportStashed(EntryId id, tiering::DiskSegment segment, error_code ec) override {
-    if (ec)
+    if (ec) {
+      VLOG(1) << "Stash failed " << ec.message();
       visit([this](auto id) { ClearIoPending(id); }, id);
-    else
+    } else {
       visit([this, segment](auto id) { SetExternal(id, segment); }, id);
+    }
   }
 
   void ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,

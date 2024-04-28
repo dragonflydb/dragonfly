@@ -36,7 +36,7 @@ class DiskStorage {
   // Request bytes to be stored, cb will be called with assigned segment on completion. Can block to
   // grow backing file. Returns error code if operation failed  immediately (most likely it failed
   // to grow the backing file) or passes an empty segment if the final write operation failed.
-  // Bytes must not outlive the object call and can be dropped before cb is resolved
+  // Bytes are copied and can be dropped before cb is resolved
   std::error_code Stash(io::Bytes bytes, StashCb cb);
 
   Stats GetStats() const;

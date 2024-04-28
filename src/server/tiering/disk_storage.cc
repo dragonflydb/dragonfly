@@ -24,6 +24,8 @@ namespace {
 
 UringBuf AllocateTmpBuf(size_t size) {
   size = (size + kPageSize - 1) / kPageSize * kPageSize;
+  VLOG(1) << "Fallback to temporary allocation: " << size;
+
   uint8_t* buf = new (std::align_val_t(kPageSize)) uint8_t[size];
   return UringBuf{{buf, size}, std::nullopt};
 }
