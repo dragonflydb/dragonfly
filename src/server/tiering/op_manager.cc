@@ -62,13 +62,11 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
   auto id = ToOwned(id_ref);
   unsigned version = ++pending_stash_ver_[id];
 
-  std::shared_ptr<char[]> buf(new char[value.length()]);
-  memcpy(buf.get(), value.data(), value.length());
-
-  io::MutableBytes buf_view{reinterpret_cast<uint8_t*>(buf.get()), value.length()};
-  return storage_.Stash(buf_view, [this, version, id = std::move(id), buf](DiskSegment segment) {
-    ProcessStashed(Borrowed(id), version, segment);
-  });
+  io::Bytes buf_view{reinterpret_cast<const uint8_t*>(value.data()), value.length()};
+  auto io_cb = [this, version, id = std::move(id)](DiskSegment segment, std::error_code ec) {
+    ProcessStashed(Borrowed(id), version, segment, ec);
+  };
+  return storage_.Stash(buf_view, std::move(io_cb));
 }
 
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
@@ -77,18 +75,20 @@ OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
 
   auto [it, inserted] = pending_reads_.try_emplace(aligned_segment.offset, aligned_segment);
   if (inserted) {
-    storage_.Read(aligned_segment, [this, aligned_segment](std::string_view value) {
+    auto io_cb = [this, aligned_segment](std::string_view value, std::error_code ec) {
       ProcessRead(aligned_segment.offset, value);
-    });
+    };
+    storage_.Read(aligned_segment, io_cb);
   }
   return it->second;
 }
 
-void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment) {
+void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment,
+                               std::error_code ec) {
   if (auto it = pending_stash_ver_.find(ToOwned(id));
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
-    ReportStashed(id, segment);
+    ReportStashed(id, segment, ec);
   } else {
     storage_.MarkAsFree(segment);
   }

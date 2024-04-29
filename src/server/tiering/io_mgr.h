@@ -9,6 +9,7 @@
 
 #include "server/common.h"
 #include "util/fibers/uring_file.h"
+#include "util/fibers/uring_proactor.h"
 
 namespace dfly::tiering {
 
@@ -18,9 +19,6 @@ class IoMgr {
   // using WriteCb = fu2::function_base<true, false, fu2::capacity_default, false, false,
   // void(int)>;
   using WriteCb = std::function<void(int)>;
-
-  // (io_res, )
-  using GrowCb = std::function<void(int)>;
 
   using ReadCb = std::function<void(int)>;
 
@@ -32,19 +30,13 @@ class IoMgr {
   // Try growing file by that length. Return error if growth failed.
   std::error_code Grow(size_t len);
 
-  // Grows file by that length. len must be divided by 1MB.
-  // passing other values will check-fail.
-  std::error_code GrowAsync(size_t len, GrowCb cb);
+  // Write into offset from src and call cb once done. The callback is guaranteed to be invoked in
+  // any error case for cleanup. The src buffer must outlive the call, until cb is resolved.
+  void WriteAsync(size_t offset, util::fb2::UringBuf src, WriteCb cb);
 
-  // Returns error if submission failed. Otherwise - returns the io result
-  // via cb. A caller must make sure that the blob exists until cb is called.
-  std::error_code WriteAsync(size_t offset, std::string_view blob, WriteCb cb);
-
-  // Read synchronously into dest
-  std::error_code Read(size_t offset, io::MutableBytes dest);
-
-  // Read into dest and call cb once read
-  std::error_code ReadAsync(size_t offset, io::MutableBytes dest, ReadCb cb);
+  // Read into dest and call cb once read. The callback is guaranteed to be invoked in any error
+  // case for cleanup. The dest buffer must outlive the call, until cb is resolved.
+  void ReadAsync(size_t offset, util::fb2::UringBuf dest, ReadCb cb);
 
   // Total file span
   size_t Span() const {

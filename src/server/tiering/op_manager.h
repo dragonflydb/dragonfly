@@ -48,8 +48,9 @@ class OpManager {
   std::error_code Stash(EntryId id, std::string_view value);
 
  protected:
-  // Report that a stash succeeded and the entry was stored at the provided segment
-  virtual void ReportStashed(EntryId id, DiskSegment segment) = 0;
+  // Report that a stash succeeded and the entry was stored at the provided segment or failed with
+  // given error
+  virtual void ReportStashed(EntryId id, DiskSegment segment, std::error_code ec) = 0;
 
   // Report that an entry was successfully fetched.
   // If modify is set, a modification was executed during the read and the stored value is outdated.
@@ -88,7 +89,7 @@ class OpManager {
   void ProcessRead(size_t offset, std::string_view value);
 
   // Called once Stash finished
-  void ProcessStashed(EntryId id, unsigned version, DiskSegment segment);
+  void ProcessStashed(EntryId id, unsigned version, DiskSegment segment, std::error_code ec);
 
  protected:
   DiskStorage storage_;

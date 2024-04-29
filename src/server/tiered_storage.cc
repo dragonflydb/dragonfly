@@ -41,7 +41,7 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   }
 
   // Find entry by key in db_slice and store external segment in place of original value
-  void SetExternal(std::string_view key, tiering::DiskSegment segment) {
+  void SetExternal(string_view key, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv) {
       pv->SetIoPending(false);
       pv->SetExternal(segment.offset, segment.length);  // TODO: Handle memory stats
@@ -50,14 +50,27 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  void ClearIoPending(std::string_view key) {
+  // Find bin by id and call SetExternal for all contained entries
+  void SetExternal(tiering::SmallBins::BinId id, tiering::DiskSegment segment) {
+    for (const auto& [sub_key, sub_segment] : ts_->bins_->ReportStashed(id, segment))
+      SetExternal(string_view{sub_key}, sub_segment);
+  }
+
+  // Clear IO pending flag for entry
+  void ClearIoPending(string_view key) {
     if (auto pv = Find(key); pv)
       pv->SetIoPending(false);
   }
 
+  // Clear IO pending flag for all contained entries of bin
+  void ClearIoPending(tiering::SmallBins::BinId id) {
+    for (const string& key : ts_->bins_->ReportStashAborted(id))
+      ClearIoPending(key);
+  }
+
   // Find entry by key and store it's up-to-date value in place of external segment.
   // Returns false if the value is outdated, true otherwise
-  bool SetInMemory(std::string_view key, std::string_view value, tiering::DiskSegment segment) {
+  bool SetInMemory(string_view key, string_view value, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
       pv->Reset();  // TODO: account for memory
       pv->SetString(value);
@@ -68,17 +81,16 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     return false;
   }
 
-  void ReportStashed(EntryId id, tiering::DiskSegment segment) override {
-    if (holds_alternative<string_view>(id)) {
-      SetExternal(get<string_view>(id), segment);
+  void ReportStashed(EntryId id, tiering::DiskSegment segment, error_code ec) override {
+    if (ec) {
+      VLOG(1) << "Stash failed " << ec.message();
+      visit([this](auto id) { ClearIoPending(id); }, id);
     } else {
-      for (const auto& [sub_key, sub_segment] :
-           ts_->bins_->ReportStashed(get<tiering::SmallBins::BinId>(id), segment))
-        SetExternal(string_view{sub_key}, sub_segment);
+      visit([this, segment](auto id) { SetExternal(id, segment); }, id);
     }
   }
 
-  void ReportFetched(EntryId id, std::string_view value, tiering::DiskSegment segment,
+  void ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,
                      bool modified) override {
     DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
 
@@ -104,7 +116,7 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   }
 
  private:
-  PrimeValue* Find(std::string_view key) {
+  PrimeValue* Find(string_view key) {
     // TODO: Get DbContext for transaction for correct dbid and time
     auto it = db_slice_->FindMutable(DbContext{}, key);
     return IsValid(it.it) ? &it.it->second : nullptr;
@@ -126,7 +138,7 @@ TieredStorageV2::TieredStorageV2(DbSlice* db_slice)
 TieredStorageV2::~TieredStorageV2() {
 }
 
-std::error_code TieredStorageV2::Open(string_view path) {
+error_code TieredStorageV2::Open(string_view path) {
   return op_manager_->Open(path);
 }
 
@@ -134,10 +146,10 @@ void TieredStorageV2::Close() {
   op_manager_->Close();
 }
 
-util::fb2::Future<std::string> TieredStorageV2::Read(string_view key, const PrimeValue& value) {
+util::fb2::Future<string> TieredStorageV2::Read(string_view key, const PrimeValue& value) {
   DCHECK(value.IsExternal());
-  util::fb2::Future<std::string> future;
-  op_manager_->Enqueue(key, value.GetExternalSlice(), [future](std::string* value) mutable {
+  util::fb2::Future<string> future;
+  op_manager_->Enqueue(key, value.GetExternalSlice(), [future](string* value) mutable {
     future.Resolve(*value);
     return false;
   });
@@ -167,14 +179,19 @@ void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
   string_view value_sv = value->GetSlice(&buf);
   value->SetIoPending(true);
 
+  tiering::OpManager::EntryId id;
+  error_code ec;
   if (value->Size() >= kMinOccupancySize) {
-    if (auto ec = op_manager_->Stash(key, value_sv); ec)
-      value->SetIoPending(false);
+    id = key;
+    ec = op_manager_->Stash(key, value_sv);
   } else if (auto bin = bins_->Stash(key, value_sv); bin) {
-    if (auto ec = op_manager_->Stash(bin->first, bin->second); ec) {
-      for (const string& key : bins_->ReportStashAborted(bin->first))
-        op_manager_->ClearIoPending(key);  // clear IO_PENDING flag
-    }
+    id = bin->first;
+    ec = op_manager_->Stash(bin->first, bin->second);
+  }
+
+  if (ec) {
+    VLOG(1) << "Stash failed immediately" << ec.message();
+    visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
   }
 }
 void TieredStorageV2::Delete(string_view key, PrimeValue* value) {

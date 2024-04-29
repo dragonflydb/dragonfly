@@ -88,92 +88,31 @@ error_code IoMgr::Grow(size_t len) {
   }
 }
 
-error_code IoMgr::GrowAsync(size_t len, GrowCb cb) {
-  DCHECK_EQ(0u, len % (1 << 20));
+void IoMgr::WriteAsync(size_t offset, util::fb2::UringBuf buf, WriteCb cb) {
+  DCHECK(!buf.bytes.empty());
 
-  if (exchange(grow_progress_, true)) {
-    return make_error_code(errc::operation_in_progress);
-  }
-
-  Proactor* proactor = (Proactor*)ProactorBase::me();
-
-  SubmitEntry entry = proactor->GetSubmitEntry(
-      [this, len, cb = std::move(cb)](auto*, Proactor::IoResult res, uint32_t) {
-        this->grow_progress_ = false;
-        sz_ += (res == 0 ? len : 0);
-        cb(res);
-      },
-      0);
-
-  entry.PrepFallocate(backing_file_->fd(), 0, sz_, len);
-
-  return error_code{};
-}
-
-error_code IoMgr::WriteAsync(size_t offset, string_view blob, WriteCb cb) {
-  DCHECK(!blob.empty());
-  VLOG(1) << "WriteAsync " << offset << "/" << blob.size();
-
-  Proactor* proactor = (Proactor*)ProactorBase::me();
-
+  auto* proactor = static_cast<Proactor*>(ProactorBase::me());
   auto ring_cb = [cb = std::move(cb)](auto*, Proactor::IoResult res, uint32_t flags) { cb(res); };
 
   SubmitEntry se = proactor->GetSubmitEntry(std::move(ring_cb), 0);
-  se.PrepWrite(backing_file_->fd(), blob.data(), blob.size(), offset);
-
-  return error_code{};
+  if (buf.buf_idx)
+    se.PrepWriteFixed(backing_file_->fd(), buf.bytes.data(), buf.bytes.size(), offset,
+                      *buf.buf_idx);
+  else
+    se.PrepWrite(backing_file_->fd(), buf.bytes.data(), buf.bytes.size(), offset);
 }
 
-error_code IoMgr::Read(size_t offset, io::MutableBytes dest) {
-  DCHECK(!dest.empty());
+void IoMgr::ReadAsync(size_t offset, util::fb2::UringBuf buf, ReadCb cb) {
+  DCHECK(!buf.bytes.empty());
 
-  if (absl::GetFlag(FLAGS_backing_file_direct)) {
-    size_t read_offs = offset & ~(kPageSize - 1);
-    size_t end_range = alignup(offset + dest.size(), kPageSize);
-    size_t space_needed = end_range - read_offs;
-    DCHECK_EQ(0u, space_needed % kPageSize);
-
-    uint8_t* space = (uint8_t*)mi_malloc_aligned(space_needed, kPageSize);
-    iovec v{.iov_base = space, .iov_len = space_needed};
-    uint64_t from_ts = ProactorBase::GetMonotonicTimeNs();
-    error_code ec = backing_file_->Read(&v, 1, read_offs, 0);
-    uint64_t end_ts = ProactorBase::GetMonotonicTimeNs();
-
-    stats_.read_delay_usec += (end_ts - from_ts) / 1000;
-    ++stats_.read_total;
-
-    if (ec) {
-      mi_free(space);
-      return ec;
-    }
-
-    memcpy(dest.data(), space + offset - read_offs, dest.size());
-    mi_free_size_aligned(space, space_needed, kPageSize);
-    return ec;
-  }
-
-  iovec v{.iov_base = dest.data(), .iov_len = dest.size()};
-  uint64_t from_ts = ProactorBase::GetMonotonicTimeNs();
-  auto ec = backing_file_->Read(&v, 1, offset, 0);
-  uint64_t end_ts = ProactorBase::GetMonotonicTimeNs();
-
-  stats_.read_delay_usec += (end_ts - from_ts) / 1000;
-  ++stats_.read_total;
-  return ec;
-}
-
-std::error_code IoMgr::ReadAsync(size_t offset, absl::Span<uint8_t> buffer, ReadCb cb) {
-  DCHECK(!buffer.empty());
-  VLOG(1) << "Read " << offset << "/" << buffer.size();
-
-  Proactor* proactor = (Proactor*)ProactorBase::me();
-
+  auto* proactor = static_cast<Proactor*>(ProactorBase::me());
   auto ring_cb = [cb = std::move(cb)](auto*, Proactor::IoResult res, uint32_t flags) { cb(res); };
 
   SubmitEntry se = proactor->GetSubmitEntry(std::move(ring_cb), 0);
-  se.PrepRead(backing_file_->fd(), buffer.data(), buffer.size(), offset);
-
-  return error_code{};
+  if (buf.buf_idx)
+    se.PrepReadFixed(backing_file_->fd(), buf.bytes.data(), buf.bytes.size(), offset, *buf.buf_idx);
+  else
+    se.PrepRead(backing_file_->fd(), buf.bytes.data(), buf.bytes.size(), offset);
 }
 
 void IoMgr::Shutdown() {
