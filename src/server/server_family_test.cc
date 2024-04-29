@@ -229,6 +229,36 @@ TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
 }
 
+TEST_F(ServerFamilyTest, ClientTrackingOptin) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON", "OPTIN"});
+
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+  Run({"GET", "FOO"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+
+  Run({"CLIENT", "CACHING", "TRUE"});
+  // Start tracking once
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "20"});
+  Run({"GET", "FOO"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+
+  Run({"GET", "BAR"});
+  Run({"SET", "BAR", "20"});
+  Run({"GET", "BAR"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+
+  // Start tracking once
+  Run({"CLIENT", "CACHING", "TRUE"});
+  Run({"GET", "BAR"});
+  Run({"SET", "BAR", "20"});
+  Run({"GET", "BAR"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingUpdateKey) {
   Run({"HELLO", "3"});
   Run({"CLIENT", "TRACKING", "ON"});

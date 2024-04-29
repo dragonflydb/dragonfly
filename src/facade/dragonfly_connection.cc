@@ -1642,13 +1642,29 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
 }
 
 void Connection::SetClientTrackingSwitch(bool is_on) {
-  tracking_enabled_ = is_on;
-  if (tracking_enabled_)
+  tracking_info_.tracking_enabled = is_on;
+  if (is_on)
     cc_->subscriptions++;
 }
 
+void Connection::SetOptin(bool optin) {
+  tracking_info_.optin = optin;
+}
+
+void Connection::LastCommandIsClientCaching() {
+  tracking_info_.last_command = true;
+}
+
+void Connection::UpdatePrevAndLastCommand() {
+  tracking_info_.prev_command = std::exchange(tracking_info_.last_command, false);
+}
+
 bool Connection::IsTrackingOn() const {
-  return tracking_enabled_;
+  return tracking_info_.tracking_enabled;
+}
+
+bool Connection::ShouldTrackKeys() const {
+  return !tracking_info_.optin || tracking_info_.prev_command;
 }
 
 void Connection::StartTrafficLogging(string_view path) {

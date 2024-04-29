@@ -450,27 +450,56 @@ void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, Connec
 }
 
 void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() != 1)
-    return cntx->SendError(kSyntaxErr);
-
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (!rb->IsResp3())
     return cntx->SendError(
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
 
-  ToUpper(&args[0]);
-  string_view state = ArgS(args, 0);
-  bool is_on;
-  if (state == "ON") {
+  CmdArgParser parser{args};
+  if (!parser.HasAtLeast(1) || args.size() > 2)
+    return cntx->SendError(kSyntaxErr);
+
+  bool is_on = false;
+  bool optin = false;
+  if (parser.Check("ON").IgnoreCase()) {
     is_on = true;
-  } else if (state == "OFF") {
-    is_on = false;
-  } else {
+  } else if (!parser.Check("OFF").IgnoreCase()) {
     return cntx->SendError(kSyntaxErr);
   }
 
+  if (parser.HasNext()) {
+    if (parser.Check("OPTIN").IgnoreCase()) {
+      optin = true;
+    } else {
+      return cntx->SendError(kSyntaxErr);
+    }
+  }
+
   cntx->conn()->SetClientTrackingSwitch(is_on);
+  cntx->conn()->SetOptin(optin);
   return cntx->SendOk();
+}
+
+void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (!rb->IsResp3())
+    return cntx->SendError(
+        "Client caching is currently not supported for RESP2. Please use RESP3.");
+
+  if (args.size() != 1) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  CmdArgParser parser{args};
+  if (parser.Check("TRUE").IgnoreCase()) {
+    cntx->conn()->LastCommandIsClientCaching();
+  } else if (!parser.Check("FALSE").IgnoreCase()) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  return cntx->SendError(
+      "Client caching is currently not properly supported. Use CLIENT CACHING TRUE with CLIENT "
+      "TRACKING OPTIN only");
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, ConnectionContext* cntx) {
@@ -1590,6 +1619,8 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientTracking(sub_args, cntx);
   } else if (sub_cmd == "KILL") {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), cntx);
+  } else if (sub_cmd == "CACHING") {
+    return ClientCaching(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {

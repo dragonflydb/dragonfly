@@ -1394,7 +1394,8 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
   if (it != client_tracking_map_.end()) {
     // notify all the clients.
     auto& client_set = it->second;
-    auto cb = [key, client_set = std::move(client_set)](unsigned idx, util::ProactorBase*) {
+    auto cb = [key = std::string(key), client_set = std::move(client_set)](unsigned idx,
+                                                                           util::ProactorBase*) {
       for (auto it = client_set.begin(); it != client_set.end(); ++it) {
         if ((unsigned int)it->Thread() != idx)
           continue;
