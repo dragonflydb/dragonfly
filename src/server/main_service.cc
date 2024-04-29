@@ -1260,7 +1260,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->transaction->ScheduleSingleHopT(cb);
   }
 
-  cntx->conn()->UpdatePrevAndLastCommand();
+  if (cntx->conn()) {
+    cntx->conn()->UpdatePrevAndLastCommand();
+  }
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;

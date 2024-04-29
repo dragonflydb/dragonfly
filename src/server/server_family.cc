@@ -491,15 +491,13 @@ void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
   }
 
   CmdArgParser parser{args};
-  if (parser.Check("TRUE").IgnoreCase()) {
+  if (parser.Check("YES").IgnoreCase()) {
     cntx->conn()->LastCommandIsClientCaching();
-  } else if (!parser.Check("FALSE").IgnoreCase()) {
+  } else if (!parser.Check("NO").IgnoreCase()) {
     return cntx->SendError(kSyntaxErr);
   }
 
-  return cntx->SendError(
-      "Client caching is currently not properly supported. Use CLIENT CACHING TRUE with CLIENT "
-      "TRACKING OPTIN only");
+  cntx->SendOk();
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, ConnectionContext* cntx) {
