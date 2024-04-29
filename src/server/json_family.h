@@ -42,6 +42,7 @@ class JsonFamily {
   static void Resp(CmdArgList args, ConnectionContext* cntx);
   static void Set(CmdArgList args, ConnectionContext* cntx);
   static void MSet(CmdArgList args, ConnectionContext* cntx);
+  static void Merge(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly
