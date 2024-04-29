@@ -90,13 +90,13 @@ OutgoingMigration::~OutgoingMigration() {
 
 void OutgoingMigration::Finish(bool is_error) {
   std::lock_guard lk(finish_mu_);
-  if (state_.load() != MigrationState::C_FINISHED || state_.load() != MigrationState::C_ERROR) {
+  if (state_.load() != MigrationState::C_FINISHED) {
+    const auto new_state = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
+    state_.store(new_state);
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (const auto* shard = EngineShard::tlocal(); shard)
         slot_migrations_[shard->shard_id()]->Cancel();
     });
-    const auto new_state = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
-    state_.store(new_state);
   }
 }
 

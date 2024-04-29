@@ -76,6 +76,14 @@ async def push_config(config, admin_connections):
     assert all([r == "OK" for r in res])
 
 
+async def wait_for_status(admin_client, node_id, status):
+    while status not in await admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
+    ):
+        logging.debug("SLOT-MIGRATION-STATUS is not %s", status)
+        await asyncio.sleep(0.05)
+
+
 async def get_node_id(admin_connection):
     id = await admin_connection.execute_command("DFLYCLUSTER MYID")
     assert isinstance(id, str)
@@ -1408,19 +1416,18 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     ]
     logging.debug("Migrating slots 6000-8000")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-    await asyncio.sleep(0.1)
-    assert await nodes[0].admin_client.dbsize() == SIZE
-    assert await nodes[1].admin_client.dbsize(), "weak test case" < SIZE
+    # await asyncio.sleep(0.1)
 
     logging.debug("Cancelling migration")
     nodes[0].migrations = []
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    assert SIZE == await nodes[0].admin_client.dbsize()
     while True:
         db_size = await nodes[1].admin_client.dbsize()
-        if db_size == 0:
+        if 0 == db_size:
             break
-        # logging.debug("db sizes ", ', '.join(map(str, db_sizes)))
-        logging.debug(f"db sizes {db_size}")
+        logging.debug(f"target dbsize is {db_size}")
+        logging.debug(await nodes[1].admin_client.execute_command("KEYS", "*"))
         await asyncio.sleep(0.1)
 
     logging.debug("Reissuing migration")
@@ -1428,14 +1435,8 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(6001, 8000)], nodes[1].id)
     )
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-    await asyncio.sleep(0.1)
-    assert SIZE == await nodes[0].admin_client.dbsize()
-    for i in range(100):
-        if SIZE == await nodes[1].admin_client.dbsize():
-            break
-        await asyncio.sleep(0.1)
-    else:
-        assert False, "Target node not synced"
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+    assert [SIZE, SIZE] == [await node.admin_client.dbsize() for node in nodes]
 
     logging.debug("Finalizing migration")
     nodes[0].migrations = []
@@ -1444,8 +1445,10 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     logging.debug("Migration finalized")
 
-    await asyncio.sleep(0.1)
-    assert [0, SIZE] == [await node.admin_client.dbsize() for node in nodes]
+    while 0 != await nodes[0].admin_client.dbsize():
+        logging.debug(f"wait until source dbsize is empty")
+        await asyncio.sleep(0.1)
+
     for i in range(SIZE):
         assert str(i) == await nodes[1].admin_client.get(f"{{key50}}:{i}")
 
