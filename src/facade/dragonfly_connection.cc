@@ -1456,6 +1456,10 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
     return false;
   }
 
+  if (cc_->conn_closing) {
+    return false;
+  }
+
   listener()->Migrate(this, dest);
   // After we migrate, it could be the case the connection was shut down. We should
   // act accordingly.
