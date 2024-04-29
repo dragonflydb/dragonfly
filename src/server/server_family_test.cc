@@ -239,7 +239,7 @@ TEST_F(ServerFamilyTest, ClientTrackingOptin) {
   Run({"GET", "FOO"});
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
 
-  Run({"CLIENT", "CACHING", "TRUE"});
+  Run({"CLIENT", "CACHING", "YES"});
   // Start tracking once
   Run({"GET", "FOO"});
   Run({"SET", "FOO", "20"});
@@ -252,7 +252,7 @@ TEST_F(ServerFamilyTest, ClientTrackingOptin) {
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
 
   // Start tracking once
-  Run({"CLIENT", "CACHING", "TRUE"});
+  Run({"CLIENT", "CACHING", "YES"});
   Run({"GET", "BAR"});
   Run({"SET", "BAR", "20"});
   Run({"GET", "BAR"});
