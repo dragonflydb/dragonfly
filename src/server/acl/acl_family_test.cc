@@ -64,25 +64,30 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl deluser' command"));
 
   resp = Run({"ACL", "DELUSER", "default"});
-  EXPECT_THAT(resp, ErrArg("ERR The 'default' user cannot be removed"));
+  EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"ACL", "DELUSER", "NOTEXISTS"});
-  EXPECT_THAT(resp.GetInt(), 0);
+  EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"ACL", "SETUSER", "kostas", "ON"});
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "DELUSER", "KOSTAS", "NONSENSE"});
-  EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl deluser' command"));
+  EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"ACL", "DELUSER", "kostas"});
-  EXPECT_THAT(resp.GetInt(), 1);
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"ACL", "DELUSER", "kostas"});
-  EXPECT_THAT(resp.GetInt(), 0);
+  EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"ACL", "LIST"});
   EXPECT_THAT(resp.GetString(), "user default on nopass +@ALL +ALL ~*");
+
+  Run({"ACL", "SETUSER", "michael", "ON"});
+  Run({"ACL", "SETUSER", "kobe", "ON"});
+  resp = Run({"ACL", "DELUSER", "michael", "kobe"});
+  EXPECT_THAT(resp, IntArg(2));
 }
 
 TEST_F(AclFamilyTest, AclList) {
@@ -137,7 +142,7 @@ TEST_F(AclFamilyTest, AclWhoAmI) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "WHOAMI"});
-  EXPECT_THAT(resp, "kostas");
+  EXPECT_THAT(resp, "User is kostas");
 }
 
 TEST_F(AclFamilyTest, TestAllCategories) {
@@ -161,7 +166,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
-      EXPECT_THAT(resp.GetInt(), 1);
+      EXPECT_THAT(resp, IntArg(1));
     }
   }
 
@@ -208,7 +213,7 @@ TEST_F(AclFamilyTest, TestAllCommands) {
                                        absl::StrCat("user kostas off nopass ", "+@NONE")));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
-      EXPECT_THAT(resp.GetInt(), 1);
+      EXPECT_THAT(resp, IntArg(1));
     }
   }
 }
@@ -353,7 +358,7 @@ TEST_F(AclFamilyTestRename, AclRename) {
   EXPECT_THAT(resp.GetString(), "OK");
 
   resp = Run({"ROCKS", "DELUSER", "billy"});
-  EXPECT_THAT(resp.GetInt(), 1);
+  EXPECT_THAT(resp, IntArg(1));
 }
 
 TEST_F(AclFamilyTest, TestKeys) {
