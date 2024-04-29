@@ -367,7 +367,7 @@ Context::~Context() {
   JoinErrorHandler();
 }
 
-GenericError Context::GetError() {
+GenericError Context::GetError() const {
   std::lock_guard lk(mu_);
   return err_;
 }

@@ -21,15 +21,15 @@ class ClusterFamily;
 // Whole outgoing slots migration manager
 class OutgoingMigration : private ProtocolClient {
  public:
-  OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Context::ErrHandler err_handler,
-                    ServerFamily* sf);
+  OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf);
   ~OutgoingMigration();
 
   // start migration process, sends INIT command to the target node
-  std::error_code Start(ConnectionContext* cntx);
+  void Start();
 
   // mark migration as FINISHED and cancel migration if it's not finished yet
-  void Finish();
+  // can be called from any thread, but only after Start()
+  void Finish(bool is_error = false);
 
   MigrationState GetState() const;
 
@@ -49,26 +49,34 @@ class OutgoingMigration : private ProtocolClient {
     return migration_info_;
   }
 
+  const std::string GetErrorStr() const {
+    return last_error_.Format();
+  }
+
   static constexpr long kInvalidAttempt = -1;
 
  private:
   // should be run for all shards
   void StartFlow(journal::Journal* journal, io::Sink* dest);
 
+  // if we have an error reports it into cntx_ and return true
+  bool CheckFlowsForErrors();
+
   MigrationState GetStateImpl() const;
   // SliceSlotMigration manages state and data transfering for the corresponding shard
   class SliceSlotMigration;
 
   void SyncFb();
+  // return true if migration is finalized even with C_ERROR state
   bool FinalyzeMigration(long attempt);
 
  private:
   MigrationInfo migration_info_;
-  Context cntx_;
   mutable util::fb2::Mutex finish_mu_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
   ServerFamily* server_family_;
   ClusterFamily* cf_;
+  dfly::GenericError last_error_;
 
   util::fb2::Fiber main_sync_fb_;
 
