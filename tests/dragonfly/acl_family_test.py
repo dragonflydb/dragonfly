@@ -323,11 +323,18 @@ async def test_bad_acl_file(df_local_factory, tmp_dir):
 @pytest.mark.asyncio
 @dfly_args({"port": 1111})
 async def test_good_acl_file(df_local_factory, tmp_dir):
-    acl = create_temp_file("", tmp_dir)
+    acl = create_temp_file("USER MrFoo ON >mypass", tmp_dir)
     df = df_local_factory.create(aclfile=acl)
 
     df.start()
     client = df.client()
+
+    await client.execute_command("ACL LOAD")
+    result = await client.execute_command("ACL LIST")
+    assert 2 == len(result)
+    assert "user MrFoo on ea71c25a7a60224 +@NONE" in result
+    assert "user default on nopass +@ALL +ALL ~*" in result
+    await client.execute_command("ACL DELUSER MrFoo")
 
     await client.execute_command("ACL SETUSER roy ON >mypass +@STRING +HSET")
     await client.execute_command("ACL SETUSER shahar >mypass +@SET")
