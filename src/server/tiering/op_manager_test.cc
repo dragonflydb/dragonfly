@@ -63,8 +63,12 @@ TEST_F(OpManagerTest, SimpleStashesWithReads) {
       EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "real")));
     }
 
+    EXPECT_EQ(GetStats().pending_stash_cnt, 100);
+
     while (stashed_.size() < 100)
       util::ThisFiber::SleepFor(1ms);
+
+    EXPECT_EQ(GetStats().disk_stats.allocated_bytes, 100 * kPageSize);
 
     for (unsigned i = 0; i < 100; i++) {
       EXPECT_GE(stashed_[i].offset, i > 0);

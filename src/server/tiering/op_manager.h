@@ -20,10 +20,18 @@ namespace dfly::tiering {
 // safely schedules deletes after reads and allows cancelling pending stashes
 class OpManager {
  public:
+  struct Stats {
+    DiskStorage::Stats disk_stats;
+
+    size_t pending_read_cnt = 0;
+    size_t pending_stash_cnt = 0;
+  };
+
   // Two separate keyspaces are provided - one for strings, one for numeric identifiers.
   // Ids can be used to track auxiliary values that don't map to real keys (like packed pages).
   using EntryId = std::variant<unsigned, std::string_view>;
   using OwnedEntryId = std::variant<unsigned, std::string>;
+
   // Callback for post-read completion. Returns whether the value was modified
   using ReadCallback = std::function<bool(std::string*)>;
 
@@ -46,6 +54,8 @@ class OpManager {
 
   // Stash value to be offloaded
   std::error_code Stash(EntryId id, std::string_view value);
+
+  Stats GetStats() const;
 
  protected:
   // Report that a stash succeeded and the entry was stored at the provided segment or failed with

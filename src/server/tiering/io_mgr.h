@@ -47,16 +47,11 @@ class IoMgr {
     return grow_progress_;
   }
 
-  const IoMgrStats& GetStats() const {
-    return stats_;
-  }
-
  private:
   std::unique_ptr<util::fb2::LinuxFile> backing_file_;
   size_t sz_ = 0;
 
   bool grow_progress_ = false;
-  IoMgrStats stats_;
 };
 
 }  // namespace dfly::tiering

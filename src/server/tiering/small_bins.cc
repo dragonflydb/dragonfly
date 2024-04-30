@@ -59,7 +59,7 @@ SmallBins::FilledBin SmallBins::FlushBin() {
     data += value.size();
   }
 
-  current_bin_bytes_ = 0;  // num hashes
+  current_bin_bytes_ = 0;
   current_bin_.erase(current_bin_.begin(), current_bin_.end());
 
   return {id, std::move(out)};
@@ -67,9 +67,13 @@ SmallBins::FilledBin SmallBins::FlushBin() {
 
 SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment) {
   auto key_list = pending_bins_.extract(id);
+  DCHECK_GT(key_list.mapped().size(), 0u);
+
   auto segment_list = SmallBins::KeySegmentList{key_list.mapped().begin(), key_list.mapped().end()};
   for (auto& [_, sub_segment] : segment_list)
     sub_segment.offset += segment.offset;
+
+  stats_.total_stashed_entries += segment_list.size();
   return segment_list;
 }
 
@@ -98,12 +102,20 @@ std::optional<SmallBins::BinId> SmallBins::Delete(std::string_view key) {
 
 std::optional<DiskSegment> SmallBins::Delete(DiskSegment segment) {
   segment = segment.FillPages();
-  if (auto it = stashed_bins_.find(segment.offset);
-      it != stashed_bins_.end() && --it->second == 0) {
-    stashed_bins_.erase(it);
-    return segment;
+  if (auto it = stashed_bins_.find(segment.offset); it != stashed_bins_.end()) {
+    stats_.total_stashed_entries--;
+    if (--it->second == 0) {
+      stashed_bins_.erase(it);
+      return segment;
+    }
   }
   return std::nullopt;
+}
+
+SmallBins::Stats SmallBins::GetStats() const {
+  return Stats{.stashed_bins_cnt = stashed_bins_.size(),
+               .stashed_entries_cnt = stats_.total_stashed_entries,
+               .current_bin_bytes = current_bin_bytes_};
 }
 
 }  // namespace dfly::tiering
