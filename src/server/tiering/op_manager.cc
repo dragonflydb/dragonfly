@@ -89,7 +89,8 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
     ReportStashed(id, segment, ec);
-  } else {
+  } else if (!ec) {
+    // Throw away the value because it's no longer up-to-date even if no error occured
     storage_.MarkAsFree(segment);
   }
 }
