@@ -119,7 +119,6 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   memcpy(buf.bytes.data(), bytes.data(), bytes.length());
 
   auto io_cb = [this, cb, offset, buf, len = bytes.size()](int io_res) {
-    VLOG(0) << "IoRes " << io_res << " " << len;
     if (io_res < 0) {
       MarkAsFree({size_t(offset), len});
       cb({}, std::error_code{-io_res, std::system_category()});
@@ -134,7 +133,7 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
-  return {alloc_.allocated_bytes()};
+  return {alloc_.allocated_bytes(), alloc_.capacity()};
 }
 
 }  // namespace dfly::tiering

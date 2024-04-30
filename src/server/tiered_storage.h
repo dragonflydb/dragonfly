@@ -58,7 +58,7 @@ class TieredStorageV2 {
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv);
 
-  TieredStatsV2 GetStats() const;
+  TieredStats GetStats() const;
 
  private:
   std::unique_ptr<ShardOpManager> op_manager_;
@@ -108,8 +108,8 @@ class TieredStorageV2 {
   void Delete(std::string_view key, PrimeValue* value) {
   }
 
-  TieredStatsV2 GetStats() {
-    return TieredStatsV2{};
+  TieredStats GetStats() {
+    return TieredStats{};
   }
 };
 

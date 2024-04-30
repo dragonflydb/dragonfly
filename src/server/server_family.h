@@ -80,10 +80,8 @@ struct Metrics {
   EngineShard::Stats shard_stats;  // per-shard stats
 
   facade::FacadeStats facade_stats;  // client stats and buffer sizes
-  TieredStats tiered_stats;          // stats for tiered storage
-  TieredStatsV2 tiered_stats_v2;
+  TieredStats tiered_stats;
 
-  IoMgrStats disk_stats;  // disk stats for io_mgr
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;

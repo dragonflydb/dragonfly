@@ -44,7 +44,7 @@ void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
 void OpManager::Delete(EntryId id) {
   // If the item isn't offloaded, it has io pending, so cancel it
   DCHECK(pending_stash_ver_.count(ToOwned(id)));
-  ++pending_stash_ver_[ToOwned(id)];
+  pending_stash_ver_.erase(ToOwned(id));
 }
 
 void OpManager::Delete(DiskSegment segment) {
@@ -89,7 +89,8 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
     ReportStashed(id, segment, ec);
-  } else {
+  } else if (!ec) {
+    // Throw away the value because it's no longer up-to-date even if no error occured
     storage_.MarkAsFree(segment);
   }
 }
@@ -123,6 +124,12 @@ OpManager::EntryOps& OpManager::ReadOp::ForId(EntryId id, DiskSegment key_segmen
       return ops;
   }
   return key_ops.emplace_back(ToOwned(id), key_segment);
+}
+
+OpManager::Stats OpManager::GetStats() const {
+  return {.disk_stats = storage_.GetStats(),
+          .pending_read_cnt = pending_reads_.size(),
+          .pending_stash_cnt = pending_stash_ver_.size()};
 }
 
 }  // namespace dfly::tiering

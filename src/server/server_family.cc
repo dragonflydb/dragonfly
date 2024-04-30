@@ -1144,15 +1144,6 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                               MetricType::COUNTER, &resp->body());
     AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
                               MetricType::COUNTER, &resp->body());
-
-    // Tiered metrics.
-    if (m.disk_stats.read_total > 0) {
-      AppendMetricWithoutLabels("tiered_reads_total", "", m.disk_stats.read_total,
-                                MetricType::COUNTER, &resp->body());
-      AppendMetricWithoutLabels("tiered_reads_latency_seconds", "",
-                                double(m.disk_stats.read_delay_usec) * 1e-6, MetricType::COUNTER,
-                                &resp->body());
-    }
   }
 
   AppendMetricWithoutLabels("script_error_total", "", m.facade_stats.reply_stats.script_error_count,
@@ -1845,7 +1836,7 @@ Metrics ServerFamily::GetMetrics() const {
       result.shard_stats += shard->stats();
 
       if (shard->tiered_storage_v2()) {
-        result.tiered_stats_v2 += shard->tiered_storage_v2()->GetStats();
+        result.tiered_stats += shard->tiered_storage_v2()->GetStats();
       }
 
       if (shard->search_indices()) {
@@ -2057,23 +2048,19 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("TIERED", true)) {
-    append("tiered_entries", total.tiered_entries);
-    append("tiered_bytes", total.tiered_size);
-    append("tiered_bytes_human", HumanReadableNumBytes(total.tiered_size));
-    append("tiered_reads", m.disk_stats.read_total);
-    append("tiered_read_latency_usec", m.disk_stats.read_delay_usec);
-    append("tiered_writes", m.tiered_stats.tiered_writes);
-    append("tiered_reserved", m.tiered_stats.storage_reserved);
-    append("tiered_capacity", m.tiered_stats.storage_capacity);
-    append("tiered_aborted_writes", m.tiered_stats.aborted_write_cnt);
-    append("tiered_flush_skipped", m.tiered_stats.flush_skip_cnt);
-    append("tiered_throttled_writes", m.tiered_stats.throttled_write_cnt);
-  }
+    append("tiered_total_stashes", m.tiered_stats.total_stashes);
+    append("tiered_total_fetches", m.tiered_stats.total_fetches);
+    append("tiered_total_cancels", m.tiered_stats.total_cancels);
 
-  if (should_enter("TIERED_V2", true)) {
-    append("tiered_v2_total_stashes", m.tiered_stats_v2.total_stashes);
-    append("tiered_v2_total_fetches", m.tiered_stats_v2.total_fetches);
-    append("tiered_v2_allocated_bytes", m.tiered_stats_v2.allocated_bytes);
+    append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
+    append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
+
+    append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
+    append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
+
+    append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
+    append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
+    append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
   }
 
   if (should_enter("PERSISTENCE", true)) {

@@ -59,33 +59,22 @@ struct LockTagOptions {
   static const LockTagOptions& instance();
 };
 
-struct IoMgrStats {
-  uint64_t read_total = 0;
-  uint64_t read_delay_usec = 0;
-
-  IoMgrStats& operator+=(const IoMgrStats& rhs);
-};
-
 struct TieredStats {
-  uint64_t tiered_writes = 0;
-
-  size_t storage_capacity = 0;
-
-  // how much was reserved by actively stored items.
-  size_t storage_reserved = 0;
-  uint64_t aborted_write_cnt = 0;
-  uint64_t flush_skip_cnt = 0;
-  uint64_t throttled_write_cnt = 0;
-
-  TieredStats& operator+=(const TieredStats&);
-};
-
-struct TieredStatsV2 {
   size_t total_stashes = 0;
   size_t total_fetches = 0;
-  size_t allocated_bytes = 0;
+  size_t total_cancels = 0;
 
-  TieredStatsV2& operator+=(const TieredStatsV2&);
+  size_t allocated_bytes = 0;
+  size_t capacity_bytes = 0;
+
+  size_t pending_read_cnt = 0;
+  size_t pending_stash_cnt = 0;
+
+  size_t small_bins_cnt = 0;
+  size_t small_bins_entries_cnt = 0;
+  size_t small_bins_filling_bytes = 0;
+
+  TieredStats& operator+=(const TieredStats&);
 };
 
 struct SearchStats {

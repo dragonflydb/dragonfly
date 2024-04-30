@@ -257,34 +257,22 @@ bool ParseDouble(string_view src, double* value) {
 
 #define ADD(x) (x) += o.x
 
-IoMgrStats& IoMgrStats::operator+=(const IoMgrStats& rhs) {
-  static_assert(sizeof(IoMgrStats) == 16);
-
-  read_total += rhs.read_total;
-  read_delay_usec += rhs.read_delay_usec;
-
-  return *this;
-}
-
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 48);
-
-  ADD(tiered_writes);
-  ADD(storage_capacity);
-  ADD(storage_reserved);
-  ADD(aborted_write_cnt);
-  ADD(flush_skip_cnt);
-  ADD(throttled_write_cnt);
-
-  return *this;
-}
-
-TieredStatsV2& TieredStatsV2::operator+=(const TieredStatsV2& o) {
-  static_assert(sizeof(TieredStatsV2) == 24);
+  static_assert(sizeof(TieredStats) == 80);
 
   ADD(total_stashes);
   ADD(total_fetches);
+  ADD(total_cancels);
+
   ADD(allocated_bytes);
+  ADD(capacity_bytes);
+
+  ADD(pending_read_cnt);
+  ADD(pending_stash_cnt);
+
+  ADD(small_bins_cnt);
+  ADD(small_bins_entries_cnt);
+  ADD(small_bins_filling_bytes);
 
   return *this;
 }

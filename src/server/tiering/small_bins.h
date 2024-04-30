@@ -19,6 +19,12 @@ namespace dfly::tiering {
 // SIMPLEST VERSION for now.
 class SmallBins {
  public:
+  struct Stats {
+    size_t stashed_bins_cnt = 0;
+    size_t stashed_entries_cnt = 0;
+    size_t current_bin_bytes = 0;
+  };
+
   using BinId = unsigned;
 
   // Bin filled with blob of serialized entries
@@ -42,6 +48,8 @@ class SmallBins {
   // Delete a stored segment. Returns page segment if it became emtpy and needs to be deleted.
   std::optional<DiskSegment> Delete(DiskSegment segment);
 
+  Stats GetStats() const;
+
  private:
   // Flush current bin
   FilledBin FlushBin();
@@ -58,6 +66,10 @@ class SmallBins {
 
   // Map of bins that were stashed and should be deleted when refcount reaches 0
   absl::flat_hash_map<size_t /*offset*/, unsigned /* refcount*/> stashed_bins_;
+
+  struct {
+    size_t total_stashed_entries = 0;
+  } stats_;
 };
 
 };  // namespace dfly::tiering

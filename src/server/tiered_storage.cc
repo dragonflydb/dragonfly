@@ -58,8 +58,10 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
 
   // Clear IO pending flag for entry
   void ClearIoPending(string_view key) {
-    if (auto pv = Find(key); pv)
+    if (auto pv = Find(key); pv) {
       pv->SetIoPending(false);
+      stats_.total_cancels++;
+    }
   }
 
   // Clear IO pending flag for all contained entries of bin
@@ -109,13 +111,9 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  TieredStatsV2 GetStats() const {
-    auto stats = stats_;
-    stats.allocated_bytes = OpManager::storage_.GetStats().allocated_bytes;
-    return stats;
-  }
-
  private:
+  friend class TieredStorageV2;
+
   PrimeValue* Find(string_view key) {
     // TODO: Get DbContext for transaction for correct dbid and time
     auto it = db_slice_->FindMutable(DbContext{}, key);
@@ -124,7 +122,9 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
 
   bool cache_fetched_ = false;
 
-  TieredStatsV2 stats_;
+  struct {
+    size_t total_stashes = 0, total_fetches = 0, total_cancels = 0;
+  } stats_;
 
   TieredStorageV2* ts_;
   DbSlice* db_slice_;
@@ -218,8 +218,32 @@ bool TieredStorageV2::ShouldStash(const PrimeValue& pv) {
   return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize;
 }
 
-TieredStatsV2 TieredStorageV2::GetStats() const {
-  return op_manager_->GetStats();
+TieredStats TieredStorageV2::GetStats() const {
+  TieredStats stats{};
+
+  {  // ShardOpManager stats
+    auto shard_stats = op_manager_->stats_;
+    stats.total_fetches = shard_stats.total_fetches;
+    stats.total_stashes = shard_stats.total_stashes;
+    stats.total_cancels = shard_stats.total_cancels;
+  }
+
+  {  // OpManager stats
+    tiering::OpManager::Stats op_stats = op_manager_->GetStats();
+    stats.pending_read_cnt = op_stats.pending_read_cnt;
+    stats.pending_stash_cnt = op_stats.pending_stash_cnt;
+    stats.allocated_bytes = op_stats.disk_stats.allocated_bytes;
+    stats.capacity_bytes = op_stats.disk_stats.capacity_bytes;
+  }
+
+  {  // SmallBins stats
+    tiering::SmallBins::Stats bins_stats = bins_->GetStats();
+    stats.small_bins_cnt = bins_stats.stashed_bins_cnt;
+    stats.small_bins_entries_cnt = bins_stats.stashed_entries_cnt;
+    stats.small_bins_filling_bytes = bins_stats.current_bin_bytes;
+  }
+
+  return stats;
 }
 
 }  // namespace dfly
