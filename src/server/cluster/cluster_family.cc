@@ -774,14 +774,14 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
 
 namespace {
 // returns removed incoming migration
-std::shared_ptr<IncomingSlotMigration> RemoveIncomingMigrationImpl(
-    std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs, string source_id) {
+bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
+                                 string source_id) {
   auto it = std::find_if(jobs.begin(), jobs.end(), [&source_id](const auto& im) {
     // we can have only one migration per target-source pair
     return source_id == im->GetSourceID();
   });
   if (it == jobs.end()) {
-    return nullptr;
+    return false;
   }
   DCHECK(it->get() != nullptr);
   std::shared_ptr<IncomingSlotMigration> migration = *it;
@@ -792,6 +792,8 @@ std::shared_ptr<IncomingSlotMigration> RemoveIncomingMigrationImpl(
 
   // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
   migration->Cancel();
+  migration->Join();
+  jobs.erase(it);
 
   if (!removed.Empty()) {
     auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
@@ -805,17 +807,16 @@ std::shared_ptr<IncomingSlotMigration> RemoveIncomingMigrationImpl(
     });
   }
 
-  jobs.erase(it);
-  return migration;
+  return true;
 }
 }  // namespace
 
 void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
-    auto removed_migration = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_id);
-    DCHECK(removed_migration);
-    VLOG(1) << "Migration was canceled from: " << removed_migration->GetSourceID();
+    auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_id);
+    DCHECK(was_removed);
+    VLOG(1) << "Migration was canceled from: " << m.node_id;
   }
 }
 
@@ -837,8 +838,8 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Init migration " << source_id;
 
   lock_guard lk(migration_mu_);
-  auto removed_migration = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
-  LOG_IF(WARNING, removed_migration) << "Reinit was happen for migration from:" << source_id;
+  auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
+  LOG_IF(WARNING, was_removed) << "Reinit was happen for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
       std::move(source_id), &server_family_->service(), std::move(slots), flows_num));
