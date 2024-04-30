@@ -1416,7 +1416,7 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     ]
     logging.debug("Migrating slots 6000-8000")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-    # await asyncio.sleep(0.1)
+    await asyncio.sleep(0.5)
 
     logging.debug("Cancelling migration")
     nodes[0].migrations = []
