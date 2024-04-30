@@ -22,9 +22,13 @@
 #include "server/tiering/common.h"
 #include "server/tiering/op_manager.h"
 #include "server/tiering/small_bins.h"
+#include "server/tx_base.h"
 
 ABSL_FLAG(bool, tiered_storage_cache_fetched, true,
           "WIP: Load results of offloaded reads to memory");
+
+ABSL_FLAG(size_t, tiered_storage_max_stashes, 10,
+          "Maximum number of concurrent stash requests issued by background offload");
 
 namespace dfly {
 
@@ -52,11 +56,29 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_cache_fetched);
   }
 
-  // Find entry by key in db_slice and store external segment in place of original value
+
+  // Called before overriding value with segment
+  void RecordAdded(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
+    stats->AddTypeMemoryUsage(pv.ObjType(), -pv.MallocUsed());
+    stats->tiered_entries++;
+    stats->tiered_size += segment.length;
+  }
+
+  // Called after setting new value in place of previous segment
+  void RecordDeleted(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
+    stats->AddTypeMemoryUsage(pv.ObjType(), pv.MallocUsed());
+    stats->tiered_entries--;
+    stats->tiered_size -= segment.length;
+  }
+
+  // Find entry by key in db_slice and store external segment in place of original value.
+  // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv) {
+      RecordAdded(db_slice_->MutableStats(0), *pv, segment);
+
       pv->SetIoPending(false);
-      pv->SetExternal(segment.offset, segment.length);  // TODO: Handle memory stats
+      pv->SetExternal(segment.offset, segment.length);
 
       stats_.total_stashes++;
     }
@@ -82,14 +104,22 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       ClearIoPending(key);
   }
 
+  // Set value to be an in-memory type again, either empty or with a value. Update memory stats
+  void SetInMemory(PrimeValue* pv, string_view value, tiering::DiskSegment segment) {
+    pv->Reset();
+    if (!value.empty())
+      pv->SetString(value);
+
+    RecordDeleted(db_slice_->MutableStats(0), *pv, segment);
+
+    (value.empty() ? stats_.total_deletes : stats_.total_fetches)++;
+  }
+
   // Find entry by key and store it's up-to-date value in place of external segment.
   // Returns false if the value is outdated, true otherwise
   bool SetInMemory(OpManager::KeyRef key, string_view value, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-      pv->Reset();  // TODO: account for memory
-      pv->SetString(value);
-
-      stats_.total_fetches++;
+      SetInMemory(pv, value, segment);
       return true;
     }
     return false;
@@ -136,7 +166,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   bool cache_fetched_ = false;
 
   struct {
-    size_t total_stashes = 0, total_fetches = 0, total_cancels = 0;
+    size_t total_stashes = 0, total_fetches = 0, total_cancels = 0, total_deletes = 0;
   } stats_;
 
   TieredStorage* ts_;
@@ -219,7 +249,7 @@ void TieredStorage::Delete(PrimeValue* value) {
   } else if (auto bin = bins_->Delete(segment); bin) {
     op_manager_->Delete(*bin);
   }
-  value->Reset();
+  op_manager_->SetInMemory(value, "", segment);
 }
 
 void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
@@ -232,7 +262,7 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
   value->SetIoPending(false);
 }
 
-bool TieredStorage::ShouldStash(const PrimeValue& pv) {
+bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
   return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize;
 }
 
@@ -262,6 +292,33 @@ TieredStats TieredStorage::GetStats() const {
   }
 
   return stats;
+}
+
+void TieredStorage::RunOffloading(DbIndex dbid) {
+  PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
+  int stash_limit =
+      absl::GetFlag(FLAGS_tiered_storage_max_stashes) - op_manager_->GetStats().pending_stash_cnt;
+  if (stash_limit <= 0)
+    return;
+
+  auto cb = [this, &stash_limit](PrimeIterator it) {
+    if (it->second.HasIoPending() || it->second.IsExternal())
+      return;
+
+    if (ShouldStash(it->second)) {
+      std::string tmp;
+      Stash(it->first.GetSlice(&tmp), &it->second);
+
+      stash_limit--;
+    }
+  };
+
+  PrimeTable::Cursor start_cursor;
+
+  // Loop while we haven't traversed all entries or reached our limit
+  do {
+    offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
+  } while (offloading_cursor_ != start_cursor && stash_limit > 0);
 }
 
 }  // namespace dfly

@@ -701,6 +701,14 @@ class DashCursor {
     return val_ != 0;
   }
 
+  bool operator==(const DashCursor& other) const {
+    return val_ == other.val_;
+  }
+
+  bool operator!=(const DashCursor& other) const {
+    return !(val_ == other.val_);
+  }
+
  private:
   uint64_t val_;
 };

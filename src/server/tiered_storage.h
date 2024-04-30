@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "server/tiering/common.h"
+#include "server/tx_base.h"
 #include "util/fibers/future.h"
 #ifdef __linux__
 
@@ -60,11 +61,16 @@ class TieredStorage {
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
   // Returns if a value should be stashed
-  bool ShouldStash(const PrimeValue& pv);
+  bool ShouldStash(const PrimeValue& pv) const;
 
   TieredStats GetStats() const;
 
+  // Run offloading loop until i/o device is loaded or all entries were traversed
+  void RunOffloading(DbIndex dbid);
+
  private:
+  PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
+
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
 };
@@ -126,6 +132,9 @@ class TieredStorage {
 
   TieredStats GetStats() const {
     return {};
+  }
+
+  void RunOffloading() {
   }
 };
 

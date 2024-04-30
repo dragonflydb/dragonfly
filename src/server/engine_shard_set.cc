@@ -51,7 +51,7 @@ ABSL_FLAG(uint32_t, hz, 100,
 ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
           "by evicting entries when getting close to maxmemory limit");
-// memory defragmented related flags
+
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
           "defragmentation");
@@ -582,6 +582,8 @@ void EngineShard::Heartbeat() {
   }
 
   ssize_t eviction_redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
+  size_t tiering_redline =
+      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
 
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
@@ -602,6 +604,10 @@ void EngineShard::Heartbeat() {
     // if our budget is below the limit
     if (db_slice_.memory_budget() < eviction_redline) {
       db_slice_.FreeMemWithEvictionStep(i, eviction_redline - db_slice_.memory_budget());
+    }
+
+    if (tiered_storage_ && UsedMemory() > tiering_redline) {
+      tiered_storage_->RunOffloading(i);
     }
   }
 
@@ -772,7 +778,7 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
  */
 
 uint64_t GetFsLimit() {
-  std::filesystem::path file_path(GetFlag(FLAGS_tiered_prefix));
+  std::filesystem::path file_path(GetFlag(FLAGS_tiered_prefix_v2));
   std::string dir_name_str = file_path.parent_path().string();
 
   if (dir_name_str.empty())

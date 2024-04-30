@@ -120,6 +120,9 @@ class CompactObj {
     // while ASCII2_ENC_BIT rounds it up. See DecodedLen implementation for more info.
     ASCII1_ENC_BIT = 8,
     ASCII2_ENC_BIT = 0x10,
+
+    // IO_PENDING is set when the tiered storage has issued an i/o request to save the value. It is
+    // cleared when the io request finishes or is cancelled.
     IO_PENDING = 0x20,
     STICKY = 0x40,
 
