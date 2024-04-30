@@ -218,8 +218,8 @@ bool TieredStorageV2::ShouldStash(const PrimeValue& pv) {
   return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize;
 }
 
-TieredStatsV2 TieredStorageV2::GetStats() const {
-  TieredStatsV2 stats{};
+TieredStats TieredStorageV2::GetStats() const {
+  TieredStats stats{};
 
   {  // ShardOpManager stats
     auto shard_stats = op_manager_->stats_;

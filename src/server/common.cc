@@ -257,8 +257,8 @@ bool ParseDouble(string_view src, double* value) {
 
 #define ADD(x) (x) += o.x
 
-TieredStatsV2& TieredStatsV2::operator+=(const TieredStatsV2& o) {
-  static_assert(sizeof(TieredStatsV2) == 80);
+TieredStats& TieredStats::operator+=(const TieredStats& o) {
+  static_assert(sizeof(TieredStats) == 80);
 
   ADD(total_stashes);
   ADD(total_fetches);

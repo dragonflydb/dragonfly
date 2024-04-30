@@ -1836,7 +1836,7 @@ Metrics ServerFamily::GetMetrics() const {
       result.shard_stats += shard->stats();
 
       if (shard->tiered_storage_v2()) {
-        result.tiered_stats_v2 += shard->tiered_storage_v2()->GetStats();
+        result.tiered_stats += shard->tiered_storage_v2()->GetStats();
       }
 
       if (shard->search_indices()) {
@@ -2048,19 +2048,19 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("TIERED", true)) {
-    append("tiered_total_stashes", m.tiered_stats_v2.total_stashes);
-    append("tiered_total_fetches", m.tiered_stats_v2.total_fetches);
-    append("tiered_total_cancels", m.tiered_stats_v2.total_cancels);
+    append("tiered_total_stashes", m.tiered_stats.total_stashes);
+    append("tiered_total_fetches", m.tiered_stats.total_fetches);
+    append("tiered_total_cancels", m.tiered_stats.total_cancels);
 
-    append("tiered_allocated_bytes", m.tiered_stats_v2.allocated_bytes);
-    append("tiered_capacity_bytes", m.tiered_stats_v2.capacity_bytes);
+    append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
+    append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
 
-    append("tiered_pending_read_cnt", m.tiered_stats_v2.pending_read_cnt);
-    append("tiered_pending_stash_cnt", m.tiered_stats_v2.pending_stash_cnt);
+    append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
+    append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
 
-    append("tiered_small_bins_cnt", m.tiered_stats_v2.small_bins_cnt);
-    append("tiered_small_bins_entries_cnt", m.tiered_stats_v2.small_bins_entries_cnt);
-    append("tiered_small_bins_filling_bytes", m.tiered_stats_v2.small_bins_filling_bytes);
+    append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
+    append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
+    append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
   }
 
   if (should_enter("PERSISTENCE", true)) {

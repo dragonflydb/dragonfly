@@ -80,7 +80,7 @@ struct Metrics {
   EngineShard::Stats shard_stats;  // per-shard stats
 
   facade::FacadeStats facade_stats;  // client stats and buffer sizes
-  TieredStatsV2 tiered_stats_v2;
+  TieredStats tiered_stats;
 
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running

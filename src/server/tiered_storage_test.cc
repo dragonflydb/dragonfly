@@ -63,7 +63,7 @@ TEST_F(TieredStorageV2Test, SimpleGetSet) {
   // Make sure all entries were stashed, except the one few not filling a small page
   size_t stashes = 0;
   ExpectConditionWithinTimeout([this, &stashes] {
-    stashes = GetMetrics().tiered_stats_v2.total_stashes;
+    stashes = GetMetrics().tiered_stats.total_stashes;
     return stashes >= kMax - 64 - 1;
   });
 

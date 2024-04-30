@@ -21,9 +21,10 @@ async def test_tiering_simple(async_client: aioredis.Redis):
 
     # Wait for all to be offloaded
     with async_timeout.timeout(1):
-        info = await async_client.info("TIERED_V2")
+        info = await async_client.info("TIERED")
+        print(info)
         while info["tiered_total_stashes"] != 100:
-            info = await async_client.info("TIERED_V2")
+            info = await async_client.info("TIERED")
             await asyncio.sleep(0.1)
         assert 3000 * 100 <= info["tiered_allocated_bytes"] <= 4096 * 100
 

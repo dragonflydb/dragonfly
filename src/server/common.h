@@ -59,7 +59,7 @@ struct LockTagOptions {
   static const LockTagOptions& instance();
 };
 
-struct TieredStatsV2 {
+struct TieredStats {
   size_t total_stashes = 0;
   size_t total_fetches = 0;
   size_t total_cancels = 0;
@@ -74,7 +74,7 @@ struct TieredStatsV2 {
   size_t small_bins_entries_cnt = 0;
   size_t small_bins_filling_bytes = 0;
 
-  TieredStatsV2& operator+=(const TieredStatsV2&);
+  TieredStats& operator+=(const TieredStats&);
 };
 
 struct SearchStats {
