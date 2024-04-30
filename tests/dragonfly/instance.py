@@ -170,6 +170,11 @@ class DflyInstance:
             else:
                 proc.terminate()
                 proc.communicate(timeout=15)
+                # if the return code is 0 it means normal termination
+                # if the return code is negative it means termination by signal
+                # if the return code is positive it means abnormal exit
+                if proc.returncode > 0:
+                    raise subprocess.TimeoutExpired
 
         except subprocess.TimeoutExpired:
             # We need to send SIGUSR1 to DF such that it prints the stacktrace
