@@ -1452,11 +1452,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   CHECK(!cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
-  if (dispatch_fb_.IsJoinable()) {  // can't move once it started
-    return false;
-  }
-
-  if (cc_->conn_closing) {
+  if (dispatch_fb_.IsJoinable() || cc_->conn_closing) {  // can't move once it started
     return false;
   }
 
