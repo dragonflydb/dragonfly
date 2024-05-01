@@ -13,6 +13,7 @@
 #include "facade/reply_builder.h"
 #include "server/channel_store.h"
 #include "server/detail/save_stages_controller.h"
+#include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
 #include "server/server_state.h"
@@ -49,7 +50,6 @@ class ClusterFamily;
 
 class ConnectionContext;
 class CommandRegistry;
-class DflyCmd;
 class Service;
 class ScriptMgr;
 
@@ -214,6 +214,10 @@ class ServerFamily {
 
   bool HasReplica() const;
   std::optional<Replica::Info> GetReplicaInfo() const;
+
+  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfo(ConnectionContext* cntx) const {
+    return dfly_cmd_->GetReplicaInfo(cntx);
+  }
 
   void OnClose(ConnectionContext* cntx);
 

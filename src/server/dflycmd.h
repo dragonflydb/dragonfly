@@ -149,6 +149,9 @@ class DflyCmd {
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
 
+  // Transition into cancelled state, run cleanup.
+  void CancelReplication(uint32_t sync_id, std::shared_ptr<ReplicaInfo> replica_info_ptr);
+
  private:
   // JOURNAL [START/STOP]
   // Start or stop journaling.
@@ -199,9 +202,6 @@ class DflyCmd {
 
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id);
-
-  // Transition into cancelled state, run cleanup.
-  void CancelReplication(uint32_t sync_id, std::shared_ptr<ReplicaInfo> replica_info_ptr);
 
   // Get ReplicaInfo by sync_id.
   std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id);
