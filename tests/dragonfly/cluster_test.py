@@ -955,31 +955,14 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
       ]
     """
 
-    # push config only to source node
-    await push_config(
-        migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
-        [c_nodes_admin[0]],
-    )
-
-    while "SYNC" not in await c_nodes_admin[0].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[1]
-    ):
-        logging.debug("source SLOT-MIGRATION-STATUS is not SYNC")
-        await asyncio.sleep(0.05)
-
-    while "SYNC" not in await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0]
-    ):
-        logging.debug("target SLOT-MIGRATION-STATUS is not SYNC")
-        await asyncio.sleep(0.05)
-
-    # migration shouldn't be finished until we set the same config to target node
-    await asyncio.sleep(0.5)
-
-    # push config to target node
+    # Push config to the target node first, so that it won't reject the migration which will lead to errors
     await push_config(
         migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
         [c_nodes_admin[1]],
+    )
+    await push_config(
+        migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
+        [c_nodes_admin[0]],
     )
 
     while "FINISHED" not in await c_nodes_admin[1].execute_command(
