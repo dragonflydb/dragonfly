@@ -88,9 +88,9 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* own
   acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
 }
 
-ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
+ConnectionContext::ConnectionContext(ConnectionContext* owner, Transaction* tx,
                                      facade::CapturingReplyBuilder* crb)
-    : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
+    : facade::ConnectionContext(nullptr, nullptr), transaction{tx}, parent_cntx_(owner) {
   acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
   if (tx) {  // If we have a carrier transaction, this context is used for squashing
     DCHECK(owner);
@@ -117,6 +117,13 @@ void ConnectionContext::ChangeMonitor(bool start) {
   shard_set->pool()->AwaitBrief(
       [start](unsigned, auto*) { ServerState::tlocal()->Monitors().NotifyChangeCount(start); });
   EnableMonitoring(start);
+}
+
+ConnectionState::ClientTracking& ConnectionContext::ClientTrackingInfo() {
+  if (parent_cntx_) {
+    return parent_cntx_->conn_state.tracking_info_;
+  }
+  return conn_state.tracking_info_;
 }
 
 vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add, bool to_reply,
@@ -265,4 +272,78 @@ void ConnectionState::ExecInfo::ClearWatched() {
   watched_existed = 0;
 }
 
+void ConnectionState::ClientTracking::SetClientTracking(bool is_on) {
+  tracking_enabled_ = is_on;
+}
+
+void ConnectionState::ClientTracking::TrackClientCaching() {
+  executing_command_ = true;
+}
+
+void ConnectionState::ClientTracking::UpdatePrevAndLastCommand() {
+  if (prev_command_ && multi_) {
+    return;
+  }
+  prev_command_ = std::exchange(executing_command_, false);
+}
+
+void ConnectionState::ClientTracking::SetOptin(bool optin) {
+  optin_ = optin;
+}
+
+void ConnectionState::ClientTracking::SetMulti(bool multi) {
+  multi_ = multi;
+}
+
+bool ConnectionState::ClientTracking::IsTrackingOn() const {
+  return tracking_enabled_;
+}
+
+bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
+  if (!IsTrackingOn()) {
+    return false;
+  }
+
+  return !optin_ || prev_command_;
+}
+
+OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::WeakRef& conn_ref,
+                           const ShardArgs& args) {
+  if (conn_ref.IsExpired()) {
+    DVLOG(2) << "Connection expired, exiting TrackKey function.";
+    return OpStatus::OK;
+  }
+
+  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
+           << " with thread ID: " << conn_ref.Thread();
+
+  auto& db_slice = slice_args.shard->db_slice();
+  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
+  for (auto key : args) {
+    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
+             << " into the tracking client set of key " << key;
+    db_slice.TrackKey(conn_ref, key);
+  }
+
+  return OpStatus::OK;
+}
+
+void ConnectionState::ClientTracking::Track(ConnectionContext* cntx, const CommandId* cid) {
+  auto& info = cntx->ClientTrackingInfo();
+  auto shards = cntx->transaction->GetActiveShards();
+  if ((cid->opt_mask() & CO::READONLY) && cid->IsTransactional() && info.ShouldTrackKeys()) {
+    if (cntx->parent_cntx_) {
+    }
+    auto conn = cntx->parent_cntx_ ? cntx->parent_cntx_->conn()->Borrow() : cntx->conn()->Borrow();
+    auto cb = [&, conn](unsigned i, auto* pb) {
+      if (shards.find(i) != shards.end()) {
+        auto* t = cntx->transaction;
+        CHECK(t);
+        auto* shard = EngineShard::tlocal();
+        OpTrackKeys(t->GetOpArgs(shard), conn, t->GetShardArgs(shard->shard_id()));
+      }
+    };
+    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+  }
+}
 }  // namespace dfly

@@ -4,6 +4,8 @@
 
 #include "server/main_service.h"
 
+#include "facade/resp_expr.h"
+
 #ifdef __FreeBSD__
 #include <pthread_np.h>
 #endif
@@ -1127,28 +1129,6 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-OpResult<void> OpTrackKeys(const OpArgs& op_args, const facade::Connection::WeakRef& conn_ref,
-                           const ShardArgs& args) {
-  if (conn_ref.IsExpired()) {
-    DVLOG(2) << "Connection expired, exiting TrackKey function.";
-    return OpStatus::OK;
-  }
-
-  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
-           << " with thread ID: " << conn_ref.Thread();
-
-  DbSlice& db_slice = op_args.shard->db_slice();
-
-  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
-  for (auto key : args) {
-    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
-             << " into the tracking client set of key " << key;
-    db_slice.TrackKey(conn_ref, key);
-  }
-
-  return OpStatus::OK;
-}
-
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -1206,6 +1186,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (stored_cmd.Cid()->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
+    dfly_cntx->conn_state.tracking_info_.UpdatePrevAndLastCommand();
     return cntx->SendSimpleString("QUEUED");
   }
 
@@ -1242,26 +1223,14 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   dfly_cntx->cid = cid;
+  std::string res;
+  for (auto arg : args_no_cmd) {
+    absl::StrAppend(&res, " ", facade::ToSV(arg));
+  }
 
   if (!InvokeCmd(cid, args_no_cmd, dfly_cntx)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
-  }
-
-  // if this is a read command, and client tracking has enabled,
-  // start tracking all the updates to the keys in this read command
-  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
-      dfly_cntx->conn()->ShouldTrackKeys() && cid->IsTransactional()) {
-    facade::Connection::WeakRef conn_ref = dfly_cntx->conn()->Borrow();
-    auto cb = [&, conn_ref](Transaction* t, EngineShard* shard) {
-      return OpTrackKeys(t->GetOpArgs(shard), conn_ref, t->GetShardArgs(shard->shard_id()));
-    };
-    dfly_cntx->transaction->Refurbish();
-    dfly_cntx->transaction->ScheduleSingleHopT(cb);
-  }
-
-  if (cntx->conn()) {
-    cntx->conn()->UpdatePrevAndLastCommand();
   }
 
   if (!dispatching_in_multi) {
@@ -1319,6 +1288,10 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   ServerState::tlocal()->RecordCmd();
 
+  if (cntx->transaction) {
+    cntx->transaction->SetConnectionContextAndInvokeCid(cntx, cid);
+  }
+
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(cntx, cid->name());
@@ -1330,6 +1303,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
   }
+
+  cntx->conn_state.tracking_info_.UpdatePrevAndLastCommand();
 
   // TODO: we should probably discard more commands here,
   // not just the blocking ones
@@ -1616,6 +1591,7 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("MULTI calls can not be nested");
   }
   cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_COLLECT;
+  cntx->conn_state.tracking_info_.SetMulti(true);
   // TODO: to protect against huge exec transactions.
   return cntx->SendOk();
 }
@@ -2022,6 +1998,7 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
   }
 
   MultiCleanup(cntx);
+  cntx->conn_state.tracking_info_.SetMulti(false);
   rb->SendOk();
 }
 
@@ -2167,6 +2144,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   // EXEC should not run if any of the watched keys expired.
   if (!exec_info.watched_keys.empty() && !CheckWatchedKeyExpiry(cntx, registry_)) {
     cntx->transaction->UnlockMulti();
+    cntx->conn_state.tracking_info_.SetMulti(false);
     return rb->SendNull();
   }
 
@@ -2218,6 +2196,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
+  cntx->conn_state.tracking_info_.SetMulti(false);
 
   cntx->cid = exec_cid_;
   VLOG(1) << "Exec completed";
@@ -2557,7 +2536,7 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 
   server_family_.OnClose(server_cntx);
 
-  cntx->conn()->SetClientTrackingSwitch(false);
+  conn_state.tracking_info_.SetClientTracking(false);
 }
 
 Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) const {

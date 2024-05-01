@@ -1391,25 +1391,30 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
     return;
 
   auto it = client_tracking_map_.find(key);
-  if (it != client_tracking_map_.end()) {
-    // notify all the clients.
-    auto& client_set = it->second;
-    auto cb = [key = std::string(key), client_set = std::move(client_set)](unsigned idx,
-                                                                           util::ProactorBase*) {
-      for (auto it = client_set.begin(); it != client_set.end(); ++it) {
-        if ((unsigned int)it->Thread() != idx)
-          continue;
-        facade::Connection* conn = it->Get();
-        if ((conn != nullptr) && conn->IsTrackingOn()) {
-          std::string key_str = {key.begin(), key.end()};
-          conn->SendInvalidationMessageAsync({key_str});
-        }
-      }
-    };
-    shard_set->pool()->DispatchBrief(std::move(cb));
-    // remove this key from the tracking table as the key no longer exists
-    client_tracking_map_.erase(key);
+  if (it == client_tracking_map_.end()) {
+    return;
   }
+  auto& client_set = it->second;
+  // notify all the clients.
+  auto cb = [key = std::string(key), client_set = std::move(client_set)](unsigned idx,
+                                                                         util::ProactorBase*) {
+    for (auto& client : client_set) {
+      if (client.IsExpired()) {
+        continue;
+      }
+      if (client.Thread() != idx) {
+        continue;
+      }
+      auto* conn = client.Get();
+      auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
+      if (cntx && cntx->ClientTrackingInfo().IsTrackingOn()) {
+        conn->SendInvalidationMessageAsync({key});
+      }
+    }
+  };
+  shard_set->pool()->DispatchBrief(std::move(cb));
+  // remove this key from the tracking table as the key no longer exists
+  client_tracking_map_.erase(key);
 }
 
 void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {

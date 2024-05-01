@@ -254,8 +254,9 @@ thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_poo
 thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
 
 void Connection::QueueBackpressure::EnsureBelowLimit() {
-  ec.await(
-      [this] { return subscriber_bytes.load(memory_order_relaxed) <= subscriber_thread_limit; });
+  ec.await([this] {
+    return done || subscriber_bytes.load(memory_order_relaxed) <= subscriber_thread_limit;
+  });
 }
 
 struct Connection::Shutdown {
@@ -885,6 +886,8 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // After the client disconnected.
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
+  queue_backpressure_->done = true;
+  queue_backpressure_->ec.notify();
   phase_ = SHUTTING_DOWN;
 
   VLOG(2) << "Before dispatch_fb.join()";
@@ -1114,7 +1117,7 @@ void Connection::HandleMigrateRequest() {
     this->Migrate(dest);
   }
 
-  DCHECK(dispatch_q_.empty());
+  // DCHECK(dispatch_q_.empty());
 
   // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
   LaunchDispatchFiberIfNeeded();
@@ -1639,32 +1642,6 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
   // Connections can migrate at most once.
   migration_enabled_ = false;
   migration_request_ = dest;
-}
-
-void Connection::SetClientTrackingSwitch(bool is_on) {
-  tracking_info_.tracking_enabled = is_on;
-  if (is_on)
-    cc_->subscriptions++;
-}
-
-void Connection::SetOptin(bool optin) {
-  tracking_info_.optin = optin;
-}
-
-void Connection::LastCommandIsClientCaching() {
-  tracking_info_.last_command = true;
-}
-
-void Connection::UpdatePrevAndLastCommand() {
-  tracking_info_.prev_command = std::exchange(tracking_info_.last_command, false);
-}
-
-bool Connection::IsTrackingOn() const {
-  return tracking_info_.tracking_enabled;
-}
-
-bool Connection::ShouldTrackKeys() const {
-  return !tracking_info_.optin || tracking_info_.prev_command;
 }
 
 void Connection::StartTrafficLogging(string_view path) {

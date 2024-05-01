@@ -838,13 +838,23 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
 // Runs in coordinator thread.
 void Transaction::Execute(RunnableType cb, bool conclude) {
+  auto tracking_wrap = [cb, this](Transaction* t, EngineShard* shard) -> RunnableResult {
+    auto res = cb(t, shard);
+    if (cntx_) {
+      cntx_->ClientTrackingInfo().Track(cntx_, invoke_cid_);
+    }
+    return res;
+  };
+
+  RunnableType wrapper = tracking_wrap;
+
   if (multi_ && multi_->role == SQUASHED_STUB) {
-    local_result_ = RunSquashedMultiCb(cb);
+    local_result_ = RunSquashedMultiCb(wrapper);
     return;
   }
 
   local_result_ = OpStatus::OK;
-  cb_ptr_ = &cb;
+  cb_ptr_ = &wrapper;
 
   if (IsAtomicMulti()) {
     multi_->concluding = conclude;

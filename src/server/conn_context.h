@@ -147,6 +147,78 @@ struct ConnectionState {
 
   size_t UsedMemory() const;
 
+  // Client tracking is a per-connection state machine that adheres to the requirements
+  // of the CLIENT TRACKING command. Note that the semantics described below are enforced
+  // by the tests in server_family_test. The rules are:
+  // 1. If CLIENT TRACKING is ON then each READ command must be tracked. Invalidation
+  //    messages are sent `only once`. Subsequent changes of the same key require the
+  //    client to re-read the key in order to receive the next invalidation message.
+  // 2. CLIENT TRACKING ON OPTIN turns on optional tracking. Read commands are not
+  //    tracked unless the client issues a CLIENT CACHING YES command which conditionally
+  //    allows the tracking of the command that follows CACHING YES). For example:
+  //    >> CLIENT TRACKING ON
+  //    >> CLIENT CACHING YES
+  //    >> GET foo  <--------------------- From now foo is being tracked
+  //    However:
+  //    >> CLIENT TRACKING ON
+  //    >> CLIENT CACHING YES
+  //    >> SET foo bar
+  //    >> GET foo <--------------------- is *NOT* tracked since GET does not succeed CACHING
+  //    Also, in the context of multi transactions, CLIENT CACHING YES is *STICKY*:
+  //    >> CLIENT TRACKING ON
+  //    >> CLIENT CACHING YES
+  //    >> MULTI
+  //    >>   GET foo
+  //    >>   SET foo bar
+  //    >>   GET brother_foo
+  //    >> EXEC
+  //    From this point onwards `foo` and `get` keys are tracked. Same aplies if CACHING YES
+  //    is used within the MULTI/EXEC block.
+  //
+  // The state machine implements the above rules. We need to track two commands at each time:
+  // 1. The command invoked previously.
+  // 2. The command that is invoked now (via InvokeCmd).
+  // Which is tracked by current_command_ and prev_command_ respectively. When CACHING YES
+  // is invoked the current_command_ is set to true which is later moved to the prev_command_
+  // when the next command is invoked. This is needed to keep track of the different rules
+  // described above. Stickiness is covered similarly by the multi/exec/discard command which
+  // when called sets the corresponding multi_ variable to true.
+  class ClientTracking {
+   public:
+    // Sets to true when CLIENT TRACKING is ON
+    void SetClientTracking(bool is_on);
+    // Enable tracking on the client
+    void TrackClientCaching();
+
+    void UpdatePrevAndLastCommand();
+    // Set if OPTIN subcommand is used in CLIENT TRACKING
+    void SetOptin(bool optin);
+    // When Multi command is invoked, it calls this to broadcast that we are on a multi
+    // transaction.
+    void SetMulti(bool multi);
+
+    // Check if the keys should be tracked. Result adheres to the state machine described above.
+    bool ShouldTrackKeys() const;
+    // Check only if CLIENT TRACKING is ON
+    bool IsTrackingOn() const;
+
+    // Iterates over the active shards of the transaction. If a key satisfies
+    // the tracking requirements, is is set for tracking.
+    void Track(ConnectionContext* cntx, const CommandId* cid);
+
+   private:
+    // a flag indicating whether the client has turned on client tracking.
+    bool tracking_enabled_ = false;
+    bool optin_ = false;
+    // remember if CLIENT CACHING TRUE was the last command
+    // true if the previous command invoked is CLIENT CACHING TRUE
+    bool prev_command_ = false;
+    // true if the currently executing command is CLIENT CACHING TRUE
+    bool executing_command_ = false;
+    // true if we are in a multi transaction
+    bool multi_ = false;
+  };
+
  public:
   DbIndex db_index = 0;
 
@@ -161,14 +233,14 @@ struct ConnectionState {
   std::optional<SquashingInfo> squashing_info;
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
+  ClientTracking tracking_info_;
 };
 
 class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, facade::Connection* owner);
 
-  ConnectionContext(const ConnectionContext* owner, Transaction* tx,
-                    facade::CapturingReplyBuilder* crb);
+  ConnectionContext(ConnectionContext* owner, Transaction* tx, facade::CapturingReplyBuilder* crb);
 
   struct DebugInfo {
     uint32_t shards_count = 0;
@@ -183,6 +255,10 @@ class ConnectionContext : public facade::ConnectionContext {
   // TODO: to introduce proper accessors.
   Transaction* transaction = nullptr;
   const CommandId* cid = nullptr;
+  ConnectionContext* parent_cntx_ = nullptr;
+
+  ConnectionState::ClientTracking& ClientTrackingInfo();
+
   ConnectionState conn_state;
 
   DbIndex db_index() const {

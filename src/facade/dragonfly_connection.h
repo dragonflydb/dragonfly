@@ -292,18 +292,6 @@ class Connection : public util::Connection {
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest);
 
-  void SetClientTrackingSwitch(bool is_on);
-
-  void LastCommandIsClientCaching();
-
-  void UpdatePrevAndLastCommand();
-
-  void SetOptin(bool optin);
-
-  bool IsTrackingOn() const;
-
-  bool ShouldTrackKeys() const;
-
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file combining requests from all the connections in
   // that thread. A noop if the thread is already logging.
@@ -341,6 +329,8 @@ class Connection : public util::Connection {
 
     size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
     size_t pipeline_cache_limit = 0;     // cached flag pipeline_cache_limit
+    // cancelation flag
+    bool done = false;
   };
 
  private:
@@ -451,19 +441,6 @@ class Connection : public util::Connection {
 
   // Per-thread queue backpressure structs.
   static thread_local QueueBackpressure tl_queue_backpressure_;
-
-  struct ClientTracking {
-    // a flag indicating whether the client has turned on client tracking.
-    bool tracking_enabled = false;
-    bool optin = false;
-    // remember if CLIENT CACHING TRUE was the last command
-    // true if prev command was CLIENT CACHING TRUE
-    bool prev_command = false;
-    // true if last command was CLIENT CACHING TRUE
-    bool last_command = false;
-  };
-
-  ClientTracking tracking_info_;
 
   bool skip_next_squashing_ = false;  // Forcefully skip next squashing
 

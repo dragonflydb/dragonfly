@@ -20,6 +20,7 @@
 #include "facade/op_status.h"
 #include "server/cluster/unique_slot_checker.h"
 #include "server/common.h"
+#include "server/conn_context.h"
 #include "server/journal/types.h"
 #include "server/table.h"
 #include "server/tx_base.h"
@@ -362,6 +363,17 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
+  void SetConnectionContextAndInvokeCid(ConnectionContext* cntx, const CommandId* cid) {
+    cntx_ = cntx;
+    invoke_cid_ = cid;
+  }
+
+  std::set<unsigned> GetActiveShards() {
+    std::set<unsigned> active_shards;
+    IterateActiveShards([&](const auto& sd, ShardId i) mutable { active_shards.insert(i); });
+    return active_shards;
+  }
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
@@ -635,6 +647,9 @@ class Transaction {
     size_t schedule_attempts = 0;
     ShardId coordinator_index = 0;
   } stats_;
+
+  ConnectionContext* cntx_{nullptr};
+  const CommandId* invoke_cid_{nullptr};
 
  private:
   struct TLTmpSpace {

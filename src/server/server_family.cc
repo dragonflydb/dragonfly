@@ -475,8 +475,11 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  cntx->conn()->SetClientTrackingSwitch(is_on);
-  cntx->conn()->SetOptin(optin);
+  if (is_on) {
+    ++cntx->subscriptions;
+  }
+  cntx->ClientTrackingInfo().SetClientTracking(is_on);
+  cntx->ClientTrackingInfo().SetOptin(optin);
   return cntx->SendOk();
 }
 
@@ -492,7 +495,7 @@ void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
 
   CmdArgParser parser{args};
   if (parser.Check("YES").IgnoreCase()) {
-    cntx->conn()->LastCommandIsClientCaching();
+    cntx->ClientTrackingInfo().TrackClientCaching();
   } else if (!parser.Check("NO").IgnoreCase()) {
     return cntx->SendError(kSyntaxErr);
   }
@@ -1526,7 +1529,7 @@ void ServerFamily::SendInvalidationMessages() const {
     facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
     if (fc) {
       ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
-      if (cntx->conn()->IsTrackingOn()) {
+      if (cntx->ClientTrackingInfo().IsTrackingOn()) {
         facade::Connection::InvalidationMessage x;
         x.invalidate_due_to_flush = true;
         cntx->conn()->SendInvalidationMessageAsync(x);
