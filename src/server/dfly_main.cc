@@ -288,7 +288,8 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   if (mc_port > 0 && !tcp_disabled) {
     auto listener = MakeListener(Protocol::MEMCACHE, &service);
-    acceptor->AddListener(mc_port, listener.release());
+    acceptor->AddListener(mc_port, listener.get());
+    listeners.push_back(listener.release());
   }
 
   service.Init(acceptor, listeners, opts);
