@@ -490,8 +490,8 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
 }
 
 // Helper for building replies for strings
-struct StringReplies {
-  StringReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
+struct GetReplies {
+  GetReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
     DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
   }
 
@@ -795,7 +795,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return StringReplies{cntx->reply_builder()}.Send(std::move(prev));
+    return GetReplies{cntx->reply_builder()}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OK) {
@@ -853,7 +853,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     return StringValue::Read(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 // With tieringV2 support
@@ -869,7 +869,7 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
     return value;
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 // With tieringV2 support
@@ -885,7 +885,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(status);
   }
 
-  StringReplies{cntx->reply_builder()}.Send(std::move(prev));
+  GetReplies{cntx->reply_builder()}.Send(std::move(prev));
 }
 
 void StringFamily::Append(CmdArgList args, ConnectionContext* cntx) {
@@ -1003,7 +1003,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     return value;
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
