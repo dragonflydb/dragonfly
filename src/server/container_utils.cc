@@ -40,14 +40,12 @@ OpResult<std::pair<DbSlice::ConstIterator, unsigned>> FindFirstReadOnly(const Db
                                                                         int req_obj_type) {
   DCHECK(!args.Empty());
 
-  unsigned i = 0;
-  for (string_view key : args) {
-    OpResult<DbSlice::ConstIterator> res = db_slice.FindReadOnly(cntx, key, req_obj_type);
+  for (auto it = args.begin(); it != args.end(); ++it) {
+    OpResult<DbSlice::ConstIterator> res = db_slice.FindReadOnly(cntx, *it, req_obj_type);
     if (res)
-      return make_pair(res.value(), i);
+      return make_pair(res.value(), unsigned(it.index()));
     if (res.status() != OpStatus::KEY_NOTFOUND)
       return res.status();
-    ++i;
   }
 
   VLOG(2) << "FindFirst not found";
@@ -119,8 +117,8 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   auto comp = [trans](const OpResult<FFResult>& lhs, const OpResult<FFResult>& rhs) {
     if (!lhs || !rhs)
       return lhs.ok();
-    size_t i1 = trans->ReverseArgIndex(std::get<ShardId>(*lhs), std::get<unsigned>(*lhs));
-    size_t i2 = trans->ReverseArgIndex(std::get<ShardId>(*rhs), std::get<unsigned>(*rhs));
+    size_t i1 = std::get<1>(*lhs);
+    size_t i2 = std::get<1>(*rhs);
     return i1 < i2;
   };
 
