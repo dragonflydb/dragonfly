@@ -3,7 +3,10 @@ FROM ghcr.io/romange/ubuntu-dev:20 as builder
 
 WORKDIR /build
 
-COPY . ./
+COPY ./Makefile ./CMakeLists.txt ./
+COPY src ./src
+COPY cmake ./cmake
+COPY helio ./helio
 
 RUN make release
 
@@ -12,7 +15,7 @@ RUN build-release/dragonfly --version
 RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/212b75144bbc06722fbd7661f651390dc47a43d1/su-exec.c && \
     gcc -Wall -O2 su-exec.c -o su-exec
 
-FROM ubuntu:20.04
+FROM debian:12-slim
 
 RUN --mount=type=tmpfs,target=/var/cache/apt \
     --mount=type=tmpfs,target=/var/lib/apt/lists \
