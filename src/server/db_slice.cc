@@ -982,7 +982,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   // If the value has a pending stash, cancel it before any modification are applied.
   // Note: we don't delete offloaded values before updates, because a read-modify operation (like
   // append) can be applied instead of a full overwrite. Deleting is reponsibility of the commands
-  if (it->second.HasIoPending()) {
+  if (it.IsOccupied() && it->second.HasIoPending()) {
     owner_->tiered_storage_v2()->CancelStash(db_ind, key, &it->second);
   }
 
