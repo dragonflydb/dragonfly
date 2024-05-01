@@ -116,12 +116,11 @@ std::optional<std::string> MaybeParsePassword(std::string_view command, bool has
     return std::string(command);
   }
 
-  char symbol = hashed ? '#' : '>';
-  if (command[0] != symbol) {
-    return {};
+  if (command[0] == '>' || (hashed && command[0] == '#')) {
+    return std::string(command.substr(1));
   }
 
-  return std::string(command.substr(1));
+  return {};
 }
 
 std::optional<bool> MaybeParseStatus(std::string_view command) {
@@ -231,7 +230,9 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
         return ErrorReply("Only one password is allowed");
       }
       req.password = std::move(pass);
-      req.is_hashed = hashed;
+      if (hashed && absl::StartsWith(facade::ToSV(arg), "#")) {
+        req.is_hashed = hashed;
+      }
       continue;
     }
 
