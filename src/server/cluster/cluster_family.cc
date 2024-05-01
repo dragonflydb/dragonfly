@@ -837,6 +837,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   bool found = false;
   for (const auto& known_migration : cluster_config()->GetIncomingMigrations()) {
+    // TODO: also compare slot ranges (in an order-agnostic way)
     if (known_migration.node_id == source_id) {
       found = true;
       break;
