@@ -57,11 +57,16 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
+    if (cancelled_) {
+      return;
+    }
+
     streamer_.Start(Sock());
   }
 
   void Cancel() {
     streamer_.Cancel();
+    cancelled_ = true;
   }
 
   void Finalize() {
@@ -74,6 +79,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
  private:
   RestoreStreamer streamer_;
+  bool cancelled_ = false;
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
@@ -94,8 +100,12 @@ void OutgoingMigration::Finish(bool is_error) {
     const auto new_state = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
     state_.store(new_state);
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-      if (const auto* shard = EngineShard::tlocal(); shard)
-        slot_migrations_[shard->shard_id()]->Cancel();
+      if (const auto* shard = EngineShard::tlocal(); shard) {
+        auto& migration = slot_migrations_[shard->shard_id()];
+        if (migration != nullptr) {
+          migration->Cancel();
+        }
+      }
     });
   }
 }
@@ -106,7 +116,12 @@ MigrationState OutgoingMigration::GetState() const {
 
 void OutgoingMigration::SyncFb() {
   // we retry starting migration until "cancel" is happened
-  while (state_.load() != MigrationState::C_FINISHED) {
+  while (true) {
+    auto state = state_.load();
+    if (state == MigrationState::C_FINISHED || state == MigrationState::C_ERROR) {
+      break;
+    }
+
     state_.store(MigrationState::C_CONNECTING);
     last_error_ = cntx_.GetError();
     cntx_.Reset(nullptr);

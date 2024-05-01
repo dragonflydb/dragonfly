@@ -835,6 +835,18 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
+  bool found = false;
+  for (const auto& known_migration : cluster_config()->GetIncomingMigrations()) {
+    if (known_migration.node_id == source_id) {
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    VLOG(1) << "Unrecognized incoming migration from " << source_id;
+    return cntx->SendError("Unrecognized incoming migration");
+  }
+
   VLOG(1) << "Init migration " << source_id;
 
   lock_guard lk(migration_mu_);
