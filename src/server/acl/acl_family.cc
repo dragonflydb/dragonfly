@@ -126,7 +126,7 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
 void AclFamily::EvictOpenConnectionsOnAllProactors(
     const absl::flat_hash_set<std::string_view>& users) {
   auto close_cb = [&users]([[maybe_unused]] size_t id, util::Connection* conn) {
-    DCHECK(conn);
+    CHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
     auto ctx = static_cast<ConnectionContext*>(connection->cntx());
     if (ctx && users.contains(ctx->authed_username)) {
@@ -142,7 +142,7 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(
 void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
     const UserRegistry::RegistryType& registry) {
   auto close_cb = [&registry]([[maybe_unused]] size_t id, util::Connection* conn) {
-    DCHECK(conn);
+    CHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
     auto ctx = static_cast<ConnectionContext*>(connection->cntx());
     if (ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username)) {
@@ -173,8 +173,9 @@ void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
     cntx->SendLong(0);
     return;
   }
-
+  VLOG(1) << "Evicting open acl connections";
   EvictOpenConnectionsOnAllProactors(users);
+  VLOG(1) << "Done evicting open acl connections";
   cntx->SendLong(users.size());
 }
 
