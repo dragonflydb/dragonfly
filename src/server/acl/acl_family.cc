@@ -87,7 +87,8 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user, u
   auto update_cb = [&]([[maybe_unused]] size_t id, util::Connection* conn) {
     DCHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
-    if (!connection->IsHttp() && connection->cntx()) {
+    if (connection->protocol() == facade::Protocol::REDIS && !connection->IsHttp() &&
+        connection->cntx()) {
       connection->SendAclUpdateAsync(
           facade::Connection::AclUpdateMessage{user, update_cat, update_commands, update_keys});
     }
