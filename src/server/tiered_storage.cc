@@ -32,6 +32,8 @@ using namespace util;
 
 using namespace tiering::literals;
 
+using KeyRef = tiering::OpManager::KeyRef;
+
 class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   friend class TieredStorageV2;
 
@@ -155,7 +157,7 @@ util::fb2::Future<string> TieredStorageV2::Read(DbIndex dbid, string_view key,
     future.Resolve(*value);
     return false;
   };
-  op_manager_->Enqueue(std::make_pair(dbid, key), value.GetExternalSlice(), std::move(cb));
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
   return future;
 }
 
@@ -169,7 +171,7 @@ util::fb2::Future<T> TieredStorageV2::Modify(DbIndex dbid, std::string_view key,
     future.Resolve(modf(value));
     return true;
   };
-  op_manager_->Enqueue(std::make_pair(dbid, key), value.GetExternalSlice(), std::move(cb));
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
   return future;
 }
 
@@ -186,8 +188,8 @@ void TieredStorageV2::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
 
   tiering::OpManager::EntryId id;
   error_code ec;
-  if (value->Size() >= kMinOccupancySize) {
-    id = std::make_pair(dbid, key);
+  if (value->Size() >= kMinOccupancySize) {  // large enough for own page
+    id = KeyRef(dbid, key);
     ec = op_manager_->Stash(id, value_sv);
   } else if (auto bin = bins_->Stash(dbid, key, value_sv); bin) {
     id = bin->first;
@@ -199,10 +201,10 @@ void TieredStorageV2::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
   }
 }
-void TieredStorageV2::Delete(DbIndex dbid, string_view key, PrimeValue* value) {
+void TieredStorageV2::Delete(PrimeValue* value) {
   DCHECK(value->IsExternal());
   tiering::DiskSegment segment = value->GetExternalSlice();
-  if (segment.length >= kMinOccupancySize) {
+  if (segment.length >= kMinOccupancySize) {  // large enough for own page
     op_manager_->Delete(segment);
   } else if (auto bin = bins_->Delete(segment); bin) {
     op_manager_->Delete(*bin);
@@ -212,8 +214,8 @@ void TieredStorageV2::Delete(DbIndex dbid, string_view key, PrimeValue* value) {
 
 void TieredStorageV2::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
   DCHECK(value->HasIoPending());
-  if (value->Size() >= kMinOccupancySize) {
-    op_manager_->Delete(std::make_pair(dbid, key));
+  if (value->Size() >= kMinOccupancySize) {  // large enough for own page
+    op_manager_->Delete(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
     op_manager_->Delete(*bin);
   }
