@@ -57,6 +57,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
+    // Check if migration was cancelled while we yielded so far.
     if (cancelled_) {
       return;
     }
