@@ -658,7 +658,6 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
       break;
     }
     ThisFiber::SleepFor(5ms);
-    // absl::SleepFor(absl::Milliseconds(10)); ??
   }
 
   EXPECT_LE(absl::Now(), deadline)

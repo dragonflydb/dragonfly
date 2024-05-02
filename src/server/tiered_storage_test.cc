@@ -125,6 +125,7 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   }
 
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+  ASSERT_EQ(GetMetrics().db_stats[0].tiered_entries, kNum);
 
   // Trigger re-fetch
   for (size_t i = 0; i < kNum; i++) {
