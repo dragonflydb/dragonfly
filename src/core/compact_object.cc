@@ -790,8 +790,8 @@ void CompactObj::SetString(std::string_view str) {
     }
   }
 
-  if (kUseSmallStrings && SmallString::CanAllocate()) {
-    if ((taglen_ == 0 && encoded.size() < SmallString::kMaxSize)) {
+  if (kUseSmallStrings && SmallString::CanAllocate(encoded.size())) {
+    if (taglen_ == 0) {
       SetMeta(SMALL_TAG, mask);
       tl.small_str_bytes += u_.small_str.Assign(encoded);
       return;

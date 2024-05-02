@@ -15,13 +15,13 @@ namespace dfly {
 // Please note that this class does not have automatic constructors and destructors, therefore
 // it requires explicit management.
 class SmallString {
-  static constexpr unsigned kPrefLen = 11;
+  static constexpr unsigned kPrefLen = 10;
+  static constexpr unsigned kMaxSize = (1 << 8) - 1;
 
  public:
-  static constexpr unsigned kMaxSize = (1 << 8) - 1;
   static void InitThreadLocal(void* heap);
   static size_t UsedThreadLocal();
-  static bool CanAllocate();
+  static bool CanAllocate(size_t size);
 
   void Reset() {
     size_ = 0;
@@ -57,7 +57,7 @@ class SmallString {
   char prefix_[kPrefLen];
 
   uint32_t small_ptr_;  // 32GB capacity because we ignore 3 lsb bits (i.e. x8).
-  uint8_t size_;        // uint8_t - total size (including prefix)
+  uint16_t size_;       // uint16_t - total size (including prefix)
 
 } __attribute__((packed));
 
