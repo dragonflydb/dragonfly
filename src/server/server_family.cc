@@ -1074,9 +1074,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
-  AppendMetricHeader("memory_fiberstack_vms_bytes", "virtual memory size used by all the fibers",
-                     MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("memory_fiberstack_vms_bytes", "", m.worker_fiber_stack_size,
+  AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
+                            "virtual memory size used by all the fibers", m.worker_fiber_stack_size,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
@@ -1108,16 +1107,20 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
 
   {
     string type_used_memory_metric;
+    bool added = false;
     AppendMetricHeader("type_used_memory", "Memory used per type", MetricType::GAUGE,
                        &type_used_memory_metric);
+
     for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
       size_t mem = total.memory_usage_by_type[type];
       if (mem > 0) {
         AppendMetricValue("type_used_memory", mem, {"type"}, {CompactObj::ObjTypeToString(type)},
                           &type_used_memory_metric);
+        added = true;
       }
     }
-    absl::StrAppend(&resp->body(), type_used_memory_metric);
+    if (added)
+      absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
 
   // Stats metrics
@@ -1155,22 +1158,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER,
                             &resp->body());
 
-  string db_key_metrics;
-  string db_key_expire_metrics;
-
-  AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
-  AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
-                     &db_key_expire_metrics);
-
-  for (size_t i = 0; i < m.db_stats.size(); ++i) {
-    AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
-                      &db_key_metrics);
-    AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
-                      &db_key_expire_metrics);
-  }
-
   // Command stats
-  {
+  if (!m.cmd_stats_map.empty()) {
     string command_metrics;
 
     AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
@@ -1211,16 +1200,37 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
 
-  AppendMetricHeader("transaction_widths_total", "Transaction counts by their widths",
-                     MetricType::COUNTER, &resp->body());
+  {
+    bool added = false;
+    string str;
+    AppendMetricHeader("transaction_widths_total", "Transaction counts by their widths",
+                       MetricType::COUNTER, &str);
 
-  for (unsigned width = 0; width < shard_set->size(); ++width) {
-    uint64_t count = m.coordinator_stats.tx_width_freq_arr[width];
+    for (unsigned width = 0; width < shard_set->size(); ++width) {
+      uint64_t count = m.coordinator_stats.tx_width_freq_arr[width];
 
-    if (count > 0) {
-      AppendMetricValue("transaction_widths_total", count, {"width"}, {StrCat("w", width + 1)},
-                        &resp->body());
+      if (count > 0) {
+        AppendMetricValue("transaction_widths_total", count, {"width"}, {StrCat("w", width + 1)},
+                          &str);
+        added = true;
+      }
     }
+    if (added)
+      absl::StrAppend(&resp->body(), str);
+  }
+
+  string db_key_metrics;
+  string db_key_expire_metrics;
+
+  AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
+  AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
+                     &db_key_expire_metrics);
+
+  for (size_t i = 0; i < m.db_stats.size(); ++i) {
+    AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
+                      &db_key_metrics);
+    AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
+                      &db_key_expire_metrics);
   }
 
   absl::StrAppend(&resp->body(), db_key_metrics);
