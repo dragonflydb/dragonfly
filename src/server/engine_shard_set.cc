@@ -778,7 +778,7 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
  */
 
 uint64_t GetFsLimit() {
-  std::filesystem::path file_path(GetFlag(FLAGS_tiered_prefix_v2));
+  std::filesystem::path file_path(GetFlag(FLAGS_tiered_prefix));
   std::string dir_name_str = file_path.parent_path().string();
 
   if (dir_name_str.empty())

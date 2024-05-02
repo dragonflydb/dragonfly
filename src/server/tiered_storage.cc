@@ -27,7 +27,7 @@
 ABSL_FLAG(bool, tiered_storage_cache_fetched, true,
           "WIP: Load results of offloaded reads to memory");
 
-ABSL_FLAG(size_t, tiered_storage_max_stashes, 10,
+ABSL_FLAG(size_t, tiered_storage_max_stashes, 50,
           "Maximum number of concurrent stash requests issued by background offload");
 
 namespace dfly {
@@ -55,7 +55,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       : tiering::OpManager{max_size}, ts_{ts}, db_slice_{db_slice} {
     cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_cache_fetched);
   }
-
 
   // Called before overriding value with segment
   void RecordAdded(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
@@ -301,13 +300,13 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   if (stash_limit <= 0)
     return;
 
-  auto cb = [this, &stash_limit](PrimeIterator it) {
+  auto cb = [this, dbid, &stash_limit](PrimeIterator it) {
     if (it->second.HasIoPending() || it->second.IsExternal())
       return;
 
     if (ShouldStash(it->second)) {
       std::string tmp;
-      Stash(it->first.GetSlice(&tmp), &it->second);
+      Stash(dbid, it->first.GetSlice(&tmp), &it->second);
 
       stash_limit--;
     }
@@ -315,10 +314,12 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   PrimeTable::Cursor start_cursor;
 
-  // Loop while we haven't traversed all entries or reached our limit
+  // Loop while we haven't traversed all entries or reached our stash io device limit.
+  // Keep number of iterations below resonable limit to keep datastore always responsive
+  size_t iterations = 0;
   do {
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
-  } while (offloading_cursor_ != start_cursor && stash_limit > 0);
+  } while (offloading_cursor_ != start_cursor && stash_limit > 0 && iterations++ < 100);
 }
 
 }  // namespace dfly

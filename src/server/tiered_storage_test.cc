@@ -114,10 +114,10 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
 
-  max_memory_limit = 300000;
-  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->TEST_EnableHeartbeat(); });
+  const int kNum = 500;
 
-  const int kNum = 1000;
+  max_memory_limit = kNum * 4096;
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->TEST_EnableHeartbeat(); });
 
   // Stash all values
   for (size_t i = 0; i < kNum; i++) {
@@ -125,6 +125,7 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   }
 
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+  ASSERT_EQ(GetMetrics().tiered_stats.total_stashes, kNum);
   ASSERT_EQ(GetMetrics().db_stats[0].tiered_entries, kNum);
 
   // Trigger re-fetch
