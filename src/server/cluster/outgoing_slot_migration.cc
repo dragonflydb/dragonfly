@@ -57,11 +57,17 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
+    // Check if migration was cancelled while we yielded so far.
+    if (cancelled_) {
+      return;
+    }
+
     streamer_.Start(Sock());
   }
 
   void Cancel() {
     streamer_.Cancel();
+    cancelled_ = true;
   }
 
   void Finalize() {
@@ -74,6 +80,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
  private:
   RestoreStreamer streamer_;
+  bool cancelled_ = false;
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
@@ -88,26 +95,42 @@ OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 }
 
+bool OutgoingMigration::ChangeState(MigrationState new_state) {
+  std::lock_guard lk(state_mu_);
+  if (state_ == MigrationState::C_FINISHED) {
+    return false;
+  }
+
+  state_ = new_state;
+  return true;
+}
+
 void OutgoingMigration::Finish(bool is_error) {
-  std::lock_guard lk(finish_mu_);
-  if (state_.load() != MigrationState::C_FINISHED) {
-    const auto new_state = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
-    state_.store(new_state);
+  const auto new_state = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
+  if (ChangeState(new_state)) {
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-      if (const auto* shard = EngineShard::tlocal(); shard)
-        slot_migrations_[shard->shard_id()]->Cancel();
+      if (const auto* shard = EngineShard::tlocal(); shard) {
+        auto& flow = slot_migrations_[shard->shard_id()];
+        if (flow != nullptr) {
+          flow->Cancel();
+        }
+      }
     });
   }
 }
 
 MigrationState OutgoingMigration::GetState() const {
-  return state_.load();
+  std::lock_guard lk(state_mu_);
+  return state_;
 }
 
 void OutgoingMigration::SyncFb() {
   // we retry starting migration until "cancel" is happened
-  while (state_.load() != MigrationState::C_FINISHED) {
-    state_.store(MigrationState::C_CONNECTING);
+  while (GetState() != MigrationState::C_FINISHED) {
+    if (!ChangeState(MigrationState::C_CONNECTING)) {
+      break;
+    }
+
     last_error_ = cntx_.GetError();
     cntx_.Reset(nullptr);
 
@@ -137,11 +160,15 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
-      cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
+      if (!CheckRespIsSimpleReply(kUnknownMigration)) {
+        cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
+      }
       continue;
     }
 
-    state_.store(MigrationState::C_SYNC);
+    if (!ChangeState(MigrationState::C_SYNC)) {
+      break;
+    }
 
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (auto* shard = EngineShard::tlocal(); shard) {
@@ -163,7 +190,7 @@ void OutgoingMigration::SyncFb() {
     VLOG(1) << "Migrations snapshot is finished";
 
     long attempt = 0;
-    while (state_.load() != MigrationState::C_FINISHED && !FinalyzeMigration(++attempt)) {
+    while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
       // process commands that were on pause and try again
       ThisFiber::SleepFor(500ms);
     }
@@ -174,7 +201,7 @@ void OutgoingMigration::SyncFb() {
   }
 }
 
-bool OutgoingMigration::FinalyzeMigration(long attempt) {
+bool OutgoingMigration::FinalizeMigration(long attempt) {
   // if it's not the 1st attempt and flows are work correctly we try to reconnect and ACK one more
   // time
   if (attempt > 1) {

@@ -814,8 +814,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
 void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
-    auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_id);
-    DCHECK(was_removed);
+    RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_id);
     VLOG(1) << "Migration was canceled from: " << m.node_id;
   }
 }
@@ -834,6 +833,17 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
+
+  const auto& incoming_migrations = cluster_config()->GetIncomingMigrations();
+  bool found = any_of(incoming_migrations.begin(), incoming_migrations.end(),
+                      [&](const MigrationInfo& info) {
+                        // TODO: also compare slot ranges (in an order-agnostic way)
+                        return info.node_id == source_id;
+                      });
+  if (!found) {
+    VLOG(1) << "Unrecognized incoming migration from " << source_id;
+    return cntx->SendError(OutgoingMigration::kUnknownMigration);
+  }
 
   VLOG(1) << "Init migration " << source_id;
 

@@ -77,11 +77,15 @@ async def push_config(config, admin_connections):
 
 
 async def wait_for_status(admin_client, node_id, status):
-    while status not in await admin_client.execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
-    ):
-        logging.debug("SLOT-MIGRATION-STATUS is not %s", status)
-        await asyncio.sleep(0.05)
+    while True:
+        response = await admin_client.execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
+        )
+        if status in response:
+            break
+        else:
+            logging.debug(f"SLOT-MIGRATION-STATUS is {response}, not {status}")
+            await asyncio.sleep(0.05)
 
 
 async def get_node_id(admin_connection):
@@ -955,42 +959,21 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
       ]
     """
 
-    # push config only to source node
+    # Push config to source node. Migration will not start until target node gets the config as well.
     await push_config(
         migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
         [c_nodes_admin[0]],
     )
+    await wait_for_status(c_nodes_admin[0], node_ids[1], "CONNECTING")
+    await wait_for_status(c_nodes_admin[1], node_ids[0], "NO_STATE")
 
-    while "SYNC" not in await c_nodes_admin[0].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[1]
-    ):
-        logging.debug("source SLOT-MIGRATION-STATUS is not SYNC")
-        await asyncio.sleep(0.05)
-
-    while "SYNC" not in await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0]
-    ):
-        logging.debug("target SLOT-MIGRATION-STATUS is not SYNC")
-        await asyncio.sleep(0.05)
-
-    # migration shouldn't be finished until we set the same config to target node
-    await asyncio.sleep(0.5)
-
-    # push config to target node
     await push_config(
         migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
         [c_nodes_admin[1]],
     )
 
-    while "FINISHED" not in await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0]
-    ):
-        logging.debug("SLOT-MIGRATION-STATUS is not FINISHED")
-        await asyncio.sleep(0.05)
-
-    assert await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == [
-        f"""out {node_ids[1]} FINISHED keys:0 errors: 0"""
-    ]
+    await wait_for_status(c_nodes_admin[1], node_ids[0], "FINISHED")
+    await wait_for_status(c_nodes_admin[0], node_ids[1], "FINISHED")
 
     # remove finished migrations
     await push_config(
@@ -1416,7 +1399,6 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     ]
     logging.debug("Migrating slots 6000-8000")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-    await asyncio.sleep(0.5)
 
     logging.debug("Cancelling migration")
     nodes[0].migrations = []
