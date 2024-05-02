@@ -19,7 +19,6 @@
 #include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
-#include "core/overloaded.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
