@@ -33,7 +33,8 @@ struct StringValue {
   bool IsEmpty() const;
 
   // Read string from prime value - either from memory or issue tiered storage read
-  static StringValue Read(std::string_view key, const PrimeValue& pv, EngineShard* es);
+  static StringValue Read(DbIndex dbid, std::string_view key, const PrimeValue& pv,
+                          EngineShard* es);
 
  private:
   std::variant<std::monostate, std::string, util::fb2::Future<std::string>> v_;

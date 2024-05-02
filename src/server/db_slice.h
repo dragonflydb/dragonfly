@@ -251,13 +251,15 @@ class DbSlice {
   }
 
   // returns absolute time of the expiration.
-  time_t ExpireTime(ExpConstIterator it) const {
+  time_t ExpireTime(const ExpConstIterator& it) const {
     return ExpireTime(it.GetInnerIt());
   }
-  time_t ExpireTime(ExpIterator it) const {
+
+  time_t ExpireTime(const ExpIterator& it) const {
     return ExpireTime(it.GetInnerIt());
   }
-  time_t ExpireTime(ExpireConstIterator it) const {
+
+  time_t ExpireTime(const ExpireConstIterator& it) const {
     return it.is_done() ? 0 : expire_base_[0] + it->second.duration_ms();
   }
 
@@ -468,7 +470,7 @@ class DbSlice {
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
  private:
-  void PreUpdate(DbIndex db_ind, Iterator it);
+  void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
 
   OpResult<AddOrFindResult> AddOrUpdateInternal(const Context& cntx, std::string_view key,
@@ -503,11 +505,12 @@ class DbSlice {
   };
 
   PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
+
+  OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key);
+
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
                                        UpdateStatsMode stats_mode) const;
-
-  OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key);
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type);
 
@@ -572,19 +575,19 @@ class DbSlice {
       client_tracking_map_;
 };
 
-inline bool IsValid(DbSlice::Iterator it) {
+inline bool IsValid(const DbSlice::Iterator& it) {
   return dfly::IsValid(it.GetInnerIt());
 }
 
-inline bool IsValid(DbSlice::ConstIterator it) {
+inline bool IsValid(const DbSlice::ConstIterator& it) {
   return dfly::IsValid(it.GetInnerIt());
 }
 
-inline bool IsValid(DbSlice::ExpIterator it) {
+inline bool IsValid(const DbSlice::ExpIterator& it) {
   return dfly::IsValid(it.GetInnerIt());
 }
 
-inline bool IsValid(DbSlice::ExpConstIterator it) {
+inline bool IsValid(const DbSlice::ExpConstIterator& it) {
   return dfly::IsValid(it.GetInnerIt());
 }
 
