@@ -183,11 +183,14 @@ class EngineShard {
 
   TxQueueInfo AnalyzeTxQueue() const;
 
+  void ForceDefrag();
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
     bool underutilized_found = false;
+    bool is_force_defrag = false;
 
     // check the current threshold and return true if
     // we need to do the defragmentation
