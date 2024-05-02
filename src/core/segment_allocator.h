@@ -30,6 +30,7 @@ class SegmentAllocator {
   using Ptr = uint32_t;
 
   SegmentAllocator(mi_heap_t* heap);
+  bool CanAllocate();
 
   uint8_t* Translate(Ptr p) const {
     return address_table_[p & kSegmentIdMask] + Offset(p);

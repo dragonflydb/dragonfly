@@ -25,4 +25,8 @@ void SegmentAllocator::ValidateMapSize() {
   }
 }
 
+bool SegmentAllocator::CanAllocate() {
+  return address_table_.size() < (1u << kSegmentIdBits);
+}
+
 }  // namespace dfly
