@@ -34,6 +34,14 @@ using namespace tiering::literals;
 
 using KeyRef = tiering::OpManager::KeyRef;
 
+namespace {
+
+bool OccupiesWholePages(size_t size) {
+  return size >= TieredStorageV2::kMinOccupancySize;
+}
+
+}  // anonymous namespace
+
 class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   friend class TieredStorageV2;
 
@@ -105,7 +113,7 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     SetInMemory(get<OpManager::KeyRef>(id), value, segment);
 
     // Delete value
-    if (segment.length >= TieredStorageV2::kMinOccupancySize) {
+    if (OccupiesWholePages(segment.length)) {
       Delete(segment);
     } else {
       if (auto bin_segment = ts_->bins_->Delete(segment); bin_segment)
@@ -188,7 +196,7 @@ void TieredStorageV2::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
 
   tiering::OpManager::EntryId id;
   error_code ec;
-  if (value->Size() >= kMinOccupancySize) {  // large enough for own page
+  if (OccupiesWholePages(value->Size())) {  // large enough for own page
     id = KeyRef(dbid, key);
     ec = op_manager_->Stash(id, value_sv);
   } else if (auto bin = bins_->Stash(dbid, key, value_sv); bin) {
@@ -204,7 +212,7 @@ void TieredStorageV2::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
 void TieredStorageV2::Delete(PrimeValue* value) {
   DCHECK(value->IsExternal());
   tiering::DiskSegment segment = value->GetExternalSlice();
-  if (segment.length >= kMinOccupancySize) {  // large enough for own page
+  if (OccupiesWholePages(segment.length)) {
     op_manager_->Delete(segment);
   } else if (auto bin = bins_->Delete(segment); bin) {
     op_manager_->Delete(*bin);
@@ -214,7 +222,7 @@ void TieredStorageV2::Delete(PrimeValue* value) {
 
 void TieredStorageV2::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
   DCHECK(value->HasIoPending());
-  if (value->Size() >= kMinOccupancySize) {  // large enough for own page
+  if (OccupiesWholePages(value->Size())) {
     op_manager_->Delete(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
     op_manager_->Delete(*bin);

@@ -27,12 +27,12 @@ class SmallBins;
 class TieredStorageV2 {
   class ShardOpManager;
 
+ public:
   const static size_t kMinValueSize = 64;
 
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
- public:
   explicit TieredStorageV2(DbSlice* db_slice);
   ~TieredStorageV2();  // drop forward declared unique_ptrs
 
