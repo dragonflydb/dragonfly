@@ -1399,10 +1399,7 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
   auto cb = [key = std::string(key), client_set = std::move(client_set)](unsigned idx,
                                                                          util::ProactorBase*) {
     for (auto& client : client_set) {
-      if (client.IsExpired()) {
-        continue;
-      }
-      if (client.Thread() != idx) {
+      if (client.IsExpired() || (client.Thread() != idx)) {
         continue;
       }
       auto* conn = client.Get();

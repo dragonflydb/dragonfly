@@ -1223,10 +1223,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   dfly_cntx->cid = cid;
-  std::string res;
-  for (auto arg : args_no_cmd) {
-    absl::StrAppend(&res, " ", facade::ToSV(arg));
-  }
 
   if (!InvokeCmd(cid, args_no_cmd, dfly_cntx)) {
     dfly_cntx->reply_builder()->SendError("Internal Error");
