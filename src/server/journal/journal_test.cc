@@ -11,58 +11,50 @@ using namespace std;
 using namespace util;
 
 namespace dfly {
+namespace journal {
+template <typename T> string ConCat(const T& list) {
+  string res;
+  for (auto arg : list) {
+    res += string_view{arg.data(), arg.size()};
+    res += ' ';
+  }
+  return res;
+}
+
+template <> string ConCat(const CmdArgList& list) {
+  string res;
+  for (auto arg : list) {
+    res += facade::ToSV(arg);
+    res += ' ';
+  }
+  return res;
+}
 
 struct EntryPayloadVisitor {
-  void operator()(const string_view sv) {
-    *out += sv;
-    *out += ' ';
-  }
-
-  void operator()(const CmdArgList list) {
-    for (auto arg : list) {
-      *out += facade::ToSV(arg);
-      *out += ' ';
-    }
-  }
-
-  void operator()(const ArgSlice slice) {
-    for (auto arg : slice) {
-      *out += arg;
-      *out += ' ';
-    }
-  }
-
-  template <typename C> void operator()(const pair<string_view, C> p) {
-    (*this)(p.first);
-    (*this)(p.second);
-  }
-
-  void operator()(monostate) {
+  void operator()(const Entry::Payload& p) {
+    out->append(p.cmd).append(" ");
+    *out += visit([this](const auto& args) { return ConCat(args); }, p.args);
   }
 
   string* out;
 };
 
 // Extract payload from entry in string form.
-std::string ExtractPayload(journal::ParsedEntry& entry) {
-  std::string out;
-  EntryPayloadVisitor visitor{&out};
+std::string ExtractPayload(ParsedEntry& entry) {
+  std::string out = ConCat(entry.cmd.cmd_args);
 
-  CmdArgList list{entry.cmd.cmd_args.data(), entry.cmd.cmd_args.size()};
-  visitor(list);
-
-  if (out.size() > 0 && out.back() == ' ')
+  if (out.size() > 0)
     out.pop_back();
 
   return out;
 }
 
-std::string ExtractPayload(journal::Entry& entry) {
+std::string ExtractPayload(Entry& entry) {
   std::string out;
   EntryPayloadVisitor visitor{&out};
-  std::visit(visitor, entry.payload);
+  visitor(entry.payload);
 
-  if (out.size() > 0 && out.back() == ' ')
+  if (out.size() > 0)
     out.pop_back();
 
   return out;
@@ -96,17 +88,18 @@ TEST(Journal, WriteRead) {
 
   auto slice = [v = &slices](auto... ss) { return StoreSlice(v, ss...); };
   auto list = [v = &lists](auto... ss) { return StoreList(v, ss...); };
+  using Payload = Entry::Payload;
 
-  std::vector<journal::Entry> test_entries = {
-      {0, journal::Op::COMMAND, 0, 2, nullopt, make_pair("MSET", slice("A", "1", "B", "2"))},
-      {0, journal::Op::COMMAND, 0, 2, nullopt, make_pair("MSET", slice("C", "3"))},
-      {1, journal::Op::COMMAND, 0, 2, nullopt, make_pair("DEL", list("A", "B"))},
-      {2, journal::Op::COMMAND, 1, 1, nullopt, make_pair("LPUSH", list("l", "v1", "v2"))},
-      {3, journal::Op::COMMAND, 0, 1, nullopt, make_pair("MSET", slice("D", "4"))},
-      {4, journal::Op::COMMAND, 1, 1, nullopt, make_pair("DEL", list("l1"))},
-      {5, journal::Op::COMMAND, 2, 1, nullopt, make_pair("DEL", list("E", "2"))},
-      {6, journal::Op::MULTI_COMMAND, 2, 1, nullopt, make_pair("SET", list("E", "2"))},
-      {6, journal::Op::EXEC, 2, 1, nullopt}};
+  std::vector<Entry> test_entries = {
+      {0, Op::COMMAND, 0, 2, nullopt, Payload("MSET", slice("A", "1", "B", "2"))},
+      {0, Op::COMMAND, 0, 2, nullopt, Payload("MSET", slice("C", "3"))},
+      {1, Op::COMMAND, 0, 2, nullopt, Payload("DEL", list("A", "B"))},
+      {2, Op::COMMAND, 1, 1, nullopt, Payload("LPUSH", list("l", "v1", "v2"))},
+      {3, Op::COMMAND, 0, 1, nullopt, Payload("MSET", slice("D", "4"))},
+      {4, Op::COMMAND, 1, 1, nullopt, Payload("DEL", list("l1"))},
+      {5, Op::COMMAND, 2, 1, nullopt, Payload("DEL", list("E", "2"))},
+      {6, Op::MULTI_COMMAND, 2, 1, nullopt, Payload("SET", list("E", "2"))},
+      {6, Op::EXEC, 2, 1, nullopt}};
 
   // Write all entries to a buffer.
   base::IoBuf buf;
@@ -134,6 +127,5 @@ TEST(Journal, WriteRead) {
   }
 }
 
+}  // namespace journal
 }  // namespace dfly
-
-// TODO: extend test.

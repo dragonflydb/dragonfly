@@ -39,6 +39,7 @@ using namespace std;
 using namespace util;
 using absl::GetFlag;
 using facade::OpStatus;
+using Payload = journal::Entry::Payload;
 
 namespace {
 
@@ -205,7 +206,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       ArgSlice delete_args(&key, 1);
       journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1, cluster::KeySlot(key),
-                           make_pair("DEL", delete_args), false);
+                           Payload("DEL", delete_args), false);
     }
 
     db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
@@ -1230,7 +1231,7 @@ finish:
     for (string_view key : keys_to_journal) {
       ArgSlice delete_args(&key, 1);
       journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, cluster::KeySlot(key),
-                           make_pair("DEL", delete_args), false);
+                           Payload("DEL", delete_args), false);
     }
   }
 

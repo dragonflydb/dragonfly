@@ -201,7 +201,7 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pv, uint64_t
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
 
-  WriteCommand(make_pair("RESTORE", ArgSlice{args}));
+  WriteCommand(journal::Entry::Payload("RESTORE", ArgSlice(args)));
 }
 
 void RestoreStreamer::WriteCommand(journal::Entry::Payload cmd_payload) {

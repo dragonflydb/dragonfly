@@ -35,30 +35,36 @@ void JournalWriter::Write(std::string_view sv) {
   sink_->Write(io::Buffer(sv));
 }
 
-template <typename C> void JournalWriter::Write(std::pair<std::string_view, C> args) {
-  auto [cmd, tail_args] = args;
-
-  Write(1 + tail_args.size());
-
-  size_t cmd_size = cmd.size();
-  for (auto v : tail_args) {
-    cmd_size += v.size();
+// element count, total size
+template <typename C> pair<size_t, size_t> SliceSize(const C& list) {
+  size_t res = 0, count = 0;
+  for (auto a : list) {
+    res += a.size();
+    ++count;
   }
-  Write(cmd_size);
-
-  Write(cmd);
-  for (auto v : tail_args) {
-    if constexpr (is_same_v<C, CmdArgList>)
-      Write(facade::ToSV(v));
-    else
-      Write(v);
-  }
+  return {count, res};
 }
 
-template void JournalWriter::Write(pair<string_view, CmdArgList>);
-template void JournalWriter::Write(pair<string_view, ArgSlice>);
+void JournalWriter::Write(const journal::Entry::Payload& payload) {
+  if (payload.cmd.empty())
+    return;
 
-void JournalWriter::Write(std::monostate) {
+  auto [num_elems, size] =
+      std::visit([](const auto& list) { return SliceSize(list); }, payload.args);
+
+  Write(1 + num_elems);
+
+  size_t cmd_size = payload.cmd.size() + size;
+  Write(cmd_size);
+  Write(payload.cmd);
+
+  std::visit(
+      [this](const auto& list) {
+        for (auto v : list) {
+          this->Write(v);
+        }
+      },
+      payload.args);
 }
 
 void JournalWriter::Write(const journal::Entry& entry) {
@@ -86,7 +92,8 @@ void JournalWriter::Write(const journal::Entry& entry) {
     case journal::Op::EXEC:
       Write(entry.txid);
       Write(entry.shard_cnt);
-      return std::visit([this](const auto& payload) { return Write(payload); }, entry.payload);
+      Write(entry.payload);
+      break;
     default:
       break;
   };

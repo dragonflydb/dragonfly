@@ -39,11 +39,19 @@ struct EntryBase {
 // Those are either control instructions or commands.
 struct Entry : public EntryBase {
   // Payload represents a non-owning view into a command executed on the shard.
-  using Payload =
-      std::variant<std::monostate,                           // No payload.
-                   std::pair<std::string_view, CmdArgList>,  // Parts of a full command.
-                   std::pair<std::string_view, ArgSlice>     // Command and its shard parts.
-                   >;
+  struct Payload {
+    std::string_view cmd;
+    std::variant<CmdArgList,  // Parts of a full command.
+                 ShardArgs    // Command and its shard parts.
+                 >
+        args;
+
+    Payload() = default;
+    Payload(std::string_view c, CmdArgList a) : cmd(c), args(a) {
+    }
+    Payload(std::string_view c, const ShardArgs& a) : cmd(c), args(a) {
+    }
+  };
 
   Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt,
         std::optional<cluster::SlotId> slot_id, Payload pl)
@@ -63,7 +71,7 @@ struct Entry : public EntryBase {
   }
 
   bool HasPayload() const {
-    return !std::holds_alternative<std::monostate>(payload);
+    return !payload.cmd.empty();
   }
 
   std::string ToString() const;

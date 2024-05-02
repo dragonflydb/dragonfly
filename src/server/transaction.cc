@@ -1422,9 +1422,9 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
 
   string_view cmd{cid_->name()};
   if (unique_shard_cnt_ == 1 || kv_args_.empty()) {
-    entry_payload = make_pair(cmd, full_args_);
+    entry_payload = journal::Entry::Payload(cmd, full_args_);
   } else {
-    entry_payload = make_pair(cmd, GetShardArgs(shard->shard_id()).AsSlice());
+    entry_payload = journal::Entry::Payload(cmd, GetShardArgs(shard->shard_id()).AsSlice());
   }
   LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false, true);
 }
