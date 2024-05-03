@@ -4,6 +4,7 @@
 #pragma once
 
 #include <memory>
+#include <utility>
 
 #include "server/tiering/common.h"
 #include "util/fibers/future.h"
@@ -26,12 +27,12 @@ class SmallBins;
 class TieredStorageV2 {
   class ShardOpManager;
 
+ public:
   const static size_t kMinValueSize = 64;
 
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
- public:
   explicit TieredStorageV2(DbSlice* db_slice, size_t max_size);
   ~TieredStorageV2();  // drop forward declared unique_ptrs
 
@@ -42,18 +43,21 @@ class TieredStorageV2 {
   void Close();
 
   // Read offloaded value. It must be of external type
-  util::fb2::Future<std::string> Read(std::string_view key, const PrimeValue& value);
+  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
   // Apply modification to offloaded value, return generic result from callback
   template <typename T>
-  util::fb2::Future<T> Modify(std::string_view key, const PrimeValue& value,
+  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
                               std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
-  void Stash(std::string_view key, PrimeValue* value);
+  void Stash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
-  // Delete value. Must either have pending IO or be offloaded (of external type)
-  void Delete(std::string_view key, PrimeValue* value);
+  // Delete value, must be offloaded (external type)
+  void Delete(PrimeValue* value);
+
+  // Cancel pending stash for value, must have IO_PENDING flag set
+  void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv);

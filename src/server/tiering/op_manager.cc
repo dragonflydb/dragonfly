@@ -19,7 +19,9 @@ namespace {
 
 OpManager::OwnedEntryId ToOwned(OpManager::EntryId id) {
   Overloaded convert{[](unsigned i) -> OpManager::OwnedEntryId { return i; },
-                     [](std::string_view s) -> OpManager::OwnedEntryId { return std::string{s}; }};
+                     [](std::pair<DbIndex, std::string_view> p) -> OpManager::OwnedEntryId {
+                       return std::make_pair(p.first, std::string{p.second});
+                     }};
   return std::visit(convert, id);
 }
 

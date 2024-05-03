@@ -387,7 +387,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 
   auto it = Iterator(res->it, StringOrView::FromView(key));
   auto exp_it = ExpIterator(res->exp_it, StringOrView::FromView(key));
-  PreUpdate(cntx.db_index, it);
+  PreUpdate(cntx.db_index, it, key);
   // PreUpdate() might have caused a deletion of `it`
   if (res->it.IsOccupied()) {
     return {{it, exp_it,
@@ -503,7 +503,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   if (res.ok()) {
     Iterator it(res->it, StringOrView::FromView(key));
     ExpIterator exp_it(res->exp_it, StringOrView::FromView(key));
-    PreUpdate(cntx.db_index, it);
+    PreUpdate(cntx.db_index, it, key);
     // PreUpdate() might have caused a deletion of `it`
     if (res->it.IsOccupied()) {
       return DbSlice::AddOrFindResult{
@@ -972,12 +972,19 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
   return true;
 }
 
-void DbSlice::PreUpdate(DbIndex db_ind, Iterator it) {
+void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   FiberAtomicGuard fg;
 
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
+  }
+
+  // If the value has a pending stash, cancel it before any modification are applied.
+  // Note: we don't delete offloaded values before updates, because a read-modify operation (like
+  // append) can be applied instead of a full overwrite. Deleting is reponsibility of the commands
+  if (it.IsOccupied() && it->second.HasIoPending()) {
+    owner_->tiered_storage_v2()->CancelStash(db_ind, key, &it->second);
   }
 
   it.GetInnerIt().SetVersion(NextVersion());
@@ -1432,7 +1439,7 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   const PrimeValue& pv = del_it->second;
 
   if (pv.IsExternal() && shard_owner()->tiered_storage_v2()) {
-    shard_owner()->tiered_storage_v2()->Delete(del_it.key(), &del_it->second);
+    shard_owner()->tiered_storage_v2()->Delete(&del_it->second);
   }
 
   size_t value_heap_size = pv.MallocUsed();

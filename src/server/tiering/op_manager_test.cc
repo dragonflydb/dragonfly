@@ -123,7 +123,7 @@ TEST_F(OpManagerTest, ReadSamePageDifferentOffsets) {
     // Issue lots of concurrent reads
     std::vector<util::fb2::Future<std::string>> futures;
     for (size_t i = 0; i < 100; i++)
-      futures.emplace_back(Read(absl::StrCat("k", i), number_segments[i]));
+      futures.emplace_back(Read(std::make_pair(0, absl::StrCat("k", i)), number_segments[i]));
 
     for (size_t i = 0; i < 100; i++)
       EXPECT_EQ(futures[i].Get(), std::to_string(i));

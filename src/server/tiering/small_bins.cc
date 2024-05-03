@@ -13,14 +13,16 @@
 #include "core/compact_object.h"
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
+#include "server/tx_base.h"
 
 namespace dfly::tiering {
 
-std::optional<SmallBins::FilledBin> SmallBins::Stash(std::string_view key, std::string_view value) {
+std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
+                                                     std::string_view value) {
   DCHECK_LT(value.size(), 2_KB);
 
   // See FlushBin() for format details
-  size_t value_bytes = 8 /* hash */ + value.size();
+  size_t value_bytes = 2 /* dbid */ + 8 /* hash */ + value.size();
 
   std::optional<FilledBin> filled_bin;
   if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
@@ -28,7 +30,7 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(std::string_view key, std::
   }
 
   current_bin_bytes_ += value_bytes;
-  current_bin_[key] = value;
+  current_bin_.emplace(std::make_pair(dbid, key), value);
   return filled_bin;
 }
 
@@ -45,9 +47,12 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   absl::little_endian::Store16(data, current_bin_.size());
   data += sizeof(uint16_t);
 
-  // Store all hashes, n * 8 bytes
+  // Store all dbids and hashes, n * 10 bytes
   for (const auto& [key, _] : current_bin_) {
-    absl::little_endian::Store64(data, CompactObj::HashCode(key));
+    absl::little_endian::Store16(data, key.first);
+    data += sizeof(DbIndex);
+
+    absl::little_endian::Store64(data, CompactObj::HashCode(key.second));
     data += sizeof(uint64_t);
   }
 
@@ -69,16 +74,18 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   auto key_list = pending_bins_.extract(id);
   DCHECK_GT(key_list.mapped().size(), 0u);
 
-  auto segment_list = SmallBins::KeySegmentList{key_list.mapped().begin(), key_list.mapped().end()};
-  for (auto& [_, sub_segment] : segment_list)
-    sub_segment.offset += segment.offset;
+  SmallBins::KeySegmentList list;
+  for (auto& [key, sub_segment] : key_list.mapped()) {
+    list.emplace_back(key.first, key.second,
+                      DiskSegment{segment.offset + sub_segment.offset, sub_segment.length});
+  }
 
-  stats_.total_stashed_entries += segment_list.size();
-  return segment_list;
+  stats_.total_stashed_entries += list.size();
+  return list;
 }
 
-std::vector<std::string> SmallBins::ReportStashAborted(BinId id) {
-  std::vector<std::string> out;
+std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId id) {
+  std::vector<std::pair<DbIndex, std::string>> out;
 
   auto node = pending_bins_.extract(id);
   auto& entries = node.mapped();
@@ -88,13 +95,15 @@ std::vector<std::string> SmallBins::ReportStashAborted(BinId id) {
   return out;
 }
 
-std::optional<SmallBins::BinId> SmallBins::Delete(std::string_view key) {
-  if (current_bin_.erase(key)) {
+std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view key) {
+  std::pair<DbIndex, std::string> key_pair{dbid, key};
+
+  if (current_bin_.erase(key_pair)) {
     return std::nullopt;
   }
 
   for (auto& [id, keys] : pending_bins_) {
-    if (keys.erase(key))
+    if (keys.erase(key_pair))
       return keys.empty() ? std::make_optional(id) : std::nullopt;
   }
   return std::nullopt;

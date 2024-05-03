@@ -482,17 +482,16 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();
     };
-    return {shard->tiered_storage_v2()->Modify<size_t>(key, pv, std::move(modf))};
+    return {shard->tiered_storage_v2()->Modify<size_t>(op_args.db_cntx.db_index, key, pv,
+                                                       std::move(modf))};
   } else {
-    if (pv.HasIoPending())
-      shard->tiered_storage_v2()->Delete(key, &pv);
     return {ExtendExisting(it_res->it, key, value, prepend)};
   }
 }
 
 // Helper for building replies for strings
-struct StringReplies {
-  StringReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
+struct GetReplies {
+  GetReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
     DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
   }
 
@@ -520,8 +519,9 @@ struct StringReplies {
 
 }  // namespace
 
-StringValue StringValue::Read(string_view key, const PrimeValue& pv, EngineShard* es) {
-  return pv.IsExternal() ? StringValue{es->tiered_storage_v2()->Read(key, pv)}
+StringValue StringValue::Read(DbIndex dbid, string_view key, const PrimeValue& pv,
+                              EngineShard* es) {
+  return pv.IsExternal() ? StringValue{es->tiered_storage_v2()->Read(dbid, key, pv)}
                          : StringValue(GetString(pv));
 }
 
@@ -611,8 +611,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
 
   // If value is external, mark it as deleted
-  if (prime_value.IsExternal() || prime_value.HasIoPending()) {
-    shard->tiered_storage_v2()->Delete(key, &prime_value);
+  if (prime_value.IsExternal()) {
+    shard->tiered_storage_v2()->Delete(&prime_value);
   }
 
   // overwrite existing entry.
@@ -653,7 +653,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
 
   // Currently we always offload
   if (auto* ts = shard->tiered_storage_v2(); ts && ts->ShouldStash(*pv)) {
-    ts->Stash(key, pv);
+    ts->Stash(op_args_.db_cntx.db_index, key, pv);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -692,7 +692,8 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  *params.prev_val = StringValue::Read(it.key(), it->second, EngineShard::tlocal());
+  *params.prev_val =
+      StringValue::Read(op_args_.db_cntx.db_index, it.key(), it->second, EngineShard::tlocal());
   return OpStatus::OK;
 }
 
@@ -794,7 +795,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return StringReplies{cntx->reply_builder()}.Send(std::move(prev));
+    return GetReplies{cntx->reply_builder()}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OK) {
@@ -849,10 +850,10 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     if (!it_res.ok())
       return it_res.status();
 
-    return StringValue::Read(key, (*it_res)->second, es);
+    return StringValue::Read(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 // With tieringV2 support
@@ -862,13 +863,13 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
     if (!it_res.ok())
       return it_res.status();
 
-    auto value = StringValue::Read(key, it_res->it->second, es);
+    auto value = StringValue::Read(tx->GetDbIndex(), key, it_res->it->second, es);
     it_res->post_updater.Run();  // Run manually before delete
     es->db_slice().Del(tx->GetDbIndex(), it_res->it);
     return value;
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 // With tieringV2 support
@@ -884,7 +885,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(status);
   }
 
-  StringReplies{cntx->reply_builder()}.Send(std::move(prev));
+  GetReplies{cntx->reply_builder()}.Send(std::move(prev));
 }
 
 void StringFamily::Append(CmdArgList args, ConnectionContext* cntx) {
@@ -895,6 +896,7 @@ void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
   ExtendGeneric(args, true, cntx);
 }
 
+// With tieringV2 support
 void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
@@ -979,7 +981,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     if (!it_res)
       return it_res.status();
 
-    StringValue value = StringValue::Read(key, it_res->it->second, shard);
+    StringValue value = StringValue::Read(t->GetDbIndex(), key, it_res->it->second, shard);
 
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
@@ -1001,7 +1003,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     return value;
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
