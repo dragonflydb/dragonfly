@@ -25,6 +25,8 @@ class DiskStorage {
   using ReadCb = std::function<void(std::string_view, std::error_code)>;
   using StashCb = std::function<void(DiskSegment, std::error_code)>;
 
+  explicit DiskStorage(size_t max_size);
+
   std::error_code Open(std::string_view path);
   void Close();
 
@@ -43,6 +45,7 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
+  size_t max_size_;
   IoMgr io_mgr_;
   ExternalAllocator alloc_;
 };

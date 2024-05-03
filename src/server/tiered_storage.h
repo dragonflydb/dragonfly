@@ -24,7 +24,7 @@ class SmallBins;
 };
 
 // Manages offloaded values
-class TieredStorageV2 {
+class TieredStorage {
   class ShardOpManager;
 
  public:
@@ -33,11 +33,11 @@ class TieredStorageV2 {
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
-  explicit TieredStorageV2(DbSlice* db_slice);
-  ~TieredStorageV2();  // drop forward declared unique_ptrs
+  explicit TieredStorage(DbSlice* db_slice, size_t max_size);
+  ~TieredStorage();  // drop forward declared unique_ptrs
 
-  TieredStorageV2(TieredStorageV2&& other) = delete;
-  TieredStorageV2(const TieredStorageV2& other) = delete;
+  TieredStorage(TieredStorage&& other) = delete;
+  TieredStorage(const TieredStorage& other) = delete;
 
   std::error_code Open(std::string_view path);
   void Close();
@@ -81,17 +81,17 @@ class DbSlice;
 namespace dfly {
 
 // Manages offloaded values
-class TieredStorageV2 {
+class TieredStorage {
   class ShardOpManager;
 
   const static size_t kMinValueSize = tiering::kPageSize / 2;
 
  public:
-  explicit TieredStorageV2(DbSlice* db_slice) {
+  explicit TieredStorage(DbSlice* db_slice) {
   }
 
-  TieredStorageV2(TieredStorageV2&& other) = delete;
-  TieredStorageV2(const TieredStorageV2& other) = delete;
+  TieredStorage(TieredStorage&& other) = delete;
+  TieredStorage(const TieredStorage& other) = delete;
 
   std::error_code Open(std::string_view path) {
   }

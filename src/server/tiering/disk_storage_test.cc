@@ -24,7 +24,7 @@ struct DiskStorageTest : public PoolTestBase {
   }
 
   void Open() {
-    storage_ = make_unique<DiskStorage>();
+    storage_ = make_unique<DiskStorage>(256_MB);
     storage_->Open("disk_storage_test_backing");
   }
 

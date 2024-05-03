@@ -25,14 +25,14 @@ using absl::StrCat;
 ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(string, tiered_prefix_v2);
-ABSL_DECLARE_FLAG(bool, tiered_storage_v2_cache_fetched);
+ABSL_DECLARE_FLAG(bool, tiered_storage_cache_fetched);
 ABSL_DECLARE_FLAG(bool, backing_file_direct);
 
 namespace dfly {
 
-class TieredStorageV2Test : public BaseFamilyTest {
+class TieredStorageTest : public BaseFamilyTest {
  protected:
-  TieredStorageV2Test() {
+  TieredStorageTest() {
     num_threads_ = 1;
   }
 
@@ -44,7 +44,7 @@ class TieredStorageV2Test : public BaseFamilyTest {
 
     absl::SetFlag(&FLAGS_tiered_prefix, "");
     absl::SetFlag(&FLAGS_tiered_prefix_v2, "/tmp/tiered_storage_test");
-    absl::SetFlag(&FLAGS_tiered_storage_v2_cache_fetched, true);
+    absl::SetFlag(&FLAGS_tiered_storage_cache_fetched, true);
     absl::SetFlag(&FLAGS_backing_file_direct, true);
 
     BaseFamilyTest::SetUp();
@@ -52,7 +52,7 @@ class TieredStorageV2Test : public BaseFamilyTest {
 };
 
 // Perform simple series of SET, GETSET and GET
-TEST_F(TieredStorageV2Test, SimpleGetSet) {
+TEST_F(TieredStorageTest, SimpleGetSet) {
   const int kMax = 5000;
 
   // Perform SETs
@@ -80,7 +80,7 @@ TEST_F(TieredStorageV2Test, SimpleGetSet) {
   }
 }
 
-TEST_F(TieredStorageV2Test, SimpleAppend) {
+TEST_F(TieredStorageTest, SimpleAppend) {
   // TODO: use pipelines to issue APPEND/GET/APPEND sequence,
   // currently it's covered only for op_manager_test
   for (size_t sleep : {0, 100, 500, 1000}) {
@@ -92,7 +92,7 @@ TEST_F(TieredStorageV2Test, SimpleAppend) {
   }
 }
 
-TEST_F(TieredStorageV2Test, MultiDb) {
+TEST_F(TieredStorageTest, MultiDb) {
   for (size_t i = 0; i < 10; i++) {
     Run({"SELECT", absl::StrCat(i)});
     Run({"SET", absl::StrCat("k", i), string(3000, char('A' + i))});
