@@ -69,6 +69,9 @@ ABSL_FLAG(string, shard_round_robin_prefix, "",
           "support up to a few hundreds of prefixes. Note: prefix is looked inside hash tags when "
           "cluster mode is enabled.");
 
+ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 10,
+          "Number of seconds between every defragmentation necessity check");
+
 namespace dfly {
 
 using namespace tiering::literals;
@@ -222,7 +225,6 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 
 void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
   cursor = cursor_val;
-  underutilized_found = false;
   // Once we're done with a db, jump to the next
   if (cursor == kCursorDoneState) {
     dbid++;
@@ -231,7 +233,6 @@ void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
 
 void EngineShard::DefragTaskState::ResetScanState() {
   dbid = cursor = 0u;
-  underutilized_found = false;
 }
 
 // This function checks 3 things:
@@ -241,9 +242,9 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
 bool EngineShard::DefragTaskState::CheckRequired() {
-  if (is_force_defrag || cursor > kCursorDoneState || underutilized_found) {
+  if (is_force_defrag || cursor > kCursorDoneState) {
     is_force_defrag = false;
-    VLOG(2) << "cursor: " << cursor << " and underutilized_found " << underutilized_found;
+    VLOG(2) << "cursor: " << cursor << " and is_force_defrag " << is_force_defrag;
     return true;
   }
 
@@ -255,12 +256,26 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   const std::size_t threshold_mem = memory_per_shard * GetFlag(FLAGS_mem_defrag_threshold);
   const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
 
+  uint64_t rss_bytes_per_shard = rss_mem_current.load(memory_order_relaxed) / shard_set->size();
+  if (threshold_mem >= rss_bytes_per_shard) {
+    return false;
+  }
+
+  auto now = std::chrono::steady_clock::now();
+  auto seconds_from_prev_check = chrono::duration_cast<chrono::seconds>(now - prev_check);
+
+  chrono::seconds check_interval(GetFlag(FLAGS_mem_defrag_check_sec_interval));
+  if (seconds_from_prev_check > check_interval) {
+    return false;
+  }
+
+  prev_check = now;
   ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
 
   if (threshold_mem < usage.commited &&
       usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
     VLOG(1) << "memory issue found for memory " << usage;
-    underutilized_found = true;
+    return true;
   }
 
   return false;
@@ -346,8 +361,7 @@ uint32_t EngineShard::DefragTask() {
   const auto shard_id = db_slice().shard_id();
 
   if (defrag_state_.CheckRequired()) {
-    VLOG(2) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor
-            << ", underutilzation found: " << defrag_state_.underutilized_found;
+    VLOG(2) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     if (DoDefrag()) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
