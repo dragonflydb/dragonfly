@@ -1,0 +1,25 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: memtier-benchmark
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      containers:
+        - name: memtier
+          image: redislabs/memtier_benchmark:latest
+          args:
+            - memtier_benchmark --pipeline=30 --key-maximum=10000 -c 10 -t 2 --requests=500000 --expiry-range=10-100 --reconnect-interval=10000 --distinct-client-seed --hide-histogram -s dragonfly-sample
+          command:
+            - sh # This is important! without it memtier cannot DIG the dragonfly SVC domain
+            - -c
+          resources:
+            requests:
+              cpu: "2"
+              memory: "500Mi"
+            limits:
+              cpu: "2"
+              memory: "500Mi"
+      restartPolicy: Never

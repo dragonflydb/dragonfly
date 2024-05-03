@@ -32,34 +32,8 @@ jobs:
                   limits:
                     cpu: "2"
                     memory: "2000Mi"
-            benchmark:
-              apiVersion: batch/v1
-              kind: Job
-              metadata:
-                name: memtier-benchmark
-              spec:
-                backoffLimit: 0
-                template:
-                  spec:
-                    containers:
-                      - name: memtier
-                        image: redislabs/memtier_benchmark:latest
-                        args:
-                          - memtier_benchmark --pipeline=30 --key-maximum=10000 -c 10 -t 2 --requests=500000 --expiry-range=10-100 --reconnect-interval=10000 --distinct-client-seed --hide-histogram -s dragonfly-sample
-                        command:
-                          - sh # This is important! without it memtier cannot DIG the dragonfly SVC domain
-                          - -c
-                        resources:
-                          requests:
-                            cpu: "2"
-                            memory: "500Mi"
-                          limits:
-                            cpu: "2"
-                            memory: "500Mi"
-                    restartPolicy: Never
 
     runs-on: ubuntu-latest
-    # runs-on: [self-hosted, linux, x86, benchmark]
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
@@ -80,12 +54,12 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.ROLE_TO_ASSUME }}
-          aws-region: us-east-1
+          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Update kube config
         run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
         env:
-          AWS_REGION: us-east-1
+          AWS_REGION: ${{ vars.AWS_REGION }}
           EKS_CLUSTER_NAME: dev
 
       - name: Scale up
@@ -93,7 +67,7 @@ jobs:
           set -x
           aws autoscaling set-desired-capacity --auto-scaling-group-name "$AUTOSCALING_GROUP" --desired-capacity "$DESIRED_CAPACITY"
         env:
-          AUTOSCALING_GROUP: eks-eks-dev-spot-16c7784f-98ec-b121-a362-55c060aaed3a
+          AUTOSCALING_GROUP: ${{ vars.DEV_EKS_AS_GROUP }}
           DESIRED_CAPACITY: 1
 
       - name: Install the CRD and Operator
@@ -117,7 +91,8 @@ jobs:
       - name: Run Benchmark
         shell: bash
         run: |
-          echo '${{ toJson(matrix.config.benchmark) }}' | kubectl apply -n ${{ steps.setup.outputs.namespace }} -f -
+          kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
+
           while true; do
             if kubectl wait --for=condition=complete --timeout=0 -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null; then
               job_result=0
@@ -141,7 +116,7 @@ jobs:
         run: |
           nohup kubectl port-forward -n ${{ steps.setup.outputs.namespace }} service/dragonfly-sample 6379:6379 &
           pip install -r tools/requirements.txt
-          python3 tools/benchmark_checks.py
+          python3 tools/benchmark/post_run_checks.py
 
       - name: Get Dragonfly logs
         if: always()
@@ -159,7 +134,7 @@ jobs:
           set -x
           aws autoscaling set-desired-capacity --auto-scaling-group-name "$AUTOSCALING_GROUP" --desired-capacity 0
         env:
-          AUTOSCALING_GROUP: eks-eks-dev-spot-16c7784f-98ec-b121-a362-55c060aaed3a
+          AUTOSCALING_GROUP: ${{ vars.DEV_EKS_AS_GROUP }}
 
       - name: Cleanup
         if: always()
