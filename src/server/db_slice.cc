@@ -984,7 +984,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   // Note: we don't delete offloaded values before updates, because a read-modify operation (like
   // append) can be applied instead of a full overwrite. Deleting is reponsibility of the commands
   if (it.IsOccupied() && it->second.HasIoPending()) {
-    owner_->tiered_storage_v2()->CancelStash(db_ind, key, &it->second);
+    owner_->tiered_storage()->CancelStash(db_ind, key, &it->second);
   }
 
   it.GetInnerIt().SetVersion(NextVersion());
@@ -1438,8 +1438,8 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   DbTableStats& stats = table->stats;
   const PrimeValue& pv = del_it->second;
 
-  if (pv.IsExternal() && shard_owner()->tiered_storage_v2()) {
-    shard_owner()->tiered_storage_v2()->Delete(&del_it->second);
+  if (pv.IsExternal() && shard_owner()->tiered_storage()) {
+    shard_owner()->tiered_storage()->Delete(&del_it->second);
   }
 
   size_t value_heap_size = pv.MallocUsed();

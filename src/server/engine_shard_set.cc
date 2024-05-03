@@ -373,9 +373,9 @@ EngineShard::~EngineShard() {
 void EngineShard::Shutdown() {
   queue_.Shutdown();
 
-  if (tiered_storage_v2_) {
-    tiered_storage_v2_->Close();
-    tiered_storage_v2_.reset();
+  if (tiered_storage_) {
+    tiered_storage_->Close();
+    tiered_storage_.reset();
   }
 
   fiber_periodic_done_.Notify();
@@ -411,8 +411,8 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
     LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
         << "Only ioring based backing storage is supported. Exiting...";
 
-    shard_->tiered_storage_v2_ = make_unique<TieredStorageV2>(&shard_->db_slice_, max_file_size);
-    error_code ec = shard_->tiered_storage_v2_->Open(backing_prefix);
+    shard_->tiered_storage_ = make_unique<TieredStorage>(&shard_->db_slice_, max_file_size);
+    error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();
   }
 

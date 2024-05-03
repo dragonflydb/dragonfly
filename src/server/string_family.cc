@@ -482,8 +482,8 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();
     };
-    return {shard->tiered_storage_v2()->Modify<size_t>(op_args.db_cntx.db_index, key, pv,
-                                                       std::move(modf))};
+    return {shard->tiered_storage()->Modify<size_t>(op_args.db_cntx.db_index, key, pv,
+                                                    std::move(modf))};
   } else {
     return {ExtendExisting(it_res->it, key, value, prepend)};
   }
@@ -521,7 +521,7 @@ struct GetReplies {
 
 StringValue StringValue::Read(DbIndex dbid, string_view key, const PrimeValue& pv,
                               EngineShard* es) {
-  return pv.IsExternal() ? StringValue{es->tiered_storage_v2()->Read(dbid, key, pv)}
+  return pv.IsExternal() ? StringValue{es->tiered_storage()->Read(dbid, key, pv)}
                          : StringValue(GetString(pv));
 }
 
@@ -612,7 +612,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
-    shard->tiered_storage_v2()->Delete(&prime_value);
+    shard->tiered_storage()->Delete(&prime_value);
   }
 
   // overwrite existing entry.
@@ -652,7 +652,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   EngineShard* shard = op_args_.shard;
 
   // Currently we always offload
-  if (auto* ts = shard->tiered_storage_v2(); ts && ts->ShouldStash(*pv)) {
+  if (auto* ts = shard->tiered_storage(); ts && ts->ShouldStash(*pv)) {
     ts->Stash(op_args_.db_cntx.db_index, key, pv);
   }
 

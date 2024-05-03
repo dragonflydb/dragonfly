@@ -1845,8 +1845,8 @@ Metrics ServerFamily::GetMetrics() const {
       MergeDbSliceStats(shard->db_slice().GetStats(), &result);
       result.shard_stats += shard->stats();
 
-      if (shard->tiered_storage_v2()) {
-        result.tiered_stats += shard->tiered_storage_v2()->GetStats();
+      if (shard->tiered_storage()) {
+        result.tiered_stats += shard->tiered_storage()->GetStats();
       }
 
       if (shard->search_indices()) {

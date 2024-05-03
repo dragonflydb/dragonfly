@@ -21,6 +21,9 @@ using namespace std;
 using namespace std::string_literals;
 
 struct OpManagerTest : PoolTestBase, OpManager {
+  OpManagerTest() : OpManager(256_MB) {
+  }
+
   void Open() {
     EXPECT_FALSE(OpManager::Open("op_manager_test_backing"));
   }
