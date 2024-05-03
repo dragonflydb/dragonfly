@@ -46,7 +46,7 @@ jobs:
         id: setup
         run: echo "::set-output name=namespace::benchmark-$(date +"%Y-%m-%d-%s")"
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
 
