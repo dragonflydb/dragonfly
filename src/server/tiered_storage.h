@@ -32,7 +32,7 @@ class TieredStorageV2 {
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
  public:
-  explicit TieredStorageV2(DbSlice* db_slice);
+  explicit TieredStorageV2(DbSlice* db_slice, size_t max_size);
   ~TieredStorageV2();  // drop forward declared unique_ptrs
 
   TieredStorageV2(TieredStorageV2&& other) = delete;

@@ -6,6 +6,7 @@
 
 #include <mimalloc.h>
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -36,7 +37,8 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   friend class TieredStorageV2;
 
  public:
-  ShardOpManager(TieredStorageV2* ts, DbSlice* db_slice) : ts_{ts}, db_slice_{db_slice} {
+  ShardOpManager(TieredStorageV2* ts, DbSlice* db_slice, size_t max_size)
+      : tiering::OpManager{max_size}, ts_{ts}, db_slice_{db_slice} {
     cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_v2_cache_fetched);
   }
 
@@ -130,8 +132,8 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
   DbSlice* db_slice_;
 };
 
-TieredStorageV2::TieredStorageV2(DbSlice* db_slice)
-    : op_manager_{make_unique<ShardOpManager>(this, db_slice)},
+TieredStorageV2::TieredStorageV2(DbSlice* db_slice, size_t max_size)
+    : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
 }
 

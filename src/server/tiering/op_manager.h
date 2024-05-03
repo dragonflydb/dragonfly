@@ -35,7 +35,7 @@ class OpManager {
   // Callback for post-read completion. Returns whether the value was modified
   using ReadCallback = std::function<bool(std::string*)>;
 
-  OpManager() = default;
+  explicit OpManager(size_t max_size);
 
   // Open file with underlying disk storage, must be called before use
   std::error_code Open(std::string_view file);

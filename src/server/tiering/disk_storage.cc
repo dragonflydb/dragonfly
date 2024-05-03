@@ -4,6 +4,8 @@
 
 #include "server/tiering/disk_storage.h"
 
+#include <system_error>
+
 #include "base/flags.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
@@ -58,6 +60,9 @@ void ReturnBuf(UringBuf buf) {
 
 }  // anonymous namespace
 
+DiskStorage::DiskStorage(size_t max_size) : max_size_(max_size) {
+}
+
 std::error_code DiskStorage::Open(std::string_view path) {
   RETURN_ON_ERR(io_mgr_.Open(path));
   alloc_.AddStorage(0, io_mgr_.Span());
@@ -106,6 +111,10 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
   if (offset < 0) {
     size_t start = io_mgr_.Span();
     size_t grow_size = -offset;
+
+    if (alloc_.capacity() + grow_size >= max_size_)
+      return std::make_error_code(std::errc::no_space_on_device);
+
     RETURN_ON_ERR(io_mgr_.Grow(grow_size));
 
     alloc_.AddStorage(start, grow_size);

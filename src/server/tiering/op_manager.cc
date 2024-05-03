@@ -10,6 +10,7 @@
 #include "core/overloaded.h"
 #include "io/io.h"
 #include "server/tiering/common.h"
+#include "server/tiering/disk_storage.h"
 #include "util/fibers/future.h"
 
 namespace dfly::tiering {
@@ -27,6 +28,9 @@ OpManager::EntryId Borrowed(const OpManager::OwnedEntryId& id) {
 }
 
 }  // namespace
+
+OpManager::OpManager(size_t max_size) : storage_{max_size} {
+}
 
 std::error_code OpManager::Open(std::string_view file) {
   return storage_.Open(file);

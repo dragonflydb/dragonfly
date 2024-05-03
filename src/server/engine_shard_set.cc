@@ -6,6 +6,8 @@
 
 #include <absl/strings/match.h>
 
+#include <cerrno>
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -409,7 +411,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
     LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
         << "Only ioring based backing storage is supported. Exiting...";
 
-    shard_->tiered_storage_v2_ = make_unique<TieredStorageV2>(&shard_->db_slice_);
+    shard_->tiered_storage_v2_ = make_unique<TieredStorageV2>(&shard_->db_slice_, max_file_size);
     error_code ec = shard_->tiered_storage_v2_->Open(backing_prefix);
     CHECK(!ec) << ec.message();
   }
@@ -775,13 +777,48 @@ uint64_t GetFsLimit() {
   std::filesystem::path file_path(GetFlag(FLAGS_tiered_prefix));
   std::string dir_name_str = file_path.parent_path().string();
 
+  if (dir_name_str.empty())
+    dir_name_str = ".";
+
   struct statvfs stat;
   if (statvfs(dir_name_str.c_str(), &stat) == 0) {
     uint64_t limit = stat.f_frsize * stat.f_blocks;
     return limit;
   }
-  LOG(WARNING) << "Error getting filesystem information";
+  LOG(WARNING) << "Error getting filesystem information " << errno;
   return 0;
+}
+
+size_t GetTieredFileLimit(size_t threads) {
+  string file_prefix = GetFlag(FLAGS_tiered_prefix);
+  if (file_prefix.empty())
+    return 0;
+
+  size_t max_shard_file_size = 0;
+
+  size_t max_file_size = absl::GetFlag(FLAGS_tiered_max_file_size).value;
+  size_t max_file_size_limit = GetFsLimit();
+  if (max_file_size == 0) {
+    LOG(INFO) << "max_file_size has not been specified. Deciding myself....";
+    max_file_size = (max_file_size_limit * 0.8);
+  } else {
+    if (max_file_size_limit < max_file_size) {
+      LOG(WARNING) << "Got max file size " << HumanReadableNumBytes(max_file_size)
+                   << ", however only " << HumanReadableNumBytes(max_file_size_limit)
+                   << " disk space was found.";
+    }
+  }
+
+  max_shard_file_size = max_file_size / threads;
+  if (max_shard_file_size < 256_MB) {
+    LOG(ERROR) << "Max tiering file size is too small. Setting: "
+               << HumanReadableNumBytes(max_file_size) << " Required at least "
+               << HumanReadableNumBytes(256_MB * threads) << ". Exiting..";
+    exit(1);
+  }
+  LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
+
+  return max_shard_file_size;
 }
 
 void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
@@ -789,31 +826,9 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   cached_stats.resize(sz);
   shard_queue_.resize(sz);
 
-  string file_prefix = GetFlag(FLAGS_tiered_prefix);
-  size_t max_shard_file_size = 0;
-  if (!file_prefix.empty()) {
-    size_t max_file_size = absl::GetFlag(FLAGS_tiered_max_file_size).value;
-    size_t max_file_size_limit = GetFsLimit();
-    if (max_file_size == 0) {
-      LOG(INFO) << "max_file_size has not been specified. Deciding myself....";
-      max_file_size = (max_file_size_limit * 0.8);
-    } else {
-      if (max_file_size_limit < max_file_size) {
-        LOG(WARNING) << "Got max file size " << HumanReadableNumBytes(max_file_size)
-                     << ", however only " << HumanReadableNumBytes(max_file_size_limit)
-                     << " disk space was found.";
-      }
-    }
-    max_shard_file_size = max_file_size / shard_queue_.size();
-    if (max_shard_file_size < 256_MB) {
-      LOG(ERROR) << "Max tiering file size is too small. Setting: "
-                 << HumanReadableNumBytes(max_file_size) << " Required at least "
-                 << HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
-      exit(1);
-    }
+  size_t max_shard_file_size = GetTieredFileLimit(sz);
+  if (max_shard_file_size > 0)
     is_tiering_enabled_ = true;
-    LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
-  }
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
