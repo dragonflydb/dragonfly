@@ -253,27 +253,25 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return false;
   }
 
-  const std::size_t threshold_mem = memory_per_shard * GetFlag(FLAGS_mem_defrag_threshold);
-  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
-
-  uint64_t rss_bytes_per_shard = rss_mem_current.load(memory_order_relaxed) / shard_set->size();
-  if (threshold_mem >= rss_bytes_per_shard) {
+  const std::size_t global_threshold = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
     return false;
   }
 
-  auto now = std::chrono::steady_clock::now();
-  auto seconds_from_prev_check = chrono::duration_cast<chrono::seconds>(now - prev_check);
+  const auto now = std::chrono::steady_clock::now();
+  const auto seconds_from_prev_check =
+      chrono::duration_cast<chrono::seconds>(now - prev_check).count();
+  const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
-  chrono::seconds check_interval(GetFlag(FLAGS_mem_defrag_check_sec_interval));
-  if (seconds_from_prev_check > check_interval) {
+  if (seconds_from_prev_check < mem_defrag_interval) {
     return false;
   }
-
   prev_check = now;
+
   ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
 
-  if (threshold_mem < usage.commited &&
-      usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
+  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
+  if (usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
     VLOG(1) << "memory issue found for memory " << usage;
     return true;
   }

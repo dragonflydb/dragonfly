@@ -189,7 +189,8 @@ class EngineShard {
   struct DefragTaskState {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
-    std::chrono::time_point<std::chrono::steady_clock> prev_check;
+    std::chrono::time_point<std::chrono::steady_clock> prev_check =
+        std::chrono::steady_clock::now();
     bool is_force_defrag = false;
 
     // check the current threshold and return true if
