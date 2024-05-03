@@ -44,7 +44,7 @@ jobs:
     steps:
       - name: Setup namespace name
         id: setup
-        run: echo "::set-output name=namespace::benchmark-$(date +"%Y-%m-%d-%s")"
+        run: echo "namespace=benchmark-$(date +"%Y-%m-%d-%s")" >> $GITHUB_OUTPUT
 
       - uses: actions/checkout@v4
         with:
