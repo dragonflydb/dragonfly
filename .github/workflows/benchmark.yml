@@ -115,18 +115,27 @@ jobs:
       - name: Server checks
         run: |
           nohup kubectl port-forward -n ${{ steps.setup.outputs.namespace }} service/dragonfly-sample 6379:6379 &
+
           pip install -r tools/requirements.txt
           python3 tools/benchmark/post_run_checks.py
 
       - name: Get Dragonfly logs
+        uses: nick-fields/retry@v3
         if: always()
-        run: |
-          kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-0
+        with:
+          timeout_minutes: 1
+          max_attempts: 3
+          command: |
+            kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-0
 
       - name: Get Dragonfly replica logs
+        uses: nick-fields/retry@v3
         if: always()
-        run: |
-          kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-1
+        with:
+          timeout_minutes: 1
+          max_attempts: 3
+          command: |
+            kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-1
 
       - name: Scale down to zero
         if: always()
