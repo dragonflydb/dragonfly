@@ -1860,6 +1860,7 @@ Metrics ServerFamily::GetMetrics() const {
     }
 
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
+    result.max_clients_reached_count += Listener::TLSMaxClientsReachedCount();
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };
