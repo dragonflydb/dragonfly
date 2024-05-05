@@ -107,6 +107,8 @@ struct Metrics {
   uint32_t worker_fiber_count = 0;
   size_t worker_fiber_stack_size = 0;
 
+  InterpreterManager::Stats lua_stats;
+
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
   std::vector<ReplicaRoleInfo> replication_metrics;

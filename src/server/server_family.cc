@@ -1135,6 +1135,12 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("keyspace_mutations_total", "", m.events.mutations, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("lua_interpreter_cnt", "", m.lua_stats.interpreter_cnt,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes, MetricType::GAUGE,
+                            &resp->body());
+  AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
+                            &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
@@ -1867,6 +1873,8 @@ Metrics ServerFamily::GetMetrics() const {
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
     result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
 
+    result.lua_stats += InterpreterManager::tl_stats();
+
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };
 
@@ -1969,6 +1977,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
 
+    append("used_memory_lua", m.lua_stats.used_bytes);
+
     // Blob - all these cases where the key/objects are represented by a single blob allocated on
     // heap. For example, strings or intsets. members of lists, sets, zsets etc
     // are not accounted for to avoid complex computations. In some cases, when number of members
@@ -2061,6 +2071,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
     append("ram_hits", m.events.ram_hits);
     append("ram_misses", m.events.ram_misses);
+
+    append("lua_interpreter_cnt", m.lua_stats.interpreter_cnt);
+    append("lua_blocked", m.lua_stats.blocked_cnt);
   }
 
   if (should_enter("TIERED", true)) {
