@@ -1137,7 +1137,7 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("lua_interpreter_cnt", "", m.lua_stats.interpreter_cnt,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("lua_bytes", "", m.lua_stats.used_bytes, MetricType::GAUGE,
+  AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes, MetricType::GAUGE,
                             &resp->body());
   AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
                             &resp->body());
@@ -1971,6 +1971,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
 
+    append("used_memory_lua", m.lua_stats.used_bytes);
+
     // Blob - all these cases where the key/objects are represented by a single blob allocated on
     // heap. For example, strings or intsets. members of lists, sets, zsets etc
     // are not accounted for to avoid complex computations. In some cases, when number of members
@@ -2065,7 +2067,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("ram_misses", m.events.ram_misses);
 
     append("lua_interpreter_cnt", m.lua_stats.interpreter_cnt);
-    append("lua_bytes", m.lua_stats.used_bytes);
     append("lua_blocked", m.lua_stats.blocked_cnt);
   }
 
