@@ -1136,10 +1136,10 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("keyspace_mutations_total", "", m.events.mutations, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("lua_interpreter_cnt", "", m.lua_stats.interpreter_cnt,
-                            MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("lua_bytes", "", m.lua_stats.used_bytes, MetricType::COUNTER,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("lua_bytes", "", m.lua_stats.used_bytes, MetricType::GAUGE,
                             &resp->body());
-  AppendMetricWithoutLabels("lua_blocked_usec", "", m.lua_stats.blocked_usec, MetricType::COUNTER,
+  AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
                             &resp->body());
 
   // Net metrics
@@ -2066,7 +2066,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
     append("lua_interpreter_cnt", m.lua_stats.interpreter_cnt);
     append("lua_bytes", m.lua_stats.used_bytes);
-    append("lua_blocked_usec", m.lua_stats.blocked_usec);
+    append("lua_blocked", m.lua_stats.blocked_cnt);
   }
 
   if (should_enter("TIERED", true)) {

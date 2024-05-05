@@ -149,7 +149,7 @@ class InterpreterManager {
 
     uint64_t used_bytes = 0;
     uint64_t interpreter_cnt = 0;
-    uint64_t blocked_usec = 0;
+    uint64_t blocked_cnt = 0;
   };
 
  public:

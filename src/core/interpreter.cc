@@ -1044,7 +1044,7 @@ int Interpreter::RedisAPCallCommand(lua_State* lua) {
 InterpreterManager::Stats& InterpreterManager::Stats::operator+=(const Stats& other) {
   this->used_bytes += other.used_bytes;
   this->interpreter_cnt += other.interpreter_cnt;
-  this->blocked_usec += other.blocked_usec;
+  this->blocked_cnt += other.blocked_cnt;
 
   return *this;
 }
@@ -1063,10 +1063,8 @@ Interpreter* InterpreterManager::Get() {
 
   // We can't remove `before` from stats directly because if inspected while we wait it will return
   // invalid numbers.
-  uint64_t before = absl::GetCurrentTimeNanos() / 1'000;
-  waker_.await([this]() { return available_.size() > 0; });
-  uint64_t after = absl::GetCurrentTimeNanos() / 1'000;
-  tl_stats().blocked_usec += (after - before);
+  bool blocked = waker_.await([this]() { return available_.size() > 0; });
+  tl_stats().blocked_cnt += (uint64_t)blocked;
 
   Interpreter* ir = available_.back();
   available_.pop_back();
