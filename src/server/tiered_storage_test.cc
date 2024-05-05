@@ -65,8 +65,6 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
     return stashes >= kMax - 64 - 1;
   });
 
-  GTEST_SKIP() << "TODO: Deadlocks";
-
   // Perform GETSETs
   for (size_t i = 64; i < kMax; i++) {
     auto resp = Run({"GETSET", absl::StrCat("k", i), string(i, 'B')});
