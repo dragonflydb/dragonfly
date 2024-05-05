@@ -36,8 +36,6 @@ ABSL_FLAG(string, tiered_prefix, "",
           " associated with tiered storage. Stronly advised to use "
           "high performance NVME ssd disks for this.");
 
-ABSL_FLAG(string, tiered_prefix_v2, "", "tiered_prefix v2");
-
 ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
           "Limit on maximum file size that is used by the database for tiered storage. "
           "0 - means the program will automatically determine its maximum file size. "
@@ -407,7 +405,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  if (string backing_prefix = GetFlag(FLAGS_tiered_prefix_v2); !backing_prefix.empty()) {
+  if (string backing_prefix = GetFlag(FLAGS_tiered_prefix); !backing_prefix.empty()) {
     LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
         << "Only ioring based backing storage is supported. Exiting...";
 

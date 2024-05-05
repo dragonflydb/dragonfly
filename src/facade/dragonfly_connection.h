@@ -271,10 +271,7 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
-  void SetName(std::string name) {
-    util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
-    name_ = std::move(name);
-  }
+  void SetName(std::string name);
 
   std::string_view GetName() const {
     return name_;

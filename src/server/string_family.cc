@@ -34,10 +34,6 @@
 #include "server/transaction.h"
 #include "util/fibers/future.h"
 
-ABSL_FLAG(bool, tiered_skip_prefetch, false,
-          "If true, does not load offloaded string back to in-memory store during GET command."
-          "For testing/development purposes only.");
-
 namespace dfly {
 
 namespace {

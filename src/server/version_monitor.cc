@@ -4,6 +4,8 @@
 
 #include "server/version_monitor.h"
 
+#include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <openssl/err.h>
 

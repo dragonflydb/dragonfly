@@ -46,12 +46,6 @@ inline std::string_view ToSV(std::string_view slice) {
   return slice;
 }
 
-struct CmdArgListFormatter {
-  void operator()(std::string* out, MutableSlice arg) const {
-    out->append(absl::StrCat("`", std::string_view(arg.data(), arg.size()), "`"));
-  }
-};
-
 struct ConnectionStats {
   size_t read_buf_capacity = 0;                // total capacity of input buffers
   size_t dispatch_queue_entries = 0;           // total number of dispatch queue entries

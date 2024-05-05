@@ -801,6 +801,11 @@ bool Connection::IsMain() const {
   return static_cast<Listener*>(listener())->IsMainInterface();
 }
 
+void Connection::SetName(std::string name) {
+  util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
+  name_ = std::move(name);
+}
+
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   if (!IsPrivileged() && !IsMain()) {
     return false;
