@@ -144,6 +144,15 @@ class Interpreter {
 // thread to run multiple lua scripts in parallel.
 class InterpreterManager {
  public:
+  struct Stats {
+    Stats& operator+=(const Stats& other);
+
+    uint64_t used_bytes = 0;
+    uint64_t interpreter_cnt = 0;
+    uint64_t blocked_usec = 0;
+  };
+
+ public:
   InterpreterManager(unsigned num) : waker_{}, available_{}, storage_{} {
     // We pre-allocate the backing storage during initialization and
     // start storing pointers to slots in the available vector.
@@ -156,6 +165,8 @@ class InterpreterManager {
 
   // Clear all interpreters, keeps capacity. Waits until all are returned.
   void Reset();
+
+  static Stats& tl_stats();
 
  private:
   util::fb2::EventCount waker_, reset_ec_;
