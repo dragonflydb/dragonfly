@@ -4,7 +4,7 @@ import async_timeout
 import asyncio
 import redis.asyncio as aioredis
 
-BASIC_ARGS = {"port": 6379, "proactor_threads": 1, "tiered_prefix_v2": "/tmp/tiering_test_backing"}
+BASIC_ARGS = {"port": 6379, "proactor_threads": 1, "tiered_prefix": "/tmp/tiering_test_backing"}
 
 
 # remove once proudct requirments are tested
