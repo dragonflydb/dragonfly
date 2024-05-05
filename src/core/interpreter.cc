@@ -1061,8 +1061,6 @@ Interpreter* InterpreterManager::Get() {
     return &storage_.back();
   }
 
-  // We can't remove `before` from stats directly because if inspected while we wait it will return
-  // invalid numbers.
   bool blocked = waker_.await([this]() { return available_.size() > 0; });
   tl_stats().blocked_cnt += (uint64_t)blocked;
 
