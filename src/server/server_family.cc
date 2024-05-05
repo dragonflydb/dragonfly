@@ -235,6 +235,12 @@ inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFunc f) {
 
 using CI = CommandId;
 
+struct CmdArgListFormatter {
+  void operator()(std::string* out, MutableSlice arg) const {
+    out->append(absl::StrCat("`", std::string_view(arg.data(), arg.size()), "`"));
+  }
+};
+
 string UnknownCmd(string cmd, CmdArgList args) {
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
                       StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));

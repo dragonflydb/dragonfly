@@ -1,19 +1,20 @@
-// Copyright 2023, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #include "facade/reply_builder.h"
 
+#include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
+
 #include <random>
 
-#include "absl/strings/str_split.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
-// This will test the reply_builder RESP (Redis).
 
 using namespace testing;
 using namespace std;
