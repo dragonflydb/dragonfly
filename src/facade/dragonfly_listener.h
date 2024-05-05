@@ -45,7 +45,7 @@ class Listener : public util::ListenerInterface {
 
   // Returns thread-local dynamic memory usage by TLS.
   static size_t TLSUsedMemoryThreadLocal();
-  static uint64_t TLSMaxClientsReachedCount();
+  static uint64_t RefusedConnectionMaxClientsCount();
 
   bool IsPrivilegedInterface() const;
   bool IsMainInterface() const;

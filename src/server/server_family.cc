@@ -1152,6 +1152,11 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("script_error_total", "", m.facade_stats.reply_stats.script_error_count,
                             MetricType::COUNTER, &resp->body());
 
+  AppendMetricHeader("listener_accept_error_total", "Listener accept errors", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("listener_accept_error_total", m.refused_conn_max_clients_reached_count,
+                    {"reason"}, {"limit_reached"}, &resp->body());
+
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
                             &resp->body());
@@ -1860,7 +1865,7 @@ Metrics ServerFamily::GetMetrics() const {
     }
 
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
-    result.max_clients_reached_count += Listener::TLSMaxClientsReachedCount();
+    result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };

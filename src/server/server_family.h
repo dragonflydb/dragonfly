@@ -96,7 +96,7 @@ struct Metrics {
   uint64_t fiber_switch_cnt = 0;
   uint64_t fiber_switch_delay_usec = 0;
   uint64_t tls_bytes = 0;
-  uint64_t max_clients_reached_count = 0;
+  uint64_t refused_conn_max_clients_reached_count = 0;
 
   // Statistics about fibers running for a long time (more than 1ms).
   uint64_t fiber_longrun_cnt = 0;
