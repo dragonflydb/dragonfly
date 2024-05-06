@@ -433,7 +433,7 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, bool f
 
   for (size_t i = 0; i < iters.size(); ++i) {
     auto it = iters[i];
-    if (it.is_done())  // might have been evicted due to reading other keys
+    if (it.is_done())
       continue;
 
     auto& resp = response.resp_arr[i].emplace();
