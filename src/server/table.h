@@ -68,7 +68,7 @@ struct DbTableStats {
   size_t listpack_blob_cnt = 0;
   size_t listpack_bytes = 0;
   size_t tiered_entries = 0;
-  size_t tiered_size = 0;
+  size_t tiered_used_bytes = 0;
 
   std::array<size_t, OBJ_TYPE_MAX> memory_usage_by_type = {};
 

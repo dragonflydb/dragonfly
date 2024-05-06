@@ -2083,9 +2083,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("TIERED", true)) {
+    append("tiered_entries", total.tiered_entries);
+    append("tiered_entries_bytes", total.tiered_used_bytes);
+
     append("tiered_total_stashes", m.tiered_stats.total_stashes);
     append("tiered_total_fetches", m.tiered_stats.total_fetches);
     append("tiered_total_cancels", m.tiered_stats.total_cancels);
+    append("tiered_total_deletes", m.tiered_stats.total_deletes);
 
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);

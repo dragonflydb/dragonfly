@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include "absl/flags/internal/flag.h"
+#include "absl/flags/reflection.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -19,13 +20,12 @@
 
 using namespace std;
 using namespace testing;
-using absl::SetFlag;
-using absl::StrCat;
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(bool, tiered_storage_cache_fetched);
 ABSL_DECLARE_FLAG(bool, backing_file_direct);
+ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 
 namespace dfly {
 
@@ -59,12 +59,17 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
     Run({"SET", absl::StrCat("k", i), string(i, 'A')});
   }
 
-  // Make sure all entries were stashed, except the one few not filling a small page
+  // Make sure all entries were stashed, except the one not filling a small page
   size_t stashes = 0;
   ExpectConditionWithinTimeout([this, &stashes] {
     stashes = GetMetrics().tiered_stats.total_stashes;
     return stashes >= kMax - 256 - 1;
   });
+
+  // All entries were accounted for except that one (see comment above)
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, kMax - kMin - 1);
+  EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, (kMax - 1 + kMin) * (kMax - kMin) / 2 - 2047);
 
   // Perform GETSETs
   for (size_t i = kMin; i < kMax; i++) {
@@ -103,6 +108,38 @@ TEST_F(TieredStorageTest, MultiDb) {
     Run({"SELECT", absl::StrCat(i)});
     EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), string(3000, char('A' + i)));
   }
+}
+
+TEST_F(TieredStorageTest, BackgroundOffloading) {
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+
+  const int kNum = 500;
+
+  max_memory_limit = kNum * 4096;
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->TEST_EnableHeartbeat(); });
+
+  // Stash all values
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), string(3000, 'A')});
+  }
+
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+  ASSERT_EQ(GetMetrics().tiered_stats.total_stashes, kNum);
+  ASSERT_EQ(GetMetrics().db_stats[0].tiered_entries, kNum);
+
+  // Trigger re-fetch
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"GET", absl::StrCat("k", i)});
+  }
+
+  // Wait for offload to do it all again
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.total_stashes, 2 * kNum);
+  EXPECT_EQ(metrics.tiered_stats.total_fetches, kNum);
+  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }
 
 }  // namespace dfly
