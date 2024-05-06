@@ -20,7 +20,7 @@ class BufferedStreamerBase : public io::Sink {
  protected:
   // Initialize with global cancellation and optional stall conditions.
   BufferedStreamerBase(const Cancellation* cll, unsigned max_buffered_cnt = 5,
-                       unsigned max_buffered_mem = 512)
+                       unsigned max_buffered_mem = 8192)
       : cll_{cll}, max_buffered_cnt_{max_buffered_cnt}, max_buffered_mem_{max_buffered_mem} {
   }
 
