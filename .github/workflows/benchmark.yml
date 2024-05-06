@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
 
     container:
-      image: ghcr.io/romange/ubuntu-dev:20
+      image: ghcr.io/romange/benchmark-dev:latest
 
     permissions:
       id-token: write
