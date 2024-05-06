@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import redis
-import re
+import time
 
 
 def main():
@@ -14,8 +14,19 @@ def main():
     info = client.info("replication")
     assert info["role"] == "master"
     replication_state = info["slave0"]
-    assert replication_state["lag"] == 0, f"Lag is bad, expected 0, got {replication_state['lag']}"
     assert replication_state["state"] == "stable_sync"
+
+    def is_zero_lag(replication_state):
+        return replication_state["lag"] == 0
+
+    # Wait for 10 seconds for lag to be zero
+    for _ in range(10):
+        if is_zero_lag(replication_state):
+            break
+        time.sleep(1)
+        replication_state = client.info("replication")["slave0"]
+
+    assert replication_state["lag"] == 0, f"Lag is bad, expected 0, got {replication_state['lag']}"
 
 
 if __name__ == "__main__":
