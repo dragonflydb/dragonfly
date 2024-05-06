@@ -69,7 +69,7 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
   // All entries were accounted for except that one (see comment above)
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, kMax - kMin - 1);
-  EXPECT_EQ(metrics.db_stats[0].tiered_size, (kMax - 1 + kMin) * (kMax - kMin) / 2 - 2047);
+  EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, (kMax - 1 + kMin) * (kMax - kMin) / 2 - 2047);
 
   // Perform GETSETs
   for (size_t i = kMin; i < kMax; i++) {

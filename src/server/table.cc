@@ -39,7 +39,7 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   ADD(listpack_blob_cnt);
   ADD(listpack_bytes);
   ADD(tiered_entries);
-  ADD(tiered_size);
+  ADD(tiered_used_bytes);
 
   for (size_t i = 0; i < o.memory_usage_by_type.size(); ++i) {
     memory_usage_by_type[i] += o.memory_usage_by_type[i];

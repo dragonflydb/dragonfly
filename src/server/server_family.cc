@@ -2083,8 +2083,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("TIERED", true)) {
-    append("tiered_entries_cnt", total.tiered_entries);
-    append("tiered_entries_bytes", total.tiered_size);
+    append("tiered_entries", total.tiered_entries);
+    append("tiered_entries_bytes", total.tiered_used_bytes);
 
     append("tiered_total_stashes", m.tiered_stats.total_stashes);
     append("tiered_total_fetches", m.tiered_stats.total_fetches);

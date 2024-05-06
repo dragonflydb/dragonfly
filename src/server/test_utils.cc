@@ -33,7 +33,7 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 namespace dfly {
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
-  os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_size
+  os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_used_bytes
      << ", tiered_entries: " << stats.tiered_entries << "\n";
 
   return os;

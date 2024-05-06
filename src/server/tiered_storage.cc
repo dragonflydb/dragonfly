@@ -27,7 +27,7 @@
 ABSL_FLAG(bool, tiered_storage_cache_fetched, true,
           "WIP: Load results of offloaded reads to memory");
 
-ABSL_FLAG(size_t, tiered_storage_max_stashes, 50,
+ABSL_FLAG(size_t, tiered_storage_write_depth, 50,
           "Maximum number of concurrent stash requests issued by background offload");
 
 namespace dfly {
@@ -60,14 +60,14 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   void RecordAdded(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
     stats->AddTypeMemoryUsage(pv.ObjType(), -pv.MallocUsed());
     stats->tiered_entries++;
-    stats->tiered_size += segment.length;
+    stats->tiered_used_bytes += segment.length;
   }
 
   // Called after setting new value in place of previous segment
   void RecordDeleted(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
     stats->AddTypeMemoryUsage(pv.ObjType(), pv.MallocUsed());
     stats->tiered_entries--;
-    stats->tiered_size -= segment.length;
+    stats->tiered_used_bytes -= segment.length;
   }
 
   // Find entry by key in db_slice and store external segment in place of original value.
@@ -296,23 +296,22 @@ TieredStats TieredStorage::GetStats() const {
 void TieredStorage::RunOffloading(DbIndex dbid) {
   PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
   int stash_limit =
-      absl::GetFlag(FLAGS_tiered_storage_max_stashes) - op_manager_->GetStats().pending_stash_cnt;
+      absl::GetFlag(FLAGS_tiered_storage_write_depth) - op_manager_->GetStats().pending_stash_cnt;
   if (stash_limit <= 0)
     return;
 
-  auto cb = [this, dbid, &stash_limit](PrimeIterator it) {
+  std::string tmp;
+  auto cb = [this, dbid, &tmp, &stash_limit](PrimeIterator it) {
     if (it->second.HasIoPending() || it->second.IsExternal())
       return;
 
     if (ShouldStash(it->second)) {
-      std::string tmp;
       Stash(dbid, it->first.GetSlice(&tmp), &it->second);
-
       stash_limit--;
     }
   };
 
-  PrimeTable::Cursor start_cursor;
+  PrimeTable::Cursor start_cursor{};
 
   // Loop while we haven't traversed all entries or reached our stash io device limit.
   // Keep number of iterations below resonable limit to keep datastore always responsive
