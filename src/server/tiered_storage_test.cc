@@ -51,10 +51,11 @@ class TieredStorageTest : public BaseFamilyTest {
 
 // Perform simple series of SET, GETSET and GET
 TEST_F(TieredStorageTest, SimpleGetSet) {
-  const int kMax = 5000;
+  const int kMin = 256;
+  const int kMax = tiering::kPageSize + 10;
 
   // Perform SETs
-  for (size_t i = 64; i < kMax; i++) {
+  for (size_t i = kMin; i < kMax; i++) {
     Run({"SET", absl::StrCat("k", i), string(i, 'A')});
   }
 
@@ -62,17 +63,17 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
   size_t stashes = 0;
   ExpectConditionWithinTimeout([this, &stashes] {
     stashes = GetMetrics().tiered_stats.total_stashes;
-    return stashes >= kMax - 64 - 1;
+    return stashes >= kMax - 256 - 1;
   });
 
   // Perform GETSETs
-  for (size_t i = 64; i < kMax; i++) {
+  for (size_t i = kMin; i < kMax; i++) {
     auto resp = Run({"GETSET", absl::StrCat("k", i), string(i, 'B')});
     ASSERT_EQ(resp, string(i, 'A')) << i;
   }
 
   // Perform GETs
-  for (size_t i = 64; i < kMax; i++) {
+  for (size_t i = kMin; i < kMax; i++) {
     auto resp = Run({"GET", absl::StrCat("k", i)});
     ASSERT_EQ(resp, string(i, 'B')) << i;
   }
