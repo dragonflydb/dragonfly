@@ -45,6 +45,10 @@ class TieredStorage {
   // Read offloaded value. It must be of external type
   util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
+  // Read offloaded value. It must be of external type
+  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
+            std::function<void(const std::string&)> readf);
+
   // Apply modification to offloaded value, return generic result from callback
   template <typename T>
   util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
