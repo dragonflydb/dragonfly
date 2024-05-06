@@ -1414,8 +1414,10 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   }
 
   // If autojournaling was disabled and not re-enabled, skip it
-  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_)
+  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_) {
+    TriggerJournalWriteToSink();
     return;
+  }
 
   // TODO: Handle complex commands like LMPOP correctly once they are implemented.
   journal::Entry::Payload entry_payload;
