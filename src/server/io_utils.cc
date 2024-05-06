@@ -57,8 +57,10 @@ error_code BufferedStreamerBase::ConsumeIntoSink(io::Sink* dest) {
       return ec;
     }
 
-    // TODO: shrink big stash.
     consumer_buf_.Clear();
+    if (consumer_buf_.Capacity() > max_buffered_mem_ * 10) {
+      consumer_buf_ = base::IoBuf{};
+    }
   }
   return std::error_code{};
 }
