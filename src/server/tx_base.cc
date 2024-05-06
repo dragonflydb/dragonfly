@@ -15,7 +15,21 @@ namespace dfly {
 using namespace std;
 using Payload = journal::Entry::Payload;
 
-void RecordJournal(const OpArgs& op_args, string_view cmd, ArgSlice args, uint32_t shard_cnt,
+size_t ShardArgs::Size() const {
+  size_t sz = 0;
+  for (const auto& s : slice_.second)
+    sz += (s.second - s.first);
+  return sz;
+}
+
+void RecordJournal(const OpArgs& op_args, string_view cmd, const ShardArgs& args,
+                   uint32_t shard_cnt, bool multi_commands) {
+  VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
+  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, multi_commands,
+                                false);
+}
+
+void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args, uint32_t shard_cnt,
                    bool multi_commands) {
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
   op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, multi_commands,

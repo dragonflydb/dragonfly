@@ -40,9 +40,6 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     : facade::CommandId(name, mask, arity, first_key, last_key, acl_categories) {
   if (mask & CO::ADMIN)
     opt_mask_ |= CO::NOSCRIPT;
-
-  if (mask & CO::BLOCKING)
-    opt_mask_ |= CO::REVERSE_MAPPING;
 }
 
 bool CommandId::IsTransactional() const {
@@ -173,8 +170,6 @@ const char* OptName(CO::CommandOpt fl) {
       return "readonly";
     case DENYOOM:
       return "denyoom";
-    case REVERSE_MAPPING:
-      return "reverse-mapping";
     case FAST:
       return "fast";
     case LOADING:

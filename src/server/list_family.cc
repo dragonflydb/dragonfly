@@ -158,6 +158,22 @@ struct CircularMessages {
 // Used to recover logs for BLPOP failures. See OpBPop.
 thread_local CircularMessages debugMessages{50};
 
+// A bit awkward translation from a single key to ShardArgs.
+// We create a mutable slice (which will never be mutated) from the key, then we create
+// a CmdArgList of size 1 that references mslice and finally
+// we reference the first element in the CmdArgList via islice.
+struct SingleArg {
+  MutableSlice mslice;
+  IndexSlice islice{0, 1};
+
+  SingleArg(string_view arg) : mslice(const_cast<char*>(arg.data()), arg.size()) {
+  }
+
+  ShardArgs Get() {
+    return ShardArgs{CmdArgList{&mslice, 1}, absl::MakeSpan(&islice, 1)};
+  }
+};
+
 class BPopPusher {
  public:
   BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir);
@@ -448,7 +464,9 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
           // hack, again. since we hacked which queue we are waiting on (see RunPair)
           // we must clean-up src key here manually. See RunPair why we do this.
           // in short- we suspended on "src" on both shards.
-          shard->blocking_controller()->FinalizeWatched(ArgSlice{&src, 1}, t);
+
+          SingleArg single_arg{src};
+          shard->blocking_controller()->FinalizeWatched(single_arg.Get(), t);
         }
       } else {
         DVLOG(1) << "Popping value from list: " << key;
@@ -873,7 +891,8 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
     return op_res;
   }
 
-  auto wcb = [&](Transaction* t, EngineShard* shard) { return ShardArgs{&this->pop_key_, 1}; };
+  SingleArg single_arg{pop_key_};
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return single_arg.Get(); };
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {
@@ -900,11 +919,13 @@ OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
     return op_res;
   }
 
+  SingleArg single_arg(this->pop_key_);
+
   // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
-  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice{&this->pop_key_, 1}; };
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return single_arg.Get(); };
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {

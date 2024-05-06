@@ -180,9 +180,6 @@ class Transaction {
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
 
-  // Map arg_index from GetShardArgs slice to index in original command slice from InitByArgs.
-  size_t ReverseArgIndex(ShardId shard_id, size_t arg_index) const;
-
   // Execute transaction hop. If conclude is true, it is removed from the pending queue.
   void Execute(RunnableType cb, bool conclude);
 
@@ -389,8 +386,8 @@ class Transaction {
     // Set when the shard is prepared for another hop. Sync point. Cleared when execution starts.
     std::atomic_bool is_armed = false;
 
-    uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
-    uint32_t arg_count = 0;
+    uint32_t slice_start = 0;  // Subspan in kv_args_ with local arguments.
+    uint32_t slice_count = 0;
 
     // span into kv_fp_
     uint32_t fp_start = 0;
@@ -400,7 +397,7 @@ class Transaction {
     TxQueue::Iterator pq_pos = TxQueue::kEnd;
 
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
-    uint16_t wake_key_pos = UINT16_MAX;
+    uint32_t wake_key_pos = UINT32_MAX;
 
     // Irrational stats purely for debugging purposes.
     struct Stats {
@@ -443,13 +440,11 @@ class Transaction {
 
   // Auxiliary structure used during initialization
   struct PerShardCache {
-    std::vector<std::string_view> args;
-    std::vector<uint32_t> original_index;
+    std::vector<IndexSlice> slices;
     unsigned key_step = 1;
 
     void Clear() {
-      args.clear();
-      original_index.clear();
+      slices.clear();
     }
   };
 
@@ -488,8 +483,7 @@ class Transaction {
   void BuildShardIndex(const KeyIndex& keys, std::vector<PerShardCache>* out);
 
   // Init shard data from shard index.
-  void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
-                     bool rev_mapping);
+  void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args);
 
   // Store all key index keys in args_. Used only for single shard initialization.
   void StoreKeysInArgs(const KeyIndex& key_index);
@@ -588,10 +582,11 @@ class Transaction {
   // TODO: explore dense packing
   absl::InlinedVector<PerShardData, 4> shard_data_;
 
-  // Stores keys/values of the transaction partitioned by shards.
+  // Stores slices of key/values partitioned by shards.
+  // Slices reference full_args_.
   // We need values as well since we reorder keys, and we need to know what value corresponds
   // to what key.
-  absl::InlinedVector<std::string_view, 4> kv_args_;
+  absl::InlinedVector<IndexSlice, 4> args_slices_;
 
   // Fingerprints of keys, precomputed once during the transaction initialization.
   absl::InlinedVector<LockFp, 4> kv_fp_;
@@ -601,9 +596,6 @@ class Transaction {
 
   // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
   bool re_enabled_auto_journal_ = false;
-
-  // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.
-  std::vector<uint32_t> reverse_index_;
 
   RunnableType* cb_ptr_ = nullptr;    // Run on shard threads
   const CommandId* cid_ = nullptr;    // Underlying command
