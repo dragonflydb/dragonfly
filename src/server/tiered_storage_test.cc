@@ -84,6 +84,23 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
   }
 }
 
+TEST_F(TieredStorageTest, MGET) {
+  vector<string> command = {"MGET"}, values = {};
+  for (char key = 'A'; key <= 'B'; key++) {
+    command.emplace_back(1, key);
+    values.emplace_back(3000, key);
+    Run({"SET", command.back(), values.back()});
+  }
+
+  ExpectConditionWithinTimeout(
+      [this, &values] { return GetMetrics().tiered_stats.total_stashes >= values.size(); });
+
+  auto resp = Run(absl::MakeSpan(command));
+  auto elements = resp.GetVec();
+  for (size_t i = 0; i < elements.size(); i++)
+    EXPECT_EQ(elements[i], values[i]);
+}
+
 TEST_F(TieredStorageTest, SimpleAppend) {
   // TODO: use pipelines to issue APPEND/GET/APPEND sequence,
   // currently it's covered only for op_manager_test

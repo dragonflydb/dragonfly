@@ -200,6 +200,16 @@ util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,
   return future;
 }
 
+void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                         std::function<void(const std::string&)> readf) {
+  DCHECK(value.IsExternal());
+  auto cb = [readf = std::move(readf)](string* value) {
+    readf(*value);
+    return false;
+  };
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
+}
+
 template <typename T>
 util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
                                            const PrimeValue& value,
