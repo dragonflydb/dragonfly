@@ -56,7 +56,7 @@ SmallBins::FilledBin SmallBins::FlushBin() {
     data += sizeof(uint64_t);
   }
 
-  // Store all values, n * x bytes
+  // Store all values with sizes, n * x bytes
   for (const auto& [key, value] : current_bin_) {
     pending_set[key] = {size_t(data - out.data()), value.size()};
 
@@ -74,13 +74,17 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   auto key_list = pending_bins_.extract(id);
   DCHECK_GT(key_list.mapped().size(), 0u);
 
+  uint16_t bytes = 0;
   SmallBins::KeySegmentList list;
   for (auto& [key, sub_segment] : key_list.mapped()) {
-    list.emplace_back(key.first, key.second,
-                      DiskSegment{segment.offset + sub_segment.offset, sub_segment.length});
+    bytes += sub_segment.length;
+
+    DiskSegment real_segment{segment.offset + sub_segment.offset, sub_segment.length};
+    list.emplace_back(key.first, key.second, real_segment);
   }
 
   stats_.total_stashed_entries += list.size();
+  stashed_bins_[segment.offset] = {uint8_t(list.size()), bytes};
   return list;
 }
 
@@ -109,22 +113,55 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
   return std::nullopt;
 }
 
-std::optional<DiskSegment> SmallBins::Delete(DiskSegment segment) {
-  segment = segment.FillPages();
-  if (auto it = stashed_bins_.find(segment.offset); it != stashed_bins_.end()) {
+SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
+  auto full_segment = segment.FillPages();
+  if (auto it = stashed_bins_.find(full_segment.offset); it != stashed_bins_.end()) {
     stats_.total_stashed_entries--;
-    if (--it->second == 0) {
+    auto& bin = it->second;
+
+    DCHECK_LE(segment.length, bin.bytes);
+    bin.bytes -= segment.length;
+
+    if (--bin.entries == 0) {
       stashed_bins_.erase(it);
-      return segment;
+      return {full_segment, false /* fragmented */, true /* empty */};
+    }
+
+    if (bin.bytes < kPageSize / 2) {
+      return {full_segment, true /* fragmented */, false /* empty */};
     }
   }
-  return std::nullopt;
+
+  return {segment};
 }
 
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.total_stashed_entries,
                .current_bin_bytes = current_bin_bytes_};
+}
+
+SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
+  DCHECK_EQ(value.size(), kPageSize);
+  CHECK(stashed_bins_.erase(segment.offset));
+
+  const char* data = value.data();
+
+  uint16_t entries = absl::little_endian::Load16(data);
+  data += sizeof(uint16_t);
+
+  KeyHashDbList out(entries);
+  for (size_t i = 0; i < entries; i++) {
+    DbIndex dbid = absl::little_endian::Load16(data);
+    data += sizeof(DbIndex);
+
+    uint64_t hash = absl::little_endian::Load64(data);
+    data += sizeof(hash);
+
+    out[i] = {dbid, hash};
+  }
+
+  return out;
 }
 
 }  // namespace dfly::tiering

@@ -102,11 +102,13 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
 }
 
 void OpManager::ProcessRead(size_t offset, std::string_view value) {
+  util::FiberAtomicGuard guard;  // atomically update items, no in-between states should be possible
   ReadOp* info = &pending_reads_.at(offset);
 
   bool deleting_full = false;
   std::string key_value;
-  for (auto& ko : info->key_ops) {
+  for (size_t i = 0; i < info->key_ops.size(); i++) {  // more items can be read while iterating
+    auto& ko = info->key_ops[i];
     key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
 
     bool modified = false;
@@ -125,6 +127,7 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
 
   if (deleting_full)
     storage_.MarkAsFree(info->segment);
+
   pending_reads_.erase(offset);
 }
 

@@ -27,12 +27,21 @@ class SmallBins {
   };
 
   using BinId = unsigned;
+  static const BinId kInvalidBin = std::numeric_limits<BinId>::max();
+
+  struct BinInfo {
+    DiskSegment segment;
+    bool fragmented = false, empty = false;
+  };
 
   // Bin filled with blob of serialized entries
   using FilledBin = std::pair<BinId, std::string>;
 
   // List of locations of values for corresponding keys of previously filled bin
   using KeySegmentList = std::vector<std::tuple<DbIndex, std::string /* key*/, DiskSegment>>;
+
+  // List of item key db indices and hashes
+  using KeyHashDbList = std::vector<std::pair<DbIndex, uint64_t /* hash */>>;
 
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
   std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value);
@@ -46,8 +55,13 @@ class SmallBins {
   // Delete a key with pending io. Returns entry id if needs to be deleted.
   std::optional<BinId> Delete(DbIndex dbid, std::string_view key);
 
-  // Delete a stored segment. Returns page segment if it became emtpy and needs to be deleted.
-  std::optional<DiskSegment> Delete(DiskSegment segment);
+  // Delete a stored segment. Returns information about the current bin, which might indicate
+  // the need for external actions like deleting empty segments or triggering defragmentation
+  BinInfo Delete(DiskSegment segment);
+
+  // Delete stashed bin. Returns list of recovered item key hashes and db indices.
+  // Mainly used for defragmentation
+  KeyHashDbList DeleteBin(DiskSegment segment, std::string_view value);
 
   Stats GetStats() const;
 
@@ -56,6 +70,12 @@ class SmallBins {
   FilledBin FlushBin();
 
  private:
+  struct StashInfo {
+    uint8_t entries = 0;
+    uint16_t bytes = 0;
+  };
+  static_assert(sizeof(StashInfo) == sizeof(unsigned));
+
   BinId last_bin_id_ = 0;
 
   unsigned current_bin_bytes_ = 0;
@@ -66,8 +86,8 @@ class SmallBins {
                       absl::flat_hash_map<std::pair<DbIndex, std::string> /* key*/, DiskSegment>>
       pending_bins_;
 
-  // Map of bins that were stashed and should be deleted when refcount reaches 0
-  absl::flat_hash_map<size_t /*offset*/, unsigned /* refcount*/> stashed_bins_;
+  // Map of bins that were stashed and should be deleted when number of entries reaches 0
+  absl::flat_hash_map<size_t /*offset*/, StashInfo> stashed_bins_;
 
   struct {
     size_t total_stashed_entries = 0;

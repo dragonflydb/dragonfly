@@ -45,6 +45,10 @@ bool OccupiesWholePages(size_t size) {
   return size >= TieredStorage::kMinOccupancySize;
 }
 
+// Stashed bins no longer have bin ids. We use this id to differentiate with regular reads for the
+// same segment when reading a full segment to trigger defragmentation
+constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
+
 }  // anonymous namespace
 
 class TieredStorage::ShardOpManager : public tiering::OpManager {
@@ -124,6 +128,22 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     return false;
   }
 
+  // Load all values from bin by their hashes
+  void Defragment(tiering::DiskSegment segment, string_view value) {
+    auto hashes = ts_->bins_->DeleteBin(segment, value);
+    for (auto [dbid, hash] : hashes) {
+      auto it = db_slice_->GetDBTable(dbid)->prime.Find(hash);
+      if (IsValid(it) && it->second.IsExternal()) {
+        tiering::DiskSegment entry_segment{it->second.GetExternalSlice()};
+        if (entry_segment.FillPages().offset == segment.offset) {
+          SetInMemory(&it->second,
+                      value.substr(entry_segment.offset - segment.offset, entry_segment.length),
+                      entry_segment);
+        }
+      }
+    }
+  }
+
   void ReportStashed(EntryId id, tiering::DiskSegment segment, error_code ec) override {
     if (ec) {
       VLOG(1) << "Stash failed " << ec.message();
@@ -144,7 +164,23 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   bool ReportDelete(tiering::DiskSegment segment) override {
-    return OccupiesWholePages(segment.length) || ts_->bins_->Delete(segment);
+    if (OccupiesWholePages(segment.length))
+      return true;
+
+    auto bin = ts_->bins_->Delete(segment);
+    if (bin.empty)
+      return true;
+
+    if (bin.fragmented) {
+      // Trigger read to signal need for defragmentation.
+      // The underlying value is already in memory, so the read will be fulfilled immediately,
+      // but only after all other values from this segment have been fetched and possibly
+      // deleted.
+      VLOG(1) << "Enqueueing bin defragmentation for: x" << bin.segment.offset;
+      Enqueue(kFragmentedBin, bin.segment, [](std::string*) { return false; });
+    }
+
+    return false;
   }
 
  private:
