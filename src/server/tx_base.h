@@ -39,6 +39,7 @@ struct KeyIndex {
   // if index is non-zero then adds another key index (usually 0).
   // relevant for for commands like ZUNIONSTORE/ZINTERSTORE for destination key.
   std::optional<uint16_t> bonus{};
+  bool has_reverse_mapping = false;
 
   KeyIndex(unsigned s = 0, unsigned e = 0, unsigned step = 0) : start(s), end(e), step(step) {
   }
@@ -106,94 +107,52 @@ using KeyReadyChecker =
     std::function<bool(EngineShard*, const DbContext& context, Transaction* tx, std::string_view)>;
 
 // References arguments in another array.
-using IndexSlice = std::pair<uint32_t, uint32_t>;  // [begin, end)
+using IndexSlice = std::pair<uint32_t, uint32_t>;  // (begin, end)
 
-// ShardArgs - hold a span to full arguments and a span of sub-ranges
-// referencing those arguments.
-class ShardArgs {
-  using ArgsIndexPair = std::pair<facade::CmdArgList, absl::Span<const IndexSlice>>;
-  ArgsIndexPair slice_;
-
+class ShardArgs : protected ArgSlice {
  public:
-  class Iterator {
-    facade::CmdArgList arglist_;
-    absl::Span<const IndexSlice>::const_iterator index_it_;
-    uint32_t delta_ = 0;
+  using ArgSlice::ArgSlice;
+  using ArgSlice::at;
+  using ArgSlice::operator=;
+  using Iterator = ArgSlice::iterator;
 
-   public:
-    using iterator_category = std::input_iterator_tag;
-    using value_type = std::string_view;
-    using difference_type = ptrdiff_t;
-    using pointer = value_type*;
-    using reference = value_type&;
-
-    // First version, corresponds to spans over arguments.
-    Iterator(facade::CmdArgList list, absl::Span<const IndexSlice>::const_iterator it)
-        : arglist_(list), index_it_(it) {
-    }
-
-    bool operator==(const Iterator& o) const {
-      return arglist_ == o.arglist_ && index_it_ == o.index_it_ && delta_ == o.delta_;
-    }
-
-    bool operator!=(const Iterator& o) const {
-      return !(*this == o);
-    }
-
-    std::string_view operator*() const {
-      return facade::ArgS(arglist_, index());
-    }
-
-    Iterator& operator++() {
-      ++delta_;
-      if (index() >= index_it_->second) {
-        ++index_it_;
-        ++delta_ = 0;
-      }
-      return *this;
-    }
-
-    size_t index() const {
-      return index_it_->first + delta_;
-    }
-  };
-
-  ShardArgs(facade::CmdArgList fa, absl::Span<const IndexSlice> s) : slice_(ArgsIndexPair(fa, s)) {
+  ShardArgs(const ArgSlice& o) : ArgSlice(o) {
   }
 
-  ShardArgs() : slice_(ArgsIndexPair{}) {
+  size_t Size() const {
+    return ArgSlice::size();
   }
 
-  size_t Size() const;
-
-  Iterator cbegin() const {
-    return Iterator{slice_.first, slice_.second.begin()};
+  auto cbegin() const {
+    return ArgSlice::cbegin();
   }
 
-  Iterator cend() const {
-    return Iterator{slice_.first, slice_.second.end()};
+  auto cend() const {
+    return ArgSlice::cend();
   }
 
-  Iterator begin() const {
+  auto begin() const {
     return cbegin();
   }
 
-  Iterator end() const {
+  auto end() const {
     return cend();
   }
 
   bool Empty() const {
-    return slice_.second.empty();
+    return ArgSlice::empty();
   }
 
   std::string_view Front() const {
     return *cbegin();
   }
+
+  ArgSlice AsSlice() const {
+    return ArgSlice(*this);
+  }
 };
 
 // Record non auto journal command with own txid and dbid.
-void RecordJournal(const OpArgs& op_args, std::string_view cmd, const ShardArgs& args,
-                   uint32_t shard_cnt = 1, bool multi_commands = false);
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
                    uint32_t shard_cnt = 1, bool multi_commands = false);
 
