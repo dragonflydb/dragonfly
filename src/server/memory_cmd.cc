@@ -154,6 +154,14 @@ void MemoryCmd::Run(CmdArgList args) {
     return Track(args);
   }
 
+  if (sub_cmd == "DEFRAGMENT") {
+    shard_set->pool()->DispatchOnAll([this](util::ProactorBase*) {
+      if (auto* shard = EngineShard::tlocal(); shard)
+        shard->ForceDefrag();
+    });
+    return cntx_->SendSimpleString("OK");
+  }
+
   string err = UnknownSubCmd(sub_cmd, "MEMORY");
   return cntx_->SendError(err, kSyntaxErrType);
 }
