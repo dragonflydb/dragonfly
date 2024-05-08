@@ -141,8 +141,8 @@ void Replica::Stop() {
   // Stops the loop in MainReplicationFb.
 
   proactor_->Await([this] {
-    cntx_.Cancel();        // Context is fully resposible for cleanup.
     state_mask_.store(0);  // Specifically ~R_ENABLED.
+    cntx_.Cancel();        // Context is fully resposible for cleanup.
   });
 
   CloseSocket();
@@ -178,7 +178,7 @@ void Replica::MainReplicationFb() {
   SetShardStates(true);
 
   error_code ec;
-  while (!cntx_.IsCancelled() && state_mask_.load() & R_ENABLED) {
+  while (state_mask_.load() & R_ENABLED) {
     // Discard all previous errors and set default error handler.
     cntx_.Reset([this](const GenericError& ge) { this->DefaultErrorHandler(ge); });
     // 1. Connect socket.
