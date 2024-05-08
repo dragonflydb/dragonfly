@@ -149,6 +149,8 @@ class DashTable : public detail::DashTableBase {
   template <typename U> const_iterator Find(U&& key) const;
   template <typename U> iterator Find(U&& key);
 
+  // Find first entry with given key hash that evaulates to true on pred.
+  // Pred accepts either (const key&) or (const key&, const value&)
   template <typename Pred> iterator FindFirst(uint64_t key_hash, Pred&& pred);
 
   // it must be valid.
@@ -670,7 +672,7 @@ template <typename _Key, typename _Value, typename Policy>
 template <typename U>
 auto DashTable<_Key, _Value, Policy>::Find(U&& key) const -> const_iterator {
   uint64_t key_hash = DoHash(key);
-  uint32_t seg_id = SegmentId(key_hash);
+  uint32_t seg_id = SegmentId(key_hash);  // seg_id takes up global_depth_ high bits.
 
   // Hash structure is like this: [SSUUUUBF], where S is segment id, U - unused,
   // B - bucket id and F is a fingerprint. Segment id is needed to identify the correct segment.
@@ -693,7 +695,7 @@ template <typename Pred>
 auto DashTable<_Key, _Value, Policy>::FindFirst(uint64_t key_hash, Pred&& pred) -> iterator {
   uint32_t seg_id = SegmentId(key_hash);
   if (auto seg_it = segment_[seg_id]->FindIt(key_hash, pred); seg_it.found()) {
-    return iterator{this, seg_id, seg_it.index, seg_it.slot};
+    return {this, seg_id, seg_it.index, seg_it.slot};
   }
   return {};
 }
