@@ -145,6 +145,11 @@ void Replica::Stop() {
     state_mask_.store(0);  // Specifically ~R_ENABLED.
   });
 
+  CloseSocket();
+  for (auto& flow : shard_flows_) {
+    flow->Cancel();
+  }
+
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
@@ -173,7 +178,7 @@ void Replica::MainReplicationFb() {
   SetShardStates(true);
 
   error_code ec;
-  while (state_mask_.load() & R_ENABLED) {
+  while (!cntx_.IsCancelled() && state_mask_.load() & R_ENABLED) {
     // Discard all previous errors and set default error handler.
     cntx_.Reset([this](const GenericError& ge) { this->DefaultErrorHandler(ge); });
     // 1. Connect socket.
