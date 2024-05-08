@@ -119,13 +119,6 @@ void ConnectionContext::ChangeMonitor(bool start) {
   EnableMonitoring(start);
 }
 
-ConnectionState::ClientTracking& ConnectionContext::ClientTrackingInfo() {
-  if (parent_cntx_) {
-    return parent_cntx_->conn_state.tracking_info_;
-  }
-  return conn_state.tracking_info_;
-}
-
 vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add, bool to_reply,
                                      ConnectionContext* conn) {
   vector<unsigned> result(to_reply ? args.size() : 0, 0);
@@ -272,39 +265,12 @@ void ConnectionState::ExecInfo::ClearWatched() {
   watched_existed = 0;
 }
 
-void ConnectionState::ClientTracking::SetClientTracking(bool is_on) {
-  tracking_enabled_ = is_on;
-}
-
-void ConnectionState::ClientTracking::TrackClientCaching() {
-  executing_command_ = true;
-}
-
-void ConnectionState::ClientTracking::UpdatePrevAndLastCommand() {
-  if (prev_command_ && multi_) {
-    return;
-  }
-  prev_command_ = std::exchange(executing_command_, false);
-}
-
-void ConnectionState::ClientTracking::SetOptin(bool optin) {
-  optin_ = optin;
-}
-
-void ConnectionState::ClientTracking::SetMulti(bool multi) {
-  multi_ = multi;
-}
-
-bool ConnectionState::ClientTracking::IsTrackingOn() const {
-  return tracking_enabled_;
-}
-
 bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
   if (!IsTrackingOn()) {
     return false;
   }
 
-  return !optin_ || prev_command_;
+  return !optin_ || (seq_num_ == (1 + caching_seq_num_));
 }
 
 OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::WeakRef& conn_ref,
@@ -329,11 +295,9 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 }
 
 void ConnectionState::ClientTracking::Track(ConnectionContext* cntx, const CommandId* cid) {
-  auto& info = cntx->ClientTrackingInfo();
+  auto& info = cntx->conn_state.tracking_info_;
   auto shards = cntx->transaction->GetActiveShards();
   if ((cid->opt_mask() & CO::READONLY) && cid->IsTransactional() && info.ShouldTrackKeys()) {
-    if (cntx->parent_cntx_) {
-    }
     auto conn = cntx->parent_cntx_ ? cntx->parent_cntx_->conn()->Borrow() : cntx->conn()->Borrow();
     auto cb = [&, conn](unsigned i, auto* pb) {
       if (shards.find(i) != shards.end()) {

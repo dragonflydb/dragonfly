@@ -329,8 +329,6 @@ class Connection : public util::Connection {
 
     size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
     size_t pipeline_cache_limit = 0;     // cached flag pipeline_cache_limit
-    // cancelation flag
-    bool done = false;
   };
 
  private:

@@ -363,9 +363,8 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
-  void SetConnectionContextAndInvokeCid(ConnectionContext* cntx, const CommandId* cid) {
+  void SetConnectionContextAndInvokeCid(ConnectionContext* cntx) {
     cntx_ = cntx;
-    invoke_cid_ = cid;
   }
 
   std::set<unsigned> GetActiveShards() {
@@ -649,7 +648,6 @@ class Transaction {
   } stats_;
 
   ConnectionContext* cntx_{nullptr};
-  const CommandId* invoke_cid_{nullptr};
 
  private:
   struct TLTmpSpace {

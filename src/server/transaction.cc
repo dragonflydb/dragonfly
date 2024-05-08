@@ -691,8 +691,12 @@ void Transaction::RunCallback(EngineShard* shard) {
   }
 
   // Log to journal only once the command finished running
-  if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding))
+  if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
+    if (cntx_) {
+      cntx_->conn_state.tracking_info_.Track(cntx_, cid_);
+    }
+  }
 }
 
 // TODO: For multi-transactions we should be able to deduce mode() at run-time based
@@ -838,23 +842,13 @@ OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
 
 // Runs in coordinator thread.
 void Transaction::Execute(RunnableType cb, bool conclude) {
-  auto tracking_wrap = [cb, this](Transaction* t, EngineShard* shard) -> RunnableResult {
-    auto res = cb(t, shard);
-    if (cntx_) {
-      cntx_->ClientTrackingInfo().Track(cntx_, invoke_cid_);
-    }
-    return res;
-  };
-
-  RunnableType wrapper = tracking_wrap;
-
   if (multi_ && multi_->role == SQUASHED_STUB) {
-    local_result_ = RunSquashedMultiCb(wrapper);
+    local_result_ = RunSquashedMultiCb(cb);
     return;
   }
 
   local_result_ = OpStatus::OK;
-  cb_ptr_ = &wrapper;
+  cb_ptr_ = &cb;
 
   if (IsAtomicMulti()) {
     multi_->concluding = conclude;

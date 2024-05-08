@@ -254,9 +254,8 @@ thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_poo
 thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
 
 void Connection::QueueBackpressure::EnsureBelowLimit() {
-  ec.await([this] {
-    return done || subscriber_bytes.load(memory_order_relaxed) <= subscriber_thread_limit;
-  });
+  ec.await(
+      [this] { return subscriber_bytes.load(memory_order_relaxed) <= subscriber_thread_limit; });
 }
 
 struct Connection::Shutdown {
@@ -886,10 +885,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   // After the client disconnected.
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
-  queue_backpressure_->done = true;
-  queue_backpressure_->ec.notify();
   phase_ = SHUTTING_DOWN;
-
   VLOG(2) << "Before dispatch_fb.join()";
   dispatch_fb_.JoinIfNeeded();
   VLOG(2) << "After dispatch_fb.join()";

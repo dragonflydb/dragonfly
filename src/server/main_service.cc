@@ -1093,7 +1093,9 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     if (cmd_name == "SELECT" || absl::EndsWith(cmd_name, "SUBSCRIBE"))
       return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
 
-    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB")
+    // for some reason we get a trailing \n\r, and that's why we use StartsWith
+    bool client_cmd = cmd_name == "CLIENT" && !absl::StartsWith(ToSV(tail_args[0]), "CACHING");
+    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB" || client_cmd)
       return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
 
@@ -1186,7 +1188,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (stored_cmd.Cid()->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
-    dfly_cntx->conn_state.tracking_info_.UpdatePrevAndLastCommand();
     return cntx->SendSimpleString("QUEUED");
   }
 
@@ -1284,8 +1285,9 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   ServerState::tlocal()->RecordCmd();
 
-  if (cntx->transaction) {
-    cntx->transaction->SetConnectionContextAndInvokeCid(cntx, cid);
+  auto* trans = cntx->transaction;
+  if (trans) {
+    cntx->transaction->SetConnectionContextAndInvokeCid(cntx);
   }
 
 #ifndef NDEBUG
@@ -1300,7 +1302,10 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return false;
   }
 
-  cntx->conn_state.tracking_info_.UpdatePrevAndLastCommand();
+  auto cid_name = cid->name();
+  if ((!trans && cid_name != "MULTI") || (trans && !trans->IsMulti())) {
+    cntx->conn_state.tracking_info_.IncrementSequenceNumber();
+  }
 
   // TODO: we should probably discard more commands here,
   // not just the blocking ones
@@ -1587,7 +1592,6 @@ void Service::Multi(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("MULTI calls can not be nested");
   }
   cntx->conn_state.exec_info.state = ConnectionState::ExecInfo::EXEC_COLLECT;
-  cntx->conn_state.tracking_info_.SetMulti(true);
   // TODO: to protect against huge exec transactions.
   return cntx->SendOk();
 }
@@ -1994,7 +1998,6 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
   }
 
   MultiCleanup(cntx);
-  cntx->conn_state.tracking_info_.SetMulti(false);
   rb->SendOk();
 }
 
@@ -2140,7 +2143,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   // EXEC should not run if any of the watched keys expired.
   if (!exec_info.watched_keys.empty() && !CheckWatchedKeyExpiry(cntx, registry_)) {
     cntx->transaction->UnlockMulti();
-    cntx->conn_state.tracking_info_.SetMulti(false);
     return rb->SendNull();
   }
 
@@ -2158,7 +2160,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       ServerState::tlocal()->exec_freq_count[descr]++;
     }
 
-    if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
+    if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE &&
+        !cntx->conn_state.tracking_info_.IsTrackingOn()) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {
       CmdArgVec arg_vec;
@@ -2192,7 +2195,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
-  cntx->conn_state.tracking_info_.SetMulti(false);
 
   cntx->cid = exec_cid_;
   VLOG(1) << "Exec completed";
@@ -2205,7 +2207,6 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   auto* cs = ServerState::tlocal()->channel_store();
   vector<ChannelStore::Subscriber> subscribers = cs->FetchSubscribers(channel);
   int num_published = subscribers.size();
-
   if (!subscribers.empty()) {
     // Make sure neither of the threads limits is reached.
     // This check actually doesn't reserve any memory ahead and doesn't prevent the buffer
