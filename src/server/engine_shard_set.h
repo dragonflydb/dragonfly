@@ -189,7 +189,7 @@ class EngineShard {
   struct DefragTaskState {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
-    time_t prev_check = 0;
+    time_t last_check_time = 0;
     bool is_force_defrag = false;
 
     // check the current threshold and return true if

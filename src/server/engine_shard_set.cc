@@ -259,13 +259,13 @@ bool EngineShard::DefragTaskState::CheckRequired() {
   }
 
   const auto now = time(nullptr);
-  const auto seconds_from_prev_check = now - prev_check;
+  const auto seconds_from_prev_check = now - last_check_time;
   const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
 
   if (seconds_from_prev_check < mem_defrag_interval) {
     return false;
   }
-  prev_check = now;
+  last_check_time = now;
 
   ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
 
