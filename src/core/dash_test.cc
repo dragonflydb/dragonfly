@@ -36,6 +36,10 @@ static uint64_t callbackHash(const void* key) {
   return XXH64(&key, sizeof(key), 0);
 }
 
+template <typename K> auto EqTo(const K& key) {
+  return [&key](const auto& probe) { return key == probe; };
+}
+
 static dictType IntDict = {callbackHash, NULL, NULL, NULL, NULL, NULL, NULL};
 
 static uint64_t dictSdsHash(const void* key) {
@@ -136,8 +140,7 @@ class DashTest : public testing::Test {
   bool Find(Segment::Key_t key, Segment::Value_t* val) const {
     uint64_t hash = dt_.DoHash(key);
 
-    std::equal_to<Segment::Key_t> eq;
-    auto it = segment_.FindIt(key, hash, eq);
+    auto it = segment_.FindIt(hash, EqTo(key));
     if (!it.found())
       return false;
     *val = segment_.Value(it.index, it.slot);
@@ -146,9 +149,7 @@ class DashTest : public testing::Test {
 
   bool Contains(Segment::Key_t key) const {
     uint64_t hash = dt_.DoHash(key);
-
-    std::equal_to<Segment::Key_t> eq;
-    auto it = segment_.FindIt(key, hash, eq);
+    auto it = segment_.FindIt(hash, EqTo(key));
     return it.found();
   }
 
@@ -161,7 +162,6 @@ class DashTest : public testing::Test {
 set<Segment::Key_t> DashTest::FillSegment(unsigned bid) {
   std::set<Segment::Key_t> keys;
 
-  std::equal_to<Segment::Key_t> eq;
   for (Segment::Key_t key = 0; key < 1000000u; ++key) {
     uint64_t hash = dt_.DoHash(key);
     unsigned bi = (hash >> 8) % Segment::kBucketNum;
@@ -170,7 +170,7 @@ set<Segment::Key_t> DashTest::FillSegment(unsigned bid) {
     uint8_t fp = hash & 0xFF;
     if (fp > 2)  // limit fps considerably to find interesting cases.
       continue;
-    auto [it, success] = segment_.Insert(key, 0, hash, eq);
+    auto [it, success] = segment_.Insert(key, 0, hash, EqTo(key));
     if (!success) {
       LOG(INFO) << "Stopped at " << key;
       break;
@@ -203,10 +203,9 @@ TEST_F(DashTest, Basic) {
   Segment::Key_t key = 0;
   Segment::Value_t val = 0;
   uint64_t hash = dt_.DoHash(key);
-  std::equal_to<Segment::Key_t> eq;
 
-  EXPECT_TRUE(segment_.Insert(key, val, hash, eq).second);
-  auto [it, res] = segment_.Insert(key, val, hash, eq);
+  EXPECT_TRUE(segment_.Insert(key, val, hash, EqTo(key)).second);
+  auto [it, res] = segment_.Insert(key, val, hash, EqTo(key));
   EXPECT_TRUE(!res && it.found());
 
   EXPECT_TRUE(Find(key, &val));
@@ -262,10 +261,10 @@ TEST_F(DashTest, Segment) {
     const auto* k = &segment_.Key(i, 0);
     next = std::copy(k, k + Segment::kSlotNum, next);
   }
-  std::equal_to<Segment::Key_t> eq;
+
   for (auto k : arr) {
     auto hash = hfun(k);
-    auto it = segment_.FindIt(k, hash, eq);
+    auto it = segment_.FindIt(hash, [&k](const auto& probe) { return k == probe; });
     ASSERT_TRUE(it.found());
     segment_.Delete(it, hash);
   }
@@ -319,10 +318,10 @@ TEST_F(DashTest, Split) {
 
   segment_.Split(&UInt64Policy::HashFn, &s2);
   unsigned sum[2] = {0};
-  std::equal_to<Segment::Key_t> eq;
   for (auto key : keys) {
-    auto it1 = segment_.FindIt(key, dt_.DoHash(key), eq);
-    auto it2 = s2.FindIt(key, dt_.DoHash(key), eq);
+    auto eq = [key](const auto& probe) { return key == probe; };
+    auto it1 = segment_.FindIt(dt_.DoHash(key), eq);
+    auto it2 = s2.FindIt(dt_.DoHash(key), eq);
     ASSERT_NE(it1.found(), it2.found()) << key;
 
     sum[0] += it1.found();
@@ -476,10 +475,25 @@ TEST_F(DashTest, Custom) {
   (void)kBuckSz;
 
   ItemSegment seg{2};
-  auto cb = [](auto v, auto u) { return v.buf[0] == u.buf[0] && v.buf[1] == u.buf[1]; };
 
-  auto it = seg.FindIt(Item{1, 1}, 42, cb);
+  auto eq = [v = Item{1, 1}](auto u) { return v.buf[0] == u.buf[0] && v.buf[1] == u.buf[1]; };
+  auto it = seg.FindIt(42, eq);
   ASSERT_FALSE(it.found());
+}
+
+TEST_F(DashTest, FindByValue) {
+  using ItemSegment = detail::Segment<Item, uint64_t>;
+
+  // Insert three different values with the same hash
+  ItemSegment segment{2};
+  segment.Insert(Item{1}, 1, 42, [](const auto& pred) { return pred.buf[0] == 1; });
+  segment.Insert(Item{2}, 2, 42, [](const auto& pred) { return pred.buf[0] == 2; });
+  segment.Insert(Item{3}, 3, 42, [](const auto& pred) { return pred.buf[0] == 3; });
+
+  // We should be able to find the middle one by value
+  auto it = segment.FindIt(42, [](const auto& key, const auto& value) { return value == 2; });
+  EXPECT_TRUE(it.found());
+  EXPECT_EQ(segment.Value(it.index, it.slot), 2);
 }
 
 TEST_F(DashTest, Reserve) {

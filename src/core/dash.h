@@ -149,6 +149,10 @@ class DashTable : public detail::DashTableBase {
   template <typename U> const_iterator Find(U&& key) const;
   template <typename U> iterator Find(U&& key);
 
+  // Find first entry with given key hash that evaulates to true on pred.
+  // Pred accepts either (const key&) or (const key&, const value&)
+  template <typename Pred> iterator FindFirst(uint64_t key_hash, Pred&& pred);
+
   // it must be valid.
   void Erase(iterator it);
 
@@ -308,8 +312,8 @@ class DashTable : public detail::DashTableBase {
   // the same object. IterateDistinct goes over all distinct segments in the table.
   template <typename Cb> void IterateDistinct(Cb&& cb);
 
-  auto EqPred() const {
-    return [p = &policy_](const auto& a, const auto& b) -> bool { return p->Equal(a, b); };
+  template <typename K> auto EqPred(const K& key) const {
+    return [p = &policy_, &key](const auto& probe) -> bool { return p->Equal(probe, key); };
   }
 
   Policy policy_;
@@ -669,32 +673,31 @@ template <typename U>
 auto DashTable<_Key, _Value, Policy>::Find(U&& key) const -> const_iterator {
   uint64_t key_hash = DoHash(key);
   uint32_t seg_id = SegmentId(key_hash);  // seg_id takes up global_depth_ high bits.
-  const auto* target = segment_[seg_id];
 
   // Hash structure is like this: [SSUUUUBF], where S is segment id, U - unused,
   // B - bucket id and F is a fingerprint. Segment id is needed to identify the correct segment.
   // Once identified, the segment instance uses the lower part of hash to locate the key.
   // It uses 8 least significant bits for a fingerprint and few more bits for bucket id.
-  auto seg_it = target->FindIt(key, key_hash, EqPred());
-
-  if (seg_it.found()) {
-    return const_iterator{this, seg_id, seg_it.index, seg_it.slot};
+  if (auto seg_it = segment_[seg_id]->FindIt(key_hash, EqPred(key)); seg_it.found()) {
+    return {this, seg_id, seg_it.index, seg_it.slot};
   }
-  return const_iterator{};
+  return {};
 }
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename U>
 auto DashTable<_Key, _Value, Policy>::Find(U&& key) -> iterator {
-  uint64_t key_hash = DoHash(key);
-  uint32_t segid = SegmentId(key_hash);
-  const auto* target = segment_[segid];
+  return FindFirst(DoHash(key), EqPred(key));
+}
 
-  auto seg_it = target->FindIt(key, key_hash, EqPred());
-  if (seg_it.found()) {
-    return iterator{this, segid, seg_it.index, seg_it.slot};
+template <typename _Key, typename _Value, typename Policy>
+template <typename Pred>
+auto DashTable<_Key, _Value, Policy>::FindFirst(uint64_t key_hash, Pred&& pred) -> iterator {
+  uint32_t seg_id = SegmentId(key_hash);
+  if (auto seg_it = segment_[seg_id]->FindIt(key_hash, pred); seg_it.found()) {
+    return {this, seg_id, seg_it.index, seg_it.slot};
   }
-  return iterator{};
+  return {};
 }
 
 template <typename _Key, typename _Value, typename Policy>
@@ -702,7 +705,7 @@ size_t DashTable<_Key, _Value, Policy>::Erase(const Key_t& key) {
   uint64_t key_hash = DoHash(key);
   size_t x = SegmentId(key_hash);
   auto* target = segment_[x];
-  auto it = target->FindIt(key, key_hash, EqPred());
+  auto it = target->FindIt(key_hash, EqPred(key));
   if (!it.found())
     return 0;
 
@@ -764,7 +767,7 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       res = it.found();
     } else {
       std::tie(it, res) =
-          target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash, EqPred());
+          target->Insert(std::forward<U>(key), std::forward<V>(value), key_hash, EqPred(key));
     }
 
     if (res) {  // success
