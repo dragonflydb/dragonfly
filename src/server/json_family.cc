@@ -1543,14 +1543,12 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
       continue;
 
     vector<OptString>& res = mget_resp[sid];
-    ShardArgs shard_args = transaction->GetShardArgs(sid);
-    unsigned src_index = 0;
-    for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_index) {
-      if (!res[src_index])
+    for (size_t j = 0; j < res.size(); ++j) {
+      if (!res[j])
         continue;
 
-      uint32_t dst_indx = it.index();
-      results[dst_indx] = std::move(res[src_index]);
+      uint32_t indx = transaction->ReverseArgIndex(sid, j);
+      results[indx] = std::move(res[j]);
     }
   }
 
@@ -2093,7 +2091,8 @@ void JsonFamily::Register(CommandRegistry* registry) {
   constexpr size_t kMsetFlags = CO::WRITE | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS;
   registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Get);
-  *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST, -3, 1, -2, acl::JSON}.HFUNC(MGet);
+  *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -3, 1, -2, acl::JSON}
+                   .HFUNC(MGet);
   *registry << CI{"JSON.TYPE", CO::READONLY | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(Type);
   *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(StrLen);
   *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(ObjLen);
