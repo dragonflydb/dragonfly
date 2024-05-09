@@ -1373,7 +1373,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     ToUpper(&args[0]);
     const auto [cid, tail_args] = FindCmd(args);
     // is client tracking command
-    if (cid->name() == "CLIENT" && !tail_args.empty() && ToSV(tail_args[0]) == "TRACKING") {
+    if (cid && cid->name() == "CLIENT" && !tail_args.empty() && ToSV(tail_args[0]) == "TRACKING") {
       break;
     }
 
