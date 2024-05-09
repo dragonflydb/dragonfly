@@ -1,7 +1,7 @@
 option(REDIS_ZMALLOC_MI "Implement zmalloc layer using mimalloc allocator" ON)
 
 if (REDIS_ZMALLOC_MI)
-  set(ZMALLOC_SRC "zmalloc_mi.c")
+  set(ZMALLOC_SRC "zmalloc_mi.cc")
   set(ZMALLOC_DEPS "TRDP::mimalloc")
 else()
   set(ZMALLOC_SRC "zmalloc.c")

@@ -161,7 +161,11 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
     crb.SetReplyMode(ReplyMode::NONE);
     stub_tx->InitByArgs(local_cntx.conn_state.db_index, args_span);
 
-    sf->service().InvokeCmd(cid, args_span, &local_cntx);
+    try {
+      sf->service().InvokeCmd(cid, args_span, &local_cntx);
+    } catch (const bad_alloc& e) {
+      LOG(WARNING) << "Unable to complete DEBUG POPULATE due to out of memory";
+    }
   }
 
   local_cntx.Inject(nullptr);

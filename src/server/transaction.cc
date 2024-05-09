@@ -1284,7 +1284,12 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   DCHECK_EQ(unique_shard_cnt_, 1u);
 
   auto* shard = EngineShard::tlocal();
-  auto result = cb(this, shard);
+  RunnableResult result;
+  try {
+    result = cb(this, shard);
+  } catch (const bad_alloc& e) {
+    result = RunnableResult(OpStatus::OUT_OF_MEMORY);
+  }
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard, result);
 

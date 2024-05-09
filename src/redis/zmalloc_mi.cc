@@ -7,7 +7,9 @@
 #include <string.h>
 #include <unistd.h>
 
+extern "C" {
 #include "zmalloc.h"
+}
 
 __thread ssize_t zmalloc_used_memory_tl = 0;
 __thread mi_heap_t* zmalloc_heap = NULL;
@@ -147,7 +149,7 @@ bool heap_count_wasted_blocks(const mi_heap_t* heap, const mi_heap_area_t* area,
 };
 
 int zmalloc_get_allocator_info(size_t* allocated, size_t* active, size_t* resident) {
-  Sum_t sum = {0};
+  Sum_t sum = {0, 0};
 
   mi_heap_visit_blocks(zmalloc_heap, false /* visit all blocks*/, heap_visit_cb, &sum);
   *allocated = sum.allocated;
@@ -172,7 +174,7 @@ int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* 
 void init_zmalloc_threadlocal(void* heap) {
   if (zmalloc_heap)
     return;
-  zmalloc_heap = heap;
+  zmalloc_heap = (mi_heap_t*)heap;
 }
 
 int zmalloc_page_is_underutilized(void* ptr, float ratio) {

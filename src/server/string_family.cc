@@ -541,7 +541,7 @@ bool StringValue::IsEmpty() const {
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
   auto& db_slice = op_args_.shard->db_slice();
 
-  DCHECK(db_slice.IsDbValid(op_args_.db_cntx.db_index));
+  DCHECK(db_slice.IsDbValid(op_args_.db_cntx.db_index)) << op_args_.db_cntx.db_index;
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
 
   if (params.IsConditionalSet()) {
