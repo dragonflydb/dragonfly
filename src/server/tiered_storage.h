@@ -138,7 +138,7 @@ class TieredStorage {
     return {};
   }
 
-  void RunOffloading() {
+  void RunOffloading(DbIndex dbid) {
   }
 };
 
