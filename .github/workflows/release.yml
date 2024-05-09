@@ -32,17 +32,6 @@ jobs:
     - uses: actions/checkout@v4
       with:
         submodules: true
-    - name: Cache build deps
-      id: cache-deps
-      uses: actions/cache@v3
-      with:
-        path: |
-          ${{github.workspace}}/${{ env.RELEASE_DIR }}/
-          !${{github.workspace}}/${{ env.RELEASE_DIR }}/CMakeCache.txt
-        key: ${{ runner.os }}-release-deps-${{ github.sha }}
-        #restore-keys: |
-        #  ${{ runner.os }}-release-deps-
-
     - uses: uraimo/run-on-arch-action@v2
       name: Run commands
       id: runcmd
@@ -90,7 +79,7 @@ jobs:
         echo finished
         ls -al
     - name: Upload
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: dragonfly-aarch64
         path: |
