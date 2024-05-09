@@ -145,11 +145,6 @@ void Replica::Stop() {
     cntx_.Cancel();        // Context is fully resposible for cleanup.
   });
 
-  CloseSocket();
-  for (auto& flow : shard_flows_) {
-    flow->Cancel();
-  }
-
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
@@ -763,8 +758,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
-  RdbLoader loader(&service_);
-  loader.SetFullSyncCutCb([bc, ran = false]() mutable {
+  rdb_loader_->SetFullSyncCutCb([bc, ran = false]() mutable {
     if (!ran) {
       bc->Dec();
       ran = true;
@@ -772,13 +766,13 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
   });
 
   // Load incoming rdb stream.
-  if (std::error_code ec = loader.Load(&ps); ec) {
+  if (std::error_code ec = rdb_loader_->Load(&ps); ec) {
     cntx->ReportError(ec, "Error loading rdb format");
     return;
   }
 
   // Try finding eof token.
-  io::PrefixSource chained_tail{loader.Leftover(), &ps};
+  io::PrefixSource chained_tail{rdb_loader_->Leftover(), &ps};
   if (!eof_token.empty()) {
     unique_ptr<uint8_t[]> buf{new uint8_t[eof_token.size()]};
 
@@ -801,14 +795,14 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
     leftover_buf_.reset();
   }
 
-  if (auto jo = loader.journal_offset(); jo.has_value()) {
+  if (auto jo = rdb_loader_->journal_offset(); jo.has_value()) {
     this->journal_rec_executed_.store(*jo);
   } else {
     if (master_context_.version > DflyVersion::VER0)
       cntx->ReportError(std::make_error_code(errc::protocol_error),
                         "Error finding journal offset in stream");
   }
-  VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
+  VLOG(1) << "FullSyncDflyFb finished after reading " << rdb_loader_->bytes_read() << " bytes";
 }
 
 void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
@@ -931,6 +925,7 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
       flow_id_(flow_id) {
   use_multi_shard_exe_sync_ = GetFlag(FLAGS_enable_multi_shard_sync);
   executor_ = std::make_unique<JournalExecutor>(service);
+  rdb_loader_ = std::make_unique<RdbLoader>(&service_);
 }
 
 DflyShardReplica::~DflyShardReplica() {
@@ -1173,6 +1168,7 @@ void DflyShardReplica::JoinFlow() {
 }
 
 void DflyShardReplica::Cancel() {
+  rdb_loader_->stop();
   CloseSocket();
   shard_replica_waker_.notifyAll();
 }
