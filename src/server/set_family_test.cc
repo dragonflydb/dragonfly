@@ -21,6 +21,20 @@ class SetFamilyTest : public BaseFamilyTest {
  protected:
 };
 
+MATCHER_P(ConsistsOfMatcher, elements, "") {
+  auto vec = arg.GetVec();
+  for (const auto& x : vec) {
+    if (elements.find(x.GetString()) == elements.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+auto ConsistsOf(std::initializer_list<std::string> elements) {
+  return ConsistsOfMatcher(std::unordered_set<std::string>{elements});
+}
+
 TEST_F(SetFamilyTest, SAdd) {
   auto resp = Run({"sadd", "x", "1", "2", "3"});
   EXPECT_THAT(resp, IntArg(3));
@@ -159,34 +173,107 @@ TEST_F(SetFamilyTest, SPop) {
 }
 
 TEST_F(SetFamilyTest, SRandMember) {
-  auto resp = Run({"sadd", "x", "1", "2", "3"});
-  resp = Run({"SRandMember", "x"});
+  // Test IntSet
+  Run({"sadd", "x", "1", "2", "3"});
+
+  // Test if count > 0 (IntSet)
+  auto resp = Run({"SRandMember", "x"});
   ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, "1");
+  EXPECT_THAT(resp, AnyOf("1", "2", "3"));
+
+  resp = Run({"SRandMember", "x", "1"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, AnyOf("1", "2", "3"));
 
   resp = Run({"SRandMember", "x", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("1", "2"));
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), IsSubsetOf({"1", "2", "3"}));
 
-  resp = Run({"SRandMember", "x", "0"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_EQ(resp.GetVec().size(), 0);
-
-  resp = Run({"SRandMember", "k"});
-  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
-
-  resp = Run({"SRandMember", "k", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_EQ(resp.GetVec().size(), 0);
-
-  resp = Run({"SRandMember", "x", "-5"});
-  ASSERT_THAT(resp, ArrLen(5));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("1", "2", "3", "1", "1"));
-
-  resp = Run({"SRandMember", "x", "5"});
+  resp = Run({"SRandMember", "x", "3"});
   ASSERT_THAT(resp, ArrLen(3));
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("1", "2", "3"));
 
+  // Test if count is larger than the size of the IntSet
+  resp = Run({"SRandMember", "x", "25"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("1", "2", "3"));
+
+  // Test if count < 0 (IntSet)
+  resp = Run({"SRandMember", "x", "-1"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, AnyOf("1", "2", "3"));
+
+  resp = Run({"SRandMember", "x", "-2"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp, ConsistsOf({"1", "2", "3"}));
+
+  resp = Run({"SRandMember", "x", "-3"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp, ConsistsOf({"1", "2", "3"}));
+
+  // Test if count < 0, but the absolute value is larger than the size of the IntSet
+  resp = Run({"SRandMember", "x", "-25"});
+  ASSERT_THAT(resp, ArrLen(25));
+  EXPECT_THAT(resp, ConsistsOf({"1", "2", "3"}));
+
+  // Test StrSet
+  Run({"sadd", "y", "a", "b", "c"});
+
+  // Test if count > 0 (StrSet)
+  resp = Run({"SRandMember", "y"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+
+  resp = Run({"SRandMember", "y", "1"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+
+  resp = Run({"SRandMember", "y", "2"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), IsSubsetOf({"a", "b", "c"}));
+
+  resp = Run({"SRandMember", "y", "3"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b", "c"));
+
+  // Test if count is larger than the size of the StrSet
+  resp = Run({"SRandMember", "y", "25"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b", "c"));
+
+  // Test if count < 0 (StrSet)
+  resp = Run({"SRandMember", "y", "-1"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+
+  resp = Run({"SRandMember", "y", "-2"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp, ConsistsOf({"a", "b", "c"}));
+
+  resp = Run({"SRandMember", "y", "-3"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp, ConsistsOf({"a", "b", "c"}));
+
+  // Test if count < 0, but the absolute value is larger than the size of the StrSet
+  resp = Run({"SRandMember", "y", "-25"});
+  ASSERT_THAT(resp, ArrLen(25));
+  EXPECT_THAT(resp, ConsistsOf({"a", "b", "c"}));
+
+  // Test if count is 0
+  ASSERT_THAT(Run({"SRandMember", "x", "0"}), ArrLen(0));
+
+  // Test if set is empty
+  EXPECT_THAT(Run({"SAdd", "empty::set", "1"}), IntArg(1));
+  EXPECT_THAT(Run({"SRem", "empty::set", "1"}), IntArg(1));
+  ASSERT_THAT(Run({"SRandMember", "empty::set", "0"}), ArrLen(0));
+  ASSERT_THAT(Run({"SRandMember", "empty::set", "3"}), ArrLen(0));
+  ASSERT_THAT(Run({"SRandMember", "empty::set", "-4"}), ArrLen(0));
+
+  // Test if key does not exist
+  ASSERT_THAT(Run({"SRandMember", "unknown::set"}), ArgType(RespExpr::NIL));
+  ASSERT_THAT(Run({"SRandMember", "unknown::set", "0"}), ArrLen(0));
+
+  // Test wrong arguments
   resp = Run({"SRandMember", "x", "5", "3"});
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 }
