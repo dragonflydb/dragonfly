@@ -90,7 +90,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* own
 
 ConnectionContext::ConnectionContext(ConnectionContext* owner, Transaction* tx,
                                      facade::CapturingReplyBuilder* crb)
-    : facade::ConnectionContext(nullptr, nullptr), transaction{tx}, parent_cntx_(owner) {
+    : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
   acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
   if (tx) {  // If we have a carrier transaction, this context is used for squashing
     DCHECK(owner);
@@ -296,14 +296,13 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 
 void ConnectionState::ClientTracking::Track(ConnectionContext* cntx, const CommandId* cid) {
   auto& info = cntx->conn_state.tracking_info_;
-  auto shards = cntx->transaction->GetActiveShards();
   if ((cid->opt_mask() & CO::READONLY) && cid->IsTransactional() && info.ShouldTrackKeys()) {
-    auto conn = cntx->parent_cntx_ ? cntx->parent_cntx_->conn()->Borrow() : cntx->conn()->Borrow();
+    auto conn = cntx->conn()->Borrow();
     auto cb = [&, conn](unsigned i, auto* pb) {
-      if (shards.find(i) != shards.end()) {
-        auto* t = cntx->transaction;
-        CHECK(t);
-        auto* shard = EngineShard::tlocal();
+      auto* t = cntx->transaction;
+      CHECK(t);
+      auto* shard = EngineShard::tlocal();
+      if (shard && t->IsActive(i)) {
         OpTrackKeys(t->GetOpArgs(shard), conn, t->GetShardArgs(shard->shard_id()));
       }
     };

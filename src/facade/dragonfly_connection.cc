@@ -1113,6 +1113,7 @@ void Connection::HandleMigrateRequest() {
     this->Migrate(dest);
   }
 
+  // This triggers on rueidis SingleIntegrationTest
   // DCHECK(dispatch_q_.empty());
 
   // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
@@ -1325,6 +1326,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   while (!builder->GetError()) {
+    DCHECK_EQ(socket()->proactor(), ProactorBase::me());
     evc_.await(
         [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
     if (cc_->conn_closing)

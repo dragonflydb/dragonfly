@@ -268,7 +268,6 @@ class ConnectionContext : public facade::ConnectionContext {
   // TODO: to introduce proper accessors.
   Transaction* transaction = nullptr;
   const CommandId* cid = nullptr;
-  ConnectionContext* parent_cntx_ = nullptr;
 
   ConnectionState conn_state;
 

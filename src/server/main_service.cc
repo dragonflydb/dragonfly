@@ -1287,7 +1287,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   auto* trans = cntx->transaction;
   if (trans) {
-    cntx->transaction->SetConnectionContextAndInvokeCid(cntx);
+    cntx->transaction->SetConnectionContext(cntx);
   }
 
 #ifndef NDEBUG
@@ -1372,6 +1372,10 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   for (auto args : args_list) {
     ToUpper(&args[0]);
     const auto [cid, tail_args] = FindCmd(args);
+    // is client tracking command
+    if (cid->name() == "CLIENT" && !tail_args.empty() && ToSV(tail_args[0]) == "TRACKING") {
+      break;
+    }
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible

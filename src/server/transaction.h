@@ -363,14 +363,8 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
-  void SetConnectionContextAndInvokeCid(ConnectionContext* cntx) {
+  void SetConnectionContext(ConnectionContext* cntx) {
     cntx_ = cntx;
-  }
-
-  std::set<unsigned> GetActiveShards() {
-    std::set<unsigned> active_shards;
-    IterateActiveShards([&](const auto& sd, ShardId i) mutable { active_shards.insert(i); });
-    return active_shards;
   }
 
  private:
