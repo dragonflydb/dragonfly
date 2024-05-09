@@ -22,7 +22,7 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   DCHECK_LT(value.size(), 2_KB);
 
   // See FlushBin() for format details
-  size_t value_bytes = 2 /* dbid */ + 8 /* hash */ + value.size();
+  size_t value_bytes = 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
 
   std::optional<FilledBin> filled_bin;
   if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
@@ -56,10 +56,12 @@ SmallBins::FilledBin SmallBins::FlushBin() {
     data += sizeof(uint64_t);
   }
 
-  // Store all values with sizes, n * x bytes
+  // Store all values with sizes, n * (2 + x) bytes
   for (const auto& [key, value] : current_bin_) {
-    pending_set[key] = {size_t(data - out.data()), value.size()};
+    absl::little_endian::Store16(data, value.size());
+    data += sizeof(uint16_t);
 
+    pending_set[key] = {size_t(data - out.data()), value.size()};
     memcpy(data, value.data(), value.size());
     data += value.size();
   }
@@ -123,6 +125,7 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
     bin.bytes -= segment.length;
 
     if (--bin.entries == 0) {
+      DCHECK_EQ(bin.bytes, 0u);
       stashed_bins_.erase(it);
       return {full_segment, false /* fragmented */, true /* empty */};
     }
@@ -143,7 +146,7 @@ SmallBins::Stats SmallBins::GetStats() const {
 
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
   DCHECK_EQ(value.size(), kPageSize);
-  CHECK(stashed_bins_.erase(segment.offset));
+  stats_.total_stashed_entries -= stashed_bins_.extract(segment.offset).mapped().entries;
 
   const char* data = value.data();
 
@@ -151,6 +154,8 @@ SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_v
   data += sizeof(uint16_t);
 
   KeyHashDbList out(entries);
+
+  // Recover dbids and hashes
   for (size_t i = 0; i < entries; i++) {
     DbIndex dbid = absl::little_endian::Load16(data);
     data += sizeof(DbIndex);
@@ -158,7 +163,16 @@ SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_v
     uint64_t hash = absl::little_endian::Load64(data);
     data += sizeof(hash);
 
-    out[i] = {dbid, hash};
+    out[i] = {dbid, hash, {0, 0}};
+  }
+
+  // Recover segments
+  for (size_t i = 0; i < entries; i++) {
+    uint16_t length = absl::little_endian::Load16(data);
+    data += sizeof(uint16_t);
+
+    std::get<DiskSegment>(out[i]) = {segment.offset + (data - value.data()), length};
+    data += length;
   }
 
   return out;

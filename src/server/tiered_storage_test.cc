@@ -135,6 +135,34 @@ TEST_F(TieredStorageTest, MultiDb) {
   }
 }
 
+TEST_F(TieredStorageTest, Defrag) {
+  for (char k = 'a'; k < 'a' + 8; k++) {
+    Run({"SET", string(1, k), string(512, k)});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // 7 out 8 are in one bin, the last one made if flush and is now filling
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
+  EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 7u);
+  EXPECT_EQ(metrics.tiered_stats.small_bins_filling_bytes, 512 + 12);
+
+  // Reading 3 values still leaves the bin more than half occupied
+  Run({"GET", string(1, 'a')});
+  Run({"GET", string(1, 'b')});
+  Run({"GET", string(1, 'c')});
+  metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
+  EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 4u);
+
+  // This tirggers defragmentation
+  Run({"GET", string(1, 'd')});
+  metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 0u);
+  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
+}
+
 TEST_F(TieredStorageTest, BackgroundOffloading) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values

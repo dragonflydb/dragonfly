@@ -105,6 +105,13 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
   util::FiberAtomicGuard guard;  // atomically update items, no in-between states should be possible
   ReadOp* info = &pending_reads_.at(offset);
 
+  // most generic page must be last
+  for (size_t i = 0; i + 1 < info->key_ops.size(); i++) {
+    if (info->key_ops[i].segment.offset == 0) {
+      std::swap(info->key_ops[i], info->key_ops.back());
+    }
+  }
+
   bool deleting_full = false;
   std::string key_value;
   for (size_t i = 0; i < info->key_ops.size(); i++) {  // more items can be read while iterating

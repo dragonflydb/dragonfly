@@ -130,17 +130,19 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // Load all values from bin by their hashes
   void Defragment(tiering::DiskSegment segment, string_view value) {
-    auto hashes = ts_->bins_->DeleteBin(segment, value);
-    for (auto [dbid, hash] : hashes) {
-      auto it = db_slice_->GetDBTable(dbid)->prime.Find(hash);
-      if (IsValid(it) && it->second.IsExternal()) {
-        tiering::DiskSegment entry_segment{it->second.GetExternalSlice()};
-        if (entry_segment.FillPages().offset == segment.offset) {
-          SetInMemory(&it->second,
-                      value.substr(entry_segment.offset - segment.offset, entry_segment.length),
-                      entry_segment);
-        }
-      }
+    for (auto [dbid, hash, sub_segment] : ts_->bins_->DeleteBin(segment, value)) {
+      // Search for key with the same hash and value pointing to the same segment.
+      // If it still exists, it must correspond to the value stored in this bin
+      auto predicate = [sub_segment = sub_segment](const PrimeKey& key, const PrimeValue& probe) {
+        return probe.IsExternal() && tiering::DiskSegment{probe.GetExternalSlice()} == sub_segment;
+      };
+      auto it = db_slice_->GetDBTable(dbid)->prime.FindFirst(hash, predicate);
+      if (!IsValid(it))
+        continue;
+
+      // Cut out relevant part of value and restore it to memory
+      string_view sub_value = value.substr(sub_segment.offset - segment.offset, sub_segment.length);
+      SetInMemory(&it->second, sub_value, sub_segment);
     }
   }
 
@@ -173,9 +175,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
     if (bin.fragmented) {
       // Trigger read to signal need for defragmentation.
-      // The underlying value is already in memory, so the read will be fulfilled immediately,
-      // but only after all other values from this segment have been fetched and possibly
-      // deleted.
       VLOG(1) << "Enqueueing bin defragmentation for: x" << bin.segment.offset;
       Enqueue(kFragmentedBin, bin.segment, [](std::string*) { return false; });
     }

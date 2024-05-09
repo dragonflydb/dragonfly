@@ -41,7 +41,7 @@ class SmallBins {
   using KeySegmentList = std::vector<std::tuple<DbIndex, std::string /* key*/, DiskSegment>>;
 
   // List of item key db indices and hashes
-  using KeyHashDbList = std::vector<std::pair<DbIndex, uint64_t /* hash */>>;
+  using KeyHashDbList = std::vector<std::tuple<DbIndex, uint64_t /* hash */, DiskSegment>>;
 
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
   std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value);
