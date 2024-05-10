@@ -45,6 +45,7 @@
 "$"         return Parser::make_ROOT(loc());
 ".."        return Parser::make_DESCENT(loc());
 "."         return Parser::make_DOT(loc());
+":"         return Parser::make_COLON(loc());
 "["         return Parser::make_LBRACKET(loc());
 "]"         return Parser::make_RBRACKET(loc());
 "*"         return Parser::make_WILDCARD(loc());
