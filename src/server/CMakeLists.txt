@@ -26,7 +26,6 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     cxx_test(tiering/external_alloc_test dfly_test_lib LABELS DFLY)
 endif()
 
-
 add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             command_registry.cc  cluster/unique_slot_checker.cc
             journal/tx_executor.cc
@@ -54,7 +53,8 @@ add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc channel_store.cc
             cluster/cluster_family.cc cluster/incoming_slot_migration.cc
             cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
-            acl/validator.cc acl/helpers.cc)
+            acl/validator.cc acl/helpers.cc
+            wasm/engine_example.cc wasm/wasm_family.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)
@@ -76,6 +76,11 @@ cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib awsv2_lib jsonpath
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
+
+add_library(wasmtime STATIC IMPORTED)
+
+target_include_directories(dragonfly_lib PRIVATE ${CMAKE_SOURCE_DIR}/wasmtime/crates/c-api/include)
+target_link_libraries(dragonfly_lib ${CMAKE_SOURCE_DIR}/wasmtime/target/release/libwasmtime.a)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
