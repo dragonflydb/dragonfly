@@ -55,9 +55,10 @@ class AggFunction {
   int valid_ = -1;
 };
 
-// Bracket index representation
+// Bracket index representation, IndexExpr is a closed range, i.e. both ends are inclusive.
 // Single index is: <I, I>, wildcard: <0, INT_MAX>,
 // [begin:end): <begin, end - 1>
+// IndexExpr is 0-based, with negative indices referring to the array size of the applied object.
 struct IndexExpr : public std::pair<int, int> {
   bool Empty() const {
     return first > second;
@@ -68,7 +69,14 @@ struct IndexExpr : public std::pair<int, int> {
   }
 
   using pair::pair;
+
+  // Returns subrange with length `array_len`.
   IndexExpr Normalize(size_t array_len) const;
+
+  // Returns IndexExpr representing [left_closed, right_open) range.
+  static IndexExpr HalfOpen(int left_closed, int right_open) {
+    return IndexExpr(left_closed, right_open - 1);
+  }
 };
 
 class PathSegment {

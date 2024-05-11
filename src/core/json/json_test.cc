@@ -135,6 +135,10 @@ TEST_F(JsonTest, Path) {
   jsonpath::json_query(j2, "$.field[-1]", [&](const std::string& path, const json& val) {
     EXPECT_EQ(5, val.as<int>());
   });
+
+  jsonpath::json_query(j2, "$.field[-6:1]", [&](const std::string& path, const json& val) {
+    EXPECT_EQ(1, val.as<int>());
+  });
 }
 
 TEST_F(JsonTest, Delete) {
