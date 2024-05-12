@@ -201,6 +201,10 @@ class RdbLoader : protected RdbLoaderBase {
     return load_time_;
   }
 
+  void stop() {
+    stop_early_.store(true);
+  }
+
   // Return the offset that was received with a RDB_OPCODE_JOURNAL_OFFSET command,
   // or 0 if no offset was received.
   std::optional<uint64_t> journal_offset() const {
