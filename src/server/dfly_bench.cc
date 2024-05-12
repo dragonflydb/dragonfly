@@ -13,9 +13,9 @@
 #include "absl/time/time.h"
 #include "base/histogram.h"
 #include "base/init.h"
-#include "base/io_buf.h"
 #include "base/zipf_gen.h"
 #include "facade/redis_parser.h"
+#include "io/io_buf.h"
 #include "util/fibers/dns_resolve.h"
 #include "util/fibers/pool.h"
 #include "util/fibers/uring_socket.h"
@@ -268,7 +268,7 @@ void Driver::Run(uint32_t num_reqs, uint64_t cycle_ns, base::Histogram* dest) {
 
 void Driver::ReceiveFb(base::Histogram* dest) {
   facade::RedisParser parser{1 << 16, false};
-  base::IoBuf io_buf{512};
+  io::IoBuf io_buf{512};
   unsigned num_resp = 0;
   while (true) {
     auto buf = io_buf.AppendBuffer();

@@ -709,7 +709,7 @@ Usage: dragonfly [FLAGS]
   // export MIMALLOC_VERBOSE=1 to see the options before the override.
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
-  mi_option_set(mi_option_decommit_delay, 1);
+  mi_option_enable(mi_option_purge_decommits);
 
   fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 

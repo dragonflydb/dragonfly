@@ -93,7 +93,7 @@ bool MatchHttp11Line(string_view line) {
          absl::EndsWith(line, "HTTP/1.1");
 }
 
-void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
+void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
                          absl::FunctionRef<void()> f) {
   const size_t prev_capacity = io_buf.Capacity();
   f();

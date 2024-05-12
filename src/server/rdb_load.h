@@ -9,10 +9,10 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
-#include "base/io_buf.h"
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
 #include "io/io.h"
+#include "io/io_buf.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
 
