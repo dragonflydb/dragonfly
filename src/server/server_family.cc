@@ -1090,6 +1090,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
 
   if (m.events.insertion_rejections | m.coordinator_stats.oom_error_cmd_cnt) {
+    AppendMetricHeader("oom_errors_total", "Rejected requests due to out of memory errors",
+                       MetricType::COUNTER, &resp->body());
     AppendMetricValue("oom_errors_total", m.events.insertion_rejections, {"type"}, {"insert"},
                       &resp->body());
     AppendMetricValue("oom_errors_total", m.coordinator_stats.oom_error_cmd_cnt, {"type"}, {"cmd"},
