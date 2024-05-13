@@ -519,6 +519,18 @@ TYPED_TEST(JsonPathTest, SubRange) {
   EvaluatePath(path, json, cb);
   ASSERT_THAT(arr, ElementsAre());
   arr.clear();
+
+  ASSERT_EQ(0, this->Parse("$.arr[:2]"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre(1, 2));
+  arr.clear();
+
+  ASSERT_EQ(0, this->Parse("$.arr[2:]"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre(3, 4, 5));
+  arr.clear();
 }
 
 }  // namespace dfly::json

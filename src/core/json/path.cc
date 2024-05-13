@@ -55,7 +55,7 @@ IndexExpr IndexExpr::Normalize(size_t array_len) const {
     return IndexExpr(1, 0);  // empty range.
 
   IndexExpr res = *this;
-  auto wrap = [=](int negative) {
+  auto wrap = [array_len](int negative) {
     unsigned positive = -negative;
     return positive > array_len ? 0 : array_len - positive;
   };

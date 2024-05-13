@@ -30,7 +30,7 @@
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 
-ABSL_FLAG(bool, jsonpathv2, false,
+ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
 ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
