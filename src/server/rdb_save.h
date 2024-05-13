@@ -11,9 +11,9 @@ extern "C" {
 
 #include <optional>
 
-#include "base/io_buf.h"
 #include "base/pod_array.h"
 #include "io/io.h"
+#include "io/io_buf.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
@@ -181,7 +181,7 @@ class SerializerBase {
   std::error_code SaveLzfBlob(const ::io::Bytes& src, size_t uncompressed_len);
 
   CompressionMode compression_mode_;
-  base::IoBuf mem_buf_;
+  io::IoBuf mem_buf_;
   std::unique_ptr<CompressorImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;

@@ -20,7 +20,7 @@ io::Result<size_t> BufferedStreamerBase::WriteSome(const iovec* vec, uint32_t le
       write_len += vec->iov_len;
     }
     if (write_len < max_buffered_mem_) {
-      producer_buf_ = base::IoBuf{max_buffered_mem_};
+      producer_buf_ = io::IoBuf{max_buffered_mem_};
     }
   }
 
