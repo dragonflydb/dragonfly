@@ -91,7 +91,7 @@ jobs:
 
           # Preven updating these packages that bring in dependencies that sometimes break
           # the update
-          brew pin azure-cli jpeg-xl aom lima pipx
+          brew pin azure-cli jpeg-xl aom lima pipx gcc
           # Remove Python3 symlinks in /usr/local/bin as workaround to brew update issues
           # https://github.com/actions/setup-python/issues/577
           rm /usr/local/bin/2to3* || :
