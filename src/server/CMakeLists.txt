@@ -80,11 +80,11 @@ cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib awsv2_lib jsonpath
 
 # Better way to integrate
 # https://github.com/corrosion-rs/corrosion
-target_include_directories(dfly_transaction PUBLIC ${CMAKE_SOURCE_DIR}/wasmtime/crates/c-api/include)
+target_include_directories(dfly_transaction PUBLIC ${CMAKE_SOURCE_DIR}/c-api/include)
 
 add_library(wasmtime STATIC IMPORTED)
-target_include_directories(dragonfly_lib PRIVATE ${CMAKE_SOURCE_DIR}/wasmtime/crates/c-api/include)
-target_link_libraries(dragonfly_lib ${CMAKE_SOURCE_DIR}/wasmtime/target/release/libwasmtime.a)
+target_include_directories(dragonfly_lib PRIVATE ${CMAKE_SOURCE_DIR}/c-api/include)
+target_link_libraries(dragonfly_lib ${CMAKE_SOURCE_DIR}/c-api/lib/libwasmtime.a)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
