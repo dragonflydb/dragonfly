@@ -37,6 +37,7 @@ enum AclCat {
   SCRIPTING = 1ULL << 20,
 
   // Extensions
+  WASM = 1ULL << 27,
   BLOOM = 1ULL << 28,
   FT_SEARCH = 1ULL << 29,
   THROTTLE = 1ULL << 30,
@@ -67,6 +68,7 @@ inline const absl::flat_hash_map<std::string_view, uint32_t> CATEGORY_INDEX_TABL
     {"CONNECTION", CONNECTION},
     {"TRANSACTION", TRANSACTION},
     {"SCRIPTING", SCRIPTING},
+    {"WASM", WASM},
     {"BLOOM", BLOOM},
     {"FT_SEARCH", FT_SEARCH},
     {"THROTTLE", THROTTLE},
@@ -81,7 +83,7 @@ inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
     "KEYSPACE",  "READ",      "WRITE",     "SET",       "SORTEDSET",  "LIST",        "HASH",
     "STRING",    "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",     "PUBSUB",      "ADMIN",
     "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION", "TRANSACTION", "SCRIPTING",
-    "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",
+    "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "WASM",
     "BLOOM",     "FT_SEARCH", "THROTTLE",  "JSON"};
 
 using RevCommandField = std::vector<std::string>;
