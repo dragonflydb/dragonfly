@@ -7,52 +7,39 @@
 #include <server/wasm/api.h>
 
 #include <shared_mutex>
+#include <variant>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "io/file_util.h"
 #include "server/wasm/api.h"
-#include "wasm.h"
-#include "wasmtime.h"
+#include "server/wasm/wasmtime.hh"
 
 namespace dfly::wasm {
 
-WasmRegistry::WasmRegistry() {
-  engine_ = wasm_engine_new();
-  CHECK(engine_);
-  linker_ = wasmtime_linker_new(engine_);
-  CHECK(linker_);
-  CHECK_EQ(wasmtime_linker_define_wasi(linker_), nullptr);
+WasmRegistry::WasmRegistry()
+    : engine_(WasmRegistry::GetConfig()), linker_(engine_), store_(engine_) {
+  api::RegisterApiFunction(
+      "hello",
+      [](auto...) {
+        LOG(INFO) << "Hello from WASM";
+        return std::monostate();
+      },
+      &linker_);
 
-  // There are more configs we should look at. In particular we can spend a little more
-  // time in compiling but generate a more optimized binary as well ass signal handling config.
-  wasi_config_ = wasi_config_new();
-  CHECK(wasi_config_);
-  wasi_config_inherit_argv(wasi_config_);
-  wasi_config_inherit_env(wasi_config_);
-  wasi_config_inherit_stdin(wasi_config_);
-  wasi_config_inherit_stdout(wasi_config_);
-  wasi_config_inherit_stderr(wasi_config_);
+  wasmtime::WasiConfig wasi;
+  wasi.inherit_argv();
+  wasi.inherit_env();
+  wasi.inherit_stdin();
+  wasi.inherit_stdout();
+  wasi.inherit_stderr();
+  store_.context().set_wasi(std::move(wasi)).unwrap();
 
-  // Define API functions
-  // This should really be done with a separate abstraction. Something line
-  // WasmFunction::Register()
-  std::string mod = "dragonfly";
-  std::string export_f = "hello";
-  wasm_valtype_vec_new_empty(&result_types_);
-  wasm_valtype_vec_new_empty(&arg_types_);
-  hello_handle_ = wasm_functype_new(&arg_types_, &result_types_);
-  auto error =
-      wasmtime_linker_define_func(linker_, mod.data(), mod.size(), export_f.data(), export_f.size(),
-                                  hello_handle_, api::Hello, nullptr, nullptr);
-  CHECK_EQ(error, nullptr);
+  linker_.define_wasi().unwrap();
 }
 
 WasmRegistry::~WasmRegistry() {
-  wasi_config_delete(wasi_config_);
-  wasmtime_linker_delete(linker_);
-  wasm_engine_delete(engine_);
 }
 
 std::string WasmRegistry::Add(std::string_view path) {
@@ -63,32 +50,26 @@ std::string WasmRegistry::Add(std::string_view path) {
                         is_file_read.error().message());
   }
 
+  // In this context the cast is safe
+  wasmtime::Span<uint8_t> wasm_bin{reinterpret_cast<uint8_t*>(is_file_read->data()),
+                                   is_file_read->size()};
+
   // 2. Setup && compile
-  //  wasmtime_module_t* module = nullptr;
-  //  wasm_byte_vec_t wasm;
-  //  wasm_byte_vec_new_uninitialized(&wasm, is_file_read->size());
-  //  std::memcpy(wasm.data, is_file_read->data(), wasm.size);
+  auto result = wasmtime::Module::compile(engine_, wasm_bin);
+  if (!result) {
+    return absl::StrCat("Error compiling file: ", path, " with error: ", result.err().message());
+  }
 
-  // The following line is problematic, it causes a SEGFAULT when we switch fibers
-  // after the command gets executed
+  // 3. Insert to registry
+  auto slash = path.rfind('/');
+  auto name = path;
+  if (slash != path.npos) {
+    name = name.substr(slash + 1);
+    // HELLO
+  }
+  std::unique_lock<util::fb2::SharedMutex> lock(mu_);
+  modules_.emplace(name, std::move(result.ok()));
 
-  //  auto error = wasmtime_module_new(engine_, (uint8_t*)wasm.data, wasm.size, &module);
-  //  if(error != nullptr || !module) {
-  //    wasm_byte_vec_delete(&wasm);
-  //    return "Could not compile WASM module";
-  //  }
-  //
-  //
-  //  // 3. Insert to registry
-  //  auto slash = path.rfind('/');
-  //  auto name = path;
-  //  if(slash != path.npos) {
-  //    name.substr(slash);
-  //  }
-  //  std::unique_lock<util::fb2::SharedMutex> lock(mu_);
-  //  modules_.emplace(name, module);
-  //  wasm_byte_vec_delete(&wasm);
-  //  wasmtime_module_delete(module);
   return {};
 }
 
@@ -107,29 +88,13 @@ std::optional<WasmRegistry::WasmModuleInstance> WasmRegistry::GetInstanceFromMod
 
   auto& module = modules_.at(module_name);
 
-  wasmtime_store_t* store = wasmtime_store_new(engine_, nullptr, nullptr);
-  wasmtime_context_t* context = wasmtime_store_context(store);
-  if (!store) {
-    return {};
-  }
-  auto error = wasmtime_context_set_wasi(context, wasi_config_);
-  if (error != nullptr) {
-    return {};
-  }
-  // instantiate the module
-  error = wasmtime_linker_module(linker_, context, "", 0, module.GetImpl());
-  if (error != nullptr) {
+  auto instance = linker_.instantiate(store_, module.GetImpl());
+  if (!instance) {
+    LOG(INFO) << instance.err().message();
     return {};
   }
 
-  // Create the function handler
-  wasmtime_func_t func;
-  error = wasmtime_linker_get_default(linker_, context, "", 0, &func);
-  if (error != nullptr) {
-    return {};
-  }
-
-  return WasmModuleInstance(store, context, func);
+  return WasmModuleInstance{instance.ok(), &store_};
 }
 
 }  // namespace dfly::wasm

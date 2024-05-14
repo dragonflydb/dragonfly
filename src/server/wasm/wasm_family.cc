@@ -34,6 +34,11 @@ void WasmFamily::Load(CmdArgList args, ConnectionContext* cntx) {
     cntx->SendError(res);
     return;
   }
+  auto slash = path.rfind('/');
+  auto name = path;
+  if (slash != path.npos) {
+    name = name.substr(slash + 1);
+  }
   cntx->SendOk();
 }
 

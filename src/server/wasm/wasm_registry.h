@@ -11,42 +11,28 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "base/logging.h"
+#include "server/wasm/api.h"
+#include "server/wasm/wasmtime.hh"
 #include "util/fibers/synchronization.h"
-#include "wasi.h"
-#include "wasm.h"
-#include "wasmtime.h"
 
 namespace dfly::wasm {
 
-template <typename T, auto fn> struct Deleter {
-  void operator()(T* ptr) {
-    fn(ptr);
-  }
-};
-
-template <typename T, auto fn> using Handle = std::unique_ptr<T, Deleter<T, fn>>;
-
 class WasmModule {
  public:
-  WasmModule(wasmtime_module_t* module) {
-    module_ = module;
+  explicit WasmModule(wasmtime::Module module) : module_(std::move(module)) {
   }
 
   WasmModule(WasmModule&&) = default;
+  WasmModule& operator=(WasmModule&&) = default;
   WasmModule(const WasmModule&) = delete;
+  ~WasmModule() = default;
 
-  ~WasmModule() {
-    if (module_) {
-      wasmtime_module_delete(module_);
-    }
-  }
-
-  wasmtime_module_t* GetImpl() {
+  wasmtime::Module& GetImpl() {
     return module_;
   }
 
  private:
-  wasmtime_module_t* module_;
+  wasmtime::Module module_;
 };
 
 class WasmRegistry {
@@ -64,29 +50,25 @@ class WasmRegistry {
   // will execute (effectively allowing concurrent calls to the same wasm module)
   class WasmModuleInstance {
    public:
-    explicit WasmModuleInstance(wasmtime_store_t* store, wasmtime_context_t* cntx,
-                                wasmtime_func_t wasm_fun)
-        : store_{store}, context_{cntx}, wasm_fun_{wasm_fun} {
+    explicit WasmModuleInstance(wasmtime::Instance instance, wasmtime::Store* store)
+        : instance_{instance}, store_(store) {
     }
 
     void operator()() {
-      wasm_trap_t* trap = nullptr;
-      auto error = wasmtime_func_call(context_, &wasm_fun_, nullptr, 0, nullptr, 0, &trap);
-      if (error != nullptr || trap != nullptr) {
-        LOG(INFO) << "error calling default export";
+      // Users will export functions for their modules via the attribute
+      //  __attribute__((export_name(func_name))). We will expose this in our sdk
+      auto extern_def = instance_.get(*store_, "my_fun");
+      if (!extern_def) {
+        // return error
         return;
       }
-    }
-
-    ~WasmModuleInstance() {
-      wasmtime_store_delete(store_);
+      auto run = std::get<wasmtime::Func>(*extern_def);
+      run.call(store_, {}).unwrap();
     }
 
    private:
-    // Full ownership
-    wasmtime_store_t* store_;
-    wasmtime_context_t* context_;
-    wasmtime_func_t wasm_fun_;
+    wasmtime::Instance instance_;
+    wasmtime::Store* store_;
   };
 
   std::optional<WasmModuleInstance> GetInstanceFromModule(std::string_view module_name);
@@ -97,13 +79,14 @@ class WasmRegistry {
 
   // Global available for all threads
   // see: https://docs.wasmtime.dev/c-api/wasmtime_8h.html in section thread safety
-  wasm_engine_t* engine_;
-  wasmtime_linker_t* linker_;
-  wasi_config_t* wasi_config_;
-  // TODO move this to an API registry since we will need multiple API functions
-  wasm_valtype_vec_t arg_types_;
-  wasm_valtype_vec_t result_types_;
-  wasm_functype_t* hello_handle_;
+  wasmtime::Engine engine_;
+  wasmtime::Linker linker_;
+  wasmtime::Store store_;
+  static wasmtime::Config GetConfig() {
+    wasmtime::Config config;
+    config.epoch_interruption(false);
+    return config;
+  }
 };
 
 }  // namespace dfly::wasm
