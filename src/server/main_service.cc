@@ -2641,6 +2641,7 @@ void Service::RegisterCommands() {
   BloomFamily::Register(&registry_);
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
+  wasm_family_.Register(&registry_);
 
   acl_family_.Register(&registry_);
   acl::BuildIndexers(registry_.GetFamilies());

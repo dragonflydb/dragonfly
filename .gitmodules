@@ -1,3 +1,6 @@
 [submodule "helio"]
 	path = helio
 	url = https://github.com/romange/helio.git
+[submodule "wasmtime"]
+	path = wasmtime
+	url = https://github.com/bytecodealliance/wasmtime.git

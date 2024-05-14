@@ -17,6 +17,7 @@
 #include "server/config_registry.h"
 #include "server/engine_shard_set.h"
 #include "server/server_family.h"
+#include "server/wasm/wasm_family.h"
 
 namespace util {
 class AcceptServer;
@@ -185,6 +186,7 @@ class Service : public facade::ServiceInterface {
   cluster::ClusterFamily cluster_family_;
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
+  wasm::WasmFamily wasm_family_;
 
   const CommandId* exec_cid_;  // command id of EXEC command for pipeline squashing
 
