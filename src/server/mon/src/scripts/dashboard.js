@@ -317,5 +317,6 @@ window.addEventListener('DOMContentLoaded', (event) => {
     initTabs();
     initGraphs();
     setInterval(updateStats, UPDATE_INTERVAL);
+    setInterval(updateShardStats, UPDATE_INTERVAL);    
     loadWinnerTab();
 });
