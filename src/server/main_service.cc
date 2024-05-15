@@ -2533,6 +2533,11 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
                        HttpAPI(args, std::move(req), this, send);
                      });
   }
+
+  const char kRootResp[] = R"(
+    <p>Hello World!</p>
+  )";
+  base->set_root_response(kRootResp);
 }
 
 void Service::OnClose(facade::ConnectionContext* cntx) {
