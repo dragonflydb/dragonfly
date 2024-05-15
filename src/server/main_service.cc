@@ -1000,7 +1000,7 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
     cntx = cntx->conn_state.squashing_info->owner;
 
   if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid, tail_args)) {
-    return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
+    return ErrorReply(absl::StrCat("-NOPERM ", cntx->authed_username, " ", error_msg));
   }
   return nullopt;
 }
