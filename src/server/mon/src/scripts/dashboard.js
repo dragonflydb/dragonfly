@@ -4,7 +4,7 @@ function getSVG(data, bars) {
 
     if (!data || !data.length) return svg;
 
-    const leftPadding = 10 + Math.max(...data.map((d)=>numberToShortString(d).length)) * 8;
+    const leftPadding = 17 + Math.max(...data.map((d)=>numberToShortString(d).length)) * 4;
 
     const width = 550;
     const height = 100;
@@ -47,11 +47,12 @@ function getSVG(data, bars) {
     return svg;
 
     function numberToShortString(num) {
+        num = Number(num);
         if (num === 0) return "0";
         const units = ["", "K", "M", "B"];
         const isNegative = num < 0;
         num = Math.abs(num);
-        const unit = Math.floor((num.toString().length - 1) / 3);
+        const unit = Math.floor(Math.log10(num) / 3);
         let scaledNum = num / Math.pow(1000, unit);
         scaledNum = scaledNum.toFixed(1);
         let roundedNum = scaledNum.replace(/\.0$/, ''); // Remove unnecessary .0 if the number is whole
