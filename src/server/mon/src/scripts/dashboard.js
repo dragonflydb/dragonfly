@@ -1,36 +1,43 @@
-
-const UPDATE_INTERVAL = 1000;
-
 function getSVG(data, bars) {
-
     const svgNS = "http://www.w3.org/2000/svg";
-    const leftPadding = 10+numberToShortString(Math.max(...data)).length*10;
+    const svg = document.createElementNS(svgNS, "svg");
 
-    const width = 550 - leftPadding;
+    if (!data || !data.length) return svg;
+
+    const leftPadding = 10 + Math.max(...data.map((d)=>numberToShortString(d).length)) * 8;
+
+    const width = 550;
     const height = 100;
     const numGridLines = 4;
 
     const padding = 10;  // Top and bottom padding within the SVG
 
     // Create SVG element
-    const svg = document.createElementNS(svgNS, "svg");
-    svg.setAttribute("width", width + leftPadding);
+    svg.setAttribute("width", width);
     svg.setAttribute("height", height);
 
     if (!data || data.length < 2) return svg;
 
     // Create gradient
-
     createGradient(svg, "df-gradient", [
         { offset: "0%", color: "#5A3EE0" },
         { offset: "100%", color: "#C53EE0" }
     ]);
 
-    // Adjust scale to include padding
     const maxY = Math.max(...data);
-    const scaledData = data.map(d => (height - padding) - (d / maxY) * (height - 2 * padding));
+    let yMax;
+    let scaledData;
 
-    drawGrid();
+    if (maxY === 0 || (maxY >= 1 && maxY <= 10)) {
+        yMax = 10;
+    } else {
+        const uniqueData = [...new Set(data)];
+        yMax = uniqueData.length === 1 ? maxY * 2 : maxY; // Adjust scale if data contains same numbers
+    }
+
+    scaledData = data.map(d => (height - padding) - (d / yMax) * (height - 2 * padding));
+
+    drawGrid(yMax);
 
     if (bars) drawBarGraph();
     else drawGraph();
@@ -40,24 +47,26 @@ function getSVG(data, bars) {
     function numberToShortString(num) {
         if (num === 0) return "0";
         const units = ["", "K", "M", "B"];
-        const unit = Math.floor((Math.round(num).toString().length - 1) / 3);
+        const isNegative = num < 0;
+        num = Math.abs(num);
+        const unit = Math.floor((num.toString().length - 1) / 3);
         let scaledNum = num / Math.pow(1000, unit);
-        scaledNum = Math.round(scaledNum);
-        let roundedNum = scaledNum.toString().replace(/\.?0+$/, '');
-        return roundedNum + units[unit];
+        scaledNum = scaledNum.toFixed(1);
+        let roundedNum = scaledNum.replace(/\.0$/, ''); // Remove unnecessary .0 if the number is whole
+        return (isNegative ? '-' : '') + roundedNum + units[unit];
     }
 
-    function drawGrid() {
+    function drawGrid(yMax) {
         // Draw Y-axis grid lines and labels
         for (let i = 0; i <= numGridLines; i++) {
             const lineY = Math.round(padding + (height - 2 * padding) / numGridLines * i);
-            const value = maxY * (1 - i / numGridLines); // Calculate the value at each grid line
+            const value = yMax * (1 - i / numGridLines); // Calculate the value at each grid line
 
             // Draw the grid line
             const gridLine = document.createElementNS(svgNS, "line");
             gridLine.setAttribute("x1", leftPadding);
             gridLine.setAttribute("y1", lineY);
-            gridLine.setAttribute("x2", leftPadding + width); // Ensure lines span the width of the graph
+            gridLine.setAttribute("x2", width); // Ensure lines span the width of the graph
             gridLine.setAttribute("y2", lineY);
             gridLine.setAttribute("stroke", "#525259");
             gridLine.setAttribute("stroke-width", "1");
@@ -80,33 +89,47 @@ function getSVG(data, bars) {
         // Define the path for the line graph
         const lp = leftPadding * 1.45;
         let pathData = `M ${lp} ${scaledData[0]}`;
-        for (let i = 1; i < scaledData.length; i++) {
-            const x1 = lp + (width / data.length) * (i - 1);
-            const y1 = scaledData[i - 1];
-            const x2 = lp + (width / data.length) * i;
-            const y2 = scaledData[i];
-            const controlDistance = (width / data.length) / 2; // Adjust this to control the roundness
-            const cx1 = x1 + controlDistance;
-            const cy1 = y1;
-            const cx2 = x2 - controlDistance;
-            const cy2 = y2;
-            pathData += ` C ${cx1},${cy1} ${cx2},${cy2} ${x2},${y2}`;
-        }
+
+        // Check if all y values are the same
+        const allYsSame = scaledData.every((y) => y === scaledData[0]);
 
         const path = document.createElementNS(svgNS, "path");
+
+        if (allYsSame) {
+            // Draw a straight horizontal line if all y values are the same
+            const xEnd = Math.round(lp + (width / data.length) * (scaledData.length - 1));
+            pathData += ` L ${xEnd} ${scaledData[0]}`;
+            path.setAttribute("stroke", "#C53EE0");
+        } else {
+            // Draw the cubic Bezier curve if y values are not all the same
+            for (let i = 1; i < scaledData.length; i++) {
+                const x1 = lp + (width / data.length) * (i - 1);
+                const y1 = scaledData[i - 1];
+                const x2 = lp + (width / data.length) * i;
+                const y2 = scaledData[i];
+                const controlDistance = (width / data.length) / 2; // Adjust this to control the roundness
+                const cx1 = x1 + controlDistance;
+                const cy1 = y1;
+                const cx2 = x2 - controlDistance;
+                const cy2 = y2;
+                pathData += ` C ${cx1},${cy1} ${cx2},${cy2} ${x2},${y2}`;
+            }
+            path.setAttribute("stroke", "url(#df-gradient)");
+        }
+
         path.setAttribute("d", pathData);
-        path.setAttribute("stroke", "url(#df-gradient)");
         path.setAttribute("stroke-width", "2");
         path.setAttribute("fill", "none");
         svg.appendChild(path);
     }
 
+
     function drawBarGraph() {
         const barPadding = width / data.length * 0.3; // Padding between bars
-        const barWidth = (width - barPadding * (data.length + 1)) / data.length; // Calculate bar width
+        const barWidth = (width - leftPadding - barPadding * (data.length + 1)) / data.length; // Calculate bar width
 
         data.forEach((value, index) => {
-            const barHeight = (value / maxY) * (height - 2 * padding);
+            const barHeight = (value / yMax) * (height - 2 * padding);
             const x = leftPadding + barPadding + (barWidth + barPadding) * index; // Adjust x to include padding
             const y = height - barHeight - padding; // Y position of the bar
 
@@ -138,8 +161,8 @@ function getSVG(data, bars) {
 
         defs.appendChild(gradient);
     }
-
 }
+
 
 function openTab(tabName) {
     var i, tabcontent, tablinks;
@@ -234,13 +257,15 @@ function Widget(settings) {
 
     this.updateHeader = () => {
         const stats = this.stats();
-        if (stats[stats.length - 1]) {
+        if (stats[stats.length - 1] || stats[stats.length - 1] == 0) {
             if (settings.id == "uptime") {
-                this.html.header.textContent = stats[stats.length - 1];
+                const vals = stats[stats.length - 1].split(",");
+                vals.pop();
+                this.html.header.textContent = vals.join(",");
                 return;
             }
             const num = stats[stats.length - 1].toLocaleString('en-US');
-            if (stats[stats.length - 1]) this.html.header.textContent = `${num}${settings.suffix||""}`;
+            this.html.header.textContent = `${num}${settings.suffix || ""}`;
         }
     }
 
@@ -317,6 +342,6 @@ window.addEventListener('DOMContentLoaded', (event) => {
     initTabs();
     initGraphs();
     setInterval(updateStats, UPDATE_INTERVAL);
-    setInterval(updateShardStats, UPDATE_INTERVAL);    
+    setInterval(updateShardStats, UPDATE_INTERVAL);
     loadWinnerTab();
 });

@@ -1,5 +1,3 @@
-const PROMPT_PREFIX = 'dragonfly>';
-const API_URL = "/api";
 
 function formatCommands(commands) {
     return commands[0].split(" ");
