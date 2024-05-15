@@ -21,7 +21,9 @@ const encodeImageToBase64 = (imagePath) => {
 const inlineCSS = (cssPaths) => {
     return cssPaths.map((cssPath) => {
         const cssContent = readFile(cssPath);
-        return new CleanCSS().minify(cssContent).styles;
+        return new CleanCSS({
+            format: { quotes: 'single' } // Use single quotes
+        }).minify(cssContent).styles;
     }).join(' ');
 };
 
@@ -29,7 +31,11 @@ const inlineCSS = (cssPaths) => {
 const inlineJS = (jsPaths) => {
     return jsPaths.map((jsPath) => {
         const jsContent = readFile(jsPath);
-        return UglifyJS.minify(jsContent).code;
+        return UglifyJS.minify(jsContent, {
+            output: {
+                quote_style: 1 // 1 forces single quotes
+            }
+        }).code;
     }).join('; ');
 };
 
@@ -80,7 +86,8 @@ const inlineAssets = async (htmlPath) => {
         collapseWhitespace: true,
         removeComments: true,
         minifyCSS: true,
-        minifyJS: true,
+        minifyJS: false,
+        quoteCharacter: "'"
     });
 
     // Write the inlined HTML to a new file
