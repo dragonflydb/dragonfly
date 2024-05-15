@@ -137,7 +137,9 @@ function getSVG(data, bars) {
         const barWidth = (width - leftPadding - barPadding * (data.length + 1)) / data.length; // Calculate bar width
 
         data.forEach((value, index) => {
-            const barHeight = (value / yMax) * (height - 2 * padding);
+            let barHeight = (value / yMax) * (height - 2 * padding);
+            if (barHeight == 0) barHeight = 1;
+
             const x = leftPadding + barPadding + (barWidth + barPadding) * index; // Adjust x to include padding
             const y = height - barHeight - padding; // Y position of the bar
 
