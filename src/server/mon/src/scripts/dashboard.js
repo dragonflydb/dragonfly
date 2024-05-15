@@ -353,5 +353,5 @@ window.addEventListener('DOMContentLoaded', (event) => {
     initGraphs();
     setInterval(updateStats, UPDATE_INTERVAL);
     setInterval(updateShardStats, UPDATE_INTERVAL);
-    loadWinnerTab();
+    loadAchievementsTab();
 });

@@ -1,10 +1,10 @@
 
-async function loadWinnerTab() {
+async function loadAchievementsTab() {
     try {
-        const response = await fetch("winner.html");
+        const response = await fetch("achievements.html");
         if (!response.ok) return;
         const html = await response.text();
-        const container = document.getElementById('winner');
+        const container = document.getElementById('achievements');
         container.innerHTML = html;
 
         const scripts = container.querySelectorAll('script');
