@@ -264,7 +264,7 @@ function Widget(settings) {
                 this.html.header.textContent = vals.join(",");
                 return;
             }
-            const num = stats[stats.length - 1].toLocaleString('en-US');
+            const num = Number(stats[stats.length - 1]).toLocaleString('en-US');
             this.html.header.textContent = `${num}${settings.suffix || ""}`;
         }
     }
