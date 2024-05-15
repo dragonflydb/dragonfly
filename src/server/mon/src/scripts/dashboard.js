@@ -268,7 +268,7 @@ function Widget(settings) {
         if (stats[stats.length - 1] || stats[stats.length - 1] == 0) {
             if (settings.id == "uptime") {
                 const vals = stats[stats.length - 1].split(",");
-                vals.pop();
+                if (vals.length > 2) vals.pop();
                 this.html.header.textContent = vals.join(",");
                 return;
             }
