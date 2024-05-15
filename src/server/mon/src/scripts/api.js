@@ -122,7 +122,6 @@ function parseRedisInfo(text) {
   return result;
 }
 
-const HISTORY_WINDOW = 60;
 async function updateStats() {
   const info = await fetchData("info all");
   const data = parseRedisInfo(info.result);

@@ -12,6 +12,8 @@ function getSVG(data, bars) {
 
     const padding = 10;  // Top and bottom padding within the SVG
 
+    const graphPadding = 10;
+
     // Create SVG element
     svg.setAttribute("width", width);
     svg.setAttribute("height", height);
@@ -87,7 +89,13 @@ function getSVG(data, bars) {
 
     function drawGraph() {
         // Define the path for the line graph
-        const lp = leftPadding * 1.45;
+
+        const xDist = (width-leftPadding-graphPadding*2)/HISTORY_WINDOW;
+        const lp = leftPadding+graphPadding+(HISTORY_WINDOW-(data.length))*xDist;
+
+        //const lp = leftPadding * 1.45;
+
+
         let pathData = `M ${lp} ${scaledData[0]}`;
 
         // Check if all y values are the same
@@ -97,17 +105,17 @@ function getSVG(data, bars) {
 
         if (allYsSame) {
             // Draw a straight horizontal line if all y values are the same
-            const xEnd = Math.round(lp + (width / data.length) * (scaledData.length - 1));
+            const xEnd = Math.round(width-graphPadding);
             pathData += ` L ${xEnd} ${scaledData[0]}`;
             path.setAttribute("stroke", "#C53EE0");
         } else {
             // Draw the cubic Bezier curve if y values are not all the same
             for (let i = 1; i < scaledData.length; i++) {
-                const x1 = lp + (width / data.length) * (i - 1);
+                const x1 = lp + xDist * (i - 1);
                 const y1 = scaledData[i - 1];
-                const x2 = lp + (width / data.length) * i;
+                const x2 = lp + xDist * i;
                 const y2 = scaledData[i];
-                const controlDistance = (width / data.length) / 2; // Adjust this to control the roundness
+                const controlDistance = xDist / 2; // Adjust this to control the roundness
                 const cx1 = x1 + controlDistance;
                 const cy1 = y1;
                 const cx2 = x2 - controlDistance;

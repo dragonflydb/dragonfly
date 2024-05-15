@@ -17,7 +17,6 @@ const globalStats = {
 
 async function updateStats() {
 
-    const limit = 20;
     const range = [1, 100];
 
     update(globalStats);
@@ -27,7 +26,7 @@ async function updateStats() {
         Object.keys(stats).forEach(key => {
             if (key == "uptime") return;
             if (stats[key].constructor === Array) {
-                if (stats[key].length >= limit) {
+                if (stats[key].length >= HISTORY_WINDOW) {
                     stats[key].shift();
                 }
                 const num = Math.floor(Math.random() * (range[1] - range[0] + 1) + range[0]);

@@ -17,7 +17,6 @@ async function executeCommands(dbid, pre, input, commands, animate) {
 }
 
 function formatReply(reply, indent = '') {
-    console.log(Object.keys(reply));
     if (reply === null) {
         return '(nil)';
     } else {
