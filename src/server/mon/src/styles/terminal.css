@@ -1,0 +1,75 @@
+.terminal {
+    width: 100%;
+    height: 600px;
+    border-radius: 10px;
+    background-color: #212020;
+    color: #fff;
+    font-family: 'Courier New', Courier, monospace;
+    padding: 20px;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    margin-top: 20px;
+}
+
+.terminal pre {
+    margin: 0;
+    margin-bottom: 10px;
+    line-height: 1.3em;
+}
+
+.prompt {
+    display: flex;
+    position: relative;
+}
+
+.prompt span {
+    color: #C53EE0;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 15px;
+}
+
+.prompt input {
+    background-color: #212020;
+    border: none;
+    color: #fff;
+    font-family: 'Courier New', Courier, monospace;
+    outline: none;
+    flex-grow: 1;
+    margin-left: 5px;
+}
+
+.prompt input::placeholder {
+    color: #555;
+}
+
+.prompt input:focus {
+    border: none;
+    outline: none;
+}
+
+.autocomplete {
+    visibility: hidden;
+    min-width: 200px;
+    background-color: #383838;
+    color: #fff;
+    padding: 5px 0;
+    border-radius: 6px;
+
+    position: fixed;
+    z-index: 1000;
+
+    /* Position the tooltip text - see examples below! */
+    width: 120px;
+    padding: 10px 0px;
+}
+
+.ac-prompt {
+    font-size: 14px;
+    padding: 5px 15px;
+}
+
+div.autocomplete>.ac-prompt:first-child {
+    background: #2C2C2C;
+}

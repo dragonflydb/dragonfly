@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DragonflyDB</title>
+    <link rel="stylesheet" href="styles/terminal.css">
+    <link rel="stylesheet" href="styles/style.css">
+
+    <script src="scripts/cli.js"></script>
+    <script src="scripts/api.js"></script>
+    <script src="scripts/script.js"></script>
+    <script src="scripts/winner.js"></script>
+
+</head>
+
+<body>
+
+    <header>
+        <div class="logo">
+            <img src="imgs/logo.png">
+        </div>
+        <div class="nav-links">
+            <div id="dashboard-link" class="tablink" onclick="openTab('dashboard')">
+                <img src="imgs/dashboard.png">
+                <div>Dashboard</div>
+            </div>
+            <div id="cli-link" class="tablink" onclick="openTab('cli')">
+                <img src="imgs/cli.png">
+                <div>CLI</div>
+            </div>
+            <div id="winner-link" class="tablink" onclick="openTab('winner')">
+                <img src="imgs/winner.png">
+                <div>Winner</div>
+            </div>
+        </div>
+        <div class="empty-space"> </div>
+    </header>
+
+    <main>
+        <section id="dashboard" class="tab-container">
+
+            <div class="row">
+                <div id="uptime" class="w-container"></div>
+                <div id="total_commands_num" class="w-container"></div>
+            </div>
+
+            <div class="row">
+                <div id="used_memory_bytes" class="w-container"></div>
+                <div id="num_connected_clients" class="w-container"></div>
+            </div>
+
+            <div class="row">
+                <div id="qps" class="w-container"></div>
+                <div id="hit_rate" class="w-container"></div>
+            </div>
+
+            <div class="w-title" style="padding-left:20px; margin-bottom:-10px;">Shard Stats</div>
+
+            <div class="row shards-container">
+                <div id="used_memory" class="w-container"></div>
+                <div id="key_count" class="w-container"></div>
+            </div>
+
+            <div class="row shards-container">
+                <div id="expire_count" class="w-container"></div>
+                <div id="key_reads" class="w-container"></div>
+            </div>
+
+
+
+        </section>
+        <section id="cli" class="tab-container">
+            <div class="terminal" id="terminal"> </div>
+        </section>
+        <section id="winner" class="tab-container">
+
+            <div class="placeholder">
+                Offline...
+            </div>
+
+        </section>
+    </main>
+
+</body>
+
+</html>

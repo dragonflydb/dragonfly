@@ -1,0 +1,11 @@
+{
+    "scripts": {
+        "build": "node scripts/build.js"
+    },
+    "dependencies": {
+        "cheerio": "^1.0.0-rc.12",
+        "clean-css": "^5.3.3",
+        "html-minifier-terser": "^7.2.0",
+        "uglify-js": "^3.17.4"
+    }
+}

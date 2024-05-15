@@ -1,0 +1,135 @@
+:root {
+    --df-color: #5A3EE0;
+}
+
+http,
+body {
+    color: #FFF;
+    padding: 0;
+    margin: 0;
+    background-color: #2C2C2C;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    position: absolute;
+    font-family: Sans-Serif;
+}
+
+header {
+    height: 100px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #212020;
+    flex: 0 1 auto;
+}
+
+.logo,
+.empty-space {
+    flex: 1;
+    display: flex;
+    justify-content: flex-start;
+}
+
+.logo img {
+    margin-left: 50px;
+}
+
+.nav-links {
+    width: 172px;
+    height: 100%;
+    font-size: 15px;
+    flex: 0 1 auto;
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+}
+
+.tablink {
+    display: flex;
+    align-items: center;
+    padding: 20px;
+    cursor: pointer;
+    gap: 10px;
+    filter: grayscale(1);
+}
+
+.tablink.active {
+    border-image: linear-gradient(#5A3EE0, #C53EE0) 30;
+    border-bottom: solid 5px;
+    font-weight: 900;
+    filter: grayscale(0);
+}
+
+.tab-container {
+    display: flex;
+    flex-direction: column;
+    max-width: 1206px;
+    margin: auto;
+    padding-top: 50px;
+}
+
+.row {
+    display: flex;
+    width: 100%;
+}
+
+.w-container {
+    flex-grow: 1;
+    /* border: 1px solid black; */
+    padding: 20px;
+}
+
+.w-title {
+    margin-bottom: 10px;
+    font-size: 20px;
+    font-weight: bold;
+}
+
+.w-header {
+    font-size: 40px;
+    text-align: center;
+    height: 45px;
+}
+
+.shards-container .w-header {
+    margin-top: 10px;
+    font-size: 20px;
+}
+
+.w-graph {
+    margin-top: 10px;
+    height: 104px;
+}
+
+.graph-container {
+    background-color: #383838;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    padding: 10px;
+    border-radius: 10px;
+    width: 563px;
+}
+
+.progress-bar-bg {
+    height: 20px;
+    background-color: #333;
+}
+
+.progress-bar {
+    background-color: green;
+    height: 100%;
+    width: 90%;
+}
+
+
+.placeholder {
+    background-color: #333;
+    width: 100%;
+    height: 200px;
+    border-radius: 10px;
+    padding-top: 200px;
+    color: #838383;
+    text-align: center;
+    margin-top: 20px;
+}
