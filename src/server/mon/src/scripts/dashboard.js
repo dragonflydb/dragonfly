@@ -1,4 +1,6 @@
-function getSVG(data, bars) {
+function getSVG(data, settings) {
+
+    const { bars, suffix } = settings;
     const svgNS = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(svgNS, "svg");
 
@@ -26,25 +28,31 @@ function getSVG(data, bars) {
         { offset: "100%", color: "#C53EE0" }
     ]);
 
-    const maxY = Math.max(...data);
-    let yMax;
-    let scaledData;
+    let maxY = Math.max(...data);
 
-    if (maxY === 0 || (maxY >= 1 && maxY <= 10)) {
-        yMax = 10;
+    if (suffix == "%" && maxY <= 100) maxY = 100;
+    else if (maxY === 0 || (maxY >= 1 && maxY <= 10)) {
+        maxY = 10;
     } else {
         const uniqueData = [...new Set(data)];
-        yMax = uniqueData.length === 1 ? maxY * 2 : maxY; // Adjust scale if data contains same numbers
+        maxY = uniqueData.length === 1 ? maxY * 2 : maxY;
     }
 
-    scaledData = data.map(d => (height - padding) - (d / yMax) * (height - 2 * padding));
+    maxY = nextDivisible(maxY, numGridLines);
 
-    drawGrid(yMax);
+    let scaledData;
+    scaledData = data.map(d => (height - padding) - (d / maxY) * (height - 2 * padding));
+
+    drawGrid();
 
     if (bars) drawBarGraph();
     else drawGraph();
 
     return svg;
+
+    function nextDivisible(num, divider) {
+        return num % divider === 0 ? num : num + (divider - (num % divider));
+    }
 
     function numberToShortString(num) {
         num = Number(num);
@@ -59,11 +67,11 @@ function getSVG(data, bars) {
         return (isNegative ? '-' : '') + roundedNum + units[unit];
     }
 
-    function drawGrid(yMax) {
+    function drawGrid() {
         // Draw Y-axis grid lines and labels
         for (let i = 0; i <= numGridLines; i++) {
             const lineY = Math.round(padding + (height - 2 * padding) / numGridLines * i);
-            const value = yMax * (1 - i / numGridLines); // Calculate the value at each grid line
+            const value = maxY * (1 - i / numGridLines); // Calculate the value at each grid line
 
             // Draw the grid line
             const gridLine = document.createElementNS(svgNS, "line");
@@ -138,7 +146,7 @@ function getSVG(data, bars) {
         const barWidth = (width - leftPadding - barPadding * (data.length + 1)) / data.length; // Calculate bar width
 
         data.forEach((value, index) => {
-            let barHeight = (value / yMax) * (height - 2 * padding);
+            let barHeight = (value / maxY) * (height - 2 * padding);
             if (barHeight == 0) barHeight = 1;
 
             const x = leftPadding + barPadding + (barWidth + barPadding) * index; // Adjust x to include padding
@@ -274,6 +282,9 @@ function Widget(settings) {
                 if (vals.length > 2) vals.pop();
                 this.html.header.textContent = vals.join(",");
                 return;
+            } else if (settings.id == "used_memory_bytes") {
+                this.html.header.textContent = MemoryDisplay(Number(stats[stats.length - 1]));
+                return;
             }
             const num = Number(stats[stats.length - 1]).toLocaleString('en-US');
             this.html.header.textContent = `${num}${settings.suffix || ""}`;
@@ -282,13 +293,36 @@ function Widget(settings) {
 
     this.updateGraph = () => {
         const data = this.stats();
-        const svg = getSVG(data, this.settings.bars);
+        const svg = getSVG(data, this.settings);
         me.html.graph.textContent = '';
         me.html.graph.appendChild(svg);
     }
 
     this.stats = () => {
         return this.settings.bars ? globalStats.shards_stats[this.settings.id] : globalStats[this.settings.id];
+    }
+
+    function MemoryDisplay(bytes) {
+        const thresh = 1000;
+
+        if (Math.abs(bytes) < thresh) {
+            return bytes + ' B';
+        }
+
+        const units = ['kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+        let u = -1;
+        const r = 10;
+
+        do {
+            bytes /= thresh;
+            ++u;
+        } while (Math.round(Math.abs(bytes) * r) / r >= thresh && u < units.length - 1);
+
+        const fixedBytes = bytes.toFixed(1);
+        const decimalPart = fixedBytes.split('.')[1];
+        const hasNonZeroDecimal = decimalPart && parseInt(decimalPart) !== 0;
+
+        return (hasNonZeroDecimal ? fixedBytes : Math.round(bytes)) + units[u];
     }
 
     function initHtml({ title, bars }) {
