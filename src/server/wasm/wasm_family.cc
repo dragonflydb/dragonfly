@@ -66,6 +66,9 @@ void WasmFamily::Call(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
   auto& wasm_function = *res;
+  // This is fine because we block and is atomic in respect to proactor.
+  // When we switch to async execution of the runtime this will be able to suspend and resume
+  // which will make the current approach invalid.
   auto wasm_result = wasm_function(exported_fun_name);
   if (!wasm_result.empty()) {
     cntx->SendError(wasm_result);

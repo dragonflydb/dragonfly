@@ -24,13 +24,33 @@ namespace dfly::wasm {
 
 WasmRegistry::WasmRegistry()
     : engine_(WasmRegistry::GetConfig()), linker_(engine_), store_(engine_) {
-  api::RegisterApiFunction(
-      "hello",
-      [](auto...) {
-        LOG(INFO) << "Hello from WASM";
-        return std::monostate();
-      },
-      &linker_);
+  auto hellofunc = [](wasmtime::Caller caller, auto params, auto results) {
+    auto res = caller.get_export("allocate_on_guest_mem");
+    std::string value = "Hello world from wasm!";
+    value.push_back('\0');
+
+    // Call the exported alloc to allocate memory on the guest
+    auto alloc = std::get<wasmtime::Func>(*res);
+    const int32_t alloc_size = static_cast<int32_t>(value.size());
+    auto result = alloc.call(caller.context(), {wasmtime::Val{alloc_size}});
+    if (!result) {
+      // handle errors
+    }
+    auto wasm_value = result.ok().front();
+    auto offset = wasm_value.i32();
+
+    wasmtime::Memory memory = std::get<wasmtime::Memory>(*caller.get_export("memory"));
+
+    uint8_t* data = memory.data(caller.context()).data() + offset;
+    absl::little_endian::Store32(data, value.size());
+    // TODO inject payload size at the front so we dont have to push an extra \0
+    memcpy(data, value.c_str(), value.size());
+
+    results[0] = wasm_value;
+    return std::monostate();
+  };
+
+  api::RegisterApiFunction("hello", hellofunc, &linker_);
 
   wasmtime::WasiConfig wasi;
   wasi.inherit_argv();

@@ -62,8 +62,12 @@ class WasmRegistry {
         return absl::StrCat("No exported function with name ", export_func_name, " found");
       }
       auto run = std::get<wasmtime::Func>(*extern_def);
-      run.call(store_, {}).unwrap();
+      auto res = run.call(store_, {}).unwrap();
       return {};
+    }
+
+    wasmtime::Instance* GetInstance() {
+      return &instance_;
     }
 
    private:
