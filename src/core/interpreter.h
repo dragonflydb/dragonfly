@@ -126,8 +126,9 @@ class Interpreter {
  private:
   // Returns true if function was successfully added,
   // otherwise returns false and sets the error.
-  bool AddInternal(const char* f_id, std::string_view body, std::string* error);
+  bool AddInternal(std::string_view sha, std::string_view body, std::string* error);
   bool IsTableSafe() const;
+  bool LuaNameExists(std::string_view sha) const;
 
   static int RedisCallCommand(lua_State* lua);
   static int RedisPCallCommand(lua_State* lua);

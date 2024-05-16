@@ -180,10 +180,18 @@ TEST_F(InterpreterTest, UnknownFunc) {
       return myunknownfunc(1, n)
     end)");
 
-  CHECK_EQ(0, luaL_loadbuffer(lua(), code.data(), code.size(), "code1"));
-  CHECK_EQ(0, lua_pcall(lua(), 0, 0, 0));
-  int type = lua_getglobal(lua(), "myunknownfunc");
-  ASSERT_EQ(LUA_TNIL, type);
+  RunInline(code, "code1");
+  lua_pushglobaltable(lua());              // Push the global table
+  lua_pushstring(lua(), "myunknownfunc");  // Push the function name onto the stack
+  int type = lua_rawget(lua(), -2);        // Perform a raw access to get the value
+  ASSERT_EQ(LUA_TNIL, type);               // does not exist
+  lua_pop(lua(), 1);
+
+  ASSERT_EQ(LUA_TTABLE, lua_type(lua(), -1));
+  lua_pushstring(lua(), "foo");
+  type = lua_rawget(lua(), -2);
+  ASSERT_EQ(LUA_TFUNCTION, type);
+  lua_pop(lua(), 2);
 }
 
 TEST_F(InterpreterTest, Stack) {
@@ -267,6 +275,21 @@ TEST_F(InterpreterTest, Execute) {
 
   EXPECT_TRUE(Execute("return {map={a=1,b=2}}"));
   EXPECT_THAT(ser_.res, testing::AnyOf("{str(a) i(1) str(b) i(2)}", "{str(b) i(2) str(a) i(1)}"));
+
+  EXPECT_FALSE(Execute("var = 45"));
+  EXPECT_EQ(error_, "");
+
+  // Unknown variables.
+  EXPECT_FALSE(Execute("return {foo, bar}"));
+
+  // f_61fb78a9b8dad5c413e203473e5714dc00c982fc is a function registered due to
+  // previous executions.
+  //
+  // TODO: we inject here a new implementation, so when we run the script corresponding
+  // to the same sha again, we run something else. It's a security breach and must to be protected.
+  EXPECT_TRUE(Execute("f_61fb78a9b8dad5c413e203473e5714dc00c982fc = function() return 42 end"));
+  EXPECT_TRUE(Execute("return {foo, bar}"));
+  EXPECT_EQ(ser_.res, "i(42)");
 }
 
 TEST_F(InterpreterTest, Call) {
@@ -485,11 +508,20 @@ TEST_F(InterpreterTest, Log) {
   EXPECT_EQ("nil", ser_.res);
 }
 
-TEST_F(InterpreterTest, Robust) {
+TEST_F(InterpreterTest, NonExistent) {
   EXPECT_FALSE(Execute(R"(eval "local a = {}
       setmetatable(a,{__index=function() foo() end})
       return a")"));
   EXPECT_EQ("", ser_.res);
+}
+
+TEST_F(InterpreterTest, ModifyG) {
+  EXPECT_TRUE(Execute(R"(
+  setmetatable(_G, {})
+  return _G
+)"));
+  EXPECT_EQ("[]", ser_.res);
+  // EXPECT_TRUE(Execute("local g = getmetatable(_G); g.__index = {}"));
 }
 
 }  // namespace dfly
