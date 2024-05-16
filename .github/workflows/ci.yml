@@ -151,7 +151,7 @@ jobs:
 
       - name: Upload unit logs on failure
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: unit_logs
           path: /tmp/*INFO*
@@ -167,7 +167,7 @@ jobs:
 
       - name: Upload regression logs on failure
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: regression_logs
           path: /tmp/failed/*
