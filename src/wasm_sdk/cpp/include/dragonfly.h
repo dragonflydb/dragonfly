@@ -3,7 +3,9 @@
 //
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
 #include <string>
 
@@ -14,16 +16,31 @@ namespace dragonfly {
 extern "C" {
 #define WASM_IMPORT(mod, name) __attribute__((import_module(#mod), import_name(#name)))
 
-WASM_IMPORT(dragonfly, hello)
-uint8_t* hello();
+WASM_IMPORT(dragonfly, call)
+uint8_t* call(uint32_t);
 
 // Add rest of functions here
 }
 
 inline std::string deserialize(uint8_t* ptr);
 
-inline std::string hello_world() {
-  return deserialize(hello());
+inline std::string call(std::initializer_list<std::string> arguments) {
+  std::string data(4, 'x');
+
+  uint32_t parts = arguments.size();
+  memcpy((void*)data.data(), &parts, 4);
+
+  for (const std::string& str : arguments) {
+    data.append(4, 'x');
+
+    uint32_t strsize = str.size();
+    memcpy((void*)(data.data() + data.size() - 4), &strsize, 4);
+
+    data += str;
+  }
+
+  uint32_t ptr = (uint64_t)data.data();
+  return deserialize(call(ptr));
 }
 
 /* Used to export functions from wasm modules */
@@ -46,8 +63,10 @@ inline std::string deserialize(/*Get ownership*/ uint8_t* ptr) {
   // TODO Figure out how to reduce copies. This is two copies:
   // 1. Host allocates via allocate_on_guest_mem and copies data
   // 2. Data is deserialized on a new location
-  char* start = reinterpret_cast<char*>(ptr);
-  std::string res(start);
+  uint32_t length;
+  memcpy(&length, ptr, sizeof(length));
+
+  std::string res(reinterpret_cast<char*>(ptr) + sizeof(length), length);
   delete[] ptr;
   return res;
 }

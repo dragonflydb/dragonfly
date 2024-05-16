@@ -12,6 +12,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
+#include "facade/service_interface.h"
 #include "server/wasm/api.h"
 #include "server/wasm/wasmtime.hh"
 #include "util/fibers/synchronization.h"
@@ -38,10 +39,11 @@ class WasmModule {
 
 class WasmRegistry {
  public:
-  WasmRegistry();
+  WasmRegistry(facade::ServiceInterface& service);
   WasmRegistry(const WasmRegistry&) = delete;
   WasmRegistry(WasmRegistry&&) = delete;
   ~WasmRegistry();
+
   bool Delete(std::string_view name);
 
   // Very light-weight. Each Module is compiled *once* but each UDF call, e,g, `CALLWASM`
@@ -78,6 +80,12 @@ class WasmRegistry {
   std::optional<WasmModuleInstance> GetInstanceFromModule(std::string_view module_name);
 
  private:
+  static wasmtime::Config GetConfig() {
+    wasmtime::Config config;
+    config.epoch_interruption(false);
+    return config;
+  }
+
   std::string Add(std::string_view path);
   void InstantiateAndLinkModules();
 
@@ -89,11 +97,6 @@ class WasmRegistry {
   wasmtime::Engine engine_;
   wasmtime::Linker linker_;
   wasmtime::Store store_;
-  static wasmtime::Config GetConfig() {
-    wasmtime::Config config;
-    config.epoch_interruption(false);
-    return config;
-  }
 };
 
 }  // namespace dfly::wasm

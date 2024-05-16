@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "facade/facade_types.h"
+#include "facade/service_interface.h"
 #include "server/command_registry.h"
 #include "server/wasm/wasm_registry.h"
 
@@ -17,7 +18,7 @@ namespace wasm {
 
 class WasmFamily final {
  public:
-  WasmFamily();
+  WasmFamily(facade::ServiceInterface& service);
   void Register(CommandRegistry* registry);
 
  private:
