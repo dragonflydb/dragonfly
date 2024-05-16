@@ -1,6 +1,6 @@
 
 function formatCommands(commands) {
-    return commands[0].split(" ");
+    return (commands[0]||"").trim().split(" ");
 }
 
 async function executeCommands(dbid, pre, input, commands, animate) {
@@ -111,19 +111,9 @@ async function createCli(cli) {
 
     if (toExecute) {
         disablePrompt(cli, input, prompt, () =>
-            executeCommands(dbid, pre, input, toExecute, shouldAnimate(cli)));
+            executeCommands(dbid, pre, input, toExecute));
     }
 
-}
-
-function drawBadge(cli) {
-    if (shouldAnimate(cli)) {
-        return
-    }
-    const badge = document.createElement('div');
-    badge.classList.add('powered');
-    badge.appendChild(document.createTextNode('Powered by'));
-    cli.appendChild(badge);
 }
 
 function drawTerminal(cli) {
@@ -145,15 +135,6 @@ function drawTerminal(cli) {
 
 function isTerminal(cli) {
     return cli.getAttribute('terminal') !== null
-}
-
-function shouldAnimate(cli) {
-    try {
-        return cli.getAttribute('typewriter') !== null &&
-            !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    } catch {
-        return true;
-    }
 }
 
 function getCommandsToExecute(cli) {
@@ -308,34 +289,13 @@ async function writeLine(pre, input, line, animate, prompt) {
 
     const toWrite = line + '\n';
     if (prompt) textNode.nodeValue = PROMPT_PREFIX;
-    if (!animate) {
-        textNode.nodeValue += toWrite;
-    } else {
-        await typewriter(textNode, toWrite);
-    }
+    textNode.nodeValue += toWrite;
     input.scrollIntoView({ block: "nearest" });
 
     var div = document.getElementById("terminal");
     setTimeout(() => div.scrollTop = div.scrollHeight, 10);
 }
 
-function typewriter(textNode, toWrite) {
-    return new Promise(resolve => {
-        let i = 0;
-        const intervalId = setInterval(() => {
-            if (i === toWrite.length) {
-                clearInterval(intervalId);
-                resolve();
-                return;
-            }
-
-            textNode.nodeValue += toWrite[i++];
-        }, 10 + Math.random() * 25);
-    });
-}
-
 document.addEventListener('DOMContentLoaded', () => {
-    for (const cli of document.querySelectorAll('.terminal')) {
-        createCli(cli);
-    }
+    createCli(document.getElementById("terminal"));
 });
