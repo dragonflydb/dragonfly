@@ -271,6 +271,8 @@ function formatValue(value, settings) {
 function openTab(tabName) {
     var i, tabcontent, tablinks;
 
+    if (tabName == "performance") fetchSlowLog().then(d => loadSlowLog(d));
+
     tabcontent = document.getElementsByClassName("tab-container");
     for (i = 0; i < tabcontent.length; i++) {
         tabcontent[i].style.display = "none";
@@ -423,6 +425,47 @@ function Widget(settings) {
             element: element,
             header: header,
         }
+    }
+}
+
+function loadSlowLog(data) {
+
+    const placeholder = document.getElementById("slow-log-placeholder");
+    placeholder.style.display = "none";
+
+    const table = document.getElementById("slow-log-table");
+    table.style.display = "";
+
+    const tbody = table.getElementsByTagName('tbody')[0];
+    tbody.innerHTML = '';
+    data.sort((a, b) => b.time - a.time).forEach(rowData => {
+        const row = document.createElement('tr');
+        addColumn(row, timeDisplay(Number(rowData.time) * 1000));
+        addColumn(row, rowData.duration);
+        addColumn(row, `${rowData.command} ${rowData.key}`);
+        tbody.appendChild(row);
+    });
+    function addColumn(row, content) {
+        const cell = document.createElement('td');
+        cell.textContent = content;
+        row.appendChild(cell);
+    }
+    function timeDisplay(timestamp) {
+        const date = new Date(timestamp);
+        const timeOptions = {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        };
+        const dateOptions = {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric'
+        };
+        const formattedDate = date.toLocaleDateString('en-US', dateOptions);
+        const formattedTime = date.toLocaleTimeString('en-US', timeOptions);
+        return `${formattedTime} ${formattedDate}`;
     }
 }
 

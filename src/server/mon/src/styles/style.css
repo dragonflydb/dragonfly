@@ -37,7 +37,6 @@ header {
 }
 
 .nav-links {
-    width: 172px;
     height: 100%;
     font-size: 15px;
     flex: 0 1 auto;
@@ -136,10 +135,38 @@ header {
 #svg-tooltip::after {
     content: " ";
     position: absolute;
-    top: 100%; /* At the bottom of the tooltip */
+    top: 100%;
+    /* At the bottom of the tooltip */
     left: 50%;
     margin-left: -5px;
     border-width: 5px;
     border-style: solid;
     border-color: black transparent transparent transparent;
-  }
+}
+
+
+table, tr, td {
+    border: none;
+    font-size: 15px;
+}
+
+table {
+    padding: 20px;
+    background-color: #333;
+    border-radius: 10px;
+    margin-bottom: 50px;
+}
+
+td, th {
+    padding: 10px;
+}
+
+th {
+    border-bottom: 2px solid #2C2C2C;
+    padding-bottom: 25px;
+    font-size: 14px;
+}
+
+tr:nth-child(even) {
+    background-color: #383838;
+}

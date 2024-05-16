@@ -31,6 +31,10 @@
                 <img src="imgs/cli.png">
                 <div>CLI</div>
             </div>
+            <div id="performance-link" class="tablink" onclick="openTab('performance')">
+                <img src="imgs/performance.png">
+                <div>Slow Log</div>
+            </div>
             <div id="achievements-link" class="tablink" onclick="openTab('achievements')">
                 <img src="imgs/achievements.png">
                 <div>Achievements</div>
@@ -74,6 +78,25 @@
         </section>
         <section id="cli" class="tab-container">
             <div class="terminal" id="terminal"> </div>
+        </section>
+        <section id="performance" class="tab-container">
+
+            <div id="slow-log-placeholder" class="placeholder">
+                Loading...
+            </div>
+
+            <table id="slow-log-table" style="display: none;">
+                <thead>
+                    <tr style="text-align: left;">
+                        <th>Timestamp</th>
+                        <th>Duration</th>
+                        <th>Command</th>
+                    </tr>
+                </thead>
+                <tbody>
+                </tbody>
+            </table>
+
         </section>
         <section id="achievements" class="tab-container">
 
