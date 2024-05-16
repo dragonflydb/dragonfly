@@ -79,6 +79,10 @@ ABSL_FLAG(bool, version_check, true,
 
 ABSL_FLAG(uint16_t, tcp_backlog, 128, "TCP listen(2) backlog parameter.");
 
+#ifdef __linux__
+ABSL_DECLARE_FLAG(bool, enable_direct_fd);
+#endif
+
 using namespace util;
 using namespace facade;
 using namespace io;
@@ -716,6 +720,10 @@ Usage: dragonfly [FLAGS]
   unique_ptr<util::ProactorPool> pool;
 
 #ifdef __linux__
+  // NOTE: Seems that enable_direct_fd causes sockets leakage.
+  // Until it is fixed in helio, we disable it.
+  absl::SetFlag(&FLAGS_enable_direct_fd, false);
+
   base::sys::KernelVersion kver;
   base::sys::GetKernelVersion(&kver);
 
