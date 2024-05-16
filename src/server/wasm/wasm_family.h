@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "facade/facade_types.h"
 #include "server/command_registry.h"
 #include "server/wasm/wasm_registry.h"
@@ -15,6 +17,7 @@ namespace wasm {
 
 class WasmFamily final {
  public:
+  WasmFamily();
   void Register(CommandRegistry* registry);
 
  private:
@@ -22,7 +25,7 @@ class WasmFamily final {
   void Call(facade::CmdArgList args, ConnectionContext* cntx);
   void Delete(facade::CmdArgList args, ConnectionContext* cntx);
 
-  WasmRegistry registry_;
+  std::unique_ptr<WasmRegistry> registry_;
 };
 
 }  // namespace wasm

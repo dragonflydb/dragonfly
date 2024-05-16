@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "server/wasm/api.h"
 #include "server/wasm/wasmtime.hh"
@@ -41,7 +42,6 @@ class WasmRegistry {
   WasmRegistry(const WasmRegistry&) = delete;
   WasmRegistry(WasmRegistry&&) = delete;
   ~WasmRegistry();
-  std::string Add(std::string_view path);
   bool Delete(std::string_view name);
 
   // Very light-weight. Each Module is compiled *once* but each UDF call, e,g, `CALLWASM`
@@ -54,16 +54,16 @@ class WasmRegistry {
         : instance_{instance}, store_(store) {
     }
 
-    void operator()() {
+    std::string operator()(std::string_view export_func_name) {
       // Users will export functions for their modules via the attribute
       //  __attribute__((export_name(func_name))). We will expose this in our sdk
-      auto extern_def = instance_.get(*store_, "my_fun");
+      auto extern_def = instance_.get(*store_, export_func_name);
       if (!extern_def) {
-        // return error
-        return;
+        return absl::StrCat("No exported function with name ", export_func_name, " found");
       }
       auto run = std::get<wasmtime::Func>(*extern_def);
       run.call(store_, {}).unwrap();
+      return {};
     }
 
    private:
@@ -74,6 +74,9 @@ class WasmRegistry {
   std::optional<WasmModuleInstance> GetInstanceFromModule(std::string_view module_name);
 
  private:
+  std::string Add(std::string_view path);
+  void InstantiateAndLinkModules();
+
   absl::flat_hash_map<std::string, WasmModule> modules_;
   mutable util::fb2::SharedMutex mu_;
 

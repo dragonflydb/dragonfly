@@ -11,10 +11,14 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_split.h"
+#include "base/flags.h"
 #include "base/logging.h"
 #include "io/file_util.h"
 #include "server/wasm/api.h"
 #include "server/wasm/wasmtime.hh"
+
+ABSL_DECLARE_FLAG(std::string, wasmpaths);
 
 namespace dfly::wasm {
 
@@ -37,17 +41,28 @@ WasmRegistry::WasmRegistry()
   store_.context().set_wasi(std::move(wasi)).unwrap();
 
   linker_.define_wasi().unwrap();
+
+  InstantiateAndLinkModules();
 }
 
 WasmRegistry::~WasmRegistry() {
+}
+
+void WasmRegistry::InstantiateAndLinkModules() {
+  auto wasm_modules = absl::GetFlag(FLAGS_wasmpaths);
+  std::vector<std::string_view> modules = absl::StrSplit(wasm_modules, ",");
+  for (auto mod_path : modules) {
+    Add(mod_path);
+  }
 }
 
 std::string WasmRegistry::Add(std::string_view path) {
   // 1. Read the wasm file in path
   auto is_file_read = io::ReadFileToString(path);
   if (!is_file_read) {
-    return absl::StrCat("File error for path: ", path, " with error ",
-                        is_file_read.error().message());
+    LOG(ERROR) << "File error for path: " << path << " with error "
+               << is_file_read.error().message();
+    exit(1);
   }
 
   // In this context the cast is safe
@@ -57,7 +72,8 @@ std::string WasmRegistry::Add(std::string_view path) {
   // 2. Setup && compile
   auto result = wasmtime::Module::compile(engine_, wasm_bin);
   if (!result) {
-    return absl::StrCat("Error compiling file: ", path, " with error: ", result.err().message());
+    LOG(ERROR) << "Error compiling file: " << path << " with error: " << result.err().message();
+    exit(1);
   }
 
   // 3. Insert to registry
@@ -65,9 +81,7 @@ std::string WasmRegistry::Add(std::string_view path) {
   auto name = path;
   if (slash != path.npos) {
     name = name.substr(slash + 1);
-    // HELLO
   }
-  std::unique_lock<util::fb2::SharedMutex> lock(mu_);
   modules_.emplace(name, std::move(result.ok()));
 
   return {};
