@@ -10,6 +10,9 @@
 
 DF_EXPORT("my_fun")
 void my_fun() {
-  // call exported dragonfly function hello()
-  hello();
+  std::string result = dragonfly::hello_world();
+  // passes
+  assert(result == "Hello world from wasm!");
+  // when we return the bson here we need to be carefull with the allocation.
+  // does that mean the host will need to free the memory? e.g, export a `free` function?
 }
