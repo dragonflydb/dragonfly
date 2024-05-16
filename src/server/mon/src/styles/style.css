@@ -133,3 +133,25 @@ header {
     text-align: center;
     margin-top: 20px;
 }
+
+#svg-tooltip {
+    position: absolute;
+    padding: 10px;
+    background-color: black;
+    color: #fff;
+    text-align: center;
+    border-radius: 10px;
+    pointer-events: none;
+    font-size: 13px;
+}
+
+#svg-tooltip::after {
+    content: " ";
+    position: absolute;
+    top: 100%; /* At the bottom of the tooltip */
+    left: 50%;
+    margin-left: -5px;
+    border-width: 5px;
+    border-style: solid;
+    border-color: black transparent transparent transparent;
+  }

@@ -4,9 +4,11 @@ function getSVG(data, settings) {
     const svgNS = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(svgNS, "svg");
 
+    const tooltip = document.getElementById("svg-tooltip");
+
     if (!data || !data.length) return svg;
 
-    const leftPadding = 17 + Math.max(...data.map((d)=>numberToShortString(d).length)) * 4;
+    const leftPadding = 17 + Math.max(...data.map((d) => numberToShortString(d).length)) * 4;
 
     const width = 550;
     const height = 100;
@@ -99,8 +101,8 @@ function getSVG(data, settings) {
     function drawGraph() {
         // Define the path for the line graph
 
-        const xDist = (width-leftPadding-graphPadding*2)/HISTORY_WINDOW;
-        const lp = leftPadding+graphPadding+(HISTORY_WINDOW-(data.length))*xDist;
+        const xDist = (width - leftPadding - graphPadding * 2) / HISTORY_WINDOW;
+        const lp = leftPadding + graphPadding + (HISTORY_WINDOW - (data.length)) * xDist;
 
         //const lp = leftPadding * 1.45;
 
@@ -114,7 +116,7 @@ function getSVG(data, settings) {
 
         if (allYsSame) {
             // Draw a straight horizontal line if all y values are the same
-            const xEnd = Math.round(width-graphPadding);
+            const xEnd = Math.round(width - graphPadding);
             pathData += ` L ${xEnd} ${scaledData[0]}`;
             path.setAttribute("stroke", "#C53EE0");
         } else {
@@ -138,6 +140,23 @@ function getSVG(data, settings) {
         path.setAttribute("stroke-width", "2");
         path.setAttribute("fill", "none");
         svg.appendChild(path);
+
+        data.forEach((value, index) => {
+            const x = lp + xDist * index;
+            const y = scaledData[index];
+
+            const circle = document.createElementNS(svgNS, "circle");
+            circle.setAttribute("cx", x);
+            circle.setAttribute("cy", y);
+            circle.setAttribute("r", 5);
+            circle.setAttribute("fill", "#C53EE0");
+            circle.setAttribute("opacity", 0);
+            circle.setAttribute("style", "cursor: pointer;");
+
+            addTooltip(circle, value, true);
+
+            svg.appendChild(circle);
+        });
     }
 
 
@@ -158,7 +177,34 @@ function getSVG(data, settings) {
             rect.setAttribute("y", y);
             rect.setAttribute("height", barHeight);
             rect.setAttribute("fill", "url(#df-gradient)");
+            rect.setAttribute("style", "cursor: pointer;");
             svg.appendChild(rect);
+
+            addTooltip(rect, value);
+
+            svg.appendChild(rect);
+        });
+    }
+
+    function addTooltip(element, value, hideElement) {
+        element.addEventListener("mouseover", (event) => {
+            if (hideElement) element.setAttribute("opacity", 1);
+            tooltip.style.display = "block";
+            tooltip.textContent = formatValue(value, settings);
+            const rect = event.target.getBoundingClientRect();
+            tooltip.style.left = `${rect.x + window.scrollX + rect.width / 2 - tooltip.clientWidth / 2}px`;
+            tooltip.style.top = `${rect.y + window.scrollY - tooltip.clientHeight - 5}px`;
+        });
+
+        element.addEventListener("mousemove", (event) => {
+            const rect = event.target.getBoundingClientRect();
+            tooltip.style.left = `${rect.x + window.scrollX + rect.width / 2 - tooltip.clientWidth / 2}px`;
+            tooltip.style.top = `${rect.y + window.scrollY - tooltip.clientHeight - 5}px`;
+        });
+
+        element.addEventListener("mouseout", () => {
+            if (hideElement) element.setAttribute("opacity", 0); // Hide the dot
+            tooltip.style.display = "none";
         });
     }
 
@@ -182,6 +228,45 @@ function getSVG(data, settings) {
     }
 }
 
+function formatValue(value, settings) {
+    if (!(value || value == 0)) return "";
+
+    if (settings.id == "uptime") {
+        const vals = value.split(",");
+        if (vals.length > 2) vals.pop();
+        return vals.join(",");
+    }
+
+    value = Number(value);
+    if (settings.id.startsWith("used_memory")) {
+        return MemoryDisplay(value);
+    }
+
+    return `${value.toLocaleString('en-US')}${settings.suffix || ""}`;
+
+    function MemoryDisplay(bytes) {
+        const thresh = 1000;
+
+        if (Math.abs(bytes) < thresh) {
+            return bytes + ' B';
+        }
+
+        const units = ['kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+        let u = -1;
+        const r = 10;
+
+        do {
+            bytes /= thresh;
+            ++u;
+        } while (Math.round(Math.abs(bytes) * r) / r >= thresh && u < units.length - 1);
+
+        const fixedBytes = bytes.toFixed(1);
+        const decimalPart = fixedBytes.split('.')[1];
+        const hasNonZeroDecimal = decimalPart && parseInt(decimalPart) !== 0;
+
+        return (hasNonZeroDecimal ? fixedBytes : Math.round(bytes)) + units[u];
+    }
+}
 
 function openTab(tabName) {
     var i, tabcontent, tablinks;
@@ -276,19 +361,7 @@ function Widget(settings) {
 
     this.updateHeader = () => {
         const stats = this.stats();
-        if (stats[stats.length - 1] || stats[stats.length - 1] == 0) {
-            if (settings.id == "uptime") {
-                const vals = stats[stats.length - 1].split(",");
-                if (vals.length > 2) vals.pop();
-                this.html.header.textContent = vals.join(",");
-                return;
-            } else if (settings.id == "used_memory_bytes") {
-                this.html.header.textContent = MemoryDisplay(Number(stats[stats.length - 1]));
-                return;
-            }
-            const num = Number(stats[stats.length - 1]).toLocaleString('en-US');
-            this.html.header.textContent = `${num}${settings.suffix || ""}`;
-        }
+        this.html.header.textContent = formatValue(stats[stats.length - 1], settings)
     }
 
     this.updateGraph = () => {
@@ -300,29 +373,6 @@ function Widget(settings) {
 
     this.stats = () => {
         return this.settings.bars ? globalStats.shards_stats[this.settings.id] : globalStats[this.settings.id];
-    }
-
-    function MemoryDisplay(bytes) {
-        const thresh = 1000;
-
-        if (Math.abs(bytes) < thresh) {
-            return bytes + ' B';
-        }
-
-        const units = ['kB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-        let u = -1;
-        const r = 10;
-
-        do {
-            bytes /= thresh;
-            ++u;
-        } while (Math.round(Math.abs(bytes) * r) / r >= thresh && u < units.length - 1);
-
-        const fixedBytes = bytes.toFixed(1);
-        const decimalPart = fixedBytes.split('.')[1];
-        const hasNonZeroDecimal = decimalPart && parseInt(decimalPart) !== 0;
-
-        return (hasNonZeroDecimal ? fixedBytes : Math.round(bytes)) + units[u];
     }
 
     function initHtml({ title, bars }) {
