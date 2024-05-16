@@ -193,13 +193,13 @@ function getSVG(data, settings) {
             tooltip.textContent = formatValue(value, settings);
             const rect = event.target.getBoundingClientRect();
             tooltip.style.left = `${rect.x + window.scrollX + rect.width / 2 - tooltip.clientWidth / 2}px`;
-            tooltip.style.top = `${rect.y + window.scrollY - tooltip.clientHeight - 5}px`;
+            tooltip.style.top = `${rect.y + window.scrollY - tooltip.clientHeight - 10}px`;
         });
 
         element.addEventListener("mousemove", (event) => {
             const rect = event.target.getBoundingClientRect();
             tooltip.style.left = `${rect.x + window.scrollX + rect.width / 2 - tooltip.clientWidth / 2}px`;
-            tooltip.style.top = `${rect.y + window.scrollY - tooltip.clientHeight - 5}px`;
+            tooltip.style.top = `${rect.y + window.scrollY - tooltip.clientHeight - 10}px`;
         });
 
         element.addEventListener("mouseout", () => {
