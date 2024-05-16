@@ -111,18 +111,6 @@ header {
     width: 563px;
 }
 
-.progress-bar-bg {
-    height: 20px;
-    background-color: #333;
-}
-
-.progress-bar {
-    background-color: green;
-    height: 100%;
-    width: 90%;
-}
-
-
 .placeholder {
     background-color: #333;
     width: 100%;

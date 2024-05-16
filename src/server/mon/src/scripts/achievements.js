@@ -1,7 +1,7 @@
 
 async function loadAchievementsTab() {
     try {
-        const response = await fetch("achievements.html");
+        const response = await fetch(ACHIEVEMENTS_URL);
         if (!response.ok) return;
         const html = await response.text();
         const container = document.getElementById('achievements');

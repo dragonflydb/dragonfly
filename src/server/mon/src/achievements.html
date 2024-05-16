@@ -5,6 +5,57 @@
 
 <script>
 
+    const commandsCounter = document.getElementById("commands-counter");
+    const uptimeCounter = document.getElementById("uptime-counter");
+    const progressBar = document.getElementById("achievment-progress-bar");
+    const progressBarTitle = document.getElementById("achievment-bar-title");
+
+
+    const updateCounters = () => {
+        const cc = globalStats.total_commands_num[globalStats.total_commands_num.length - 1];
+        const tt = globalStats.uptime[globalStats.uptime.length - 1];
+        if (cc) {
+            commandsCounter.innerHTML = Number(cc).toLocaleString('en-US');
+            let percent = (Math.round((cc / 1000000000000 * 100) * 100) / 100);
+            progressBar.style.width = percent + "%";
+            progressBarTitle.innerHTML = percent + "% done";
+            if (percent >= 100) initBadge(tt);
+        }
+
+        if (tt) uptimeCounter.innerHTML = tt;
+    }
+
+    setInterval(updateCounters, 1000);
+
+    function initBadge(time) {
+
+        const progressContainer = document.getElementById("achievment-in-progress");
+        const badgeContainer = document.getElementById("achievment-recieved");
+
+        progressContainer.style.display = "none";
+        badgeContainer.style.display = "";
+
+        const canvas = document.getElementById('achievmentCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const backgroundImage = new Image();
+        backgroundImage.src = 'imgs/badge.png';
+        backgroundImage.onload = () => {
+            ctx.drawImage(backgroundImage, 0, 0, canvas.width, canvas.height);
+            ctx.font = 'bold 75px Archivo';
+            ctx.fillStyle = 'black';
+            ctx.fillText('1,000,000,000,000', 165, 222);
+            ctx.fillText(time.split(",")[0], 165, 400);
+        };
+
+        document.getElementById('downloadBtn').addEventListener('click', () => {
+            const link = document.createElement('a');
+            link.download = 'canvas-image.png';
+            link.href = canvas.toDataURL();
+            link.click();
+        });
+    }
+
 </script>
 
 
@@ -17,27 +68,110 @@
         font-variation-settings:
             "wdth" 100;
     }
+
+    .badge-container {
+        background-color: #383838;
+        padding: 0px 35px;
+        border-radius: 20px;
+    }
+
+    .badge-section {
+        padding: 30px 0px;
+    }
+
+    .badge-section-title {
+        font-size: 45px;
+        font-weight: 600;
+    }
+
+    .badge-section-subtitle {
+        color: #939398;
+        font-size: 25;
+        margin-top: 10px;
+    }
+
+    .separator {
+        border-bottom: solid 1px #FFF;
+    }
+
+    .progress-bar-bg {
+        height: 15px;
+        width: 200px;
+        background-color: #525259;
+    }
+
+    .progress-bar {
+        background-color: #3EE075;
+        height: 100%;
+        width: 0%;
+    }
+
+    .progress-bar-title {
+        margin-bottom: 10px;
+        font-size: 30px;
+    }
 </style>
 
-<div class="archivo-div" style="width: 800px; margin: auto; display: flex; flex-direction: column; gap: 20px;">
+<div id="achievment-recieved" class="archivo-div"
+    style="width: 800px; margin: auto; display: flex; flex-direction: column; gap: 20px; display: none;">
+
+    <div style="display: flex; flex-direction: column; align-items: center; gap: 40px;">
+
+        <div style="font-size: 25px; color: #939398">Incredible work!</div>
+
+        <div style="font-size: 30px; text-align: center;">Don't forget to brag about your latest achievements with
+            #Dragonfly on social media!</div>
+
+        <button id="downloadBtn"
+            style="width:250px; padding: 15px; font-size: 20px; font-weight: 600; background-color: transparent; border: solid 3px #C53EE0; border-radius: 20px; color: #FFF; cursor: pointer;">Download
+            Badge</button>
+
+        <canvas id="achievmentCanvas" width="952" height="548"></canvas>
+
+    </div>
+
+</div>
+
+<div id="achievment-in-progress" class="archivo-div"
+    style="width: 800px; margin: auto; display: flex; flex-direction: column; gap: 20px;">
 
     <div>
-        <div style="font-size: 25px;">Your Stats</div>
-        <div style="color: #939398; font-size: 15px; margin-top: 10px;">Explanation Text</div>
+        <div style="font-size: 25px;">You're doing awesome!</div>
+        <div style="color: #939398; font-size: 15px; margin-top: 10px;">Reach 1,000,000,000,000 commands count to get
+            your first achievment!</div>
     </div>
 
-    <div style="background-color: #383838; padding: 35px; border-radius: 20px;">
-        <div>
-            <div>
-                <div style="font-size: 75px">1111111</div>
-                <div>Total commands</div>
+    <div class="badge-container">
+        <div class="badge-section" style="display: flex; flex-direction: row;">
+            <div style="flex-grow: 1;">
+                <div style="display: flex; flex-direction: row; align-items: center;">
+                    <div style="height:30px; margin-right: 10px"><img width="30px" height="30px"
+                            src="imgs/total_commands.png"></div>
+                    <div id="commands-counter" class="badge-section-title">0</div>
+                </div>
+                <div class="badge-section-subtitle">Total commands</div>
             </div>
-            <div>30% done</div>
+            <div style="display: flex; align-items: center;">
+                <div>
+                    <div id="achievment-bar-title" class="progress-bar-title">0% done</div>
+                    <div class="progress-bar-bg">
+                        <div id="achievment-progress-bar" class="progress-bar"></div>
+                    </div>
+                </div>
+            </div>
         </div>
-        <div>
-            Uptime
+        <div class="separator"></div>
+        <div class="badge-section">
+            <div style="display: flex; flex-direction: row; align-items: center;">
+                <div style="height:30px; margin-right: 10px"><img width="30px" height="30px" src="imgs/uptime.png">
+                </div>
+                <div id="uptime-counter" class="badge-section-title">0</div>
+            </div>
+            <div class="badge-section-subtitle">Uptime</div>
         </div>
     </div>
+
+</div>
 
 </div>
 
