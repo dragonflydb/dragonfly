@@ -1,20 +1,25 @@
-async function fetchData(cmd) {
+async function fetchData(cmd, isJson = true) {
   try {
-    const response = await fetch(API_URL, {
-      method: 'POST',
-      mode: 'cors',
-      cache: 'no-cache',
-      credentials: 'same-origin',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(formatCommands([cmd]))
-    });
-
-    const reply = await response.json();
-    return reply;
+      const response = await fetch(API_URL, {
+          method: 'POST',
+          mode: 'cors',
+          cache: 'no-cache',
+          credentials: 'same-origin',
+          headers: {
+              'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(formatCommands([cmd]))
+      });
+  
+      let reply = null;
+      if (isJson) {
+        reply = await response.json();
+      } else {
+        reply = await response.text();
+      }
+      return reply;
   } catch (e) {
-    console.log("cannot fetch data for command ", cmd, e);
+    console.log("cannot fetch data for command ", cmd, isJson, e);
   }
   return null;
 }
@@ -53,8 +58,6 @@ function formatTime(seconds) {
 /**
 * Functions to extract the list of commands from Dragonfly.
 */
-
-
 function parseCommands(input) {
   const regex = /([A-Z]+)/g;
   const matches = input.match(regex);
@@ -62,22 +65,8 @@ function parseCommands(input) {
 }
 
 async function fetchCommands() {
-  try {
-    const response = await fetch(API_URL, {
-      method: 'POST',
-      mode: 'cors',
-      cache: 'no-cache',
-      credentials: 'same-origin',
-      body: JSON.stringify(formatCommands(["command"]))
-    });
-
-
-    const text = await response.text();
-    commands = parseCommands(text);
-    return commands;
-  } catch (e) {
-    console.error('Error fetching commands:', e);
-  }
+  const text = await fetchData("command", false);
+  return parseCommands(text);  
 }
 
 
@@ -154,7 +143,6 @@ async function updateStats() {
 /**
 * Shards related functions
 */
-
 function parseShardInfo(text) {
   const lines = text.split('\n');
   const data = {};
@@ -197,4 +185,43 @@ async function updateShardStats() {
     globalStats.shards_stats["expire_count"].push(shards[i].expire_count);
     globalStats.shards_stats["key_reads"].push(shards[i].key_reads);
   }
+}
+
+/**
+* Slowlog related functions
+*/
+
+// Example of the str: "1510171586325711220"
+function extractTimeAndDuration(str) {
+  const index = str.indexOf("17");
+  const timeStamp = str.slice(index, index + 10);
+  const duration = str.slice(index+10);
+  return [timeStamp, duration];
+}
+  
+/**
+* Return an Array of slow commands in the following format
+* [] if empty
+* [{time, duration, command, key}, {time, duration, command, key} ...]
+*/ 
+function parseSlowLog(text) {
+  const str = text.slice(11, -4); // remove {"result":[ and the """} from the end
+  const lines = str.replaceAll('[','').split('"""'); // remove [ and split to lines according to """
+  const result = [];
+  lines.forEach(line => {
+      const parts = line.replaceAll('""','"').split('"');
+      const timeDuration = extractTimeAndDuration(parts[0]);
+      result.push({
+        "time" : timeDuration[0],
+        "duration" : timeDuration[1],
+        "command" : parts[1],
+        "key" : parts[2]
+      });
+  });
+  return result;
+}
+  
+async function fetchSlowLog() {
+  const res = await fetchData("slowlog get 50", false);
+  return parseSlowLog(res);
 }
