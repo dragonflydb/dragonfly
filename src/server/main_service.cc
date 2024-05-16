@@ -1783,15 +1783,16 @@ optional<ScriptMgr::ScriptParams> LoadScript(string_view sha, ScriptMgr* script_
       return std::nullopt;
 
     string err;
-    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(sha, script_data->body, &err));
-    CHECK(err.empty()) << err;
+    Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
+    if (add_res != Interpreter::ADD_OK) {
+      LOG(ERROR) << "Error adding " << sha << " to database, err " << err;
+      return std::nullopt;
+    }
 
     return script_data;
   }
 
-  auto params = ss->GetScriptParams(sha);
-  CHECK(params);  // We update all caches from script manager
-  return params;
+  return ss->GetScriptParams(sha);
 }
 
 // Determine multi mode based on script params.
