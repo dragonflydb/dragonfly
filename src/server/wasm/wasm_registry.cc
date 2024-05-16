@@ -4,6 +4,9 @@
 
 #include "server/wasm/wasm_registry.h"
 
+#include <absl/base/internal/endian.h>
+#include <absl/cleanup/cleanup.h>
+#include <absl/strings/str_cat.h>
 #include <server/wasm/api.h>
 
 #include <memory>
