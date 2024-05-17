@@ -33,12 +33,12 @@ namespace dfly::wasm {
 
 namespace {
 
-std::vector<std::string> ParseArguments(uint8_t* data) {
+std::vector<facade::MutableSlice> ParseArguments(uint8_t* data) {
   uint32_t parts;
   memcpy(&parts, data, sizeof(uint32_t));
   data += sizeof(uint32_t);
 
-  std::vector<std::string> out;
+  std::vector<facade::MutableSlice> out;
   for (int32_t i = 0; i < parts; i++) {
     uint32_t length;
     memcpy(&length, data, sizeof(uint32_t));
@@ -51,16 +51,13 @@ std::vector<std::string> ParseArguments(uint8_t* data) {
   return out;
 }
 
-std::string CallCommand(facade::ServiceInterface* service, std::vector<std::string> arguments) {
+std::string CallCommand(facade::ServiceInterface* service,
+                        std::vector<facade::MutableSlice> arguments) {
   facade::CapturingReplyBuilder capture;
   ConnectionContext cntx(nullptr, nullptr);
   delete cntx.Inject(&capture);
 
-  facade::CmdArgVec arguments_span;
-  for (auto& str : arguments)
-    arguments_span.emplace_back(str);
-
-  service->DispatchCommand(absl::MakeSpan(arguments_span), &cntx);
+  service->DispatchCommand(absl::MakeSpan(arguments), &cntx);
   cntx.Inject(nullptr);
 
   return facade::FormatToJson(capture.Take());
