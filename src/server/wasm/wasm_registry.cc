@@ -51,45 +51,48 @@ std::vector<std::string> ParseArguments(uint8_t* data) {
   return out;
 }
 
+std::string CallCommand(facade::ServiceInterface* service, std::vector<std::string> arguments) {
+  facade::CapturingReplyBuilder capture;
+  ConnectionContext cntx(nullptr, nullptr);
+  delete cntx.Inject(&capture);
+
+  facade::CmdArgVec arguments_span;
+  for (auto& str : arguments)
+    arguments_span.emplace_back(str);
+
+  service->DispatchCommand(absl::MakeSpan(arguments_span), &cntx);
+  cntx.Inject(nullptr);
+
+  return facade::FormatToJson(capture.Take());
+}
+
+std::optional<absl::Span<uint8_t>> ProvideMemory(wasmtime::Caller* caller, wasmtime::Memory* memory,
+                                                 size_t bytes) {
+  auto res = caller->get_export("provide_buffer");
+  auto alloc_func = std::get<wasmtime::Func>(*res);
+
+  auto alloc_res = alloc_func.call(caller->context(), {wasmtime::Val{int32_t(bytes)}});
+  if (!alloc_res)
+    return std::nullopt;
+
+  int32_t offset = alloc_res.ok().front().i32();
+  uint8_t* ptr = memory->data(caller->context()).data() + offset;
+  return {{ptr, bytes}};
+}
+
 }  // namespace
 
 WasmRegistry::WasmRegistry(facade::ServiceInterface& service)
     : engine_(WasmRegistry::GetConfig()), linker_(engine_), store_(engine_) {
   auto callfunc = [&service](wasmtime::Caller caller, wasmtime::Span<const wasmtime::Val> params,
                              auto results) {
-    auto res = caller.get_export("allocate_on_guest_mem");
-
     wasmtime::Memory memory = std::get<wasmtime::Memory>(*caller.get_export("memory"));
 
-    facade::CapturingReplyBuilder capture;
-    ConnectionContext cntx(nullptr, nullptr);
-    delete cntx.Inject(&capture);
+    std::string result = CallCommand(
+        &service, ParseArguments(memory.data(caller.context()).data() + params[0].i32()));
 
-    auto arguments = ParseArguments(memory.data(caller.context()).data() + params[0].i32());
-    facade::CmdArgVec arguments_span;
-    for (auto& str : arguments)
-      arguments_span.emplace_back(str);
-
-    service.DispatchCommand(absl::MakeSpan(arguments_span), &cntx);
-    cntx.Inject(nullptr);
-
-    std::string value = facade::FormatToJson(capture.Take());
-
-    // Call the exported alloc to allocate memory on the guest
-    auto alloc = std::get<wasmtime::Func>(*res);
-    const int32_t alloc_size = static_cast<int32_t>(value.size() + sizeof(uint32_t));
-    auto result = alloc.call(caller.context(), {wasmtime::Val{alloc_size}});
-    if (!result) {
-      // handle errors
-    }
-    auto wasm_value = result.ok().front();
-    auto offset = wasm_value.i32();
-
-    uint8_t* data = memory.data(caller.context()).data() + offset;
-    absl::little_endian::Store32(data, value.size());
-    memcpy(data + sizeof(uint32_t), value.c_str(), value.size());
-
-    results[0] = wasm_value;
+    auto result_buffer = ProvideMemory(&caller, &memory, result.size());
+    memcpy(result_buffer->data(), result.data(), result.size());
     return std::monostate();
   };
 
