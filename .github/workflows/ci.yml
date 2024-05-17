@@ -103,7 +103,7 @@ jobs:
             -L
           cd ${GITHUB_WORKSPACE}
           ./tools/install_wasmtime.sh
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
 
