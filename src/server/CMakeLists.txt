@@ -73,6 +73,7 @@ endif()
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
 
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
+target_link_libraries(dragonfly_lib ${CMAKE_SOURCE_DIR}/c-api/lib/libwasmtime.a)
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib awsv2_lib jsonpath
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
@@ -84,7 +85,6 @@ target_include_directories(dfly_transaction PUBLIC ${CMAKE_SOURCE_DIR}/c-api/inc
 
 add_library(wasmtime STATIC IMPORTED)
 target_include_directories(dragonfly_lib PRIVATE ${CMAKE_SOURCE_DIR}/c-api/include)
-target_link_libraries(dragonfly_lib ${CMAKE_SOURCE_DIR}/c-api/lib/libwasmtime.a)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
