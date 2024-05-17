@@ -1,3 +1,5 @@
+#include <string>
+
 #include "dragonfly.h"
 
 // wasi-sdk-22.0/bin/clang++ -std=c++11 example.cc -o example.wasm
