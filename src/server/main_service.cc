@@ -789,7 +789,8 @@ Service::Service(ProactorPool* pp)
     : pp_(*pp),
       acl_family_(&user_registry_, pp),
       server_family_(this),
-      cluster_family_(&server_family_) {
+      cluster_family_(&server_family_),
+      wasm_family_(*this) {
   CHECK(pp);
   CHECK(shard_set == NULL);
 
@@ -1255,7 +1256,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   // if this is a read command, and client tracking has enabled,
   // start tracking all the updates to the keys in this read command
-  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
+  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn() && dfly_cntx->conn()->IsTrackingOn() &&
       cid->IsTransactional()) {
     facade::Connection::WeakRef conn_ref = dfly_cntx->conn()->Borrow();
     auto cb = [&, conn_ref](Transaction* t, EngineShard* shard) {

@@ -6,6 +6,7 @@
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "facade/facade_types.h"
+#include "facade/service_interface.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -24,9 +25,9 @@ CommandId::Handler HandlerFunc(WasmFamily* wasm, MemberFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &WasmFamily::x))
 
-WasmFamily::WasmFamily() {
+WasmFamily::WasmFamily(facade::ServiceInterface& service) {
   if (auto wasm_modules = absl::GetFlag(FLAGS_wasmpaths); !wasm_modules.empty()) {
-    registry_ = std::make_unique<WasmRegistry>();
+    registry_ = std::make_unique<WasmRegistry>(service);
   }
 }
 

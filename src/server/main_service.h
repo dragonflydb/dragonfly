@@ -184,9 +184,10 @@ class Service : public facade::ServiceInterface {
   acl::AclFamily acl_family_;
   ServerFamily server_family_;
   cluster::ClusterFamily cluster_family_;
+  wasm::WasmFamily wasm_family_;
+
   CommandRegistry registry_;
   absl::flat_hash_map<std::string, unsigned> unknown_cmds_;
-  wasm::WasmFamily wasm_family_;
 
   const CommandId* exec_cid_;  // command id of EXEC command for pipeline squashing
 

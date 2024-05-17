@@ -3,7 +3,9 @@
 //
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
 #include <string>
 
@@ -14,16 +16,32 @@ namespace dragonfly {
 extern "C" {
 #define WASM_IMPORT(mod, name) __attribute__((import_module(#mod), import_name(#name)))
 
-WASM_IMPORT(dragonfly, hello)
-uint8_t* hello();
+WASM_IMPORT(dragonfly, call)
+void call(uint32_t);
 
 // Add rest of functions here
 }
 
-inline std::string deserialize(uint8_t* ptr);
+// guard against multiple defines
+std::string call_buffer;
 
-inline std::string hello_world() {
-  return deserialize(hello());
+inline std::string_view call(std::initializer_list<std::string> arguments) {
+  std::string data(4, 'x');
+
+  uint32_t parts = arguments.size();
+  memcpy((void*)data.data(), &parts, 4);
+
+  for (const std::string& str : arguments) {
+    data.append(4, 'x');
+
+    uint32_t strsize = str.size();
+    memcpy((void*)(data.data() + data.size() - 4), &strsize, 4);
+
+    data += str;
+  }
+
+  call((uint64_t)data.data());
+  return call_buffer;
 }
 
 /* Used to export functions from wasm modules */
@@ -34,22 +52,10 @@ inline std::string hello_world() {
 #define DF_EXPORT(name) __attribute__((export_name(name)))
 
 /* Private and NOT part of the public API */
-DF_EXPORT("allocate_on_guest_mem")
-inline uint8_t* allocate_on_guest_mem(size_t bytes) {
-  return new uint8_t[bytes];
-}
-
-/* Entry point to deserialize data coming from Dragonfly */
-/* For now this is hardcoded and only returns a string and should */
-/* be extended with json */
-inline std::string deserialize(/*Get ownership*/ uint8_t* ptr) {
-  // TODO Figure out how to reduce copies. This is two copies:
-  // 1. Host allocates via allocate_on_guest_mem and copies data
-  // 2. Data is deserialized on a new location
-  char* start = reinterpret_cast<char*>(ptr);
-  std::string res(start);
-  delete[] ptr;
-  return res;
+DF_EXPORT("provide_buffer")
+inline char* provide_buffer(size_t bytes) {
+  call_buffer.resize(bytes);
+  return call_buffer.data();
 }
 
 }  // namespace dragonfly
