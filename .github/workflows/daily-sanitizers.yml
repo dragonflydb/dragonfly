@@ -64,7 +64,13 @@ jobs:
           echo "disk space is:"
           df -h
           echo "-----------------------------"
+
+          cd $GITHUB_WORKSPACE
+          ./tools/install_wasmtime.sh
+
           mkdir -p $GITHUB_WORKSPACE/build
+          cd $GITHUB_WORKSPACE
+          ./tools/install_wasmtime.sh
           cd $GITHUB_WORKSPACE/build
           cmake .. \
             -DCMAKE_BUILD_TYPE=Debug \

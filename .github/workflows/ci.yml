@@ -101,6 +101,8 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
             -L
+          cd ${GITHUB_WORKSPACE}
+          ./tools/install_wasmtime.sh
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
 

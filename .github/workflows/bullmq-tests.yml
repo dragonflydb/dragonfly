@@ -28,6 +28,8 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/build
       - name: Configure/Build
         run: |
+          cd $GITHUB_WORKSPACE
+          ./tools/install_wasmtime.sh
           cd $GITHUB_WORKSPACE/build
           cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja
           ninja dragonfly

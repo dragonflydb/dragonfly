@@ -1,0 +1,1 @@
+mkdir c-api && wget https://github.com/bytecodealliance/wasmtime/releases/download/dev/wasmtime-dev-x86_64-linux-c-api.tar.xz && tar xf wasmtime-dev-x86_64-linux-c-api.tar.xz -C c-api --strip-components=1
