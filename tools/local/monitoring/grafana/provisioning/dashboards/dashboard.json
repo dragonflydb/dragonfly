@@ -495,6 +495,19 @@
           "legendFormat": "max",
           "refId": "B",
           "step": 240
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "exemplar": true,
+          "expr": "dragonfly_used_memory_rss_bytes{instance=~\"$instance\"} ",
+          "range": true,
+          "format": "time_series",
+          "hide": false,
+          "legendFormat": "RSS",
+          "refId": "C"
         }
       ],
       "thresholds": [],

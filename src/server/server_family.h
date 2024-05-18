@@ -62,8 +62,8 @@ struct ReplicaRoleInfo {
 };
 
 struct ReplicationMemoryStats {
-  size_t streamer_buf_capacity_bytes_ = 0;  // total capacities of streamer buffers
-  size_t full_sync_buf_bytes_ = 0;          // total bytes used for full sync buffers
+  size_t streamer_buf_capacity_bytes = 0;  // total capacities of streamer buffers
+  size_t full_sync_buf_bytes = 0;          // total bytes used for full sync buffers
 };
 
 // Global peak stats recorded after aggregating metrics over all shards.
