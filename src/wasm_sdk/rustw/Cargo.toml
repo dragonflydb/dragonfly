@@ -7,3 +7,7 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
+
+[dependencies]
+build_html = "2.4.0"
+serde_json = "1.0.117"

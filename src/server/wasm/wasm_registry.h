@@ -11,7 +11,9 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_cat.h"
+#include "base/expected.hpp"
 #include "base/logging.h"
+#include "facade/facade_types.h"
 #include "facade/service_interface.h"
 #include "server/wasm/api.h"
 #include "server/wasm/wasmtime.hh"
@@ -56,16 +58,29 @@ class WasmRegistry {
         : instance_{instance}, store_(store) {
     }
 
-    std::string operator()(std::string_view export_func_name) {
+    std::variant<std::monostate, facade::ErrorReply, std::string> operator()(
+        std::string_view export_func_name) {
       // Users will export functions for their modules via the attribute
       //  __attribute__((export_name(func_name))). We will expose this in our sdk
       auto extern_def = instance_.get(*store_, export_func_name);
       if (!extern_def) {
-        return absl::StrCat("No exported function with name ", export_func_name, " found");
+        return facade::ErrorReply(
+            absl::StrCat("No exported function with name ", export_func_name, " found"));
       }
+
       auto run = std::get<wasmtime::Func>(*extern_def);
       auto res = run.call(store_, {}).unwrap();
-      return {};
+
+      if (res.size() == 1) {
+        uint32_t offset = res[0].i32();
+        wasmtime::Memory mem =
+            std::get<wasmtime::Memory>(*instance_.get(store_->context(), "memory"));
+
+        char* ptr = reinterpret_cast<char*>(mem.data(store_->context()).data() + offset);
+        return std::string{ptr, strlen(ptr)};
+      }
+
+      return std::monostate{};
     }
 
     wasmtime::Instance* GetInstance() {
