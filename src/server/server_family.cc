@@ -1051,7 +1051,7 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
+void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
@@ -1129,6 +1129,15 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
     }
     if (added)
       absl::StrAppend(&resp->body(), type_used_memory_metric);
+  }
+  if (!m.replication_metrics.empty()) {
+    ReplicationMemoryStats repl_mem;
+    dfly_cmd->GetReplicationMemoryStats(&repl_mem);
+    AppendMetricWithoutLabels(
+        "replication_streaming_bytes", "Stable sync replication memory  usage",
+        repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
+                              repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
   }
 
   // Stats metrics
@@ -1262,7 +1271,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
-    PrintPrometheusMetrics(this->GetMetrics(), &resp);
+    PrintPrometheusMetrics(this->GetMetrics(), this->dfly_cmd_.get(), &resp);
 
     return send->Invoke(std::move(resp));
   };
@@ -2027,8 +2036,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     if (!m.replication_metrics.empty()) {
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
-      append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes_);
-      append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
+      append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes);
+      append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes);
     }
 
     {

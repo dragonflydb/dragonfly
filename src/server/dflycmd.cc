@@ -719,10 +719,10 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
       const auto& flow = info->flows[shard->shard_id()];
 
       if (flow.streamer)
-        stats->streamer_buf_capacity_bytes_ += flow.streamer->GetTotalBufferCapacities();
+        stats->streamer_buf_capacity_bytes += flow.streamer->GetTotalBufferCapacities();
 
       if (flow.saver)
-        stats->full_sync_buf_bytes_ += flow.saver->GetTotalBuffersSize();
+        stats->full_sync_buf_bytes += flow.saver->GetTotalBuffersSize();
     }
   };
   shard_set->RunBlockingInParallel(cb);

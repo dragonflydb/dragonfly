@@ -41,7 +41,7 @@ services:
       mode: global
 
   grafana:
-    image: grafana/grafana
+    image: grafana/grafana:10.1.10
     user: '472'
     restart: always
     environment:
