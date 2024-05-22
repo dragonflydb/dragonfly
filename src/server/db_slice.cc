@@ -975,6 +975,8 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   FiberAtomicGuard fg;
 
+  it->second.SetCold(false);
+
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
   for (const auto& ccb : change_cb_) {
     ccb.second(db_ind, ChangeReq{it.GetInnerIt()});

@@ -126,11 +126,8 @@ class CompactObj {
     IO_PENDING = 0x20,
     STICKY = 0x40,
 
-    // TOUCHED used to determin which items are hot/cold.
-    // by checking if the item was touched from the last time we
-    // reached this item while travering the database to set items as cold.
-    // https://junchengyang.com/publication/nsdi24-SIEVE.pdf
-    TOUCHED = 0x80,
+    // Offloading loop views this item as cold
+    COLD = 0x80,
   };
 
   static constexpr uint8_t kEncMask = ASCII1_ENC_BIT | ASCII2_ENC_BIT;
@@ -225,15 +222,15 @@ class CompactObj {
     }
   }
 
-  bool WasTouched() const {
-    return mask_ & TOUCHED;
+  bool IsCold() const {
+    return mask_ & COLD;
   }
 
-  void SetTouched(bool e) {
+  void SetCold(bool e) {
     if (e) {
-      mask_ |= TOUCHED;
+      mask_ |= COLD;
     } else {
-      mask_ &= ~TOUCHED;
+      mask_ &= ~COLD;
     }
   }
 

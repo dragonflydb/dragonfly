@@ -315,9 +315,11 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
     if (it->second.HasIoPending() || it->second.IsExternal())
       return;
 
-    if (ShouldStash(it->second)) {
+    if (it->second.IsCold() && ShouldStash(it->second)) {
       Stash(dbid, it->first.GetSlice(&tmp), &it->second);
       stash_limit--;
+    } else {
+      it->second.SetCold(true);
     }
   };
 
