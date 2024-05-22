@@ -1439,7 +1439,7 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   const PrimeValue& pv = del_it->second;
 
   if (pv.IsExternal() && shard_owner()->tiered_storage()) {
-    shard_owner()->tiered_storage()->Delete(&del_it->second);
+    shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
   }
 
   size_t value_heap_size = pv.MallocUsed();

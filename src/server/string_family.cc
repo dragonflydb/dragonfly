@@ -620,7 +620,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
-    shard->tiered_storage()->Delete(&prime_value);
+    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, &prime_value);
   }
 
   // overwrite existing entry.
