@@ -15,6 +15,7 @@
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/tiered_storage.h"
 
 namespace dfly {
 
@@ -284,12 +285,30 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     expire_time = db_slice_->ExpireTime(eit);
   }
 
-  io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
-  CHECK(res);
-  ++type_freq_map_[*res];
+  if (pv.IsExternal()) {
+    // We can't block, so we just schedule a tiered read and append it to the delayed entries
+    util::fb2::Future<PrimeValue> future;
+    EngineShard::tlocal()->tiered_storage()->Read(
+        db_indx, pk.ToString(), pv,
+        [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
+    delayed_entries_.push_back({db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time});
+    ++type_freq_map_[RDB_TYPE_STRING];
+  } else {
+    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
+    CHECK(res);
+    ++type_freq_map_[*res];
+  }
 }
 
 bool SliceSnapshot::PushSerializedToChannel(bool force) {
+  // Bucket serialization might have accumulated some delayed values.
+  // Becuause we can finally block in this function, we'll await and serialze them
+  while (!delayed_entries_.empty()) {
+    auto& entry = delayed_entries_.front();
+    serializer_->SaveEntry(entry.key, PrimeValue(entry.value.Get()), entry.expire, entry.dbid);
+    delayed_entries_.pop_front();
+  }
+
   if (!force && serializer_->SerializedLen() < 4096)
     return false;
 

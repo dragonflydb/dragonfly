@@ -1432,10 +1432,11 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
                                                Transaction* trans, bool ignore_state) {
-  if (shard_set->IsTieringEnabled()) {
-    return GenericError{make_error_code(errc::operation_not_permitted),
-                        StrCat("Can not save database in tiering mode")};
-  }
+  // if (shard_set->IsTieringEnabled()) {
+  //   return GenericError{make_error_code(errc::operation_not_permitted),
+  //                       StrCat("Can not save database in tiering mode")};
+  // }
+
   auto state = service_.GetGlobalState();
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
   if (!ignore_state && (state != GlobalState::ACTIVE)) {
