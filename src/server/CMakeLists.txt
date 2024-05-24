@@ -71,8 +71,12 @@ endif()
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
 
+if (WITH_AWS)
+  SET(AWS_LIB awsv2_lib)
+endif()
+
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
-cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib awsv2_lib jsonpath
+cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib ${AWS_LIB} jsonpath
          strings_lib html_lib
          http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
