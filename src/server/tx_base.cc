@@ -18,8 +18,7 @@ using Payload = journal::Entry::Payload;
 void RecordJournal(const OpArgs& op_args, string_view cmd, ArgSlice args, uint32_t shard_cnt,
                    bool multi_commands) {
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
-  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, multi_commands,
-                                false);
+  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, multi_commands, true);
 }
 
 void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt) {

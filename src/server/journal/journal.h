@@ -34,6 +34,7 @@ class Journal {
 
   LSN GetLsn() const;
 
+  // WHY NO COMMENTS?? :(
   void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
                    std::optional<cluster::SlotId> slot, Entry::Payload payload, bool await);
 
