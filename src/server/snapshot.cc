@@ -302,10 +302,10 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 
 bool SliceSnapshot::PushSerializedToChannel(bool force) {
   // Bucket serialization might have accumulated some delayed values.
-  // Becuause we can finally block in this function, we'll await and serialze them
+  // Becuause we can finally block in this function, we'll await and serialize them
   while (!delayed_entries_.empty()) {
     auto& entry = delayed_entries_.front();
-    serializer_->SaveEntry(entry.key, PrimeValue(entry.value.Get()), entry.expire, entry.dbid);
+    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid);
     delayed_entries_.pop_front();
   }
 
