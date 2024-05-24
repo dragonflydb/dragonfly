@@ -5,6 +5,7 @@
 
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
+#include "core/overloaded.h"
 #include "facade/facade_types.h"
 #include "facade/service_interface.h"
 #include "server/acl/acl_commands_def.h"
@@ -71,11 +72,11 @@ void WasmFamily::Call(CmdArgList args, ConnectionContext* cntx) {
   // When we switch to async execution of the runtime this will be able to suspend and resume
   // which will make the current approach invalid.
   auto wasm_result = wasm_function(exported_fun_name);
-  if (!wasm_result.empty()) {
-    cntx->SendError(wasm_result);
-    return;
-  }
-  cntx->SendOk();
+
+  Overloaded result_handler{[cntx](std::monostate) { cntx->SendOk(); },
+                            [cntx](facade::ErrorReply err) { cntx->SendError(err); },
+                            [cntx](std::string result) { cntx->SendSimpleString(result); }};
+  visit(result_handler, wasm_result);
 }
 
 void WasmFamily::Delete(CmdArgList args, ConnectionContext* cntx) {

@@ -53,7 +53,7 @@ inline std::string_view call(std::initializer_list<std::string> arguments) {
 
 /* Private and NOT part of the public API */
 DF_EXPORT("provide_buffer")
-inline char* provide_buffer(size_t bytes) {
+inline char* provide_buffer(int32_t bytes) {
   call_buffer.resize(bytes);
   return call_buffer.data();
 }
