@@ -45,6 +45,7 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
+  size_t pending_ops_ = 0;
   size_t max_size_;
   IoMgr io_mgr_;
   ExternalAllocator alloc_;

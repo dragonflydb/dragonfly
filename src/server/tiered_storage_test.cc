@@ -47,15 +47,6 @@ class TieredStorageTest : public BaseFamilyTest {
 
     BaseFamilyTest::SetUp();
   }
-
-  void TearDown() override {
-    TieredStats stats;
-    do {
-      util::ThisFiber::SleepFor(20ms);
-      stats = GetMetrics().tiered_stats;
-    } while (stats.pending_read_cnt + stats.pending_stash_cnt > 0);
-    BaseFamilyTest::TearDown();
-  }
 };
 
 // Perform simple series of SET, GETSET and GET
