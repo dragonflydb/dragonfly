@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,7 +107,7 @@ func (w *FileWorker) Run(file string, wg *sync.WaitGroup) {
 	})
 
 	if err != nil {
-		log.Fatalf("Could not parse records!")
+		log.Fatalf("Could not parse records for file %s: %v", file, err)
 	}
 
 	for _, client := range clients {
@@ -139,7 +138,7 @@ func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) 
 
 func main() {
 	flag.Parse()
-	files := os.Args[1:]
+	files := flag.Args()
 
 	timeOffset := time.Now().Add(500 * time.Millisecond).Sub(DetermineBaseTime(files))
 	fmt.Println("Offset -> ", timeOffset)
