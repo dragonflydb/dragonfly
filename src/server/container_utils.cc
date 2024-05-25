@@ -280,7 +280,8 @@ string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms,
-                                              bool* block_flag, bool* pause_flag) {
+                                              bool* block_flag, bool* pause_flag,
+                                              std::string* info) {
   string result_key;
 
   // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
@@ -289,10 +290,13 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   OpResult<ShardFFResult> result;
   if (trans->GetUniqueShardCnt() == 1 && absl::GetFlag(FLAGS_singlehop_blocking)) {
     auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
-    if (res.ok())
+    if (res.ok()) {
+      if (info)
+        *info = "FF1S/";
       return res;
-    else
+    } else {
       result = res.status();
+    }
   } else {
     result = FindFirstNonEmpty(trans, req_obj_type);
   }
@@ -307,6 +311,8 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
       return OpStatus::OK;
     };
     trans->Execute(std::move(cb), true);
+    if (info)
+      *info = "FFMS/";
     return result_key;
   }
 
@@ -351,7 +357,8 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return OpStatus::OK;
   };
   trans->Execute(std::move(cb), true);
-
+  if (info)
+    *info = "BLOCK/";
   return result_key;
 }
 
