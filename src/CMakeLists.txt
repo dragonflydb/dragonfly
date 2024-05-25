@@ -8,7 +8,7 @@ endif()
 add_third_party(
   lua
   GIT_REPOSITORY https://github.com/dragonflydb/lua
-  GIT_TAG Dragonfly-5.4.6
+  GIT_TAG Dragonfly-5.4.6a
   CONFIGURE_COMMAND echo
   BUILD_IN_SOURCE 1
   BUILD_COMMAND ${DFLY_TOOLS_MAKE} all
