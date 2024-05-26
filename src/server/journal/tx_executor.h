@@ -43,13 +43,13 @@ struct TransactionData {
 
   bool IsGlobalCmd() const;
 
-  static TransactionData FromSingle(journal::ParsedEntry&& entry);
+  static TransactionData FromEntry(journal::ParsedEntry&& entry);
 
   TxId txid{0};
   DbIndex dbid{0};
   uint32_t shard_cnt{0};
-  absl::InlinedVector<journal::ParsedEntry::CmdData, 1> commands{0};
-  uint32_t journal_rec_count{0};  // Count number of source entries to check offset.
+  journal::ParsedEntry::CmdData command;
+
   journal::Op opcode = journal::Op::NOOP;
   uint64_t lsn = 0;
 };
@@ -58,15 +58,11 @@ struct TransactionData {
 // The journal stream can contain interleaved data for multiple multi transactions,
 // expiries and out of order executed transactions that need to be grouped on the replica side.
 struct TransactionReader {
-  TransactionReader(bool accumulate_multi, std::optional<uint64_t> lsn = std::nullopt)
-      : accumulate_multi_(accumulate_multi), lsn_(lsn) {
+  TransactionReader(std::optional<uint64_t> lsn = std::nullopt) : lsn_(lsn) {
   }
   std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
 
  private:
-  // Stores ongoing multi transaction data.
-  absl::flat_hash_map<TxId, TransactionData> current_;
-  bool accumulate_multi_ = false;
   std::optional<uint64_t> lsn_ = 0;
 };
 
