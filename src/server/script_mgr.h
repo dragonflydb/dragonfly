@@ -75,7 +75,6 @@ class ScriptMgr {
   struct InternalScriptData : public ScriptParams {
     std::unique_ptr<char[]> body{};
     std::unique_ptr<char[]> orig_body{};
-    uint32_t error_resp = 0;
   };
 
   ScriptParams default_params_;

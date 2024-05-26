@@ -18,7 +18,8 @@ class MemoryCmd {
 
  private:
   void Stats();
-  void MallocStats(CmdArgList args);
+  void MallocStats();
+  void ArenaStats(CmdArgList args);
   void Usage(std::string_view key);
   void Track(CmdArgList args);
 
