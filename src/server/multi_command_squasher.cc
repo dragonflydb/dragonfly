@@ -8,7 +8,7 @@
 
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
-#include "server/cluster/unique_slot_checker.h"
+#include "server/cluster/cluster_utility.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"

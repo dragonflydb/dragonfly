@@ -35,7 +35,7 @@ extern "C" {
 #include "server/bitops_family.h"
 #include "server/bloom_family.h"
 #include "server/cluster/cluster_family.h"
-#include "server/cluster/unique_slot_checker.h"
+#include "server/cluster/cluster_utility.h"
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"

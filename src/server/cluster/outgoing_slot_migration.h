@@ -53,6 +53,8 @@ class OutgoingMigration : private ProtocolClient {
     return last_error_.Format();
   }
 
+  size_t GetKeyCount() const;
+
   static constexpr long kInvalidAttempt = -1;
   static constexpr std::string_view kUnknownMigration = "UNKNOWN_MIGRATION";
 
@@ -84,6 +86,10 @@ class OutgoingMigration : private ProtocolClient {
 
   mutable util::fb2::Mutex state_mu_;
   MigrationState state_ ABSL_GUARDED_BY(state_mu_) = MigrationState::C_NO_STATE;
+
+  // when migration is finished we need to store number of migrated keys
+  // because new request can add or remove keys and we get incorrect statistic
+  size_t keys_number_ = 0;
 };
 
 }  // namespace dfly::cluster
