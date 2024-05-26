@@ -47,6 +47,8 @@ class IncomingSlotMigration {
     return source_id_;
   }
 
+  size_t GetKeysNumber() const;
+
  private:
   std::string source_id_;
   Service& service_;
@@ -54,6 +56,7 @@ class IncomingSlotMigration {
   SlotRanges slots_;
   std::atomic<MigrationState> state_ = MigrationState::C_NO_STATE;
   Context cntx_;
+  size_t keys_number_ = 0;
 
   util::fb2::BlockingCounter bc_;
 };

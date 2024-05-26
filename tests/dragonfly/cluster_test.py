@@ -1067,12 +1067,17 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
         c_nodes_admin,
     )
 
-    await asyncio.sleep(0.5)
+    await wait_for_status(c_nodes_admin[1], node_ids[0], "FINISHED")
 
-    while "FINISHED" not in await c_nodes_admin[1].execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0]
-    ):
-        await asyncio.sleep(0.05)
+    assert await c_nodes[1].set("KEY20", "value")
+    assert await c_nodes[1].set("KEY21", "value")
+
+    assert (
+        await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[1])
+    ).startswith(f"""out {node_ids[1]} FINISHED keys:7""")
+    assert (
+        await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0])
+    ).startswith(f"""in {node_ids[0]} FINISHED keys:7""")
 
     await push_config(
         config.replace("LAST_SLOT_CUTOFF", "2999").replace("NEXT_SLOT_CUTOFF", "3000"),
@@ -1099,7 +1104,9 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     assert await c_nodes[1].get("KEY17") == "value"
     assert await c_nodes[1].get("KEY18") == "value"
     assert await c_nodes[1].get("KEY19") == "value"
-    assert await c_nodes[1].execute_command("DBSIZE") == 17
+    assert await c_nodes[1].get("KEY20") == "value"
+    assert await c_nodes[1].get("KEY21") == "value"
+    assert await c_nodes[1].execute_command("DBSIZE") == 19
 
     assert (
         await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"

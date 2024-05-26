@@ -24,4 +24,6 @@ class UniqueSlotChecker {
   std::optional<SlotId> slot_id_;
 };
 
+uint64_t GetKeyCount(const SlotRanges& slots);
+
 }  // namespace dfly::cluster

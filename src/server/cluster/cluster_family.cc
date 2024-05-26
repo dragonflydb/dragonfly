@@ -660,26 +660,6 @@ static string_view StateToStr(MigrationState state) {
   return "UNDEFINED_STATE"sv;
 }
 
-static uint64_t GetKeyCount(const SlotRanges& slots) {
-  atomic_uint64_t keys = 0;
-
-  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
-    EngineShard* shard = EngineShard::tlocal();
-    if (shard == nullptr)
-      return;
-
-    uint64_t shard_keys = 0;
-    for (const SlotRange& range : slots) {
-      for (SlotId slot = range.start; slot <= range.end; slot++) {
-        shard_keys += shard->db_slice().GetSlotStats(slot).key_count;
-      }
-    }
-    keys.fetch_add(shard_keys);
-  });
-
-  return keys.load();
-}
-
 void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   CmdArgParser parser(args);
@@ -698,22 +678,21 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
   auto append_answer = [rb, &reply](string_view direction, string_view node_id, string_view filter,
-                                    MigrationState state, const SlotRanges& slots,
-                                    string_view error) {
+                                    MigrationState state, size_t keys_number, string_view error) {
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
       reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
-                                   " keys:", GetKeyCount(slots), " errors: ", error));
+                                   " keys:", keys_number, " errors: ", error));
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
     // TODO add error status
-    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetSlots(), "");
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeysNumber(), "");
   }
   for (const auto& migration : outgoing_migration_jobs_) {
     append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
-                  migration->GetSlots(), migration->GetErrorStr());
+                  migration->GetKeysNumber(), migration->GetErrorStr());
   }
 
   if (reply.empty()) {
@@ -927,6 +906,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   if (!migration)
     return cntx->SendError(kIdNotFound);
 
+  // TODO add timeout for join because it can fail
   migration->Join();
 
   VLOG(1) << "Migration is joined for " << source_id;
