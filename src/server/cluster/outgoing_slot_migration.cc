@@ -271,7 +271,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   auto is_error = CheckFlowsForErrors();
   Finish(is_error);
   if (!is_error) {
-    keys_number_ = GetKeyCount(migration_info_.slot_ranges);
+    keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
     cf_->UpdateConfig(migration_info_.slot_ranges, false);
     VLOG(1) << "Config is updated for " << cf_->MyID();
   }
@@ -298,10 +298,10 @@ bool OutgoingMigration::CheckFlowsForErrors() {
   return false;
 }
 
-size_t OutgoingMigration::GetKeysNumber() const {
+size_t OutgoingMigration::GetKeyCount() const {
   if (state_ == MigrationState::C_FINISHED) {
     return keys_number_;
   }
-  return GetKeyCount(migration_info_.slot_ranges);
+  return cluster::GetKeyCount(migration_info_.slot_ranges);
 }
 }  // namespace dfly::cluster

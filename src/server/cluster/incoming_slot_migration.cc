@@ -124,7 +124,7 @@ void IncomingSlotMigration::Join() {
   // TODO add timeout
   bc_->Wait();
   state_.store(MigrationState::C_FINISHED);
-  keys_number_ = GetKeyCount(slots_);
+  keys_number_ = cluster::GetKeyCount(slots_);
 }
 
 void IncomingSlotMigration::Cancel() {
@@ -144,11 +144,11 @@ void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* sou
   shard_flows_[shard]->Start(&cntx_, source, bc_);
 }
 
-size_t IncomingSlotMigration::GetKeysNumber() const {
+size_t IncomingSlotMigration::GetKeyCount() const {
   if (state_.load() == MigrationState::C_FINISHED) {
     return keys_number_;
   }
-  return GetKeyCount(slots_);
+  return cluster::GetKeyCount(slots_);
 }
 
 }  // namespace dfly::cluster

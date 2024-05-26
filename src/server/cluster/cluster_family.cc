@@ -688,11 +688,11 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
 
   for (const auto& m : incoming_migrations_jobs_) {
     // TODO add error status
-    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeysNumber(), "");
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(), "");
   }
   for (const auto& migration : outgoing_migration_jobs_) {
     append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
-                  migration->GetKeysNumber(), migration->GetErrorStr());
+                  migration->GetKeyCount(), migration->GetErrorStr());
   }
 
   if (reply.empty()) {
