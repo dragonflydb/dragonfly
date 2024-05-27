@@ -1403,8 +1403,9 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
     return;
   }
   auto& client_set = it->second;
-  // notify all the clients. copy key because we dispatch briefly below and we need to preserve
-  // lifetime
+  // Notify all the clients. We copy key because we dispatch briefly below and
+  // we need to preserve its lifetime
+  // TODO this key is further copied within DispatchFiber. Fix this.
   auto cb = [key = std::string(key), client_set = std::move(client_set)](unsigned idx,
                                                                          util::ProactorBase*) {
     for (auto& client : client_set) {
