@@ -1109,8 +1109,8 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                            << sdata_res.error().message();
   }
   AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("serialization_bytes", "", m.serialization_bytes, MetricType::GAUGE,
-                            &resp->body());
+  AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
+                            MetricType::GAUGE, &resp->body());
 
   DbStats total;
   for (const auto& db_stats : m.db_stats) {
@@ -2027,7 +2027,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
     append("tls_bytes", m.tls_bytes);
-    append("serialization_bytes", m.serialization_bytes);
+    append("snapshot_serialization_bytes", m.serialization_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
