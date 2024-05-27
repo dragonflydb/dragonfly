@@ -1073,6 +1073,8 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
+                            MetricType::GAUGE, &resp->body());
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
