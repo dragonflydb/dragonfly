@@ -6,6 +6,8 @@
 
 #include <absl/strings/match.h>
 
+#include <cerrno>
+
 extern "C" {
 #include "redis/zmalloc.h"
 }
@@ -34,8 +36,6 @@ ABSL_FLAG(string, tiered_prefix, "",
           " associated with tiered storage. Stronly advised to use "
           "high performance NVME ssd disks for this.");
 
-ABSL_FLAG(string, tiered_prefix_v2, "", "tiered_prefix v2");
-
 ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
           "Limit on maximum file size that is used by the database for tiered storage. "
           "0 - means the program will automatically determine its maximum file size. "
@@ -51,7 +51,7 @@ ABSL_FLAG(uint32_t, hz, 100,
 ABSL_FLAG(bool, cache_mode, false,
           "If true, the backend behaves like a cache, "
           "by evicting entries when getting close to maxmemory limit");
-// memory defragmented related flags
+
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
           "defragmentation");
@@ -68,6 +68,9 @@ ABSL_FLAG(string, shard_round_robin_prefix, "",
           "based on their value but instead via round-robin. Use cautiously! This can efficiently "
           "support up to a few hundreds of prefixes. Note: prefix is looked inside hash tags when "
           "cluster mode is enabled.");
+
+ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 10,
+          "Number of seconds between every defragmentation necessity check");
 
 namespace dfly {
 
@@ -222,7 +225,6 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
 
 void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
   cursor = cursor_val;
-  underutilized_found = false;
   // Once we're done with a db, jump to the next
   if (cursor == kCursorDoneState) {
     dbid++;
@@ -231,7 +233,6 @@ void EngineShard::DefragTaskState::UpdateScanState(uint64_t cursor_val) {
 
 void EngineShard::DefragTaskState::ResetScanState() {
   dbid = cursor = 0u;
-  underutilized_found = false;
 }
 
 // This function checks 3 things:
@@ -241,8 +242,9 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
 // (control by mem_defrag_waste_threshold flag)
 bool EngineShard::DefragTaskState::CheckRequired() {
-  if (cursor > kCursorDoneState || underutilized_found) {
-    VLOG(2) << "cursor: " << cursor << " and underutilized_found " << underutilized_found;
+  if (is_force_defrag || cursor > kCursorDoneState) {
+    is_force_defrag = false;
+    VLOG(2) << "cursor: " << cursor << " and is_force_defrag " << is_force_defrag;
     return true;
   }
 
@@ -251,18 +253,33 @@ bool EngineShard::DefragTaskState::CheckRequired() {
     return false;
   }
 
-  const std::size_t threshold_mem = memory_per_shard * GetFlag(FLAGS_mem_defrag_threshold);
-  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
+  const std::size_t global_threshold = max_memory_limit * GetFlag(FLAGS_mem_defrag_threshold);
+  if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
+    return false;
+  }
+
+  const auto now = time(nullptr);
+  const auto seconds_from_prev_check = now - last_check_time;
+  const auto mem_defrag_interval = GetFlag(FLAGS_mem_defrag_check_sec_interval);
+
+  if (seconds_from_prev_check < mem_defrag_interval) {
+    return false;
+  }
+  last_check_time = now;
 
   ShardMemUsage usage = ReadShardMemUsage(GetFlag(FLAGS_mem_defrag_page_utilization_threshold));
 
-  if (threshold_mem < usage.commited &&
-      usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
+  const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
+  if (usage.wasted_mem > (uint64_t(usage.commited * waste_threshold))) {
     VLOG(1) << "memory issue found for memory " << usage;
-    underutilized_found = true;
+    return true;
   }
 
   return false;
+}
+
+void EngineShard::ForceDefrag() {
+  defrag_state_.is_force_defrag = true;
 }
 
 bool EngineShard::DoDefrag() {
@@ -341,8 +358,7 @@ uint32_t EngineShard::DefragTask() {
   const auto shard_id = db_slice().shard_id();
 
   if (defrag_state_.CheckRequired()) {
-    VLOG(2) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor
-            << ", underutilzation found: " << defrag_state_.underutilized_found;
+    VLOG(2) << shard_id << ": need to run defrag memory cursor state: " << defrag_state_.cursor;
     if (DoDefrag()) {
       // we didn't finish the scan
       return util::ProactorBase::kOnIdleMaxLevel;
@@ -371,9 +387,9 @@ EngineShard::~EngineShard() {
 void EngineShard::Shutdown() {
   queue_.Shutdown();
 
-  if (tiered_storage_v2_) {
-    tiered_storage_v2_->Close();
-    tiered_storage_v2_.reset();
+  if (tiered_storage_) {
+    tiered_storage_->Close();
+    tiered_storage_.reset();
   }
 
   fiber_periodic_done_.Notify();
@@ -405,12 +421,12 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  if (string backing_prefix = GetFlag(FLAGS_tiered_prefix_v2); !backing_prefix.empty()) {
+  if (string backing_prefix = GetFlag(FLAGS_tiered_prefix); !backing_prefix.empty()) {
     LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
         << "Only ioring based backing storage is supported. Exiting...";
 
-    shard_->tiered_storage_v2_ = make_unique<TieredStorageV2>(&shard_->db_slice_);
-    error_code ec = shard_->tiered_storage_v2_->Open(backing_prefix);
+    shard_->tiered_storage_ = make_unique<TieredStorage>(&shard_->db_slice_, max_file_size);
+    error_code ec = shard_->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();
   }
 
@@ -582,6 +598,8 @@ void EngineShard::Heartbeat() {
   }
 
   ssize_t eviction_redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
+  size_t tiering_redline =
+      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
 
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
@@ -602,6 +620,10 @@ void EngineShard::Heartbeat() {
     // if our budget is below the limit
     if (db_slice_.memory_budget() < eviction_redline) {
       db_slice_.FreeMemWithEvictionStep(i, eviction_redline - db_slice_.memory_budget());
+    }
+
+    if (tiered_storage_ && UsedMemory() > tiering_redline) {
+      tiered_storage_->RunOffloading(i);
     }
   }
 
@@ -775,13 +797,48 @@ uint64_t GetFsLimit() {
   std::filesystem::path file_path(GetFlag(FLAGS_tiered_prefix));
   std::string dir_name_str = file_path.parent_path().string();
 
+  if (dir_name_str.empty())
+    dir_name_str = ".";
+
   struct statvfs stat;
   if (statvfs(dir_name_str.c_str(), &stat) == 0) {
     uint64_t limit = stat.f_frsize * stat.f_blocks;
     return limit;
   }
-  LOG(WARNING) << "Error getting filesystem information";
+  LOG(WARNING) << "Error getting filesystem information " << errno;
   return 0;
+}
+
+size_t GetTieredFileLimit(size_t threads) {
+  string file_prefix = GetFlag(FLAGS_tiered_prefix);
+  if (file_prefix.empty())
+    return 0;
+
+  size_t max_shard_file_size = 0;
+
+  size_t max_file_size = absl::GetFlag(FLAGS_tiered_max_file_size).value;
+  size_t max_file_size_limit = GetFsLimit();
+  if (max_file_size == 0) {
+    LOG(INFO) << "max_file_size has not been specified. Deciding myself....";
+    max_file_size = (max_file_size_limit * 0.8);
+  } else {
+    if (max_file_size_limit < max_file_size) {
+      LOG(WARNING) << "Got max file size " << HumanReadableNumBytes(max_file_size)
+                   << ", however only " << HumanReadableNumBytes(max_file_size_limit)
+                   << " disk space was found.";
+    }
+  }
+
+  max_shard_file_size = max_file_size / threads;
+  if (max_shard_file_size < 256_MB) {
+    LOG(ERROR) << "Max tiering file size is too small. Setting: "
+               << HumanReadableNumBytes(max_file_size) << " Required at least "
+               << HumanReadableNumBytes(256_MB * threads) << ". Exiting..";
+    exit(1);
+  }
+  LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
+
+  return max_shard_file_size;
 }
 
 void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
@@ -789,31 +846,9 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   cached_stats.resize(sz);
   shard_queue_.resize(sz);
 
-  string file_prefix = GetFlag(FLAGS_tiered_prefix);
-  size_t max_shard_file_size = 0;
-  if (!file_prefix.empty()) {
-    size_t max_file_size = absl::GetFlag(FLAGS_tiered_max_file_size).value;
-    size_t max_file_size_limit = GetFsLimit();
-    if (max_file_size == 0) {
-      LOG(INFO) << "max_file_size has not been specified. Deciding myself....";
-      max_file_size = (max_file_size_limit * 0.8);
-    } else {
-      if (max_file_size_limit < max_file_size) {
-        LOG(WARNING) << "Got max file size " << HumanReadableNumBytes(max_file_size)
-                     << ", however only " << HumanReadableNumBytes(max_file_size_limit)
-                     << " disk space was found.";
-      }
-    }
-    max_shard_file_size = max_file_size / shard_queue_.size();
-    if (max_shard_file_size < 256_MB) {
-      LOG(ERROR) << "Max tiering file size is too small. Setting: "
-                 << HumanReadableNumBytes(max_file_size) << " Required at least "
-                 << HumanReadableNumBytes(256_MB * shard_queue_.size()) << ". Exiting..";
-      exit(1);
-    }
+  size_t max_shard_file_size = GetTieredFileLimit(sz);
+  if (max_shard_file_size > 0)
     is_tiering_enabled_ = true;
-    LOG(INFO) << "Max file size is: " << HumanReadableNumBytes(max_file_size);
-  }
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {

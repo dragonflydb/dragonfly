@@ -15,7 +15,7 @@ RUN curl -O https://raw.githubusercontent.com/ncopa/su-exec/212b75144bbc06722fbd
 RUN /tmp/fetch_release.sh ${TARGETPLATFORM}
 
 # Now prod image
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 # ARG in fact change the env vars during the build process
 # ENV persist the env vars for the built image as well.

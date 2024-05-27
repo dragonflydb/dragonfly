@@ -37,7 +37,7 @@ extern "C" {
 #include "server/bitops_family.h"
 #include "server/bloom_family.h"
 #include "server/cluster/cluster_family.h"
-#include "server/cluster/unique_slot_checker.h"
+#include "server/cluster/cluster_utility.h"
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
@@ -1002,7 +1002,7 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
     cntx = cntx->conn_state.squashing_info->owner;
 
   if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid, tail_args)) {
-    return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
+    return ErrorReply(absl::StrCat("-NOPERM ", cntx->authed_username, " ", error_msg));
   }
   return nullopt;
 }
@@ -1173,7 +1173,12 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
-      LOG(ERROR) << "Tried to reply to REPLCONF";
+      auto info_ptr = server_family_.GetReplicaInfo(dfly_cntx);
+      if (info_ptr) {
+        unsigned session_id = dfly_cntx->conn_state.replication_info.repl_session_id;
+        DCHECK(session_id);
+        server_family_.GetDflyCmd()->CancelReplication(session_id, std::move(info_ptr));
+      }
       return;
     }
     dfly_cntx->SendError(std::move(*err));
@@ -1762,15 +1767,16 @@ optional<ScriptMgr::ScriptParams> LoadScript(string_view sha, ScriptMgr* script_
       return std::nullopt;
 
     string err;
-    CHECK_EQ(Interpreter::ADD_OK, interpreter->AddFunction(sha, script_data->body, &err));
-    CHECK(err.empty()) << err;
+    Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
+    if (add_res != Interpreter::ADD_OK) {
+      LOG(ERROR) << "Error adding " << sha << " to database, err " << err;
+      return std::nullopt;
+    }
 
     return script_data;
   }
 
-  auto params = ss->GetScriptParams(sha);
-  CHECK(params);  // We update all caches from script manager
-  return params;
+  return ss->GetScriptParams(sha);
 }
 
 // Determine multi mode based on script params.

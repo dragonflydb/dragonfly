@@ -18,7 +18,7 @@
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
-#include "server/cluster/unique_slot_checker.h"
+#include "server/cluster/cluster_utility.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/journal/types.h"

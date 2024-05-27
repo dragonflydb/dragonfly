@@ -47,6 +47,7 @@ using namespace std;
 %token
   LBRACKET "["
   RBRACKET "]"
+  COLON    ":"
   LPARENT  "("
   RPARENT  ")"
   ROOT "$"
@@ -86,6 +87,9 @@ identifier: UNQ_STR
 
 bracket_index: WILDCARD { $$ = PathSegment{SegmentType::INDEX, IndexExpr::All()}; }
               | INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr($1, $1)); }
+              | INT COLON INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr::HalfOpen($1, $3)); }
+              | INT COLON { $$ = PathSegment(SegmentType::INDEX, IndexExpr($1, INT_MAX)); }
+              | COLON INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr::HalfOpen(0, $2)); }
 
 function_expr: UNQ_STR { driver->AddFunction($1); } LPARENT ROOT relative_location RPARENT
 %%

@@ -13,6 +13,7 @@
 #include "facade/reply_builder.h"
 #include "server/channel_store.h"
 #include "server/detail/save_stages_controller.h"
+#include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/replica.h"
 #include "server/server_state.h"
@@ -49,7 +50,6 @@ class ClusterFamily;
 
 class ConnectionContext;
 class CommandRegistry;
-class DflyCmd;
 class Service;
 class ScriptMgr;
 
@@ -62,8 +62,8 @@ struct ReplicaRoleInfo {
 };
 
 struct ReplicationMemoryStats {
-  size_t streamer_buf_capacity_bytes_ = 0;  // total capacities of streamer buffers
-  size_t full_sync_buf_bytes_ = 0;          // total bytes used for full sync buffers
+  size_t streamer_buf_capacity_bytes = 0;  // total capacities of streamer buffers
+  size_t full_sync_buf_bytes = 0;          // total bytes used for full sync buffers
 };
 
 // Global peak stats recorded after aggregating metrics over all shards.
@@ -80,10 +80,8 @@ struct Metrics {
   EngineShard::Stats shard_stats;  // per-shard stats
 
   facade::FacadeStats facade_stats;  // client stats and buffer sizes
-  TieredStats tiered_stats;          // stats for tiered storage
-  TieredStatsV2 tiered_stats_v2;
+  TieredStats tiered_stats;
 
-  IoMgrStats disk_stats;  // disk stats for io_mgr
   SearchStats search_stats;
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;
@@ -98,6 +96,7 @@ struct Metrics {
   uint64_t fiber_switch_cnt = 0;
   uint64_t fiber_switch_delay_usec = 0;
   uint64_t tls_bytes = 0;
+  uint64_t refused_conn_max_clients_reached_count = 0;
 
   // Statistics about fibers running for a long time (more than 1ms).
   uint64_t fiber_longrun_cnt = 0;
@@ -107,6 +106,8 @@ struct Metrics {
   uint32_t tx_queue_len = 0;
   uint32_t worker_fiber_count = 0;
   size_t worker_fiber_stack_size = 0;
+
+  InterpreterManager::Stats lua_stats;
 
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
@@ -216,6 +217,10 @@ class ServerFamily {
 
   bool HasReplica() const;
   std::optional<Replica::Info> GetReplicaInfo() const;
+
+  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfo(ConnectionContext* cntx) const {
+    return dfly_cmd_->GetReplicaInfo(cntx);
+  }
 
   void OnClose(ConnectionContext* cntx);
 

@@ -235,6 +235,12 @@ inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFunc f) {
 
 using CI = CommandId;
 
+struct CmdArgListFormatter {
+  void operator()(std::string* out, MutableSlice arg) const {
+    out->append(absl::StrCat("`", std::string_view(arg.data(), arg.size()), "`"));
+  }
+};
+
 string UnknownCmd(string cmd, CmdArgList args) {
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
                       StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
@@ -1078,7 +1084,7 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
+void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
@@ -1107,9 +1113,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("memory_used_peak_bytes", "", used_mem_peak.load(memory_order_relaxed),
                             MetricType::GAUGE, &resp->body());
-  AppendMetricHeader("memory_fiberstack_vms_bytes", "virtual memory size used by all the fibers",
-                     MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("memory_fiberstack_vms_bytes", "", m.worker_fiber_stack_size,
+  AppendMetricWithoutLabels("memory_fiberstack_vms_bytes",
+                            "virtual memory size used by all the fibers", m.worker_fiber_stack_size,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
@@ -1118,6 +1123,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
 
   if (m.events.insertion_rejections | m.coordinator_stats.oom_error_cmd_cnt) {
+    AppendMetricHeader("oom_errors_total", "Rejected requests due to out of memory errors",
+                       MetricType::COUNTER, &resp->body());
     AppendMetricValue("oom_errors_total", m.events.insertion_rejections, {"type"}, {"insert"},
                       &resp->body());
     AppendMetricValue("oom_errors_total", m.coordinator_stats.oom_error_cmd_cnt, {"type"}, {"cmd"},
@@ -1141,16 +1148,29 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
 
   {
     string type_used_memory_metric;
+    bool added = false;
     AppendMetricHeader("type_used_memory", "Memory used per type", MetricType::GAUGE,
                        &type_used_memory_metric);
+
     for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
       size_t mem = total.memory_usage_by_type[type];
       if (mem > 0) {
         AppendMetricValue("type_used_memory", mem, {"type"}, {CompactObj::ObjTypeToString(type)},
                           &type_used_memory_metric);
+        added = true;
       }
     }
-    absl::StrAppend(&resp->body(), type_used_memory_metric);
+    if (added)
+      absl::StrAppend(&resp->body(), type_used_memory_metric);
+  }
+  if (!m.replication_metrics.empty()) {
+    ReplicationMemoryStats repl_mem;
+    dfly_cmd->GetReplicationMemoryStats(&repl_mem);
+    AppendMetricWithoutLabels(
+        "replication_streaming_bytes", "Stable sync replication memory  usage",
+        repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
+                              repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
   }
 
   // Stats metrics
@@ -1165,6 +1185,12 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("keyspace_mutations_total", "", m.events.mutations, MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("lua_interpreter_cnt", "", m.lua_stats.interpreter_cnt,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("used_memory_lua", "", m.lua_stats.used_bytes, MetricType::GAUGE,
+                            &resp->body());
+  AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
+                            &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
@@ -1177,19 +1203,15 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                               MetricType::COUNTER, &resp->body());
     AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
                               MetricType::COUNTER, &resp->body());
-
-    // Tiered metrics.
-    if (m.disk_stats.read_total > 0) {
-      AppendMetricWithoutLabels("tiered_reads_total", "", m.disk_stats.read_total,
-                                MetricType::COUNTER, &resp->body());
-      AppendMetricWithoutLabels("tiered_reads_latency_seconds", "",
-                                double(m.disk_stats.read_delay_usec) * 1e-6, MetricType::COUNTER,
-                                &resp->body());
-    }
   }
 
   AppendMetricWithoutLabels("script_error_total", "", m.facade_stats.reply_stats.script_error_count,
                             MetricType::COUNTER, &resp->body());
+
+  AppendMetricHeader("listener_accept_error_total", "Listener accept errors", MetricType::COUNTER,
+                     &resp->body());
+  AppendMetricValue("listener_accept_error_total", m.refused_conn_max_clients_reached_count,
+                    {"reason"}, {"limit_reached"}, &resp->body());
 
   // DB stats
   AppendMetricWithoutLabels("expired_keys_total", "", m.events.expired_keys, MetricType::COUNTER,
@@ -1197,22 +1219,8 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
   AppendMetricWithoutLabels("evicted_keys_total", "", m.events.evicted_keys, MetricType::COUNTER,
                             &resp->body());
 
-  string db_key_metrics;
-  string db_key_expire_metrics;
-
-  AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
-  AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
-                     &db_key_expire_metrics);
-
-  for (size_t i = 0; i < m.db_stats.size(); ++i) {
-    AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
-                      &db_key_metrics);
-    AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
-                      &db_key_expire_metrics);
-  }
-
   // Command stats
-  {
+  if (!m.cmd_stats_map.empty()) {
     string command_metrics;
 
     AppendMetricHeader("commands", "Metrics for all commands ran", MetricType::COUNTER,
@@ -1253,16 +1261,37 @@ void PrintPrometheusMetrics(const Metrics& m, StringResponse* resp) {
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
 
-  AppendMetricHeader("transaction_widths_total", "Transaction counts by their widths",
-                     MetricType::COUNTER, &resp->body());
+  {
+    bool added = false;
+    string str;
+    AppendMetricHeader("transaction_widths_total", "Transaction counts by their widths",
+                       MetricType::COUNTER, &str);
 
-  for (unsigned width = 0; width < shard_set->size(); ++width) {
-    uint64_t count = m.coordinator_stats.tx_width_freq_arr[width];
+    for (unsigned width = 0; width < shard_set->size(); ++width) {
+      uint64_t count = m.coordinator_stats.tx_width_freq_arr[width];
 
-    if (count > 0) {
-      AppendMetricValue("transaction_widths_total", count, {"width"}, {StrCat("w", width + 1)},
-                        &resp->body());
+      if (count > 0) {
+        AppendMetricValue("transaction_widths_total", count, {"width"}, {StrCat("w", width + 1)},
+                          &str);
+        added = true;
+      }
     }
+    if (added)
+      absl::StrAppend(&resp->body(), str);
+  }
+
+  string db_key_metrics;
+  string db_key_expire_metrics;
+
+  AppendMetricHeader("db_keys", "Total number of keys by DB", MetricType::GAUGE, &db_key_metrics);
+  AppendMetricHeader("db_keys_expiring", "Total number of expiring keys by DB", MetricType::GAUGE,
+                     &db_key_expire_metrics);
+
+  for (size_t i = 0; i < m.db_stats.size(); ++i) {
+    AppendMetricValue("db_keys", m.db_stats[i].key_count, {"db"}, {StrCat("db", i)},
+                      &db_key_metrics);
+    AppendMetricValue("db_keys_expiring", m.db_stats[i].expire_count, {"db"}, {StrCat("db", i)},
+                      &db_key_expire_metrics);
   }
 
   absl::StrAppend(&resp->body(), db_key_metrics);
@@ -1275,7 +1304,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
-    PrintPrometheusMetrics(this->GetMetrics(), &resp);
+    PrintPrometheusMetrics(this->GetMetrics(), this->dfly_cmd_.get(), &resp);
 
     return send->Invoke(std::move(resp));
   };
@@ -1879,8 +1908,8 @@ Metrics ServerFamily::GetMetrics() const {
       MergeDbSliceStats(shard->db_slice().GetStats(), &result);
       result.shard_stats += shard->stats();
 
-      if (shard->tiered_storage_v2()) {
-        result.tiered_stats_v2 += shard->tiered_storage_v2()->GetStats();
+      if (shard->tiered_storage()) {
+        result.tiered_stats += shard->tiered_storage()->GetStats();
       }
 
       if (shard->search_indices()) {
@@ -1894,6 +1923,9 @@ Metrics ServerFamily::GetMetrics() const {
     }
 
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
+    result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
+
+    result.lua_stats += InterpreterManager::tl_stats();
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };
@@ -1997,6 +2029,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("maxmemory", max_memory_limit);
     append("maxmemory_human", HumanReadableNumBytes(max_memory_limit));
 
+    append("used_memory_lua", m.lua_stats.used_bytes);
+
     // Blob - all these cases where the key/objects are represented by a single blob allocated on
     // heap. For example, strings or intsets. members of lists, sets, zsets etc
     // are not accounted for to avoid complex computations. In some cases, when number of members
@@ -2037,8 +2071,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     if (!m.replication_metrics.empty()) {
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
-      append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes_);
-      append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes_);
+      append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes);
+      append("replication_full_sync_buffer_bytes", repl_mem.full_sync_buf_bytes);
     }
 
     {
@@ -2089,26 +2123,29 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
     append("ram_hits", m.events.ram_hits);
     append("ram_misses", m.events.ram_misses);
+
+    append("lua_interpreter_cnt", m.lua_stats.interpreter_cnt);
+    append("lua_blocked", m.lua_stats.blocked_cnt);
   }
 
   if (should_enter("TIERED", true)) {
     append("tiered_entries", total.tiered_entries);
-    append("tiered_bytes", total.tiered_size);
-    append("tiered_bytes_human", HumanReadableNumBytes(total.tiered_size));
-    append("tiered_reads", m.disk_stats.read_total);
-    append("tiered_read_latency_usec", m.disk_stats.read_delay_usec);
-    append("tiered_writes", m.tiered_stats.tiered_writes);
-    append("tiered_reserved", m.tiered_stats.storage_reserved);
-    append("tiered_capacity", m.tiered_stats.storage_capacity);
-    append("tiered_aborted_writes", m.tiered_stats.aborted_write_cnt);
-    append("tiered_flush_skipped", m.tiered_stats.flush_skip_cnt);
-    append("tiered_throttled_writes", m.tiered_stats.throttled_write_cnt);
-  }
+    append("tiered_entries_bytes", total.tiered_used_bytes);
 
-  if (should_enter("TIERED_V2", true)) {
-    append("tiered_v2_total_stashes", m.tiered_stats_v2.total_stashes);
-    append("tiered_v2_total_fetches", m.tiered_stats_v2.total_fetches);
-    append("tiered_v2_allocated_bytes", m.tiered_stats_v2.allocated_bytes);
+    append("tiered_total_stashes", m.tiered_stats.total_stashes);
+    append("tiered_total_fetches", m.tiered_stats.total_fetches);
+    append("tiered_total_cancels", m.tiered_stats.total_cancels);
+    append("tiered_total_deletes", m.tiered_stats.total_deletes);
+
+    append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
+    append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
+
+    append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
+    append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
+
+    append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
+    append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
+    append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
   }
 
   if (should_enter("PERSISTENCE", true)) {
@@ -2637,6 +2674,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       cntx->replication_flow->last_acked_lsn = ack;
       return;
     } else if (cmd == "ACL-CHECK") {
+      // TODO(kostasrim): Remove this branch 20/6/2024
       cntx->SendOk();
       return;
     } else {

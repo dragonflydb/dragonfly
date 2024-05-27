@@ -1281,10 +1281,18 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
 
   PrimeValue& pv = it->second;
+  CHECK_GT(pv.Size(), 0u) << key << " " << pv.GetRobjWrapper()->encoding();
+
   IntervalVisitor iv{Action::POP, range_spec.params, &pv};
   std::visit(iv, range_spec.interval);
 
   it_res->post_updater.Run();
+
+  auto res = iv.PopResult();
+
+  // We don't store empty keys
+  CHECK(!res.empty()) << key << " failed to pop from type " << pv.GetRobjWrapper()->encoding()
+                      << " now size is " << pv.Size();
 
   auto zlen = pv.Size();
   if (zlen == 0) {
@@ -1298,7 +1306,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
     RecordJournal(op_args, command, ArgSlice{key}, 1);
   }
 
-  return iv.PopResult();
+  return res;
 }
 
 void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
@@ -1316,19 +1324,25 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
 
   Transaction* transaction = cntx->transaction;
 
+  std::string dinfo;
+  std::string callback_ran_key = "/NONE/";
   OpResult<ScoredArray> popped_array;
-  auto cb = [is_max, &popped_array](Transaction* t, EngineShard* shard, std::string_view key) {
+  auto cb = [is_max, &popped_array, &callback_ran_key](Transaction* t, EngineShard* shard,
+                                                       std::string_view key) {
+    callback_ran_key = key;
     popped_array = OpBZPop(t, shard, key, is_max);
   };
 
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
-      &cntx->paused);
+      transaction, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused,
+      &dinfo);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {
     DVLOG(1) << "BZPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
-    CHECK(popped_array->size() == 1);
+    CHECK(popped_array.ok()) << dinfo;
+    CHECK_EQ(popped_array->size(), 1u)
+        << popped_key << " ran " << callback_ran_key << " info " << dinfo;
     rb->StartArray(3);
     rb->SendBulkString(*popped_key);
     rb->SendBulkString(popped_array->front().first);
@@ -1700,6 +1714,48 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
   }
 
   return res;
+}
+
+OpResult<ScoredArray> OpRandMember(int count, const ZSetFamily::RangeParams& params,
+                                   const OpArgs& op_args, string_view key) {
+  auto it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
+  if (!it)
+    return it.status();
+
+  // Action::RANGE is a read-only operation, but requires const_cast
+  PrimeValue& pv = const_cast<PrimeValue&>(it.value()->second);
+
+  const std::size_t size = pv.Size();
+  const std::size_t picks_count =
+      count >= 0 ? std::min(static_cast<std::size_t>(count), size) : std::abs(count);
+
+  ScoredArray result{picks_count};
+  std::unique_ptr<PicksGenerator> generator =
+      count >= 0 ? static_cast<std::unique_ptr<PicksGenerator>>(
+                       std::make_unique<UniquePicksGenerator>(picks_count, size))
+                 : std::make_unique<NonUniquePicksGenerator>(size);
+
+  if (picks_count * static_cast<std::uint64_t>(std::log2(size)) < size) {
+    for (std::size_t i = 0; i < picks_count; i++) {
+      const std::size_t picked_index = generator->Generate();
+
+      IntervalVisitor iv{Action::RANGE, params, &pv};
+      iv(ZSetFamily::IndexInterval{picked_index, picked_index});
+
+      result[i] = iv.PopResult().front();
+    }
+  } else {
+    IntervalVisitor iv{Action::RANGE, params, &pv};
+    iv(ZSetFamily::IndexInterval{0, -1});
+
+    ScoredArray all_elements = iv.PopResult();
+
+    for (std::size_t i = 0; i < picks_count; i++) {
+      result[i] = all_elements[generator->Generate()];
+    }
+  }
+
+  return result;
 }
 
 void ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_sp,
@@ -2323,16 +2379,14 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 3)
     return cntx->SendError(WrongNumArgsError("ZRANDMEMBER"));
 
-  ZRangeSpec range_spec;
-  range_spec.interval = IndexInterval(0, -1);
-
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
   bool is_count = parser.HasNext();
   int count = is_count ? parser.Next<int>() : 1;
 
-  range_spec.params.with_scores = static_cast<bool>(parser.Check("WITHSCORES").IgnoreCase());
+  ZSetFamily::RangeParams params;
+  params.with_scores = static_cast<bool>(parser.Check("WITHSCORES").IgnoreCase());
 
   if (parser.HasNext())
     return cntx->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
@@ -2340,26 +2394,17 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  bool sign = count < 0;
-  range_spec.params.limit = std::abs(count);
-
   const auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRange(range_spec, t->GetOpArgs(shard), key);
+    return OpRandMember(count, params, t->GetOpArgs(shard), key);
   };
 
   OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    if (sign && !result->empty()) {
-      for (auto i = result->size(); i < range_spec.params.limit; ++i) {
-        // we can return duplicate elements, so first is OK
-        result->push_back(result->front());
-      }
-    }
-    rb->SendScoredArray(result.value(), range_spec.params.with_scores);
+    rb->SendScoredArray(result.value(), params.with_scores);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
-      rb->SendScoredArray(ScoredArray(), range_spec.params.with_scores);
+      rb->SendScoredArray(ScoredArray(), params.with_scores);
     } else {
       rb->SendNull();
     }

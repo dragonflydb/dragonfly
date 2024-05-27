@@ -159,7 +159,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_local_factory):
     await client.execute_command("MULTI")
     assert res == b"OK"
 
-    with pytest.raises(redis.exceptions.ResponseError):
+    with pytest.raises(redis.exceptions.NoPermissionError):
         await client.execute_command(f"SET x{x} {x}")
     await client.close()
 
@@ -186,7 +186,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_local_factory):
     # return multiple errors for each command failed. Since the nature of the error
     # is the same, that a rule has changed we should squash those error messages into
     # one.
-    assert res[0].args[0] == "NOPERM: kk ACL rules changed between the MULTI and EXEC"
+    assert res[0].args[0] == "kk ACL rules changed between the MULTI and EXEC"
 
     await admin_client.close()
     await client.close()
@@ -213,7 +213,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_local_factory):
     # NOPERM while executing multi
     await client.execute_command("MULTI")
 
-    with pytest.raises(redis.exceptions.ResponseError):
+    with pytest.raises(redis.exceptions.NoPermissionError):
         await client.execute_command(f"SET x{x} {x}")
 
     await admin_client.close()
@@ -323,11 +323,18 @@ async def test_bad_acl_file(df_local_factory, tmp_dir):
 @pytest.mark.asyncio
 @dfly_args({"port": 1111})
 async def test_good_acl_file(df_local_factory, tmp_dir):
-    acl = create_temp_file("", tmp_dir)
+    acl = create_temp_file("USER MrFoo ON >mypass", tmp_dir)
     df = df_local_factory.create(aclfile=acl)
 
     df.start()
-    client = aioredis.Redis(port=df.port)
+    client = df.client()
+
+    await client.execute_command("ACL LOAD")
+    result = await client.execute_command("ACL LIST")
+    assert 2 == len(result)
+    assert "user MrFoo on ea71c25a7a60224 +@NONE" in result
+    assert "user default on nopass +@ALL +ALL ~*" in result
+    await client.execute_command("ACL DELUSER MrFoo")
 
     await client.execute_command("ACL SETUSER roy ON >mypass +@STRING +HSET")
     await client.execute_command("ACL SETUSER shahar >mypass +@SET")

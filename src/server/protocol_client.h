@@ -8,9 +8,9 @@
 #include <queue>
 #include <variant>
 
-#include "base/io_buf.h"
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
+#include "io/io_buf.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/version.h"

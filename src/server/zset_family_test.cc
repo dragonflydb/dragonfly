@@ -20,6 +20,84 @@ class ZSetFamilyTest : public BaseFamilyTest {
  protected:
 };
 
+using ScoredElement = std::pair<std::string, std::string>;
+
+template <typename Array> auto ParseToScoredArray(Array arr) {
+  std::vector<ScoredElement> scored_elements;
+  for (std::size_t i = 1; i < arr.size(); i += 2) {
+    scored_elements.emplace_back(arr[i - 1].GetString(), arr[i].GetString());
+  }
+  return scored_elements;
+}
+
+MATCHER_P(ConsistsOfMatcher, elements, "") {
+  auto vec = arg.GetVec();
+  for (const auto& x : vec) {
+    if (elements.find(x.GetString()) == elements.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+MATCHER_P(ConsistsOfScoredElementsMatcher, elements, "") {
+  auto vec = arg.GetVec();
+  if (vec.size() % 2) {
+    return false;
+  }
+
+  auto scored_vec = ParseToScoredArray(vec);
+  for (const auto& scored_element : scored_vec) {
+    if (elements.find(scored_element) == elements.end()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+MATCHER_P(IsScoredSubsetOfMatcher, elements_list, "") {
+  auto vec = arg.GetVec();
+  if (vec.size() % 2) {
+    return false;
+  }
+
+  auto scored_vec = ParseToScoredArray(vec);
+  std::vector<ScoredElement> elements{elements_list};
+
+  std::sort(scored_vec.begin(), scored_vec.end());
+  std::sort(elements.begin(), elements.end());
+
+  return std::includes(elements.begin(), elements.end(), scored_vec.begin(), scored_vec.end());
+}
+
+MATCHER_P(UnorderedScoredElementsAreMatcher, elements_list, "") {
+  auto vec = arg.GetVec();
+  if (vec.size() % 2) {
+    return false;
+  }
+
+  auto scored_vec = ParseToScoredArray(vec);
+  return std::is_permutation(scored_vec.begin(), scored_vec.end(), elements_list.begin(),
+                             elements_list.end());
+}
+
+auto ConsistsOf(std::initializer_list<std::string> elements) {
+  return ConsistsOfMatcher(std::unordered_set<std::string>{elements});
+}
+
+auto ConsistsOfScoredElements(std::initializer_list<std::pair<std::string, std::string>> elements) {
+  return ConsistsOfScoredElementsMatcher(std::set<std::pair<std::string, std::string>>{elements});
+}
+
+auto IsScoredSubsetOf(std::initializer_list<std::pair<std::string, std::string>> elements) {
+  return IsScoredSubsetOfMatcher(elements);
+}
+
+auto UnorderedScoredElementsAre(
+    std::initializer_list<std::pair<std::string, std::string>> elements) {
+  return UnorderedScoredElementsAreMatcher(elements);
+}
+
 TEST_F(ZSetFamilyTest, Add) {
   auto resp = Run({"zadd", "x", "1.1", "a"});
   EXPECT_THAT(resp, IntArg(1));
@@ -77,53 +155,95 @@ TEST_F(ZSetFamilyTest, ZRem) {
 }
 
 TEST_F(ZSetFamilyTest, ZRandMember) {
-  auto resp = Run({
-      "zadd",
-      "x",
-      "1",
-      "a",
-      "2",
-      "b",
-      "3",
-      "c",
-  });
+  auto resp = Run({"ZAdd", "x", "1", "a", "2", "b", "3", "c"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // Test if count > 0
   resp = Run({"ZRandMember", "x"});
   ASSERT_THAT(resp, ArgType(RespExpr::STRING));
-  EXPECT_THAT(resp, "a");
+  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+
+  resp = Run({"ZRandMember", "x", "1"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
 
   resp = Run({"ZRandMember", "x", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b"));
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec(), IsSubsetOf({"a", "b", "c"}));
 
-  resp = Run({"ZRandMember", "x", "0"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_EQ(resp.GetVec().size(), 0);
-
-  resp = Run({"ZRandMember", "k"});
-  ASSERT_THAT(resp, ArgType(RespExpr::NIL));
-
-  resp = Run({"ZRandMember", "k", "2"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_EQ(resp.GetVec().size(), 0);
-
-  resp = Run({"ZRandMember", "x", "-5"});
-  ASSERT_THAT(resp, ArrLen(5));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b", "c", "a", "a"));
-
-  resp = Run({"ZRandMember", "x", "5"});
+  resp = Run({"ZRandMember", "x", "3"});
   ASSERT_THAT(resp, ArrLen(3));
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b", "c"));
 
-  resp = Run({"ZRandMember", "x", "-5", "WITHSCORES"});
-  ASSERT_THAT(resp, ArrLen(10));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "3", "a", "1", "a", "1"));
+  // Test if count < 0
+  resp = Run({"ZRandMember", "x", "-1"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp, AnyOf("a", "b", "c"));
+
+  resp = Run({"ZRandMember", "x", "-2"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp, ConsistsOf({"a", "b", "c"}));
+
+  resp = Run({"ZRandMember", "x", "-3"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp, ConsistsOf({"a", "b", "c"}));
+
+  // Test if count < 0, but the absolute value is larger than the size of the sorted set
+  resp = Run({"ZRandMember", "x", "-15"});
+  ASSERT_THAT(resp, ArrLen(15));
+  EXPECT_THAT(resp, ConsistsOf({"a", "b", "c"}));
+
+  // Test if count is 0
+  ASSERT_THAT(Run({"ZRandMember", "x", "0"}), ArrLen(0));
+
+  // Test if count is larger than the size of the sorted set
+  resp = Run({"ZRandMember", "x", "15"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "b", "c"));
+
+  // Test if sorted set is empty
+  EXPECT_THAT(Run({"ZAdd", "empty::zset", "1", "one"}), IntArg(1));
+  EXPECT_THAT(Run({"ZRem", "empty::zset", "one"}), IntArg(1));
+  ASSERT_THAT(Run({"ZRandMember", "empty::zset", "0"}), ArrLen(0));
+  ASSERT_THAT(Run({"ZRandMember", "empty::zset", "3"}), ArrLen(0));
+  ASSERT_THAT(Run({"ZRandMember", "empty::zset", "-4"}), ArrLen(0));
+
+  // Test if key does not exist
+  ASSERT_THAT(Run({"ZRandMember", "y"}), ArgType(RespExpr::NIL));
+  ASSERT_THAT(Run({"ZRandMember", "y", "0"}), ArrLen(0));
+
+  // Test WITHSCORES
+  resp = Run({"ZRandMember", "x", "1", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp, IsScoredSubsetOf({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
+
+  resp = Run({"ZRandMember", "x", "2", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp, IsScoredSubsetOf({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
 
   resp = Run({"ZRandMember", "x", "3", "WITHSCORES"});
   ASSERT_THAT(resp, ArrLen(6));
-  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("a", "1", "b", "2", "c", "3"));
+  EXPECT_THAT(resp, UnorderedScoredElementsAre({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
 
-  resp = Run({"ZRandMember", "x", "3", "WITHSCORES", "test"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+  resp = Run({"ZRandMember", "x", "15", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(6));
+  EXPECT_THAT(resp, UnorderedScoredElementsAre({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
+
+  resp = Run({"ZRandMember", "x", "-1", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp, ConsistsOfScoredElements({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
+
+  resp = Run({"ZRandMember", "x", "-2", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp, ConsistsOfScoredElements({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
+
+  resp = Run({"ZRandMember", "x", "-3", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(6));
+  EXPECT_THAT(resp, ConsistsOfScoredElements({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
+
+  resp = Run({"ZRandMember", "x", "-15", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(30));
+  EXPECT_THAT(resp, ConsistsOfScoredElements({{"a", "1"}, {"b", "2"}, {"c", "3"}}));
 }
 
 TEST_F(ZSetFamilyTest, ZMScore) {

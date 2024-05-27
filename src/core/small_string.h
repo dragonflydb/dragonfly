@@ -10,16 +10,18 @@
 
 namespace dfly {
 
-// blob strings of upto ~64KB. Small sizes are probably predominant
+// blob strings of upto ~256B. Small sizes are probably predominant
 // for in-memory workloads, especially for keys.
 // Please note that this class does not have automatic constructors and destructors, therefore
 // it requires explicit management.
 class SmallString {
   static constexpr unsigned kPrefLen = 10;
+  static constexpr unsigned kMaxSize = (1 << 8) - 1;
 
  public:
   static void InitThreadLocal(void* heap);
   static size_t UsedThreadLocal();
+  static bool CanAllocate(size_t size);
 
   void Reset() {
     size_ = 0;

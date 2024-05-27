@@ -10,69 +10,144 @@ jobs:
     strategy:
       matrix:
         config:
-          - apiVersion: "dragonflydb.io/v1alpha1"
-            kind: "Dragonfly"
-            metadata:
-              labels:
-                app.kubernetes.io/name: "dragonfly"
-                app.kubernetes.io/instance: "dragonfly-sample"
-                app.kubernetes.io/part-of: "dragonfly-operator"
-                app.kubernetes.io/managed-by: "kustomize"
-                app.kubernetes.io/created-by: "dragonfly-operator"
-              name: "dragonfly-sample"
-            spec:
-              image: "ghcr.io/dragonflydb/dragonfly-weekly:latest"
-              args: ["--cache_mode"]
-              replicas: 2
-              resources:
-                requests:
-                  cpu: "4"
-                  memory: "2000Mi"
-                limits:
-                  cpu: "4"
-                  memory: "2000Mi"
+          - operator:
+              apiVersion: "dragonflydb.io/v1alpha1"
+              kind: "Dragonfly"
+              metadata:
+                labels:
+                  app.kubernetes.io/name: "dragonfly"
+                  app.kubernetes.io/instance: "dragonfly-sample"
+                  app.kubernetes.io/part-of: "dragonfly-operator"
+                  app.kubernetes.io/managed-by: "kustomize"
+                  app.kubernetes.io/created-by: "dragonfly-operator"
+                name: "dragonfly-sample"
+              spec:
+                image: "ghcr.io/dragonflydb/dragonfly-weekly:latest"
+                args: ["--cache_mode"]
+                replicas: 2
+                resources:
+                  requests:
+                    cpu: "2"
+                    memory: "2000Mi"
+                  limits:
+                    cpu: "2"
+                    memory: "2000Mi"
 
-    runs-on: [self-hosted, linux, x86, benchmark]
+    runs-on: ubuntu-latest
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
 
+    permissions:
+      id-token: write
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Setup namespace name
+        id: setup
+        run: echo "namespace=benchmark-$(date +"%Y-%m-%d-%s")" >> $GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Set up Python
-        uses: actions/setup-python@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          python-version: 3.9
-      - name: KinD Cluster
-        uses: container-tools/kind-action@v2.0.3
-        with:
-          kubectl_version: v1.28.0
-          registry: false
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Update kube config
+        run: aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          EKS_CLUSTER_NAME: dev
+
+      - name: Scale up
+        run: |
+          set -x
+          aws autoscaling set-desired-capacity --auto-scaling-group-name "$AUTOSCALING_GROUP" --desired-capacity "$DESIRED_CAPACITY"
+        env:
+          AUTOSCALING_GROUP: ${{ vars.DEV_EKS_AS_GROUP }}
+          DESIRED_CAPACITY: 1
+
       - name: Install the CRD and Operator
         run: |
           # Install the CRD and Operator
           kubectl apply -f https://raw.githubusercontent.com/dragonflydb/dragonfly-operator/main/manifests/dragonfly-operator.yaml
+
       - name: Apply Configuration
         run: |
-          echo '${{ toJson(matrix.config) }}' | kubectl apply -f -
+          set -x
+          kubectl create namespace ${{ steps.setup.outputs.namespace }} || true
+          echo '${{ toJson(matrix.config.operator) }}' | kubectl apply -n ${{ steps.setup.outputs.namespace }} -f -
 
       - name: Wait For Service
         run: |
-          kubectl wait dragonfly/dragonfly-sample --for=jsonpath='{.status.phase}'=ready --timeout=120s
-          kubectl wait pods --selector app=dragonfly-sample --for condition=Ready --timeout=120s
-          kubectl describe pod dragonfly-sample-0
+          set -x
+          kubectl wait -n ${{ steps.setup.outputs.namespace }} dragonfly/dragonfly-sample --for=jsonpath='{.status.phase}'=ready --timeout=180s
+          kubectl wait -n ${{ steps.setup.outputs.namespace }} pods --selector app=dragonfly-sample --for condition=Ready --timeout=120s
+          kubectl describe -n ${{ steps.setup.outputs.namespace }} pod dragonfly-sample-0
 
       - name: Run Benchmark
+        shell: bash
         run: |
-          nohup kubectl port-forward service/dragonfly-sample 6379:6379 &
-          sleep 5
-          redis-cli ping
-          # run small memtier benchmark
-          memtier_benchmark  --pipeline=30 --key-maximum=10000 -c 10 -t 8 --requests=500000 --expiry-range=10-100 --reconnect-interval=10000 --distinct-client-seed --hide-histogram
+          kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
+
+          while true; do
+            if kubectl wait --for=condition=complete --timeout=0 -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null; then
+              job_result=0
+              break
+            fi
+
+            if kubectl wait --for=condition=failed --timeout=0 -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null; then
+              job_result=1
+              break
+            fi
+
+            sleep 3
+          done
+
+          kubectl logs -n ${{ steps.setup.outputs.namespace }} -f jobs/memtier-benchmark
+          if [[ $job_result -eq 1 ]]; then
+              exit 1
+          fi
 
       - name: Server checks
         run: |
-          pip3 install -r tools/requirements.txt
-          python tools/benchmark_checks.py
+          nohup kubectl port-forward -n ${{ steps.setup.outputs.namespace }} service/dragonfly-sample 6379:6379 &
+
+          pip install -r tools/requirements.txt
+          python3 tools/benchmark/post_run_checks.py
+
+      - name: Get Dragonfly logs
+        uses: nick-fields/retry@v3
+        if: always()
+        with:
+          timeout_minutes: 1
+          max_attempts: 3
+          command: |
+            kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-0
+
+      - name: Get Dragonfly replica logs
+        uses: nick-fields/retry@v3
+        if: always()
+        with:
+          timeout_minutes: 1
+          max_attempts: 3
+          command: |
+            kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-1
+
+      - name: Scale down to zero
+        if: always()
+        run: |
+          set -x
+          aws autoscaling set-desired-capacity --auto-scaling-group-name "$AUTOSCALING_GROUP" --desired-capacity 0
+        env:
+          AUTOSCALING_GROUP: ${{ vars.DEV_EKS_AS_GROUP }}
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set -x
+          kubectl delete namespace ${{ steps.setup.outputs.namespace }}
+          kubectl delete namespace dragonfly-operator-system

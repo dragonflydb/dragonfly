@@ -4,8 +4,10 @@
 #pragma once
 
 #include <memory>
+#include <utility>
 
 #include "server/tiering/common.h"
+#include "server/tx_base.h"
 #include "util/fibers/future.h"
 #ifdef __linux__
 
@@ -23,44 +25,56 @@ class SmallBins;
 };
 
 // Manages offloaded values
-class TieredStorageV2 {
+class TieredStorage {
   class ShardOpManager;
 
+ public:
   const static size_t kMinValueSize = 64;
 
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
- public:
-  explicit TieredStorageV2(DbSlice* db_slice);
-  ~TieredStorageV2();  // drop forward declared unique_ptrs
+  explicit TieredStorage(DbSlice* db_slice, size_t max_size);
+  ~TieredStorage();  // drop forward declared unique_ptrs
 
-  TieredStorageV2(TieredStorageV2&& other) = delete;
-  TieredStorageV2(const TieredStorageV2& other) = delete;
+  TieredStorage(TieredStorage&& other) = delete;
+  TieredStorage(const TieredStorage& other) = delete;
 
   std::error_code Open(std::string_view path);
   void Close();
 
   // Read offloaded value. It must be of external type
-  util::fb2::Future<std::string> Read(std::string_view key, const PrimeValue& value);
+  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
+
+  // Read offloaded value. It must be of external type
+  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
+            std::function<void(const std::string&)> readf);
 
   // Apply modification to offloaded value, return generic result from callback
   template <typename T>
-  util::fb2::Future<T> Modify(std::string_view key, const PrimeValue& value,
+  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
                               std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
-  void Stash(std::string_view key, PrimeValue* value);
+  void Stash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
-  // Delete value. Must either have pending IO or be offloaded (of external type)
-  void Delete(std::string_view key, PrimeValue* value);
+  // Delete value, must be offloaded (external type)
+  void Delete(PrimeValue* value);
+
+  // Cancel pending stash for value, must have IO_PENDING flag set
+  void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
   // Returns if a value should be stashed
-  bool ShouldStash(const PrimeValue& pv);
+  bool ShouldStash(const PrimeValue& pv) const;
 
-  TieredStatsV2 GetStats() const;
+  TieredStats GetStats() const;
+
+  // Run offloading loop until i/o device is loaded or all entries were traversed
+  void RunOffloading(DbIndex dbid);
 
  private:
+  PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
+
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
 };
@@ -75,41 +89,56 @@ class DbSlice;
 
 // This is a stub implementation for non-linux platforms.
 namespace dfly {
-
-// Manages offloaded values
-class TieredStorageV2 {
+class TieredStorage {
   class ShardOpManager;
 
-  const static size_t kMinValueSize = tiering::kPageSize / 2;
-
  public:
-  explicit TieredStorageV2(DbSlice* db_slice) {
+  const static size_t kMinValueSize = 64;
+
+  // Min sizes of values taking up full page on their own
+  const static size_t kMinOccupancySize = tiering::kPageSize / 2;
+
+  explicit TieredStorage(DbSlice* db_slice, size_t max_size) {
   }
 
-  TieredStorageV2(TieredStorageV2&& other) = delete;
-  TieredStorageV2(const TieredStorageV2& other) = delete;
+  TieredStorage(TieredStorage&& other) = delete;
+  TieredStorage(const TieredStorage& other) = delete;
 
   std::error_code Open(std::string_view path) {
+    return {};
   }
 
   void Close() {
   }
 
-  // Read offloaded value. It must be of external type
-  util::fb2::Future<std::string> Read(std::string_view key, const PrimeValue& value) {
+  util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value) {
     return {};
   }
 
-  // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
-  void Stash(std::string_view key, PrimeValue* value) {
+  template <typename T>
+  util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                              std::function<T(std::string*)> modf) {
+    return {};
   }
 
-  // Delete value. Must either have pending IO or be offloaded (of external type)
-  void Delete(std::string_view key, PrimeValue* value) {
+  void Stash(DbIndex dbid, std::string_view key, PrimeValue* value) {
   }
 
-  TieredStatsV2 GetStats() {
-    return TieredStatsV2{};
+  void Delete(PrimeValue* value) {
+  }
+
+  void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
+  }
+
+  bool ShouldStash(const PrimeValue& pv) {
+    return false;
+  }
+
+  TieredStats GetStats() const {
+    return {};
+  }
+
+  void RunOffloading(DbIndex dbid) {
   }
 };
 

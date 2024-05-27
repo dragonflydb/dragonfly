@@ -479,4 +479,58 @@ TYPED_TEST(JsonPathTest, Mutate) {
   }
 }
 
+TYPED_TEST(JsonPathTest, SubRange) {
+  TypeParam json = ValidJson<TypeParam>(R"({"arr": [1, 2, 3, 4, 5]})");
+  ASSERT_EQ(0, this->Parse("$.arr[1:2]"));
+  Path path = this->driver_.TakePath();
+  ASSERT_EQ(2, path.size());
+  EXPECT_THAT(path[1], SegType(SegmentType::INDEX));
+
+  vector<int> arr;
+  auto cb = [&arr](optional<string_view> key, const TypeParam& val) {
+    ASSERT_FALSE(key);
+    arr.push_back(to_int(val));
+  };
+
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre(2));
+  arr.clear();
+
+  ASSERT_EQ(0, this->Parse("$.arr[0:2]"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre(1, 2));
+  arr.clear();
+
+  ASSERT_EQ(0, this->Parse("$.arr[2:-1]"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre(3, 4));
+  arr.clear();
+
+  ASSERT_EQ(0, this->Parse("$.arr[-2:-1]"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre(4));
+  arr.clear();
+
+  ASSERT_EQ(0, this->Parse("$.arr[-2:-2]"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre());
+  arr.clear();
+
+  ASSERT_EQ(0, this->Parse("$.arr[:2]"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre(1, 2));
+  arr.clear();
+
+  ASSERT_EQ(0, this->Parse("$.arr[2:]"));
+  path = this->driver_.TakePath();
+  EvaluatePath(path, json, cb);
+  ASSERT_THAT(arr, ElementsAre(3, 4, 5));
+  arr.clear();
+}
+
 }  // namespace dfly::json

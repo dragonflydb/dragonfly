@@ -6,6 +6,7 @@
 
 #include <mimalloc.h>
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <variant>
@@ -21,9 +22,13 @@
 #include "server/tiering/common.h"
 #include "server/tiering/op_manager.h"
 #include "server/tiering/small_bins.h"
+#include "server/tx_base.h"
 
-ABSL_FLAG(bool, tiered_storage_v2_cache_fetched, true,
+ABSL_FLAG(bool, tiered_storage_cache_fetched, true,
           "WIP: Load results of offloaded reads to memory");
+
+ABSL_FLAG(size_t, tiered_storage_write_depth, 50,
+          "Maximum number of concurrent stash requests issued by background offload");
 
 namespace dfly {
 
@@ -32,19 +37,47 @@ using namespace util;
 
 using namespace tiering::literals;
 
-class TieredStorageV2::ShardOpManager : public tiering::OpManager {
-  friend class TieredStorageV2;
+using KeyRef = tiering::OpManager::KeyRef;
+
+namespace {
+
+bool OccupiesWholePages(size_t size) {
+  return size >= TieredStorage::kMinOccupancySize;
+}
+
+}  // anonymous namespace
+
+class TieredStorage::ShardOpManager : public tiering::OpManager {
+  friend class TieredStorage;
 
  public:
-  ShardOpManager(TieredStorageV2* ts, DbSlice* db_slice) : ts_{ts}, db_slice_{db_slice} {
-    cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_v2_cache_fetched);
+  ShardOpManager(TieredStorage* ts, DbSlice* db_slice, size_t max_size)
+      : tiering::OpManager{max_size}, ts_{ts}, db_slice_{db_slice} {
+    cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_cache_fetched);
   }
 
-  // Find entry by key in db_slice and store external segment in place of original value
-  void SetExternal(string_view key, tiering::DiskSegment segment) {
+  // Called before overriding value with segment
+  void RecordAdded(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
+    stats->AddTypeMemoryUsage(pv.ObjType(), -pv.MallocUsed());
+    stats->tiered_entries++;
+    stats->tiered_used_bytes += segment.length;
+  }
+
+  // Called after setting new value in place of previous segment
+  void RecordDeleted(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
+    stats->AddTypeMemoryUsage(pv.ObjType(), pv.MallocUsed());
+    stats->tiered_entries--;
+    stats->tiered_used_bytes -= segment.length;
+  }
+
+  // Find entry by key in db_slice and store external segment in place of original value.
+  // Update memory stats
+  void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv) {
+      RecordAdded(db_slice_->MutableStats(0), *pv, segment);
+
       pv->SetIoPending(false);
-      pv->SetExternal(segment.offset, segment.length);  // TODO: Handle memory stats
+      pv->SetExternal(segment.offset, segment.length);
 
       stats_.total_stashes++;
     }
@@ -52,30 +85,40 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
 
   // Find bin by id and call SetExternal for all contained entries
   void SetExternal(tiering::SmallBins::BinId id, tiering::DiskSegment segment) {
-    for (const auto& [sub_key, sub_segment] : ts_->bins_->ReportStashed(id, segment))
-      SetExternal(string_view{sub_key}, sub_segment);
+    for (const auto& [sub_dbid, sub_key, sub_segment] : ts_->bins_->ReportStashed(id, segment))
+      SetExternal({sub_dbid, sub_key}, sub_segment);
   }
 
   // Clear IO pending flag for entry
-  void ClearIoPending(string_view key) {
-    if (auto pv = Find(key); pv)
+  void ClearIoPending(OpManager::KeyRef key) {
+    if (auto pv = Find(key); pv) {
       pv->SetIoPending(false);
+      stats_.total_cancels++;
+    }
   }
 
   // Clear IO pending flag for all contained entries of bin
   void ClearIoPending(tiering::SmallBins::BinId id) {
-    for (const string& key : ts_->bins_->ReportStashAborted(id))
+    for (const auto& key : ts_->bins_->ReportStashAborted(id))
       ClearIoPending(key);
+  }
+
+  // Set value to be an in-memory type again, either empty or with a value. Update memory stats
+  void SetInMemory(PrimeValue* pv, string_view value, tiering::DiskSegment segment) {
+    pv->Reset();
+    if (!value.empty())
+      pv->SetString(value);
+
+    RecordDeleted(db_slice_->MutableStats(0), *pv, segment);
+
+    (value.empty() ? stats_.total_deletes : stats_.total_fetches)++;
   }
 
   // Find entry by key and store it's up-to-date value in place of external segment.
   // Returns false if the value is outdated, true otherwise
-  bool SetInMemory(string_view key, string_view value, tiering::DiskSegment segment) {
+  bool SetInMemory(OpManager::KeyRef key, string_view value, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-      pv->Reset();  // TODO: account for memory
-      pv->SetString(value);
-
-      stats_.total_fetches++;
+      SetInMemory(pv, value, segment);
       return true;
     }
     return false;
@@ -92,16 +135,16 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
 
   void ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,
                      bool modified) override {
-    DCHECK(holds_alternative<string_view>(id));  // we never issue reads for bins
+    DCHECK(holds_alternative<OpManager::KeyRef>(id));  // we never issue reads for bins
 
     // Modified values are always cached and deleted from disk
     if (!modified && !cache_fetched_)
       return;
 
-    SetInMemory(get<string_view>(id), value, segment);
+    SetInMemory(get<OpManager::KeyRef>(id), value, segment);
 
     // Delete value
-    if (segment.length >= TieredStorageV2::kMinOccupancySize) {
+    if (OccupiesWholePages(segment.length)) {
       Delete(segment);
     } else {
       if (auto bin_segment = ts_->bins_->Delete(segment); bin_segment)
@@ -109,70 +152,83 @@ class TieredStorageV2::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  TieredStatsV2 GetStats() const {
-    auto stats = stats_;
-    stats.allocated_bytes = OpManager::storage_.GetStats().allocated_bytes;
-    return stats;
-  }
-
  private:
-  PrimeValue* Find(string_view key) {
+  friend class TieredStorage;
+
+  PrimeValue* Find(OpManager::KeyRef key) {
     // TODO: Get DbContext for transaction for correct dbid and time
-    auto it = db_slice_->FindMutable(DbContext{}, key);
-    return IsValid(it.it) ? &it.it->second : nullptr;
+    // Bypass all update and stat mechanisms
+    auto it = db_slice_->GetDBTable(key.first)->prime.Find(key.second);
+    return IsValid(it) ? &it->second : nullptr;
   }
 
   bool cache_fetched_ = false;
 
-  TieredStatsV2 stats_;
+  struct {
+    size_t total_stashes = 0, total_fetches = 0, total_cancels = 0, total_deletes = 0;
+  } stats_;
 
-  TieredStorageV2* ts_;
+  TieredStorage* ts_;
   DbSlice* db_slice_;
 };
 
-TieredStorageV2::TieredStorageV2(DbSlice* db_slice)
-    : op_manager_{make_unique<ShardOpManager>(this, db_slice)},
+TieredStorage::TieredStorage(DbSlice* db_slice, size_t max_size)
+    : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
 }
 
-TieredStorageV2::~TieredStorageV2() {
+TieredStorage::~TieredStorage() {
 }
 
-error_code TieredStorageV2::Open(string_view path) {
-  return op_manager_->Open(path);
+error_code TieredStorage::Open(string_view path) {
+  return op_manager_->Open(absl::StrCat(path, ProactorBase::me()->GetPoolIndex()));
 }
 
-void TieredStorageV2::Close() {
+void TieredStorage::Close() {
   op_manager_->Close();
 }
 
-util::fb2::Future<string> TieredStorageV2::Read(string_view key, const PrimeValue& value) {
+util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,
+                                              const PrimeValue& value) {
   DCHECK(value.IsExternal());
   util::fb2::Future<string> future;
-  op_manager_->Enqueue(key, value.GetExternalSlice(), [future](string* value) mutable {
+  auto cb = [future](string* value) mutable {
     future.Resolve(*value);
     return false;
-  });
+  };
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
   return future;
 }
 
+void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
+                         std::function<void(const std::string&)> readf) {
+  DCHECK(value.IsExternal());
+  auto cb = [readf = std::move(readf)](string* value) {
+    readf(*value);
+    return false;
+  };
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
+}
+
 template <typename T>
-util::fb2::Future<T> TieredStorageV2::Modify(std::string_view key, const PrimeValue& value,
-                                             std::function<T(std::string*)> modf) {
+util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
+                                           const PrimeValue& value,
+                                           std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
   util::fb2::Future<T> future;
   auto cb = [future, modf = std::move(modf)](std::string* value) mutable {
     future.Resolve(modf(value));
     return true;
   };
-  op_manager_->Enqueue(key, value.GetExternalSlice(), std::move(cb));
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
   return future;
 }
 
-template util::fb2::Future<size_t> TieredStorageV2::Modify(
-    std::string_view key, const PrimeValue& value, std::function<size_t(std::string*)> modf);
+template util::fb2::Future<size_t> TieredStorage::Modify(DbIndex dbid, std::string_view key,
+                                                         const PrimeValue& value,
+                                                         std::function<size_t(std::string*)> modf);
 
-void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
+void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
   DCHECK(!value->IsExternal() && !value->HasIoPending());
 
   string buf;
@@ -181,10 +237,10 @@ void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
 
   tiering::OpManager::EntryId id;
   error_code ec;
-  if (value->Size() >= kMinOccupancySize) {
-    id = key;
-    ec = op_manager_->Stash(key, value_sv);
-  } else if (auto bin = bins_->Stash(key, value_sv); bin) {
+  if (OccupiesWholePages(value->Size())) {  // large enough for own page
+    id = KeyRef(dbid, key);
+    ec = op_manager_->Stash(id, value_sv);
+  } else if (auto bin = bins_->Stash(dbid, key, value_sv); bin) {
     id = bin->first;
     ec = op_manager_->Stash(bin->first, bin->second);
   }
@@ -194,32 +250,85 @@ void TieredStorageV2::Stash(string_view key, PrimeValue* value) {
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
   }
 }
-void TieredStorageV2::Delete(string_view key, PrimeValue* value) {
-  if (value->IsExternal()) {
-    tiering::DiskSegment segment = value->GetExternalSlice();
-    if (segment.length >= kMinOccupancySize) {
-      op_manager_->Delete(segment);
-    } else if (auto bin = bins_->Delete(segment); bin) {
-      op_manager_->Delete(*bin);
-    }
-    value->Reset();
-  } else {
-    DCHECK(value->HasIoPending());
-    if (value->Size() >= kMinOccupancySize) {
-      op_manager_->Delete(key);
-    } else if (auto bin = bins_->Delete(key); bin) {
-      op_manager_->Delete(*bin);
-    }
-    value->SetIoPending(false);
+void TieredStorage::Delete(PrimeValue* value) {
+  DCHECK(value->IsExternal());
+  tiering::DiskSegment segment = value->GetExternalSlice();
+  if (OccupiesWholePages(segment.length)) {
+    op_manager_->Delete(segment);
+  } else if (auto bin = bins_->Delete(segment); bin) {
+    op_manager_->Delete(*bin);
   }
+  op_manager_->SetInMemory(value, "", segment);
 }
 
-bool TieredStorageV2::ShouldStash(const PrimeValue& pv) {
+void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
+  DCHECK(value->HasIoPending());
+  if (OccupiesWholePages(value->Size())) {
+    op_manager_->Delete(KeyRef(dbid, key));
+  } else if (auto bin = bins_->Delete(dbid, key); bin) {
+    op_manager_->Delete(*bin);
+  }
+  value->SetIoPending(false);
+}
+
+bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
   return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize;
 }
 
-TieredStatsV2 TieredStorageV2::GetStats() const {
-  return op_manager_->GetStats();
+TieredStats TieredStorage::GetStats() const {
+  TieredStats stats{};
+
+  {  // ShardOpManager stats
+    auto shard_stats = op_manager_->stats_;
+    stats.total_fetches = shard_stats.total_fetches;
+    stats.total_stashes = shard_stats.total_stashes;
+    stats.total_cancels = shard_stats.total_cancels;
+  }
+
+  {  // OpManager stats
+    tiering::OpManager::Stats op_stats = op_manager_->GetStats();
+    stats.pending_read_cnt = op_stats.pending_read_cnt;
+    stats.pending_stash_cnt = op_stats.pending_stash_cnt;
+    stats.allocated_bytes = op_stats.disk_stats.allocated_bytes;
+    stats.capacity_bytes = op_stats.disk_stats.capacity_bytes;
+  }
+
+  {  // SmallBins stats
+    tiering::SmallBins::Stats bins_stats = bins_->GetStats();
+    stats.small_bins_cnt = bins_stats.stashed_bins_cnt;
+    stats.small_bins_entries_cnt = bins_stats.stashed_entries_cnt;
+    stats.small_bins_filling_bytes = bins_stats.current_bin_bytes;
+  }
+
+  return stats;
+}
+
+void TieredStorage::RunOffloading(DbIndex dbid) {
+  PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
+  int stash_limit =
+      absl::GetFlag(FLAGS_tiered_storage_write_depth) - op_manager_->GetStats().pending_stash_cnt;
+  if (stash_limit <= 0)
+    return;
+
+  std::string tmp;
+  auto cb = [this, dbid, &tmp, &stash_limit](PrimeIterator it) {
+    if (it->second.HasIoPending() || it->second.IsExternal())
+      return;
+
+    if (ShouldStash(it->second)) {
+      Stash(dbid, it->first.GetSlice(&tmp), &it->second);
+      stash_limit--;
+    }
+  };
+
+  PrimeTable::Cursor start_cursor{};
+
+  // Loop while we haven't traversed all entries or reached our stash io device limit.
+  // Keep number of iterations below resonable limit to keep datastore always responsive
+  size_t iterations = 0;
+  do {
+    offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
+  } while (offloading_cursor_ != start_cursor && stash_limit > 0 && iterations++ < 100);
 }
 
 }  // namespace dfly

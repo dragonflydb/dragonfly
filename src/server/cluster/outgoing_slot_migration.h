@@ -53,7 +53,10 @@ class OutgoingMigration : private ProtocolClient {
     return last_error_.Format();
   }
 
+  size_t GetKeyCount() const;
+
   static constexpr long kInvalidAttempt = -1;
+  static constexpr std::string_view kUnknownMigration = "UNKNOWN_MIGRATION";
 
  private:
   // should be run for all shards
@@ -68,11 +71,12 @@ class OutgoingMigration : private ProtocolClient {
 
   void SyncFb();
   // return true if migration is finalized even with C_ERROR state
-  bool FinalyzeMigration(long attempt);
+  bool FinalizeMigration(long attempt);
+
+  bool ChangeState(MigrationState new_state) ABSL_LOCKS_EXCLUDED(state_mu_);
 
  private:
   MigrationInfo migration_info_;
-  mutable util::fb2::Mutex finish_mu_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
   ServerFamily* server_family_;
   ClusterFamily* cf_;
@@ -80,8 +84,12 @@ class OutgoingMigration : private ProtocolClient {
 
   util::fb2::Fiber main_sync_fb_;
 
-  // Atomic only for simple read operation, writes - from the same thread, reads - from any thread
-  std::atomic<MigrationState> state_ = MigrationState::C_NO_STATE;
+  mutable util::fb2::Mutex state_mu_;
+  MigrationState state_ ABSL_GUARDED_BY(state_mu_) = MigrationState::C_NO_STATE;
+
+  // when migration is finished we need to store number of migrated keys
+  // because new request can add or remove keys and we get incorrect statistic
+  size_t keys_number_ = 0;
 };
 
 }  // namespace dfly::cluster

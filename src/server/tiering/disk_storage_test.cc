@@ -8,6 +8,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "server/tiering/common.h"
 #include "server/tiering/test_common.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/pool.h"
@@ -23,7 +24,7 @@ struct DiskStorageTest : public PoolTestBase {
   }
 
   void Open() {
-    storage_ = make_unique<DiskStorage>();
+    storage_ = make_unique<DiskStorage>(256_MB);
     storage_->Open("disk_storage_test_backing");
   }
 
@@ -59,10 +60,14 @@ struct DiskStorageTest : public PoolTestBase {
     last_reads_.erase(index);
   }
 
-  void Wait() {
+  void Wait() const {
     while (pending_ops_ > 0) {
       ::util::ThisFiber::SleepFor(1ms);
     }
+  }
+
+  DiskStorage::Stats GetStats() const {
+    return storage_->GetStats();
   }
 
  protected:
@@ -82,6 +87,8 @@ TEST_F(DiskStorageTest, Basic) {
     Wait();
     EXPECT_EQ(segments_.size(), 100);
 
+    EXPECT_EQ(GetStats().allocated_bytes, 100 * kPageSize);
+
     // Read all 100 values
     for (size_t i = 0; i < 100; i++)
       Read(i);
@@ -90,6 +97,11 @@ TEST_F(DiskStorageTest, Basic) {
     // Expect them to be equal to written
     for (size_t i = 0; i < 100; i++)
       EXPECT_EQ(last_reads_[i], absl::StrCat("value", i));
+
+    // Delete all values
+    for (size_t i = 0; i < 100; i++)
+      Delete(i);
+    EXPECT_EQ(GetStats().allocated_bytes, 0);
 
     Close();
   });

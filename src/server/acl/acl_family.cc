@@ -14,9 +14,11 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/flags/commandlineflag.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
@@ -85,7 +87,8 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user, u
   auto update_cb = [&]([[maybe_unused]] size_t id, util::Connection* conn) {
     DCHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
-    if (!connection->IsHttp() && connection->cntx()) {
+    if (connection->protocol() == facade::Protocol::REDIS && !connection->IsHttp() &&
+        connection->cntx()) {
       connection->SendAclUpdateAsync(
           facade::Connection::AclUpdateMessage{user, update_cat, update_commands, update_keys});
     }
@@ -121,12 +124,13 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::visit(Overloaded{error_case, update_case}, std::move(req));
 }
 
-void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
-  auto close_cb = [user]([[maybe_unused]] size_t id, util::Connection* conn) {
-    DCHECK(conn);
+void AclFamily::EvictOpenConnectionsOnAllProactors(
+    const absl::flat_hash_set<std::string_view>& users) {
+  auto close_cb = [&users]([[maybe_unused]] size_t id, util::Connection* conn) {
+    CHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
     auto ctx = static_cast<ConnectionContext*>(connection->cntx());
-    if (ctx && ctx->authed_username == user) {
+    if (ctx && users.contains(ctx->authed_username)) {
       connection->ShutdownSelf();
     }
   };
@@ -139,7 +143,7 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(std::string_view user) {
 void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
     const UserRegistry::RegistryType& registry) {
   auto close_cb = [&registry]([[maybe_unused]] size_t id, util::Connection* conn) {
-    DCHECK(conn);
+    CHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
     auto ctx = static_cast<ConnectionContext*>(connection->cntx());
     if (ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username)) {
@@ -153,24 +157,32 @@ void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
 }
 
 void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view username = facade::ToSV(args[0]);
-  if (username == "default") {
-    cntx->SendError("The 'default' user cannot be removed");
-    return;
+  auto& registry = *registry_;
+  absl::flat_hash_set<std::string_view> users;
+
+  for (auto arg : args) {
+    std::string_view username = facade::ToSV(arg);
+    if (username == "default") {
+      continue;
+    }
+    if (registry.RemoveUser(username)) {
+      users.insert(username);
+    }
   }
 
-  auto& registry = *registry_;
-  if (!registry.RemoveUser(username)) {
+  if (users.empty()) {
     cntx->SendLong(0);
     return;
   }
-
-  EvictOpenConnectionsOnAllProactors(username);
-  cntx->SendLong(1);
+  VLOG(1) << "Evicting open acl connections";
+  EvictOpenConnectionsOnAllProactors(users);
+  VLOG(1) << "Done evicting open acl connections";
+  cntx->SendLong(users.size());
 }
 
 void AclFamily::WhoAmI(CmdArgList args, ConnectionContext* cntx) {
-  cntx->SendSimpleString(cntx->authed_username);
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendBulkString(absl::StrCat("User is ", cntx->authed_username));
 }
 
 std::string AclFamily::RegistryToString() const {
@@ -609,7 +621,7 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
   *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
   *registry << CI{"ACL LIST", kAclMask, 1, 0, 0, acl::kList}.HFUNC(List);
   *registry << CI{"ACL SETUSER", kAclMask, -2, 0, 0, acl::kSetUser}.HFUNC(SetUser);
-  *registry << CI{"ACL DELUSER", kAclMask, 2, 0, 0, acl::kDelUser}.HFUNC(DelUser);
+  *registry << CI{"ACL DELUSER", kAclMask, -2, 0, 0, acl::kDelUser}.HFUNC(DelUser);
   *registry << CI{"ACL WHOAMI", kAclMask, 1, 0, 0, acl::kWhoAmI}.HFUNC(WhoAmI);
   *registry << CI{"ACL SAVE", kAclMask, 1, 0, 0, acl::kSave}.HFUNC(Save);
   *registry << CI{"ACL LOAD", kAclMask, 1, 0, 0, acl::kLoad}.HFUNC(Load);

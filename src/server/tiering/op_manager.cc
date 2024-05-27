@@ -10,6 +10,7 @@
 #include "core/overloaded.h"
 #include "io/io.h"
 #include "server/tiering/common.h"
+#include "server/tiering/disk_storage.h"
 #include "util/fibers/future.h"
 
 namespace dfly::tiering {
@@ -18,7 +19,9 @@ namespace {
 
 OpManager::OwnedEntryId ToOwned(OpManager::EntryId id) {
   Overloaded convert{[](unsigned i) -> OpManager::OwnedEntryId { return i; },
-                     [](std::string_view s) -> OpManager::OwnedEntryId { return std::string{s}; }};
+                     [](std::pair<DbIndex, std::string_view> p) -> OpManager::OwnedEntryId {
+                       return std::make_pair(p.first, std::string{p.second});
+                     }};
   return std::visit(convert, id);
 }
 
@@ -27,6 +30,9 @@ OpManager::EntryId Borrowed(const OpManager::OwnedEntryId& id) {
 }
 
 }  // namespace
+
+OpManager::OpManager(size_t max_size) : storage_{max_size} {
+}
 
 std::error_code OpManager::Open(std::string_view file) {
   return storage_.Open(file);
@@ -44,7 +50,7 @@ void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
 void OpManager::Delete(EntryId id) {
   // If the item isn't offloaded, it has io pending, so cancel it
   DCHECK(pending_stash_ver_.count(ToOwned(id)));
-  ++pending_stash_ver_[ToOwned(id)];
+  pending_stash_ver_.erase(ToOwned(id));
 }
 
 void OpManager::Delete(DiskSegment segment) {
@@ -89,7 +95,8 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
     ReportStashed(id, segment, ec);
-  } else {
+  } else if (!ec) {
+    // Throw away the value because it's no longer up-to-date even if no error occured
     storage_.MarkAsFree(segment);
   }
 }
@@ -123,6 +130,12 @@ OpManager::EntryOps& OpManager::ReadOp::ForId(EntryId id, DiskSegment key_segmen
       return ops;
   }
   return key_ops.emplace_back(ToOwned(id), key_segment);
+}
+
+OpManager::Stats OpManager::GetStats() const {
+  return {.disk_stats = storage_.GetStats(),
+          .pending_read_cnt = pending_reads_.size(),
+          .pending_stash_cnt = pending_stash_ver_.size()};
 }
 
 }  // namespace dfly::tiering

@@ -33,7 +33,7 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 namespace dfly {
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
-  os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_size
+  os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_used_bytes
      << ", tiered_entries: " << stats.tiered_entries << "\n";
 
   return os;
@@ -658,7 +658,6 @@ void BaseFamilyTest::ExpectConditionWithinTimeout(const std::function<bool()>& c
       break;
     }
     ThisFiber::SleepFor(5ms);
-    // absl::SleepFor(absl::Milliseconds(10)); ??
   }
 
   EXPECT_LE(absl::Now(), deadline)

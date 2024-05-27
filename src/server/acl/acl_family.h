@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "helio/util/proactor_pool.h"
@@ -53,7 +54,7 @@ class AclFamily final {
                                              const AclKeys& update_keys);
 
   // Helper function that closes all open connection from the deleted user
-  void EvictOpenConnectionsOnAllProactors(std::string_view user);
+  void EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<std::string_view>& user);
 
   // Helper function that closes all open connections for users in the registry
   void EvictOpenConnectionsOnAllProactorsWithRegistry(const UserRegistry::RegistryType& registry);

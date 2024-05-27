@@ -233,10 +233,10 @@ class DecompressImpl {
   }
   virtual ~DecompressImpl() {
   }
-  virtual io::Result<base::IoBuf*> Decompress(std::string_view str) = 0;
+  virtual io::Result<io::IoBuf*> Decompress(std::string_view str) = 0;
 
  protected:
-  base::IoBuf uncompressed_mem_buf_;
+  io::IoBuf uncompressed_mem_buf_;
 };
 
 class ZstdDecompress : public DecompressImpl {
@@ -248,13 +248,13 @@ class ZstdDecompress : public DecompressImpl {
     ZSTD_freeDCtx(dctx_);
   }
 
-  io::Result<base::IoBuf*> Decompress(std::string_view str);
+  io::Result<io::IoBuf*> Decompress(std::string_view str);
 
  private:
   ZSTD_DCtx* dctx_;
 };
 
-io::Result<base::IoBuf*> ZstdDecompress::Decompress(std::string_view str) {
+io::Result<io::IoBuf*> ZstdDecompress::Decompress(std::string_view str) {
   // Prepare membuf memory to uncompressed string.
   auto uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
   if (uncomp_size == ZSTD_CONTENTSIZE_UNKNOWN) {

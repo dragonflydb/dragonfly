@@ -4,6 +4,8 @@
 
 #include "core/lru.h"
 
+#include <absl/strings/str_cat.h>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/compact_object.h"

@@ -4,6 +4,7 @@
 
 #include "server/top_keys.h"
 
+#include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
 
 #include "base/gtest.h"

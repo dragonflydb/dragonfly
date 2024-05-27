@@ -1033,7 +1033,9 @@ async def assert_lag_condition(inst, client, condition):
 
 @dfly_args({"proactor_threads": 2})
 @pytest.mark.asyncio
-async def test_replication_info(df_local_factory, df_seeder_factory, n_keys=2000):
+async def test_replication_info(
+    df_local_factory: DflyInstanceFactory, df_seeder_factory, n_keys=2000
+):
     master = df_local_factory.create()
     replica = df_local_factory.create(logtostdout=True, replication_acks_interval=100)
     df_local_factory.start_all([master, replica])

@@ -9,10 +9,10 @@ extern "C" {
 #include "redis/rdb.h"
 }
 
-#include "base/io_buf.h"
 #include "base/mpsc_intrusive_queue.h"
 #include "base/pod_array.h"
 #include "io/io.h"
+#include "io/io_buf.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
 
@@ -199,6 +199,10 @@ class RdbLoader : protected RdbLoaderBase {
   // returns time in seconds.
   double load_time() const {
     return load_time_;
+  }
+
+  void stop() {
+    stop_early_.store(true);
   }
 
   // Return the offset that was received with a RDB_OPCODE_JOURNAL_OFFSET command,

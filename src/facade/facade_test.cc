@@ -5,6 +5,7 @@
 #include "facade/facade_test.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/numbers.h>
 
 #include "base/logging.h"
 

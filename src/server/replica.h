@@ -9,9 +9,9 @@
 #include <queue>
 #include <variant>
 
-#include "base/io_buf.h"
 #include "facade/facade_types.h"
 #include "facade/redis_parser.h"
+#include "io/io_buf.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/common.h"
 #include "server/journal/tx_executor.h"
@@ -152,7 +152,6 @@ class Replica : ProtocolClient {
   // In redis replication mode.
   util::fb2::Fiber sync_fb_;
   util::fb2::Fiber acks_fb_;
-  util::fb2::Fiber acl_check_fb_;
   util::fb2::EventCount replica_waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
@@ -176,6 +175,7 @@ class Replica : ProtocolClient {
   std::optional<cluster::SlotRange> slot_range_;
 };
 
+class RdbLoader;
 // This class implements a single shard replication flow from a Dragonfly master instance.
 // Multiple DflyShardReplica objects are managed by a Replica object.
 class DflyShardReplica : public ProtocolClient {
@@ -225,6 +225,7 @@ class DflyShardReplica : public ProtocolClient {
   bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;
+  std::unique_ptr<RdbLoader> rdb_loader_;
 
   // The master instance has a LSN for each journal record. This counts
   // the number of journal records executed in this flow plus the initial

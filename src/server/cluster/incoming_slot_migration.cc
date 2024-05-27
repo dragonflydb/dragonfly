@@ -6,6 +6,7 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "base/logging.h"
+#include "cluster_utility.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/tx_executor.h"
@@ -50,7 +51,7 @@ class ClusterShardMigration {
       while (tx_data->opcode == journal::Op::FIN) {
         VLOG(2) << "Attempt to finalize flow " << source_shard_id_;
         bc->Dec();  // we can Join the flow now
-        // if we get new data attempt is failed
+        // if we get new data, attempt is failed
         if (tx_data = tx_reader.NextTxData(&reader, cntx); !tx_data) {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
@@ -109,7 +110,7 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
       service_(*se),
       slots_(std::move(slots)),
       state_(MigrationState::C_CONNECTING),
-      bc_(shards_num) {
+      bc_(0) {
   shard_flows_.resize(shards_num);
   for (unsigned i = 0; i < shards_num; ++i) {
     shard_flows_[i].reset(new ClusterShardMigration(i, &service_));
@@ -120,8 +121,10 @@ IncomingSlotMigration::~IncomingSlotMigration() {
 }
 
 void IncomingSlotMigration::Join() {
+  // TODO add timeout
   bc_->Wait();
-  state_ = MigrationState::C_FINISHED;
+  state_.store(MigrationState::C_FINISHED);
+  keys_number_ = cluster::GetKeyCount(slots_);
 }
 
 void IncomingSlotMigration::Cancel() {
@@ -137,7 +140,15 @@ void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* sou
   VLOG(1) << "Start flow for shard: " << shard;
   state_.store(MigrationState::C_SYNC);
 
+  bc_->Add();
   shard_flows_[shard]->Start(&cntx_, source, bc_);
+}
+
+size_t IncomingSlotMigration::GetKeyCount() const {
+  if (state_.load() == MigrationState::C_FINISHED) {
+    return keys_number_;
+  }
+  return cluster::GetKeyCount(slots_);
 }
 
 }  // namespace dfly::cluster

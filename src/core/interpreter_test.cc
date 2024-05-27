@@ -89,6 +89,7 @@ class InterpreterTest : public ::testing::Test {
 
   void SetGlobalArray(const char* name, const vector<string_view>& vec);
 
+  // returns true if script run successfully.
   bool Execute(string_view script);
 
   Interpreter intptr_;
@@ -490,6 +491,27 @@ TEST_F(InterpreterTest, Robust) {
       setmetatable(a,{__index=function() foo() end})
       return a")"));
   EXPECT_EQ("", ser_.res);
+}
+
+TEST_F(InterpreterTest, Unpack) {
+  auto cb = [](Interpreter::CallArgs ca) {
+    auto* reply = ca.translator;
+    reply->OnInt(1);
+  };
+  intptr_.SetRedisFunc(cb);
+  ASSERT_TRUE(lua_checkstack(lua(), 7000));
+  bool res = Execute(R"(
+local N = 7000
+
+local stringTable = {}
+for i = 1, N do
+    stringTable[i] = "String " .. i
+end
+  return redis.pcall('func', unpack(stringTable))
+)");
+
+  ASSERT_TRUE(res) << error_;
+  EXPECT_EQ("i(1)", ser_.res);
 }
 
 }  // namespace dfly

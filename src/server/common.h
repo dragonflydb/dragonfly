@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/random/random.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/types/span.h>
@@ -59,33 +60,23 @@ struct LockTagOptions {
   static const LockTagOptions& instance();
 };
 
-struct IoMgrStats {
-  uint64_t read_total = 0;
-  uint64_t read_delay_usec = 0;
-
-  IoMgrStats& operator+=(const IoMgrStats& rhs);
-};
-
 struct TieredStats {
-  uint64_t tiered_writes = 0;
-
-  size_t storage_capacity = 0;
-
-  // how much was reserved by actively stored items.
-  size_t storage_reserved = 0;
-  uint64_t aborted_write_cnt = 0;
-  uint64_t flush_skip_cnt = 0;
-  uint64_t throttled_write_cnt = 0;
-
-  TieredStats& operator+=(const TieredStats&);
-};
-
-struct TieredStatsV2 {
   size_t total_stashes = 0;
   size_t total_fetches = 0;
-  size_t allocated_bytes = 0;
+  size_t total_cancels = 0;
+  size_t total_deletes = 0;
 
-  TieredStatsV2& operator+=(const TieredStatsV2&);
+  size_t allocated_bytes = 0;
+  size_t capacity_bytes = 0;
+
+  size_t pending_read_cnt = 0;
+  size_t pending_stash_cnt = 0;
+
+  size_t small_bins_cnt = 0;
+  size_t small_bins_entries_cnt = 0;
+  size_t small_bins_filling_bytes = 0;
+
+  TieredStats& operator+=(const TieredStats&);
 };
 
 struct SearchStats {
@@ -318,5 +309,48 @@ struct MemoryBytesFlag {
 
 bool AbslParseFlag(std::string_view in, dfly::MemoryBytesFlag* flag, std::string* err);
 std::string AbslUnparseFlag(const dfly::MemoryBytesFlag& flag);
+
+using RandomPick = std::uint32_t;
+
+class PicksGenerator {
+ public:
+  virtual RandomPick Generate() = 0;
+  virtual ~PicksGenerator() = default;
+};
+
+class NonUniquePicksGenerator : public PicksGenerator {
+ public:
+  /* The generated value will be within the closed-open interval [0, max_range) */
+  NonUniquePicksGenerator(RandomPick max_range);
+
+  RandomPick Generate() override;
+
+ private:
+  const RandomPick max_range_;
+  absl::BitGen bitgen_{};
+};
+
+/*
+ * Generates unique index in O(1).
+ *
+ * picks_count specifies the number of random indexes to be generated.
+ * In other words, this is the number of times the Generate() function is called.
+ *
+ * The class uses Robert Floyd's sampling algorithm
+ * https://dl.acm.org/doi/pdf/10.1145/30401.315746
+ * */
+class UniquePicksGenerator : public PicksGenerator {
+ public:
+  /* The generated value will be within the closed-open interval [0, max_range) */
+  UniquePicksGenerator(std::uint32_t picks_count, RandomPick max_range);
+
+  RandomPick Generate() override;
+
+ private:
+  RandomPick current_random_limit_;
+  std::uint32_t remaining_picks_count_;
+  std::unordered_set<RandomPick> picked_indexes_;
+  absl::BitGen bitgen_{};
+};
 
 }  // namespace dfly

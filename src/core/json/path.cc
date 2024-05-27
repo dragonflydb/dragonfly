@@ -55,14 +55,19 @@ IndexExpr IndexExpr::Normalize(size_t array_len) const {
     return IndexExpr(1, 0);  // empty range.
 
   IndexExpr res = *this;
+  auto wrap = [array_len](int negative) {
+    unsigned positive = -negative;
+    return positive > array_len ? 0 : array_len - positive;
+  };
+
   if (res.second >= int(array_len)) {
     res.second = array_len - 1;
   } else if (res.second < 0) {
-    res.second = res.second % array_len;
+    res.second = wrap(res.second);
     DCHECK_GE(res.second, 0);
   }
   if (res.first < 0) {
-    res.first = res.first % array_len;
+    res.first = wrap(res.first);
     DCHECK_GE(res.first, 0);
   }
   return res;

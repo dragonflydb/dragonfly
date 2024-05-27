@@ -23,6 +23,8 @@ extern "C" {
 #include "server/test_utils.h"
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
+ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
+ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(double, oom_deny_ratio);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
@@ -641,7 +643,11 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
     GTEST_SKIP() << "Defragmentation via idle task is only supported in io uring";
   }
 
-  absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.02);
+  // mem_defrag_threshold is based on RSS statistic, but we don't count it in the test
+  absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.0);
+  absl::SetFlag(&FLAGS_mem_defrag_check_sec_interval, 0);
+  absl::SetFlag(&FLAGS_mem_defrag_waste_threshold, 0.1);
+
   //  Fill data into dragonfly and then check if we have
   //  any location in memory to defrag. See issue #448 for details about this.
   constexpr size_t kMaxMemoryForTest = 1'100'000;
@@ -686,13 +692,13 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
 
   ArgSlice delete_cmd(keys);
   r = CheckedInt(delete_cmd);
-  LOG(WARNING) << "finish deleting memory entries " << r;
+  LOG(INFO) << "finish deleting memory entries " << r;
   // the first element in this is the command del so size is one less
   ASSERT_EQ(r, keys2delete.size() - 1);
   // At this point we need to see whether we did running the task and whether the task did something
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
     EngineShard* shard = EngineShard::tlocal();
-    ASSERT_FALSE(shard == nullptr);  // we only have one and its should not be empty!
+    ASSERT_TRUE(shard != nullptr);  // we only have one and its should not be empty!
     // a "busy wait" to ensure that memory defragmentations was successful:
     // the task ran and did it work
     auto stats = shard->stats();

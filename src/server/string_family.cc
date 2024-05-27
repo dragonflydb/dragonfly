@@ -34,10 +34,6 @@
 #include "server/transaction.h"
 #include "util/fibers/future.h"
 
-ABSL_FLAG(bool, tiered_skip_prefetch, false,
-          "If true, does not load offloaded string back to in-memory store during GET command."
-          "For testing/development purposes only.");
-
 namespace dfly {
 
 namespace {
@@ -49,11 +45,10 @@ using CI = CommandId;
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
 
-size_t CopyValueToBuffer(const PrimeValue& pv, char* dest) {
+void CopyValueToBuffer(const PrimeValue& pv, char* dest) {
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);
   DCHECK(!pv.IsExternal());
   pv.GetString(dest);
-  return pv.Size();
 }
 
 string GetString(const PrimeValue& pv) {
@@ -411,8 +406,8 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_ms, reset_after_ms};
 }
 
-SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const Transaction* t,
-                                      EngineShard* shard) {
+SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, bool fetch_mcflag,
+                                      bool fetch_mcver, const Transaction* t, EngineShard* shard) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -421,17 +416,18 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
   SinkReplyBuilder::MGetResponse response(keys.Size());
   absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
 
+  // First, fetch all iterators and count total size ahead
   size_t total_size = 0;
   unsigned index = 0;
   for (string_view key : keys) {
     auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
-    auto& dest = iters[index++];
-    if (!it_res)
-      continue;
-    dest = *it_res;
-    total_size += (*it_res)->second.Size();
+    if (auto& dest = iters[index++]; it_res) {
+      dest = *it_res;
+      total_size += (*it_res)->second.Size();
+    }
   }
 
+  // Allocate enough for all values
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
 
@@ -442,7 +438,19 @@ SinkReplyBuilder::MGetResponse OpMGet(bool fetch_mcflag, bool fetch_mcver, const
 
     auto& resp = response.resp_arr[i].emplace();
 
-    size_t size = CopyValueToBuffer(it->second, next);
+    // Copy to buffer or trigger tiered read that will eventually write to buffer
+    if (it->second.IsExternal()) {
+      wait_bc->Add(1);
+      auto cb = [next, wait_bc](const string& v) mutable {
+        memcpy(next, v.data(), v.size());
+        wait_bc->Dec();
+      };
+      shard->tiered_storage()->Read(t->GetDbIndex(), it.key(), it->second, std::move(cb));
+    } else {
+      CopyValueToBuffer(it->second, next);
+    }
+
+    size_t size = it->second.Size();
     resp.value = string_view(next, size);
     next += size;
 
@@ -482,17 +490,16 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();
     };
-    return {shard->tiered_storage_v2()->Modify<size_t>(key, pv, std::move(modf))};
+    return {shard->tiered_storage()->Modify<size_t>(op_args.db_cntx.db_index, key, pv,
+                                                    std::move(modf))};
   } else {
-    if (pv.HasIoPending())
-      shard->tiered_storage_v2()->Delete(key, &pv);
     return {ExtendExisting(it_res->it, key, value, prepend)};
   }
 }
 
 // Helper for building replies for strings
-struct StringReplies {
-  StringReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
+struct GetReplies {
+  GetReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
     DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
   }
 
@@ -520,8 +527,9 @@ struct StringReplies {
 
 }  // namespace
 
-StringValue StringValue::Read(string_view key, const PrimeValue& pv, EngineShard* es) {
-  return pv.IsExternal() ? StringValue{es->tiered_storage_v2()->Read(key, pv)}
+StringValue StringValue::Read(DbIndex dbid, string_view key, const PrimeValue& pv,
+                              EngineShard* es) {
+  return pv.IsExternal() ? StringValue{es->tiered_storage()->Read(dbid, key, pv)}
                          : StringValue(GetString(pv));
 }
 
@@ -611,8 +619,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   db_slice.SetMCFlag(op_args_.db_cntx.db_index, it->first.AsRef(), params.memcache_flags);
 
   // If value is external, mark it as deleted
-  if (prime_value.IsExternal() || prime_value.HasIoPending()) {
-    shard->tiered_storage_v2()->Delete(key, &prime_value);
+  if (prime_value.IsExternal()) {
+    shard->tiered_storage()->Delete(&prime_value);
   }
 
   // overwrite existing entry.
@@ -652,8 +660,8 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
   EngineShard* shard = op_args_.shard;
 
   // Currently we always offload
-  if (auto* ts = shard->tiered_storage_v2(); ts && ts->ShouldStash(*pv)) {
-    ts->Stash(key, pv);
+  if (auto* ts = shard->tiered_storage(); ts && ts->ShouldStash(*pv)) {
+    ts->Stash(op_args_.db_cntx.db_index, key, pv);
   }
 
   if (manual_journal_ && op_args_.shard->journal()) {
@@ -692,7 +700,8 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   if (it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  *params.prev_val = StringValue::Read(it.key(), it->second, EngineShard::tlocal());
+  *params.prev_val =
+      StringValue::Read(op_args_.db_cntx.db_index, it.key(), it->second, EngineShard::tlocal());
   return OpStatus::OK;
 }
 
@@ -707,7 +716,6 @@ OpStatus SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams, s
   });
 }
 
-// With tieringV2 support
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
 
@@ -794,7 +802,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return StringReplies{cntx->reply_builder()}.Send(std::move(prev));
+    return GetReplies{cntx->reply_builder()}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OK) {
@@ -842,36 +850,33 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
 }
 
-// With tieringV2 support
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
     auto it_res = es->db_slice().FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
-    return StringValue::Read(key, (*it_res)->second, es);
+    return StringValue::Read(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
-// With tieringV2 support
 void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
     auto it_res = es->db_slice().FindMutable(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
-    auto value = StringValue::Read(key, it_res->it->second, es);
+    auto value = StringValue::Read(tx->GetDbIndex(), key, it_res->it->second, es);
     it_res->post_updater.Run();  // Run manually before delete
     es->db_slice().Del(tx->GetDbIndex(), it_res->it);
     return value;
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
-// With tieringV2 support
 void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
@@ -884,7 +889,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(status);
   }
 
-  StringReplies{cntx->reply_builder()}.Send(std::move(prev));
+  GetReplies{cntx->reply_builder()}.Send(std::move(prev));
 }
 
 void StringFamily::Append(CmdArgList args, ConnectionContext* cntx) {
@@ -928,7 +933,6 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
   }
 }
 
-// With tieringV2 support
 void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
@@ -979,7 +983,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     if (!it_res)
       return it_res.status();
 
-    StringValue value = StringValue::Read(key, it_res->it->second, shard);
+    StringValue value = StringValue::Read(t->GetDbIndex(), key, it_res->it->second, shard);
 
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
@@ -1001,7 +1005,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     return value;
   };
 
-  StringReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
@@ -1130,32 +1134,31 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
 
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1U);
-
   Transaction* transaction = cntx->transaction;
-  unsigned shard_count = shard_set->size();
-  std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_count);
+  std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_set->size());
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   bool fetch_mcflag = cntx->protocol() == Protocol::MEMCACHE;
   bool fetch_mcver =
       fetch_mcflag && (dfly_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER);
 
+  // Count of pending tiered reads
+  util::fb2::BlockingCounter tiering_bc{0};
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ShardId sid = shard->shard_id();
-    mget_resp[sid] = OpMGet(fetch_mcflag, fetch_mcver, t, shard);
+    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mcflag, fetch_mcver, t, shard);
     return OpStatus::OK;
   };
 
-  // MGet requires locking as well. For example, if coordinator A applied W(x) and then W(y)
-  // it necessarily means that whoever observed y, must observe x.
-  // Without locking, mget x y could read stale x but latest y.
   OpStatus result = transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
+
+  // wait for all tiered reads to finish
+  tiering_bc->Wait();
 
   // reorder the responses back according to the order of their corresponding keys.
   SinkReplyBuilder::MGetResponse res(args.size());
 
-  for (ShardId sid = 0; sid < shard_count; ++sid) {
+  for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!transaction->IsActive(sid))
       continue;
 

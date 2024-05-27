@@ -12,6 +12,18 @@ using namespace std;
 namespace dfly {
 
 io::Result<size_t> BufferedStreamerBase::WriteSome(const iovec* vec, uint32_t len) {
+  // Shrink producer_buf_ only if it is empty, its capacity reached 10 times more than max buffer
+  // memory and the write len is less than max buffer memory.
+  if (producer_buf_.InputLen() == 0 && producer_buf_.Capacity() > max_buffered_mem_ * 10) {
+    uint32_t write_len = 0;
+    for (uint32_t i = 0; i < len; ++i) {
+      write_len += vec->iov_len;
+    }
+    if (write_len < max_buffered_mem_) {
+      producer_buf_ = io::IoBuf{max_buffered_mem_};
+    }
+  }
+
   return io::BufSink{&producer_buf_}.WriteSome(vec, len);
 }
 
@@ -57,7 +69,6 @@ error_code BufferedStreamerBase::ConsumeIntoSink(io::Sink* dest) {
       return ec;
     }
 
-    // TODO: shrink big stash.
     consumer_buf_.Clear();
   }
   return std::error_code{};

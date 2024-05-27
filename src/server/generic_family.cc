@@ -472,7 +472,8 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
                     restore_args.ExpirationTime());
 }
 
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, string* scratch,
+            StringVec* res) {
   auto& db_slice = op_args.shard->db_slice();
 
   DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
@@ -492,11 +493,11 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
     return false;
   }
 
-  string str = it->first.ToString();
-  if (!opts.Matches(str)) {
+  it->first.GetString(scratch);
+  if (!opts.Matches(*scratch)) {
     return false;
   }
-  res->push_back(std::move(str));
+  res->push_back(*scratch);
 
   return true;
 }
@@ -512,9 +513,10 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
+  string scratch;
   do {
     cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
+        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
   } while (cur && cnt < scan_opts.limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
@@ -1365,6 +1367,7 @@ void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendBulkString(key);
 }
 
+// SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
 void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   string_view token = ArgS(args, 0);
   uint64_t cursor = 0;

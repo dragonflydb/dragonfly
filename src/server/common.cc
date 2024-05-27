@@ -257,34 +257,23 @@ bool ParseDouble(string_view src, double* value) {
 
 #define ADD(x) (x) += o.x
 
-IoMgrStats& IoMgrStats::operator+=(const IoMgrStats& rhs) {
-  static_assert(sizeof(IoMgrStats) == 16);
-
-  read_total += rhs.read_total;
-  read_delay_usec += rhs.read_delay_usec;
-
-  return *this;
-}
-
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 48);
-
-  ADD(tiered_writes);
-  ADD(storage_capacity);
-  ADD(storage_reserved);
-  ADD(aborted_write_cnt);
-  ADD(flush_skip_cnt);
-  ADD(throttled_write_cnt);
-
-  return *this;
-}
-
-TieredStatsV2& TieredStatsV2::operator+=(const TieredStatsV2& o) {
-  static_assert(sizeof(TieredStatsV2) == 24);
+  static_assert(sizeof(TieredStats) == 88);
 
   ADD(total_stashes);
   ADD(total_fetches);
+  ADD(total_cancels);
+  ADD(total_deletes);
+
   ADD(allocated_bytes);
+  ADD(capacity_bytes);
+
+  ADD(pending_read_cnt);
+  ADD(pending_stash_cnt);
+
+  ADD(small_bins_cnt);
+  ADD(small_bins_entries_cnt);
+  ADD(small_bins_filling_bytes);
 
   return *this;
 }
@@ -436,6 +425,37 @@ std::string AbslUnparseFlag(const dfly::MemoryBytesFlag& flag) {
 
 std::ostream& operator<<(std::ostream& os, const GlobalState& state) {
   return os << GlobalStateName(state);
+}
+
+NonUniquePicksGenerator::NonUniquePicksGenerator(RandomPick max_range) : max_range_(max_range) {
+  CHECK_GT(max_range, RandomPick(0));
+}
+
+RandomPick NonUniquePicksGenerator::Generate() {
+  return absl::Uniform(bitgen_, 0u, max_range_);
+}
+
+UniquePicksGenerator::UniquePicksGenerator(std::uint32_t picks_count, RandomPick max_range)
+    : remaining_picks_count_(picks_count), picked_indexes_(picks_count) {
+  CHECK_GE(max_range, picks_count);
+  current_random_limit_ = max_range - picks_count;
+}
+
+RandomPick UniquePicksGenerator::Generate() {
+  DCHECK_GT(remaining_picks_count_, 0u);
+
+  remaining_picks_count_--;
+
+  const RandomPick max_index = current_random_limit_++;
+  const RandomPick random_index = absl::Uniform(bitgen_, 0u, max_index + 1u);
+
+  const bool random_index_is_picked = picked_indexes_.emplace(random_index).second;
+  if (random_index_is_picked) {
+    return random_index;
+  }
+
+  picked_indexes_.insert(max_index);
+  return max_index;
 }
 
 }  // namespace dfly

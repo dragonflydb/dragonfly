@@ -156,25 +156,30 @@ bool ConfigureKeepAlive(int fd) {
   return true;
 }
 
-thread_local size_t ssl_allocated_bytes = 0;
+struct ListenerStats {
+  size_t tls_allocated_bytes = 0;
+  uint64_t refused_conn_maxclients_reached_cnt = 0;
+};
+
+thread_local ListenerStats listener_tl_stats;
 atomic_int ssl_init_refcount = 0;
 
 void* OverriddenSSLMalloc(size_t size, const char* file, int line) {
   void* res = mi_malloc(size);
-  ssl_allocated_bytes += mi_malloc_usable_size(res);
+  listener_tl_stats.tls_allocated_bytes += mi_malloc_usable_size(res);
   return res;
 }
 
 void* OverriddenSSLRealloc(void* addr, size_t size, const char* file, int line) {
   size_t prev_size = mi_malloc_usable_size(addr);
   void* res = mi_realloc(addr, size);
-  ssl_allocated_bytes += mi_malloc_usable_size(res);
-  ssl_allocated_bytes -= prev_size;
+  listener_tl_stats.tls_allocated_bytes += mi_malloc_usable_size(res);
+  listener_tl_stats.tls_allocated_bytes -= prev_size;
   return res;
 }
 
 void OverriddenSSLFree(void* addr, const char* file, int line) {
-  ssl_allocated_bytes -= mi_malloc_usable_size(addr);
+  listener_tl_stats.tls_allocated_bytes -= mi_malloc_usable_size(addr);
   mi_free(addr);
 }
 
@@ -274,7 +279,11 @@ bool Listener::ReconfigureTLS() {
 }
 
 size_t Listener::TLSUsedMemoryThreadLocal() {
-  return ssl_allocated_bytes;
+  return listener_tl_stats.tls_allocated_bytes;
+}
+
+uint64_t Listener::RefusedConnectionMaxClientsCount() {
+  return listener_tl_stats.refused_conn_maxclients_reached_cnt;
 }
 
 void Listener::PreAcceptLoop(util::ProactorBase* pb) {
@@ -356,6 +365,7 @@ void Listener::OnConnectionClose(util::Connection* conn) {
 }
 
 void Listener::OnMaxConnectionsReached(util::FiberSocketBase* sock) {
+  listener_tl_stats.refused_conn_maxclients_reached_cnt++;
   sock->Write(io::Buffer("-ERR max number of clients reached\r\n"));
 }
 

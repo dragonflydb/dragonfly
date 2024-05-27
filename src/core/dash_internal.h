@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <functional>
+#include <type_traits>
 
 #include "core/sse_port.h"
 
@@ -328,8 +328,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
       this->SetHash(slot, meta_hash, probe);
     }
 
-    template <typename U, typename Pred>
-    SlotId FindByFp(uint8_t fp_hash, bool probe, U&& k, Pred&& pred) const;
+    template <typename Pred> SlotId FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const;
 
     bool ShiftRight();
 
@@ -403,7 +402,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
   // Returns (iterator, true) if insert succeeds,
   // (iterator, false) for duplicate and (invalid-iterator, false) if it's full
   template <typename K, typename V, typename Pred>
-  std::pair<Iterator, bool> Insert(K&& key, V&& value, Hash_t key_hash, Pred&& cmp_fun);
+  std::pair<Iterator, bool> Insert(K&& key, V&& value, Hash_t key_hash, Pred&& pred);
 
   template <typename HashFn> void Split(HashFn&& hfunc, Segment* dest);
 
@@ -501,7 +500,8 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
     dest[3] = NextBid(dest[2]);
   }
 
-  template <typename U, typename Pred> Iterator FindIt(U&& key, Hash_t key_hash, Pred&& cf) const;
+  // Find item with given key hash and truthy predicate
+  template <typename Pred> Iterator FindIt(Hash_t key_hash, Pred&& pred) const;
 
   // Returns valid iterator if succeeded or invalid if not (it's full).
   // Requires: key should be not present in the segment.
@@ -699,6 +699,14 @@ class DashCursor {
 
   explicit operator bool() const {
     return val_ != 0;
+  }
+
+  bool operator==(const DashCursor& other) const {
+    return val_ == other.val_;
+  }
+
+  bool operator!=(const DashCursor& other) const {
+    return !(val_ == other.val_);
   }
 
  private:
@@ -1013,9 +1021,9 @@ ___] |___ |__] |  | |___ | \|  |
 */
 
 template <typename Key, typename Value, typename Policy>
-template <typename U, typename Pred>
-auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, U&& k,
-                                                   Pred&& pred) const -> SlotId {
+template <typename Pred>
+auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, Pred&& pred) const
+    -> SlotId {
   unsigned mask = this->Find(fp_hash, probe);
   if (!mask)
     return kNanSlot;
@@ -1023,9 +1031,18 @@ auto Segment<Key, Value, Policy>::Bucket::FindByFp(uint8_t fp_hash, bool probe, 
   unsigned delta = __builtin_ctz(mask);
   mask >>= delta;
   for (unsigned i = delta; i < kSlotNum; ++i) {
-    if ((mask & 1) && pred(key[i], k)) {
-      return i;
+    // Filterable just by key
+    if constexpr (std::is_invocable_v<Pred, const Key_t&>) {
+      if ((mask & 1) && pred(key[i]))
+        return i;
     }
+
+    // Filterable by key and value
+    if constexpr (std::is_invocable_v<Pred, const Key_t&, const Value_t&>) {
+      if ((mask & 1) && pred(key[i], value[i]))
+        return i;
+    }
+
     mask >>= 1;
   };
 
@@ -1086,9 +1103,9 @@ auto Segment<Key, Value, Policy>::TryMoveFromStash(unsigned stash_id, unsigned s
 
 template <typename Key, typename Value, typename Policy>
 template <typename U, typename V, typename Pred>
-auto Segment<Key, Value, Policy>::Insert(U&& key, V&& value, Hash_t key_hash, Pred&& cmp_fun)
+auto Segment<Key, Value, Policy>::Insert(U&& key, V&& value, Hash_t key_hash, Pred&& pred)
     -> std::pair<Iterator, bool> {
-  Iterator it = FindIt(key, key_hash, std::forward<Pred>(cmp_fun));
+  Iterator it = FindIt(key_hash, pred);
   if (it.found()) {
     return std::make_pair(it, false); /* duplicate insert*/
   }
@@ -1099,8 +1116,8 @@ auto Segment<Key, Value, Policy>::Insert(U&& key, V&& value, Hash_t key_hash, Pr
 }
 
 template <typename Key, typename Value, typename Policy>
-template <typename U, typename Pred>
-auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) const -> Iterator {
+template <typename Pred>
+auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& pred) const -> Iterator {
   uint8_t bidx = BucketIndex(key_hash);
   const Bucket& target = bucket_[bidx];
 
@@ -1109,7 +1126,7 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
   __builtin_prefetch(&target);
 
   uint8_t fp_hash = key_hash & kFpMask;
-  SlotId sid = target.FindByFp(fp_hash, false, key, cf);
+  SlotId sid = target.FindByFp(fp_hash, false, pred);
   if (sid != BucketType::kNanSlot) {
     return Iterator{bidx, sid};
   }
@@ -1117,7 +1134,7 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
   uint8_t nid = NextBid(bidx);
   const Bucket& probe = bucket_[nid];
 
-  sid = probe.FindByFp(fp_hash, true, key, cf);
+  sid = probe.FindByFp(fp_hash, true, pred);
 
 #ifdef ENABLE_DASH_STATS
   stats.neighbour_probes++;
@@ -1136,7 +1153,7 @@ auto Segment<Key, Value, Policy>::FindIt(U&& key, Hash_t key_hash, Pred&& cf) co
 
     pos += kBucketNum;
     const Bucket& bucket = bucket_[pos];
-    return bucket.FindByFp(fp_hash, false, key, cf);
+    return bucket.FindByFp(fp_hash, false, pred);
   };
 
   if (target.HasStashOverflow()) {

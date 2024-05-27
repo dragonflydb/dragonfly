@@ -13,11 +13,12 @@
 namespace dfly {
 
 using namespace std;
+using Payload = journal::Entry::Payload;
 
 void RecordJournal(const OpArgs& op_args, string_view cmd, ArgSlice args, uint32_t shard_cnt,
                    bool multi_commands) {
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
-  op_args.tx->LogJournalOnShard(op_args.shard, make_pair(cmd, args), shard_cnt, multi_commands,
+  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, multi_commands,
                                 false);
 }
 
@@ -29,7 +30,7 @@ void RecordExpiry(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
   journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, cluster::KeySlot(key),
-                       make_pair("DEL", ArgSlice{key}), false);
+                       Payload("DEL", ArgSlice{key}), false);
 }
 
 void TriggerJournalWriteToSink() {

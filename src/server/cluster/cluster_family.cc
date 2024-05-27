@@ -48,7 +48,7 @@ namespace {
 using namespace std;
 using namespace facade;
 using namespace util;
-
+using Payload = journal::Entry::Payload;
 using CI = CommandId;
 
 constexpr char kIdNotFound[] = "syncid not found";
@@ -485,7 +485,7 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
     // TODO: Break slot migration upon FLUSHSLOTS
     journal->RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
                          /* shard_cnt= */ shard_set->size(), nullopt,
-                         make_pair("DFLYCLUSTER", args_view), false);
+                         Payload("DFLYCLUSTER", args_view), false);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
@@ -660,26 +660,6 @@ static string_view StateToStr(MigrationState state) {
   return "UNDEFINED_STATE"sv;
 }
 
-static uint64_t GetKeyCount(const SlotRanges& slots) {
-  atomic_uint64_t keys = 0;
-
-  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
-    EngineShard* shard = EngineShard::tlocal();
-    if (shard == nullptr)
-      return;
-
-    uint64_t shard_keys = 0;
-    for (const SlotRange& range : slots) {
-      for (SlotId slot = range.start; slot <= range.end; slot++) {
-        shard_keys += shard->db_slice().GetSlotStats(slot).key_count;
-      }
-    }
-    keys.fetch_add(shard_keys);
-  });
-
-  return keys.load();
-}
-
 void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   CmdArgParser parser(args);
@@ -698,22 +678,21 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
   auto append_answer = [rb, &reply](string_view direction, string_view node_id, string_view filter,
-                                    MigrationState state, const SlotRanges& slots,
-                                    string_view error) {
+                                    MigrationState state, size_t keys_number, string_view error) {
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
       reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
-                                   " keys:", GetKeyCount(slots), " errors: ", error));
+                                   " keys:", keys_number, " errors: ", error));
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
     // TODO add error status
-    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetSlots(), "");
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(), "");
   }
   for (const auto& migration : outgoing_migration_jobs_) {
     append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
-                  migration->GetSlots(), migration->GetErrorStr());
+                  migration->GetKeyCount(), migration->GetErrorStr());
   }
 
   if (reply.empty()) {
@@ -774,14 +753,14 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
 
 namespace {
 // returns removed incoming migration
-std::shared_ptr<IncomingSlotMigration> RemoveIncomingMigrationImpl(
-    std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs, string source_id) {
+bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
+                                 string source_id) {
   auto it = std::find_if(jobs.begin(), jobs.end(), [&source_id](const auto& im) {
     // we can have only one migration per target-source pair
     return source_id == im->GetSourceID();
   });
   if (it == jobs.end()) {
-    return nullptr;
+    return false;
   }
   DCHECK(it->get() != nullptr);
   std::shared_ptr<IncomingSlotMigration> migration = *it;
@@ -792,6 +771,8 @@ std::shared_ptr<IncomingSlotMigration> RemoveIncomingMigrationImpl(
 
   // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
   migration->Cancel();
+  migration->Join();
+  jobs.erase(it);
 
   if (!removed.Empty()) {
     auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
@@ -805,17 +786,15 @@ std::shared_ptr<IncomingSlotMigration> RemoveIncomingMigrationImpl(
     });
   }
 
-  jobs.erase(it);
-  return migration;
+  return true;
 }
 }  // namespace
 
 void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
   lock_guard lk(migration_mu_);
   for (const auto& m : migrations) {
-    auto removed_migration = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_id);
-    DCHECK(removed_migration);
-    VLOG(1) << "Migration was canceled from: " << removed_migration->GetSourceID();
+    RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_id);
+    VLOG(1) << "Migration was canceled from: " << m.node_id;
   }
 }
 
@@ -834,11 +813,22 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
+  const auto& incoming_migrations = cluster_config()->GetIncomingMigrations();
+  bool found = any_of(incoming_migrations.begin(), incoming_migrations.end(),
+                      [&](const MigrationInfo& info) {
+                        // TODO: also compare slot ranges (in an order-agnostic way)
+                        return info.node_id == source_id;
+                      });
+  if (!found) {
+    VLOG(1) << "Unrecognized incoming migration from " << source_id;
+    return cntx->SendError(OutgoingMigration::kUnknownMigration);
+  }
+
   VLOG(1) << "Init migration " << source_id;
 
   lock_guard lk(migration_mu_);
-  auto removed_migration = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
-  LOG_IF(WARNING, removed_migration) << "Reinit was happen for migration from:" << source_id;
+  auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
+  LOG_IF(WARNING, was_removed) << "Reinit was happen for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
       std::move(source_id), &server_family_->service(), std::move(slots), flows_num));
@@ -916,6 +906,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   if (!migration)
     return cntx->SendError(kIdNotFound);
 
+  // TODO add timeout for join because it can fail
   migration->Join();
 
   VLOG(1) << "Migration is joined for " << source_id;

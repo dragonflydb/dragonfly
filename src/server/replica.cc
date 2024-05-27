@@ -78,7 +78,6 @@ Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
 Replica::~Replica() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
-  acl_check_fb_.JoinIfNeeded();
 }
 
 static const char kConnErr[] = "could not connect to master: ";
@@ -142,15 +141,14 @@ void Replica::Stop() {
   // Stops the loop in MainReplicationFb.
 
   proactor_->Await([this] {
-    cntx_.Cancel();        // Context is fully resposible for cleanup.
     state_mask_.store(0);  // Specifically ~R_ENABLED.
+    cntx_.Cancel();        // Context is fully resposible for cleanup.
   });
 
   // Make sure the replica fully stopped and did all cleanup,
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
-  acl_check_fb_.JoinIfNeeded();
 }
 
 void Replica::Pause(bool pause) {
@@ -625,8 +623,6 @@ error_code Replica::ConsumeRedisStream() {
 error_code Replica::ConsumeDflyStream() {
   // Set new error handler that closes flow sockets.
   auto err_handler = [this](const auto& ge) {
-    // Trigger acl-checker
-    replica_waker_.notifyAll();
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
     DefaultErrorHandler(ge);
@@ -655,12 +651,7 @@ error_code Replica::ConsumeDflyStream() {
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
   }
 
-  if (master_context_.version >= DflyVersion::VER3) {
-    acl_check_fb_ = fb2::Fiber("acl-check", &Replica::AclCheckFb, this);
-  }
-
   JoinDflyFlows();
-  acl_check_fb_.JoinIfNeeded();
 
   last_journal_LSNs_.emplace();
   for (auto& flow : shard_flows_) {
@@ -767,8 +758,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
-  RdbLoader loader(&service_);
-  loader.SetFullSyncCutCb([bc, ran = false]() mutable {
+  rdb_loader_->SetFullSyncCutCb([bc, ran = false]() mutable {
     if (!ran) {
       bc->Dec();
       ran = true;
@@ -776,13 +766,13 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
   });
 
   // Load incoming rdb stream.
-  if (std::error_code ec = loader.Load(&ps); ec) {
+  if (std::error_code ec = rdb_loader_->Load(&ps); ec) {
     cntx->ReportError(ec, "Error loading rdb format");
     return;
   }
 
   // Try finding eof token.
-  io::PrefixSource chained_tail{loader.Leftover(), &ps};
+  io::PrefixSource chained_tail{rdb_loader_->Leftover(), &ps};
   if (!eof_token.empty()) {
     unique_ptr<uint8_t[]> buf{new uint8_t[eof_token.size()]};
 
@@ -805,14 +795,14 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
     leftover_buf_.reset();
   }
 
-  if (auto jo = loader.journal_offset(); jo.has_value()) {
+  if (auto jo = rdb_loader_->journal_offset(); jo.has_value()) {
     this->journal_rec_executed_.store(*jo);
   } else {
     if (master_context_.version > DflyVersion::VER0)
       cntx->ReportError(std::make_error_code(errc::protocol_error),
                         "Error finding journal offset in stream");
   }
-  VLOG(1) << "FullSyncDflyFb finished after reading " << loader.bytes_read() << " bytes";
+  VLOG(1) << "FullSyncDflyFb finished after reading " << rdb_loader_->bytes_read() << " bytes";
 }
 
 void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
@@ -893,53 +883,6 @@ void Replica::RedisStreamAcksFb() {
   }
 }
 
-class AclCheckerClient : public ProtocolClient {
- public:
-  AclCheckerClient(ServerContext server, Context* cntx)
-      : ProtocolClient(std::move(server)), cntx_(cntx) {
-    Connect();
-  }
-
-  void CheckAclRoundTrip() {
-    if (auto ec = SendCommandAndReadResponse(StrCat("REPLCONF acl-check ", "0")); ec) {
-      cntx_->Cancel();
-      LOG(INFO) << "Error in REPLCONF acl-check: " << ec.message();
-    } else if (!CheckRespIsSimpleReply("OK")) {
-      cntx_->Cancel();
-      LOG(INFO) << "Error: " << ToSV(LastResponseArgs().front().GetBuf());
-    }
-  }
-
- private:
-  void Connect() {
-    VLOG(1) << "Connecting with acl client";
-    auto ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, cntx_);
-    if (ec) {
-      LOG(INFO) << "Failed to connect with acl client " << ec.message();
-      cntx_->Cancel();
-    }
-  }
-
-  Context* cntx_;
-};
-
-void Replica::AclCheckFb() {
-  // We need a new client with a different socket for acl-checks
-  // instead of using the ACK's fiber. This is because acks should
-  // not be replied (which makes them unusable for periodic ACL checks).
-  // Also there are N ACK fibers per replica instance while we only need
-  // one fiber to periodically check for ACL changes. Therefore,
-  // we decouple the logic via AclCheckFb.
-  AclCheckerClient acl_client(server(), &cntx_);
-
-  while (!cntx_.IsCancelled()) {
-    acl_client.CheckAclRoundTrip();
-    // We poll for ACL changes every second
-    replica_waker_.await_until([&]() { return cntx_.IsCancelled(); },
-                               std::chrono::steady_clock::now() + std::chrono::seconds(1));
-  }
-}
-
 void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
   constexpr size_t kAckRecordMaxInterval = 1024;
   std::chrono::duration ack_time_max_interval =
@@ -982,6 +925,7 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
       flow_id_(flow_id) {
   use_multi_shard_exe_sync_ = GetFlag(FLAGS_enable_multi_shard_sync);
   executor_ = std::make_unique<JournalExecutor>(service);
+  rdb_loader_ = std::make_unique<RdbLoader>(&service_);
 }
 
 DflyShardReplica::~DflyShardReplica() {
@@ -1224,6 +1168,7 @@ void DflyShardReplica::JoinFlow() {
 }
 
 void DflyShardReplica::Cancel() {
+  rdb_loader_->stop();
   CloseSocket();
   shard_replica_waker_.notifyAll();
 }

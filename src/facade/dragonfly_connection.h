@@ -14,11 +14,11 @@
 #include <utility>
 #include <variant>
 
-#include "base/io_buf.h"
 #include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "facade/memcache_parser.h"
 #include "facade/resp_expr.h"
+#include "io/io_buf.h"
 #include "util/connection.h"
 #include "util/fibers/fibers.h"
 #include "util/http/http_handler.h"
@@ -271,10 +271,7 @@ class Connection : public util::Connection {
     return protocol_;
   }
 
-  void SetName(std::string name) {
-    util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
-    name_ = std::move(name);
-  }
+  void SetName(std::string name);
 
   std::string_view GetName() const {
     return name_;
@@ -282,7 +279,7 @@ class Connection : public util::Connection {
 
   struct MemoryUsage {
     size_t mem = 0;
-    base::IoBuf::MemoryUsage buf_mem;
+    io::IoBuf::MemoryUsage buf_mem;
   };
   MemoryUsage GetMemoryUsage() const;
 
@@ -397,7 +394,7 @@ class Connection : public util::Connection {
 
   size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued async commands in dispatch_q
 
-  base::IoBuf io_buf_;  // used in io loop and parsers
+  io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
 

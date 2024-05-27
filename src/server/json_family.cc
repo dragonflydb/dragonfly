@@ -30,7 +30,7 @@
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
 
-ABSL_FLAG(bool, jsonpathv2, false,
+ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
 ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
@@ -1212,7 +1212,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
                      std::string_view json_str, bool is_nx_condition, bool is_xx_condition) {
   std::optional<JsonType> parsed_json = JsonFromString(json_str);
   if (!parsed_json) {
-    LOG(WARNING) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
     return OpStatus::SYNTAX_ERR;
   }
 
@@ -1287,6 +1287,55 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   }
 
   return operation_result;
+}
+
+// Implements the recursive algorithm from
+// https://datatracker.ietf.org/doc/html/rfc7386#section-2
+void RecursiveMerge(const JsonType& patch, JsonType* dest) {
+  if (!patch.is_object()) {
+    *dest = patch;
+    return;
+  }
+
+  if (!dest->is_object()) {
+    *dest = JsonType(json_object_arg, dest->get_allocator());
+  }
+
+  for (const auto& k_v : patch.object_range()) {
+    if (k_v.value().is_null()) {
+      dest->erase(k_v.key());
+    } else {
+      RecursiveMerge(k_v.value(), &dest->at(k_v.key()));
+    }
+  }
+}
+
+OpStatus OpMerge(const OpArgs& op_args, string_view key, std::string_view json_str) {
+  std::optional<JsonType> parsed_json = JsonFromString(json_str);
+  if (!parsed_json) {
+    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    return OpStatus::SYNTAX_ERR;
+  }
+
+  auto& db_slice = op_args.shard->db_slice();
+  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  if (it_res.ok()) {
+    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_res->it->second);
+
+    JsonType* obj = it_res->it->second.GetJson();
+    RecursiveMerge(*parsed_json, obj);
+    it_res->post_updater.Run();
+    op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
+    return OpStatus::OK;
+  }
+
+  // We add a new key only with path being root.
+  if (it_res.status() != OpStatus::KEY_NOTFOUND) {
+    return it_res.status();
+  }
+
+  // Add a new key.
+  return OpSet(op_args, key, "$", json_str, false, false).status();
 }
 
 io::Result<JsonPathV2, string> ParsePathV2(string_view path) {
@@ -1365,6 +1414,8 @@ void JsonFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(facade::WrongNumArgsError("json.mset"));
   }
 
+  return cntx->SendError("Not implemented");
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
     (void)args;  // TBD
@@ -1374,6 +1425,27 @@ void JsonFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   trans->ScheduleSingleHop(cb);
   cntx->SendOk();
+}
+
+// JSON.MERGE key path value
+// Based on https://datatracker.ietf.org/doc/html/rfc7386 spec
+void JsonFamily::Merge(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view path = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
+
+  if (path != "." && path != "$") {
+    return cntx->SendError("Only root path is supported", kSyntaxErrType);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpMerge(t->GetOpArgs(shard), key, value);
+  };
+
+  OpStatus status = cntx->transaction->ScheduleSingleHop(cb);
+  if (status == OpStatus::OK)
+    return cntx->SendOk();
+  cntx->SendError(status);
 }
 
 void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
@@ -2016,6 +2088,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 // TODO: Add sensible defaults/categories to json commands
 
 void JsonFamily::Register(CommandRegistry* registry) {
+  constexpr size_t kMsetFlags = CO::WRITE | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS;
   registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST | CO::REVERSE_MAPPING, -3, 1, -2, acl::JSON}
@@ -2045,9 +2118,9 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -3, 2, 2, acl::JSON}.HFUNC(Debug)
             << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
             << CI{"JSON.SET", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
-            << CI{"JSON.MSET", CO::WRITE | CO::DENYOOM | CO::FAST | CO::INTERLEAVED_KEYS, -4, 1, -1,
-                  acl::JSON}
-                   .HFUNC(MSet);
+            << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)
+            << CI{"JSON.MERGE", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(
+                   Merge);
 }
 
 }  // namespace dfly

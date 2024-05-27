@@ -25,7 +25,7 @@ namespace journal {
 class Journal;
 }  // namespace journal
 
-class TieredStorageV2;
+class TieredStorage;
 class ShardDocIndices;
 class BlockingController;
 
@@ -113,8 +113,8 @@ class EngineShard {
   // Returns used memory for this shard.
   size_t UsedMemory() const;
 
-  TieredStorageV2* tiered_storage_v2() {
-    return tiered_storage_v2_.get();
+  TieredStorage* tiered_storage() {
+    return tiered_storage_.get();
   }
 
   ShardDocIndices* search_indices() const {
@@ -183,11 +183,14 @@ class EngineShard {
 
   TxQueueInfo AnalyzeTxQueue() const;
 
+  void ForceDefrag();
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
     uint64_t cursor = 0u;
-    bool underutilized_found = false;
+    time_t last_check_time = 0;
+    bool is_force_defrag = false;
 
     // check the current threshold and return true if
     // we need to do the defragmentation
@@ -249,7 +252,7 @@ class EngineShard {
   util::fb2::Done fiber_periodic_done_;
 
   DefragTaskState defrag_state_;
-  std::unique_ptr<TieredStorageV2> tiered_storage_v2_;
+  std::unique_ptr<TieredStorage> tiered_storage_;
   std::unique_ptr<ShardDocIndices> shard_search_indices_;
   std::unique_ptr<BlockingController> blocking_controller_;
 

@@ -79,6 +79,10 @@ ABSL_FLAG(bool, version_check, true,
 
 ABSL_FLAG(uint16_t, tcp_backlog, 128, "TCP listen(2) backlog parameter.");
 
+#ifdef __linux__
+ABSL_DECLARE_FLAG(bool, enable_direct_fd);
+#endif
+
 using namespace util;
 using namespace facade;
 using namespace io;
@@ -288,7 +292,8 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   if (mc_port > 0 && !tcp_disabled) {
     auto listener = MakeListener(Protocol::MEMCACHE, &service);
-    acceptor->AddListener(mc_port, listener.release());
+    acceptor->AddListener(mc_port, listener.get());
+    listeners.push_back(listener.release());
   }
 
   service.Init(acceptor, listeners, opts);
@@ -708,13 +713,17 @@ Usage: dragonfly [FLAGS]
   // export MIMALLOC_VERBOSE=1 to see the options before the override.
   mi_option_enable(mi_option_show_errors);
   mi_option_set(mi_option_max_warnings, 0);
-  mi_option_set(mi_option_decommit_delay, 1);
+  mi_option_enable(mi_option_purge_decommits);
 
   fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 
   unique_ptr<util::ProactorPool> pool;
 
 #ifdef __linux__
+  // NOTE: Seems that enable_direct_fd causes sockets leakage.
+  // Until it is fixed in helio, we disable it.
+  absl::SetFlag(&FLAGS_enable_direct_fd, false);
+
   base::sys::KernelVersion kver;
   base::sys::GetKernelVersion(&kver);
 

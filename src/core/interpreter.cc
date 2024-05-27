@@ -474,18 +474,26 @@ int RedisLogCommand(lua_State* lua) {
 void* mimalloc_glue(void* ud, void* ptr, size_t osize, size_t nsize) {
   (void)ud;
   if (nsize == 0) {
+    InterpreterManager::tl_stats().used_bytes -= mi_usable_size(ptr);
     mi_free_size(ptr, osize);
     return nullptr;
   } else if (ptr == nullptr) {
-    return mi_malloc(nsize);
+    ptr = mi_malloc(nsize);
+    InterpreterManager::tl_stats().used_bytes += mi_usable_size(ptr);
+    return ptr;
   } else {
-    return mi_realloc(ptr, nsize);
+    InterpreterManager::tl_stats().used_bytes -= mi_usable_size(ptr);
+    ptr = mi_realloc(ptr, nsize);
+    InterpreterManager::tl_stats().used_bytes += mi_usable_size(ptr);
+    return ptr;
   }
 }
 
 }  // namespace
 
 Interpreter::Interpreter() {
+  InterpreterManager::tl_stats().interpreter_cnt++;
+
   lua_ = lua_newstate(mimalloc_glue, nullptr);
   InitLua(lua_);
   void** ptr = static_cast<void**>(lua_getextraspace(lua_));
@@ -562,6 +570,8 @@ Interpreter::Interpreter() {
 }
 
 Interpreter::~Interpreter() {
+  InterpreterManager::tl_stats().interpreter_cnt--;
+
   lua_close(lua_);
 }
 
@@ -1031,6 +1041,19 @@ int Interpreter::RedisAPCallCommand(lua_State* lua) {
   return reinterpret_cast<Interpreter*>(*ptr)->RedisGenericCommand(false, true);
 }
 
+InterpreterManager::Stats& InterpreterManager::Stats::operator+=(const Stats& other) {
+  this->used_bytes += other.used_bytes;
+  this->interpreter_cnt += other.interpreter_cnt;
+  this->blocked_cnt += other.blocked_cnt;
+
+  return *this;
+}
+
+InterpreterManager::Stats& InterpreterManager::tl_stats() {
+  static thread_local Stats stats;
+  return stats;
+}
+
 Interpreter* InterpreterManager::Get() {
   // Grow if none is available and we have unused capacity left.
   if (available_.empty() && storage_.size() < storage_.capacity()) {
@@ -1038,7 +1061,8 @@ Interpreter* InterpreterManager::Get() {
     return &storage_.back();
   }
 
-  waker_.await([this]() { return available_.size() > 0; });
+  bool blocked = waker_.await([this]() { return available_.size() > 0; });
+  tl_stats().blocked_cnt += (uint64_t)blocked;
 
   Interpreter* ir = available_.back();
   available_.pop_back();

@@ -93,7 +93,7 @@ bool MatchHttp11Line(string_view line) {
          absl::EndsWith(line, "HTTP/1.1");
 }
 
-void UpdateIoBufCapacity(const base::IoBuf& io_buf, ConnectionStats* stats,
+void UpdateIoBufCapacity(const io::IoBuf& io_buf, ConnectionStats* stats,
                          absl::FunctionRef<void()> f) {
   const size_t prev_capacity = io_buf.Capacity();
   f();
@@ -801,6 +801,11 @@ bool Connection::IsMain() const {
   return static_cast<Listener*>(listener())->IsMainInterface();
 }
 
+void Connection::SetName(std::string name) {
+  util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
+  name_ = std::move(name);
+}
+
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   if (!IsPrivileged() && !IsMain()) {
     return false;
@@ -1453,7 +1458,7 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   CHECK(!cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
-  if (dispatch_fb_.IsJoinable()) {  // can't move once it started
+  if (dispatch_fb_.IsJoinable() || cc_->conn_closing) {  // can't move once it started
     return false;
   }
 

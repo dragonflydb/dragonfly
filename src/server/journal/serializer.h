@@ -7,8 +7,8 @@
 #include <optional>
 #include <string>
 
-#include "base/io_buf.h"
 #include "io/io.h"
+#include "io/io_buf.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 
@@ -26,11 +26,11 @@ class JournalWriter {
 
  private:
   void Write(std::string_view sv);  // Write string.
+  void Write(facade::MutableSlice slice) {
+    Write(facade::ToSV(slice));
+  }
 
-  template <typename C>  // CmdArgList or ArgSlice.
-  void Write(std::pair<std::string_view, C> args);
-
-  void Write(std::monostate);  // Overload for empty std::variant
+  void Write(const journal::Entry::Payload& payload);
 
  private:
   io::Sink* sink_;

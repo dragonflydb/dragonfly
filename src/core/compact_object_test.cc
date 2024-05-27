@@ -106,9 +106,6 @@ class CompactObjectTest : public ::testing::Test {
 };
 
 TEST_F(CompactObjectTest, WastedMemoryDetection) {
-  GTEST_SKIP() << "TODO: this test is unreliable and must be revisited";
-  mi_option_set(mi_option_decommit_delay, 0);
-
   size_t allocated = 0, commited = 0, wasted = 0;
   // By setting the threshold to high value we are expecting
   // To find locations where we have wasted memory
@@ -181,15 +178,12 @@ TEST_F(CompactObjectTest, WastedMemoryDetection) {
 }
 
 TEST_F(CompactObjectTest, WastedMemoryDontCount) {
-  GTEST_SKIP() << "TODO: this test is unreliable and must be revisited";
-
   // The commited memory per blocks are:
   // 64bit => 4K
   // 128bit => 8k
   // 256 => 16k
   // and so on, which mean every n * sizeof(ptr) ^ 2 == 2^11*2*(n-1) (where n starts with 1)
   constexpr std::size_t kExpectedFor256MemWasted = 0x4000;  // memory block 256
-  mi_option_set(mi_option_decommit_delay, 0);
   auto* myheap = mi_heap_get_backing();
 
   size_t allocated = 0, commited = 0, wasted = 0;

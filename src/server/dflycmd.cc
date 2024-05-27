@@ -688,13 +688,13 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
     // the same applies of course if its state is not STABLE_SYNC.
     if (info->mu.try_lock()) {
       state = info->replica_state;
-      // If the replica is not in stable sync, its lag is undefined, so we set it as max.
+      // If the replica is not in stable sync, its lag is undefined, so we set it to 0.
       if (state != SyncState::STABLE_SYNC) {
-        lag = std::numeric_limits<LSN>::max();
+        lag = 0;
       }
       info->mu.unlock();
     } else {
-      lag = std::numeric_limits<LSN>::max();
+      lag = 0;
     }
     vec.push_back(
         ReplicaRoleInfo{info->id, info->address, info->listening_port, SyncStateName(state), lag});
@@ -719,10 +719,10 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
       const auto& flow = info->flows[shard->shard_id()];
 
       if (flow.streamer)
-        stats->streamer_buf_capacity_bytes_ += flow.streamer->GetTotalBufferCapacities();
+        stats->streamer_buf_capacity_bytes += flow.streamer->GetTotalBufferCapacities();
 
       if (flow.saver)
-        stats->full_sync_buf_bytes_ += flow.saver->GetTotalBuffersSize();
+        stats->full_sync_buf_bytes += flow.saver->GetTotalBuffersSize();
     }
   };
   shard_set->RunBlockingInParallel(cb);

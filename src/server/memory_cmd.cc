@@ -12,13 +12,13 @@
 
 #include <mimalloc.h>
 
-#include "base/io_buf.h"
 #include "base/logging.h"
 #include "core/allocation_tracker.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/error.h"
+#include "io/io_buf.h"
 #include "server/engine_shard_set.h"
 #include "server/main_service.h"
 #include "server/server_family.h"
@@ -98,8 +98,10 @@ void MemoryCmd::Run(CmdArgList args) {
         "MEMORY <subcommand> [<arg> ...]. Subcommands are:",
         "STATS",
         "    Shows breakdown of memory.",
-        "MALLOC-STATS [BACKING] [thread-id]",
-        "    Show malloc stats for a heap residing in specified thread-id. 0 by default.",
+        "MALLOC-STATS",
+        "    Show global malloc stats as provided by allocator libraries",
+        "ARENA [BACKING] [thread-id]",
+        "    Show mimalloc arena stats for a heap residing in specified thread-id. 0 by default.",
         "    If BACKING is specified, show stats for the backing heap.",
         "USAGE <key>",
         "    Show memory usage of a key.",
@@ -146,12 +148,24 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (sub_cmd == "MALLOC-STATS") {
-    return MallocStats(args);
+    return MallocStats();
+  }
+
+  if (sub_cmd == "ARENA") {
+    return ArenaStats(args);
   }
 
   if (sub_cmd == "TRACK") {
     args.remove_prefix(1);
     return Track(args);
+  }
+
+  if (sub_cmd == "DEFRAGMENT") {
+    shard_set->pool()->DispatchOnAll([this](util::ProactorBase*) {
+      if (auto* shard = EngineShard::tlocal(); shard)
+        shard->ForceDefrag();
+    });
+    return cntx_->SendSimpleString("OK");
   }
 
   string err = UnknownSubCmd(sub_cmd, "MEMORY");
@@ -164,11 +178,11 @@ struct ConnectionMemoryUsage {
   size_t connection_count = 0;
   size_t connection_size = 0;
   size_t pipelined_bytes = 0;
-  base::IoBuf::MemoryUsage connections_memory;
+  io::IoBuf::MemoryUsage connections_memory;
 
   size_t replication_connection_count = 0;
   size_t replication_connection_size = 0;
-  base::IoBuf::MemoryUsage replication_memory;
+  io::IoBuf::MemoryUsage replication_memory;
 };
 
 ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
@@ -276,7 +290,35 @@ void MemoryCmd::Stats() {
   }
 }
 
-void MemoryCmd::MallocStats(CmdArgList args) {
+void MemoryCmd::MallocStats() {
+  string report;
+
+#if __GLIBC__  // MUSL/alpine do not have mallinfo routines.
+#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33)
+  struct mallinfo2 malloc_info = mallinfo2();
+#else
+  struct mallinfo malloc_info = mallinfo();  // buggy because 32-bit stats may overflow.
+#endif
+
+  absl::StrAppend(&report, "___ Begin malloc stats ___\n");
+  absl::StrAppend(&report, "arena: ", malloc_info.arena, ", ordblks: ", malloc_info.ordblks,
+                  ", smblks: ", malloc_info.smblks, "\n");
+  absl::StrAppend(&report, "hblks: ", malloc_info.hblks, ", hblkhd: ", malloc_info.hblkhd,
+                  ", usmblks: ", malloc_info.usmblks, "\n");
+  absl::StrAppend(&report, "fsmblks: ", malloc_info.fsmblks, ", uordblks: ", malloc_info.uordblks,
+                  ", fordblks: ", malloc_info.fordblks, ", keepcost: ", malloc_info.keepcost, "\n");
+  absl::StrAppend(&report, "___ End malloc stats ___\n\n");
+#endif
+
+  absl::StrAppend(&report, "___ Begin mimalloc stats ___\n");
+  mi_stats_print_out(MiStatsCallback, &report);
+  absl::StrAppend(&report, "___ End mimalloc stats ___\n\n");
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  return rb->SendVerbatimString(report);
+}
+
+void MemoryCmd::ArenaStats(CmdArgList args) {
   uint32_t tid = 0;
   bool backing = false;
   if (args.size() >= 2) {
@@ -302,34 +344,11 @@ void MemoryCmd::MallocStats(CmdArgList args) {
     return cntx_->SendError(absl::StrCat("Thread id must be less than ", shard_set->size()));
   }
 
-  string report;
-
-#if __GLIBC__  // MUSL/alpine do not have mallinfo routines.
-#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 33)
-  struct mallinfo2 malloc_info = mallinfo2();
-#else
-  struct mallinfo malloc_info = mallinfo();  // buggy because 32-bit stats may overflow.
-#endif
-
-  absl::StrAppend(&report, "___ Begin malloc stats ___\n");
-  absl::StrAppend(&report, "arena: ", malloc_info.arena, ", ordblks: ", malloc_info.ordblks,
-                  ", smblks: ", malloc_info.smblks, "\n");
-  absl::StrAppend(&report, "hblks: ", malloc_info.hblks, ", hblkhd: ", malloc_info.hblkhd,
-                  ", usmblks: ", malloc_info.usmblks, "\n");
-  absl::StrAppend(&report, "fsmblks: ", malloc_info.fsmblks, ", uordblks: ", malloc_info.uordblks,
-                  ", fordblks: ", malloc_info.fordblks, ", keepcost: ", malloc_info.keepcost, "\n");
-  absl::StrAppend(&report, "___ End malloc stats ___\n\n");
-#endif
-
-  absl::StrAppend(&report, "___ Begin mimalloc stats ___\n");
-  mi_stats_print_out(MiStatsCallback, &report);
-
   string mi_malloc_info =
       shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStatsCb(backing, tid); });
-  report.append(std::move(mi_malloc_info));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
-  return rb->SendVerbatimString(report);
+  return rb->SendVerbatimString(mi_malloc_info);
 }
 
 void MemoryCmd::Usage(std::string_view key) {

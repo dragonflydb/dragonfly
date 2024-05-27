@@ -2,8 +2,8 @@
 // See LICENSE for licensing terms.
 //
 
-#include "base/io_buf.h"
 #include "io/io.h"
+#include "io/io_buf.h"
 #include "server/common.h"
 
 namespace dfly {
@@ -20,7 +20,7 @@ class BufferedStreamerBase : public io::Sink {
  protected:
   // Initialize with global cancellation and optional stall conditions.
   BufferedStreamerBase(const Cancellation* cll, unsigned max_buffered_cnt = 5,
-                       unsigned max_buffered_mem = 512)
+                       unsigned max_buffered_mem = 8192)
       : cll_{cll}, max_buffered_cnt_{max_buffered_cnt}, max_buffered_mem_{max_buffered_mem} {
   }
 
@@ -72,7 +72,7 @@ class BufferedStreamerBase : public io::Sink {
   unsigned max_buffered_cnt_;  // Max buffered entries before stall
   unsigned max_buffered_mem_;  // Max buffered mem before stall
 
-  base::IoBuf producer_buf_, consumer_buf_;  // Two buffers that are swapped in turns.
+  io::IoBuf producer_buf_, consumer_buf_;  // Two buffers that are swapped in turns.
 };
 
 }  // namespace dfly

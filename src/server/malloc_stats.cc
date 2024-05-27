@@ -4,7 +4,7 @@
 
 // clang-format off
 #include <mimalloc.h>
-#include <mimalloc-types.h>
+#include <mimalloc/types.h>
 
 // clang-format on
 
