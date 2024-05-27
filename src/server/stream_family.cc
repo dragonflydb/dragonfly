@@ -793,6 +793,7 @@ namespace {
 stream* GetReadOnlyStream(const CompactObj& cobj) {
   return const_cast<stream*>((const stream*)cobj.RObjPtr());
 }
+
 }  // namespace
 
 // Returns a map of stream to the ID of the last entry in the stream. Any
@@ -2007,6 +2008,35 @@ optional<pair<AddTrimOpts, unsigned>> ParseAddOrTrimArgsOrReply(CmdArgList args,
   return make_pair(opts, id_indx);
 }
 
+void FetchGroupInfo(Transaction* tx, ReadOpts* opts) {
+  vector<vector<GroupConsumerPair>> res_pairs(shard_set->size());
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto sid = shard->shard_id();
+    ShardArgs s_args = t->GetShardArgs(sid);
+    GroupConsumerPairOpts gc_opts = {opts->group_name, opts->consumer_name};
+
+    res_pairs[sid] = OpGetGroupConsumerPairs(s_args, t->GetOpArgs(shard), gc_opts);
+    return OpStatus::OK;
+  };
+
+  tx->Execute(std::move(cb), false);
+
+  for (size_t i = 0; i < shard_set->size(); i++) {
+    auto s_item = res_pairs[i];
+    auto s_args = tx->GetShardArgs(i);
+    if (s_item.size() == 0) {
+      continue;
+    }
+    unsigned index = 0;
+    for (string_view key : s_args) {
+      StreamIDsItem& item = opts->stream_ids.at(key);
+      item.consumer = s_item[index].consumer;
+      item.group = s_item[index].group;
+      ++index;
+    }
+  }
+}
+
 }  // namespace
 
 void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
@@ -2777,7 +2807,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
 }
 
 // Returns the last ID of each stream in the transaction.
-OpResult<unordered_map<string_view, streamID>> StreamLastIDs(Transaction* trans) {
+OpResult<unordered_map<string_view, streamID>> FetchLastStreamIDs(Transaction* trans) {
   vector<OpResult<vector<pair<string_view, streamID>>>> last_ids_res(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -2897,9 +2927,10 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
 // Read entries from given streams
 void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  auto last_ids = StreamLastIDs(cntx->transaction);
+
+  // First, read all last stream ids
+  auto last_ids = FetchLastStreamIDs(cntx->transaction);
   if (!last_ids) {
-    // Close the transaction.
     cntx->transaction->Conclude();
 
     if (last_ids.status() == OpStatus::WRONG_TYPE) {
@@ -3033,36 +3064,10 @@ void XReadGeneric(CmdArgList args, bool read_group, ConnectionContext* cntx) {
     return;
   }
 
-  vector<vector<GroupConsumerPair>> res_pairs(shard_set->size());
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto sid = shard->shard_id();
-    ShardArgs s_args = t->GetShardArgs(sid);
-    GroupConsumerPairOpts gc_opts = {opts->group_name, opts->consumer_name};
-
-    res_pairs[sid] = OpGetGroupConsumerPairs(s_args, t->GetOpArgs(shard), gc_opts);
-    return OpStatus::OK;
-  };
-
   if (opts->read_group) {
-    // If the command is `XReadGroup`, we need to get
-    // the (group, consumer) pairs for each key.
-    cntx->transaction->Execute(std::move(cb), false);
-
-    for (size_t i = 0; i < shard_set->size(); i++) {
-      auto s_item = res_pairs[i];
-      auto s_args = cntx->transaction->GetShardArgs(i);
-      if (s_item.size() == 0) {
-        continue;
-      }
-      unsigned index = 0;
-      for (string_view key : s_args) {
-        StreamIDsItem& item = opts->stream_ids.at(key);
-        item.consumer = s_item[index].consumer;
-        item.group = s_item[index].group;
-        ++index;
-      }
-    }
+    FetchGroupInfo(cntx->transaction, &*opts);
   }
+
   return XReadImpl(args, opts, cntx);
 }
 
