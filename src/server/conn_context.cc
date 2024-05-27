@@ -298,15 +298,10 @@ void ConnectionState::ClientTracking::Track(ConnectionContext* cntx, const Comma
   auto& info = cntx->conn_state.tracking_info_;
   if ((cid->opt_mask() & CO::READONLY) && cid->IsTransactional() && info.ShouldTrackKeys()) {
     auto conn = cntx->conn()->Borrow();
-    auto cb = [&, conn](unsigned i, auto* pb) {
-      auto* t = cntx->transaction;
-      CHECK(t);
-      auto* shard = EngineShard::tlocal();
-      if (shard && t->IsActive(i)) {
-        OpTrackKeys(t->GetOpArgs(shard), conn, t->GetShardArgs(shard->shard_id()));
-      }
-    };
-    shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+    auto* t = cntx->transaction;
+    CHECK(t);
+    auto* shard = EngineShard::tlocal();
+    OpTrackKeys(t->GetOpArgs(shard), conn, t->GetShardArgs(shard->shard_id()));
   }
 }
 }  // namespace dfly
