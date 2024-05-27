@@ -2037,6 +2037,50 @@ void FetchGroupInfo(Transaction* tx, ReadOpts* opts) {
   }
 }
 
+struct StreamReplies {
+  explicit StreamReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
+    DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
+  }
+
+  void SendRecord(const Record& record) const {
+    rb->StartArray(2);
+    rb->SendBulkString(StreamIdRepr(record.id));
+    rb->StartArray(record.kv_arr.size() * 2);
+    for (const auto& k_v : record.kv_arr) {
+      rb->SendBulkString(k_v.first);
+      rb->SendBulkString(k_v.second);
+    }
+  }
+
+  void SendIDs(absl::Span<const streamID> ids) const {
+    rb->StartArray(ids.size());
+    for (auto id : ids)
+      rb->SendBulkString(StreamIdRepr(id));
+  }
+
+  void SendRecords(absl::Span<const Record> records) const {
+    rb->StartArray(records.size());
+    for (const auto& record : records)
+      SendRecord(record);
+  }
+
+  void SendStreamRecords(string_view key, absl::Span<const Record> records) const {
+    rb->StartArray(2);
+    rb->SendBulkString(key);
+    SendRecords(records);
+  }
+
+  void SendClaimInfo(const ClaimInfo& ci) const {
+    if (ci.justid) {
+      SendIDs(ci.ids);
+    } else {
+      SendRecords(ci.records);
+    }
+  }
+
+  RedisReplyBuilder* rb;
+};
+
 }  // namespace
 
 void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
@@ -2177,26 +2221,7 @@ void StreamFamily::XClaim(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  ClaimInfo cresult = result.value();
-  if (cresult.justid) {
-    rb->StartArray(cresult.ids.size());
-    for (auto id : cresult.ids) {
-      rb->SendBulkString(StreamIdRepr(id));
-    }
-  } else {
-    const RecordVec& crec = cresult.records;
-    rb->StartArray(crec.size());
-    for (const auto& item : crec) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& [k, v] : item.kv_arr) {
-        rb->SendBulkString(k);
-        rb->SendBulkString(v);
-      }
-    }
-  }
+  StreamReplies{cntx->reply_builder()}.SendClaimInfo(result.value());
 }
 
 void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
@@ -2393,16 +2418,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
         if (full) {
           rb->SendBulkString("entries");
-          rb->StartArray(sinfo->entries.size());
-          for (const auto& entry : sinfo->entries) {
-            rb->StartArray(2);
-            rb->SendBulkString(StreamIdRepr(entry.id));
-            rb->StartArray(2);
-            for (const auto& k_v : entry.kv_arr) {
-              rb->SendBulkString(k_v.first);
-              rb->SendBulkString(k_v.second);
-            }
-          }
+          StreamReplies{rb}.SendRecords(sinfo->entries);
 
           rb->SendBulkString("groups");
           rb->StartArray(sinfo->cgroups.size());
@@ -2476,26 +2492,14 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
           rb->SendBulkString("first-entry");
           if (sinfo->first_entry.kv_arr.size() != 0) {
-            rb->StartArray(2);
-            rb->SendBulkString(StreamIdRepr(sinfo->first_entry.id));
-            rb->StartArray(sinfo->first_entry.kv_arr.size() * 2);
-            for (pair<string, string> k_v : sinfo->first_entry.kv_arr) {
-              rb->SendBulkString(k_v.first);
-              rb->SendBulkString(k_v.second);
-            }
+            StreamReplies{rb}.SendRecord(sinfo->first_entry);
           } else {
             rb->SendNullArray();
           }
 
           rb->SendBulkString("last-entry");
           if (sinfo->last_entry.kv_arr.size() != 0) {
-            rb->StartArray(2);
-            rb->SendBulkString(StreamIdRepr(sinfo->last_entry.id));
-            rb->StartArray(sinfo->last_entry.kv_arr.size() * 2);
-            for (pair<string, string> k_v : sinfo->last_entry.kv_arr) {
-              rb->SendBulkString(k_v.first);
-              rb->SendBulkString(k_v.second);
-            }
+            StreamReplies{rb}.SendRecord(sinfo->last_entry);
           } else {
             rb->SendNullArray();
           }
@@ -2902,23 +2906,8 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
 
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-
     rb->StartArray(1);
-
-    rb->StartArray(2);
-    rb->SendBulkString(key);
-
-    rb->StartArray(result->size());
-    for (const auto& item : *result) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& k_v : item.kv_arr) {
-        rb->SendBulkString(k_v.first);
-        rb->SendBulkString(k_v.second);
-      }
-    }
-    return;
+    StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, *result);
   } else {
     return rb->SendNullArray();
   }
@@ -3043,18 +3032,8 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
       continue;
     }
 
-    rb->StartArray(2);
-    rb->SendBulkString(ArgS(args, i + opts->streams_arg));
-    rb->StartArray(res[i].size());
-    for (const auto& item : res[i]) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& k_v : item.kv_arr) {
-        rb->SendBulkString(k_v.first);
-        rb->SendBulkString(k_v.second);
-      }
-    }
+    string_view key = ArgS(args, i + opts->streams_arg);
+    StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, res[i]);
   }
 }
 
@@ -3168,17 +3147,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-
-    rb->StartArray(result->size());
-    for (const auto& item : *result) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& k_v : item.kv_arr) {
-        rb->SendBulkString(k_v.first);
-        rb->SendBulkString(k_v.second);
-      }
-    }
+    StreamReplies{cntx->reply_builder()}.SendRecords(*result);
     return;
   }
 
@@ -3279,29 +3248,8 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(3);
   rb->SendBulkString(StreamIdRepr(cresult.end_id));
-  if (cresult.justid) {
-    rb->StartArray(cresult.ids.size());
-    for (auto id : cresult.ids) {
-      rb->SendBulkString(StreamIdRepr(id));
-    }
-  } else {
-    const RecordVec& crec = cresult.records;
-    rb->StartArray(crec.size());
-    for (const auto& item : crec) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& [k, v] : item.kv_arr) {
-        rb->SendBulkString(k);
-        rb->SendBulkString(v);
-      }
-    }
-  }
-
-  rb->StartArray(cresult.deleted_ids.size());
-  for (auto id : cresult.deleted_ids) {
-    rb->SendBulkString(StreamIdRepr(id));
-  }
+  StreamReplies{rb}.SendClaimInfo(cresult);
+  StreamReplies{rb}.SendIDs(cresult.deleted_ids);
 }
 
 #define HFUNC(x) SetHandler(&StreamFamily::x)
