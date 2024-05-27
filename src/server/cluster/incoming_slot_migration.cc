@@ -38,7 +38,7 @@ class ClusterShardMigration {
       socket_ = nullptr;
     });
     JournalReader reader{source, 0};
-    TransactionReader tx_reader{false};
+    TransactionReader tx_reader;
 
     while (!cntx->IsCancelled()) {
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
@@ -89,10 +89,10 @@ class ClusterShardMigration {
     CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
     if (!tx_data.IsGlobalCmd()) {
       VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
-      executor_.Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
+      executor_.Execute(tx_data.dbid, tx_data.command);
     } else {
       // TODO check which global commands should be supported
-      CHECK(false) << "We don't support command: " << ToSV(tx_data.commands.front().cmd_args[0])
+      CHECK(false) << "We don't support command: " << ToSV(tx_data.command.cmd_args[0])
                    << "in cluster migration process.";
     }
   }

@@ -12,8 +12,6 @@
 using namespace std;
 using namespace facade;
 
-ABSL_DECLARE_FLAG(bool, enable_multi_shard_sync);
-
 namespace dfly {
 
 bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
@@ -50,7 +48,6 @@ void MultiShardExecution::CancelAllBlockingEntities() {
 }
 
 void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
-  ++journal_rec_count;
   opcode = entry.opcode;
 
   switch (entry.opcode) {
@@ -63,7 +60,7 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
     case journal::Op::MULTI_COMMAND:
-      commands.push_back(std::move(entry.cmd));
+      command = std::move(entry.cmd);
       [[fallthrough]];
     case journal::Op::EXEC:
       shard_cnt = entry.shard_cnt;
@@ -76,11 +73,6 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
 }
 
 bool TransactionData::IsGlobalCmd() const {
-  if (commands.size() > 1) {
-    return false;
-  }
-
-  auto& command = commands.front();
   if (command.cmd_args.empty()) {
     return false;
   }
@@ -96,7 +88,7 @@ bool TransactionData::IsGlobalCmd() const {
   return false;
 }
 
-TransactionData TransactionData::FromSingle(journal::ParsedEntry&& entry) {
+TransactionData TransactionData::FromEntry(journal::ParsedEntry&& entry) {
   TransactionData data;
   data.AddEntry(std::move(entry));
   return data;
@@ -116,35 +108,14 @@ std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* read
       VLOG(2) << "read lsn: " << *lsn_;
     }
 
-    // Check if journal command can be executed right away.
-    // Expiration checks lock on master, so it never conflicts with running multi transactions.
-    if (res->opcode == journal::Op::EXPIRED || res->opcode == journal::Op::COMMAND ||
-        res->opcode == journal::Op::PING || res->opcode == journal::Op::FIN ||
-        res->opcode == journal::Op::LSN ||
-        (res->opcode == journal::Op::MULTI_COMMAND && !accumulate_multi_)) {
-      TransactionData tx_data = TransactionData::FromSingle(std::move(res.value()));
-      if (lsn_.has_value() && tx_data.opcode == journal::Op::LSN) {
-        DCHECK_NE(tx_data.lsn, 0u);
-        LOG_IF_EVERY_N(WARNING, tx_data.lsn != *lsn_, 10000)
-            << "master lsn:" << tx_data.lsn << " replica lsn" << *lsn_;
-        DCHECK_EQ(tx_data.lsn, *lsn_);
-      }
-      return tx_data;
+    TransactionData tx_data = TransactionData::FromEntry(std::move(res.value()));
+    if (lsn_.has_value() && tx_data.opcode == journal::Op::LSN) {
+      DCHECK_NE(tx_data.lsn, 0u);
+      LOG_IF_EVERY_N(WARNING, tx_data.lsn != *lsn_, 10000)
+          << "master lsn:" << tx_data.lsn << " replica lsn" << *lsn_;
+      DCHECK_EQ(tx_data.lsn, *lsn_);
     }
-
-    // Otherwise, continue building multi command.
-    DCHECK(res->opcode == journal::Op::MULTI_COMMAND || res->opcode == journal::Op::EXEC);
-    DCHECK(res->txid > 0 || res->shard_cnt == 1);
-
-    auto txid = res->txid;
-    auto& txdata = current_[txid];
-    txdata.AddEntry(std::move(res.value()));
-    // accumulate multi until we get exec opcode.
-    if (txdata.opcode == journal::Op::EXEC) {
-      auto out = std::move(txdata);
-      current_.erase(txid);
-      return out;
-    }
+    return tx_data;
   }
 
   return std::nullopt;
