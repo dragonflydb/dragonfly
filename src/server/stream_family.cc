@@ -2037,6 +2037,62 @@ void FetchGroupInfo(Transaction* tx, ReadOpts* opts) {
   }
 }
 
+// Returns true if the last-ids list has relevant entries according to read options,
+// false if blocking is required to fetch entries.
+io::Result<bool, facade::ErrorReply> HasEntries(
+    ReadOpts* opts, const unordered_map<string_view, streamID>& last_ids) {
+  bool has_entries = false;
+  for (auto& [stream, requested_sitem] : opts->stream_ids) {
+    if (auto last_id_it = last_ids.find(stream); last_id_it != last_ids.end()) {
+      streamID last_id = last_id_it->second;
+
+      if (opts->read_group && !requested_sitem.group) {
+        // if the group associated with the key is not found,
+        // send NoGroupOrKey error.
+        // We are simply mimicking Redis' error message here.
+        // However, we could actually report more precise error message.
+        return nonstd::make_unexpected(facade::ErrorReply(
+            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option")));
+      }
+
+      // Resolve $ to the last ID in the stream.
+      if (requested_sitem.id.last_id && !opts->read_group) {
+        requested_sitem.id.val = last_id;
+        // We only include messages with IDs greater than the last message so
+        // increment the ID.
+        streamIncrID(&requested_sitem.id.val);
+        requested_sitem.id.last_id = false;
+        continue;
+      }
+      if (opts->read_group) {
+        // If '>' is not provided, consumer PEL is used. So don't need to block.
+        if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
+          has_entries = true;
+          opts->serve_history = true;
+          continue;
+        }
+        // we know the requested last_id only when we already have it
+        if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
+          requested_sitem.id.val = requested_sitem.group->last_id;
+          streamIncrID(&requested_sitem.id.val);
+        }
+      }
+
+      if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
+        has_entries = true;
+      }
+    } else {
+      if (opts->read_group) {
+        // See equivalent reply above
+        return nonstd::make_unexpected(facade::ErrorReply(
+            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option")));
+      }
+    }
+  }
+
+  return has_entries;
+}
+
 struct StreamReplies {
   explicit StreamReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
     DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
@@ -2930,64 +2986,14 @@ void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext*
     return rb->SendNullArray();
   }
 
-  // Resolve '$' IDs and check if there are any streams with entries that can
-  // be resolved without blocking.
-  bool block = true;
-  for (auto& [stream, requested_sitem] : opts->stream_ids) {
-    if (auto last_id_it = last_ids->find(stream); last_id_it != last_ids->end()) {
-      streamID last_id = last_id_it->second;
-
-      if (opts->read_group && !requested_sitem.group) {
-        // if the group associated with the key is not found,
-        // send NoGroupOrKey error.
-        // We are simply mimicking Redis' error message here.
-        // However, we could actually report more precise error message.
-        cntx->transaction->Conclude();
-        rb->SendError(NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
-        return;
-      }
-
-      // Resolve $ to the last ID in the stream.
-      if (requested_sitem.id.last_id && !opts->read_group) {
-        requested_sitem.id.val = last_id;
-        // We only include messages with IDs greater than the last message so
-        // increment the ID.
-        streamIncrID(&requested_sitem.id.val);
-        requested_sitem.id.last_id = false;
-        continue;
-      }
-      if (opts->read_group) {
-        // If '>' is not provided, consumer PEL is used. So don't need to block.
-        if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
-          block = false;
-          opts->serve_history = true;
-          continue;
-        }
-        // we know the requested last_id only when we already have it
-        if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
-          requested_sitem.id.val = requested_sitem.group->last_id;
-          streamIncrID(&requested_sitem.id.val);
-        }
-      }
-
-      if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
-        block = false;
-      }
-    } else {
-      if (opts->read_group) {
-        // if the key is not found, send NoGroupOrKey error.
-        // We are simply mimicking Redis' error message here.
-        // However, we could actually report more precise error message.
-        string error_msg =
-            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option");
-        cntx->transaction->Conclude();
-        rb->SendError(error_msg);
-        return;
-      }
-    }
+  auto has_entries = HasEntries(&*opts, *last_ids);
+  if (!has_entries.has_value()) {
+    cntx->transaction->Conclude();
+    rb->SendError(has_entries.error());
+    return;
   }
 
-  if (block) {
+  if (!has_entries.value()) {
     return XReadBlock(*opts, cntx);
   }
 
