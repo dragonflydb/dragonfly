@@ -55,7 +55,7 @@ void OpManager::Delete(EntryId id) {
 void OpManager::Delete(DiskSegment segment) {
   EntryOps* pending_op = nullptr;
   if (auto it = pending_reads_.find(segment.offset); it != pending_reads_.end())
-    pending_op = it->second.ForPart(segment);
+    pending_op = it->second.Find(segment);
 
   if (pending_op) {
     pending_op->deleting = true;
@@ -113,9 +113,12 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
     for (auto& cb : ko.callbacks)
       modified |= cb(&key_value);
 
+    // If the item is not being deleted, report is as fetched to be cached potentially.
+    // In case it's cached, we might need to delete it.
     if (!ko.deleting)
-      ko.deleting |= ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified || ko.deleting);
+      ko.deleting |= ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified);
 
+    // If the item is being deleted, check if the full page needs to be deleted.
     if (ko.deleting)
       deleting_full |= ReportDelete(ko.segment);
   }
@@ -136,7 +139,7 @@ OpManager::EntryOps& OpManager::ReadOp::ForPart(DiskSegment key_segment, EntryId
   return key_ops.emplace_back(ToOwned(id), key_segment);
 }
 
-OpManager::EntryOps* OpManager::ReadOp::ForPart(DiskSegment key_segment) {
+OpManager::EntryOps* OpManager::ReadOp::Find(DiskSegment key_segment) {
   for (auto& ops : key_ops) {
     if (ops.segment.offset == key_segment.offset)
       return &ops;

@@ -93,7 +93,8 @@ class OpManager {
     // Get ops for id or create new
     EntryOps& ForPart(DiskSegment segment, EntryId id);
 
-    EntryOps* ForPart(DiskSegment segment);
+    // Find if there are operations for the given segment, return nullptr otherwise
+    EntryOps* Find(DiskSegment segment);
 
     DiskSegment segment;                       // spanning segment of whole read
     absl::InlinedVector<EntryOps, 1> key_ops;  // enqueued operations for different keys
