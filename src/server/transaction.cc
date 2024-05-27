@@ -1413,21 +1413,24 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
     return;
   }
 
-  // If autojournaling was disabled and not re-enabled, skip it
+  // If autojournaling was disabled and not re-enabled the callback is writing to journal.
+  // We do not allow preemption in callbacks and therefor the call to RecordJournal from
+  // from callbacks does not allow await.
+  // To make sure we flush the changes to sync we call TriggerJournalWriteToSink here.
   if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_) {
     TriggerJournalWriteToSink();
     return;
   }
 
-  // TODO: Handle complex commands like LMPOP correctly once they are implemented.
   journal::Entry::Payload entry_payload;
-
   string_view cmd{cid_->name()};
   if (unique_shard_cnt_ == 1 || kv_args_.empty()) {
     entry_payload = journal::Entry::Payload(cmd, full_args_);
   } else {
     entry_payload = journal::Entry::Payload(cmd, GetShardArgs(shard->shard_id()).AsSlice());
   }
+  // Record to journal autojournal commands, here we allow await which anables writing to sync
+  // the journal change.
   LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false, true);
 }
 

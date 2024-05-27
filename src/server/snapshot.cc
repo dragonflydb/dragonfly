@@ -330,12 +330,17 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
 void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
-  // We ignore EXEC and NOOP entries because we they have no meaning during
+  // We ignore EXEC entries because we they have no meaning during
   // the LOAD phase on replica.
-  if (item.opcode == journal::Op::NOOP || item.opcode == journal::Op::EXEC)
+  if (item.opcode == journal::Op::EXEC)
     return;
 
-  serializer_->WriteJournalEntry(item.data);
+  // To enable journal flushing to sync after non auto journal command is executed we call
+  // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
+  // additional journal change to serialize, it simply invokes PushSerializedToChannel.
+  if (item.opcode != journal::Op::NOOP) {
+    serializer_->WriteJournalEntry(item.data);
+  }
 
   if (await) {
     // This is the only place that flushes in streaming mode
