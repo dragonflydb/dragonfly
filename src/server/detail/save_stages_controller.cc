@@ -181,7 +181,9 @@ void SaveStagesController::WaitAllSnapshots() {
 SaveInfo SaveStagesController::Finalize() {
   RunStage(&SaveStagesController::CloseCb);
 
-  FinalizeFileMovement();
+  if (auto err = FinalizeFileMovement(); err) {
+    shared_err_ = err;
+  }
 
   return GetSaveInfo();
 }
@@ -338,19 +340,24 @@ void SaveStagesController::InitResources() {
 }
 
 // Remove .tmp extension or delete files in case of error
-void SaveStagesController::FinalizeFileMovement() {
+GenericError SaveStagesController::FinalizeFileMovement() {
   if (is_cloud_)
-    return;
+    return {};
 
   // If the shared_err is set, the snapshot saving failed
   bool has_error = bool(shared_err_);
 
+  std::error_code ec;
   for (const auto& [_, filename] : snapshots_) {
-    if (has_error)
-      filesystem::remove(filename);
-    else
-      filesystem::rename(filename, fs::path{filename}.replace_extension(""));
+    if (has_error) {
+      filesystem::remove(filename, ec);
+    } else {
+      filesystem::rename(filename, fs::path{filename}.replace_extension(""), ec);
+    }
+    if (ec)
+      break;
   }
+  return GenericError(ec);
 }
 
 // Build full path: get dir, try creating dirs, get filename with placeholder
