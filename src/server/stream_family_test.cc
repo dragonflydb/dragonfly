@@ -126,9 +126,15 @@ TEST_F(StreamFamilyTest, XRead) {
   Run({"xadd", "foo", "1-*", "k2", "v2"});
   Run({"xadd", "foo", "1-*", "k3", "v3"});
   Run({"xadd", "bar", "1-*", "k4", "v4"});
+  EXPECT_EQ(GetMetrics().shard_stats.tx_immediate_total, 4u);
+
+  // Receive all records from a single stream, in a single hop
+  auto resp = Run({"xread", "streams", "foo", "0"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(3)));
+  EXPECT_EQ(GetMetrics().shard_stats.tx_immediate_total, 5u);
 
   // Receive all records from both streams.
-  auto resp = Run({"xread", "streams", "foo", "bar", "0", "0"});
+  resp = Run({"xread", "streams", "foo", "bar", "0", "0"});
   EXPECT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(3)));
   EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
@@ -274,13 +280,17 @@ TEST_F(StreamFamilyTest, XReadBlock) {
   EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
 
   // Timeout.
+  resp = Run({"xread", "block", "1", "streams", "foo", "$"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  // Timeout again, on two steams
   resp = Run({"xread", "block", "1", "streams", "foo", "bar", "$", "$"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 
   // Run XREAD BLOCK from 2 fibers.
   RespExpr resp0, resp1;
   auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp0 = Run({"xread", "block", "0", "streams", "foo", "bar", "$", "$"});
+    resp0 = Run({"xread", "block", "0", "streams", "foo", "$"});
   });
   auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     resp1 = Run({"xread", "block", "0", "streams", "foo", "bar", "$", "$"});
