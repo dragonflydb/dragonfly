@@ -54,7 +54,7 @@ void OpManager::Delete(EntryId id) {
 
 void OpManager::Delete(DiskSegment segment) {
   EntryOps* pending_op = nullptr;
-  if (auto it = pending_reads_.find(segment.offset); it != pending_reads_.end())
+  if (auto it = pending_reads_.find(segment.FillPages().offset); it != pending_reads_.end())
     pending_op = it->second.Find(segment);
 
   if (pending_op) {
@@ -105,10 +105,11 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
   util::FiberAtomicGuard guard;  // atomically update items, no in-between states should be possible
   ReadOp* info = &pending_reads_.at(offset);
 
-  // most generic page must be last
+  // Reorder base read (offset 0) to be last, so reads for defragmentation are handled last
   for (size_t i = 0; i + 1 < info->key_ops.size(); i++) {
-    if (info->key_ops[i].segment.offset == 0) {
+    if (info->key_ops[i].segment.offset % kPageSize == 0) {
       std::swap(info->key_ops[i], info->key_ops.back());
+      break;
     }
   }
 

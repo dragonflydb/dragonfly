@@ -45,8 +45,7 @@ bool OccupiesWholePages(size_t size) {
   return size >= TieredStorage::kMinOccupancySize;
 }
 
-// Stashed bins no longer have bin ids. We use this id to differentiate with regular reads for the
-// same segment when reading a full segment to trigger defragmentation
+// Stashed bins no longer have bin ids, so this sentinel is used to differentiate from regular reads
 constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
 
 }  // anonymous namespace
@@ -142,7 +141,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
       // Cut out relevant part of value and restore it to memory
       string_view sub_value = value.substr(sub_segment.offset - segment.offset, sub_segment.length);
-      SetInMemory(&it->second, sub_value, sub_segment);
+      SetInMemory(&it->second, dbid, sub_value, sub_segment);
     }
   }
 
@@ -157,7 +156,11 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   bool ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,
                      bool modified) override {
-    DCHECK(holds_alternative<OpManager::KeyRef>(id));  // we never issue reads for bins
+    if (id == EntryId{kFragmentedBin}) {
+      Defragment(segment, value);
+      return true;
+    }
+
     if (!modified && !cache_fetched_)
       return false;
 
@@ -174,7 +177,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       return true;
 
     if (bin.fragmented) {
-      // Trigger read to signal need for defragmentation.
+      // Trigger read to signal need for defragmentation. ReportFetched will handle it.
       VLOG(1) << "Enqueueing bin defragmentation for: x" << bin.segment.offset;
       Enqueue(kFragmentedBin, bin.segment, [](std::string*) { return false; });
     }
