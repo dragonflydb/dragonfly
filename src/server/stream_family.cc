@@ -2972,8 +2972,9 @@ void XReadImpl(CmdArgList args, ReadOpts opts, ConnectionContext* cntx) {
   vector<RecordVec> prefetched_results;
   bool requires_blocking = false;
 
-  // If only a single shard is active, we can read the items immediately
+  // If only a single shard is active, we can read the items immediately without wasting another hop
   if (!tx->IsScheduled() && tx->GetUniqueShardCnt() == 1) {
+    optional<facade::ErrorReply> detailed_err;
     auto res = tx->ScheduleSingleHop([&](auto* tx, auto* es) -> Transaction::RunnableResult {
       auto last_ids = OpLastIDs(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()));
       if (!last_ids)
@@ -2981,31 +2982,36 @@ void XReadImpl(CmdArgList args, ReadOpts opts, ConnectionContext* cntx) {
 
       absl::flat_hash_map<string, streamID> last_ids_map(last_ids->begin(), last_ids->end());
       auto has_entries = HasEntries(&opts, last_ids_map);
-      if (!has_entries)
-        return OpStatus::SKIPPED;
+      if (!has_entries.has_value()) {
+        detailed_err = has_entries.error();
+        return OpStatus::INVALID_VALUE;
+      }
 
+      // If no entries are available, avoid concluding to proceed waiting with acquired keys
       if (!*has_entries) {
         requires_blocking = true;
-        return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};  // block
+        return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
       }
 
       prefetched_results = OpRead(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()), opts);
       return OpStatus::OK;
     });
 
-    if (res != OpStatus::OK)
-      return rb->SendError(res);
+    if (detailed_err.has_value())
+      return rb->SendError(*detailed_err);
 
+    if (res != OpStatus::OK) {
+      if (res == OpStatus::WRONG_TYPE)
+        return cntx->SendError(kWrongTypeErr);
+
+      return rb->SendNullArray();
+    }
   } else {
-    // First, read all last stream ids
     auto last_ids = FetchLastStreamIDs(cntx->transaction);
     if (!last_ids) {
       cntx->transaction->Conclude();
-
-      if (last_ids.status() == OpStatus::WRONG_TYPE) {
-        cntx->SendError(kWrongTypeErr);
-        return;
-      }
+      if (last_ids.status() == OpStatus::WRONG_TYPE)
+        return cntx->SendError(kWrongTypeErr);
 
       return rb->SendNullArray();
     }
