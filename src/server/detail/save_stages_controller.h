@@ -110,7 +110,7 @@ struct SaveStagesController : public SaveStagesInputs {
   void InitResources();
 
   // Remove .tmp extension or delete files in case of error
-  void FinalizeFileMovement();
+  GenericError FinalizeFileMovement();
 
   // Build full path: get dir, try creating dirs, get filename with placeholder
   GenericError BuildFullPath();
