@@ -771,7 +771,8 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
 
   // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
   migration->Cancel();
-  migration->Join();
+  while (!migration->Join())
+    ;  // we need to join anycase
   jobs.erase(it);
 
   if (!removed.Empty()) {
@@ -906,8 +907,9 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   if (!migration)
     return cntx->SendError(kIdNotFound);
 
-  // TODO add timeout for join because it can fail
-  migration->Join();
+  if (!migration->Join()) {
+    return cntx->SendError("Join timeout happened");
+  }
 
   VLOG(1) << "Migration is joined for " << source_id;
 
