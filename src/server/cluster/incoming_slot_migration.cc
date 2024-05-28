@@ -12,12 +12,13 @@
 #include "server/journal/tx_executor.h"
 #include "server/main_service.h"
 
+ABSL_DECLARE_FLAG(int, slot_migration_connection_timeout_ms);
+
 namespace dfly::cluster {
 
 using namespace std;
 using namespace util;
 using namespace facade;
-using absl::GetFlag;
 
 // ClusterShardMigration manage data receiving in slots migration process.
 // It is created per shard on the target node to initiate FLOW step.
@@ -120,11 +121,15 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 IncomingSlotMigration::~IncomingSlotMigration() {
 }
 
-void IncomingSlotMigration::Join() {
-  // TODO add timeout
-  bc_->Wait();
-  state_.store(MigrationState::C_FINISHED);
-  keys_number_ = cluster::GetKeyCount(slots_);
+bool IncomingSlotMigration::Join() {
+  auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
+  if (bc_->WaitFor(timeout)) {
+    state_.store(MigrationState::C_FINISHED);
+    keys_number_ = cluster::GetKeyCount(slots_);
+    return true;
+  }
+  LOG(WARNING) << "Can't join migration in time";
+  return false;
 }
 
 void IncomingSlotMigration::Cancel() {
