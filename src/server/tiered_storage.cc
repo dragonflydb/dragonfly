@@ -74,7 +74,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv) {
-      RecordAdded(db_slice_->MutableStats(0), *pv, segment);
+      RecordAdded(db_slice_->MutableStats(key.first), *pv, segment);
 
       pv->SetIoPending(false);
       pv->SetExternal(segment.offset, segment.length);
@@ -104,12 +104,12 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   // Set value to be an in-memory type again, either empty or with a value. Update memory stats
-  void SetInMemory(PrimeValue* pv, string_view value, tiering::DiskSegment segment) {
+  void SetInMemory(PrimeValue* pv, DbIndex dbid, string_view value, tiering::DiskSegment segment) {
     pv->Reset();
     if (!value.empty())
       pv->SetString(value);
 
-    RecordDeleted(db_slice_->MutableStats(0), *pv, segment);
+    RecordDeleted(db_slice_->MutableStats(dbid), *pv, segment);
 
     (value.empty() ? stats_.total_deletes : stats_.total_fetches)++;
   }
@@ -118,7 +118,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Returns false if the value is outdated, true otherwise
   bool SetInMemory(OpManager::KeyRef key, string_view value, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-      SetInMemory(pv, value, segment);
+      SetInMemory(pv, key.first, value, segment);
       return true;
     }
     return false;
@@ -133,23 +133,18 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     }
   }
 
-  void ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,
+  bool ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,
                      bool modified) override {
     DCHECK(holds_alternative<OpManager::KeyRef>(id));  // we never issue reads for bins
-
-    // Modified values are always cached and deleted from disk
     if (!modified && !cache_fetched_)
-      return;
+      return false;
 
     SetInMemory(get<OpManager::KeyRef>(id), value, segment);
+    return true;
+  }
 
-    // Delete value
-    if (OccupiesWholePages(segment.length)) {
-      Delete(segment);
-    } else {
-      if (auto bin_segment = ts_->bins_->Delete(segment); bin_segment)
-        Delete(*bin_segment);
-    }
+  bool ReportDelete(tiering::DiskSegment segment) override {
+    return OccupiesWholePages(segment.length) || ts_->bins_->Delete(segment);
   }
 
  private:
@@ -250,15 +245,11 @@ void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
   }
 }
-void TieredStorage::Delete(PrimeValue* value) {
+void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   DCHECK(value->IsExternal());
   tiering::DiskSegment segment = value->GetExternalSlice();
-  if (OccupiesWholePages(segment.length)) {
-    op_manager_->Delete(segment);
-  } else if (auto bin = bins_->Delete(segment); bin) {
-    op_manager_->Delete(*bin);
-  }
-  op_manager_->SetInMemory(value, "", segment);
+  op_manager_->Delete(segment);
+  op_manager_->SetInMemory(value, dbid, "", segment);
 }
 
 void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {

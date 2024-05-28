@@ -51,6 +51,8 @@ class TieredStorageTest : public BaseFamilyTest {
 
 // Perform simple series of SET, GETSET and GET
 TEST_F(TieredStorageTest, SimpleGetSet) {
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.1f);  // disable offloading
   const int kMin = 256;
   const int kMax = tiering::kPageSize + 10;
 
@@ -82,6 +84,10 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
     auto resp = Run({"GET", absl::StrCat("k", i)});
     ASSERT_EQ(resp, string(i, 'B')) << i;
   }
+
+  metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0);
+  EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, 0);
 }
 
 TEST_F(TieredStorageTest, MGET) {
@@ -123,7 +129,9 @@ TEST_F(TieredStorageTest, MultiDb) {
 
   for (size_t i = 0; i < 10; i++) {
     Run({"SELECT", absl::StrCat(i)});
+    EXPECT_EQ(GetMetrics().db_stats[i].tiered_entries, 1);
     EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), string(3000, char('A' + i)));
+    EXPECT_EQ(GetMetrics().db_stats[i].tiered_entries, 0);
   }
 }
 
