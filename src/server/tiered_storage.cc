@@ -158,9 +158,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   bool ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,
                      bool modified) override {
-    if (id == EntryId{kFragmentedBin}) {
+    if (id == EntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
       Defragment(segment, value);
-      return true;
+      return true;  // delete
     }
 
     if (!modified && !cache_fetched_)
@@ -201,7 +201,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   struct {
     size_t total_stashes = 0, total_fetches = 0, total_cancels = 0, total_deletes = 0;
-    size_t total_defrags = 0;  // part of total_fetches
+    size_t total_defrags = 0;  // included in total_fetches
   } stats_;
 
   TieredStorage* ts_;
