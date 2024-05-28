@@ -287,10 +287,11 @@ class ServerFamily {
   using VersionBasename = std::pair<bool, std::string_view>;
   std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, ConnectionContext* cntx);
 
-  void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
+  void BgSaveFb(boost::intrusive_ptr<Transaction> trans, std::unique_lock<util::fb2::Mutex> lk)
+      ABSL_GUARDED_BY(save_mu_);
 
   GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
-                                   bool ignore_state = false);
+                                   bool ignore_state = false) ABSL_GUARDED_BY(save_mu_);
 
   GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
   void StopAllClusterReplicas();

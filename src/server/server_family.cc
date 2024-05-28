@@ -1400,24 +1400,21 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
-  {
-    std::lock_guard lk(save_mu_);
-    if (save_controller_) {
-      return GenericError{make_error_code(errc::operation_in_progress),
-                          "SAVING - can not save database"};
-    }
+  if (save_controller_) {
+    return GenericError{make_error_code(errc::operation_in_progress),
+                        "SAVING - can not save database"};
+  }
 
-    save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
-        new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
+  save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
+      new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
 
-    auto res = save_controller_->InitResourcesAndStart();
+  auto res = save_controller_->InitResourcesAndStart();
 
-    if (res) {
-      DCHECK_EQ(res->error, true);
-      last_save_info_.SetLastSaveError(*res);
-      save_controller_.reset();
-      return res->error;
-    }
+  if (res) {
+    DCHECK_EQ(res->error, true);
+    last_save_info_.SetLastSaveError(*res);
+    save_controller_.reset();
+    return res->error;
   }
   return {};
 }
@@ -1426,26 +1423,24 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
-  {
-    std::lock_guard lk(save_mu_);
-    save_info = save_controller_->Finalize();
+  save_info = save_controller_->Finalize();
 
-    if (save_info.error) {
-      last_save_info_.SetLastSaveError(save_info);
-    } else {
-      last_save_info_.save_time = save_info.save_time;
-      last_save_info_.success_duration_sec = save_info.duration_sec;
-      last_save_info_.file_name = save_info.file_name;
-      last_save_info_.freq_map = save_info.freq_map;
-    }
-    save_controller_.reset();
+  if (save_info.error) {
+    last_save_info_.SetLastSaveError(save_info);
+  } else {
+    last_save_info_.save_time = save_info.save_time;
+    last_save_info_.success_duration_sec = save_info.duration_sec;
+    last_save_info_.file_name = save_info.file_name;
+    last_save_info_.freq_map = save_info.freq_map;
   }
+  save_controller_.reset();
 
   return save_info.error;
 }
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
                                   bool ignore_state) {
+  std::lock_guard lk(save_mu_);
   if (auto ec = DoSaveCheckAndStart(new_version, basename, trans, ignore_state); ec) {
     return ec;
   }
@@ -1729,7 +1724,8 @@ void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
   return mem_cmd.Run(args);
 }
 
-void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans) {
+void ServerFamily::BgSaveFb(boost::intrusive_ptr<Transaction> trans,
+                            std::unique_lock<util::fb2::Mutex> lk) {
   GenericError ec = WaitUntilSaveFinished(trans.get());
   if (ec) {
     LOG(INFO) << "Error in BgSaveFb: " << ec.Format();
@@ -1776,13 +1772,15 @@ void ServerFamily::BgSave(CmdArgList args, ConnectionContext* cntx) {
 
   const auto [version, basename] = *maybe_res;
 
+  bg_save_fb_.JoinIfNeeded();
+  std::unique_lock lk(save_mu_);
   if (auto ec = DoSaveCheckAndStart(version, basename, cntx->transaction); ec) {
     cntx->SendError(ec.Format());
     return;
   }
-  bg_save_fb_.JoinIfNeeded();
+
   bg_save_fb_ = fb2::Fiber("bg_save_fiber", &ServerFamily::BgSaveFb, this,
-                           boost::intrusive_ptr<Transaction>(cntx->transaction));
+                           boost::intrusive_ptr<Transaction>(cntx->transaction), std::move(lk));
   cntx->SendOk();
 }
 
