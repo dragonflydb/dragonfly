@@ -43,7 +43,7 @@ void OpManager::Close() {
 
 void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
-  PrepareRead(segment.FillPages()).ForPart(segment, id).callbacks.emplace_back(std::move(cb));
+  PrepareRead(segment.FillPages()).ForSegment(segment, id).callbacks.emplace_back(std::move(cb));
 }
 
 void OpManager::Delete(EntryId id) {
@@ -128,7 +128,7 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
   pending_reads_.erase(offset);
 }
 
-OpManager::EntryOps& OpManager::ReadOp::ForPart(DiskSegment key_segment, EntryId id) {
+OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, EntryId id) {
   DCHECK_GE(key_segment.offset, segment.offset);
   DCHECK_LE(key_segment.length, segment.length);
 

@@ -91,7 +91,7 @@ class OpManager {
     }
 
     // Get ops for id or create new
-    EntryOps& ForPart(DiskSegment segment, EntryId id);
+    EntryOps& ForSegment(DiskSegment segment, EntryId id);
 
     // Find if there are operations for the given segment, return nullptr otherwise
     EntryOps* Find(DiskSegment segment);
