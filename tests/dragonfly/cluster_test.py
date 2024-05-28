@@ -1282,10 +1282,8 @@ async def test_cluster_fuzzymigration(
         for node in nodes:
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             print(states)
-            is_all_finished = (
-                is_all_finished
-                and all("FINISHED" in s for s in states)
-                and not states == "NO_STATE"
+            is_all_finished = is_all_finished and (
+                all("FINISHED" in s for s in states) or states == "NO_STATE"
             )
 
         if is_all_finished:
