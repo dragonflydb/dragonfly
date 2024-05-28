@@ -156,9 +156,10 @@ TEST_F(TieredStorageTest, Defrag) {
   EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
   EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 4u);
 
-  // This tirggers defragmentation
+  // This tirggers defragmentation, as only 3 < 7/2 remain left
   Run({"GET", string(1, 'd')});
   metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.total_defrags, 3u);
   EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 0u);
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
 }

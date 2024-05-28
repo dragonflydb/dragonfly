@@ -139,6 +139,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       if (!IsValid(it))
         continue;
 
+      stats_.total_defrags++;
+
       // Cut out relevant part of value and restore it to memory
       string_view sub_value = value.substr(sub_segment.offset - segment.offset, sub_segment.length);
       SetInMemory(&it->second, dbid, sub_value, sub_segment);
@@ -199,6 +201,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   struct {
     size_t total_stashes = 0, total_fetches = 0, total_cancels = 0, total_deletes = 0;
+    size_t total_defrags = 0;  // part of total_fetches
   } stats_;
 
   TieredStorage* ts_;
@@ -312,6 +315,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.total_fetches = shard_stats.total_fetches;
     stats.total_stashes = shard_stats.total_stashes;
     stats.total_cancels = shard_stats.total_cancels;
+    stats.total_defrags = shard_stats.total_defrags;
   }
 
   {  // OpManager stats

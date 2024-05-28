@@ -90,7 +90,7 @@ class SmallBins {
   absl::flat_hash_map<size_t /*offset*/, StashInfo> stashed_bins_;
 
   struct {
-    size_t total_stashed_entries = 0;
+    size_t stashed_entries_cnt = 0;
   } stats_;
 };
 

@@ -85,7 +85,7 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
     list.emplace_back(key.first, key.second, real_segment);
   }
 
-  stats_.total_stashed_entries += list.size();
+  stats_.stashed_entries_cnt += list.size();
   stashed_bins_[segment.offset] = {uint8_t(list.size()), bytes};
   return list;
 }
@@ -118,7 +118,7 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
 SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
   auto full_segment = segment.FillPages();
   if (auto it = stashed_bins_.find(full_segment.offset); it != stashed_bins_.end()) {
-    stats_.total_stashed_entries--;
+    stats_.stashed_entries_cnt--;
     auto& bin = it->second;
 
     DCHECK_LE(segment.length, bin.bytes);
@@ -140,13 +140,13 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
-               .stashed_entries_cnt = stats_.total_stashed_entries,
+               .stashed_entries_cnt = stats_.stashed_entries_cnt,
                .current_bin_bytes = current_bin_bytes_};
 }
 
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
   DCHECK_EQ(value.size(), kPageSize);
-  stats_.total_stashed_entries -= stashed_bins_.extract(segment.offset).mapped().entries;
+  stats_.stashed_entries_cnt -= stashed_bins_.extract(segment.offset).mapped().entries;
 
   const char* data = value.data();
 
