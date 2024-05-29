@@ -94,7 +94,7 @@ class ClusterFamily {
       ABSL_GUARDED_BY(migration_mu_);
 
  private:
-  ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
+  ClusterShardInfos GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   mutable util::fb2::Mutex config_update_mu_;
 
