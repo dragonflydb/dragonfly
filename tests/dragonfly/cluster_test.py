@@ -68,6 +68,63 @@ def redis_cluster(port_picker):
         node.stop()
 
 
+@dataclass
+class MigrationInfo:
+    ip: str
+    port: int
+    slots: list
+    node_id: str
+
+
+@dataclass
+class NodeInfo:
+    instance: DflyInstance
+    client: aioredis.Redis
+    admin_client: aioredis.Redis
+    slots: list
+    next_slots: list
+    migrations: list
+    id: str
+
+
+async def create_node_info(instance):
+    admin_client = instance.admin_client()
+    ninfo = NodeInfo(
+        instance=instance,
+        client=instance.client(),
+        admin_client=admin_client,
+        slots=[],
+        next_slots=[],
+        migrations=[],
+        id=await get_node_id(admin_client),
+    )
+    return ninfo
+
+
+def generate_config(nodes):
+    return [
+        {
+            "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
+            "master": {
+                "id": node.id,
+                "ip": "127.0.0.1",
+                "port": node.instance.port,
+            },
+            "replicas": [],
+            "migrations": [
+                {
+                    "slot_ranges": [{"start": s, "end": e} for (s, e) in m.slots],
+                    "node_id": m.node_id,
+                    "ip": m.ip,
+                    "port": m.port,
+                }
+                for m in node.migrations
+            ],
+        }
+        for node in nodes
+    ]
+
+
 async def push_config(config, admin_connections):
     logging.debug("Pushing config %s", config)
     res = await asyncio.gather(
@@ -86,6 +143,14 @@ async def wait_for_status(admin_client, node_id, status):
         else:
             logging.debug(f"SLOT-MIGRATION-STATUS is {response}, not {status}")
             await asyncio.sleep(0.05)
+
+
+async def check_for_no_state_status(admin_clients):
+    for client in admin_clients:
+        state = await client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
+        if state != "NO_STATE":
+            logging.debug(f"SLOT-MIGRATION-STATUS is {state}, instead of NO_STATE")
+            assert False
 
 
 async def get_node_id(admin_connection):
@@ -907,84 +972,50 @@ async def test_cluster_native_client(
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_config_consistency(df_local_factory: DflyInstanceFactory):
     # Check slot migration from one node to another
-    nodes = [
+    instances = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
         for i in range(2)
     ]
 
-    df_local_factory.start_all(nodes)
+    df_local_factory.start_all(instances)
 
-    c_nodes = [node.client() for node in nodes]
-    c_nodes_admin = [node.admin_client() for node in nodes]
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots.append((0, 5259))
+    nodes[0].slots.append((5260, 16383))
 
-    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes_admin))
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    config = f"""
-      [
-        {{
-          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
-          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
-          "replicas": []
-        }},
-        {{
-          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
-          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
-          "replicas": []
-        }}
-      ]
-    """
+    await check_for_no_state_status([node.admin_client for node in nodes])
 
-    await push_config(
-        config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
-        c_nodes_admin,
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(5200, 5259)], nodes[1].id)
     )
-
-    for node in c_nodes_admin:
-        assert await node.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"
-
-    migation_config = f"""
-      [
-        {{
-          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
-          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
-          "replicas": [],
-          "migrations": [{{ "slot_ranges": [ {{ "start": 5200, "end": 5259 }} ]
-                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "node_id": "{node_ids[1]}" }}]
-        }},
-        {{
-          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
-          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
-          "replicas": []
-        }}
-      ]
-    """
 
     # Push config to source node. Migration will not start until target node gets the config as well.
-    await push_config(
-        migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
-        [c_nodes_admin[0]],
-    )
-    await wait_for_status(c_nodes_admin[0], node_ids[1], "CONNECTING")
-    await wait_for_status(c_nodes_admin[1], node_ids[0], "NO_STATE")
+    logging.debug("Push migration config to source node")
+    await push_config(json.dumps(generate_config(nodes)), [nodes[0].admin_client])
 
-    await push_config(
-        migation_config.replace("LAST_SLOT_CUTOFF", "5259").replace("NEXT_SLOT_CUTOFF", "5260"),
-        [c_nodes_admin[1]],
-    )
+    # some delay to check that migration isn't started until we send config to target node
+    await asyncio.sleep(0.2)
 
-    await wait_for_status(c_nodes_admin[1], node_ids[0], "FINISHED")
-    await wait_for_status(c_nodes_admin[0], node_ids[1], "FINISHED")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "CONNECTING")
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "NO_STATE")
 
-    # remove finished migrations
-    await push_config(
-        config.replace("LAST_SLOT_CUTOFF", "5199").replace("NEXT_SLOT_CUTOFF", "5200"),
-        c_nodes_admin,
-    )
+    logging.debug("Push migration config to target node")
+    await push_config(json.dumps(generate_config(nodes)), [nodes[1].admin_client])
 
-    for node in c_nodes_admin:
-        assert await node.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    await close_clients(*c_nodes, *c_nodes_admin)
+    nodes[0].migrations = []
+    nodes[0].slots = [(0, 5199)]
+    nodes[1].slots = [(5200, 16383)]
+
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await check_for_no_state_status([node.admin_client for node in nodes])
+    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1116,63 +1147,6 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     )
 
     await close_clients(*c_nodes, *c_nodes_admin)
-
-
-@dataclass
-class MigrationInfo:
-    ip: str
-    port: int
-    slots: list
-    node_id: str
-
-
-@dataclass
-class NodeInfo:
-    instance: DflyInstance
-    client: aioredis.Redis
-    admin_client: aioredis.Redis
-    slots: list
-    next_slots: list
-    migrations: list
-    id: str
-
-
-async def create_node_info(instance):
-    admin_client = instance.admin_client()
-    ninfo = NodeInfo(
-        instance=instance,
-        client=instance.client(),
-        admin_client=admin_client,
-        slots=[],
-        next_slots=[],
-        migrations=[],
-        id=await get_node_id(admin_client),
-    )
-    return ninfo
-
-
-def generate_config(nodes):
-    return [
-        {
-            "slot_ranges": [{"start": s, "end": e} for (s, e) in node.slots],
-            "master": {
-                "id": node.id,
-                "ip": "127.0.0.1",
-                "port": node.instance.port,
-            },
-            "replicas": [],
-            "migrations": [
-                {
-                    "slot_ranges": [{"start": s, "end": e} for (s, e) in m.slots],
-                    "node_id": m.node_id,
-                    "ip": m.ip,
-                    "port": m.port,
-                }
-                for m in node.migrations
-            ],
-        }
-        for node in nodes
-    ]
 
 
 @pytest.mark.parametrize(
