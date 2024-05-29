@@ -43,7 +43,9 @@ void OpManager::Close() {
 
 void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
-  PrepareRead(segment.FillPages()).ForSegment(segment, id).callbacks.emplace_back(std::move(cb));
+  PrepareRead(segment.ContainingPages())
+      .ForSegment(segment, id)
+      .callbacks.emplace_back(std::move(cb));
 }
 
 void OpManager::Delete(EntryId id) {
@@ -54,13 +56,13 @@ void OpManager::Delete(EntryId id) {
 
 void OpManager::Delete(DiskSegment segment) {
   EntryOps* pending_op = nullptr;
-  if (auto it = pending_reads_.find(segment.offset); it != pending_reads_.end())
+  if (auto it = pending_reads_.find(segment.ContainingPages().offset); it != pending_reads_.end())
     pending_op = it->second.Find(segment);
 
   if (pending_op) {
     pending_op->deleting = true;
   } else if (ReportDelete(segment)) {
-    storage_.MarkAsFree(segment.FillPages());
+    storage_.MarkAsFree(segment.ContainingPages());
   }
 }
 
@@ -102,11 +104,26 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
 }
 
 void OpManager::ProcessRead(size_t offset, std::string_view value) {
+  util::FiberAtomicGuard guard;  // atomically update items, no in-between states should be possible
   ReadOp* info = &pending_reads_.at(offset);
+
+  // Reorder base read (offset 0) to be last, so reads for defragmentation are handled last.
+  // If we already have a page read for defragmentation pending and some other read for the
+  // sub-segment is enqueued, we first must handle the sub-segment read, only then the full page
+  // read
+  for (size_t i = 0; i + 1 < info->key_ops.size(); i++) {
+    if (info->key_ops[i].segment.offset % kPageSize == 0) {
+      std::swap(info->key_ops[i], info->key_ops.back());
+      break;
+    }
+  }
 
   bool deleting_full = false;
   std::string key_value;
-  for (auto& ko : info->key_ops) {
+
+  // Report functions in the loop may append items to info->key_ops during the traversal
+  for (size_t i = 0; i < info->key_ops.size(); i++) {
+    auto& ko = info->key_ops[i];
     key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
 
     bool modified = false;
@@ -125,6 +142,7 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
 
   if (deleting_full)
     storage_.MarkAsFree(info->segment);
+
   pending_reads_.erase(offset);
 }
 

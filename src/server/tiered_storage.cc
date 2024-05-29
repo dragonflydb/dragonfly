@@ -45,6 +45,9 @@ bool OccupiesWholePages(size_t size) {
   return size >= TieredStorage::kMinOccupancySize;
 }
 
+// Stashed bins no longer have bin ids, so this sentinel is used to differentiate from regular reads
+constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
+
 }  // anonymous namespace
 
 class TieredStorage::ShardOpManager : public tiering::OpManager {
@@ -124,6 +127,26 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     return false;
   }
 
+  // Load all values from bin by their hashes
+  void Defragment(tiering::DiskSegment segment, string_view value) {
+    for (auto [dbid, hash, sub_segment] : ts_->bins_->DeleteBin(segment, value)) {
+      // Search for key with the same hash and value pointing to the same segment.
+      // If it still exists, it must correspond to the value stored in this bin
+      auto predicate = [sub_segment = sub_segment](const PrimeKey& key, const PrimeValue& probe) {
+        return probe.IsExternal() && tiering::DiskSegment{probe.GetExternalSlice()} == sub_segment;
+      };
+      auto it = db_slice_->GetDBTable(dbid)->prime.FindFirst(hash, predicate);
+      if (!IsValid(it))
+        continue;
+
+      stats_.total_defrags++;
+
+      // Cut out relevant part of value and restore it to memory
+      string_view sub_value = value.substr(sub_segment.offset - segment.offset, sub_segment.length);
+      SetInMemory(&it->second, dbid, sub_value, sub_segment);
+    }
+  }
+
   void ReportStashed(EntryId id, tiering::DiskSegment segment, error_code ec) override {
     if (ec) {
       VLOG(1) << "Stash failed " << ec.message();
@@ -135,7 +158,11 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   bool ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,
                      bool modified) override {
-    DCHECK(holds_alternative<OpManager::KeyRef>(id));  // we never issue reads for bins
+    if (id == EntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
+      Defragment(segment, value);
+      return true;  // delete
+    }
+
     if (!modified && !cache_fetched_)
       return false;
 
@@ -144,7 +171,20 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   bool ReportDelete(tiering::DiskSegment segment) override {
-    return OccupiesWholePages(segment.length) || ts_->bins_->Delete(segment);
+    if (OccupiesWholePages(segment.length))
+      return true;
+
+    auto bin = ts_->bins_->Delete(segment);
+    if (bin.empty)
+      return true;
+
+    if (bin.fragmented) {
+      // Trigger read to signal need for defragmentation. ReportFetched will handle it.
+      VLOG(1) << "Enqueueing bin defragmentation for: x" << bin.segment.offset;
+      Enqueue(kFragmentedBin, bin.segment, [](std::string*) { return false; });
+    }
+
+    return false;
   }
 
  private:
@@ -161,6 +201,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   struct {
     size_t total_stashes = 0, total_fetches = 0, total_cancels = 0, total_deletes = 0;
+    size_t total_defrags = 0;  // included in total_fetches
   } stats_;
 
   TieredStorage* ts_;
@@ -274,6 +315,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.total_fetches = shard_stats.total_fetches;
     stats.total_stashes = shard_stats.total_stashes;
     stats.total_cancels = shard_stats.total_cancels;
+    stats.total_defrags = shard_stats.total_defrags;
   }
 
   {  // OpManager stats

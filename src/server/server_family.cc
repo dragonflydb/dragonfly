@@ -2107,6 +2107,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_total_fetches", m.tiered_stats.total_fetches);
     append("tiered_total_cancels", m.tiered_stats.total_cancels);
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
+    append("tiered_total_deletes", m.tiered_stats.total_defrags);
 
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
