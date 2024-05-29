@@ -167,4 +167,33 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }
 
+TEST_F(TieredStorageTest, FlushAll) {
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+
+  const int kNum = 500;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), string(3000, 'A')});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+
+  // Start reading random entries
+  atomic_bool done = false;
+  auto reader = pp_->at(0)->LaunchFiber([&] {
+    while (!done) {
+      Run("reader", {"GET", absl::StrCat("k", rand() % kNum)});
+    }
+  });
+
+  util::ThisFiber::SleepFor(10ms);
+  Run({"FLUSHALL"});
+
+  done = true;
+  reader.Join();
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats.front().tiered_entries, 0u);
+  EXPECT_GT(metrics.tiered_stats.total_fetches, 2u);
+}
+
 }  // namespace dfly

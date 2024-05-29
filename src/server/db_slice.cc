@@ -704,9 +704,43 @@ void DbSlice::FlushSlots(cluster::SlotRanges slot_ranges) {
 }
 
 void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
+  // Async cleanup can only be performed if no tiered entries exist
+  bool async_cleanup = true;
+  for (DbIndex index : indexes) {
+    async_cleanup &= db_arr_[index]->stats.tiered_entries == 0;
+  }
+
   // TODO: to add preeemptiveness by yielding inside clear.
+  auto clear_entries = [this, indexes](const DbTableArray& db_arr, bool async) {
+    for (auto index : indexes) {
+      VLOG(0) << "Checking " << index;
+      const auto& db_ptr = db_arr[index];
+      if (!db_ptr || db_ptr->stats.tiered_entries == 0)
+        continue;
+
+      // Delete all tiered entries
+      PrimeTable::Cursor cursor;
+      do {
+        cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
+          if (it->second.IsExternal())
+            PerformDeletion(it, db_ptr.get());
+        });
+      } while (cursor && db_ptr->stats.tiered_entries > 0);
+
+      // Wait for delete operations to finish in sync
+      while (!async && db_ptr->stats.tiered_entries > 0) {
+        LOG_EVERY_T(ERROR, 0.5) << "Long wait for tiered entry delete on flush";
+        ThisFiber::SleepFor(1ms);
+      }
+    }
+  };
+
+  if (!async_cleanup)
+    clear_entries(db_arr_, false);
+
   DbTableArray flush_db_arr(db_arr_.size());
   for (DbIndex index : indexes) {
+    VLOG(0) << "SWapped " << index;
     auto& db = db_arr_[index];
     CHECK(db);
     InvalidateDbWatches(index);
@@ -715,19 +749,11 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     CreateDb(index);
     std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
   }
-  CHECK(fetched_items_.empty());
-  auto cb = [this, flush_db_arr = std::move(flush_db_arr)]() mutable {
-    for (auto& db_ptr : flush_db_arr) {
-      if (db_ptr && db_ptr->stats.tiered_entries > 0) {
-        for (auto it = db_ptr->prime.begin(); it != db_ptr->prime.end(); ++it) {
-          if (it->second.IsExternal())
-            PerformDeletion(Iterator::FromPrime(it), db_ptr.get());
-        }
 
-        DCHECK_EQ(0u, db_ptr->stats.tiered_entries);
-        db_ptr.reset();
-      }
-    }
+  CHECK(fetched_items_.empty());
+  auto cb = [async_cleanup, clear_entries, flush_db_arr = std::move(flush_db_arr)]() mutable {
+    if (async_cleanup)
+      clear_entries(flush_db_arr, true);
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
