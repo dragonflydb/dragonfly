@@ -43,7 +43,9 @@ void OpManager::Close() {
 
 void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
-  PrepareRead(segment.FillPages()).ForSegment(segment, id).callbacks.emplace_back(std::move(cb));
+  PrepareRead(segment.ContainingPages())
+      .ForSegment(segment, id)
+      .callbacks.emplace_back(std::move(cb));
 }
 
 void OpManager::Delete(EntryId id) {
@@ -54,13 +56,13 @@ void OpManager::Delete(EntryId id) {
 
 void OpManager::Delete(DiskSegment segment) {
   EntryOps* pending_op = nullptr;
-  if (auto it = pending_reads_.find(segment.FillPages().offset); it != pending_reads_.end())
+  if (auto it = pending_reads_.find(segment.ContainingPages().offset); it != pending_reads_.end())
     pending_op = it->second.Find(segment);
 
   if (pending_op) {
     pending_op->deleting = true;
   } else if (ReportDelete(segment)) {
-    storage_.MarkAsFree(segment.FillPages());
+    storage_.MarkAsFree(segment.ContainingPages());
   }
 }
 

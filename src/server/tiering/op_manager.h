@@ -47,7 +47,7 @@ class OpManager {
 
   // Enqueue callback to be executed once value is read. Trigger read if none is pending yet for
   // this segment. Multiple entries can be obtained from a single segment, but every distinct id
-  // will have it's own indepentend callback loop that can safely modifly the underlying value
+  // will have it's own independent callback loop that can safely modify the underlying value
   void Enqueue(EntryId id, DiskSegment segment, ReadCallback cb);
 
   // Delete entry with pending io

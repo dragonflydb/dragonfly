@@ -116,7 +116,7 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
 }
 
 SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
-  auto full_segment = segment.FillPages();
+  auto full_segment = segment.ContainingPages();
   if (auto it = stashed_bins_.find(full_segment.offset); it != stashed_bins_.end()) {
     stats_.stashed_entries_cnt--;
     auto& bin = it->second;

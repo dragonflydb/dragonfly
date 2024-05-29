@@ -27,7 +27,7 @@ constexpr size_t kPageSize = 4_KB;
 
 // Location on the offloaded blob, measured in bytes
 struct DiskSegment {
-  DiskSegment FillPages() const {
+  DiskSegment ContainingPages() const {
     return {offset / kPageSize * kPageSize, (length + kPageSize - 1) / kPageSize * kPageSize};
   }
 
