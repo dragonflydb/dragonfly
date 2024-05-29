@@ -494,12 +494,24 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
     flow->saver.reset();
   };
 
+  error_code ec;
+  RdbSaver* saver = flow->saver.get();
+  if (saver->Mode() == SaveMode::SUMMARY || saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
+    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service()));
+  } else {
+    ec = saver->SaveHeader({});
+  }
+  if (ec) {
+    cntx->ReportError(ec);
+    return OpStatus::CANCELLED;
+  }
+
   // Shard can be null for io thread.
   if (shard != nullptr) {
     if (flow->start_partial_sync_at.has_value())
-      flow->saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
+      saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
     else
-      flow->saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
+      saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
   }
 
   flow->full_sync_fb = fb2::Fiber("full_sync", &DflyCmd::FullSyncFb, this, flow, cntx);
@@ -542,20 +554,8 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
 
 void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   error_code ec;
-  RdbSaver* saver = flow->saver.get();
 
-  if (saver->Mode() == SaveMode::SUMMARY || saver->Mode() == SaveMode::SINGLE_SHARD_WITH_SUMMARY) {
-    ec = saver->SaveHeader(saver->GetGlobalData(&sf_->service()));
-  } else {
-    ec = saver->SaveHeader({});
-  }
-
-  if (ec) {
-    cntx->ReportError(ec);
-    return;
-  }
-
-  if (ec = saver->SaveBody(cntx, nullptr); ec) {
+  if (ec = flow->saver->SaveBody(cntx, nullptr); ec) {
     cntx->ReportError(ec);
     return;
   }
