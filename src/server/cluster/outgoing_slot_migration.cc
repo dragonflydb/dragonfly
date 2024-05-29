@@ -156,7 +156,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      cntx_.ReportError(GenericError(ec, "Could send INIT command."));
+      cntx_.ReportError(GenericError(ec, "Could not send INIT command."));
       continue;
     }
 
