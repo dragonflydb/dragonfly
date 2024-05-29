@@ -980,8 +980,8 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
     df_local_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
-    nodes[0].slots.append((0, 5259))
-    nodes[0].slots.append((5260, 16383))
+    nodes[0].slots = [(0, 5259)]
+    nodes[1].slots = [(5260, 16383)]
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
@@ -1021,132 +1021,97 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     # Check data migration from one node to another
-    nodes = [
+    instances = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
         for i in range(2)
     ]
 
-    df_local_factory.start_all(nodes)
+    df_local_factory.start_all(instances)
 
-    c_nodes = [node.client() for node in nodes]
-    c_nodes_admin = [node.admin_client() for node in nodes]
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 9000)]
+    nodes[1].slots = [(9001, 16383)]
 
-    node_ids = await asyncio.gather(*(get_node_id(c) for c in c_nodes_admin))
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    config = f"""
-      [
-        {{
-          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
-          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
-          "replicas": []
-        }},
-        {{
-          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
-          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
-          "replicas": []
-        }}
-      ]
-    """
+    assert await nodes[0].client.set("KEY0", "value")
+    assert await nodes[0].client.set("KEY1", "value")
+    assert await nodes[1].client.set("KEY2", "value")
+    assert await nodes[1].client.set("KEY3", "value")
+    assert await nodes[0].client.set("KEY4", "value")
+    assert await nodes[0].client.set("KEY5", "value")
+    assert await nodes[1].client.set("KEY6", "value")
+    assert await nodes[1].client.set("KEY7", "value")
+    assert await nodes[0].client.set("KEY8", "value")
+    assert await nodes[0].client.set("KEY9", "value")
+    assert await nodes[1].client.set("KEY10", "value")
+    assert await nodes[1].client.set("KEY11", "value")
+    assert await nodes[0].client.set("KEY12", "value")
+    assert await nodes[0].client.set("KEY13", "value")
+    assert await nodes[1].client.set("KEY14", "value")
+    assert await nodes[1].client.set("KEY15", "value")
+    assert await nodes[0].client.set("KEY16", "value")
+    assert await nodes[0].client.set("KEY17", "value")
+    assert await nodes[1].client.set("KEY18", "value")
+    assert await nodes[1].client.set("KEY19", "value")
 
-    await push_config(
-        config.replace("LAST_SLOT_CUTOFF", "9000").replace("NEXT_SLOT_CUTOFF", "9001"),
-        c_nodes_admin,
+    assert await nodes[0].client.execute_command("DBSIZE") == 10
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(3000, 9000)], nodes[1].id)
     )
 
-    assert await c_nodes[0].set("KEY0", "value")
-    assert await c_nodes[0].set("KEY1", "value")
-    assert await c_nodes[1].set("KEY2", "value")
-    assert await c_nodes[1].set("KEY3", "value")
-    assert await c_nodes[0].set("KEY4", "value")
-    assert await c_nodes[0].set("KEY5", "value")
-    assert await c_nodes[1].set("KEY6", "value")
-    assert await c_nodes[1].set("KEY7", "value")
-    assert await c_nodes[0].set("KEY8", "value")
-    assert await c_nodes[0].set("KEY9", "value")
-    assert await c_nodes[1].set("KEY10", "value")
-    assert await c_nodes[1].set("KEY11", "value")
-    assert await c_nodes[0].set("KEY12", "value")
-    assert await c_nodes[0].set("KEY13", "value")
-    assert await c_nodes[1].set("KEY14", "value")
-    assert await c_nodes[1].set("KEY15", "value")
-    assert await c_nodes[0].set("KEY16", "value")
-    assert await c_nodes[0].set("KEY17", "value")
-    assert await c_nodes[1].set("KEY18", "value")
-    assert await c_nodes[1].set("KEY19", "value")
+    logging.debug("Start migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert await c_nodes[0].execute_command("DBSIZE") == 10
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
-    migation_config = f"""
-      [
-        {{
-          "slot_ranges": [ {{ "start": 0, "end": LAST_SLOT_CUTOFF }} ],
-          "master": {{ "id": "{node_ids[0]}", "ip": "localhost", "port": {nodes[0].port} }},
-          "replicas": [],
-          "migrations": [{{ "slot_ranges": [ {{ "start": 3000, "end": 9000 }} ]
-                         , "ip": "127.0.0.1", "port" : {nodes[1].admin_port}, "node_id": "{node_ids[1]}" }}]
-        }},
-        {{
-          "slot_ranges": [ {{ "start": NEXT_SLOT_CUTOFF, "end": 16383 }} ],
-          "master": {{ "id": "{node_ids[1]}", "ip": "localhost", "port": {nodes[1].port} }},
-          "replicas": []
-        }}
-      ]
-    """
-
-    await push_config(
-        migation_config.replace("LAST_SLOT_CUTOFF", "9000").replace("NEXT_SLOT_CUTOFF", "9001"),
-        c_nodes_admin,
-    )
-
-    await wait_for_status(c_nodes_admin[1], node_ids[0], "FINISHED")
-
-    assert await c_nodes[1].set("KEY20", "value")
-    assert await c_nodes[1].set("KEY21", "value")
+    assert await nodes[1].client.set("KEY20", "value")
+    assert await nodes[1].client.set("KEY21", "value")
 
     assert (
-        await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[1])
-    ).startswith(f"""out {node_ids[1]} FINISHED keys:7""")
+        await nodes[0].admin_client.execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
+        )
+    ).startswith(f"""out {nodes[1].id} FINISHED keys:7""")
     assert (
-        await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_ids[0])
-    ).startswith(f"""in {node_ids[0]} FINISHED keys:7""")
+        await nodes[1].admin_client.execute_command(
+            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+        )
+    ).startswith(f"""in {nodes[0].id} FINISHED keys:7""")
 
-    await push_config(
-        config.replace("LAST_SLOT_CUTOFF", "2999").replace("NEXT_SLOT_CUTOFF", "3000"),
-        c_nodes_admin,
-    )
+    nodes[0].migrations = []
+    nodes[0].slots = [(0, 2999)]
+    nodes[1].slots = [(3000, 16383)]
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert await c_nodes[0].get("KEY0") == "value"
-    assert await c_nodes[1].get("KEY1") == "value"
-    assert await c_nodes[1].get("KEY2") == "value"
-    assert await c_nodes[1].get("KEY3") == "value"
-    assert await c_nodes[0].get("KEY4") == "value"
-    assert await c_nodes[1].get("KEY5") == "value"
-    assert await c_nodes[1].get("KEY6") == "value"
-    assert await c_nodes[1].get("KEY7") == "value"
-    assert await c_nodes[0].get("KEY8") == "value"
-    assert await c_nodes[1].get("KEY9") == "value"
-    assert await c_nodes[1].get("KEY10") == "value"
-    assert await c_nodes[1].get("KEY11") == "value"
-    assert await c_nodes[1].get("KEY12") == "value"
-    assert await c_nodes[1].get("KEY13") == "value"
-    assert await c_nodes[1].get("KEY14") == "value"
-    assert await c_nodes[1].get("KEY15") == "value"
-    assert await c_nodes[1].get("KEY16") == "value"
-    assert await c_nodes[1].get("KEY17") == "value"
-    assert await c_nodes[1].get("KEY18") == "value"
-    assert await c_nodes[1].get("KEY19") == "value"
-    assert await c_nodes[1].get("KEY20") == "value"
-    assert await c_nodes[1].get("KEY21") == "value"
-    assert await c_nodes[1].execute_command("DBSIZE") == 19
+    assert await nodes[0].client.get("KEY0") == "value"
+    assert await nodes[1].client.get("KEY1") == "value"
+    assert await nodes[1].client.get("KEY2") == "value"
+    assert await nodes[1].client.get("KEY3") == "value"
+    assert await nodes[0].client.get("KEY4") == "value"
+    assert await nodes[1].client.get("KEY5") == "value"
+    assert await nodes[1].client.get("KEY6") == "value"
+    assert await nodes[1].client.get("KEY7") == "value"
+    assert await nodes[0].client.get("KEY8") == "value"
+    assert await nodes[1].client.get("KEY9") == "value"
+    assert await nodes[1].client.get("KEY10") == "value"
+    assert await nodes[1].client.get("KEY11") == "value"
+    assert await nodes[1].client.get("KEY12") == "value"
+    assert await nodes[1].client.get("KEY13") == "value"
+    assert await nodes[1].client.get("KEY14") == "value"
+    assert await nodes[1].client.get("KEY15") == "value"
+    assert await nodes[1].client.get("KEY16") == "value"
+    assert await nodes[1].client.get("KEY17") == "value"
+    assert await nodes[1].client.get("KEY18") == "value"
+    assert await nodes[1].client.get("KEY19") == "value"
+    assert await nodes[1].client.get("KEY20") == "value"
+    assert await nodes[1].client.get("KEY21") == "value"
+    assert await nodes[1].client.execute_command("DBSIZE") == 19
 
-    assert (
-        await c_nodes_admin[1].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"
-    )
-    assert (
-        await c_nodes_admin[0].execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS") == "NO_STATE"
-    )
-
-    await close_clients(*c_nodes, *c_nodes_admin)
+    await check_for_no_state_status([node.admin_client for node in nodes])
+    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 @pytest.mark.parametrize(
