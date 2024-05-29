@@ -3076,8 +3076,8 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
   vector<RecordVec> results(opts->stream_ids.size());
   for (size_t i = 0; i < xread_resp.size(); i++) {
     ShardId sid = tx->GetUniqueShardCnt() > 1 ? i : tx->GetUniqueShard();
-    vector<RecordVec> sub_results = xread_resp[i];
-
+    vector<RecordVec> sub_results = std::move(xread_resp[i]);
+    ShardArgs shard_args = cntx->transaction->GetShardArgs(sid);
     for (size_t j = 0; j < sub_results.size(); j++) {
       if (sub_results[j].empty())
         continue;
@@ -3336,7 +3336,7 @@ constexpr uint32_t kXAutoClaim = WRITE | STREAM | FAST;
 void StreamFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
-  constexpr auto kReadFlags = CO::READONLY | CO::BLOCKING | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS;
+  constexpr auto kReadFlags = CO::READONLY | CO::BLOCKING | CO::VARIADIC_KEYS;
   *registry << CI{"XADD", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::kXAdd}.HFUNC(XAdd)
             << CI{"XCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
             << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)

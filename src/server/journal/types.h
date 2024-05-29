@@ -42,14 +42,16 @@ struct Entry : public EntryBase {
   struct Payload {
     std::string_view cmd;
     std::variant<CmdArgList,  // Parts of a full command.
-                 ShardArgs    // Command and its shard parts.
-                 >
+                 ShardArgs,   // Shard parts.
+                 ArgSlice>
         args;
 
     Payload() = default;
     Payload(std::string_view c, CmdArgList a) : cmd(c), args(a) {
     }
     Payload(std::string_view c, const ShardArgs& a) : cmd(c), args(a) {
+    }
+    Payload(std::string_view c, ArgSlice a) : cmd(c), args(a) {
     }
   };
 
