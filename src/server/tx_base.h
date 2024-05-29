@@ -133,7 +133,7 @@ class ShardArgs {
     }
 
     bool operator==(const Iterator& o) const {
-      return arglist_ == o.arglist_ && index_it_ == o.index_it_ && delta_ == o.delta_;
+      return index_it_ == o.index_it_ && delta_ == o.delta_ && arglist_.data() == o.arglist_.data();
     }
 
     bool operator!=(const Iterator& o) const {
