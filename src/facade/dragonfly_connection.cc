@@ -580,6 +580,8 @@ void Connection::OnPostMigrateThread() {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
 
+  DCHECK(!dispatch_fb_.IsJoinable());
+
   // Update tl variables
   queue_backpressure_ = &tl_queue_backpressure_;
 
@@ -1115,7 +1117,15 @@ void Connection::HandleMigrateRequest() {
 
     DecreaseStatsOnClose();
 
-    this->Migrate(dest);
+    // We need to return early as the socket is closing and IoLoop will clean up.
+    // The reason that this is true is because of the following DCHECK
+    DCHECK(!dispatch_fb_.IsJoinable());
+    // which can never trigger since we Joined on the dispatch_fb_ above and we are
+    // atomic in respect to our proactor meaning that no other fiber will
+    // launch the DispatchFiber.
+    if (!this->Migrate(dest)) {
+      return;
+    }
   }
 
   // This triggers when a pub/sub connection both publish and subscribe to the
@@ -1459,7 +1469,10 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   CHECK(!cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
-  if (dispatch_fb_.IsJoinable() || cc_->conn_closing) {  // can't move once it started
+  // Migrate is only used by DFLY Thread and Flow command which both check against
+  // the result of Migration and handle it explicitly in their flows so this can act
+  // as a weak if condition instead of a crash prone CHECK.
+  if (dispatch_fb_.IsJoinable() || cc_->conn_closing) {
     return false;
   }
 

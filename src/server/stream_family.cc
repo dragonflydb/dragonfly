@@ -793,17 +793,17 @@ namespace {
 stream* GetReadOnlyStream(const CompactObj& cobj) {
   return const_cast<stream*>((const stream*)cobj.RObjPtr());
 }
+
 }  // namespace
 
 // Returns a map of stream to the ID of the last entry in the stream. Any
 // streams not found are omitted from the result.
-OpResult<vector<pair<string_view, streamID>>> OpLastIDs(const OpArgs& op_args,
-                                                        const ShardArgs& args) {
+OpResult<vector<pair<string, streamID>>> OpLastIDs(const OpArgs& op_args, const ShardArgs& args) {
   DCHECK(!args.Empty());
 
   auto& db_slice = op_args.shard->db_slice();
 
-  vector<pair<string_view, streamID>> last_ids;
+  vector<pair<string, streamID>> last_ids;
   for (string_view key : args) {
     auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
     if (!res_it) {
@@ -2007,6 +2007,135 @@ optional<pair<AddTrimOpts, unsigned>> ParseAddOrTrimArgsOrReply(CmdArgList args,
   return make_pair(opts, id_indx);
 }
 
+void FetchGroupInfo(Transaction* tx, ReadOpts* opts) {
+  vector<vector<GroupConsumerPair>> res_pairs(shard_set->size());
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    auto sid = shard->shard_id();
+    ShardArgs s_args = t->GetShardArgs(sid);
+    GroupConsumerPairOpts gc_opts = {opts->group_name, opts->consumer_name};
+
+    res_pairs[sid] = OpGetGroupConsumerPairs(s_args, t->GetOpArgs(shard), gc_opts);
+    return OpStatus::OK;
+  };
+
+  tx->Execute(std::move(cb), false);
+
+  for (size_t i = 0; i < shard_set->size(); i++) {
+    auto s_item = res_pairs[i];
+    auto s_args = tx->GetShardArgs(i);
+    if (s_item.size() == 0) {
+      continue;
+    }
+    unsigned index = 0;
+    for (string_view key : s_args) {
+      StreamIDsItem& item = opts->stream_ids.at(key);
+      item.consumer = s_item[index].consumer;
+      item.group = s_item[index].group;
+      ++index;
+    }
+  }
+}
+
+// Returns true if the last-ids list has relevant entries according to read options,
+// false if blocking is required to fetch entries.
+io::Result<bool, facade::ErrorReply> HasEntries(
+    ReadOpts* opts, const absl::flat_hash_map<string, streamID>& last_ids) {
+  bool has_entries = false;
+  for (auto& [stream, requested_sitem] : opts->stream_ids) {
+    if (auto last_id_it = last_ids.find(stream); last_id_it != last_ids.end()) {
+      streamID last_id = last_id_it->second;
+
+      if (opts->read_group && !requested_sitem.group) {
+        // if the group associated with the key is not found,
+        // send NoGroupOrKey error.
+        // We are simply mimicking Redis' error message here.
+        // However, we could actually report more precise error message.
+        return nonstd::make_unexpected(facade::ErrorReply(
+            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option")));
+      }
+
+      // Resolve $ to the last ID in the stream.
+      if (requested_sitem.id.last_id && !opts->read_group) {
+        requested_sitem.id.val = last_id;
+        // We only include messages with IDs greater than the last message so
+        // increment the ID.
+        streamIncrID(&requested_sitem.id.val);
+        requested_sitem.id.last_id = false;
+        continue;
+      }
+      if (opts->read_group) {
+        // If '>' is not provided, consumer PEL is used. So don't need to block.
+        if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
+          has_entries = true;
+          opts->serve_history = true;
+          continue;
+        }
+        // we know the requested last_id only when we already have it
+        if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
+          requested_sitem.id.val = requested_sitem.group->last_id;
+          streamIncrID(&requested_sitem.id.val);
+        }
+      }
+
+      if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
+        has_entries = true;
+      }
+    } else {
+      if (opts->read_group) {
+        // See equivalent reply above
+        return nonstd::make_unexpected(facade::ErrorReply(
+            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option")));
+      }
+    }
+  }
+
+  return has_entries;
+}
+
+struct StreamReplies {
+  explicit StreamReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
+    DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
+  }
+
+  void SendRecord(const Record& record) const {
+    rb->StartArray(2);
+    rb->SendBulkString(StreamIdRepr(record.id));
+    rb->StartArray(record.kv_arr.size() * 2);
+    for (const auto& k_v : record.kv_arr) {
+      rb->SendBulkString(k_v.first);
+      rb->SendBulkString(k_v.second);
+    }
+  }
+
+  void SendIDs(absl::Span<const streamID> ids) const {
+    rb->StartArray(ids.size());
+    for (auto id : ids)
+      rb->SendBulkString(StreamIdRepr(id));
+  }
+
+  void SendRecords(absl::Span<const Record> records) const {
+    rb->StartArray(records.size());
+    for (const auto& record : records)
+      SendRecord(record);
+  }
+
+  void SendStreamRecords(string_view key, absl::Span<const Record> records) const {
+    rb->StartArray(2);
+    rb->SendBulkString(key);
+    SendRecords(records);
+  }
+
+  void SendClaimInfo(const ClaimInfo& ci) const {
+    if (ci.justid) {
+      SendIDs(ci.ids);
+    } else {
+      SendRecords(ci.records);
+    }
+  }
+
+  RedisReplyBuilder* rb;
+};
+
 }  // namespace
 
 void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
@@ -2147,26 +2276,7 @@ void StreamFamily::XClaim(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  ClaimInfo cresult = result.value();
-  if (cresult.justid) {
-    rb->StartArray(cresult.ids.size());
-    for (auto id : cresult.ids) {
-      rb->SendBulkString(StreamIdRepr(id));
-    }
-  } else {
-    const RecordVec& crec = cresult.records;
-    rb->StartArray(crec.size());
-    for (const auto& item : crec) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& [k, v] : item.kv_arr) {
-        rb->SendBulkString(k);
-        rb->SendBulkString(v);
-      }
-    }
-  }
+  StreamReplies{cntx->reply_builder()}.SendClaimInfo(result.value());
 }
 
 void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
@@ -2363,16 +2473,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
         if (full) {
           rb->SendBulkString("entries");
-          rb->StartArray(sinfo->entries.size());
-          for (const auto& entry : sinfo->entries) {
-            rb->StartArray(2);
-            rb->SendBulkString(StreamIdRepr(entry.id));
-            rb->StartArray(2);
-            for (const auto& k_v : entry.kv_arr) {
-              rb->SendBulkString(k_v.first);
-              rb->SendBulkString(k_v.second);
-            }
-          }
+          StreamReplies{rb}.SendRecords(sinfo->entries);
 
           rb->SendBulkString("groups");
           rb->StartArray(sinfo->cgroups.size());
@@ -2446,26 +2547,14 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
           rb->SendBulkString("first-entry");
           if (sinfo->first_entry.kv_arr.size() != 0) {
-            rb->StartArray(2);
-            rb->SendBulkString(StreamIdRepr(sinfo->first_entry.id));
-            rb->StartArray(sinfo->first_entry.kv_arr.size() * 2);
-            for (pair<string, string> k_v : sinfo->first_entry.kv_arr) {
-              rb->SendBulkString(k_v.first);
-              rb->SendBulkString(k_v.second);
-            }
+            StreamReplies{rb}.SendRecord(sinfo->first_entry);
           } else {
             rb->SendNullArray();
           }
 
           rb->SendBulkString("last-entry");
           if (sinfo->last_entry.kv_arr.size() != 0) {
-            rb->StartArray(2);
-            rb->SendBulkString(StreamIdRepr(sinfo->last_entry.id));
-            rb->StartArray(sinfo->last_entry.kv_arr.size() * 2);
-            for (pair<string, string> k_v : sinfo->last_entry.kv_arr) {
-              rb->SendBulkString(k_v.first);
-              rb->SendBulkString(k_v.second);
-            }
+            StreamReplies{rb}.SendRecord(sinfo->last_entry);
           } else {
             rb->SendNullArray();
           }
@@ -2777,9 +2866,8 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
 }
 
 // Returns the last ID of each stream in the transaction.
-OpResult<unordered_map<string_view, streamID>> StreamLastIDs(Transaction* trans) {
-  vector<OpResult<vector<pair<string_view, streamID>>>> last_ids_res(shard_set->size());
-
+OpResult<absl::flat_hash_map<string, streamID>> FetchLastStreamIDs(Transaction* trans) {
+  vector<OpResult<vector<pair<string, streamID>>>> last_ids_res(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     last_ids_res[sid] = OpLastIDs(t->GetOpArgs(shard), t->GetShardArgs(shard->shard_id()));
@@ -2787,24 +2875,21 @@ OpResult<unordered_map<string_view, streamID>> StreamLastIDs(Transaction* trans)
   };
   trans->Execute(std::move(cb), false);
 
-  unordered_map<string_view, streamID> last_ids;
+  absl::flat_hash_map<string, streamID> last_ids;
   for (auto res : last_ids_res) {
-    if (!res) {
+    if (!res)
       return res.status();
-    }
 
-    for (auto& e : *res) {
-      last_ids.emplace(e.first, e.second);
-    }
+    last_ids.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
   }
   return last_ids;
 }
 
-void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
+void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
   // If BLOCK is not set just return an empty array as there are no resolvable
   // entries.
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (opts.timeout == -1 || cntx->transaction->IsMulti()) {
+  if (opts->timeout == -1 || cntx->transaction->IsMulti()) {
     // Close the transaction and release locks.
     cntx->transaction->Conclude();
     return rb->SendNullArray();
@@ -2812,8 +2897,8 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
 
   auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
 
-  auto tp = (opts.timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts.timeout)
-                           : Transaction::time_point::max();
+  auto tp = (opts->timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts->timeout)
+                            : Transaction::time_point::max();
 
   const auto key_checker = [&opts](EngineShard* owner, const DbContext& context, Transaction* tx,
                                    std::string_view key) -> bool {
@@ -2821,7 +2906,7 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
     if (!res_it.ok())
       return false;
 
-    auto sitem = opts.stream_ids.at(key);
+    auto sitem = opts->stream_ids.at(key);
     if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)
       return true;
 
@@ -2852,7 +2937,7 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
                                           .ms = UINT64_MAX,
                                           .seq = UINT64_MAX,
                                       }};
-      auto sitem = opts.stream_ids.at(*wake_key);
+      auto sitem = opts->stream_ids.at(*wake_key);
       range_opts.start = sitem.id;
       if (sitem.id.val.ms == UINT64_MAX || sitem.id.val.seq == UINT64_MAX) {
         range_opts.start.val = sitem.group->last_id;  // only for '>'
@@ -2861,7 +2946,7 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
 
       range_opts.group = sitem.group;
       range_opts.consumer = sitem.consumer;
-      range_opts.noack = opts.noack;
+      range_opts.noack = opts->noack;
 
       result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
       key = *wake_key;
@@ -2872,158 +2957,143 @@ void XReadBlock(ReadOpts opts, ConnectionContext* cntx) {
 
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-
     rb->StartArray(1);
-
-    rb->StartArray(2);
-    rb->SendBulkString(key);
-
-    rb->StartArray(result->size());
-    for (const auto& item : *result) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& k_v : item.kv_arr) {
-        rb->SendBulkString(k_v.first);
-        rb->SendBulkString(k_v.second);
-      }
-    }
-    return;
+    StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, *result);
   } else {
     return rb->SendNullArray();
   }
 }
 
-// Read entries from given streams
-void XReadImpl(CmdArgList args, std::optional<ReadOpts> opts, ConnectionContext* cntx) {
+// Determine if entries are available and read them in a single hop. Returns nullopt in case of an
+// error and replies.
+std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, ReadOpts* opts) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  auto last_ids = StreamLastIDs(cntx->transaction);
-  if (!last_ids) {
-    // Close the transaction.
-    cntx->transaction->Conclude();
+  auto* tx = cntx->transaction;
 
-    if (last_ids.status() == OpStatus::WRONG_TYPE) {
+  vector<RecordVec> prefetched_results;
+  bool requires_blocking = false;
+
+  optional<facade::ErrorReply> detailed_err;
+  auto res = tx->ScheduleSingleHop([&](auto* tx, auto* es) -> Transaction::RunnableResult {
+    auto last_ids = OpLastIDs(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()));
+    if (!last_ids)
+      return last_ids.status();
+
+    absl::flat_hash_map<string, streamID> last_ids_map(last_ids->begin(), last_ids->end());
+    auto has_entries = HasEntries(opts, last_ids_map);
+    if (!has_entries.has_value()) {
+      detailed_err = has_entries.error();
+      return OpStatus::INVALID_VALUE;
+    }
+
+    // If no entries are available, avoid concluding to proceed waiting with acquired keys
+    if (!*has_entries) {
+      requires_blocking = true;
+      return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
+    }
+
+    prefetched_results = OpRead(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()), *opts);
+    DCHECK(!prefetched_results.empty());
+    return OpStatus::OK;
+  });
+
+  if (detailed_err.has_value()) {
+    rb->SendError(*detailed_err);
+    return std::nullopt;
+  }
+
+  if (res != OpStatus::OK) {
+    if (res == OpStatus::WRONG_TYPE)
       cntx->SendError(kWrongTypeErr);
+    else
+      rb->SendNullArray();
+    return std::nullopt;
+  }
+
+  if (requires_blocking)
+    return vector<RecordVec>{};
+  else
+    return {std::move(prefetched_results)};
+}
+
+// Read entries from given streams
+void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* tx = cntx->transaction;
+
+  vector<RecordVec> prefetched_results;
+  bool requires_blocking = false;
+
+  // If only a single shard is active, we can read the items immediately without wasting another hop
+  if (!tx->IsScheduled() && tx->GetUniqueShardCnt() == 1) {
+    auto result = XReadImplSingleShard(cntx, opts);
+    if (!result)
+      return;  // replied with error
+
+    prefetched_results = std::move(*result);
+    requires_blocking = prefetched_results.empty();
+  } else {
+    auto last_ids = FetchLastStreamIDs(cntx->transaction);
+    if (!last_ids) {
+      cntx->transaction->Conclude();
+      if (last_ids.status() == OpStatus::WRONG_TYPE)
+        return cntx->SendError(kWrongTypeErr);
+
+      return rb->SendNullArray();
+    }
+
+    auto has_entries = HasEntries(opts, *last_ids);
+    if (!has_entries.has_value()) {
+      cntx->transaction->Conclude();
+      rb->SendError(has_entries.error());
       return;
     }
 
-    return rb->SendNullArray();
+    requires_blocking = !has_entries.value();
   }
 
-  // Resolve '$' IDs and check if there are any streams with entries that can
-  // be resolved without blocking.
-  bool block = true;
-  for (auto& [stream, requested_sitem] : opts->stream_ids) {
-    if (auto last_id_it = last_ids->find(stream); last_id_it != last_ids->end()) {
-      streamID last_id = last_id_it->second;
+  // If no items are available, proceeed with blocking flow
+  if (requires_blocking)
+    return XReadBlock(opts, cntx);
 
-      if (opts->read_group && !requested_sitem.group) {
-        // if the group associated with the key is not found,
-        // send NoGroupOrKey error.
-        // We are simply mimicking Redis' error message here.
-        // However, we could actually report more precise error message.
-        cntx->transaction->Conclude();
-        rb->SendError(NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option"));
-        return;
-      }
-
-      // Resolve $ to the last ID in the stream.
-      if (requested_sitem.id.last_id && !opts->read_group) {
-        requested_sitem.id.val = last_id;
-        // We only include messages with IDs greater than the last message so
-        // increment the ID.
-        streamIncrID(&requested_sitem.id.val);
-        requested_sitem.id.last_id = false;
-        continue;
-      }
-      if (opts->read_group) {
-        // If '>' is not provided, consumer PEL is used. So don't need to block.
-        if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
-          block = false;
-          opts->serve_history = true;
-          continue;
-        }
-        // we know the requested last_id only when we already have it
-        if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
-          requested_sitem.id.val = requested_sitem.group->last_id;
-          streamIncrID(&requested_sitem.id.val);
-        }
-      }
-
-      if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
-        block = false;
-      }
-    } else {
-      if (opts->read_group) {
-        // if the key is not found, send NoGroupOrKey error.
-        // We are simply mimicking Redis' error message here.
-        // However, we could actually report more precise error message.
-        string error_msg =
-            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option");
-        cntx->transaction->Conclude();
-        rb->SendError(error_msg);
-        return;
-      }
-    }
+  // Read entries or move them from prefetched
+  vector<vector<RecordVec>> xread_resp;
+  if (prefetched_results.empty()) {
+    xread_resp.resize(shard_set->size());
+    auto read_cb = [&](Transaction* t, EngineShard* shard) {
+      ShardId sid = shard->shard_id();
+      xread_resp[sid] = OpRead(t->GetOpArgs(shard), t->GetShardArgs(sid), *opts);
+      return OpStatus::OK;
+    };
+    cntx->transaction->Execute(std::move(read_cb), true);
+  } else {
+    DCHECK_EQ(tx->GetUniqueShardCnt(), 1u);
+    xread_resp = {std::move(prefetched_results)};
   }
 
-  if (block) {
-    return XReadBlock(*opts, cntx);
-  }
-
-  vector<vector<RecordVec>> xread_resp(shard_set->size());
-  auto read_cb = [&](Transaction* t, EngineShard* shard) {
-    ShardId sid = shard->shard_id();
-    xread_resp[sid] = OpRead(t->GetOpArgs(shard), t->GetShardArgs(shard->shard_id()), *opts);
-    return OpStatus::OK;
-  };
-  cntx->transaction->Execute(std::move(read_cb), true);
-
-  // Merge the results into a single response ordered by stream.
-  vector<RecordVec> res(opts->stream_ids.size());
-  // Track the number of streams with records as empty streams are excluded from
-  // the response.
+  // Count number of streams and merge final results in correct order
   int resolved_streams = 0;
-  for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
-    if (!cntx->transaction->IsActive(sid))
-      continue;
+  vector<RecordVec> results(opts->stream_ids.size());
+  for (size_t i = 0; i < xread_resp.size(); i++) {
+    ShardId sid = tx->GetUniqueShardCnt() > 1 ? i : tx->GetUniqueShard();
+    vector<RecordVec> sub_results = xread_resp[i];
 
-    vector<RecordVec>& results = xread_resp[sid];
-
-    for (size_t i = 0; i < results.size(); ++i) {
-      if (results[i].size() == 0) {
+    for (size_t j = 0; j < sub_results.size(); j++) {
+      if (sub_results[j].empty())
         continue;
-      }
-
       resolved_streams++;
-
-      // Add the stream records ordered by the original stream arguments.
-      size_t indx = cntx->transaction->ReverseArgIndex(sid, i);
-      res[indx - opts->streams_arg] = std::move(results[i]);
+      results[tx->ReverseArgIndex(sid, j) - opts->streams_arg] = std::move(sub_results[j]);
     }
   }
 
+  // Send all results back
   SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-
   rb->StartArray(resolved_streams);
-  for (size_t i = 0; i != res.size(); i++) {
-    // Ignore empty streams.
-    if (res[i].size() == 0) {
+  for (size_t i = 0; i < results.size(); i++) {
+    if (results[i].empty())
       continue;
-    }
-
-    rb->StartArray(2);
-    rb->SendBulkString(ArgS(args, i + opts->streams_arg));
-    rb->StartArray(res[i].size());
-    for (const auto& item : res[i]) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& k_v : item.kv_arr) {
-        rb->SendBulkString(k_v.first);
-        rb->SendBulkString(k_v.second);
-      }
-    }
+    string_view key = ArgS(args, i + opts->streams_arg);
+    StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, results[i]);
   }
 }
 
@@ -3033,37 +3103,11 @@ void XReadGeneric(CmdArgList args, bool read_group, ConnectionContext* cntx) {
     return;
   }
 
-  vector<vector<GroupConsumerPair>> res_pairs(shard_set->size());
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto sid = shard->shard_id();
-    ShardArgs s_args = t->GetShardArgs(sid);
-    GroupConsumerPairOpts gc_opts = {opts->group_name, opts->consumer_name};
-
-    res_pairs[sid] = OpGetGroupConsumerPairs(s_args, t->GetOpArgs(shard), gc_opts);
-    return OpStatus::OK;
-  };
-
   if (opts->read_group) {
-    // If the command is `XReadGroup`, we need to get
-    // the (group, consumer) pairs for each key.
-    cntx->transaction->Execute(std::move(cb), false);
-
-    for (size_t i = 0; i < shard_set->size(); i++) {
-      auto s_item = res_pairs[i];
-      auto s_args = cntx->transaction->GetShardArgs(i);
-      if (s_item.size() == 0) {
-        continue;
-      }
-      unsigned index = 0;
-      for (string_view key : s_args) {
-        StreamIDsItem& item = opts->stream_ids.at(key);
-        item.consumer = s_item[index].consumer;
-        item.group = s_item[index].group;
-        ++index;
-      }
-    }
+    FetchGroupInfo(cntx->transaction, &*opts);
   }
-  return XReadImpl(args, opts, cntx);
+
+  return XReadImpl(args, &*opts, cntx);
 }
 
 void StreamFamily::XRead(CmdArgList args, ConnectionContext* cntx) {
@@ -3163,17 +3207,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
     SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-
-    rb->StartArray(result->size());
-    for (const auto& item : *result) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& k_v : item.kv_arr) {
-        rb->SendBulkString(k_v.first);
-        rb->SendBulkString(k_v.second);
-      }
-    }
+    StreamReplies{cntx->reply_builder()}.SendRecords(*result);
     return;
   }
 
@@ -3274,29 +3308,8 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(3);
   rb->SendBulkString(StreamIdRepr(cresult.end_id));
-  if (cresult.justid) {
-    rb->StartArray(cresult.ids.size());
-    for (auto id : cresult.ids) {
-      rb->SendBulkString(StreamIdRepr(id));
-    }
-  } else {
-    const RecordVec& crec = cresult.records;
-    rb->StartArray(crec.size());
-    for (const auto& item : crec) {
-      rb->StartArray(2);
-      rb->SendBulkString(StreamIdRepr(item.id));
-      rb->StartArray(item.kv_arr.size() * 2);
-      for (const auto& [k, v] : item.kv_arr) {
-        rb->SendBulkString(k);
-        rb->SendBulkString(v);
-      }
-    }
-  }
-
-  rb->StartArray(cresult.deleted_ids.size());
-  for (auto id : cresult.deleted_ids) {
-    rb->SendBulkString(StreamIdRepr(id));
-  }
+  StreamReplies{rb}.SendClaimInfo(cresult);
+  StreamReplies{rb}.SendIDs(cresult.deleted_ids);
 }
 
 #define HFUNC(x) SetHandler(&StreamFamily::x)

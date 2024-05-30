@@ -57,7 +57,7 @@ TEST(SmallBins, SimpleDeleteAbort) {
   }
 }
 
-TEST(SmallBins, PartialStash) {
+TEST(SmallBins, PartialStashDelete) {
   SmallBins bins;
 
   // Fill single bin
@@ -76,6 +76,22 @@ TEST(SmallBins, PartialStash) {
   EXPECT_EQ(segments.size(), i / 2);
   for (auto& [dbid, key, segment] : segments) {
     EXPECT_EQ(key, "k"s + bin->second.substr(segment.offset, segment.length).substr(1));
+  }
+
+  // Delete all stashed values
+  while (!segments.empty()) {
+    auto segment = std::get<2>(segments.back());
+    segments.pop_back();
+    auto bin = bins.Delete(segment);
+
+    EXPECT_EQ(bin.segment.offset, 0u);
+    EXPECT_EQ(bin.segment.length, 4_KB);
+
+    if (segments.empty()) {
+      EXPECT_TRUE(bin.empty);
+    } else {
+      EXPECT_TRUE(bin.fragmented);  // half of the values were deleted
+    }
   }
 }
 

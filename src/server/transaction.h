@@ -333,6 +333,7 @@ class Transaction {
   // entry.
   void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload, uint32_t shard_cnt,
                          bool multi_commands, bool allow_await) const;
+
   void FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const;
 
   // Re-enable auto journal for commands marked as NO_AUTOJOURNAL. Call during setup.

@@ -22,7 +22,7 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   DCHECK_LT(value.size(), 2_KB);
 
   // See FlushBin() for format details
-  size_t value_bytes = 2 /* dbid */ + 8 /* hash */ + value.size();
+  size_t value_bytes = 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
 
   std::optional<FilledBin> filled_bin;
   if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
@@ -56,10 +56,12 @@ SmallBins::FilledBin SmallBins::FlushBin() {
     data += sizeof(uint64_t);
   }
 
-  // Store all values, n * x bytes
+  // Store all values with sizes, n * (2 + x) bytes
   for (const auto& [key, value] : current_bin_) {
-    pending_set[key] = {size_t(data - out.data()), value.size()};
+    absl::little_endian::Store16(data, value.size());
+    data += sizeof(uint16_t);
 
+    pending_set[key] = {size_t(data - out.data()), value.size()};
     memcpy(data, value.data(), value.size());
     data += value.size();
   }
@@ -74,13 +76,17 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   auto key_list = pending_bins_.extract(id);
   DCHECK_GT(key_list.mapped().size(), 0u);
 
+  uint16_t bytes = 0;
   SmallBins::KeySegmentList list;
   for (auto& [key, sub_segment] : key_list.mapped()) {
-    list.emplace_back(key.first, key.second,
-                      DiskSegment{segment.offset + sub_segment.offset, sub_segment.length});
+    bytes += sub_segment.length;
+
+    DiskSegment real_segment{segment.offset + sub_segment.offset, sub_segment.length};
+    list.emplace_back(key.first, key.second, real_segment);
   }
 
-  stats_.total_stashed_entries += list.size();
+  stats_.stashed_entries_cnt += list.size();
+  stashed_bins_[segment.offset] = {uint8_t(list.size()), bytes};
   return list;
 }
 
@@ -109,22 +115,67 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
   return std::nullopt;
 }
 
-std::optional<DiskSegment> SmallBins::Delete(DiskSegment segment) {
-  segment = segment.FillPages();
-  if (auto it = stashed_bins_.find(segment.offset); it != stashed_bins_.end()) {
-    stats_.total_stashed_entries--;
-    if (--it->second == 0) {
+SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
+  auto full_segment = segment.ContainingPages();
+  if (auto it = stashed_bins_.find(full_segment.offset); it != stashed_bins_.end()) {
+    stats_.stashed_entries_cnt--;
+    auto& bin = it->second;
+
+    DCHECK_LE(segment.length, bin.bytes);
+    bin.bytes -= segment.length;
+
+    if (--bin.entries == 0) {
+      DCHECK_EQ(bin.bytes, 0u);
       stashed_bins_.erase(it);
-      return segment;
+      return {full_segment, false /* fragmented */, true /* empty */};
+    }
+
+    if (bin.bytes < kPageSize / 2) {
+      return {full_segment, true /* fragmented */, false /* empty */};
     }
   }
-  return std::nullopt;
+
+  return {segment};
 }
 
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
-               .stashed_entries_cnt = stats_.total_stashed_entries,
+               .stashed_entries_cnt = stats_.stashed_entries_cnt,
                .current_bin_bytes = current_bin_bytes_};
+}
+
+SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
+  DCHECK_EQ(value.size(), kPageSize);
+  stats_.stashed_entries_cnt -= stashed_bins_.extract(segment.offset).mapped().entries;
+
+  const char* data = value.data();
+
+  uint16_t entries = absl::little_endian::Load16(data);
+  data += sizeof(uint16_t);
+
+  KeyHashDbList out(entries);
+
+  // Recover dbids and hashes
+  for (size_t i = 0; i < entries; i++) {
+    DbIndex dbid = absl::little_endian::Load16(data);
+    data += sizeof(DbIndex);
+
+    uint64_t hash = absl::little_endian::Load64(data);
+    data += sizeof(hash);
+
+    out[i] = {dbid, hash, {0, 0}};
+  }
+
+  // Recover segments
+  for (size_t i = 0; i < entries; i++) {
+    uint16_t length = absl::little_endian::Load16(data);
+    data += sizeof(uint16_t);
+
+    std::get<DiskSegment>(out[i]) = {segment.offset + (data - value.data()), length};
+    data += length;
+  }
+
+  return out;
 }
 
 }  // namespace dfly::tiering

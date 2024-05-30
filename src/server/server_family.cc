@@ -1106,6 +1106,8 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
+                            MetricType::GAUGE, &resp->body());
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
@@ -1140,6 +1142,8 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                            << sdata_res.error().message();
   }
   AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
+                            MetricType::GAUGE, &resp->body());
 
   DbStats total;
   for (const auto& db_stats : m.db_stats) {
@@ -1902,6 +1906,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
     result.facade_stats += *tl_facade_stats;
+    result.serialization_bytes += SliceSnapshot::GetThreadLocalMemoryUsage();
 
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
@@ -2057,6 +2062,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
     append("tls_bytes", m.tls_bytes);
+    append("snapshot_serialization_bytes", m.serialization_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
@@ -2136,6 +2142,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_total_fetches", m.tiered_stats.total_fetches);
     append("tiered_total_cancels", m.tiered_stats.total_cancels);
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
+    append("tiered_total_deletes", m.tiered_stats.total_defrags);
 
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
