@@ -65,12 +65,13 @@ def send_command(node, command, print_errors=True):
     return Exception()
 
 
+def build_node(node):
+    return {"id": node.id, "ip": node.host, "port": node.port}
+
+
 def build_config_from_list(masters):
     total_slots = 16384
     slots_per_node = math.floor(total_slots / len(masters))
-
-    def build_node(node):
-        return {"id": node.id, "ip": node.host, "port": node.port}
 
     config = []
     for i, master in enumerate(masters):
@@ -217,14 +218,26 @@ def find_node(config, host, port):
 
 def attach(args):
     print(f"Attaching remote Dragonfly {args.attach_host}:{args.attach_port} to cluster")
-    newcomer = Master(args.attach_host, args.attach_port)
-    newcomer.node.update_id()
+    if args.attach_as_replica:
+        config = build_config_from_existing(args)
+        master_node = find_node(config, args.target_host, args.target_port)
 
-    newcomer_config = build_config_from_list([newcomer])
-    newcomer_config[0]["slot_ranges"] = []
-    config = build_config_from_existing(args)
-    print(f"Pushing config:\n{config}\n")
-    push_config([*config, newcomer_config[0]])
+        newcomer = Node(args.attach_host, args.attach_port)
+        newcomer.update_id()
+        newcomer_node = build_node(newcomer)
+
+        master_node["replicas"].append(newcomer_node)
+        print(f"Pushing config:\n{config}\n")
+        push_config(config)
+    else:
+        newcomer = Master(args.attach_host, args.attach_port)
+        newcomer.node.update_id()
+
+        newcomer_config = build_config_from_list([newcomer])
+        newcomer_config[0]["slot_ranges"] = []
+        config = build_config_from_existing(args)
+        print(f"Pushing config:\n{config}\n")
+        push_config([*config, newcomer_config[0]])
     print()
 
 
@@ -444,6 +457,9 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
     )
     parser.add_argument(
         "--attach_port", type=int, default=6379, help="New cluster node master port"
+    )
+    parser.add_argument(
+        "--attach_as_replica", type=bool, default=False, help="Is the attached node a replica?"
     )
     args = parser.parse_args()
 
