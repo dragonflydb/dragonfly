@@ -3076,11 +3076,16 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
   vector<RecordVec> results(opts->stream_ids.size());
   for (size_t i = 0; i < xread_resp.size(); i++) {
     vector<RecordVec>& sub_results = xread_resp[i];
+    ShardId sid = xread_resp.size() < shard_set->size() ? tx->GetUniqueShard() : i;
+    if (!tx->IsActive(sid)) {
+      DCHECK(sub_results.empty());
+      continue;
+    }
 
-    ShardId sid = tx->GetUniqueShardCnt() > 1 ? i : tx->GetUniqueShard();
     ShardArgs shard_args = cntx->transaction->GetShardArgs(sid);
+    DCHECK_EQ(shard_args.Size(), sub_results.size());
+
     auto shard_args_it = shard_args.begin();
-    DCHECK_GE(shard_args.Size(), sub_results.size());
     for (size_t j = 0; j < sub_results.size(); j++, ++shard_args_it) {
       if (sub_results[j].empty())
         continue;
