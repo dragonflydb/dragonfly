@@ -3075,14 +3075,18 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
   int resolved_streams = 0;
   vector<RecordVec> results(opts->stream_ids.size());
   for (size_t i = 0; i < xread_resp.size(); i++) {
+    vector<RecordVec>& sub_results = xread_resp[i];
+
     ShardId sid = tx->GetUniqueShardCnt() > 1 ? i : tx->GetUniqueShard();
-    vector<RecordVec> sub_results = std::move(xread_resp[i]);
     ShardArgs shard_args = cntx->transaction->GetShardArgs(sid);
-    for (size_t j = 0; j < sub_results.size(); j++) {
+    auto shard_args_it = shard_args.begin();
+    DCHECK_GE(shard_args.Size(), sub_results.size());
+    for (size_t j = 0; j < sub_results.size(); j++, ++shard_args_it) {
       if (sub_results[j].empty())
         continue;
+
       resolved_streams++;
-      results[tx->ReverseArgIndex(sid, j) - opts->streams_arg] = std::move(sub_results[j]);
+      results[shard_args_it.index() - opts->streams_arg] = std::move(sub_results[j]);
     }
   }
 
