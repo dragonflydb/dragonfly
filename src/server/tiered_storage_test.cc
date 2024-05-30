@@ -185,7 +185,7 @@ TEST_F(TieredStorageTest, FlushAll) {
     }
   });
 
-  util::ThisFiber::SleepFor(10ms);
+  util::ThisFiber::SleepFor(50ms);
   Run({"FLUSHALL"});
 
   done = true;
