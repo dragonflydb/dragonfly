@@ -1,8 +1,7 @@
 # my global config
 global:
-  scrape_interval:     15s # By default, scrape targets every 15 seconds.
-  evaluation_interval: 15s # By default, scrape targets every 15 seconds.
-  # scrape_timeout is set to the global default (10s).
+  scrape_interval:     5s
+  evaluation_interval: 5s
 
   # Attach these labels to any time series or alerts when communicating with
   # external systems (federation, remote storage, Alertmanager).
@@ -43,8 +42,6 @@ scrape_configs:
 
 
   - job_name: 'node-exporter'
-
-    # Override the global default and scrape targets from this job every 5 seconds.
     scrape_interval: 1s
     static_configs:
       - targets: ['node-exporter:9100']

@@ -97,9 +97,13 @@ class ConnectionContext {
   bool async_dispatch : 1;    // whether this connection is amid an async dispatch
   bool sync_dispatch : 1;     // whether this connection is amid a sync dispatch
   bool journal_emulated : 1;  // whether it is used to dispatch journal commands
-  bool paused = false;        // whether this connection is paused due to CLIENT PAUSE
+
+  bool paused = false;  // whether this connection is paused due to CLIENT PAUSE
   // whether it's blocked on blocking commands like BLPOP, needs to be addressable
   bool blocked = false;
+
+  // Skip ACL validation, used by internal commands and commands run on admin port
+  bool skip_acl_validation = false;
 
   // How many async subscription sources are active: monitor and/or pubsub - at most 2.
   uint8_t subscriptions;
@@ -108,8 +112,6 @@ class ConnectionContext {
   std::string authed_username{"default"};
   uint32_t acl_categories{dfly::acl::ALL};
   std::vector<uint64_t> acl_commands;
-  // Skip ACL validation, used by internal commands and commands run on admin port
-  bool skip_acl_validation = false;
   // keys
   dfly::acl::AclKeys keys{{}, true};
 
