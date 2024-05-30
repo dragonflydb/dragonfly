@@ -738,6 +738,9 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
 
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
+  if (dispatch_q_.size()) {
+    absl::StrAppend(&after, " pipeline=", dispatch_q_.size());
+  }
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
 
@@ -1265,10 +1268,6 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
   for (auto rit = it; rit != it + dispatched; ++rit)
     RecycleMessage(std::move(*rit));
 
-  if (stats_->dispatch_queue_max_len == dispatch_q_.size()) {
-    // pessimistic reduction that will be corrected upon the next insertion.
-    stats_->dispatch_queue_max_len -= dispatched;
-  }
   dispatch_q_.erase(it, it + dispatched);
 
   // If interrupted due to pause, fall back to regular dispatch
@@ -1287,10 +1286,6 @@ void Connection::ClearPipelinedMessages() {
     RecycleMessage(std::move(msg));
   }
 
-  if (dispatch_q_.size() == stats_->dispatch_queue_max_len) {
-    // conservative reset that will be corrected upon next insertion.
-    stats_->dispatch_queue_max_len = 0;
-  }
   dispatch_q_.clear();
   queue_backpressure_->ec.notifyAll();
 }
@@ -1369,8 +1364,6 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       SquashPipeline(builder);
     } else {
       MessageHandle msg = std::move(dispatch_q_.front());
-      if (stats_->dispatch_queue_max_len == dispatch_q_.size())
-        stats_->dispatch_queue_max_len--;
       dispatch_q_.pop_front();
 
       // We keep the batch mode enabled as long as the dispatch queue is not empty, relying on the
@@ -1577,10 +1570,6 @@ void Connection::SendAsync(MessageHandle msg) {
     dispatch_q_.insert(it, std::move(msg));
   } else {
     dispatch_q_.push_back(std::move(msg));
-  }
-
-  if (dispatch_q_.size() > stats_->dispatch_queue_max_len) {
-    stats_->dispatch_queue_max_len = dispatch_q_.size();
   }
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.

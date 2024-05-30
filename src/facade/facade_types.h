@@ -49,7 +49,6 @@ inline std::string_view ToSV(std::string_view slice) {
 struct ConnectionStats {
   size_t read_buf_capacity = 0;                // total capacity of input buffers
   uint64_t dispatch_queue_entries = 0;         // total number of dispatch queue entries
-  uint64_t dispatch_queue_max_len = 0;         // maximum queue size across all current connections
   size_t dispatch_queue_bytes = 0;             // total size of all dispatch queue entries
   size_t dispatch_queue_subscriber_bytes = 0;  // total size of all publish messages
 

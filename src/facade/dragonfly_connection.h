@@ -150,16 +150,16 @@ class Connection : public util::Connection {
     // Control messages put themselves at the front of the queue, but only after all other
     // control ones. Used for management messages.
     bool IsControl() const {
-      return holds_alternative<AclUpdateMessagePtr>(handle) ||
-             holds_alternative<CheckpointMessage>(handle);
+      return std::holds_alternative<AclUpdateMessagePtr>(handle) ||
+             std::holds_alternative<CheckpointMessage>(handle);
     }
 
     bool IsPipelineMsg() const {
-      return holds_alternative<PipelineMessagePtr>(handle);
+      return std::holds_alternative<PipelineMessagePtr>(handle);
     }
 
     bool IsPubMsg() const {
-      return holds_alternative<PubMessagePtr>(handle);
+      return std::holds_alternative<PubMessagePtr>(handle);
     }
 
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
