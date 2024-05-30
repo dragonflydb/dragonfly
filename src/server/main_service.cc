@@ -1293,7 +1293,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   auto* trans = cntx->transaction;
   if (trans) {
     cntx->transaction->SetTrackingCallback(
-        [cntx](const auto* cid) { cntx->conn_state.tracking_info_.Track(cntx, cid); });
+        [cntx](const auto* cid) { cntx->conn_state.tracking_info_.TrackOnShard(cntx, cid); });
   }
 
 #ifndef NDEBUG

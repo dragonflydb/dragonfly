@@ -294,7 +294,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   return OpStatus::OK;
 }
 
-void ConnectionState::ClientTracking::Track(ConnectionContext* cntx, const CommandId* cid) {
+void ConnectionState::ClientTracking::TrackOnShard(ConnectionContext* cntx, const CommandId* cid) {
   auto& info = cntx->conn_state.tracking_info_;
   if ((cid->opt_mask() & CO::READONLY) && cid->IsTransactional() && info.ShouldTrackKeys()) {
     auto conn = cntx->conn()->Borrow();

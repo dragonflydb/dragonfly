@@ -1118,7 +1118,8 @@ void Connection::HandleMigrateRequest() {
     this->Migrate(dest);
   }
 
-  // This triggers on rueidis SingleIntegrationTest
+  // This triggers when a pub/sub connection both publish and subscribe to the
+  // same channel. See #3035 on github for details.
   // DCHECK(dispatch_q_.empty());
 
   // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
