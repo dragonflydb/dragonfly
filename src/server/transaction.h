@@ -20,7 +20,6 @@
 #include "facade/op_status.h"
 #include "server/cluster/cluster_utility.h"
 #include "server/common.h"
-#include "server/conn_context.h"
 #include "server/journal/types.h"
 #include "server/table.h"
 #include "server/tx_base.h"
@@ -363,8 +362,8 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
-  void SetConnectionContext(ConnectionContext* cntx) {
-    cntx_ = cntx;
+  void SetTrackingCallback(std::function<void(const CommandId*)> f) {
+    tracking_cb_ = std::move(f);
   }
 
  private:
@@ -641,7 +640,7 @@ class Transaction {
     ShardId coordinator_index = 0;
   } stats_;
 
-  ConnectionContext* cntx_{nullptr};
+  std::function<void(const CommandId*)> tracking_cb_;
 
  private:
   struct TLTmpSpace {

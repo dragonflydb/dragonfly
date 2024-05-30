@@ -693,8 +693,8 @@ void Transaction::RunCallback(EngineShard* shard) {
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
-    if (cntx_) {
-      cntx_->conn_state.tracking_info_.Track(cntx_, cid_);
+    if (tracking_cb_) {
+      tracking_cb_(cid_);
     }
   }
 }
