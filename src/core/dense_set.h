@@ -42,12 +42,12 @@ class DenseSet {
   // we can assume that high 12 bits of user address space
   // can be used for tagging. At most 52 bits of address are reserved for
   // some configurations, and usually it's 48 bits.
-  // https://www.kernel.org/doc/html/latest/arm64/memory.html
+  // https://docs.kernel.org/arch/arm64/memory.html
   static constexpr size_t kLinkBit = 1ULL << 52;
   static constexpr size_t kDisplaceBit = 1ULL << 53;
   static constexpr size_t kDisplaceDirectionBit = 1ULL << 54;
   static constexpr size_t kTtlBit = 1ULL << 55;
-  static constexpr size_t kTagMask = 4095ULL << 51;  // we reserve 12 high bits.
+  static constexpr size_t kTagMask = 4095ULL << 52;  // we reserve 12 high bits.
 
   class DensePtr {
    public:
