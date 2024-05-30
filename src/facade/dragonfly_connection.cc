@@ -393,19 +393,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
 }
 
-bool Connection::MessageHandle::IsIntrusive() const {
-  return holds_alternative<AclUpdateMessagePtr>(handle) ||
-         holds_alternative<CheckpointMessage>(handle);
-}
-
-bool Connection::MessageHandle::IsPipelineMsg() const {
-  return holds_alternative<PipelineMessagePtr>(handle);
-}
-
-bool Connection::MessageHandle::IsPubMsg() const {
-  return holds_alternative<PubMessagePtr>(handle);
-}
-
 bool Connection::MessageHandle::IsReplying() const {
   return IsPipelineMsg() || IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
          (holds_alternative<MCPipelineMessagePtr>(handle) &&
@@ -1272,12 +1259,16 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
   cc_->async_dispatch = false;
 
   auto it = dispatch_q_.begin();
-  while (it->IsIntrusive())  // Skip all newly received intrusive messages
+  while (it->IsControl())  // Skip all newly received intrusive messages
     ++it;
 
   for (auto rit = it; rit != it + dispatched; ++rit)
     RecycleMessage(std::move(*rit));
 
+  if (stats_->dispatch_queue_max_len == dispatch_q_.size()) {
+    // pessimistic reduction that will be corrected upon the next insertion.
+    stats_->dispatch_queue_max_len -= dispatched;
+  }
   dispatch_q_.erase(it, it + dispatched);
 
   // If interrupted due to pause, fall back to regular dispatch
@@ -1291,11 +1282,15 @@ void Connection::ClearPipelinedMessages() {
   // As well as to avoid pubsub backpressure leakege.
   for (auto& msg : dispatch_q_) {
     FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
-    if (msg.IsIntrusive())
+    if (msg.IsControl())
       visit(dispatch_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
   }
 
+  if (dispatch_q_.size() == stats_->dispatch_queue_max_len) {
+    // conservative reset that will be corrected upon next insertion.
+    stats_->dispatch_queue_max_len = 0;
+  }
   dispatch_q_.clear();
   queue_backpressure_->ec.notifyAll();
 }
@@ -1309,7 +1304,7 @@ std::string Connection::DebugInfo() const {
   absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
   absl::StrAppend(&info, "dispatch_fiber:joinable=", dispatch_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsIntrusive();
+  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsControl();
   absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
@@ -1374,6 +1369,8 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
       SquashPipeline(builder);
     } else {
       MessageHandle msg = std::move(dispatch_q_.front());
+      if (stats_->dispatch_queue_max_len == dispatch_q_.size())
+        stats_->dispatch_queue_max_len--;
       dispatch_q_.pop_front();
 
       // We keep the batch mode enabled as long as the dispatch queue is not empty, relying on the
@@ -1549,7 +1546,7 @@ void Connection::SendAsync(MessageHandle msg) {
 
   // "Closing" connections might be still processing commands, as we don't interrupt them.
   // So we still want to deliver control messages to them (like checkpoints).
-  if (cc_->conn_closing && !msg.IsIntrusive())
+  if (cc_->conn_closing && !msg.IsControl())
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
@@ -1573,13 +1570,17 @@ void Connection::SendAsync(MessageHandle msg) {
     pending_pipeline_cmd_cnt_++;
   }
 
-  if (msg.IsIntrusive()) {
+  if (msg.IsControl()) {
     auto it = dispatch_q_.begin();
-    while (it < dispatch_q_.end() && it->IsIntrusive())
+    while (it < dispatch_q_.end() && it->IsControl())
       ++it;
     dispatch_q_.insert(it, std::move(msg));
   } else {
     dispatch_q_.push_back(std::move(msg));
+  }
+
+  if (dispatch_q_.size() > stats_->dispatch_queue_max_len) {
+    stats_->dispatch_queue_max_len = dispatch_q_.size();
   }
 
   // Don't notify if a sync dispatch is in progress, it will wake after finishing.

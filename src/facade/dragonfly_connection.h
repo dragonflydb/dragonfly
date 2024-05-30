@@ -147,12 +147,21 @@ class Connection : public util::Connection {
   struct MessageHandle {
     size_t UsedMemory() const;  // How much bytes this handle takes up in total.
 
-    // Intrusive messages put themselves at the front of the queue, but only after all other
-    // intrusive ones. Used for quick transfer of control / update messages.
-    bool IsIntrusive() const;
+    // Control messages put themselves at the front of the queue, but only after all other
+    // control ones. Used for management messages.
+    bool IsControl() const {
+      return holds_alternative<AclUpdateMessagePtr>(handle) ||
+             holds_alternative<CheckpointMessage>(handle);
+    }
 
-    bool IsPipelineMsg() const;
-    bool IsPubMsg() const;
+    bool IsPipelineMsg() const {
+      return holds_alternative<PipelineMessagePtr>(handle);
+    }
+
+    bool IsPubMsg() const {
+      return holds_alternative<PubMessagePtr>(handle);
+    }
+
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MCPipelineMessagePtr,
