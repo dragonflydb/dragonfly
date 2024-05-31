@@ -2,6 +2,7 @@ import pytest
 import re
 import json
 import redis
+from binascii import crc_hqx
 from redis import asyncio as aioredis
 import asyncio
 from dataclasses import dataclass
@@ -133,16 +134,18 @@ async def push_config(config, admin_connections):
     assert all([r == "OK" for r in res])
 
 
-async def wait_for_status(admin_client, node_id, status):
-    while True:
+async def wait_for_status(admin_client, node_id, status, timeout=10):
+    start = time.time()
+    while (time.time() - start) < timeout:
         response = await admin_client.execute_command(
             "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
         )
         if status in response:
-            break
+            return
         else:
             logging.debug(f"SLOT-MIGRATION-STATUS is {response}, not {status}")
             await asyncio.sleep(0.05)
+    raise RuntimeError("Timeout to achieve migrations status")
 
 
 async def check_for_no_state_status(admin_clients):
@@ -151,6 +154,11 @@ async def check_for_no_state_status(admin_clients):
         if state != "NO_STATE":
             logging.debug(f"SLOT-MIGRATION-STATUS is {state}, instead of NO_STATE")
             assert False
+
+
+def key_slot(key_str) -> int:
+    key = str.encode(key_str)
+    return crc_hqx(key, 0) % 16384
 
 
 async def get_node_id(admin_connection):
@@ -1034,26 +1042,9 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert await nodes[0].client.set("KEY0", "value")
-    assert await nodes[0].client.set("KEY1", "value")
-    assert await nodes[1].client.set("KEY2", "value")
-    assert await nodes[1].client.set("KEY3", "value")
-    assert await nodes[0].client.set("KEY4", "value")
-    assert await nodes[0].client.set("KEY5", "value")
-    assert await nodes[1].client.set("KEY6", "value")
-    assert await nodes[1].client.set("KEY7", "value")
-    assert await nodes[0].client.set("KEY8", "value")
-    assert await nodes[0].client.set("KEY9", "value")
-    assert await nodes[1].client.set("KEY10", "value")
-    assert await nodes[1].client.set("KEY11", "value")
-    assert await nodes[0].client.set("KEY12", "value")
-    assert await nodes[0].client.set("KEY13", "value")
-    assert await nodes[1].client.set("KEY14", "value")
-    assert await nodes[1].client.set("KEY15", "value")
-    assert await nodes[0].client.set("KEY16", "value")
-    assert await nodes[0].client.set("KEY17", "value")
-    assert await nodes[1].client.set("KEY18", "value")
-    assert await nodes[1].client.set("KEY19", "value")
+    for i in range(20):
+        key = "KEY" + str(i)
+        assert await nodes[key_slot(key) // 9001].client.set(key, "value")
 
     assert await nodes[0].client.execute_command("DBSIZE") == 10
 
@@ -1066,8 +1057,9 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
-    assert await nodes[1].client.set("KEY20", "value")
-    assert await nodes[1].client.set("KEY21", "value")
+    for i in range(20, 22):
+        key = "KEY" + str(i)
+        assert await nodes[0 if (key_slot(key) // 3000) == 0 else 1].client.set(key, "value")
 
     assert (
         await nodes[0].admin_client.execute_command(
@@ -1086,28 +1078,10 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     logging.debug("remove finished migrations")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert await nodes[0].client.get("KEY0") == "value"
-    assert await nodes[1].client.get("KEY1") == "value"
-    assert await nodes[1].client.get("KEY2") == "value"
-    assert await nodes[1].client.get("KEY3") == "value"
-    assert await nodes[0].client.get("KEY4") == "value"
-    assert await nodes[1].client.get("KEY5") == "value"
-    assert await nodes[1].client.get("KEY6") == "value"
-    assert await nodes[1].client.get("KEY7") == "value"
-    assert await nodes[0].client.get("KEY8") == "value"
-    assert await nodes[1].client.get("KEY9") == "value"
-    assert await nodes[1].client.get("KEY10") == "value"
-    assert await nodes[1].client.get("KEY11") == "value"
-    assert await nodes[1].client.get("KEY12") == "value"
-    assert await nodes[1].client.get("KEY13") == "value"
-    assert await nodes[1].client.get("KEY14") == "value"
-    assert await nodes[1].client.get("KEY15") == "value"
-    assert await nodes[1].client.get("KEY16") == "value"
-    assert await nodes[1].client.get("KEY17") == "value"
-    assert await nodes[1].client.get("KEY18") == "value"
-    assert await nodes[1].client.get("KEY19") == "value"
-    assert await nodes[1].client.get("KEY20") == "value"
-    assert await nodes[1].client.get("KEY21") == "value"
+    for i in range(22):
+        key = "KEY" + str(i)
+        assert await nodes[0 if (key_slot(key) // 3000) == 0 else 1].client.set(key, "value")
+
     assert await nodes[1].client.execute_command("DBSIZE") == 19
 
     await check_for_no_state_status([node.admin_client for node in nodes])
@@ -1133,7 +1107,7 @@ async def test_network_disconnect_during_migration(df_local_factory, df_seeder_f
 
     await seeder.run(target_deviation=0.1)
 
-    proxy = Proxy("127.0.0.1", 1111, "127.0.0.1", nodes[1].instance.port)
+    proxy = Proxy("127.0.0.1", 1111, "127.0.0.1", nodes[1].instance.admin_port)
     await proxy.start()
     task = asyncio.create_task(proxy.serve())
 

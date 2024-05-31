@@ -364,7 +364,7 @@ class DflySeeder:
         if cluster_mode:
             max_multikey = 1
             multi_transaction_probability = 0
-            unsupported_types = [ValueType.JSON]  # Cluster aio client doesn't support JSON
+            unsupported_types.append(ValueType.JSON)  # Cluster aio client doesn't support JSON
 
         self.cluster_mode = cluster_mode
         self.gen = CommandGenerator(keys, val_size, batch_size, max_multikey, unsupported_types)
