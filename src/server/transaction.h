@@ -363,6 +363,13 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
+  // Remove once BZPOP is stabilized
+  std::string DEBUGV18_BlockInfo() {
+    return "claimed=" + std::to_string(blocking_barrier_.IsClaimed()) +
+           " coord_state=" + std::to_string(int(coordinator_state_)) +
+           " local_res=" + std::to_string(int(local_result_));
+  }
+
  private:
   // Holds number of locks for each IntentLock::Mode: shared and exlusive.
   struct LockCnt {
