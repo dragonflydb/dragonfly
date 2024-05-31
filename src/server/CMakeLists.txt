@@ -33,14 +33,13 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
-            ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc conn_context.cc channel_store.cc
-            )
+            ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc)
 
 SET(SEARCH_FILES search/search_family.cc search/doc_index.cc search/doc_accessors.cc
     search/aggregator.cc)
 
-add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc
-            config_registry.cc debugcmd.cc dflycmd.cc
+add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc channel_store.cc
+            config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
             ${SEARCH_FILES}
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc

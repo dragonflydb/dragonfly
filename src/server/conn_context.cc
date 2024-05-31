@@ -273,35 +273,4 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
   return !optin_ || (seq_num_ == (1 + caching_seq_num_));
 }
 
-OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::WeakRef& conn_ref,
-                           const ShardArgs& args) {
-  if (conn_ref.IsExpired()) {
-    DVLOG(2) << "Connection expired, exiting TrackKey function.";
-    return OpStatus::OK;
-  }
-
-  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
-           << " with thread ID: " << conn_ref.Thread();
-
-  auto& db_slice = slice_args.shard->db_slice();
-  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
-  for (auto key : args) {
-    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
-             << " into the tracking client set of key " << key;
-    db_slice.TrackKey(conn_ref, key);
-  }
-
-  return OpStatus::OK;
-}
-
-void ConnectionState::ClientTracking::TrackOnShard(ConnectionContext* cntx, const CommandId* cid) {
-  auto& info = cntx->conn_state.tracking_info_;
-  if ((cid->opt_mask() & CO::READONLY) && cid->IsTransactional() && info.ShouldTrackKeys()) {
-    auto conn = cntx->conn()->Borrow();
-    auto* t = cntx->transaction;
-    CHECK(t);
-    auto* shard = EngineShard::tlocal();
-    OpTrackKeys(t->GetOpArgs(shard), conn, t->GetShardArgs(shard->shard_id()));
-  }
-}
 }  // namespace dfly

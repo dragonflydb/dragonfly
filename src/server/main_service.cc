@@ -1266,6 +1266,27 @@ class ReplyGuard {
   SinkReplyBuilder* builder_ = nullptr;
 };
 
+OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::WeakRef& conn_ref,
+                           const ShardArgs& args) {
+  if (conn_ref.IsExpired()) {
+    DVLOG(2) << "Connection expired, exiting TrackKey function.";
+    return OpStatus::OK;
+  }
+
+  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
+           << " with thread ID: " << conn_ref.Thread();
+
+  auto& db_slice = slice_args.shard->db_slice();
+  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
+  for (auto key : args) {
+    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
+             << " into the tracking client set of key " << key;
+    db_slice.TrackKey(conn_ref, key);
+  }
+
+  return OpStatus::OK;
+}
+
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
@@ -1290,10 +1311,18 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   ServerState::tlocal()->RecordCmd();
 
+  auto& info = cntx->conn_state.tracking_info_;
   auto* trans = cntx->transaction;
+  const bool is_read_only = cid->opt_mask() & CO::READONLY;
   if (trans) {
-    cntx->transaction->SetTrackingCallback(
-        [cntx](const auto* cid) { cntx->conn_state.tracking_info_.TrackOnShard(cntx, cid); });
+    trans->SetTrackingCallback({});
+    if (is_read_only && info.ShouldTrackKeys()) {
+      auto conn = cntx->conn()->Borrow();
+      trans->SetTrackingCallback([trans, conn]() {
+        auto* shard = EngineShard::tlocal();
+        OpTrackKeys(trans->GetOpArgs(shard), conn, trans->GetShardArgs(shard->shard_id()));
+      });
+    }
   }
 
 #ifndef NDEBUG

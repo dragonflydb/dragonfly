@@ -209,10 +209,6 @@ struct ConnectionState {
       return tracking_enabled_;
     }
 
-    // Iterates over the active shards of the transaction. If a key satisfies
-    // the tracking requirements, is is set for tracking.
-    void TrackOnShard(ConnectionContext* cntx, const CommandId* cid);
-
     // Called by CLIENT CACHING YES and caches the current seq_num_
     void SetCachingSequenceNumber(bool is_multi) {
       // We need -1 when we are in multi
