@@ -357,8 +357,18 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return OpStatus::OK;
   };
   trans->Execute(std::move(cb), true);
-  if (info)
+  if (info) {
     *info = "BLOCK/";
+    for (unsigned sid = 0; sid < shard_set->size(); sid++) {
+      if (!trans->IsActive(sid))
+        continue;
+      if (auto wake_key = trans->GetWakeKey(sid); wake_key)
+        *info += absl::StrCat("sid:", sid, ",key:", *wake_key, ",");
+    }
+    *info += "/";
+    *info += trans->DEBUGV18_BlockInfo();
+    *info += "/";
+  }
   return result_key;
 }
 

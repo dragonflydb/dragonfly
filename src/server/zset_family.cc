@@ -1325,7 +1325,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   Transaction* transaction = cntx->transaction;
 
   std::string dinfo;
-  std::string callback_ran_key = "/NONE/";
+  optional<std::string> callback_ran_key;
   OpResult<ScoredArray> popped_array;
   auto cb = [is_max, &popped_array, &callback_ran_key](Transaction* t, EngineShard* shard,
                                                        std::string_view key) {
@@ -1339,10 +1339,15 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {
+    if (!callback_ran_key) {
+      LOG(ERROR) << "BUG: Callback didn't run! " << popped_key.value() << " " << dinfo;
+      return rb->SendNullArray();
+    }
+
     DVLOG(1) << "BZPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
     CHECK(popped_array.ok()) << dinfo;
     CHECK_EQ(popped_array->size(), 1u)
-        << popped_key << " ran " << callback_ran_key << " info " << dinfo;
+        << popped_key << " ran " << *callback_ran_key << " info " << dinfo;
     rb->StartArray(3);
     rb->SendBulkString(*popped_key);
     rb->SendBulkString(popped_array->front().first);
