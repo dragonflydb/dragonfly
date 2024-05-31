@@ -1104,10 +1104,17 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("blocked_clients", "", conn_stats.num_blocked_clients,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
+  AppendMetricWithoutLabels("pipeline_queue_bytes", "", conn_stats.dispatch_queue_bytes,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
+                            conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
+                            &resp->body());
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
@@ -2012,7 +2019,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
-    append("dispatch_queue_entries", m.facade_stats.conn_stats.dispatch_queue_entries);
+    append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries);
   }
 
   if (should_enter("MEMORY")) {

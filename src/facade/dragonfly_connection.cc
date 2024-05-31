@@ -393,19 +393,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
 }
 
-bool Connection::MessageHandle::IsIntrusive() const {
-  return holds_alternative<AclUpdateMessagePtr>(handle) ||
-         holds_alternative<CheckpointMessage>(handle);
-}
-
-bool Connection::MessageHandle::IsPipelineMsg() const {
-  return holds_alternative<PipelineMessagePtr>(handle);
-}
-
-bool Connection::MessageHandle::IsPubMsg() const {
-  return holds_alternative<PubMessagePtr>(handle);
-}
-
 bool Connection::MessageHandle::IsReplying() const {
   return IsPipelineMsg() || IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
          (holds_alternative<MCPipelineMessagePtr>(handle) &&
@@ -751,6 +738,9 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
 
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
+  if (dispatch_q_.size()) {
+    absl::StrAppend(&after, " pipeline=", dispatch_q_.size());
+  }
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
 
@@ -1275,7 +1265,7 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
   cc_->async_dispatch = false;
 
   auto it = dispatch_q_.begin();
-  while (it->IsIntrusive())  // Skip all newly received intrusive messages
+  while (it->IsControl())  // Skip all newly received intrusive messages
     ++it;
 
   for (auto rit = it; rit != it + dispatched; ++rit)
@@ -1294,7 +1284,7 @@ void Connection::ClearPipelinedMessages() {
   // As well as to avoid pubsub backpressure leakege.
   for (auto& msg : dispatch_q_) {
     FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
-    if (msg.IsIntrusive())
+    if (msg.IsControl())
       visit(dispatch_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
   }
@@ -1312,7 +1302,7 @@ std::string Connection::DebugInfo() const {
   absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
   absl::StrAppend(&info, "dispatch_fiber:joinable=", dispatch_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsIntrusive();
+  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsControl();
   absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
@@ -1552,7 +1542,7 @@ void Connection::SendAsync(MessageHandle msg) {
 
   // "Closing" connections might be still processing commands, as we don't interrupt them.
   // So we still want to deliver control messages to them (like checkpoints).
-  if (cc_->conn_closing && !msg.IsIntrusive())
+  if (cc_->conn_closing && !msg.IsControl())
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
@@ -1576,9 +1566,9 @@ void Connection::SendAsync(MessageHandle msg) {
     pending_pipeline_cmd_cnt_++;
   }
 
-  if (msg.IsIntrusive()) {
+  if (msg.IsControl()) {
     auto it = dispatch_q_.begin();
-    while (it < dispatch_q_.end() && it->IsIntrusive())
+    while (it < dispatch_q_.end() && it->IsControl())
       ++it;
     dispatch_q_.insert(it, std::move(msg));
   } else {
