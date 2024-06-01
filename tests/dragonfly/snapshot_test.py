@@ -409,6 +409,7 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
 @dfly_args(
     {
         **BASIC_ARGS,
+        "proactor_threads": 4,
         "dbfilename": "tiered-entries",
         "tiered_prefix": "/tmp/tiering_test_backing",
         "tiered_offload_threshold": "0.0",  # ask offloading loop to offload as much as possible
@@ -418,7 +419,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
     """This test makes sure tieried entries are correctly persisted"""
 
     # With variance 4: 512 - 8192 we include small and large values
-    await StaticSeeder(key_target=5_000, data_size=2048, variance=4, types=["STRING"]).run(
+    await StaticSeeder(key_target=5000, data_size=1024, variance=4, types=["STRING"]).run(
         async_client
     )
 

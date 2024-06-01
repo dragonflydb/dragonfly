@@ -378,7 +378,7 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
 
   CHECK_LE(sz, block_size);
   DCHECK_LT(block_id, blocks_num);
-  DCHECK(!page->free_blocks[block_id]);
+  DCHECK(!page->free_blocks[block_id]) << offset;
 
   page->free_blocks.set(block_id);
   ++page->available;
