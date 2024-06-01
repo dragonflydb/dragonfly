@@ -1094,8 +1094,11 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
 
     // for some reason we get a trailing \n\r, and that's why we use StartsWith
-    bool client_cmd = cmd_name == "CLIENT" && !absl::StartsWith(ToSV(tail_args[0]), "CACHING");
-    DCHECK(!tail_args.empty());
+    bool client_cmd = true;
+    if (cmd_name == "CLIENT") {
+      DCHECK(!tail_args.empty());
+      client_cmd = !absl::StartsWith(ToSV(tail_args[0]), "CACHING");
+    }
     if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB" || client_cmd)
       return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
