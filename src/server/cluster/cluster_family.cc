@@ -771,8 +771,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
 
   // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
   migration->Cancel();
-  while (!migration->Join())
-    ;  // we need to join anycase
+  // all fibers has migration shared_ptr so we don't need to join it and can erase
   jobs.erase(it);
 
   if (!removed.Empty()) {
