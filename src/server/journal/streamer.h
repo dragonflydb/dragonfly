@@ -43,7 +43,7 @@ class JournalStreamer {
   void ThrottleIfNeeded();
 
   virtual bool ShouldWrite(const journal::JournalItem& item) const {
-    return true;
+    return !is_stopped_;
   }
 
   void WaitForInflightToComplete();
@@ -52,7 +52,7 @@ class JournalStreamer {
   void OnCompletion(std::error_code ec, size_t len);
 
   bool IsStopped() const {
-    return cntx_->IsCancelled() || bool(sink_ec_);
+    return is_stopped_ || cntx_->IsCancelled();
   }
 
   bool IsStalled() const;
@@ -61,11 +61,11 @@ class JournalStreamer {
   Context* cntx_;
   io::AsyncSink* dest_ = nullptr;
   std::vector<uint8_t> pending_buf_;
-  std::error_code sink_ec_;
   size_t in_flight_bytes_ = 0;
   time_t last_lsn_time_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
+  bool is_stopped_ = false;
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.

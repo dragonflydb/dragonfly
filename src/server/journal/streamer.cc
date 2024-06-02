@@ -30,6 +30,7 @@ JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
 
 JournalStreamer::~JournalStreamer() {
   DCHECK_EQ(in_flight_bytes_, 0u);
+  VLOG(1) << "~JournalStreamer";
 }
 
 void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
@@ -37,10 +38,6 @@ void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
   dest_ = dest;
   journal_cb_id_ =
       journal_->RegisterOnChange([this, send_lsn](const JournalItem& item, bool allow_await) {
-        if (!ShouldWrite(item)) {
-          return;
-        }
-
         if (allow_await) {
           ThrottleIfNeeded();
           // No record to write, just await if data was written so consumer will read the data.
@@ -48,10 +45,14 @@ void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
             return;
         }
 
+        if (!ShouldWrite(item)) {
+          return;
+        }
+
         Write(item.data);
         time_t now = time(nullptr);
 
-        // TODO: to chain it to the same Write call.
+        // TODO: to chain it to the previous Write call.
         if (send_lsn && now - last_lsn_time_ > 3) {
           last_lsn_time_ = now;
           io::StringSink sink;
@@ -64,8 +65,7 @@ void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
 
 void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
-  if (!sink_ec_)
-    sink_ec_ = make_error_code(errc::operation_canceled);
+  is_stopped_ = true;
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
   WaitForInflightToComplete();
@@ -128,10 +128,10 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
 
   DVLOG(2) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
   in_flight_bytes_ -= len;
-  if (ec) {
-    VLOG(1) << "Error writing to sink: " << ec.message();
-    sink_ec_ = ec;
-  } else if (in_flight_bytes_ == 0 && !pending_buf_.empty() && !sink_ec_) {
+  if (ec && !is_stopped_) {
+    is_stopped_ = true;
+    cntx_->ReportError(ec);
+  } else if (in_flight_bytes_ == 0 && !pending_buf_.empty() && !is_stopped_) {
     // If everything was sent but we have a pending buf, flush it.
     io::Bytes src(pending_buf_);
     in_flight_bytes_ += src.size();
@@ -157,7 +157,8 @@ void JournalStreamer::ThrottleIfNeeded() {
       waker_.await_until([this]() { return !IsStalled() || IsStopped(); }, next);
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes " << in_flight_bytes_;
-    sink_ec_ = make_error_code(errc::stream_timeout);
+    is_stopped_ = true;
+    cntx_->ReportError(make_error_code(errc::stream_timeout));
   }
 }
 
