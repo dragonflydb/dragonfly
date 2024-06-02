@@ -571,7 +571,7 @@ void Connection::OnPostMigrateThread() {
   if (dispatch_fb_.IsJoinable()) {
     // How can we ensure that dispatch_fb_ is created on the correct thread?
     // TODO: to introduce Fiber::IsLocal method.
-    CHECK(!dispatch_q_.empty());
+    DCHECK(!dispatch_q_.empty());
   }
 
   // Update tl variables
