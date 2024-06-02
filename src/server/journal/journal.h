@@ -39,7 +39,6 @@ class Journal {
 
  private:
   mutable util::fb2::Mutex state_mu_;
-  time_t last_lsn_joural_time_ = 0;
 };
 
 }  // namespace journal

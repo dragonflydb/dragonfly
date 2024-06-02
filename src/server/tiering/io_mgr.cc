@@ -25,15 +25,6 @@ using Proactor = fb2::UringProactor;
 using fb2::ProactorBase;
 using fb2::SubmitEntry;
 
-namespace {
-
-constexpr inline size_t alignup(size_t num, size_t align) {
-  size_t amask = align - 1;
-  return (num + amask) & (~amask);
-}
-
-}  // namespace
-
 constexpr size_t kInitialSize = 1UL << 28;  // 256MB
 
 error_code IoMgr::Open(std::string_view path) {
