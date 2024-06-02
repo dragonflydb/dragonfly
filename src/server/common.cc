@@ -402,6 +402,8 @@ GenericError Context::ReportErrorInternal(GenericError&& err) {
   // This context is either new or was Reset, where the handler was joined
   CHECK(!err_handler_fb_.IsJoinable());
 
+  DVLOG(1) << "ReportError: " << err_.Format();
+
   if (err_handler_)
     err_handler_fb_ = fb2::Fiber("report_internal_error", err_handler_, err_);
 

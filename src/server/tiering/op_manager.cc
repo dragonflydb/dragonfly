@@ -33,6 +33,9 @@ OpManager::EntryId Borrowed(const OpManager::OwnedEntryId& id) {
 OpManager::OpManager(size_t max_size) : storage_{max_size} {
 }
 
+OpManager::~OpManager() {
+}
+
 std::error_code OpManager::Open(std::string_view file) {
   return storage_.Open(file);
 }

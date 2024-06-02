@@ -39,6 +39,7 @@ class OpManager {
   using ReadCallback = std::function<bool(std::string*)>;
 
   explicit OpManager(size_t max_size);
+  virtual ~OpManager();
 
   // Open file with underlying disk storage, must be called before use
   std::error_code Open(std::string_view file);

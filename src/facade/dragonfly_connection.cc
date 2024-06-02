@@ -567,7 +567,12 @@ void Connection::OnPostMigrateThread() {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
 
-  DCHECK(!dispatch_fb_.IsJoinable());
+  // If someone had sent Async during the migration, dispatch_fb_ will be created.
+  if (dispatch_fb_.IsJoinable()) {
+    // How can we ensure that dispatch_fb_ is created on the correct thread?
+    // TODO: to introduce Fiber::IsLocal method.
+    CHECK(!dispatch_q_.empty());
+  }
 
   // Update tl variables
   queue_backpressure_ = &tl_queue_backpressure_;
@@ -1321,7 +1326,6 @@ std::string Connection::DebugInfo() const {
 // DispatchFiber.
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   ThisFiber::SetName("DispatchFiber");
-
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};
 
