@@ -111,7 +111,7 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
       service_(*se),
       slots_(std::move(slots)),
       state_(MigrationState::C_CONNECTING),
-      bc_(0) {
+      bc_(shards_num) {
   shard_flows_.resize(shards_num);
   for (unsigned i = 0; i < shards_num; ++i) {
     shard_flows_[i].reset(new ClusterShardMigration(i, &service_));
@@ -139,13 +139,13 @@ void IncomingSlotMigration::Cancel() {
   for (auto& flow : shard_flows_) {
     flow->Cancel();
   }
+  bc_->Cancel();
 }
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   VLOG(1) << "Start flow for shard: " << shard;
   state_.store(MigrationState::C_SYNC);
 
-  bc_->Add();
   shard_flows_[shard]->Start(&cntx_, source, bc_);
 }
 
