@@ -888,7 +888,6 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   cc_->conn_closing = true;  // Signal dispatch to close.
   evc_.notify();
   phase_ = SHUTTING_DOWN;
-
   VLOG(2) << "Before dispatch_fb.join()";
   dispatch_fb_.JoinIfNeeded();
   VLOG(2) << "After dispatch_fb.join()";
@@ -1123,6 +1122,10 @@ void Connection::HandleMigrateRequest() {
       return;
     }
   }
+
+  // This triggers when a pub/sub connection both publish and subscribe to the
+  // same channel. See #3035 on github for details.
+  // DCHECK(dispatch_q_.empty());
 
   // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
   LaunchDispatchFiberIfNeeded();
@@ -1650,16 +1653,6 @@ void Connection::RequestAsyncMigration(util::fb2::ProactorBase* dest) {
   // Connections can migrate at most once.
   migration_enabled_ = false;
   migration_request_ = dest;
-}
-
-void Connection::SetClientTrackingSwitch(bool is_on) {
-  tracking_enabled_ = is_on;
-  if (tracking_enabled_)
-    cc_->subscriptions++;
-}
-
-bool Connection::IsTrackingOn() const {
-  return tracking_enabled_;
 }
 
 void Connection::StartTrafficLogging(string_view path) {
