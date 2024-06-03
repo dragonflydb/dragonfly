@@ -694,7 +694,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
     if (tracking_cb_) {
-      tracking_cb_();
+      tracking_cb_(this);
     }
   }
 }

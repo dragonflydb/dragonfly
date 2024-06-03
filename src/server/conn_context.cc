@@ -88,7 +88,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* own
   acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
 }
 
-ConnectionContext::ConnectionContext(ConnectionContext* owner, Transaction* tx,
+ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
                                      facade::CapturingReplyBuilder* crb)
     : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
   acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);

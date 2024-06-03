@@ -363,7 +363,7 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
-  void SetTrackingCallback(std::function<void()> f) {
+  void SetTrackingCallback(std::function<void(Transaction* trans)> f) {
     tracking_cb_ = std::move(f);
   }
 
@@ -648,7 +648,7 @@ class Transaction {
     ShardId coordinator_index = 0;
   } stats_;
 
-  std::function<void()> tracking_cb_;
+  std::function<void(Transaction* trans)> tracking_cb_;
 
  private:
   struct TLTmpSpace {

@@ -1319,10 +1319,13 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   auto* trans = cntx->transaction;
   const bool is_read_only = cid->opt_mask() & CO::READONLY;
   if (trans) {
+    // Reset it, because in multi/exec the transaction pointer is the same and
+    // we will end up triggerring the callback on the following commands. To avoid this
+    // we reset it.
     trans->SetTrackingCallback({});
     if (is_read_only && info.ShouldTrackKeys()) {
       auto conn = cntx->conn()->Borrow();
-      trans->SetTrackingCallback([trans, conn]() {
+      trans->SetTrackingCallback([conn](Transaction* trans) {
         auto* shard = EngineShard::tlocal();
         OpTrackKeys(trans->GetOpArgs(shard), conn, trans->GetShardArgs(shard->shard_id()));
       });
@@ -1343,6 +1346,11 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   auto cid_name = cid->name();
   if ((!trans && cid_name != "MULTI") || (trans && !trans->IsMulti())) {
+    // Each time we execute a command we need to increase the sequence number in
+    // order to properly track clients when OPTIN is used.
+    // We don't do this for `multi/exec` because it would break the
+    // semantics, i.e, CACHING should stick for all commands following
+    // the CLIENT CACHING ON within a multi/exec block
     cntx->conn_state.tracking_info_.IncrementSequenceNumber();
   }
 

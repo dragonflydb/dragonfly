@@ -249,7 +249,8 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(::io::Sink* stream, facade::Connection* owner);
 
-  ConnectionContext(ConnectionContext* owner, Transaction* tx, facade::CapturingReplyBuilder* crb);
+  ConnectionContext(const ConnectionContext* owner, Transaction* tx,
+                    facade::CapturingReplyBuilder* crb);
 
   struct DebugInfo {
     uint32_t shards_count = 0;
