@@ -12,6 +12,11 @@ To install: pip install -r requirements.txt
 """
 
 
+def die_with_err(err):
+    print("!!!", err)
+    exit(-1)
+
+
 class Node:
     def __init__(self, host, port):
         self.id = ""
@@ -166,8 +171,7 @@ def config_single_remote(args):
 
     test = send_command(master.node, ["get", "x"], print_errors=False)
     if type(test) is not Exception:
-        print("Node either not found or already configured")
-        exit(-1)
+        die_with_err("Node either not found or already configured")
 
     config = build_config_from_list([master])
     print(f"Pushing config:\n{config}\n")
@@ -211,26 +215,37 @@ def find_node(config, host, port):
             new_owner = shard
             break
     else:
-        print(f"Can't find master with port {port} (hint: use flag --target_port).")
-        exit(-1)
+        die_with_err(f"Can't find master with port {port} (hint: use flag --target_port).")
     return new_owner
 
 
 def attach(args):
     print(f"Attaching remote Dragonfly {args.attach_host}:{args.attach_port} to cluster")
     if args.attach_as_replica:
-        config = build_config_from_existing(args)
-        master_node = find_node(config, args.target_host, args.target_port)
-
         newcomer = Node(args.attach_host, args.attach_port)
+        replica_resp = send_command(newcomer, ["info", "replication"])
+        if replica_resp["role"] != "replica":
+            die_with_err("Node is not in replica mode")
+        if (
+            replica_resp["master_host"] != args.target_host
+            or replica_resp["master_port"] != args.target_port
+        ):
+            die_with_err("Node is not a replica of target")
+
         newcomer.update_id()
         newcomer_node = build_node(newcomer)
+
+        config = build_config_from_existing(args)
+        master_node = find_node(config, args.target_host, args.target_port)
 
         master_node["replicas"].append(newcomer_node)
         print(f"Pushing config:\n{config}\n")
         push_config(config)
     else:
         newcomer = Master(args.attach_host, args.attach_port)
+        replica_resp = send_command(newcomer.node, ["info", "replication"])
+        if replica_resp["role"] != "master":
+            die_with_err("Node is not in master mode")
         newcomer.node.update_id()
 
         newcomer_config = build_config_from_list([newcomer])
@@ -333,8 +348,7 @@ def migrate(args):
                 source = node
                 break
     if source == None:
-        print("Unsupported slot range migration (currently only 1-node migration supported)")
-        exit(-1)
+        die_with_err("Unsupported slot range migration (currently only 1-node migration supported)")
     source_node = Node(source["master"]["ip"], source["master"]["port"])
     source_node.update_id()
 
@@ -481,8 +495,7 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
     if action:
         action(args)
     else:
-        print(f'Error - unknown action "{args.action}". See --help')
-        exit(-1)
+        die_with_err(f'Error - unknown action "{args.action}". See --help')
 
 
 if __name__ == "__main__":
