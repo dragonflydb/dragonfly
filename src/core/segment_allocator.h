@@ -17,7 +17,7 @@ namespace dfly {
 
 /**
  * @brief Tightly coupled with mi_malloc 2.x implementation.
- *        Fetches 32MiB segment pointers from the allocated pointers.
+ *        Fetches 4MiB segment pointers from the allocated pointers.
  *        Provides own indexing of small pointers to real address space using the segment ptrs/
  */
 
@@ -26,7 +26,7 @@ class SegmentAllocator {
   static constexpr uint32_t kSegmentIdMask = (1u << kSegmentIdBits) - 1;
 
   // Segment range that we cover within a single segment.
-  static constexpr uint64_t kSegmentAlignMask = ~((1ULL << (32 - kSegmentIdBits + 3 + 3)) - 1);
+  static constexpr uint64_t kSegmentAlignMask = ~((1ULL << (32 - kSegmentIdBits + 3)) - 1);
 
  public:
   using Ptr = uint32_t;
