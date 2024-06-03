@@ -12,6 +12,11 @@ To install: pip install -r requirements.txt
 """
 
 
+def die_with_err(err):
+    print("!!!", err)
+    exit(-1)
+
+
 class Node:
     def __init__(self, host, port):
         self.id = ""
@@ -166,8 +171,7 @@ def config_single_remote(args):
 
     test = send_command(master.node, ["get", "x"], print_errors=False)
     if type(test) is not Exception:
-        print("Node either not found or already configured")
-        exit(-1)
+        die_with_err("Node either not found or already configured")
 
     config = build_config_from_list([master])
     print(f"Pushing config:\n{config}\n")
@@ -204,33 +208,46 @@ def build_config_from_existing(args):
     return config
 
 
-def find_node(config, host, port):
+def find_master(config, host, port, die_if_not_found=True):
     new_owner = None
     for shard in config:
         if shard["master"]["ip"] == host and shard["master"]["port"] == port:
             new_owner = shard
             break
-    else:
-        print(f"Can't find master with port {port} (hint: use flag --target_port).")
-        exit(-1)
+
+    if new_owner == None and die_if_not_found:
+        die_with_err(f"Can't find master (hint: use flag --target_host / --target_port).")
+
     return new_owner
 
 
 def attach(args):
     print(f"Attaching remote Dragonfly {args.attach_host}:{args.attach_port} to cluster")
     if args.attach_as_replica:
-        config = build_config_from_existing(args)
-        master_node = find_node(config, args.target_host, args.target_port)
-
         newcomer = Node(args.attach_host, args.attach_port)
+        replica_resp = send_command(newcomer, ["info", "replication"])
+        if replica_resp["role"] != "replica":
+            die_with_err("Node is not in replica mode")
+        if (
+            replica_resp["master_host"] != args.target_host
+            or replica_resp["master_port"] != args.target_port
+        ):
+            die_with_err("Node is not a replica of target")
+
         newcomer.update_id()
         newcomer_node = build_node(newcomer)
+
+        config = build_config_from_existing(args)
+        master_node = find_master(config, args.target_host, args.target_port)
 
         master_node["replicas"].append(newcomer_node)
         print(f"Pushing config:\n{config}\n")
         push_config(config)
     else:
         newcomer = Master(args.attach_host, args.attach_port)
+        replica_resp = send_command(newcomer.node, ["info", "replication"])
+        if replica_resp["role"] != "master":
+            die_with_err("Node is not in master mode")
         newcomer.node.update_id()
 
         newcomer_config = build_config_from_list([newcomer])
@@ -241,9 +258,34 @@ def attach(args):
     print()
 
 
+def detach(args):
+    print(f"Detaching remote Dragonfly {args.target_host}:{args.target_port} from cluster")
+    print(
+        "Important: detached node will not receive a new config! This means that the detached node will still 'think' that it belongs to the cluster"
+    )
+    config = build_config_from_existing(args)
+    node = find_master(config, args.target_host, args.target_port, die_if_not_found=False)
+    if node == None:
+        found = False
+        for master in config:
+            for replica in master["replicas"]:
+                if replica["ip"] == args.target_host and replica["port"] == args.target_port:
+                    master["replicas"].remove(replica)
+                    found = True
+        if not found:
+            die_with_err("Can't find target node")
+    else:
+        if len(node["slot_ranges"]) != 0:
+            die_with_err("Can't detach a master with assigned slots")
+        if len(node["replicas"]) != 0:
+            die_with_err("Can't detach a master with replicas")
+        config = [m for m in config if m != node]
+    push_config(config)
+
+
 def move(args):
     config = build_config_from_existing(args)
-    new_owner = find_node(config, args.target_host, args.target_port)
+    new_owner = find_master(config, args.target_host, args.target_port)
 
     def remove_slot(slot, from_range, from_shard):
         if from_range["start"] == slot:
@@ -320,7 +362,7 @@ def move(args):
 
 def migrate(args):
     config = build_config_from_existing(args)
-    target = find_node(config, args.target_host, args.target_port)
+    target = find_master(config, args.target_host, args.target_port)
     target_node = Node(target["master"]["ip"], target["master"]["port"])
     target_node.update_id()
 
@@ -333,8 +375,7 @@ def migrate(args):
                 source = node
                 break
     if source == None:
-        print("Unsupported slot range migration (currently only 1-node migration supported)")
-        exit(-1)
+        die_with_err("Unsupported slot range migration (currently only 1-node migration supported)")
     source_node = Node(source["master"]["ip"], source["master"]["port"])
     source_node.update_id()
 
@@ -410,20 +451,31 @@ This will connect to localhost:6379 by default. Override with `--target_host` an
 Attach an existing Dragonfly server to an existing cluster (owning no slots):
   ./cluster_mgr.py --action=attach --attach_host=HOST --attach_port=PORT
 This will connect to existing cluster present at localhost:6379 by default. Override with
-`--target_host` and `--target_port`
+`--target_host` and `--target_port`.
+To attach node as a replica - use --attach_as_replica=True. In such case, the node will be a
+replica of --target_host/--target_port.
 
 To set up a new cluster - start the servers and then use
   ./cluster_mgr.py --action=config_single_remote ...
   ./cluster_mgr.py --action=attach ...
 And repeat `--action=attach` for all servers.
 Afterwards, distribute the slots between the servers as desired with `--action=move` or
-`--action=migrate`
+`--action=migrate`.
+
+To detach (remove) a node from the cluster:
+  ./cluster_mgr.py --action=detach --target_host=X --target_port=X
+Notes:
+- If the node is a master, it must not have any slots assigned to it.
+- The node will not be notified that it's no longer in a cluster. It's a good idea to shut it down
+  after detaching it from the cluster.
 
 Connect to cluster and move slots 10-20 to target:
   ./cluster_mgr.py --action=move --slot_start=10 --slot_end=20 --target_host=X --target_port=X
+WARNING: This will NOT migrate existing data, i.e. data in slots 10-20 will be erased.
 
 Migrate slots 10-20 to target:
   ./cluster_mgr.py --action=migrate --slot_start=10 --slot_end=20 --target_host=X --target_port=X
+Unlike --action=move above, this will migrate the data to the new owner.
 
 Connect to cluster and shutdown all nodes:
   ./cluster_mgr.py --action=shutdown
@@ -471,6 +523,7 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
                 shutdown,
                 config_single_remote,
                 attach,
+                detach,
                 move,
                 print_config,
                 migrate,
@@ -481,8 +534,7 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
     if action:
         action(args)
     else:
-        print(f'Error - unknown action "{args.action}". See --help')
-        exit(-1)
+        die_with_err(f'Error - unknown action "{args.action}". See --help')
 
 
 if __name__ == "__main__":
