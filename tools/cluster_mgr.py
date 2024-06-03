@@ -208,14 +208,16 @@ def build_config_from_existing(args):
     return config
 
 
-def find_node(config, host, port):
+def find_master(config, host, port, die_if_not_found=True):
     new_owner = None
     for shard in config:
         if shard["master"]["ip"] == host and shard["master"]["port"] == port:
             new_owner = shard
             break
-    else:
-        die_with_err(f"Can't find master with port {port} (hint: use flag --target_port).")
+
+    if new_owner == None and die_if_not_found:
+        die_with_err(f"Can't find master (hint: use flag --target_host / --target_port).")
+
     return new_owner
 
 
@@ -236,7 +238,7 @@ def attach(args):
         newcomer_node = build_node(newcomer)
 
         config = build_config_from_existing(args)
-        master_node = find_node(config, args.target_host, args.target_port)
+        master_node = find_master(config, args.target_host, args.target_port)
 
         master_node["replicas"].append(newcomer_node)
         print(f"Pushing config:\n{config}\n")
@@ -256,9 +258,34 @@ def attach(args):
     print()
 
 
+def detach(args):
+    print(f"Detaching remote Dragonfly {args.target_host}:{args.target_port} from cluster")
+    print(
+        "Important: detached node will not receive a new config! This means that the detached node will still 'think' that it belongs to the cluster"
+    )
+    config = build_config_from_existing(args)
+    node = find_master(config, args.target_host, args.target_port, die_if_not_found=False)
+    if node == None:
+        found = False
+        for master in config:
+            for replica in master["replicas"]:
+                if replica["ip"] == args.target_host and replica["port"] == args.target_port:
+                    master["replicas"].remove(replica)
+                    found = True
+        if not found:
+            die_with_err("Can't find target node")
+    else:
+        if len(node["slot_ranges"]) != 0:
+            die_with_err("Can't detach a master with assigned slots")
+        if len(node["replicas"]) != 0:
+            die_with_err("Can't detach a master with replicas")
+        config = [m for m in config if m != node]
+    push_config(config)
+
+
 def move(args):
     config = build_config_from_existing(args)
-    new_owner = find_node(config, args.target_host, args.target_port)
+    new_owner = find_master(config, args.target_host, args.target_port)
 
     def remove_slot(slot, from_range, from_shard):
         if from_range["start"] == slot:
@@ -335,7 +362,7 @@ def move(args):
 
 def migrate(args):
     config = build_config_from_existing(args)
-    target = find_node(config, args.target_host, args.target_port)
+    target = find_master(config, args.target_host, args.target_port)
     target_node = Node(target["master"]["ip"], target["master"]["port"])
     target_node.update_id()
 
@@ -485,6 +512,7 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
                 shutdown,
                 config_single_remote,
                 attach,
+                detach,
                 move,
                 print_config,
                 migrate,
