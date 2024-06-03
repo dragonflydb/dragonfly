@@ -451,20 +451,31 @@ This will connect to localhost:6379 by default. Override with `--target_host` an
 Attach an existing Dragonfly server to an existing cluster (owning no slots):
   ./cluster_mgr.py --action=attach --attach_host=HOST --attach_port=PORT
 This will connect to existing cluster present at localhost:6379 by default. Override with
-`--target_host` and `--target_port`
+`--target_host` and `--target_port`.
+To attach node as a replica - use --attach_as_replica=True. In such case, the node will be a
+replica of --target_host/--target_port.
 
 To set up a new cluster - start the servers and then use
   ./cluster_mgr.py --action=config_single_remote ...
   ./cluster_mgr.py --action=attach ...
 And repeat `--action=attach` for all servers.
 Afterwards, distribute the slots between the servers as desired with `--action=move` or
-`--action=migrate`
+`--action=migrate`.
+
+To detach (remove) a node from the cluster:
+  ./cluster_mgr.py --action=detach ...
+Notes:
+- If the node is a master, it must not have any slots assigned to it.
+- The node will not be notified that it's no longer in a cluster. It's a good idea to shut it down
+  after detaching it from the cluster.
 
 Connect to cluster and move slots 10-20 to target:
   ./cluster_mgr.py --action=move --slot_start=10 --slot_end=20 --target_host=X --target_port=X
+WARNING: This will NOT migrate existing data, i.e. data in slots 10-20 will be erased.
 
 Migrate slots 10-20 to target:
   ./cluster_mgr.py --action=migrate --slot_start=10 --slot_end=20 --target_host=X --target_port=X
+Unlike --action=move above, this will migrate the data to the new owner.
 
 Connect to cluster and shutdown all nodes:
   ./cluster_mgr.py --action=shutdown
