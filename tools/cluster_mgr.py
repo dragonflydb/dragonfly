@@ -487,6 +487,13 @@ Notes:
 - The node will not be notified that it's no longer in a cluster. It's a good idea to shut it down
   after detaching it from the cluster.
 
+To take over (turn replica to master):
+  ./cluster_mgr.py --action=takeover --target_host=X --target_port=X
+Notes:
+- You'll need to run REPLICAOF NO ONE on the new master
+- If previous master had other replicas, you'll need to update them with REPLICAOF as well
+- Previous master will be detached from cluster. It's a good idea to shut it down.
+
 Connect to cluster and move slots 10-20 to target:
   ./cluster_mgr.py --action=move --slot_start=10 --slot_end=20 --target_host=X --target_port=X
 WARNING: This will NOT migrate existing data, i.e. data in slots 10-20 will be erased.
