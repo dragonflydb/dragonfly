@@ -463,7 +463,7 @@ Afterwards, distribute the slots between the servers as desired with `--action=m
 `--action=migrate`.
 
 To detach (remove) a node from the cluster:
-  ./cluster_mgr.py --action=detach ...
+  ./cluster_mgr.py --action=detach --target_host=X --target_port=X
 Notes:
 - If the node is a master, it must not have any slots assigned to it.
 - The node will not be notified that it's no longer in a cluster. It's a good idea to shut it down
