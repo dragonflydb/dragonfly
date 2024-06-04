@@ -560,14 +560,23 @@ void Connection::OnShutdown() {
 }
 
 void Connection::OnPreMigrateThread() {
+  DVLOG(1) << "OnPreMigrateThread " << GetClientId();
+
   CHECK(!cc_->conn_closing);
 
-  socket_->CancelOnErrorCb();
   DCHECK(!migration_in_process_);
+
+  // CancelOnErrorCb is a preemption point, so we make sure the Migration start
+  // is marked beforehand.
   migration_in_process_ = true;
+
+  socket_->CancelOnErrorCb();
+  DCHECK(!dispatch_fb_.IsJoinable()) << GetClientId();
 }
 
 void Connection::OnPostMigrateThread() {
+  DVLOG(1) << "OnPostMigrateThread " << GetClientId();
+
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
@@ -1537,6 +1546,7 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 
 void Connection::LaunchDispatchFiberIfNeeded() {
   if (!dispatch_fb_.IsJoinable() && !migration_in_process_) {
+    VLOG(1) << "LaunchDispatchFiberIfNeeded " << GetClientId();
     dispatch_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch",
                               [&, peer = socket_.get()]() { DispatchFiber(peer); });
   }
