@@ -847,9 +847,6 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   shard_queue_.resize(sz);
 
   size_t max_shard_file_size = GetTieredFileLimit(sz);
-  if (max_shard_file_size > 0)
-    is_tiering_enabled_ = true;
-
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
       InitThreadLocal(pb, update_db_time, max_shard_file_size);

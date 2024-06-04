@@ -11,7 +11,6 @@
 #include "io/io.h"
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
-
 namespace dfly::tiering {
 
 namespace {
@@ -59,12 +58,14 @@ void OpManager::Delete(EntryId id) {
 
 void OpManager::Delete(DiskSegment segment) {
   EntryOps* pending_op = nullptr;
-  if (auto it = pending_reads_.find(segment.ContainingPages().offset); it != pending_reads_.end())
-    pending_op = it->second.Find(segment);
+
+  auto base_it = pending_reads_.find(segment.ContainingPages().offset);
+  if (base_it != pending_reads_.end())
+    pending_op = base_it->second.Find(segment);
 
   if (pending_op) {
     pending_op->deleting = true;
-  } else if (ReportDelete(segment)) {
+  } else if (ReportDelete(segment) && base_it == pending_reads_.end()) {
     storage_.MarkAsFree(segment.ContainingPages());
   }
 }
@@ -143,8 +144,9 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
       deleting_full |= ReportDelete(ko.segment);
   }
 
-  if (deleting_full)
+  if (deleting_full) {
     storage_.MarkAsFree(info->segment);
+  }
 
   pending_reads_.erase(offset);
 }

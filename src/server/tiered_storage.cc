@@ -18,6 +18,7 @@
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
 #include "server/tiering/op_manager.h"
@@ -129,6 +130,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // Load all values from bin by their hashes
   void Defragment(tiering::DiskSegment segment, string_view value) {
+    // Note: Bin could've already been deleted, in that case DeleteBin returns an empty list
     for (auto [dbid, hash, sub_segment] : ts_->bins_->DeleteBin(segment, value)) {
       // Search for key with the same hash and value pointing to the same segment.
       // If it still exists, it must correspond to the value stored in this bin
@@ -166,6 +168,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     if (!modified && !cache_fetched_)
       return false;
 
+    if (SliceSnapshot::IsSnaphotInProgress())
+      return false;
+
     SetInMemory(get<OpManager::KeyRef>(id), value, segment);
     return true;
   }
@@ -175,8 +180,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       return true;
 
     auto bin = ts_->bins_->Delete(segment);
-    if (bin.empty)
+    if (bin.empty) {
       return true;
+    }
 
     if (bin.fragmented) {
       // Trigger read to signal need for defragmentation. ReportFetched will handle it.
@@ -286,6 +292,7 @@ void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
   }
 }
+
 void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   DCHECK(value->IsExternal());
   tiering::DiskSegment segment = value->GetExternalSlice();
@@ -337,6 +344,9 @@ TieredStats TieredStorage::GetStats() const {
 }
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
+  if (SliceSnapshot::IsSnaphotInProgress())
+    return;
+
   PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
   int stash_limit =
       absl::GetFlag(FLAGS_tiered_storage_write_depth) - op_manager_->GetStats().pending_stash_cnt;

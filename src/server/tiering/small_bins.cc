@@ -146,7 +146,12 @@ SmallBins::Stats SmallBins::GetStats() const {
 
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
   DCHECK_EQ(value.size(), kPageSize);
-  stats_.stashed_entries_cnt -= stashed_bins_.extract(segment.offset).mapped().entries;
+
+  auto bin = stashed_bins_.extract(segment.offset);
+  if (bin.empty())
+    return {};
+
+  stats_.stashed_entries_cnt -= bin.mapped().entries;
 
   const char* data = value.data();
 
