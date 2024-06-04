@@ -559,6 +559,8 @@ void Connection::OnPreMigrateThread() {
   CHECK(!cc_->conn_closing);
 
   socket_->CancelOnErrorCb();
+  DCHECK(!migration_in_process_);
+  migration_in_process_ = true;
 }
 
 void Connection::OnPostMigrateThread() {
@@ -566,12 +568,12 @@ void Connection::OnPostMigrateThread() {
   if (breaker_cb_ && socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
+  migration_in_process_ = false;
+  DCHECK(!dispatch_fb_.IsJoinable());
 
-  // If someone had sent Async during the migration, dispatch_fb_ will be created.
-  if (dispatch_fb_.IsJoinable()) {
-    // How can we ensure that dispatch_fb_ is created on the correct thread?
-    // TODO: to introduce Fiber::IsLocal method.
-    DCHECK(!dispatch_q_.empty());
+  // If someone had sent Async during the migration, we must create dispatch_fb_.
+  if (!dispatch_q_.empty()) {
+    LaunchDispatchFiberIfNeeded();
   }
 
   // Update tl variables
@@ -1530,7 +1532,7 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 }
 
 void Connection::LaunchDispatchFiberIfNeeded() {
-  if (!dispatch_fb_.IsJoinable()) {
+  if (!dispatch_fb_.IsJoinable() && !migration_in_process_) {
     dispatch_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch",
                               [&, peer = socket_.get()]() { DispatchFiber(peer); });
   }
