@@ -150,7 +150,7 @@ class SliceSnapshot {
   DbIndex current_db_;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::deque<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
