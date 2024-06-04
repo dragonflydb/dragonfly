@@ -70,7 +70,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
   snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
-    IterateBucketsFb(cll);
+    IterateBucketsFb(cll, stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
     if (cll->IsCancelled()) {
       Cancel();
@@ -174,7 +174,7 @@ void SliceSnapshot::Join() {
 // and survived until it finished.
 
 // Serializes all the entries with version less than snapshot_version_.
-void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
+void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut) {
   {
     auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
     ThisFiber::SetName(std::move(fiber_name));
@@ -223,8 +223,10 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   }  // for (dbindex)
 
   CHECK(!serialize_bucket_running_);
-  CHECK(!serializer_->SendFullSyncCut());
-  PushSerializedToChannel(true);
+  if (send_full_sync_cut) {
+    CHECK(!serializer_->SendFullSyncCut());
+    PushSerializedToChannel(true);
+  }
 
   // serialized + side_saved must be equal to the total saved.
   VLOG(1) << "Exit SnapshotSerializer (loop_serialized/side_saved/cbcalls): "

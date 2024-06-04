@@ -88,7 +88,7 @@ class SliceSnapshot {
  private:
   // Main fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
-  void IterateBucketsFb(const Cancellation* cll);
+  void IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut);
 
   // Called on traversing cursor by IterateBucketsFb.
   bool BucketSaveCb(PrimeIterator it);
