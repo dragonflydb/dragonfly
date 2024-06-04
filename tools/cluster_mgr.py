@@ -394,35 +394,31 @@ def migrate(args):
                 break
     if source == None:
         die_with_err("Unsupported slot range migration (currently only 1-node migration supported)")
-    source_node = Node(source["master"]["ip"], source["master"]["port"])
-    source_node.update_id()
 
-    # do migration
-    sync_id = send_command(
-        target_node,
-        [
-            "DFLYCLUSTER",
-            "START-SLOT-MIGRATION",
-            source_node.host,
-            source_node.port,
-            args.slot_start,
-            args.slot_end,
-        ],
-    )
+    source["migrations"] = [
+        {
+            "slot_ranges": [{"start": args.slot_start, "end": args.slot_end}],
+            "node_id": target_node.id,
+            "ip": target_node.host,
+            "port": target_node.port,
+        }
+    ]
+    push_config(config)
 
     # wait for migration finish
     sync_status = []
     while True:
         sync_status = send_command(target_node, ["DFLYCLUSTER", "SLOT-MIGRATION-STATUS"])
-        assert len(sync_status) == 1
-        if "STABLE_SYNC" in sync_status[0]:
+        if sync_status == "NO_STATE":
+            continue
+        if len(sync_status) != 1:
+            die_with_err(f"Unexpected number of migrations {len(sync_status)}: {sync_status}")
+        if "FINISHED" in sync_status[0]:
+            print(f"Migration finished: {sync_status[0]}")
             break
 
-    print("Reached stable sync: ", sync_status)
-    res = send_command(source_node, ["DFLYCLUSTER", "SLOT-MIGRATION-FINALIZE", sync_id])
-    assert res == "OK"
-
     # Push new config to all nodes
+    print("Updating all nodes with new slots state")
     move(args)
 
 
