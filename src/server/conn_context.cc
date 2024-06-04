@@ -265,4 +265,12 @@ void ConnectionState::ExecInfo::ClearWatched() {
   watched_existed = 0;
 }
 
+bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
+  if (!IsTrackingOn()) {
+    return false;
+  }
+
+  return !optin_ || (seq_num_ == (1 + caching_seq_num_));
+}
+
 }  // namespace dfly
