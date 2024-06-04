@@ -496,7 +496,11 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       http_listener_(http_listener),
       ssl_ctx_(ctx),
       service_(service),
-      name_{} {
+      tracking_enabled_(false),
+      skip_next_squashing_(false),
+      migration_enabled_(false),
+      migration_in_process_(false),
+      is_http_(false) {
   static atomic_uint32_t next_id{1};
 
   protocol_ = protocol;
@@ -556,22 +560,33 @@ void Connection::OnShutdown() {
 }
 
 void Connection::OnPreMigrateThread() {
+  DVLOG(1) << "OnPreMigrateThread " << GetClientId();
+
   CHECK(!cc_->conn_closing);
 
+  DCHECK(!migration_in_process_);
+
+  // CancelOnErrorCb is a preemption point, so we make sure the Migration start
+  // is marked beforehand.
+  migration_in_process_ = true;
+
   socket_->CancelOnErrorCb();
+  DCHECK(!dispatch_fb_.IsJoinable()) << GetClientId();
 }
 
 void Connection::OnPostMigrateThread() {
+  DVLOG(1) << "OnPostMigrateThread " << GetClientId();
+
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
   }
+  migration_in_process_ = false;
+  DCHECK(!dispatch_fb_.IsJoinable());
 
-  // If someone had sent Async during the migration, dispatch_fb_ will be created.
-  if (dispatch_fb_.IsJoinable()) {
-    // How can we ensure that dispatch_fb_ is created on the correct thread?
-    // TODO: to introduce Fiber::IsLocal method.
-    DCHECK(!dispatch_q_.empty());
+  // If someone had sent Async during the migration, we must create dispatch_fb_.
+  if (!dispatch_q_.empty()) {
+    LaunchDispatchFiberIfNeeded();
   }
 
   // Update tl variables
@@ -1530,7 +1545,8 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 }
 
 void Connection::LaunchDispatchFiberIfNeeded() {
-  if (!dispatch_fb_.IsJoinable()) {
+  if (!dispatch_fb_.IsJoinable() && !migration_in_process_) {
+    VLOG(1) << "LaunchDispatchFiberIfNeeded " << GetClientId();
     dispatch_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch",
                               [&, peer = socket_.get()]() { DispatchFiber(peer); });
   }

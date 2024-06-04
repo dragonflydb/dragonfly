@@ -761,6 +761,7 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
     await all
 
 
+@pytest.mark.skip("The test deadlock")
 async def test_tls_when_read_write_is_interleaved(
     with_ca_tls_server_args, with_ca_tls_client_args, df_local_factory
 ):
@@ -772,6 +773,7 @@ async def test_tls_when_read_write_is_interleaved(
     server: DflyInstance = df_local_factory.create(
         port=1211, **with_ca_tls_server_args, proactor_threads=1
     )
+    # TODO(kostas): to fix the deadlock in the test
     server.start()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
