@@ -83,15 +83,8 @@ void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
 
     bool written = false;
     cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
-      uint64_t v = it.GetVersion();
-      if (v >= snapshot_version_) {
-        // either has been already serialized or added after snapshotting started.
-        DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
-                 << " at " << v;
-      }
-      constexpr DbIndex cluster_db_index = 0;
-      db_slice_->FlushChangeToEarlierCallbacks(cluster_db_index, DbSlice::Iterator::FromPrime(it),
-                                               snapshot_version_);
+      db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
+                                               DbSlice::Iterator::FromPrime(it), snapshot_version_);
       if (WriteBucket(it)) {
         written = true;
       }
