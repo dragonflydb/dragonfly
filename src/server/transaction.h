@@ -363,10 +363,6 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
-  void SetTrackingCallback(std::function<void(Transaction* trans)> f) {
-    tracking_cb_ = std::move(f);
-  }
-
   // Remove once BZPOP is stabilized
   std::string DEBUGV18_BlockInfo() {
     return "claimed=" + std::to_string(blocking_barrier_.IsClaimed()) +
@@ -647,8 +643,6 @@ class Transaction {
     size_t schedule_attempts = 0;
     ShardId coordinator_index = 0;
   } stats_;
-
-  std::function<void(Transaction* trans)> tracking_cb_;
 
  private:
   struct TLTmpSpace {
