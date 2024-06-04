@@ -221,6 +221,14 @@ def find_master(config, host, port, die_if_not_found=True):
     return new_owner
 
 
+def find_replica(config, host, port):
+    for master in config:
+        for replica in master["replicas"]:
+            if replica["ip"] == host and replica["port"] == port:
+                return replica, master
+    die_with_err("Can't find target node")
+
+
 def attach(args):
     print(f"Attaching remote Dragonfly {args.attach_host}:{args.attach_port} to cluster")
     if args.attach_as_replica:
@@ -266,20 +274,30 @@ def detach(args):
     config = build_config_from_existing(args)
     node = find_master(config, args.target_host, args.target_port, die_if_not_found=False)
     if node == None:
-        found = False
-        for master in config:
-            for replica in master["replicas"]:
-                if replica["ip"] == args.target_host and replica["port"] == args.target_port:
-                    master["replicas"].remove(replica)
-                    found = True
-        if not found:
-            die_with_err("Can't find target node")
+        replica, master = find_replica(config, args.target_host, args.target_port)
+        master["replicas"].remove(replica)
     else:
         if len(node["slot_ranges"]) != 0:
             die_with_err("Can't detach a master with assigned slots")
         if len(node["replicas"]) != 0:
             die_with_err("Can't detach a master with replicas")
         config = [m for m in config if m != node]
+    push_config(config)
+
+
+def takeover(args):
+    print(f"Promoting Dragonfly {args.target_host}:{args.target_port} from replica to master")
+    print(
+        "Important: do not forget to send command REPLICAOF NO ONE to new master, and update "
+        "           additional replicas if such exist"
+    )
+    print("Important: previous master will be detached from the cluster")
+
+    config = build_config_from_existing(args)
+    replica, master = find_replica(config, args.target_host, args.target_port)
+    master["replicas"].remove(replica)
+    master["master"] = replica
+
     push_config(config)
 
 
@@ -469,6 +487,13 @@ Notes:
 - The node will not be notified that it's no longer in a cluster. It's a good idea to shut it down
   after detaching it from the cluster.
 
+To take over (turn replica to master):
+  ./cluster_mgr.py --action=takeover --target_host=X --target_port=X
+Notes:
+- You'll need to run REPLICAOF NO ONE on the new master
+- If previous master had other replicas, you'll need to update them with REPLICAOF as well
+- Previous master will be detached from cluster. It's a good idea to shut it down.
+
 Connect to cluster and move slots 10-20 to target:
   ./cluster_mgr.py --action=move --slot_start=10 --slot_end=20 --target_host=X --target_port=X
 WARNING: This will NOT migrate existing data, i.e. data in slots 10-20 will be erased.
@@ -524,6 +549,7 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
                 config_single_remote,
                 attach,
                 detach,
+                takeover,
                 move,
                 print_config,
                 migrate,
