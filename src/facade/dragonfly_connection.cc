@@ -496,7 +496,11 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       http_listener_(http_listener),
       ssl_ctx_(ctx),
       service_(service),
-      name_{} {
+      tracking_enabled_(false),
+      skip_next_squashing_(false),
+      migration_enabled_(false),
+      migration_in_process_(false),
+      is_http_(false) {
   static atomic_uint32_t next_id{1};
 
   protocol_ = protocol;

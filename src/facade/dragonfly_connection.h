@@ -451,13 +451,13 @@ class Connection : public util::Connection {
   static thread_local QueueBackpressure tl_queue_backpressure_;
 
   // a flag indicating whether the client has turned on client tracking.
-  bool tracking_enabled_ : 1 = false;
-  bool skip_next_squashing_ : 1 = false;  // Forcefully skip next squashing
+  bool tracking_enabled_ : 1;
+  bool skip_next_squashing_ : 1;  // Forcefully skip next squashing
 
   // Connection migration vars, see RequestAsyncMigration() above.
-  bool migration_enabled_ : 1 = false;
-  bool migration_in_process_ : 1 = false;
-  bool is_http_ : 1 = false;
+  bool migration_enabled_ : 1;
+  bool migration_in_process_ : 1;
+  bool is_http_ : 1;
 };
 
 }  // namespace facade
