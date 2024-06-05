@@ -395,6 +395,7 @@ class Connection : public util::Connection {
 
  private:
   void DecreaseStatsOnClose();
+  void BreakOnce(uint32_t ev_mask);
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::EventCount evc_;             // dispatch queue waker
