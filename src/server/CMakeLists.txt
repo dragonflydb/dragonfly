@@ -32,8 +32,7 @@ add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
-            ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc
-            )
+            ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc)
 
 SET(DF_SEARCH_SRCS search/search_family.cc search/doc_index.cc search/doc_accessors.cc
     search/aggregator.cc)

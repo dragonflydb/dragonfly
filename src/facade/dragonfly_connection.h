@@ -298,10 +298,6 @@ class Connection : public util::Connection {
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest);
 
-  void SetClientTrackingSwitch(bool is_on);
-
-  bool IsTrackingOn() const;
-
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file combining requests from all the connections in
   // that thread. A noop if the thread is already logging.

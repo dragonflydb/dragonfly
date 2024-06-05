@@ -147,6 +147,87 @@ struct ConnectionState {
 
   size_t UsedMemory() const;
 
+  // Client tracking is a per-connection state machine that adheres to the requirements
+  // of the CLIENT TRACKING command. Note that the semantics described below are enforced
+  // by the tests in server_family_test. The rules are:
+  // 1. If CLIENT TRACKING is ON then each READ command must be tracked. Invalidation
+  //    messages are sent `only once`. Subsequent changes of the same key require the
+  //    client to re-read the key in order to receive the next invalidation message.
+  // 2. CLIENT TRACKING ON OPTIN turns on optional tracking. Read commands are not
+  //    tracked unless the client issues a CLIENT CACHING YES command which conditionally
+  //    allows the tracking of the command that follows CACHING YES). For example:
+  //    >> CLIENT TRACKING ON
+  //    >> CLIENT CACHING YES
+  //    >> GET foo  <--------------------- From now foo is being tracked
+  //    However:
+  //    >> CLIENT TRACKING ON
+  //    >> CLIENT CACHING YES
+  //    >> SET foo bar
+  //    >> GET foo <--------------------- is *NOT* tracked since GET does not succeed CACHING
+  //    Also, in the context of multi transactions, CLIENT CACHING YES is *STICKY*:
+  //    >> CLIENT TRACKING ON
+  //    >> CLIENT CACHING YES
+  //    >> MULTI
+  //    >>   GET foo
+  //    >>   SET foo bar
+  //    >>   GET brother_foo
+  //    >> EXEC
+  //    From this point onwards `foo` and `get` keys are tracked. Same aplies if CACHING YES
+  //    is used within the MULTI/EXEC block.
+  //
+  // The state machine implements the above rules. We need to track:
+  // 1. If TRACKING is ON and OPTIN
+  // 2. Stickiness of CACHING as described above
+  //
+  // We introduce a monotonic counter called sequence number which we increment only:
+  // * On InvokeCmd when we are not Collecting (multi)
+  // We introduce another counter called caching_seq_num which is set to seq_num
+  // when the users sends a CLIENT CACHING YES command
+  // If seq_num == caching_seq_num + 1 then we know that we should Track().
+  class ClientTracking {
+   public:
+    // Sets to true when CLIENT TRACKING is ON
+    void SetClientTracking(bool is_on) {
+      tracking_enabled_ = is_on;
+    }
+
+    // Increment current sequence number
+    void IncrementSequenceNumber() {
+      ++seq_num_;
+    }
+
+    // Set if OPTIN subcommand is used in CLIENT TRACKING
+    void SetOptin(bool optin) {
+      optin_ = optin;
+    }
+
+    // Check if the keys should be tracked. Result adheres to the state machine described above.
+    bool ShouldTrackKeys() const;
+
+    // Check only if CLIENT TRACKING is ON
+    bool IsTrackingOn() const {
+      return tracking_enabled_;
+    }
+
+    // Called by CLIENT CACHING YES and caches the current seq_num_
+    void SetCachingSequenceNumber(bool is_multi) {
+      // We need -1 when we are in multi
+      caching_seq_num_ = is_multi && seq_num_ != 0 ? seq_num_ - 1 : seq_num_;
+    }
+
+    void ResetCachingSequenceNumber() {
+      caching_seq_num_ = 0;
+    }
+
+   private:
+    // a flag indicating whether the client has turned on client tracking.
+    bool tracking_enabled_ = false;
+    bool optin_ = false;
+    // sequence number
+    size_t seq_num_ = 0;
+    size_t caching_seq_num_ = 0;
+  };
+
  public:
   DbIndex db_index = 0;
 
@@ -161,6 +242,7 @@ struct ConnectionState {
   std::optional<SquashingInfo> squashing_info;
   std::unique_ptr<ScriptInfo> script_info;
   std::unique_ptr<SubscribeInfo> subscribe_info;
+  ClientTracking tracking_info_;
 };
 
 class ConnectionContext : public facade::ConnectionContext {
@@ -183,6 +265,7 @@ class ConnectionContext : public facade::ConnectionContext {
   // TODO: to introduce proper accessors.
   Transaction* transaction = nullptr;
   const CommandId* cid = nullptr;
+
   ConnectionState conn_state;
 
   DbIndex db_index() const {
