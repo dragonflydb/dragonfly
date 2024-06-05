@@ -21,7 +21,7 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from .instance import DflyInstance, DflyParams, DflyInstanceFactory
+from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from . import PortPicker, dfly_args
 from .utility import DflySeederFactory, gen_ca_cert, gen_certificate
 
@@ -366,3 +366,24 @@ def run_before_and_after_test():
     yield  # this is where the testing happens
 
     # Teardown
+
+
+@pytest.fixture(scope="function")
+def redis_server(port_picker) -> RedisServer:
+    s = RedisServer(port_picker.get_available_port())
+    try:
+        s.start()
+    except FileNotFoundError as e:
+        pytest.skip("Redis server not found")
+        return None
+    time.sleep(1)
+    yield s
+    s.stop()
+
+
+@pytest.fixture(scope="function")
+def redis_local_server(port_picker) -> RedisServer:
+    s = RedisServer(port_picker.get_available_port())
+    time.sleep(1)
+    yield s
+    s.stop()

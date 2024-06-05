@@ -59,7 +59,7 @@ class TieredStorage {
   void Stash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
   // Delete value, must be offloaded (external type)
-  void Delete(PrimeValue* value);
+  void Delete(DbIndex dbid, PrimeValue* value);
 
   // Cancel pending stash for value, must have IO_PENDING flag set
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);

@@ -18,20 +18,24 @@ except ImportError:
 class SeederBase:
     UID_COUNTER = 1  # multiple generators should not conflict on keys
     CACHED_SCRIPTS = {}
-    TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON"]
+    DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON"]
 
-    def __init__(self):
+    def __init__(self, types: typing.Optional[typing.List[str]] = None):
         self.uid = SeederBase.UID_COUNTER
         SeederBase.UID_COUNTER += 1
+        self.types = types if types is not None else SeederBase.DEFAULT_TYPES
 
     @classmethod
-    async def capture(clz, client: aioredis.Redis) -> typing.Tuple[int]:
+    async def capture(
+        clz, client: aioredis.Redis, types: typing.Optional[typing.List[str]] = None
+    ) -> typing.Tuple[int]:
         """Generate hash capture for all data stored in instance pointed by client"""
 
         sha = await client.script_load(clz._load_script("hash"))
+        types_to_capture = types if types is not None else clz.DEFAULT_TYPES
         return tuple(
             await asyncio.gather(
-                *(clz._run_capture(client, sha, data_type) for data_type in clz.TYPES)
+                *(clz._run_capture(client, sha, data_type) for data_type in types_to_capture)
             )
         )
 
@@ -69,8 +73,15 @@ class SeederBase:
 class StaticSeeder(SeederBase):
     """Wrapper around DEBUG POPULATE with fuzzy key sizes and a balanced type mix"""
 
-    def __init__(self, key_target=10_000, data_size=100, variance=5, samples=10):
-        SeederBase.__init__(self)
+    def __init__(
+        self,
+        key_target=10_000,
+        data_size=100,
+        variance=5,
+        samples=10,
+        types: typing.Optional[typing.List[str]] = None,
+    ):
+        SeederBase.__init__(self, types)
         self.key_target = key_target
         self.data_size = data_size
         self.variance = variance
@@ -79,7 +90,7 @@ class StaticSeeder(SeederBase):
     async def run(self, client: aioredis.Redis):
         """Run with specified options until key_target is met"""
         samples = [
-            (dtype, f"k-s{self.uid}u{i}-") for i, dtype in enumerate(self.TYPES * self.samples)
+            (dtype, f"k-s{self.uid}u{i}-") for i, dtype in enumerate(self.types * self.samples)
         ]
 
         # Handle samples in chuncks of 24 to not overload client pool and instance
@@ -89,7 +100,7 @@ class StaticSeeder(SeederBase):
             )
 
     async def _run_unit(self, client: aioredis.Redis, dtype: str, prefix: str):
-        key_target = self.key_target // (self.samples * len(self.TYPES))
+        key_target = self.key_target // (self.samples * len(self.types))
         if dtype == "STRING":
             dsize = random.uniform(self.data_size / self.variance, self.data_size * self.variance)
             csize = 1
@@ -120,7 +131,7 @@ class Seeder(SeederBase):
         self.units = [
             Seeder.Unit(
                 prefix=f"k-s{self.uid}u{i}-",
-                type=Seeder.TYPES[i % len(Seeder.TYPES)],
+                type=Seeder.DEFAULT_TYPES[i % len(Seeder.DEFAULT_TYPES)],
                 counter=0,
                 stop_key=f"_s{self.uid}u{i}-stop",
             )

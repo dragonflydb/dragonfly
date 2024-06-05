@@ -203,11 +203,7 @@ class DflyShardReplica : public ProtocolClient {
 
   void StableSyncDflyAcksFb(Context* cntx);
 
-  void StableSyncDflyExecFb(Context* cntx);
-
-  void ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx);
-  void InsertTxDataToShardResource(TransactionData&& tx_data);
-  void ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx);
+  void ExecuteTx(TransactionData&& tx_data, Context* cntx);
 
   uint32_t FlowId() const;
 
@@ -219,10 +215,7 @@ class DflyShardReplica : public ProtocolClient {
 
   std::optional<base::IoBuf> leftover_buf_;
 
-  std::queue<std::pair<TransactionData, bool>> trans_data_queue_;
-  static constexpr size_t kYieldAfterItemsInQueue = 50;
   util::fb2::EventCount shard_replica_waker_;  // waker for trans_data_queue_
-  bool use_multi_shard_exe_sync_;
 
   std::unique_ptr<JournalExecutor> executor_;
   std::unique_ptr<RdbLoader> rdb_loader_;
@@ -242,7 +235,6 @@ class DflyShardReplica : public ProtocolClient {
   size_t ack_offs_ = 0;
 
   bool force_ping_ = false;
-  util::fb2::Fiber execution_fb_;
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
   uint32_t flow_id_ = UINT32_MAX;  // Flow id if replica acts as a dfly flow.

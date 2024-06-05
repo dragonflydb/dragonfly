@@ -147,7 +147,7 @@ jobs:
     - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: dragonfly-amd64
+        name: dragonfly-amd64-${{ matrix.name }}
         path: results-artifacts/*
   publish_release:
     runs-on: ubuntu-latest

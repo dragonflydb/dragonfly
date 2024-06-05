@@ -6,7 +6,7 @@ volumes:
 
 services:
   prometheus:
-    image: prom/prometheus
+    image: prom/prometheus:v2.45.5
     restart: always
     volumes:
       - ./prometheus:/etc/prometheus/

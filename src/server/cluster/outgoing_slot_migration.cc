@@ -11,6 +11,7 @@
 #include "absl/cleanup/cleanup.h"
 #include "base/logging.h"
 #include "cluster_family.h"
+#include "cluster_utility.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -155,7 +156,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      cntx_.ReportError(GenericError(ec, "Could send INIT command."));
+      cntx_.ReportError(GenericError(ec, "Could not send INIT command."));
       continue;
     }
 
@@ -270,6 +271,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   auto is_error = CheckFlowsForErrors();
   Finish(is_error);
   if (!is_error) {
+    keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
     cf_->UpdateConfig(migration_info_.slot_ranges, false);
     VLOG(1) << "Config is updated for " << cf_->MyID();
   }
@@ -294,5 +296,12 @@ bool OutgoingMigration::CheckFlowsForErrors() {
     }
   }
   return false;
+}
+
+size_t OutgoingMigration::GetKeyCount() const {
+  if (state_ == MigrationState::C_FINISHED) {
+    return keys_number_;
+  }
+  return cluster::GetKeyCount(migration_info_.slot_ranges);
 }
 }  // namespace dfly::cluster

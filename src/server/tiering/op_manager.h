@@ -39,14 +39,16 @@ class OpManager {
   using ReadCallback = std::function<bool(std::string*)>;
 
   explicit OpManager(size_t max_size);
+  virtual ~OpManager();
 
   // Open file with underlying disk storage, must be called before use
   std::error_code Open(std::string_view file);
 
   void Close();
 
-  // Enqueue callback to be executed once value is read. Triggers read if none is pending yet for
-  // this segment
+  // Enqueue callback to be executed once value is read. Trigger read if none is pending yet for
+  // this segment. Multiple entries can be obtained from a single segment, but every distinct id
+  // will have it's own independent callback loop that can safely modify the underlying value
   void Enqueue(EntryId id, DiskSegment segment, ReadCallback cb);
 
   // Delete entry with pending io
@@ -65,20 +67,24 @@ class OpManager {
   // given error
   virtual void ReportStashed(EntryId id, DiskSegment segment, std::error_code ec) = 0;
 
-  // Report that an entry was successfully fetched.
-  // If modify is set, a modification was executed during the read and the stored value is outdated.
-  virtual void ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
+  // Report that an entry was successfully fetched. Includes whether entry was modified.
+  // Returns true if value needs to be deleted.
+  virtual bool ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
                              bool modified) = 0;
+
+  // Report delete. Return true if the filled segment needs to be marked as free.
+  virtual bool ReportDelete(DiskSegment segment) = 0;
 
  protected:
   // Describes pending futures for a single entry
   struct EntryOps {
-    EntryOps(OwnedEntryId id, DiskSegment segment) : id{std::move(id)}, segment{segment} {
+    EntryOps(OwnedEntryId id, DiskSegment segment) : id(std::move(id)), segment(segment) {
     }
 
     OwnedEntryId id;
     DiskSegment segment;
     absl::InlinedVector<ReadCallback, 1> callbacks;
+    bool deleting = false;
   };
 
   // Describes an ongoing read operation for a fixed segment
@@ -87,11 +93,13 @@ class OpManager {
     }
 
     // Get ops for id or create new
-    EntryOps& ForId(EntryId id, DiskSegment segment);
+    EntryOps& ForSegment(DiskSegment segment, EntryId id);
+
+    // Find if there are operations for the given segment, return nullptr otherwise
+    EntryOps* Find(DiskSegment segment);
 
     DiskSegment segment;                       // spanning segment of whole read
     absl::InlinedVector<EntryOps, 1> key_ops;  // enqueued operations for different keys
-    bool delete_requested = false;             // whether to delete after reading the segment
   };
 
   // Prepare read operation for aligned segment or return pending if it exists.
@@ -109,6 +117,7 @@ class OpManager {
 
   absl::flat_hash_map<size_t /* offset */, ReadOp> pending_reads_;
 
+  size_t pending_stash_counter_ = 0;
   // todo: allow heterogeneous lookups with non owned id
   absl::flat_hash_map<OwnedEntryId, unsigned /* version */> pending_stash_ver_;
 };

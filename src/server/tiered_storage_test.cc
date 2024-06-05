@@ -51,6 +51,8 @@ class TieredStorageTest : public BaseFamilyTest {
 
 // Perform simple series of SET, GETSET and GET
 TEST_F(TieredStorageTest, SimpleGetSet) {
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.1f);  // disable offloading
   const int kMin = 256;
   const int kMax = tiering::kPageSize + 10;
 
@@ -82,6 +84,10 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
     auto resp = Run({"GET", absl::StrCat("k", i)});
     ASSERT_EQ(resp, string(i, 'B')) << i;
   }
+
+  metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0);
+  EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, 0);
 }
 
 TEST_F(TieredStorageTest, MGET) {
@@ -123,8 +129,39 @@ TEST_F(TieredStorageTest, MultiDb) {
 
   for (size_t i = 0; i < 10; i++) {
     Run({"SELECT", absl::StrCat(i)});
+    EXPECT_EQ(GetMetrics().db_stats[i].tiered_entries, 1);
     EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), string(3000, char('A' + i)));
+    EXPECT_EQ(GetMetrics().db_stats[i].tiered_entries, 0);
   }
+}
+
+TEST_F(TieredStorageTest, Defrag) {
+  for (char k = 'a'; k < 'a' + 8; k++) {
+    Run({"SET", string(1, k), string(512, k)});
+  }
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  // 7 out 8 are in one bin, the last one made if flush and is now filling
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
+  EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 7u);
+  EXPECT_EQ(metrics.tiered_stats.small_bins_filling_bytes, 512 + 12);
+
+  // Reading 3 values still leaves the bin more than half occupied
+  Run({"GET", string(1, 'a')});
+  Run({"GET", string(1, 'b')});
+  Run({"GET", string(1, 'c')});
+  metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
+  EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 4u);
+
+  // This tirggers defragmentation, as only 3 < 7/2 remain left
+  Run({"GET", string(1, 'd')});
+  metrics = GetMetrics();
+  EXPECT_EQ(metrics.tiered_stats.total_defrags, 3u);
+  EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 0u);
+  EXPECT_EQ(metrics.tiered_stats.allocated_bytes, 0u);
 }
 
 TEST_F(TieredStorageTest, BackgroundOffloading) {
@@ -157,6 +194,35 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   EXPECT_EQ(metrics.tiered_stats.total_stashes, 2 * kNum);
   EXPECT_EQ(metrics.tiered_stats.total_fetches, kNum);
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
+}
+
+TEST_F(TieredStorageTest, FlushAll) {
+  absl::FlagSaver saver;
+  absl::SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+
+  const int kNum = 500;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), string(3000, 'A')});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+
+  // Start reading random entries
+  atomic_bool done = false;
+  auto reader = pp_->at(0)->LaunchFiber([&] {
+    while (!done) {
+      Run("reader", {"GET", absl::StrCat("k", rand() % kNum)});
+    }
+  });
+
+  util::ThisFiber::SleepFor(50ms);
+  Run({"FLUSHALL"});
+
+  done = true;
+  reader.Join();
+
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats.front().tiered_entries, 0u);
+  EXPECT_GT(metrics.tiered_stats.total_fetches, 2u);
 }
 
 }  // namespace dfly

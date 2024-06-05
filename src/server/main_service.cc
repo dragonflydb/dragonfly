@@ -35,7 +35,7 @@ extern "C" {
 #include "server/bitops_family.h"
 #include "server/bloom_family.h"
 #include "server/cluster/cluster_family.h"
-#include "server/cluster/unique_slot_checker.h"
+#include "server/cluster/cluster_utility.h"
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
@@ -1000,7 +1000,7 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
     cntx = cntx->conn_state.squashing_info->owner;
 
   if (!acl::IsUserAllowedToInvokeCommand(*cntx, *cid, tail_args)) {
-    return ErrorReply(absl::StrCat("NOPERM: ", cntx->authed_username, " ", error_msg));
+    return ErrorReply(absl::StrCat("-NOPERM ", cntx->authed_username, " ", error_msg));
   }
   return nullopt;
 }

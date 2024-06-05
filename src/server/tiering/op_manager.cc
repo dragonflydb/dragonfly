@@ -11,8 +11,6 @@
 #include "io/io.h"
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
-#include "util/fibers/future.h"
-
 namespace dfly::tiering {
 
 namespace {
@@ -34,6 +32,9 @@ OpManager::EntryId Borrowed(const OpManager::OwnedEntryId& id) {
 OpManager::OpManager(size_t max_size) : storage_{max_size} {
 }
 
+OpManager::~OpManager() {
+}
+
 std::error_code OpManager::Open(std::string_view file) {
   return storage_.Open(file);
 }
@@ -44,7 +45,9 @@ void OpManager::Close() {
 
 void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
   // Fill pages for prepared read as it has no penalty and potentially covers more small segments
-  PrepareRead(segment.FillPages()).ForId(id, segment).callbacks.emplace_back(std::move(cb));
+  PrepareRead(segment.ContainingPages())
+      .ForSegment(segment, id)
+      .callbacks.emplace_back(std::move(cb));
 }
 
 void OpManager::Delete(EntryId id) {
@@ -54,19 +57,22 @@ void OpManager::Delete(EntryId id) {
 }
 
 void OpManager::Delete(DiskSegment segment) {
-  DCHECK_EQ(segment.offset % kPageSize, 0u);
-  if (auto it = pending_reads_.find(segment.offset); it != pending_reads_.end()) {
-    // If a read is pending, it will be deleted once the read finished
-    it->second.delete_requested = true;
-  } else {
-    // Otherwise, delete it immediately
-    storage_.MarkAsFree(segment);
+  EntryOps* pending_op = nullptr;
+
+  auto base_it = pending_reads_.find(segment.ContainingPages().offset);
+  if (base_it != pending_reads_.end())
+    pending_op = base_it->second.Find(segment);
+
+  if (pending_op) {
+    pending_op->deleting = true;
+  } else if (ReportDelete(segment) && base_it == pending_reads_.end()) {
+    storage_.MarkAsFree(segment.ContainingPages());
   }
 }
 
 std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
   auto id = ToOwned(id_ref);
-  unsigned version = ++pending_stash_ver_[id];
+  unsigned version = pending_stash_ver_[id] = ++pending_stash_counter_;
 
   io::Bytes buf_view{reinterpret_cast<const uint8_t*>(value.data()), value.length()};
   auto io_cb = [this, version, id = std::move(id)](DiskSegment segment, std::error_code ec) {
@@ -102,34 +108,66 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
 }
 
 void OpManager::ProcessRead(size_t offset, std::string_view value) {
+  util::FiberAtomicGuard guard;  // atomically update items, no in-between states should be possible
   ReadOp* info = &pending_reads_.at(offset);
 
+  // Reorder base read (offset 0) to be last, so reads for defragmentation are handled last.
+  // If we already have a page read for defragmentation pending and some other read for the
+  // sub-segment is enqueued, we first must handle the sub-segment read, only then the full page
+  // read
+  for (size_t i = 0; i + 1 < info->key_ops.size(); i++) {
+    if (info->key_ops[i].segment.offset % kPageSize == 0) {
+      std::swap(info->key_ops[i], info->key_ops.back());
+      break;
+    }
+  }
+
+  bool deleting_full = false;
   std::string key_value;
-  for (auto& ko : info->key_ops) {
+
+  // Report functions in the loop may append items to info->key_ops during the traversal
+  for (size_t i = 0; i < info->key_ops.size(); i++) {
+    auto& ko = info->key_ops[i];
     key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
 
     bool modified = false;
     for (auto& cb : ko.callbacks)
       modified |= cb(&key_value);
 
-    // Report item as fetched only after all action were executed, pass whether it was modified
-    ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified);
+    // If the item is not being deleted, report is as fetched to be cached potentially.
+    // In case it's cached, we might need to delete it.
+    if (!ko.deleting)
+      ko.deleting |= ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified);
+
+    // If the item is being deleted, check if the full page needs to be deleted.
+    if (ko.deleting)
+      deleting_full |= ReportDelete(ko.segment);
   }
 
-  if (info->delete_requested)
+  if (deleting_full) {
     storage_.MarkAsFree(info->segment);
+  }
+
   pending_reads_.erase(offset);
 }
 
-OpManager::EntryOps& OpManager::ReadOp::ForId(EntryId id, DiskSegment key_segment) {
+OpManager::EntryOps& OpManager::ReadOp::ForSegment(DiskSegment key_segment, EntryId id) {
   DCHECK_GE(key_segment.offset, segment.offset);
   DCHECK_LE(key_segment.length, segment.length);
 
   for (auto& ops : key_ops) {
-    if (Borrowed(ops.id) == id)
+    if (ops.segment.offset == key_segment.offset)
       return ops;
   }
   return key_ops.emplace_back(ToOwned(id), key_segment);
+}
+
+OpManager::EntryOps* OpManager::ReadOp::Find(DiskSegment key_segment) {
+  for (auto& ops : key_ops) {
+    if (ops.segment.offset == key_segment.offset)
+      return &ops;
+  }
+  return nullptr;
 }
 
 OpManager::Stats OpManager::GetStats() const {

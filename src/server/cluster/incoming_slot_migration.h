@@ -28,10 +28,9 @@ class IncomingSlotMigration {
   void StartFlow(uint32_t shard, util::FiberSocketBase* source);
 
   // Waits until all flows got FIN opcode.
-  // Join can't be finished if after FIN opcode we get new data
-  // Connection can be closed by another side, or using Cancel
+  // returns true if we joined false if timeout is readed
   // After Join we still can get data due to error situation
-  void Join();
+  [[nodiscard]] bool Join();
 
   void Cancel();
 
@@ -47,6 +46,8 @@ class IncomingSlotMigration {
     return source_id_;
   }
 
+  size_t GetKeyCount() const;
+
  private:
   std::string source_id_;
   Service& service_;
@@ -54,6 +55,9 @@ class IncomingSlotMigration {
   SlotRanges slots_;
   std::atomic<MigrationState> state_ = MigrationState::C_NO_STATE;
   Context cntx_;
+  // when migration is finished we need to store number of migrated keys
+  // because new request can add or remove keys and we get incorrect statistic
+  size_t keys_number_ = 0;
 
   util::fb2::BlockingCounter bc_;
 };

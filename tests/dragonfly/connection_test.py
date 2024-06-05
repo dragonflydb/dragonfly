@@ -3,6 +3,9 @@ import string
 import pytest
 import asyncio
 import time
+import socket
+import random
+import ssl
 from redis import asyncio as aioredis
 from redis.exceptions import ConnectionError as redis_conn_error, ResponseError
 import async_timeout
@@ -756,3 +759,50 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
 
     assert not all.done()
     await all
+
+
+@pytest.mark.skip("The test deadlock")
+async def test_tls_when_read_write_is_interleaved(
+    with_ca_tls_server_args, with_ca_tls_client_args, df_local_factory
+):
+    """
+    This test covers a deadlock bug in helio and TlsSocket when a client connection renegotiated a
+    handshake without reading its pending data from the socket.
+    This is a weak test case and from our local experiments it deadlocked 30% of the test runs
+    """
+    server: DflyInstance = df_local_factory.create(
+        port=1211, **with_ca_tls_server_args, proactor_threads=1
+    )
+    # TODO(kostas): to fix the deadlock in the test
+    server.start()
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    ssl_key = with_ca_tls_client_args["ssl_keyfile"]
+    ssl_cert = with_ca_tls_client_args["ssl_certfile"]
+    ssl_ca_cert = with_ca_tls_client_args["ssl_ca_certs"]
+    ssl_sock = ssl.wrap_socket(
+        s,
+        keyfile=ssl_key,
+        certfile=ssl_cert,
+        ca_certs=ssl_ca_cert,
+        ssl_version=ssl.PROTOCOL_TLSv1_2,
+    )
+    ssl_sock.connect(("127.0.0.1", server.port))
+
+    tmp = "f" * 1000
+    message = f"SET foo {tmp}\r\n".encode()
+    ssl_sock.send(message)
+
+    for i in range(0, 100000):
+        res = random.randint(1, 4)
+        message = b""
+        for j in range(0, res):
+            message = message + b"GET foo\r\n"
+        ssl_sock.send(message)
+        ssl_sock.do_handshake()
+
+    # This deadlocks
+    client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
+    await client.execute_command("GET foo")
+    await client.close()

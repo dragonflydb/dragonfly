@@ -270,6 +270,7 @@ void OpMSet(const OpArgs& op_args, const ShardArgs& args, atomic_bool* success) 
   SetCmd sg(op_args, false);
 
   size_t index = 0;
+  bool partial = false;
   for (auto it = args.begin(); it != args.end(); ++it) {
     string_view key = *it;
     ++it;
@@ -277,6 +278,7 @@ void OpMSet(const OpArgs& op_args, const ShardArgs& args, atomic_bool* success) 
     DVLOG(1) << "MSet " << key << ":" << value;
     if (sg.Set(params, key, value) != OpStatus::OK) {  // OOM for example.
       success->store(false);
+      partial = true;
       break;
     }
     index += 2;
@@ -285,18 +287,29 @@ void OpMSet(const OpArgs& op_args, const ShardArgs& args, atomic_bool* success) 
   if (auto journal = op_args.shard->journal(); journal) {
     // We write a custom journal because an OOM in the above loop could lead to partial success, so
     // we replicate only what was changed.
-    string_view cmd;
-    ArgSlice cmd_args;
-    if (index == 0) {
-      // All shards must record the tx was executed for the replica to execute it, so we send a PING
-      // in case nothing was changed
-      cmd = "PING";
+    if (partial) {
+      string_view cmd;
+      ArgSlice cmd_args;
+      vector<string_view> store_args(index);
+      if (index == 0) {
+        // All shards must record the tx was executed for the replica to execute it, so we send a
+        // PING in case nothing was changed
+        cmd = "PING";
+      } else {
+        // journal [0, i)
+        cmd = "MSET";
+        unsigned i = 0;
+        for (string_view arg : args) {
+          store_args[i++] = arg;
+          if (i >= store_args.size())
+            break;
+        }
+        cmd_args = absl::MakeSpan(store_args);
+      }
+      RecordJournal(op_args, cmd, cmd_args, op_args.tx->GetUniqueShardCnt());
     } else {
-      // journal [0, i)
-      cmd = "MSET";
-      cmd_args = ArgSlice(args.begin(), index);
+      RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
     }
-    RecordJournal(op_args, cmd, cmd_args, op_args.tx->GetUniqueShardCnt());
   }
 }
 
@@ -620,7 +633,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
-    shard->tiered_storage()->Delete(&prime_value);
+    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, &prime_value);
   }
 
   // overwrite existing entry.
@@ -1166,16 +1179,17 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
     src.storage_list->next = res.storage_list;
     res.storage_list = src.storage_list;
     src.storage_list = nullptr;
-
-    for (size_t j = 0; j < src.resp_arr.size(); ++j) {
-      if (!src.resp_arr[j])
+    ShardArgs shard_args = transaction->GetShardArgs(sid);
+    unsigned src_indx = 0;
+    for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
+      if (!src.resp_arr[src_indx])
         continue;
 
-      uint32_t indx = transaction->ReverseArgIndex(sid, j);
+      uint32_t indx = it.index();
 
-      res.resp_arr[indx] = std::move(src.resp_arr[j]);
+      res.resp_arr[indx] = std::move(src.resp_arr[src_indx]);
       if (cntx->protocol() == Protocol::MEMCACHE) {
-        res.resp_arr[indx]->key = ArgS(args, indx);
+        res.resp_arr[indx]->key = *it;
       }
     }
   }
@@ -1491,9 +1505,7 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -1, 1, 1, acl::kGetEx}
              .HFUNC(GetEx)
       << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::kGetSet}.HFUNC(GetSet)
-      << CI{"MGET",    CO::READONLY | CO::FAST | CO::REVERSE_MAPPING | CO::IDEMPOTENT, -2, 1, -1,
-            acl::kMGet}
-             .HFUNC(MGet)
+      << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1, acl::kMGet}.HFUNC(MGet)
       << CI{"MSET", kMSetMask, -3, 1, -1, acl::kMSet}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1, acl::kMSetNx}.HFUNC(MSetNx)
       << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kStrLen}.HFUNC(StrLen)

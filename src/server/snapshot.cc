@@ -15,6 +15,7 @@
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/tiered_storage.h"
 
 namespace dfly {
 
@@ -70,7 +71,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
   snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
-    IterateBucketsFb(cll);
+    IterateBucketsFb(cll, stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
     if (cll->IsCancelled()) {
       Cancel();
@@ -174,7 +175,7 @@ void SliceSnapshot::Join() {
 // and survived until it finished.
 
 // Serializes all the entries with version less than snapshot_version_.
-void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
+void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut) {
   {
     auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
     ThisFiber::SetName(std::move(fiber_name));
@@ -223,8 +224,10 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll) {
   }  // for (dbindex)
 
   CHECK(!serialize_bucket_running_);
-  CHECK(!serializer_->SendFullSyncCut());
-  PushSerializedToChannel(true);
+  if (send_full_sync_cut) {
+    CHECK(!serializer_->SendFullSyncCut());
+    PushSerializedToChannel(true);
+  }
 
   // serialized + side_saved must be equal to the total saved.
   VLOG(1) << "Exit SnapshotSerializer (loop_serialized/side_saved/cbcalls): "
@@ -282,12 +285,30 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     expire_time = db_slice_->ExpireTime(eit);
   }
 
-  io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
-  CHECK(res);
-  ++type_freq_map_[*res];
+  if (pv.IsExternal()) {
+    // We can't block, so we just schedule a tiered read and append it to the delayed entries
+    util::fb2::Future<PrimeValue> future;
+    EngineShard::tlocal()->tiered_storage()->Read(
+        db_indx, pk.ToString(), pv,
+        [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
+    delayed_entries_.push_back({db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time});
+    ++type_freq_map_[RDB_TYPE_STRING];
+  } else {
+    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
+    CHECK(res);
+    ++type_freq_map_[*res];
+  }
 }
 
 bool SliceSnapshot::PushSerializedToChannel(bool force) {
+  // Bucket serialization might have accumulated some delayed values.
+  // Because we can finally block in this function, we'll await and serialize them
+  while (!delayed_entries_.empty()) {
+    auto& entry = delayed_entries_.back();
+    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid);
+    delayed_entries_.pop_back();
+  }
+
   if (!force && serializer_->SerializedLen() < 4096)
     return false;
 
@@ -330,12 +351,17 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
 void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
-  // We ignore EXEC and NOOP entries because we they have no meaning during
+  // We ignore EXEC entries because we they have no meaning during
   // the LOAD phase on replica.
-  if (item.opcode == journal::Op::NOOP || item.opcode == journal::Op::EXEC)
+  if (item.opcode == journal::Op::EXEC)
     return;
 
-  serializer_->WriteJournalEntry(item.data);
+  // To enable journal flushing to sync after non auto journal command is executed we call
+  // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
+  // additional journal change to serialize, it simply invokes PushSerializedToChannel.
+  if (item.opcode != journal::Op::NOOP) {
+    serializer_->WriteJournalEntry(item.data);
+  }
 
   if (await) {
     // This is the only place that flushes in streaming mode

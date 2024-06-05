@@ -6,17 +6,19 @@
 
 #include "absl/cleanup/cleanup.h"
 #include "base/logging.h"
+#include "cluster_utility.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/tx_executor.h"
 #include "server/main_service.h"
+
+ABSL_DECLARE_FLAG(int, slot_migration_connection_timeout_ms);
 
 namespace dfly::cluster {
 
 using namespace std;
 using namespace util;
 using namespace facade;
-using absl::GetFlag;
 
 // ClusterShardMigration manage data receiving in slots migration process.
 // It is created per shard on the target node to initiate FLOW step.
@@ -37,7 +39,7 @@ class ClusterShardMigration {
       socket_ = nullptr;
     });
     JournalReader reader{source, 0};
-    TransactionReader tx_reader{false};
+    TransactionReader tx_reader;
 
     while (!cntx->IsCancelled()) {
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
@@ -50,7 +52,7 @@ class ClusterShardMigration {
       while (tx_data->opcode == journal::Op::FIN) {
         VLOG(2) << "Attempt to finalize flow " << source_shard_id_;
         bc->Dec();  // we can Join the flow now
-        // if we get new data attempt is failed
+        // if we get new data, attempt is failed
         if (tx_data = tx_reader.NextTxData(&reader, cntx); !tx_data) {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
@@ -88,10 +90,10 @@ class ClusterShardMigration {
     CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
     if (!tx_data.IsGlobalCmd()) {
       VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
-      executor_.Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
+      executor_.Execute(tx_data.dbid, tx_data.command);
     } else {
       // TODO check which global commands should be supported
-      CHECK(false) << "We don't support command: " << ToSV(tx_data.commands.front().cmd_args[0])
+      CHECK(false) << "We don't support command: " << ToSV(tx_data.command.cmd_args[0])
                    << "in cluster migration process.";
     }
   }
@@ -109,7 +111,7 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
       service_(*se),
       slots_(std::move(slots)),
       state_(MigrationState::C_CONNECTING),
-      bc_(0) {
+      bc_(shards_num) {
   shard_flows_.resize(shards_num);
   for (unsigned i = 0; i < shards_num; ++i) {
     shard_flows_[i].reset(new ClusterShardMigration(i, &service_));
@@ -119,9 +121,15 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 IncomingSlotMigration::~IncomingSlotMigration() {
 }
 
-void IncomingSlotMigration::Join() {
-  bc_->Wait();
-  state_ = MigrationState::C_FINISHED;
+bool IncomingSlotMigration::Join() {
+  auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
+  if (bc_->WaitFor(timeout)) {
+    state_.store(MigrationState::C_FINISHED);
+    keys_number_ = cluster::GetKeyCount(slots_);
+    return true;
+  }
+  LOG(WARNING) << "Can't join migration in time";
+  return false;
 }
 
 void IncomingSlotMigration::Cancel() {
@@ -131,14 +139,21 @@ void IncomingSlotMigration::Cancel() {
   for (auto& flow : shard_flows_) {
     flow->Cancel();
   }
+  bc_->Cancel();
 }
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
   VLOG(1) << "Start flow for shard: " << shard;
   state_.store(MigrationState::C_SYNC);
 
-  bc_->Add();
   shard_flows_[shard]->Start(&cntx_, source, bc_);
+}
+
+size_t IncomingSlotMigration::GetKeyCount() const {
+  if (state_.load() == MigrationState::C_FINISHED) {
+    return keys_number_;
+  }
+  return cluster::GetKeyCount(slots_);
 }
 
 }  // namespace dfly::cluster

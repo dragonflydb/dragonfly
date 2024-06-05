@@ -815,7 +815,7 @@ double GetKeyWeight(Transaction* t, ShardId shard_id, const vector<double>& weig
     return 1;
   }
 
-  unsigned windex = t->ReverseArgIndex(shard_id, key_index) - cmdargs_keys_offset;
+  unsigned windex = key_index - cmdargs_keys_offset;
   DCHECK_LT(windex, weights.size());
   return weights[windex];
 }
@@ -856,8 +856,8 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
       ++index;
       continue;
     }
-    key_weight_vec[index] = {*it_res, GetKeyWeight(t, shard->shard_id(), weights,
-                                                   index + removed_keys, cmdargs_keys_offset)};
+    key_weight_vec[index] = {
+        *it_res, GetKeyWeight(t, shard->shard_id(), weights, start.index(), cmdargs_keys_offset)};
     ++index;
   }
 
@@ -1281,10 +1281,18 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
 
   PrimeValue& pv = it->second;
+  CHECK_GT(pv.Size(), 0u) << key << " " << pv.GetRobjWrapper()->encoding();
+
   IntervalVisitor iv{Action::POP, range_spec.params, &pv};
   std::visit(iv, range_spec.interval);
 
   it_res->post_updater.Run();
+
+  auto res = iv.PopResult();
+
+  // We don't store empty keys
+  CHECK(!res.empty()) << key << " failed to pop from type " << pv.GetRobjWrapper()->encoding()
+                      << " now size is " << pv.Size();
 
   auto zlen = pv.Size();
   if (zlen == 0) {
@@ -1298,7 +1306,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
     RecordJournal(op_args, command, ArgSlice{key}, 1);
   }
 
-  return iv.PopResult();
+  return res;
 }
 
 void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
@@ -1316,19 +1324,30 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
 
   Transaction* transaction = cntx->transaction;
 
+  std::string dinfo;
+  optional<std::string> callback_ran_key;
   OpResult<ScoredArray> popped_array;
-  auto cb = [is_max, &popped_array](Transaction* t, EngineShard* shard, std::string_view key) {
+  auto cb = [is_max, &popped_array, &callback_ran_key](Transaction* t, EngineShard* shard,
+                                                       std::string_view key) {
+    callback_ran_key = key;
     popped_array = OpBZPop(t, shard, key, is_max);
   };
 
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
-      &cntx->paused);
+      transaction, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused,
+      &dinfo);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (popped_key) {
+    if (!callback_ran_key) {
+      LOG(ERROR) << "BUG: Callback didn't run! " << popped_key.value() << " " << dinfo;
+      return rb->SendNullArray();
+    }
+
     DVLOG(1) << "BZPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
-    CHECK(popped_array->size() == 1);
+    CHECK(popped_array.ok()) << dinfo;
+    CHECK_EQ(popped_array->size(), 1u)
+        << popped_key << " ran " << *callback_ran_key << " info " << dinfo;
     rb->StartArray(3);
     rb->SendBulkString(*popped_key);
     rb->SendBulkString(popped_array->front().first);
@@ -3265,7 +3284,7 @@ constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
 }  // namespace acl
 
 void ZSetFamily::Register(CommandRegistry* registry) {
-  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING | CO::DENYOOM;
+  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::DENYOOM;
   registry->StartFamily();
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   *registry
@@ -3304,9 +3323,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
              ZRevRangeByScore)
       << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZRevRank}.HFUNC(ZRevRank)
       << CI{"ZSCAN", CO::READONLY, -3, 1, 1, acl::kZScan}.HFUNC(ZScan)
-      << CI{"ZUNION",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2,
-            acl::kZUnion}
-             .HFUNC(ZUnion)
+      << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZUnion}.HFUNC(ZUnion)
       << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, acl::kZUnionStore}.HFUNC(ZUnionStore)
 
       // GEO functions

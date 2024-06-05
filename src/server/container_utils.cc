@@ -40,14 +40,12 @@ OpResult<std::pair<DbSlice::ConstIterator, unsigned>> FindFirstReadOnly(const Db
                                                                         int req_obj_type) {
   DCHECK(!args.Empty());
 
-  unsigned i = 0;
-  for (string_view key : args) {
-    OpResult<DbSlice::ConstIterator> res = db_slice.FindReadOnly(cntx, key, req_obj_type);
+  for (auto it = args.begin(); it != args.end(); ++it) {
+    OpResult<DbSlice::ConstIterator> res = db_slice.FindReadOnly(cntx, *it, req_obj_type);
     if (res)
-      return make_pair(res.value(), i);
+      return make_pair(res.value(), unsigned(it.index()));
     if (res.status() != OpStatus::KEY_NOTFOUND)
       return res.status();
-    ++i;
   }
 
   VLOG(2) << "FindFirst not found";
@@ -119,8 +117,8 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   auto comp = [trans](const OpResult<FFResult>& lhs, const OpResult<FFResult>& rhs) {
     if (!lhs || !rhs)
       return lhs.ok();
-    size_t i1 = trans->ReverseArgIndex(std::get<ShardId>(*lhs), std::get<unsigned>(*lhs));
-    size_t i2 = trans->ReverseArgIndex(std::get<ShardId>(*rhs), std::get<unsigned>(*rhs));
+    size_t i1 = std::get<1>(*lhs);
+    size_t i2 = std::get<1>(*rhs);
     return i1 < i2;
   };
 
@@ -280,7 +278,8 @@ string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms,
-                                              bool* block_flag, bool* pause_flag) {
+                                              bool* block_flag, bool* pause_flag,
+                                              std::string* info) {
   string result_key;
 
   // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
@@ -289,10 +288,13 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   OpResult<ShardFFResult> result;
   if (trans->GetUniqueShardCnt() == 1 && absl::GetFlag(FLAGS_singlehop_blocking)) {
     auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
-    if (res.ok())
+    if (res.ok()) {
+      if (info)
+        *info = "FF1S/";
       return res;
-    else
+    } else {
       result = res.status();
+    }
   } else {
     result = FindFirstNonEmpty(trans, req_obj_type);
   }
@@ -307,6 +309,8 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
       return OpStatus::OK;
     };
     trans->Execute(std::move(cb), true);
+    if (info)
+      *info = "FFMS/";
     return result_key;
   }
 
@@ -351,7 +355,18 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return OpStatus::OK;
   };
   trans->Execute(std::move(cb), true);
-
+  if (info) {
+    *info = "BLOCK/";
+    for (unsigned sid = 0; sid < shard_set->size(); sid++) {
+      if (!trans->IsActive(sid))
+        continue;
+      if (auto wake_key = trans->GetWakeKey(sid); wake_key)
+        *info += absl::StrCat("sid:", sid, ",key:", *wake_key, ",");
+    }
+    *info += "/";
+    *info += trans->DEBUGV18_BlockInfo();
+    *info += "/";
+  }
   return result_key;
 }
 

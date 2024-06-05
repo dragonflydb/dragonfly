@@ -47,9 +47,14 @@ struct OpManagerTest : PoolTestBase, OpManager {
     stashed_[id] = segment;
   }
 
-  void ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
+  bool ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
                      bool modified) override {
     fetched_[id] = value;
+    return false;
+  }
+
+  bool ReportDelete(DiskSegment segment) override {
+    return true;
   }
 
   absl::flat_hash_map<EntryId, std::string> fetched_;

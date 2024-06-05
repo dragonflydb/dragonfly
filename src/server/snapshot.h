@@ -13,6 +13,7 @@
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
 #include "server/table.h"
+#include "util/fibers/future.h"
 
 namespace dfly {
 
@@ -88,7 +89,7 @@ class SliceSnapshot {
  private:
   // Main fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
-  void IterateBucketsFb(const Cancellation* cll);
+  void IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut);
 
   // Called on traversing cursor by IterateBucketsFb.
   bool BucketSaveCb(PrimeIterator it);
@@ -132,6 +133,14 @@ class SliceSnapshot {
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
  private:
+  // An entry whose value must be awaited
+  struct DelayedEntry {
+    DbIndex dbid;
+    CompactObj key;
+    util::fb2::Future<PrimeValue> value;
+    time_t expire;
+  };
+
   DbSlice* db_slice_;
   DbTableArray db_array_;
 
@@ -141,6 +150,7 @@ class SliceSnapshot {
   DbIndex current_db_;
 
   std::unique_ptr<RdbSerializer> serializer_;
+  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;

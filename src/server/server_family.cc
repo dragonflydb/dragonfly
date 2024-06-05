@@ -954,10 +954,6 @@ void ServerFamily::SnapshotScheduling() {
   if (!cron_expr) {
     return;
   }
-  if (shard_set->IsTieringEnabled()) {
-    LOG(ERROR) << "Snapshot not allowed when using tiering.  Exiting..";
-    exit(1);
-  }
 
   const auto loading_check_interval = std::chrono::seconds(10);
   while (service_.GetGlobalState() == GlobalState::LOADING) {
@@ -1077,6 +1073,17 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
+                            MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
+                            conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
+                            &resp->body());
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
@@ -1111,6 +1118,8 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                            << sdata_res.error().message();
   }
   AppendMetricWithoutLabels("tls_bytes", "", m.tls_bytes, MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("snapshot_serialization_bytes", "", m.serialization_bytes,
+                            MetricType::GAUGE, &resp->body());
 
   DbStats total;
   for (const auto& db_stats : m.db_stats) {
@@ -1390,10 +1399,6 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
                                                Transaction* trans, bool ignore_state) {
-  if (shard_set->IsTieringEnabled()) {
-    return GenericError{make_error_code(errc::operation_not_permitted),
-                        StrCat("Can not save database in tiering mode")};
-  }
   auto state = service_.GetGlobalState();
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
   if (!ignore_state && (state != GlobalState::ACTIVE)) {
@@ -1871,6 +1876,7 @@ Metrics ServerFamily::GetMetrics() const {
     result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
     result.facade_stats += *tl_facade_stats;
+    result.serialization_bytes += SliceSnapshot::GetThreadLocalMemoryUsage();
 
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
@@ -1976,7 +1982,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("max_clients", GetFlag(FLAGS_maxclients));
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
-    append("dispatch_queue_entries", m.facade_stats.conn_stats.dispatch_queue_entries);
+    append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries);
   }
 
   if (should_enter("MEMORY")) {
@@ -2026,6 +2032,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("dispatch_queue_peak_bytes", m.peak_stats.conn_dispatch_queue_bytes);
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
     append("tls_bytes", m.tls_bytes);
+    append("snapshot_serialization_bytes", m.serialization_bytes);
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
@@ -2105,6 +2112,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_total_fetches", m.tiered_stats.total_fetches);
     append("tiered_total_cancels", m.tiered_stats.total_cancels);
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
+    append("tiered_total_deletes", m.tiered_stats.total_defrags);
 
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);

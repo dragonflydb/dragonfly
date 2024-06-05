@@ -364,3 +364,36 @@ class DflyInstanceFactory:
 
     def __repr__(self) -> str:
         return f"Factory({self.args})"
+
+
+class RedisServer:
+    def __init__(self, port):
+        self.port = port
+        self.proc = None
+
+    def start(self, **kwargs):
+        command = [
+            "redis-server-6.2.11",
+            f"--port {self.port}",
+            "--save ''",
+            "--appendonly no",
+            "--protected-mode no",
+            "--repl-diskless-sync yes",
+            "--repl-diskless-sync-delay 0",
+        ]
+        # Convert kwargs to command-line arguments
+        for key, value in kwargs.items():
+            if value is None:
+                command.append(f"--{key}")
+            else:
+                command.append(f"--{key} {value}")
+
+        self.proc = subprocess.Popen(command)
+        logging.debug(self.proc.args)
+
+    def stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except Exception as e:
+            pass

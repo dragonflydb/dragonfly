@@ -147,12 +147,21 @@ class Connection : public util::Connection {
   struct MessageHandle {
     size_t UsedMemory() const;  // How much bytes this handle takes up in total.
 
-    // Intrusive messages put themselves at the front of the queue, but only after all other
-    // intrusive ones. Used for quick transfer of control / update messages.
-    bool IsIntrusive() const;
+    // Control messages put themselves at the front of the queue, but only after all other
+    // control ones. Used for management messages.
+    bool IsControl() const {
+      return std::holds_alternative<AclUpdateMessagePtr>(handle) ||
+             std::holds_alternative<CheckpointMessage>(handle);
+    }
 
-    bool IsPipelineMsg() const;
-    bool IsPubMsg() const;
+    bool IsPipelineMsg() const {
+      return std::holds_alternative<PipelineMessagePtr>(handle);
+    }
+
+    bool IsPubMsg() const {
+      return std::holds_alternative<PubMessagePtr>(handle);
+    }
+
     bool IsReplying() const;  // control messges don't reply, messages carrying data do
 
     std::variant<MonitorMessage, PubMessagePtr, PipelineMessagePtr, MCPipelineMessagePtr,
@@ -442,12 +451,13 @@ class Connection : public util::Connection {
   static thread_local QueueBackpressure tl_queue_backpressure_;
 
   // a flag indicating whether the client has turned on client tracking.
-  bool tracking_enabled_ = false;
-  bool skip_next_squashing_ = false;  // Forcefully skip next squashing
+  bool tracking_enabled_ : 1;
+  bool skip_next_squashing_ : 1;  // Forcefully skip next squashing
 
   // Connection migration vars, see RequestAsyncMigration() above.
-  bool migration_enabled_ = false;
-  bool is_http_ = false;
+  bool migration_enabled_ : 1;
+  bool migration_in_process_ : 1;
+  bool is_http_ : 1;
 };
 
 }  // namespace facade

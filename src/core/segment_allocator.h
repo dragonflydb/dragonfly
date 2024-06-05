@@ -17,7 +17,7 @@ namespace dfly {
 
 /**
  * @brief Tightly coupled with mi_malloc 2.x implementation.
- *        Fetches 4MB segment pointers from the allocated pointers.
+ *        Fetches 4MiB segment pointers from the allocated pointers.
  *        Provides own indexing of small pointers to real address space using the segment ptrs/
  */
 

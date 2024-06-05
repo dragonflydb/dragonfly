@@ -1,6 +1,7 @@
-#include "server/cluster/unique_slot_checker.h"
+#include "server/cluster/cluster_utility.h"
 
 #include "server/cluster/cluster_defs.h"
+#include "server/engine_shard_set.h"
 
 using namespace std;
 
@@ -35,6 +36,26 @@ optional<SlotId> UniqueSlotChecker::GetUniqueSlotId() const {
   }
 
   return slot_id_;
+}
+
+uint64_t GetKeyCount(const SlotRanges& slots) {
+  std::atomic_uint64_t keys = 0;
+
+  shard_set->pool()->AwaitFiberOnAll([&](auto*) {
+    EngineShard* shard = EngineShard::tlocal();
+    if (shard == nullptr)
+      return;
+
+    uint64_t shard_keys = 0;
+    for (const SlotRange& range : slots) {
+      for (SlotId slot = range.start; slot <= range.end; slot++) {
+        shard_keys += shard->db_slice().GetSlotStats(slot).key_count;
+      }
+    }
+    keys.fetch_add(shard_keys);
+  });
+
+  return keys.load();
 }
 
 }  // namespace dfly::cluster

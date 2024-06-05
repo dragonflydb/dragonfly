@@ -17,7 +17,7 @@ async def test_static_seeder(async_client: aioredis.Redis):
 @dfly_args({"proactor_threads": 4})
 async def test_seeder_key_target(async_client: aioredis.Redis):
     """Ensure seeder reaches its key targets"""
-    s = Seeder(units=len(Seeder.TYPES) * 2, key_target=5000)
+    s = Seeder(units=len(Seeder.DEFAULT_TYPES) * 2, key_target=5000)
 
     # Ensure tests are not reasonably slow
     async with async_timeout.timeout(1 + 4):

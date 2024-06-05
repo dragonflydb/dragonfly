@@ -393,19 +393,6 @@ size_t Connection::MessageHandle::UsedMemory() const {
   return sizeof(MessageHandle) + visit(MessageSize{}, this->handle);
 }
 
-bool Connection::MessageHandle::IsIntrusive() const {
-  return holds_alternative<AclUpdateMessagePtr>(handle) ||
-         holds_alternative<CheckpointMessage>(handle);
-}
-
-bool Connection::MessageHandle::IsPipelineMsg() const {
-  return holds_alternative<PipelineMessagePtr>(handle);
-}
-
-bool Connection::MessageHandle::IsPubMsg() const {
-  return holds_alternative<PubMessagePtr>(handle);
-}
-
 bool Connection::MessageHandle::IsReplying() const {
   return IsPipelineMsg() || IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
          (holds_alternative<MCPipelineMessagePtr>(handle) &&
@@ -509,7 +496,11 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       http_listener_(http_listener),
       ssl_ctx_(ctx),
       service_(service),
-      name_{} {
+      tracking_enabled_(false),
+      skip_next_squashing_(false),
+      migration_enabled_(false),
+      migration_in_process_(false),
+      is_http_(false) {
   static atomic_uint32_t next_id{1};
 
   protocol_ = protocol;
@@ -569,15 +560,33 @@ void Connection::OnShutdown() {
 }
 
 void Connection::OnPreMigrateThread() {
+  DVLOG(1) << "OnPreMigrateThread " << GetClientId();
+
   CHECK(!cc_->conn_closing);
 
+  DCHECK(!migration_in_process_);
+
+  // CancelOnErrorCb is a preemption point, so we make sure the Migration start
+  // is marked beforehand.
+  migration_in_process_ = true;
+
   socket_->CancelOnErrorCb();
+  DCHECK(!dispatch_fb_.IsJoinable()) << GetClientId();
 }
 
 void Connection::OnPostMigrateThread() {
+  DVLOG(1) << "OnPostMigrateThread " << GetClientId();
+
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
     socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
+  }
+  migration_in_process_ = false;
+  DCHECK(!dispatch_fb_.IsJoinable());
+
+  // If someone had sent Async during the migration, we must create dispatch_fb_.
+  if (!dispatch_q_.empty()) {
+    LaunchDispatchFiberIfNeeded();
   }
 
   // Update tl variables
@@ -749,6 +758,9 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
 
   string after;
   absl::StrAppend(&after, " irqmatch=", int(cpu == my_cpu_id));
+  if (dispatch_q_.size()) {
+    absl::StrAppend(&after, " pipeline=", dispatch_q_.size());
+  }
   absl::StrAppend(&after, " age=", now - creation_time_, " idle=", now - last_interaction_);
   string_view phase_name = PHASE_NAMES[phase_];
 
@@ -1116,10 +1128,16 @@ void Connection::HandleMigrateRequest() {
 
     DecreaseStatsOnClose();
 
-    this->Migrate(dest);
+    // We need to return early as the socket is closing and IoLoop will clean up.
+    // The reason that this is true is because of the following DCHECK
+    DCHECK(!dispatch_fb_.IsJoinable());
+    // which can never trigger since we Joined on the dispatch_fb_ above and we are
+    // atomic in respect to our proactor meaning that no other fiber will
+    // launch the DispatchFiber.
+    if (!this->Migrate(dest)) {
+      return;
+    }
   }
-
-  DCHECK(dispatch_q_.empty());
 
   // In case we Yield()ed in Migrate() above, dispatch_fb_ might have been started.
   LaunchDispatchFiberIfNeeded();
@@ -1264,7 +1282,7 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
   cc_->async_dispatch = false;
 
   auto it = dispatch_q_.begin();
-  while (it->IsIntrusive())  // Skip all newly received intrusive messages
+  while (it->IsControl())  // Skip all newly received intrusive messages
     ++it;
 
   for (auto rit = it; rit != it + dispatched; ++rit)
@@ -1283,7 +1301,7 @@ void Connection::ClearPipelinedMessages() {
   // As well as to avoid pubsub backpressure leakege.
   for (auto& msg : dispatch_q_) {
     FiberAtomicGuard guard;  // don't suspend when concluding to avoid getting new messages
-    if (msg.IsIntrusive())
+    if (msg.IsControl())
       visit(dispatch_op, msg.handle);  // to not miss checkpoints
     RecycleMessage(std::move(msg));
   }
@@ -1301,7 +1319,7 @@ std::string Connection::DebugInfo() const {
   absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
   absl::StrAppend(&info, "dispatch_fiber:joinable=", dispatch_fb_.IsJoinable(), ", ");
 
-  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsIntrusive();
+  bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsControl();
   absl::StrAppend(&info, "dispatch_queue:size=", dispatch_q_.size(), ", ");
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
@@ -1323,7 +1341,6 @@ std::string Connection::DebugInfo() const {
 // DispatchFiber.
 void Connection::DispatchFiber(util::FiberSocketBase* peer) {
   ThisFiber::SetName("DispatchFiber");
-
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};
 
@@ -1331,6 +1348,7 @@ void Connection::DispatchFiber(util::FiberSocketBase* peer) {
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   while (!builder->GetError()) {
+    DCHECK_EQ(socket()->proactor(), ProactorBase::me());
     evc_.await(
         [this] { return cc_->conn_closing || (!dispatch_q_.empty() && !cc_->sync_dispatch); });
     if (cc_->conn_closing)
@@ -1457,7 +1475,10 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
   CHECK(!cc_->async_dispatch);
   CHECK_EQ(cc_->subscriptions, 0);  // are bound to thread local caches
   CHECK_EQ(self_.use_count(), 1u);  // references cache our thread and backpressure
-  if (dispatch_fb_.IsJoinable() || cc_->conn_closing) {  // can't move once it started
+  // Migrate is only used by DFLY Thread and Flow command which both check against
+  // the result of Migration and handle it explicitly in their flows so this can act
+  // as a weak if condition instead of a crash prone CHECK.
+  if (dispatch_fb_.IsJoinable() || cc_->conn_closing) {
     return false;
   }
 
@@ -1524,7 +1545,8 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 }
 
 void Connection::LaunchDispatchFiberIfNeeded() {
-  if (!dispatch_fb_.IsJoinable()) {
+  if (!dispatch_fb_.IsJoinable() && !migration_in_process_) {
+    VLOG(1) << "LaunchDispatchFiberIfNeeded " << GetClientId();
     dispatch_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch",
                               [&, peer = socket_.get()]() { DispatchFiber(peer); });
   }
@@ -1537,7 +1559,7 @@ void Connection::SendAsync(MessageHandle msg) {
 
   // "Closing" connections might be still processing commands, as we don't interrupt them.
   // So we still want to deliver control messages to them (like checkpoints).
-  if (cc_->conn_closing && !msg.IsIntrusive())
+  if (cc_->conn_closing && !msg.IsControl())
     return;
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
@@ -1561,9 +1583,9 @@ void Connection::SendAsync(MessageHandle msg) {
     pending_pipeline_cmd_cnt_++;
   }
 
-  if (msg.IsIntrusive()) {
+  if (msg.IsControl()) {
     auto it = dispatch_q_.begin();
-    while (it < dispatch_q_.end() && it->IsIntrusive())
+    while (it < dispatch_q_.end() && it->IsControl())
       ++it;
     dispatch_q_.insert(it, std::move(msg));
   } else {

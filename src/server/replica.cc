@@ -33,8 +33,6 @@ extern "C" {
 #include "strings/human_readable.h"
 
 ABSL_FLAG(int, replication_acks_interval, 3000, "Interval between acks in milliseconds.");
-ABSL_FLAG(bool, enable_multi_shard_sync, false,
-          "Execute multi shards commands on replica synchronized");
 ABSL_FLAG(int, master_connect_timeout_ms, 20000,
           "Timeout for establishing connection to a replication master");
 ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
@@ -746,10 +744,6 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
 
   sync_fb_ =
       fb2::Fiber("shard_stable_sync_read", &DflyShardReplica::StableSyncDflyReadFb, this, cntx);
-  if (use_multi_shard_exe_sync_) {
-    execution_fb_ =
-        fb2::Fiber("shard_stable_sync_exec", &DflyShardReplica::StableSyncDflyExecFb, this, cntx);
-  }
 
   return std::error_code{};
 }
@@ -816,20 +810,13 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
 
   JournalReader reader{&ps, 0};
   DCHECK_GE(journal_rec_executed_, 1u);
-  TransactionReader tx_reader{use_multi_shard_exe_sync_,
-                              journal_rec_executed_.load(std::memory_order_relaxed) - 1};
+  TransactionReader tx_reader{journal_rec_executed_.load(std::memory_order_relaxed) - 1};
 
   if (master_context_.version > DflyVersion::VER0) {
     acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
   }
 
   while (!cntx->IsCancelled()) {
-    shard_replica_waker_.await([&]() {
-      return ((trans_data_queue_.size() < kYieldAfterItemsInQueue) || cntx->IsCancelled());
-    });
-    if (cntx->IsCancelled())
-      break;
-
     auto tx_data = tx_reader.NextTxData(&reader, cntx);
     if (!tx_data)
       break;
@@ -841,20 +828,10 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     } else if (tx_data->opcode == journal::Op::EXEC) {
-      if (use_multi_shard_exe_sync_) {
-        InsertTxDataToShardResource(std::move(*tx_data));
-      } else {
-        // On no shard sync mode we execute multi commands once they are recieved, therefor when
-        // receiving exec opcode, we only increase the journal counting.
-        DCHECK_EQ(tx_data->commands.size(), 0u);
-        journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
-      }
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     } else {
-      if (use_multi_shard_exe_sync_) {
-        InsertTxDataToShardResource(std::move(*tx_data));
-      } else {
-        ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
-      }
+      ExecuteTx(std::move(*tx_data), cntx);
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     }
     shard_replica_waker_.notifyAll();
   }
@@ -923,7 +900,6 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
       master_context_(master_context),
       multi_shard_exe_(multi_shard_exe),
       flow_id_(flow_id) {
-  use_multi_shard_exe_sync_ = GetFlag(FLAGS_enable_multi_shard_sync);
   executor_ = std::make_unique<JournalExecutor>(service);
   rdb_loader_ = std::make_unique<RdbLoader>(&service_);
 }
@@ -932,52 +908,18 @@ DflyShardReplica::~DflyShardReplica() {
   JoinFlow();
 }
 
-void DflyShardReplica::ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
+void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
 
-  bool was_insert = tx_data.IsGlobalCmd() &&
-                    multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
-
-  ExecuteTx(std::move(tx_data), was_insert, cntx);
-}
-
-void DflyShardReplica::InsertTxDataToShardResource(TransactionData&& tx_data) {
-  bool was_insert = false;
-  if (tx_data.shard_cnt > 1) {
-    was_insert = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
-  }
-
-  VLOG(2) << "txid: " << tx_data.txid << " pushed to queue";
-  trans_data_queue_.emplace(std::move(tx_data), was_insert);
-}
-
-void DflyShardReplica::StableSyncDflyExecFb(Context* cntx) {
-  while (!cntx->IsCancelled()) {
-    shard_replica_waker_.await(
-        [&]() { return (!trans_data_queue_.empty() || cntx->IsCancelled()); });
-    if (cntx->IsCancelled()) {
-      return;
-    }
-    DCHECK(!trans_data_queue_.empty());
-    auto& data = trans_data_queue_.front();
-    ExecuteTx(std::move(data.first), data.second, cntx);
-    trans_data_queue_.pop();
-    shard_replica_waker_.notifyAll();
-  }
-}
-
-void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me, Context* cntx) {
-  if (cntx->IsCancelled()) {
-    return;
-  }
-  if (tx_data.shard_cnt <= 1 || (!use_multi_shard_exe_sync_ && !tx_data.IsGlobalCmd())) {
+  if (!tx_data.IsGlobalCmd()) {
     VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
-    executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
-    journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
+    executor_->Execute(tx_data.dbid, tx_data.command);
     return;
   }
+
+  bool inserted_by_me = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
 
   auto& multi_shard_data = multi_shard_exe_->Find(tx_data.txid);
 
@@ -991,29 +933,23 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, bool inserted_by_me,
     return;
   VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
 
-  if (tx_data.IsGlobalCmd()) {
-    VLOG(2) << "Execute txid: " << tx_data.txid << " global command execution";
-    // Wait until all shards flows get to execution step of this transaction.
-    multi_shard_data.barrier.Wait();
-    // Check if we woke up due to cancellation.
-    if (cntx_.IsCancelled())
-      return;
-    // Global command will be executed only from one flow fiber. This ensure corectness of data in
-    // replica.
-    if (inserted_by_me) {
-      executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
-    }
-    // Wait until exection is done, to make sure we done execute next commands while the global is
-    // executed.
-    multi_shard_data.barrier.Wait();
-    // Check if we woke up due to cancellation.
-    if (cntx_.IsCancelled())
-      return;
-  } else {  // Non global command will be executed by each flow fiber
-    VLOG(2) << "Execute txid: " << tx_data.txid << " executing shard transaction commands";
-    executor_->Execute(tx_data.dbid, absl::MakeSpan(tx_data.commands));
+  VLOG(2) << "Execute txid: " << tx_data.txid << " global command execution";
+  // Wait until all shards flows get to execution step of this transaction.
+  multi_shard_data.barrier.Wait();
+  // Check if we woke up due to cancellation.
+  if (cntx_.IsCancelled())
+    return;
+  // Global command will be executed only from one flow fiber. This ensure corectness of data in
+  // replica.
+  if (inserted_by_me) {
+    executor_->Execute(tx_data.dbid, tx_data.command);
   }
-  journal_rec_executed_.fetch_add(tx_data.journal_rec_count, std::memory_order_relaxed);
+  // Wait until exection is done, to make sure we done execute next commands while the global is
+  // executed.
+  multi_shard_data.barrier.Wait();
+  // Check if we woke up due to cancellation.
+  if (cntx_.IsCancelled())
+    return;
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
   // The last fiber which will decrease the counter to 0 will be the one to erase the data from
@@ -1164,7 +1100,6 @@ uint64_t DflyShardReplica::JournalExecutedCount() const {
 void DflyShardReplica::JoinFlow() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
-  execution_fb_.JoinIfNeeded();
 }
 
 void DflyShardReplica::Cancel() {
