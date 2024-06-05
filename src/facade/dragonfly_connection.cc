@@ -552,11 +552,8 @@ Connection::~Connection() {
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
 
-  if (shutdown_cb_) {
-    for (const auto& k_v : shutdown_cb_->map) {
-      k_v.second();
-    }
-  }
+  if (breaker_cb_)
+    breaker_cb_(POLLHUP);
 }
 
 void Connection::OnPreMigrateThread() {
@@ -597,21 +594,6 @@ void Connection::OnPostMigrateThread() {
   stats_->read_buf_capacity += io_buf_.Capacity();
   if (cc_->replica_conn) {
     ++stats_->num_replicas;
-  }
-}
-
-auto Connection::RegisterShutdownHook(ShutdownCb cb) -> ShutdownHandle {
-  if (!shutdown_cb_) {
-    shutdown_cb_ = make_unique<Shutdown>();
-  }
-  return shutdown_cb_->Add(std::move(cb));
-}
-
-void Connection::UnregisterShutdownHook(ShutdownHandle id) {
-  if (shutdown_cb_) {
-    shutdown_cb_->Remove(id);
-    if (shutdown_cb_->map.empty())
-      shutdown_cb_.reset();
   }
 }
 

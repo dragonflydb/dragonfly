@@ -238,11 +238,6 @@ class Connection : public util::Connection {
   // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
   void EnsureAsyncMemoryBudget();
 
-  // Register hook that is executed on connection shutdown.
-  ShutdownHandle RegisterShutdownHook(ShutdownCb cb);
-
-  void UnregisterShutdownHook(ShutdownHandle id);
-
   // Register hook that is executen when the connection breaks.
   void RegisterBreakHook(BreakerCb breaker_cb);
 
@@ -428,7 +423,6 @@ class Connection : public util::Connection {
   unsigned parser_error_ = 0;
 
   BreakerCb breaker_cb_;
-  std::unique_ptr<Shutdown> shutdown_cb_;
 
   // Used by redis parser to avoid allocations
   RespVec tmp_parse_args_;
