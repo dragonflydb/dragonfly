@@ -73,7 +73,8 @@ async def test_cluster_mgr(df_local_factory):
         ["--action=attach", f"--target_port={BASE_PORT}", f"--attach_port={BASE_PORT+2}"]
     )
     await check_cluster_data(client)
-    # Can't migrate from 2 nodes
+    # Slots 7000-8000 belong to node0, while 8001-9000 belong to node1. cluster_mgr doesn't support
+    # such a migration in a single command.
     assert not run_cluster_mgr(
         [
             f"--action=migrate",
