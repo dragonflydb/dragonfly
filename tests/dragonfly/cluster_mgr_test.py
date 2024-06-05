@@ -149,6 +149,7 @@ async def test_cluster_mgr(df_local_factory):
             f"--attach_port={replicas[0].port}",
         ]
     )
+    await check_cluster_data(client)
 
     # Print the config - we don't really verify the output, but at least make sure there's no error
     assert run_cluster_mgr(["--action=print_config", f"--target_port={replicas[0].port}"])
@@ -156,5 +157,6 @@ async def test_cluster_mgr(df_local_factory):
     # Test detach replicas work
     for i in range(NODES):
         assert run_cluster_mgr(["--action=detach", f"--target_port={replicas[i].port}"])
+    await check_cluster_data(client)
 
     await close_clients(client, *replica_clients, c_master0)
