@@ -43,7 +43,7 @@ class JournalStreamer {
   void ThrottleIfNeeded();
 
   virtual bool ShouldWrite(const journal::JournalItem& item) const {
-    return !is_stopped_;
+    return !IsStopped();
   }
 
   void WaitForInflightToComplete();
@@ -52,7 +52,7 @@ class JournalStreamer {
   void OnCompletion(std::error_code ec, size_t len);
 
   bool IsStopped() const {
-    return is_stopped_ || cntx_->IsCancelled();
+    return cntx_->IsCancelled();
   }
 
   bool IsStalled() const;
@@ -65,7 +65,6 @@ class JournalStreamer {
   time_t last_lsn_time_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
-  bool is_stopped_ = false;
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.

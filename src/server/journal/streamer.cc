@@ -65,7 +65,7 @@ void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
 
 void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
-  is_stopped_ = true;
+  cntx_->Cancel();
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
   WaitForInflightToComplete();
@@ -92,25 +92,23 @@ void JournalStreamer::Write(std::string_view str) {
     // interfaces to pass reference-counted buffers.
     memcpy(buf, str.data(), str.size());
     in_flight_bytes_ += total_pending;
-    io::Bytes src(buf, str.size());
 
-    if (pending_buf_.empty()) {
-      dest_->AsyncWrite(src, [buf, this, len = str.size()](std::error_code ec) {
-        delete[] buf;
-        OnCompletion(ec, len);
-      });
-    } else {
-      iovec v[2];
+    iovec v[2];
+    unsigned next_buf_id = 0;
+
+    if (!pending_buf_.empty()) {
       v[0] = IoVec(pending_buf_);
-      v[1] = IoVec(src);
-
-      dest_->AsyncWrite(
-          v, 2,
-          [buf0 = std::move(pending_buf_), buf, this, len = total_pending](std::error_code ec) {
-            delete[] buf;
-            OnCompletion(ec, len);
-          });
+      ++next_buf_id;
     }
+    v[next_buf_id++] = IoVec(io::Bytes(buf, str.size()));
+
+    dest_->AsyncWrite(
+        v, next_buf_id,
+        [buf0 = std::move(pending_buf_), buf, this, len = total_pending](std::error_code ec) {
+          delete[] buf;
+          OnCompletion(ec, len);
+        });
+
     return;
   }
 
@@ -128,10 +126,9 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
 
   DVLOG(2) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
   in_flight_bytes_ -= len;
-  if (ec && !is_stopped_) {
-    is_stopped_ = true;
+  if (ec && !IsStopped()) {
     cntx_->ReportError(ec);
-  } else if (in_flight_bytes_ == 0 && !pending_buf_.empty() && !is_stopped_) {
+  } else if (in_flight_bytes_ == 0 && !pending_buf_.empty() && !IsStopped()) {
     // If everything was sent but we have a pending buf, flush it.
     io::Bytes src(pending_buf_);
     in_flight_bytes_ += src.size();
@@ -157,7 +154,6 @@ void JournalStreamer::ThrottleIfNeeded() {
       waker_.await_until([this]() { return !IsStalled() || IsStopped(); }, next);
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes " << in_flight_bytes_;
-    is_stopped_ = true;
     cntx_->ReportError(make_error_code(errc::stream_timeout));
   }
 }
