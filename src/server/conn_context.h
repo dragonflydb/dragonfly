@@ -70,6 +70,10 @@ struct ConnectionState {
       return state == EXEC_COLLECT;
     }
 
+    bool HasClientCommand() const {
+      return has_client_cmd_;
+    }
+
     bool IsRunning() const {
       return state == EXEC_RUNNING;
     }
@@ -85,6 +89,7 @@ struct ConnectionState {
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
     bool is_write = false;
+    bool has_client_cmd_ = false;
 
     std::vector<std::pair<DbIndex, std::string>> watched_keys;  // List of keys registered by WATCH
     std::atomic_bool watched_dirty = false;  // Set if a watched key was changed before EXEC

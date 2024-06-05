@@ -1093,13 +1093,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     if (cmd_name == "SELECT" || absl::EndsWith(cmd_name, "SUBSCRIBE"))
       return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
 
-    // for some reason we get a trailing \n\r, and that's why we use StartsWith
-    bool client_cmd = false;
-    if (cmd_name == "CLIENT") {
-      DCHECK(!tail_args.empty());
-      client_cmd = !absl::StartsWith(ToSV(tail_args[0]), "CACHING");
-    }
-    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB" || client_cmd)
+    if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB")
       return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
 
@@ -1196,6 +1190,9 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->conn_state.exec_info.body.push_back(std::move(stored_cmd));
     if (stored_cmd.Cid()->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
+    }
+    if (cid->name() == "CLIENT") {
+      dfly_cntx->conn_state.exec_info.has_client_cmd_ = true;
     }
     return cntx->SendSimpleString("QUEUED");
   }
@@ -1419,8 +1416,8 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   for (auto args : args_list) {
     ToUpper(&args[0]);
     const auto [cid, tail_args] = FindCmd(args);
-    // is client tracking command
-    if (cid && cid->name() == "CLIENT" && !tail_args.empty() && ToSV(tail_args[0]) == "TRACKING") {
+    // disable squashing for client commands
+    if (cid && cid->name() == "CLIENT") {
       break;
     }
 
@@ -2213,6 +2210,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     }
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE &&
+        !cntx->conn_state.exec_info.HasClientCommand() &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {

@@ -271,11 +271,15 @@ TEST_F(ServerFamilyTest, ClientTrackingMulti) {
   Run({"SET", "FOO", "10"});
   Run({"SET", "FOOBAR", "10"});
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+  Run({"CLIENT", "TRACKING", "OFF"});
 
   Run({"MULTI"});
   auto resp = Run({"CLIENT", "TRACKING", "ON"});
-  EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
-  Run({"DISCARD"});
+  EXPECT_THAT(resp, ArgType(RespExpr::STRING));
+  Run({"EXEC"});
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 3);
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingMultiOptin) {
