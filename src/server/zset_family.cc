@@ -815,7 +815,7 @@ double GetKeyWeight(Transaction* t, ShardId shard_id, const vector<double>& weig
     return 1;
   }
 
-  unsigned windex = t->ReverseArgIndex(shard_id, key_index) - cmdargs_keys_offset;
+  unsigned windex = key_index - cmdargs_keys_offset;
   DCHECK_LT(windex, weights.size());
   return weights[windex];
 }
@@ -856,8 +856,8 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
       ++index;
       continue;
     }
-    key_weight_vec[index] = {*it_res, GetKeyWeight(t, shard->shard_id(), weights,
-                                                   index + removed_keys, cmdargs_keys_offset)};
+    key_weight_vec[index] = {
+        *it_res, GetKeyWeight(t, shard->shard_id(), weights, start.index(), cmdargs_keys_offset)};
     ++index;
   }
 
@@ -3284,7 +3284,7 @@ constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
 }  // namespace acl
 
 void ZSetFamily::Register(CommandRegistry* registry) {
-  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::REVERSE_MAPPING | CO::DENYOOM;
+  constexpr uint32_t kStoreMask = CO::WRITE | CO::VARIADIC_KEYS | CO::DENYOOM;
   registry->StartFamily();
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   *registry
@@ -3323,9 +3323,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
              ZRevRangeByScore)
       << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZRevRank}.HFUNC(ZRevRank)
       << CI{"ZSCAN", CO::READONLY, -3, 1, 1, acl::kZScan}.HFUNC(ZScan)
-      << CI{"ZUNION",    CO::READONLY | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS, -3, 2, 2,
-            acl::kZUnion}
-             .HFUNC(ZUnion)
+      << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZUnion}.HFUNC(ZUnion)
       << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, acl::kZUnionStore}.HFUNC(ZUnionStore)
 
       // GEO functions
