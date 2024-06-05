@@ -761,7 +761,6 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
     await all
 
 
-@pytest.mark.skip("The test deadlock")
 async def test_tls_when_read_write_is_interleaved(
     with_ca_tls_server_args, with_ca_tls_client_args, df_local_factory
 ):
@@ -789,18 +788,23 @@ async def test_tls_when_read_write_is_interleaved(
         ssl_version=ssl.PROTOCOL_TLSv1_2,
     )
     ssl_sock.connect(("127.0.0.1", server.port))
+    ssl_sock.settimeout(0.1)
 
     tmp = "f" * 1000
     message = f"SET foo {tmp}\r\n".encode()
     ssl_sock.send(message)
 
-    for i in range(0, 100000):
-        res = random.randint(1, 4)
-        message = b""
-        for j in range(0, res):
-            message = message + b"GET foo\r\n"
-        ssl_sock.send(message)
-        ssl_sock.do_handshake()
+    try:
+        for i in range(0, 100_000):
+            res = random.randint(1, 4)
+            message = b""
+            for j in range(0, res):
+                message = message + b"GET foo\r\n"
+            ssl_sock.send(message)
+            ssl_sock.do_handshake()
+    except:
+        # We might have filled the socket buffer, causing further sending will fail
+        pass
 
     # This deadlocks
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
