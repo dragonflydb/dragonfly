@@ -47,6 +47,7 @@ absl::flat_hash_set<std::string> TokenizeWords(std::string_view text) {
 }
 
 // Split taglist, remove duplicates and convert all to lowercase
+// TODO: introduce ascii support if needed
 absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensitive,
                                           char separator) {
   string tmp;
