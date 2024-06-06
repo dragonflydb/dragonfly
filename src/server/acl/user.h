@@ -33,21 +33,53 @@ class User final {
   struct UpdateRequest {
     std::optional<std::string> password{};
 
-    std::vector<std::pair<Sign, uint32_t>> categories;
-
     std::optional<bool> is_active{};
 
     bool is_hashed{false};
 
+    // Categories and commands
+    using CategoryValueType = std::pair<Sign, uint32_t>;
     // If index s numberic_limits::max() then it's a +all flag
     using CommandsValueType = std::tuple<Sign, size_t /*index*/, uint64_t /*bit*/>;
-    using CommandsUpdateType = std::vector<CommandsValueType>;
-    CommandsUpdateType commands;
+    using UpdateType = std::vector<std::variant<CategoryValueType, CommandsValueType>>;
+    UpdateType updates;
 
     // keys
     std::vector<UpdateKey> keys;
     bool reset_all_keys{false};
     bool allow_all_keys{false};
+  };
+
+  struct CategoryChange {
+    uint32_t category;
+
+    // Customization point to make it hashable with absl containers
+    template <typename H> friend H AbslHashValue(H h, const CategoryChange& c) {
+      return H::combine(std::move(h), c.category);
+    }
+
+    friend bool operator==(CategoryChange c1, CategoryChange c2) {
+      return c1.category == c2.category;
+    }
+  };
+
+  struct CommandChange {
+    size_t family = 0;
+    uint64_t bit_index = 0;
+
+    // Customization point to make it hashable with absl containers
+    template <typename H> friend H AbslHashValue(H h, const CommandChange& c) {
+      return H::combine(std::move(h), c.family + c.bit_index);
+    }
+
+    friend bool operator==(CommandChange c1, CommandChange c2) {
+      return (c1.family == c2.family) && (c1.bit_index == c2.bit_index);
+    }
+  };
+
+  struct ChangeMetadata {
+    Sign sign;
+    size_t seq_no;
   };
 
   /* Used for default user
@@ -80,14 +112,23 @@ class User final {
 
   const AclKeys& Keys() const;
 
+  using CategoryChanges = absl::flat_hash_map<CategoryChange, ChangeMetadata>;
+  using CommandChanges = absl::flat_hash_map<CommandChange, ChangeMetadata>;
+
+  const CategoryChanges& CatChanges() const;
+
+  const CommandChanges& CmdChanges() const;
+
  private:
-  // For ACL categories
-  void SetAclCategories(uint32_t cat);
-  void UnsetAclCategories(uint32_t cat);
+  void SetAclCategoriesAndIncrSeq(uint32_t cat);
+  void UnsetAclCategoriesAndIncrSeq(uint32_t cat);
 
   // For ACL commands
   void SetAclCommands(size_t index, uint64_t bit_index);
   void UnsetAclCommands(size_t index, uint64_t bit_index);
+
+  void SetAclCommandsAndIncrSeq(size_t index, uint64_t bit_index);
+  void UnsetAclCommandsAndIncrSeq(size_t index, uint64_t bit_index);
 
   // For is_active flag
   void SetIsActive(bool is_active);
@@ -107,6 +148,16 @@ class User final {
   // command of that family. Look on TableCommandBuilder and on Service::Register
   // on how this mapping is built during the startup/registration of commands
   std::vector<uint64_t> commands_;
+
+  // We also need to track all the explicit changes (ACL SETUSER) of acl's in-order.
+  // To speed up insertion we use the flat_hash_map and a seq_ variable which is a
+  // strictly monotonically increasing number that is used for ordering. Both of these
+  // indexers are merged and then sorted by the seq_ number when for example we print
+  // the ACL rules of each user via ACL LIST.
+  CategoryChanges cat_changes_;
+  CommandChanges cmd_changes_;
+  // Global modification order for changes in rules for acl commands and categories
+  size_t seq_ = 0;
 
   // Glob patterns for the keys that a user is allowed to read/write
   AclKeys keys_;

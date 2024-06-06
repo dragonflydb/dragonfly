@@ -132,7 +132,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
-  if (!is_sub_command) {
+  if (!is_sub_command || absl::StartsWith(cmd.name(), "ACL")) {
     cmd.SetBitIndex(1ULL << bit_index_);
     family_of_commands_.back().push_back(std::string(k));
     ++bit_index_;

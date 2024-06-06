@@ -430,7 +430,6 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
   if (self->cntx()) {
     if (msg.username == self->cntx()->authed_username) {
-      self->cntx()->acl_categories = msg.categories;
       self->cntx()->acl_commands = msg.commands;
       self->cntx()->keys = msg.keys;
     }

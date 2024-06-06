@@ -113,7 +113,6 @@ class Connection : public util::Connection {
   // ACL Update message, contains ACL updates to be applied to the connection.
   struct AclUpdateMessage {
     std::string username;
-    uint32_t categories;
     std::vector<uint64_t> commands;
     dfly::acl::AclKeys keys;
   };

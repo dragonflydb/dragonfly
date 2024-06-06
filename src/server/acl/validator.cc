@@ -23,8 +23,8 @@ namespace dfly::acl {
     return true;
   }
 
-  const auto [is_authed, reason] = IsUserAllowedToInvokeCommandGeneric(
-      cntx.acl_categories, cntx.acl_commands, cntx.keys, tail_args, id);
+  const auto [is_authed, reason] =
+      IsUserAllowedToInvokeCommandGeneric(cntx.acl_commands, cntx.keys, tail_args, id);
 
   if (!is_authed) {
     auto& log = ServerState::tlocal()->acl_log;
@@ -41,15 +41,13 @@ namespace dfly::acl {
 #endif
 
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    uint32_t acl_cat, const std::vector<uint64_t>& acl_commands, const AclKeys& keys,
-    CmdArgList tail_args, const CommandId& id) {
-  const auto cat_credentials = id.acl_categories();
+    const std::vector<uint64_t>& acl_commands, const AclKeys& keys, CmdArgList tail_args,
+    const CommandId& id) {
   const size_t index = id.GetFamily();
   const uint64_t command_mask = id.GetBitIndex();
   DCHECK_LT(index, acl_commands.size());
 
-  const bool command =
-      (acl_cat & cat_credentials) != 0 || (acl_commands[index] & command_mask) != 0;
+  const bool command = (acl_commands[index] & command_mask) != 0;
 
   if (!command) {
     return {false, AclLog::Reason::COMMAND};

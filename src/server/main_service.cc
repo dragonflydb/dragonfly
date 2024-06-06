@@ -2644,7 +2644,7 @@ void Service::RegisterCommands() {
   cluster_family_.Register(&registry_);
 
   acl_family_.Register(&registry_);
-  acl::BuildIndexers(registry_.GetFamilies());
+  acl::BuildIndexers(registry_.GetFamilies(), &registry_);
 
   // Only after all the commands are registered
   registry_.Init(pp_.size());

@@ -66,22 +66,23 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
     std::string buffer = "user ";
     const std::string_view pass = user.Password();
     const std::string password = pass == "nopass" ? "nopass" : PrettyPrintSha(pass);
-    const std::string acl_cat = AclCatToString(user.AclCategory());
-    const std::string acl_commands = AclCommandToString(user.AclCommandsRef());
-    const std::string maybe_space_com = acl_commands.empty() ? "" : " ";
+
+    const std::string acl_cat_and_commands =
+        AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
+
     const std::string acl_keys = AclKeysToString(user.Keys());
-    const std::string maybe_space = acl_keys.empty() ? "" : " ";
+    const std::string maybe_space_com = acl_keys.empty() ? "" : " ";
 
     using namespace std::string_view_literals;
 
     absl::StrAppend(&buffer, username, " ", user.IsActive() ? "on "sv : "off "sv, password, " ",
-                    acl_cat, maybe_space_com, acl_commands, maybe_space, acl_keys);
+                    acl_cat_and_commands, maybe_space_com, acl_keys);
 
     cntx->SendSimpleString(buffer);
   }
 }
 
-void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user, uint32_t update_cat,
+void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
                                                       const Commands& update_commands,
                                                       const AclKeys& update_keys) {
   auto update_cb = [&]([[maybe_unused]] size_t id, util::Connection* conn) {
@@ -90,7 +91,7 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user, u
     if (connection->protocol() == facade::Protocol::REDIS && !connection->IsHttp() &&
         connection->cntx()) {
       connection->SendAclUpdateAsync(
-          facade::Connection::AclUpdateMessage{user, update_cat, update_commands, update_keys});
+          facade::Connection::AclUpdateMessage{user, update_commands, update_keys});
     }
   };
 
@@ -113,10 +114,14 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
 
   auto update_case = [username, &reg, cntx, this, exists](User::UpdateRequest&& req) {
     auto& user = reg.registry[username];
+    if (!exists) {
+      User::UpdateRequest default_req;
+      default_req.updates = {User::UpdateRequest::CategoryValueType{User::Sign::MINUS, acl::ALL}};
+      user.Update(std::move(default_req));
+    }
     user.Update(std::move(req));
     if (exists) {
-      StreamUpdatesToAllProactorConnections(std::string(username), user.AclCategory(),
-                                            user.AclCommands(), user.Keys());
+      StreamUpdatesToAllProactorConnections(std::string(username), user.AclCommands(), user.Keys());
     }
     cntx->SendOk();
   };
@@ -194,20 +199,15 @@ std::string AclFamily::RegistryToString() const {
     const std::string_view pass = user.Password();
     const std::string password =
         pass == "nopass" ? "nopass " : absl::StrCat("#", PrettyPrintSha(pass, true), " ");
-    const std::string acl_cat = AclCatToString(user.AclCategory());
-    const std::string acl_commands = AclCommandToString(user.AclCommandsRef());
-    const std::string maybe_space_com = acl_commands.empty() ? "" : " ";
+    const std::string acl_cat_and_commands =
+        AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
     const std::string acl_keys = AclKeysToString(user.Keys());
     const std::string maybe_space = acl_keys.empty() ? "" : " ";
 
     using namespace std::string_view_literals;
 
     absl::StrAppend(&result, command, username, " ", user.IsActive() ? "ON "sv : "OFF "sv, password,
-                    acl_cat, maybe_space_com, acl_commands, maybe_space, acl_keys, "\n");
-  }
-
-  if (!result.empty()) {
-    result.pop_back();
+                    acl_cat_and_commands, maybe_space, acl_keys, "\n");
   }
 
   return result;
@@ -298,7 +298,10 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
   }
 
   for (size_t i = 0; i < usernames.size(); ++i) {
+    User::UpdateRequest default_req;
+    default_req.updates = {User::UpdateRequest::CategoryValueType{User::Sign::MINUS, acl::ALL}};
     auto& user = registry[usernames[i]];
+    user.Update(std::move(default_req));
     user.Update(std::move(requests[i]));
   }
 
@@ -446,6 +449,7 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
 
     const uint32_t cid_mask = CATEGORY_INDEX_TABLE.find(category)->second;
     std::vector<std::string_view> results;
+    // TODO replace this with indexer
     auto cb = [cid_mask, &results](auto name, auto& cid) {
       if (cid_mask & cid.acl_categories()) {
         results.push_back(name);
@@ -510,10 +514,10 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   }
   rb->SendSimpleString("commands");
 
-  std::string acl = absl::StrCat(AclCatToString(user.AclCategory()), " ",
-                                 AclCommandToString(user.AclCommandsRef()));
+  const std::string acl_cat_and_commands =
+      AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
 
-  rb->SendSimpleString(acl);
+  rb->SendSimpleString(acl_cat_and_commands);
 
   rb->SendSimpleString("keys");
   std::string keys = AclKeysToString(user.Keys());
@@ -572,9 +576,8 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   }
 
   const auto& user = registry.find(username)->second;
-  const bool is_allowed = IsUserAllowedToInvokeCommandGeneric(
-                              user.AclCategory(), user.AclCommandsRef(), {{}, true}, {}, *cid)
-                              .first;
+  const bool is_allowed =
+      IsUserAllowedToInvokeCommandGeneric(user.AclCommandsRef(), {{}, true}, {}, *cid).first;
   if (is_allowed) {
     cntx->SendOk();
     return;

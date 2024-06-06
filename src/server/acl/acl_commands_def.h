@@ -5,7 +5,11 @@
 #pragma once
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "base/logging.h"
 #include "facade/acl_commands_def.h"
+#include "server/command_registry.h"
+#include "server/conn_context.h"
 
 namespace dfly::acl {
 
@@ -84,6 +88,15 @@ inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
     "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED",  "_RESERVED",   "_RESERVED",
     "BLOOM",     "FT_SEARCH", "THROTTLE",  "JSON"};
 
+// bit index to index in the REVERSE_CATEGORY_INDEX_TABLE
+using CategoryToIdxStore = absl::flat_hash_map<uint32_t, uint32_t>;
+
+// inline const CategoryToIdxStore& CategoryToIdx(CategoryToIdxStore store = {}) {
+inline const CategoryToIdxStore& CategoryToIdx(CategoryToIdxStore store = {}) {
+  static CategoryToIdxStore cat_idx = std::move(store);
+  return cat_idx;
+}
+
 using RevCommandField = std::vector<std::string>;
 using RevCommandsIndexStore = std::vector<RevCommandField>;
 
@@ -104,9 +117,39 @@ inline const RevCommandsIndexStore& CommandsRevIndexer(RevCommandsIndexStore sto
   return rev_index_store;
 }
 
-inline void BuildIndexers(std::vector<std::vector<std::string>> families) {
+using CategoryToCommandsIndexStore = absl::flat_hash_map<std::string, std::vector<uint64_t>>;
+
+inline const CategoryToCommandsIndexStore& CategoryToCommandsIndex(
+    CategoryToCommandsIndexStore store = {}) {
+  static CategoryToCommandsIndexStore index = std::move(store);
+  return index;
+}
+
+inline void BuildIndexers(RevCommandsIndexStore families, CommandRegistry* cmd_registry) {
   acl::NumberOfFamilies(families.size());
   acl::CommandsRevIndexer(std::move(families));
+  CategoryToCommandsIndexStore index;
+  cmd_registry->Traverse([&](std::string_view name, auto& cid) {
+    auto cat = cid.acl_categories();
+    for (size_t i = 0; i < 32; ++i) {
+      if (cat & (1 << i)) {
+        std::string_view cat_name = REVERSE_CATEGORY_INDEX_TABLE[i];
+        if (index[cat_name].empty()) {
+          index[cat_name].resize(CommandsRevIndexer().size());
+        }
+        auto family = cid.GetFamily();
+        auto bit_index = cid.GetBitIndex();
+        index[cat_name][family] = index[cat_name][family] | bit_index;
+      }
+    }
+  });
+
+  CategoryToCommandsIndex(std::move(index));
+  CategoryToIdxStore idx_store;
+  for (size_t i = 0; i < 32; ++i) {
+    idx_store[1 << i] = i;
+  }
+  CategoryToIdx(std::move(idx_store));
 }
 
 }  // namespace dfly::acl
