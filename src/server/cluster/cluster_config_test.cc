@@ -558,4 +558,55 @@ TEST_F(ClusterConfigTest, InvalidConfigMigrationsWithoutIP) {
   EXPECT_EQ(config, nullptr);
 }
 
+TEST_F(ClusterConfigTest, SlotSetAPI) {
+  {
+    SlotSet ss(false);
+    EXPECT_EQ(ss.ToSlotRanges(), SlotRanges());
+    EXPECT_FALSE(ss.All());
+    EXPECT_TRUE(ss.Empty());
+  }
+  {
+    SlotSet ss(true);
+    EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, SlotRange::kMaxSlotId}}));
+    EXPECT_TRUE(ss.All());
+    EXPECT_FALSE(ss.Empty());
+  }
+  {
+    SlotSet ss(SlotRanges({{0, 1000}, {1001, 2000}}));
+    EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({SlotRange{0, 2000}}));
+    EXPECT_EQ(ss.Count(), 2001);
+
+    for (uint16_t i = 0; i < 2000; ++i) {
+      EXPECT_TRUE(ss.Contains(i));
+    }
+    for (uint16_t i = 2001; i <= SlotRange::kMaxSlotId; ++i) {
+      EXPECT_FALSE(ss.Contains(i));
+    }
+
+    EXPECT_FALSE(ss.All());
+    EXPECT_FALSE(ss.Empty());
+
+    ss.Set(5010, true);
+    EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5010, 5010}}));
+
+    ss.Set({SlotRange{5000, 5100}}, true);
+    EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5000, 5100}}));
+
+    ss.Set(5050, false);
+    EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5000, 5049}, {5051, 5100}}));
+
+    ss.Set(5500, false);
+    EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5000, 5049}, {5051, 5100}}));
+
+    ss.Set({SlotRange{5090, 5100}}, false);
+    EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5000, 5049}, {5051, 5089}}));
+
+    SlotSet ss1(SlotRanges({{1001, 2000}}));
+
+    EXPECT_EQ(ss.GetRemovedSlots(ss1).ToSlotRanges(),
+              SlotRanges({{0, 1000}, {5000, 5049}, {5051, 5089}}));
+    EXPECT_EQ(ss1.GetRemovedSlots(ss).ToSlotRanges(), SlotRanges());
+  }
+}
+
 }  // namespace dfly::cluster
