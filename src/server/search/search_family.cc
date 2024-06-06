@@ -128,17 +128,18 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
       return nullopt;
     }
 
+    // Tag fields include: [separator char] [casesensitive]
     // Vector fields include: {algorithm} num_args args...
-    search::SchemaField::ParamsVariant params = std::monostate{};
-    if (*type == search::SchemaField::VECTOR) {
+    search::SchemaField::ParamsVariant params(monostate{});
+    if (*type == search::SchemaField::TAG) {
+      params = ParseTagParams(&parser);
+    } else if (*type == search::SchemaField::VECTOR) {
       auto vector_params = ParseVectorParams(&parser);
       if (!parser.HasError() && vector_params.dim == 0) {
         cntx->SendError("Knn vector dimension cannot be zero");
         return nullopt;
       }
       params = vector_params;
-    } else if (*type == search::SchemaField::TAG) {
-      params = ParseTagParams(&parser);
     }
 
     // Flags: check for SORTABLE and NOINDEX
