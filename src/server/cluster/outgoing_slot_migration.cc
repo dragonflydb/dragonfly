@@ -126,6 +126,8 @@ MigrationState OutgoingMigration::GetState() const {
 }
 
 void OutgoingMigration::SyncFb() {
+  VLOG(1) << "Starting outgoing migration fiber for migration " << migration_info_.ToString();
+
   // we retry starting migration until "cancel" is happened
   while (GetState() != MigrationState::C_FINISHED) {
     if (!ChangeState(MigrationState::C_CONNECTING)) {
@@ -141,14 +143,15 @@ void OutgoingMigration::SyncFb() {
       ThisFiber::SleepFor(1000ms);
     }
 
-    VLOG(1) << "Connecting to source";
+    VLOG(2) << "Connecting to source";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
+      VLOG(1) << "Can't connect to source";
       cntx_.ReportError(GenericError(ec, "Couldn't connect to source."));
       continue;
     }
 
-    VLOG(1) << "Migration initiating";
+    VLOG(2) << "Migration initiating";
     ResetParser(false);
     auto cmd = absl::StrCat("DFLYMIGRATE INIT ", cf_->MyID(), " ", slot_migrations_.size());
     for (const auto& s : migration_info_.slot_ranges) {
@@ -156,12 +159,15 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
+      VLOG(1) << "Unable to initialize migration";
       cntx_.ReportError(GenericError(ec, "Could not send INIT command."));
       continue;
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
+      VLOG(2) << "Received non-OK response, retrying";
       if (!CheckRespIsSimpleReply(kUnknownMigration)) {
+        VLOG(2) << "Target node does not recognize migration";
         cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
       }
       continue;
@@ -185,21 +191,26 @@ void OutgoingMigration::SyncFb() {
     });
 
     if (CheckFlowsForErrors()) {
+      VLOG(1) << "Errors detected, retrying outgoing migration";
       continue;
     }
 
-    VLOG(1) << "Migrations snapshot is finished";
+    VLOG(2) << "Migrations snapshot is finished";
 
     long attempt = 0;
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
       // process commands that were on pause and try again
+      VLOG(2) << "Waiting for migration to finalize...";
       ThisFiber::SleepFor(500ms);
     }
     if (CheckFlowsForErrors()) {
+      VLOG(1) << "Errors detected, retrying outgoing migration";
       continue;
     }
     break;
   }
+
+  VLOG(1) << "Exiting outgoing migration fiber for migration " << migration_info_.ToString();
 }
 
 bool OutgoingMigration::FinalizeMigration(long attempt) {

@@ -59,6 +59,10 @@ struct MigrationInfo {
   bool operator==(const MigrationInfo& r) const {
     return ip == r.ip && port == r.port && slot_ranges == r.slot_ranges && node_id == r.node_id;
   }
+
+  std::string ToString() const {
+    return absl::StrCat(node_id, ",", ip, ":", port, " (", SlotRange::ToString(slot_ranges), ")");
+  }
 };
 
 struct ClusterShardInfo {
