@@ -90,7 +90,7 @@ struct DocIndex {
 
 struct DocIndexInfo {
   DocIndex base_index;
-  size_t num_docs;
+  size_t num_docs = 0;
 
   // Build original ft.create command that can be used to re-create this index
   std::string BuildRestoreCommand() const;
