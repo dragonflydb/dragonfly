@@ -36,7 +36,12 @@ struct SchemaField {
     size_t hnsw_m = 16;
   };
 
-  using ParamsVariant = std::variant<std::monostate, VectorParams>;
+  struct TagParams {
+    char separator = ',';
+    bool case_sensitive = false;
+  };
+
+  using ParamsVariant = std::variant<std::monostate, VectorParams, TagParams>;
 
   FieldType type;
   uint8_t flags;

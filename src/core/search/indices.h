@@ -40,7 +40,7 @@ struct NumericIndex : public BaseIndex {
 template <typename C> struct BaseStringIndex : public BaseIndex {
   using Container = BlockList<C>;
 
-  BaseStringIndex(PMR_NS::memory_resource* mr);
+  BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive);
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -74,6 +74,8 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
     }
   };
 
+  bool case_sensitive_ = false;
+
   absl::flat_hash_map<PMR_NS::string, Container, PmrHash, PmrEqual,
                       PMR_NS::polymorphic_allocator<std::pair<PMR_NS::string, Container>>>
       entries_;
@@ -82,7 +84,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
-  TextIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr) {
+  TextIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr, false) {
   }
 
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
@@ -91,10 +93,14 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex<SortedVector> {
-  TagIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr) {
+  TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
+      : BaseStringIndex(mr, params.case_sensitive), separator_{params.separator} {
   }
 
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
+
+ private:
+  char separator_;
 };
 
 struct BaseVectorIndex : public BaseIndex {

@@ -111,6 +111,11 @@ string DocIndexInfo::BuildRestoreCommand() const {
           absl::StrAppend(out, " ", params.use_hnsw ? "HNSW" : "FLAT", " 6 ", "DIM ", params.dim,
                           " DISTANCE_METRIC ", sim, " INITIAL_CAP ", params.capacity);
         },
+        [out = &out](const search::SchemaField::TagParams& params) {
+          absl::StrAppend(out, " ", "SEPARATOR", " ", string{params.separator});
+          if (params.case_sensitive)
+            absl::StrAppend(out, " ", "CASESENSITIVE");
+        },
     };
     visit(info, finfo.special_params);
   }

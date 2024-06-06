@@ -70,6 +70,8 @@ Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldTyp
   Schema schema;
   for (auto [name, type] : ilist) {
     schema.fields[name] = {type, 0, string{name}};
+    if (type == SchemaField::TAG)
+      schema.fields[name].special_params = SchemaField::TagParams{};
   }
   return schema;
 }

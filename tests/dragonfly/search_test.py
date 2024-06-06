@@ -378,7 +378,7 @@ async def test_index_persistence(df_server):
     SCHEMA_2 = [
         TextField("name"),
         NumericField("age", sortable=True),
-        TagField("job"),
+        TagField("job", separator=":", case_sensitive=True),
         VectorField(
             "pos",
             algorithm="HNSW",
@@ -461,6 +461,7 @@ async def test_index_persistence(df_server):
 
     assert (await i2.search("@job:{writer}")).total == 100
     assert (await i2.search("@job:{writer} @age:[100 200]")).total == 50
+    assert (await i2.search("@job:{wRiTeR}")).total == 0
 
     # Check fields are sortable
     assert (await i1.search(Query("*").sort_by("views", asc=True).paging(0, 1))).docs[0][

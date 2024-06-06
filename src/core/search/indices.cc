@@ -34,6 +34,10 @@ bool IsAllAscii(string_view sv) {
   return all_of(sv.begin(), sv.end(), [](unsigned char c) { return isascii(c); });
 }
 
+string ToLower(string_view word) {
+  return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
+}
+
 // Get all words from text as matched by the ICU library
 absl::flat_hash_set<std::string> TokenizeWords(std::string_view text) {
   absl::flat_hash_set<std::string> words;
@@ -43,12 +47,14 @@ absl::flat_hash_set<std::string> TokenizeWords(std::string_view text) {
 }
 
 // Split taglist, remove duplicates and convert all to lowercase
-absl::flat_hash_set<string> NormalizeTags(string_view taglist) {
+absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensitive,
+                                          char separator) {
   string tmp;
   absl::flat_hash_set<string> tags;
-  for (string_view tag : absl::StrSplit(taglist, ',')) {
+  for (string_view tag : absl::StrSplit(taglist, separator, absl::SkipEmpty())) {
     tmp = absl::StripAsciiWhitespace(tag);
-    absl::AsciiStrToLower(&tmp);
+    if (!case_sensitive)
+      absl::AsciiStrToLower(&tmp);
     tags.insert(std::move(tmp));
   }
   return tags;
@@ -89,20 +95,21 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
 }
 
 template <typename C>
-BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
+BaseStringIndex<C>::BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive)
+    : case_sensitive_{case_sensitive}, entries_{mr} {
 }
 
 template <typename C>
 const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(string_view str) const {
   str = absl::StripAsciiWhitespace(str);
 
-  string word;
-  if (IsAllAscii(str))
-    word = absl::AsciiStrToLower(str);
-  else
-    word = una::cases::to_lowercase_utf8(str);
+  string tmp;
+  if (!case_sensitive_) {
+    tmp = ToLower(str);
+    str = tmp;
+  }
 
-  auto it = entries_.find(word);
+  auto it = entries_.find(str);
   return (it != entries_.end()) ? &it->second : nullptr;
 }
 
@@ -147,7 +154,7 @@ absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) con
 }
 
 absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) const {
-  return NormalizeTags(value);
+  return NormalizeTags(value, case_sensitive_, separator_);
 }
 
 BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim} {

@@ -80,6 +80,26 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
+search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
+  search::SchemaField::TagParams params{};
+  while (parser->HasNext()) {
+    if (parser->Check("SEPARATOR").IgnoreCase().ExpectTail(1)) {
+      string_view separator = parser->Next();
+      params.separator = separator.front();
+      continue;
+    }
+
+    if (parser->Check("CASESENSITIVE").IgnoreCase()) {
+      params.case_sensitive = true;
+      continue;
+    }
+
+    break;
+  }
+
+  return params;
+}
+
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
                                             ConnectionContext* cntx) {
   search::Schema schema;
@@ -116,7 +136,9 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
         cntx->SendError("Knn vector dimension cannot be zero");
         return nullopt;
       }
-      params = std::move(vector_params);
+      params = vector_params;
+    } else if (*type == search::SchemaField::TAG) {
+      params = ParseTagParams(&parser);
     }
 
     // Flags: check for SORTABLE and NOINDEX
