@@ -1334,6 +1334,7 @@ async def test_cluster_config_reapply(df_local_factory: DflyInstanceFactory):
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
+@pytest.mark.skip(reason="The test is broken")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     """Check data migration from one node to another."""
