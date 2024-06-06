@@ -100,6 +100,12 @@ search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
   return params;
 }
 
+// breaks on ParamsVariant initialization
+#ifndef __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
                                             ConnectionContext* cntx) {
   search::Schema schema;
@@ -176,6 +182,10 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 
   return schema;
 }
+
+#ifndef __clang__
+#pragma GCC diagnostic pop
+#endif
 
 search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   search::QueryParams params;
