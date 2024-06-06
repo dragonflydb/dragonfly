@@ -405,6 +405,8 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kClusterDisabled);
   }
 
+  VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
+
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
   args.remove_prefix(1);  // remove subcommand name
@@ -505,11 +507,12 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   lock_guard gu(set_config_mu);
 
+  VLOG(1) << "Setting new cluster config: " << json_str;
   RemoveOutgoingMigrations(new_config->GetFinishedOutgoingMigrations(tl_cluster_config));
   RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
 
-  lock_guard config_update_lk(
-      config_update_mu_);  // to prevent simultaneous update config from outgoing migration
+  // Prevent simultaneous config update from outgoing migration
+  lock_guard config_update_lk(config_update_mu_);
 
   SlotRanges enable_slots, disable_slots;
 
@@ -562,6 +565,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
+    LOG_IF(INFO, !deleted_slots.empty())
+        << "Flushing newly unowned slots: " << SlotRange::ToString(deleted_slots);
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
