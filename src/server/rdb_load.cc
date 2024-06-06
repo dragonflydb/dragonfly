@@ -2440,7 +2440,7 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* p
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   DbSlice& db_slice = EngineShard::tlocal()->db_slice();
-  DbContext db_cntx{.db_index = db_ind, .time_now_ms = GetCurrentTimeMs()};
+  DbContext db_cntx{db_ind, GetCurrentTimeMs()};
 
   for (const auto* item : ib) {
     PrimeValue pv;

@@ -59,6 +59,10 @@ struct KeyIndex {
 struct DbContext {
   DbIndex db_index = 0;
   uint64_t time_now_ms = 0;
+
+  DbContext() = default;
+  DbContext(DbIndex dbid, uint64_t now_ms) : db_index(dbid), time_now_ms(now_ms) {
+  }
 };
 
 struct OpArgs {
