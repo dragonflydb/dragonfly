@@ -552,11 +552,7 @@ Connection::~Connection() {
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
 
-  if (shutdown_cb_) {
-    for (const auto& k_v : shutdown_cb_->map) {
-      k_v.second();
-    }
-  }
+  BreakOnce(POLLHUP);
 }
 
 void Connection::OnPreMigrateThread() {
@@ -597,21 +593,6 @@ void Connection::OnPostMigrateThread() {
   stats_->read_buf_capacity += io_buf_.Capacity();
   if (cc_->replica_conn) {
     ++stats_->num_replicas;
-  }
-}
-
-auto Connection::RegisterShutdownHook(ShutdownCb cb) -> ShutdownHandle {
-  if (!shutdown_cb_) {
-    shutdown_cb_ = make_unique<Shutdown>();
-  }
-  return shutdown_cb_->Add(std::move(cb));
-}
-
-void Connection::UnregisterShutdownHook(ShutdownHandle id) {
-  if (shutdown_cb_) {
-    shutdown_cb_->Remove(id);
-    if (shutdown_cb_->map.empty())
-      shutdown_cb_.reset();
   }
 }
 
@@ -1103,8 +1084,7 @@ void Connection::OnBreakCb(int32_t mask) {
           << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();
 
   cc_->conn_closing = true;
-
-  breaker_cb_(mask);
+  BreakOnce(mask);
   evc_.notify();  // Notify dispatch fiber.
 }
 
@@ -1546,7 +1526,7 @@ void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
 
 void Connection::LaunchDispatchFiberIfNeeded() {
   if (!dispatch_fb_.IsJoinable() && !migration_in_process_) {
-    VLOG(1) << "LaunchDispatchFiberIfNeeded " << GetClientId();
+    VLOG(1) << "[" << id_ << "] LaunchDispatchFiberIfNeeded ";
     dispatch_fb_ = fb2::Fiber(fb2::Launch::post, "connection_dispatch",
                               [&, peer = socket_.get()]() { DispatchFiber(peer); });
   }
@@ -1716,6 +1696,15 @@ void Connection::DecreaseStatsOnClose() {
     --stats_->num_replicas;
   }
   --stats_->num_conns;
+}
+
+void Connection::BreakOnce(uint32_t ev_mask) {
+  if (breaker_cb_) {
+    DVLOG(1) << "[" << id_ << "] Connection::breaker_cb_ " << ev_mask;
+    auto fun = std::move(breaker_cb_);
+    DCHECK(!breaker_cb_);
+    fun(ev_mask);
+  }
 }
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
