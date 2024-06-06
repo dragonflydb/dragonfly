@@ -275,7 +275,9 @@ TEST_F(ServerFamilyTest, ClientTrackingMulti) {
 
   Run({"MULTI"});
   auto resp = Run({"CLIENT", "TRACKING", "ON"});
-  EXPECT_THAT(resp, ArgType(RespExpr::STRING));
+  EXPECT_THAT(resp.GetString(), "QUEUED");
+  resp = Run({"CLIENT", "KILL", "127.0.0.1:6380"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
   Run({"EXEC"});
   Run({"GET", "FOO"});
   Run({"SET", "FOO", "10"});
