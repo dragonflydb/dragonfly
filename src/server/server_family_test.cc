@@ -271,17 +271,31 @@ TEST_F(ServerFamilyTest, ClientTrackingMulti) {
   Run({"SET", "FOO", "10"});
   Run({"SET", "FOOBAR", "10"});
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
-  Run({"CLIENT", "TRACKING", "OFF"});
+}
 
+TEST_F(ServerFamilyTest, ClientTrackingCompatibilityMulti) {
+  // Compatibility Test, all CLIENT commands should be allowed in MULTI
+  Run({"HELLO", "3"});
   Run({"MULTI"});
   auto resp = Run({"CLIENT", "TRACKING", "ON"});
   EXPECT_THAT(resp.GetString(), "QUEUED");
+  // Used by sentinel in MULTI/EXEC blocks
   resp = Run({"CLIENT", "KILL", "127.0.0.1:6380"});
   EXPECT_THAT(resp.GetString(), "QUEUED");
+  resp = Run({"CLIENT", "SETNAME", "YO"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
+  resp = Run({"CLIENT", "GETNAME"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
   Run({"EXEC"});
+
   Run({"GET", "FOO"});
   Run({"SET", "FOO", "10"});
-  EXPECT_EQ(InvalidationMessagesLen("IO0"), 3);
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+
+  Run({"MULTI"});
+  resp = Run({"CLIENT", "PAUSE", "0", "WRITE"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
+  Run({"EXEC"});
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingMultiOptin) {
