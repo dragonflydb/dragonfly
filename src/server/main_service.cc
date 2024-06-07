@@ -1191,9 +1191,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     if (stored_cmd.Cid()->IsWriteOnly()) {
       dfly_cntx->conn_state.exec_info.is_write = true;
     }
-    if (cid->name() == "CLIENT") {
-      dfly_cntx->conn_state.exec_info.has_client_cmd_ = true;
-    }
     return cntx->SendSimpleString("QUEUED");
   }
 
@@ -2210,7 +2207,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
     }
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE &&
-        !cntx->conn_state.exec_info.HasClientCommand() &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {
