@@ -41,7 +41,7 @@ class SlotSet {
   void Set(const SlotRanges& slot_ranges, bool value) {
     for (const auto& slot_range : slot_ranges) {
       for (auto i = slot_range.start; i <= slot_range.end; ++i) {
-        slots_->set(i);
+        slots_->set(i, value);
       }
     }
   }
