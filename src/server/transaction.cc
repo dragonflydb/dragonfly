@@ -663,8 +663,12 @@ void Transaction::RunCallback(EngineShard* shard) {
   }
 
   // Log to journal only once the command finished running
-  if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding))
+  if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
+    if (tracking_cb_) {
+      tracking_cb_(this);
+    }
+  }
 }
 
 // TODO: For multi-transactions we should be able to deduce mode() at run-time based

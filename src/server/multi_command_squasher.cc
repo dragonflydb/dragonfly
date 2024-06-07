@@ -80,6 +80,10 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
       (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
 
+  if (cmd->Cid()->name() == "CLIENT") {
+    return SquashResult::NOT_SQUASHED;
+  }
+
   cmd->Fill(&tmp_keylist_);
   auto args = absl::MakeSpan(tmp_keylist_);
 

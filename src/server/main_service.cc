@@ -4,6 +4,8 @@
 
 #include "server/main_service.h"
 
+#include "facade/resp_expr.h"
+
 #ifdef __FreeBSD__
 #include <pthread_np.h>
 #endif
@@ -1127,28 +1129,6 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-OpResult<void> OpTrackKeys(const OpArgs& op_args, const facade::Connection::WeakRef& conn_ref,
-                           const ShardArgs& args) {
-  if (conn_ref.IsExpired()) {
-    DVLOG(2) << "Connection expired, exiting TrackKey function.";
-    return OpStatus::OK;
-  }
-
-  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
-           << " with thread ID: " << conn_ref.Thread();
-
-  DbSlice& db_slice = op_args.shard->db_slice();
-
-  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
-  for (auto key : args) {
-    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
-             << " into the tracking client set of key " << key;
-    db_slice.TrackKey(conn_ref, key);
-  }
-
-  return OpStatus::OK;
-}
-
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -1253,18 +1233,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
-  // if this is a read command, and client tracking has enabled,
-  // start tracking all the updates to the keys in this read command
-  if ((cid->opt_mask() & CO::READONLY) && dfly_cntx->conn()->IsTrackingOn() &&
-      cid->IsTransactional()) {
-    facade::Connection::WeakRef conn_ref = dfly_cntx->conn()->Borrow();
-    auto cb = [&, conn_ref](Transaction* t, EngineShard* shard) {
-      return OpTrackKeys(t->GetOpArgs(shard), conn_ref, t->GetShardArgs(shard->shard_id()));
-    };
-    dfly_cntx->transaction->Refurbish();
-    dfly_cntx->transaction->ScheduleSingleHopT(cb);
-  }
-
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
   }
@@ -1296,6 +1264,27 @@ class ReplyGuard {
   SinkReplyBuilder* builder_ = nullptr;
 };
 
+OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::WeakRef& conn_ref,
+                           const ShardArgs& args) {
+  if (conn_ref.IsExpired()) {
+    DVLOG(2) << "Connection expired, exiting TrackKey function.";
+    return OpStatus::OK;
+  }
+
+  DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
+           << " with thread ID: " << conn_ref.Thread();
+
+  auto& db_slice = slice_args.shard->db_slice();
+  // TODO: There is a bug here that we track all arguments instead of tracking only keys.
+  for (auto key : args) {
+    DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
+             << " into the tracking client set of key " << key;
+    db_slice.TrackKey(conn_ref, key);
+  }
+
+  return OpStatus::OK;
+}
+
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
@@ -1320,6 +1309,23 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 
   ServerState::tlocal()->RecordCmd();
 
+  auto& info = cntx->conn_state.tracking_info_;
+  auto* trans = cntx->transaction;
+  const bool is_read_only = cid->opt_mask() & CO::READONLY;
+  if (trans) {
+    // Reset it, because in multi/exec the transaction pointer is the same and
+    // we will end up triggerring the callback on the following commands. To avoid this
+    // we reset it.
+    trans->SetTrackingCallback({});
+    if (is_read_only && info.ShouldTrackKeys()) {
+      auto conn = cntx->conn()->Borrow();
+      trans->SetTrackingCallback([conn](Transaction* trans) {
+        auto* shard = EngineShard::tlocal();
+        OpTrackKeys(trans->GetOpArgs(shard), conn, trans->GetShardArgs(shard->shard_id()));
+      });
+    }
+  }
+
 #ifndef NDEBUG
   // Verifies that we reply to the client when needed.
   ReplyGuard reply_guard(cntx, cid->name());
@@ -1330,6 +1336,16 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
+  }
+
+  auto cid_name = cid->name();
+  if ((!trans && cid_name != "MULTI") || (trans && !trans->IsMulti())) {
+    // Each time we execute a command we need to increase the sequence number in
+    // order to properly track clients when OPTIN is used.
+    // We don't do this for `multi/exec` because it would break the
+    // semantics, i.e, CACHING should stick for all commands following
+    // the CLIENT CACHING ON within a multi/exec block
+    cntx->conn_state.tracking_info_.IncrementSequenceNumber();
   }
 
   // TODO: we should probably discard more commands here,
@@ -1397,6 +1413,10 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   for (auto args : args_list) {
     ToUpper(&args[0]);
     const auto [cid, tail_args] = FindCmd(args);
+    // disable squashing for client commands
+    if (cid && cid->name() == "CLIENT") {
+      break;
+    }
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
@@ -2186,7 +2206,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
       ServerState::tlocal()->exec_freq_count[descr]++;
     }
 
-    if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE) {
+    if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE &&
+        !cntx->conn_state.tracking_info_.IsTrackingOn()) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
     } else {
       CmdArgVec arg_vec;
@@ -2232,7 +2253,6 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   auto* cs = ServerState::tlocal()->channel_store();
   vector<ChannelStore::Subscriber> subscribers = cs->FetchSubscribers(channel);
   int num_published = subscribers.size();
-
   if (!subscribers.empty()) {
     // Make sure neither of the threads limits is reached.
     // This check actually doesn't reserve any memory ahead and doesn't prevent the buffer
@@ -2559,7 +2579,7 @@ void Service::OnClose(facade::ConnectionContext* cntx) {
 
   server_family_.OnClose(server_cntx);
 
-  cntx->conn()->SetClientTrackingSwitch(false);
+  conn_state.tracking_info_.SetClientTracking(false);
 }
 
 Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) const {

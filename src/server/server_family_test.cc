@@ -229,6 +229,137 @@ TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
 }
 
+TEST_F(ServerFamilyTest, ClientTrackingOptin) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON", "OPTIN"});
+
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+  Run({"GET", "FOO"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+
+  Run({"CLIENT", "CACHING", "YES"});
+  // Start tracking once
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "20"});
+  Run({"GET", "FOO"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+
+  Run({"GET", "BAR"});
+  Run({"SET", "BAR", "20"});
+  Run({"GET", "BAR"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+
+  // Start tracking once
+  Run({"CLIENT", "CACHING", "YES"});
+  Run({"GET", "BAR"});
+  Run({"SET", "BAR", "20"});
+  Run({"GET", "BAR"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingMulti) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+  Run({"MULTI"});
+  Run({"GET", "FOO"});
+  Run({"SET", "TMP", "10"});
+  Run({"GET", "FOOBAR"});
+  Run({"EXEC"});
+
+  Run({"SET", "FOO", "10"});
+  Run({"SET", "FOOBAR", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingCompatibilityMulti) {
+  // Compatibility Test, all CLIENT commands should be allowed in MULTI
+  Run({"HELLO", "3"});
+  Run({"MULTI"});
+  auto resp = Run({"CLIENT", "TRACKING", "ON"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
+  // Used by sentinel in MULTI/EXEC blocks
+  resp = Run({"CLIENT", "KILL", "127.0.0.1:6380"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
+  resp = Run({"CLIENT", "SETNAME", "YO"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
+  resp = Run({"CLIENT", "GETNAME"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
+  Run({"EXEC"});
+
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+
+  Run({"MULTI"});
+  resp = Run({"CLIENT", "PAUSE", "0", "WRITE"});
+  EXPECT_THAT(resp.GetString(), "QUEUED");
+  Run({"EXEC"});
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingMultiOptin) {
+  Run({"HELLO", "3"});
+  // Check stickiness
+  Run({"CLIENT", "TRACKING", "ON", "OPTIN"});
+  Run({"CLIENT", "CACHING", "YES"});
+  Run({"MULTI"});
+  Run({"GET", "FOO"});
+  Run({"SET", "TMP", "10"});
+  Run({"GET", "FOOBAR"});
+  Run({"DISCARD"});
+
+  Run({"SET", "FOO", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+
+  Run({"CLIENT", "CACHING", "YES"});
+  Run({"MULTI"});
+  Run({"GET", "FOO"});
+  Run({"SET", "TMP", "10"});
+  Run({"GET", "FOOBAR"});
+  Run({"EXEC"});
+
+  Run({"SET", "FOO", "10"});
+  Run({"SET", "FOOBAR", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+
+  // CACHING enclosed in MULTI
+  Run({"MULTI"});
+  Run({"GET", "TMP"});
+  Run({"GET", "TMP_TMP"});
+  Run({"SET", "TMP", "10"});
+  Run({"CLIENT", "CACHING", "YES"});
+  Run({"GET", "FOO"});
+  Run({"GET", "FOOBAR"});
+  Run({"EXEC"});
+
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+  Run({"SET", "TMP", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+  Run({"SET", "FOO", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 3);
+  Run({"SET", "FOOBAR", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 4);
+
+  // CACHING enclosed in MULTI, ON/OFF
+  Run({"MULTI"});
+  Run({"GET", "TMP"});
+  Run({"SET", "TMP", "10"});
+  Run({"CLIENT", "CACHING", "YES"});
+  Run({"GET", "FOO"});
+  Run({"CLIENT", "CACHING", "NO"});
+  Run({"GET", "BAR"});
+  Run({"EXEC"});
+
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 4);
+  Run({"SET", "FOO", "10"});
+  Run({"GET", "FOO"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 5);
+  Run({"SET", "BAR", "10"});
+  Run({"GET", "BAR"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 5);
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingUpdateKey) {
   Run({"HELLO", "3"});
   Run({"CLIENT", "TRACKING", "ON"});
