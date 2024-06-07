@@ -307,6 +307,21 @@ TEST_F(SearchFamilyTest, Tags) {
               AreDocIds("d:1", "d:2", "d:3", "d:5", "d:6"));
 }
 
+TEST_F(SearchFamilyTest, TagOptions) {
+  Run({"hset", "d:1", "color", "    red/   green // bLUe   "});
+  Run({"hset", "d:2", "color", "blue   /// GReeN   "});
+  Run({"hset", "d:3", "color", "grEEn // yellow   //"});
+  Run({"hset", "d:4", "color", "  /blue/green/  "});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag", "casesensitive",
+                 "separator", "/"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{green}"}), AreDocIds("d:1", "d:4"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{GReeN}"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), AreDocIds("d:2", "d:4"));
+}
+
 TEST_F(SearchFamilyTest, Numbers) {
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {

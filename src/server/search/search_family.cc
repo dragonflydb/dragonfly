@@ -80,6 +80,32 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
+search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
+  search::SchemaField::TagParams params{};
+  while (parser->HasNext()) {
+    if (parser->Check("SEPARATOR").IgnoreCase().ExpectTail(1)) {
+      string_view separator = parser->Next();
+      params.separator = separator.front();
+      continue;
+    }
+
+    if (parser->Check("CASESENSITIVE").IgnoreCase()) {
+      params.case_sensitive = true;
+      continue;
+    }
+
+    break;
+  }
+
+  return params;
+}
+
+// breaks on ParamsVariant initialization
+#ifndef __clang__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
 optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
                                             ConnectionContext* cntx) {
   search::Schema schema;
@@ -108,15 +134,18 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
       return nullopt;
     }
 
+    // Tag fields include: [separator char] [casesensitive]
     // Vector fields include: {algorithm} num_args args...
-    search::SchemaField::ParamsVariant params = std::monostate{};
-    if (*type == search::SchemaField::VECTOR) {
+    search::SchemaField::ParamsVariant params(monostate{});
+    if (*type == search::SchemaField::TAG) {
+      params = ParseTagParams(&parser);
+    } else if (*type == search::SchemaField::VECTOR) {
       auto vector_params = ParseVectorParams(&parser);
       if (!parser.HasError() && vector_params.dim == 0) {
         cntx->SendError("Knn vector dimension cannot be zero");
         return nullopt;
       }
-      params = std::move(vector_params);
+      params = vector_params;
     }
 
     // Flags: check for SORTABLE and NOINDEX
@@ -153,6 +182,10 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 
   return schema;
 }
+
+#ifndef __clang__
+#pragma GCC diagnostic pop
+#endif
 
 search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   search::QueryParams params;
