@@ -305,7 +305,7 @@ class Transaction {
   bool IsGlobal() const;
 
   DbContext GetDbContext() const {
-    return DbContext{.db_index = db_index_, .time_now_ms = time_now_ms_};
+    return DbContext{db_index_, time_now_ms_};
   }
 
   DbIndex GetDbIndex() const {
@@ -431,13 +431,13 @@ class Transaction {
     bool concluding = false;
 
     unsigned cmd_seq_num = 0;  // used for debugging purposes.
+    unsigned shard_journal_cnt;
 
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when
     // executing multi-command. For every write to a shard journal, the corresponding index in the
     // vector is marked as true.
     absl::InlinedVector<bool, 4> shard_journal_write;
-    unsigned shard_journal_cnt;
   };
 
   enum CoordinatorState : uint8_t {

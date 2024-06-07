@@ -2368,7 +2368,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       // We do not use transactional xemantics for xinfo since it's informational command.
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
+        DbContext db_context{cntx->db_index(), GetCurrentTimeMs()};
         return OpListGroups(db_context, key, shard);
       };
 
@@ -2437,8 +2437,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
-        return OpStreams(db_context, key, shard, full, count);
+        return OpStreams(DbContext{cntx->db_index(), GetCurrentTimeMs()}, key, shard, full, count);
       };
 
       auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -2566,9 +2565,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
       auto cb = [&]() {
-        EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
-        return OpConsumers(db_context, shard, stream_name, group_name);
+        return OpConsumers(DbContext{cntx->db_index(), GetCurrentTimeMs()}, EngineShard::tlocal(),
+                           stream_name, group_name);
       };
 
       OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));

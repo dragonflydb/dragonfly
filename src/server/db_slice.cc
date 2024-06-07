@@ -624,8 +624,7 @@ bool DbSlice::Del(DbIndex db_ind, Iterator it) {
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
-    DbContext cntx{db_ind, GetCurrentTimeMs()};
-    doc_del_cb_(key, cntx, it->second);
+    doc_del_cb_(key, DbContext{db_ind, GetCurrentTimeMs()}, it->second);
   }
   fetched_items_.erase(it->first.AsRef());
   PerformDeletion(it, db.get());
@@ -1078,7 +1077,7 @@ void DbSlice::ExpireAllIfNeeded() {
         LOG(ERROR) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
         return;
       }
-      ExpireIfNeeded(DbSlice::Context{db_index, GetCurrentTimeMs()}, prime_it);
+      ExpireIfNeeded(Context{db_index, GetCurrentTimeMs()}, prime_it);
     };
 
     ExpireTable::Cursor cursor;
