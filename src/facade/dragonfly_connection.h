@@ -328,8 +328,11 @@ class Connection : public util::Connection {
     util::fb2::EventCount ec;
     std::atomic_size_t subscriber_bytes = 0;
 
+    util::fb2::CondVarAny pipeline_cnd;
+
     size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
     size_t pipeline_cache_limit = 0;     // cached flag pipeline_cache_limit
+    size_t pipeline_buffer_limit = 0;    // cached flag for buffer size in bytes
   };
 
  private:
@@ -346,14 +349,15 @@ class Connection : public util::Connection {
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
 
-  // Dispatch Redis or MC command. `has_more` should indicate whether the buffer has more commands
+  // Dispatches a single (Redis or MC) command.
+  // `has_more` should indicate whether the io buffer has more commands
   // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
   // has_more is true, otherwise uses synchronous dispatch.
-  void DispatchCommand(bool has_more, absl::FunctionRef<void()> sync_dispatch,
-                       absl::FunctionRef<MessageHandle()> async_dispatch);
+  void DispatchSingle(bool has_more, absl::FunctionRef<void()> sync_dispatch,
+                      absl::FunctionRef<MessageHandle()> async_dispatch);
 
   // Handles events from dispatch queue.
-  void DispatchFiber(util::FiberSocketBase* peer);
+  void ExecutionFiber(util::FiberSocketBase* peer);
 
   void SendAsync(MessageHandle msg);
 
@@ -394,7 +398,7 @@ class Connection : public util::Connection {
   void BreakOnce(uint32_t ev_mask);
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
-  util::fb2::EventCount evc_;             // dispatch queue waker
+  util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
   size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued async commands in dispatch_q
@@ -413,7 +417,6 @@ class Connection : public util::Connection {
   ServiceInterface* service_;
 
   time_t creation_time_, last_interaction_;
-
   Phase phase_ = SETUP;
   std::string name_;
 
