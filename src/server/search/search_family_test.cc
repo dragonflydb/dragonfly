@@ -88,6 +88,24 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_EQ(Run({"ft._list"}), "idx-3");
 }
 
+TEST_F(SearchFamilyTest, AlterIndex) {
+  Run({"hset", "d:1", "color", "blue", "cost", "150"});
+  Run({"hset", "d:2", "color", "green", "cost", "200"});
+
+  Run({"ft.create", "idx-1", "ON", "HASH"});
+
+  EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "color", "tag"}), "OK");
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@color:{blue}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@color:{green}"}), AreDocIds("d:2"));
+
+  EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "cost", "numeric"}), "OK");
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[0 100]"}), kNoResults);
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[100 300]"}), AreDocIds("d:1", "d:2"));
+
+  EXPECT_THAT(Run({"ft.alter", "idx-2", "schema", "add", "price", "numeric"}),
+              ErrArg("Index not found"));
+}
+
 TEST_F(SearchFamilyTest, InfoIndex) {
   EXPECT_EQ(
       Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"}),

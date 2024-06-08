@@ -502,6 +502,59 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+void SearchFamily::FtAlter(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  string_view idx_name = parser.Next();
+  parser.ExpectTag("SCHEMA");
+  parser.ExpectTag("ADD");
+
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
+
+  // First, extract existing index info
+  shared_ptr<DocIndex> index_info;
+  auto idx_cb = [idx_name, &index_info](auto* tx, EngineShard* es) {
+    if (es->shard_id() > 0)  // all shards have the same data, fetch from first
+      return OpStatus::OK;
+
+    if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr)
+      index_info = make_shared<DocIndex>(idx->GetInfo().base_index);
+    return OpStatus::OK;
+  };
+  cntx->transaction->Execute(idx_cb, false);
+
+  if (!index_info) {
+    cntx->transaction->Conclude();
+    return cntx->SendError("Index not found");
+  }
+
+  // Parse additional schema
+  optional<search::Schema> new_fields = ParseSchemaOrReply(index_info->type, parser, cntx);
+  if (!new_fields) {
+    cntx->transaction->Conclude();
+    return;
+  }
+
+  LOG(INFO) << "Adding "
+            << DocIndexInfo{.base_index = DocIndex{.schema = *new_fields}}.BuildRestoreCommand();
+
+  // Merge schemas
+  search::Schema& schema = index_info->schema;
+  schema.fields.insert(new_fields->fields.begin(), new_fields->fields.end());
+  schema.field_names.insert(new_fields->field_names.begin(), new_fields->field_names.end());
+
+  // Rebuild index
+  // TODO: Introduce partial rebuild
+  auto upd_cb = [idx_name, index_info](Transaction* tx, EngineShard* es) {
+    es->search_indices()->DropIndex(idx_name);
+    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
+    return OpStatus::OK;
+  };
+  cntx->transaction->Execute(upd_cb, true);
+
+  cntx->SendOk();
+}
+
 void SearchFamily::FtDropIndex(CmdArgList args, ConnectionContext* cntx) {
   string_view idx_name = ArgS(args, 0);
   // TODO: Handle optional DD param
@@ -786,6 +839,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
                    FtCreate)
+            << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
             << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
                    FtDropIndex)
             << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
