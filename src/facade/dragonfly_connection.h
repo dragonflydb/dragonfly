@@ -61,6 +61,10 @@ class Connection : public util::Connection {
              ServiceInterface* service);
   ~Connection();
 
+  // A callback called by Listener::OnConnectionStart in the same thread where
+  // HandleRequests will run.
+  void OnConnectionStart();
+
   using BreakerCb = std::function<void(uint32_t)>;
   using ShutdownCb = std::function<void()>;
   using ShutdownHandle = unsigned;
@@ -215,7 +219,6 @@ class Connection : public util::Connection {
     uint32_t client_id_;
   };
 
- public:
   // Add PubMessage to dispatch queue.
   // Virtual because behavior is overridden in test_utils.
   virtual void SendPubMessageAsync(PubMessage);
@@ -318,21 +321,24 @@ class Connection : public util::Connection {
   struct DispatchCleanup;
   struct Shutdown;
 
-  // Keeps track of total per-thread sizes of dispatch queues to
-  // limit memory taken up by messages from PUBLISH commands and slow down clients
-  // producing them to quickly via EnsureAsyncMemoryBudget.
+  // Keeps track of total per-thread sizes of dispatch queues to limit memory taken up by messages
+  // in these queues.
   struct QueueBackpressure {
-    // Block until memory usage is below limit, can be called from any thread
+    // Block until subscriber memory usage is below limit, can be called from any thread.
     void EnsureBelowLimit();
 
+    // Used by publisher/subscriber actors to make sure we do not publish too many messages
+    // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
     util::fb2::EventCount ec;
     std::atomic_size_t subscriber_bytes = 0;
 
+    // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
+    // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
     util::fb2::CondVarAny pipeline_cnd;
 
-    size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
-    size_t pipeline_cache_limit = 0;     // cached flag pipeline_cache_limit
-    size_t pipeline_buffer_limit = 0;    // cached flag for buffer size in bytes
+    size_t publish_buffer_limit = 0;   // cached flag publish_buffer_limit
+    size_t pipeline_cache_limit = 0;   // cached flag pipeline_cache_limit
+    size_t pipeline_buffer_limit = 0;  // cached flag for buffer size in bytes
   };
 
  private:
@@ -353,8 +359,8 @@ class Connection : public util::Connection {
   // `has_more` should indicate whether the io buffer has more commands
   // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
   // has_more is true, otherwise uses synchronous dispatch.
-  void DispatchSingle(bool has_more, absl::FunctionRef<void()> sync_dispatch,
-                      absl::FunctionRef<MessageHandle()> async_dispatch);
+  void DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
+                      absl::FunctionRef<MessageHandle()> cmd_msg_cb);
 
   // Handles events from dispatch queue.
   void ExecutionFiber(util::FiberSocketBase* peer);
@@ -433,7 +439,7 @@ class Connection : public util::Connection {
 
   // Pointer to corresponding queue backpressure struct.
   // Needed for access from different threads by EnsureAsyncMemoryBudget().
-  QueueBackpressure* queue_backpressure_;
+  QueueBackpressure* queue_backpressure_ = nullptr;
 
   util::fb2::ProactorBase* migration_request_ = nullptr;
 

@@ -48,10 +48,10 @@ ABSL_FLAG(string, admin_bind, "",
 ABSL_FLAG(uint64_t, request_cache_limit, 64_MB,
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(uint64_t, pipeline_buffer_limit, 4_MB,
+ABSL_FLAG(uint64_t, pipeline_buffer_limit, 8_MB,
           "Amount of memory to use for parsing pipeline requests - per IO thread.");
 
-ABSL_FLAG(uint64_t, subscriber_thread_limit, 128_MB,
+ABSL_FLAG(uint64_t, publish_buffer_limit, 128_MB,
           "Amount of memory to use for storing pub commands in bytes - per IO thread");
 
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
@@ -258,8 +258,7 @@ thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_poo
 thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
 
 void Connection::QueueBackpressure::EnsureBelowLimit() {
-  ec.await(
-      [this] { return subscriber_bytes.load(memory_order_relaxed) <= subscriber_thread_limit; });
+  ec.await([this] { return subscriber_bytes.load(memory_order_relaxed) <= publish_buffer_limit; });
 }
 
 struct Connection::Shutdown {
@@ -594,18 +593,31 @@ void Connection::OnPostMigrateThread() {
   }
 }
 
-void Connection::HandleRequests() {
+void Connection::OnConnectionStart() {
+  DCHECK(queue_backpressure_ == nullptr);
+
   ThisFiber::SetName("DflyConnection");
 
   // We must initialize tl_queue_backpressure_ here and not in the c'tor because a connection object
   // may be created in a differrent thread from where it runs.
-  if (tl_queue_backpressure_.subscriber_thread_limit == 0) {
-    tl_queue_backpressure_.subscriber_thread_limit = absl::GetFlag(FLAGS_subscriber_thread_limit);
+  if (tl_queue_backpressure_.publish_buffer_limit == 0) {
+    tl_queue_backpressure_.publish_buffer_limit = absl::GetFlag(FLAGS_publish_buffer_limit);
     tl_queue_backpressure_.pipeline_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
     tl_queue_backpressure_.pipeline_buffer_limit = absl::GetFlag(FLAGS_pipeline_buffer_limit);
+    if (tl_queue_backpressure_.publish_buffer_limit == 0 ||
+        tl_queue_backpressure_.pipeline_cache_limit == 0 ||
+        tl_queue_backpressure_.pipeline_buffer_limit == 0) {
+      LOG(ERROR) << "Buffer limit settings are 0";
+      exit(-1);
+    }
   }
 
   queue_backpressure_ = &tl_queue_backpressure_;
+  stats_ = &tl_facade_stats->conn_stats;
+}
+
+void Connection::HandleRequests() {
+  VLOG(1) << "[" << id_ << "HandleRequests";
 
   if (absl::GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
     int val = 1;
@@ -613,7 +625,6 @@ void Connection::HandleRequests() {
     DCHECK_EQ(res, 0);
   }
 
-  stats_ = &tl_facade_stats->conn_stats;
   auto remote_ep = RemoteEndpointStr();
 
   FiberSocketBase* peer = socket_.get();
@@ -942,36 +953,44 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   }
 }
 
-void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> dispatch_sync,
-                                absl::FunctionRef<MessageHandle()> dispatch_async) {
+void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
+                                absl::FunctionRef<MessageHandle()> cmd_msg_cb) {
   // Avoid sync dispatch if we can interleave with an ongoing async dispatch
   bool can_dispatch_sync = !cc_->async_dispatch;
 
   // Avoid sync dispatch if we already have pending async messages or
   // can potentially receive some (subscriptions > 0)
-  if (dispatch_q_.size() > 0 || cc_->subscriptions > 0) {
-    can_dispatch_sync = false;
-    if (stats_->dispatch_queue_bytes >= queue_backpressure_->pipeline_buffer_limit) {
-      DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
+  if (can_dispatch_sync && (!dispatch_q_.empty() || cc_->subscriptions > 0)) {
+    DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
+    if (stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit) {
+      can_dispatch_sync = false;
+    } else {
       fb2::NoOpLock noop;
       queue_backpressure_->pipeline_cnd.wait(noop, [this] {
-        bool res = stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit / 2 ||
-                   cc_->conn_closing;
+        bool res = stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit ||
+                   (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
         return res;
       });
       if (cc_->conn_closing)
         return;
+
+      // Prefer sending synchronous request if possible (can_dispatch_sync=false),
+      // to reduce the memory pressure.
+      has_more = false;
+      if (cc_->async_dispatch || !dispatch_q_.empty() || cc_->subscriptions > 0) {
+        can_dispatch_sync = false;
+      }
     }
   }
 
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (has_more || !can_dispatch_sync) {
-    SendAsync(dispatch_async());
+    SendAsync(cmd_msg_cb());
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
       cc_->sync_dispatch = true;
-      dispatch_sync();
+      invoke_cb();
       cc_->sync_dispatch = false;
     }
     last_interaction_ = time(nullptr);
@@ -1380,6 +1399,8 @@ void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
     bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == dispatch_q_.size();
+    bool subscriber_over_limit =
+        stats_->dispatch_queue_subscriber_bytes >= queue_backpressure_->publish_buffer_limit;
     if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_) {
       SquashPipeline(builder);
     } else {
@@ -1407,10 +1428,13 @@ void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
     }
 
     DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
-    if (stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit / 2) {
-      queue_backpressure_->pipeline_cnd.notify_all();
+    if (stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit ||
+        dispatch_q_.empty()) {
+      queue_backpressure_->pipeline_cnd.notify_all();  // very cheap if noone is waiting on it.
     }
-    if (stats_->dispatch_queue_subscriber_bytes < queue_backpressure_->subscriber_thread_limit)
+
+    if (subscriber_over_limit &&
+        stats_->dispatch_queue_subscriber_bytes < queue_backpressure_->publish_buffer_limit)
       queue_backpressure_->ec.notify();
   }
 
@@ -1728,6 +1752,7 @@ void Connection::BreakOnce(uint32_t ev_mask) {
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
                              unsigned thread, uint32_t client_id)
     : ptr_{ptr}, backpressure_{backpressure}, thread_{thread}, client_id_{client_id} {
+  DCHECK(backpressure);
 }
 
 unsigned Connection::WeakRef::Thread() const {
