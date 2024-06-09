@@ -617,7 +617,7 @@ void Connection::OnConnectionStart() {
 }
 
 void Connection::HandleRequests() {
-  VLOG(1) << "[" << id_ << "HandleRequests";
+  VLOG(1) << "[" << id_ << "] HandleRequests";
 
   if (absl::GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
     int val = 1;
@@ -955,36 +955,28 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
 
 void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
                                 absl::FunctionRef<MessageHandle()> cmd_msg_cb) {
-  // Avoid sync dispatch if we can interleave with an ongoing async dispatch
-  bool can_dispatch_sync = !cc_->async_dispatch;
+  DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
+  bool optimize_for_async = has_more;
 
-  // Avoid sync dispatch if we already have pending async messages or
-  // can potentially receive some (subscriptions > 0)
-  if (can_dispatch_sync && (!dispatch_q_.empty() || cc_->subscriptions > 0)) {
-    DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
-    if (stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit) {
-      can_dispatch_sync = false;
-    } else {
-      fb2::NoOpLock noop;
-      queue_backpressure_->pipeline_cnd.wait(noop, [this] {
-        bool res = stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit ||
-                   (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
-        return res;
-      });
-      if (cc_->conn_closing)
-        return;
+  if (stats_->dispatch_queue_bytes > queue_backpressure_->pipeline_buffer_limit) {
+    fb2::NoOpLock noop;
+    queue_backpressure_->pipeline_cnd.wait(noop, [this] {
+      bool res = stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit ||
+                 (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
+      return res;
+    });
+    if (cc_->conn_closing)
+      return;
 
-      // Prefer sending synchronous request if possible (can_dispatch_sync=false),
-      // to reduce the memory pressure.
-      has_more = false;
-      if (cc_->async_dispatch || !dispatch_q_.empty() || cc_->subscriptions > 0) {
-        can_dispatch_sync = false;
-      }
-    }
+    // prefer synchronous dispatching to save memory.
+    optimize_for_async = false;
   }
 
+  // Avoid sync dispatch if we can interleave with an ongoing async dispatch.
+  bool can_dispatch_sync = !cc_->async_dispatch && dispatch_q_.empty() && cc_->subscriptions == 0;
+
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
-  if (has_more || !can_dispatch_sync) {
+  if (optimize_for_async || !can_dispatch_sync) {
     SendAsync(cmd_msg_cb());
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
@@ -1392,6 +1384,9 @@ void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
 
     builder->SetBatchMode(dispatch_q_.size() > 1);
 
+    bool subscriber_over_limit =
+        stats_->dispatch_queue_subscriber_bytes >= queue_backpressure_->publish_buffer_limit;
+
     // Special case: if the dispatch queue accumulated a big number of commands,
     // we can try to squash them
     // It is only enabled if the threshold is reached and the whole dispatch queue
@@ -1399,8 +1394,6 @@ void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
     bool squashing_enabled = squashing_threshold > 0;
     bool threshold_reached = pending_pipeline_cmd_cnt_ > squashing_threshold;
     bool are_all_plain_cmds = pending_pipeline_cmd_cnt_ == dispatch_q_.size();
-    bool subscriber_over_limit =
-        stats_->dispatch_queue_subscriber_bytes >= queue_backpressure_->publish_buffer_limit;
     if (squashing_enabled && threshold_reached && are_all_plain_cmds && !skip_next_squashing_) {
       SquashPipeline(builder);
     } else {
