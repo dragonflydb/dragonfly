@@ -23,6 +23,30 @@ bool Matches(string_view pattern, string_view channel) {
   return stringmatchlen(pattern.data(), pattern.size(), channel.data(), channel.size(), 0) == 1;
 }
 
+// Build functor for sending messages to connection
+auto BuildSender(string_view channel, facade::ArgRange messages) {
+  size_t messages_size = accumulate(messages.begin(), messages.end(), 0,
+                                    [](int sum, string_view str) { return sum + str.size(); });
+  auto buf = shared_ptr<char[]>{new char[channel.size() + messages_size]};
+  {
+    memcpy(buf.get(), channel.data(), channel.size());
+    char* ptr = buf.get() + channel.size();
+    for (string_view message : messages) {
+      memcpy(ptr, message.data(), message.size());
+      ptr += message.size();
+    }
+  }
+
+  return [channel, buf = std::move(buf), messages](facade::Connection* conn, string pattern) {
+    size_t offset = channel.size();
+    for (std::string_view message : messages) {
+      conn->SendPubMessageAsync({std::move(pattern), buf, string_view{buf.get(), channel.size()},
+                                 string_view{buf.get() + offset, message.size()}});
+      offset += message.size();
+    }
+  };
+}
+
 }  // namespace
 
 bool ChannelStore::Subscriber::ByThread(const Subscriber& lhs, const Subscriber& rhs) {
@@ -94,6 +118,39 @@ void ChannelStore::Destroy() {
 }
 
 ChannelStore::ControlBlock ChannelStore::control_block;
+
+unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange messages) const {
+  vector<Subscriber> subscribers = FetchSubscribers(channel);
+  if (subscribers.empty())
+    return 0;
+
+  // Make sure none of the threads publish buffer limits is reached. We don't reserve memory ahead
+  // and don't prevent the buffer from possibly filling, but the approach is good enough for
+  // limiting fast producers. Most importantly, we can use DispatchBrief below as we block here
+  optional<uint32_t> last_thread;
+  for (auto& sub : subscribers) {
+    DCHECK_LE(last_thread.value_or(0), sub.Thread());
+    if (last_thread && *last_thread == sub.Thread())  // skip same thread
+      continue;
+
+    if (sub.EnsureMemoryBudget())  // Invalid pointers are skipped
+      last_thread = sub.Thread();
+  }
+
+  auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
+  auto cb = [subscribers_ptr, send = BuildSender(channel, messages)](unsigned idx, auto*) {
+    auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
+                          ChannelStore::Subscriber::ByThreadId);
+    while (it != subscribers_ptr->end() && it->Thread() == idx) {
+      if (auto* ptr = it->Get(); ptr)
+        send(ptr, it->pattern);
+      it++;
+    }
+  };
+  shard_set->pool()->DispatchBrief(std::move(cb));
+
+  return subscribers_ptr->size();
+}
 
 vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view channel) const {
   vector<Subscriber> res;

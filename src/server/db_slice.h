@@ -553,6 +553,9 @@ class DbSlice {
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
 
+  // Record whenever a key expired to DbTable::expired_keys_events_ for keyspace notifications
+  bool expired_keys_events_recording_ = true;
+
   struct Hash {
     size_t operator()(const facade::Connection::WeakRef& c) const {
       return std::hash<uint32_t>()(c.GetClientId());

@@ -514,8 +514,8 @@ TEST_F(DflyEngineTest, PSubscribe) {
   ASSERT_EQ(1, SubscriberMessagesLen("IO1"));
 
   const auto& msg = GetPublishedMessage("IO1", 0);
-  EXPECT_EQ("foo", msg.Message());
-  EXPECT_EQ("ab", msg.Channel());
+  EXPECT_EQ("foo", msg.message);
+  EXPECT_EQ("ab", msg.channel);
   EXPECT_EQ("a*", msg.pattern);
 }
 

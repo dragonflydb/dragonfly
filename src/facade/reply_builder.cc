@@ -496,7 +496,7 @@ void RedisReplyBuilder::SendMGetResponse(MGetResponse resp) {
 
 void RedisReplyBuilder::SendSimpleStrArr(StrSpan arr) {
   string res = absl::StrCat("*", arr.Size(), kCRLF);
-  for (std::string_view str : arr)
+  for (string_view str : arr)
     StrAppend(&res, "+", str, kCRLF);
 
   SendRaw(res);
