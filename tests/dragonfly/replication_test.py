@@ -57,10 +57,6 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 async def test_replication_all(
     df_local_factory: DflyInstanceFactory, t_master, t_replicas, seeder_config, stream_target, mode
 ):
-    # Temporary disable the test until it passes reliably with cache mode.
-    if mode:
-        pytest.skip()
-
     if mode:
         mode["maxmemory"] = str(t_master * 256) + "mb"
 
