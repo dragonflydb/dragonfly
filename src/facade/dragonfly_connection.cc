@@ -958,12 +958,12 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
   bool optimize_for_async = has_more;
 
-  if (stats_->dispatch_queue_bytes > queue_backpressure_->pipeline_buffer_limit) {
+  if (optimize_for_async &&
+      queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes)) {
     fb2::NoOpLock noop;
     queue_backpressure_->pipeline_cnd.wait(noop, [this] {
-      bool res = stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit ||
-                 (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
-      return res;
+      return !queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes) ||
+             (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
     });
     if (cc_->conn_closing)
       return;
@@ -978,6 +978,19 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   // Dispatch async if we're handling a pipeline or if we can't dispatch sync.
   if (optimize_for_async || !can_dispatch_sync) {
     SendAsync(cmd_msg_cb());
+
+    auto epoch = fb2::FiberSwitchEpoch();
+
+    if (async_fiber_epoch_ == epoch) {
+      // If we pushed too many items without context switching - yield
+      if (++async_streak_len_ >= 10 && !cc_->async_dispatch) {
+        async_streak_len_ = 0;
+        ThisFiber::Yield();
+      }
+    } else {
+      async_streak_len_ = 0;
+      async_fiber_epoch_ = epoch;
+    }
   } else {
     ShrinkPipelinePool();  // Gradually release pipeline request pool.
     {
@@ -1421,7 +1434,7 @@ void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
     }
 
     DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
-    if (stats_->dispatch_queue_bytes < queue_backpressure_->pipeline_buffer_limit ||
+    if (!queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes) ||
         dispatch_q_.empty()) {
       queue_backpressure_->pipeline_cnd.notify_all();  // very cheap if noone is waiting on it.
     }

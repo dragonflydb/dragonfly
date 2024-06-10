@@ -327,6 +327,10 @@ class Connection : public util::Connection {
     // Block until subscriber memory usage is below limit, can be called from any thread.
     void EnsureBelowLimit();
 
+    bool IsPipelineBufferOverLimit(size_t size) const {
+      return size >= pipeline_buffer_limit;
+    }
+
     // Used by publisher/subscriber actors to make sure we do not publish too many messages
     // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
     util::fb2::EventCount ec;
@@ -427,6 +431,10 @@ class Connection : public util::Connection {
   std::string name_;
 
   unsigned parser_error_ = 0;
+
+  // amount of times we enqued requests asynchronously during the same async_fiber_epoch_.
+  unsigned async_streak_len_ = 0;
+  uint64_t async_fiber_epoch_ = 0;
 
   BreakerCb breaker_cb_;
 
