@@ -108,16 +108,26 @@ bool OutgoingMigration::ChangeState(MigrationState new_state) {
 
 void OutgoingMigration::Finish(bool is_error) {
   const auto new_state = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
-  if (ChangeState(new_state)) {
-    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-      if (const auto* shard = EngineShard::tlocal(); shard) {
-        auto& flow = slot_migrations_[shard->shard_id()];
-        if (flow != nullptr) {
-          flow->Cancel();
-        }
-      }
-    });
+  if (!ChangeState(new_state)) {
+    return;
   }
+
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      while (true) {
+        auto& flow = slot_migrations_[shard->shard_id()];
+        if (flow == nullptr) {
+          // We must wait for `flow` to initialize so that we can Cancel() it, otherwise it won't
+          // be cancelled.
+          LOG_EVERY_N(INFO, 100) << "Waiting for flow creation before cancelling it";
+          ThisFiber::SleepFor(100ms);
+          continue;
+        }
+        flow->Cancel();
+        break;
+      }
+    }
+  });
 }
 
 MigrationState OutgoingMigration::GetState() const {
