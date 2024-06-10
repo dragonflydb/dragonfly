@@ -186,6 +186,8 @@ struct ConnectionState {
   // If seq_num == caching_seq_num + 1 then we know that we should Track().
   class ClientTracking {
    public:
+    enum Options : uint8_t { NONE, OPTIN, OPTOUT };
+
     // Sets to true when CLIENT TRACKING is ON
     void SetClientTracking(bool is_on) {
       tracking_enabled_ = is_on;
@@ -196,9 +198,9 @@ struct ConnectionState {
       ++seq_num_;
     }
 
-    // Set if OPTIN subcommand is used in CLIENT TRACKING
-    void SetOptin(bool optin) {
-      optin_ = optin;
+    // Set if OPTIN/OPTOUT subcommand is used in CLIENT TRACKING
+    void SetOption(Options option) {
+      option_ = option;
     }
 
     // Check if the keys should be tracked. Result adheres to the state machine described above.
@@ -219,10 +221,14 @@ struct ConnectionState {
       caching_seq_num_ = 0;
     }
 
+    bool HasOption(Options option) const {
+      return option_ == option;
+    }
+
    private:
     // a flag indicating whether the client has turned on client tracking.
     bool tracking_enabled_ = false;
-    bool optin_ = false;
+    Options option_ = NONE;
     // sequence number
     size_t seq_num_ = 0;
     size_t caching_seq_num_ = 0;
