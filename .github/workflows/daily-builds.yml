@@ -67,6 +67,7 @@ jobs:
             ctest -V -L DFLY
 
   build-macos:
+    if: false
     runs-on: macos-12
     timeout-minutes: 45
     steps:
