@@ -118,7 +118,7 @@ bool BlockingController::DbWatchTable::AddAwakeEvent(string_view key) {
 }
 
 // Removes tx from its watch queues if tx appears there.
-void BlockingController::FinalizeWatched(const ShardArgs& args, Transaction* tx) {
+void BlockingController::FinalizeWatched(Keys keys, Transaction* tx) {
   DCHECK(tx);
   VLOG(1) << "FinalizeBlocking [" << owner_->shard_id() << "]" << tx->DebugId();
 
@@ -135,7 +135,7 @@ void BlockingController::FinalizeWatched(const ShardArgs& args, Transaction* tx)
 
   // Add keys of processed transaction so we could awake the next one in the queue
   // in case those keys still exist.
-  for (string_view key : args) {
+  for (string_view key : base::it::Wrap(facade::kToSV, keys)) {
     bool removed_awakened = wt.UnwatchTx(key, tx);
     CHECK(!removed_awakened || removed)
         << tx->DebugId() << " " << key << " " << tx->DEBUG_GetLocalMask(owner_->shard_id());
@@ -197,8 +197,7 @@ void BlockingController::NotifyPending() {
   awakened_indices_.clear();
 }
 
-void BlockingController::AddWatched(const ShardArgs& watch_keys, KeyReadyChecker krc,
-                                    Transaction* trans) {
+void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* trans) {
   auto [dbit, added] = watched_dbs_.emplace(trans->GetDbIndex(), nullptr);
   if (added) {
     dbit->second.reset(new DbWatchTable);
@@ -206,7 +205,7 @@ void BlockingController::AddWatched(const ShardArgs& watch_keys, KeyReadyChecker
 
   DbWatchTable& wt = *dbit->second;
 
-  for (auto key : watch_keys) {
+  for (auto key : base::it::Wrap(facade::kToSV, watch_keys)) {
     auto [res, inserted] = wt.queue_map.emplace(key, nullptr);
     if (inserted) {
       res->second.reset(new WatchQueue);

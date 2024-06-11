@@ -53,12 +53,7 @@ void CapturingReplyBuilder::SendSimpleStrArr(StrSpan arr) {
   SKIP_LESS(ReplyMode::FULL);
   DCHECK_EQ(current_.index(), 0u);
 
-  WrappedStrSpan warr{arr};
-  vector<string> sarr(warr.Size());
-  for (unsigned i = 0; i < warr.Size(); i++)
-    sarr[i] = warr[i];
-
-  Capture(StrArrPayload{true, ARRAY, std::move(sarr)});
+  Capture(StrArrPayload{true, ARRAY, {arr.begin(), arr.end()}});
 }
 
 void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
@@ -66,12 +61,7 @@ void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
   DCHECK_EQ(current_.index(), 0u);
 
   // TODO: 1. Allocate all strings at once 2. Allow movable types
-  WrappedStrSpan warr{arr};
-  vector<string> sarr(warr.Size());
-  for (unsigned i = 0; i < warr.Size(); i++)
-    sarr[i] = warr[i];
-
-  Capture(StrArrPayload{false, type, std::move(sarr)});
+  Capture(StrArrPayload{false, type, {arr.begin(), arr.end()}});
 }
 
 void CapturingReplyBuilder::SendNull() {

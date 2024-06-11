@@ -98,6 +98,7 @@ class StringSet : public DenseSet {
   }
 
   uint32_t Scan(uint32_t, const std::function<void(sds)>&) const;
+
   iterator Find(std::string_view member) {
     return iterator{FindIt(&member, 1)};
   }

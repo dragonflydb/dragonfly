@@ -279,7 +279,7 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
   std::vector<User::UpdateRequest> requests;
 
   for (auto& cmds : *materialized) {
-    auto req = ParseAclSetUser<std::vector<std::string_view>&>(cmds, *cmd_registry_, true);
+    auto req = ParseAclSetUser(cmds, *cmd_registry_, true);
     if (std::holds_alternative<ErrorReply>(req)) {
       auto error = std::move(std::get<ErrorReply>(req));
       LOG(WARNING) << "Error while parsing aclfile: " << error.ToSv();

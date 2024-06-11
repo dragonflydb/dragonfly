@@ -774,13 +774,13 @@ OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
 
 // Retruns array of string lengths after a successful operation.
 OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, string_view path,
-                                       JsonPathV2 expression, const vector<string_view>& strs) {
+                                       JsonPathV2 expression, facade::ArgRange strs) {
   vector<OptSizeT> vec;
   OpStatus status;
   auto cb = [&](const auto&, JsonType* val) {
     if (val->is_string()) {
       string new_val = val->as_string();
-      for (auto& str : strs) {
+      for (string_view str : strs) {
         new_val += str;
       }
 
@@ -1783,14 +1783,11 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
 
   JsonPathV2 expression = PARSE_PATHV2(path);
-
-  vector<string_view> strs;
-  for (size_t i = 2; i < args.size(); ++i) {
-    strs.emplace_back(ArgS(args, i));
-  }
+  auto strs = args.subspan(2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrAppend(t->GetOpArgs(shard), key, path, std::move(expression), strs);
+    return OpStrAppend(t->GetOpArgs(shard), key, path, std::move(expression),
+                       facade::ArgRange{strs});
   };
 
   Transaction* trans = cntx->transaction;

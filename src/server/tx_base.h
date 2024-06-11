@@ -19,7 +19,7 @@ using DbIndex = uint16_t;
 using ShardId = uint16_t;
 using LockFp = uint64_t;  // a key fingerprint used by the LockTable.
 
-using ArgSlice = absl::Span<const std::string_view>;
+using facade::ArgSlice;
 
 constexpr DbIndex kInvalidDbId = DbIndex(-1);
 constexpr ShardId kInvalidSid = ShardId(-1);
@@ -157,6 +157,8 @@ class ShardArgs {
       return index_it_->first + delta_;
     }
   };
+
+  using const_iterator = Iterator;
 
   ShardArgs(facade::CmdArgList fa, absl::Span<const IndexSlice> s) : slice_(ArgsIndexPair(fa, s)) {
   }

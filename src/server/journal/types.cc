@@ -9,7 +9,6 @@
 namespace dfly::journal {
 
 using namespace std;
-using facade::ToSV;
 
 void AppendPrefix(string_view cmd, string* dest) {
   absl::StrAppend(dest, ", cmd='");
@@ -27,7 +26,7 @@ template <typename C> string Concat(const C& list) {
   string res;
   for (auto arg : list) {
     absl::StrAppend(&res, "'");
-    absl::StrAppend(&res, ToSV(arg));
+    absl::StrAppend(&res, facade::ToSV(arg));
     absl::StrAppend(&res, "',");
   }
   return res;

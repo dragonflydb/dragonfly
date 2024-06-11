@@ -1604,7 +1604,7 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
   return count;
 }
 
-OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, ArgSlice members) {
+OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange members) {
   auto& db_slice = op_args.shard->db_slice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
@@ -1649,20 +1649,20 @@ OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view mem
   return *res;
 }
 
-OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key, ArgSlice members) {
+OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
+                                  facade::ArgRange members) {
   auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
-  MScoreResponse scores(members.size());
+  // TODO
+  MScoreResponse scores(0);
 
   const detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
   sds& tmp_str = op_args.shard->tmp_str1;
 
-  for (size_t i = 0; i < members.size(); i++) {
-    const auto& m = members[i];
-
-    tmp_str = sdscpylen(tmp_str, m.data(), m.size());
+  for (auto [i, member] : base::it::WithIndex(members.Range())) {
+    tmp_str = sdscpylen(tmp_str, member.data(), member.size());
     scores[i] = GetZsetScore(robj_wrapper, tmp_str);
   }
 
@@ -2362,12 +2362,7 @@ void ZSetFamily::ZRemRangeByLex(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZRem(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-
-  absl::InlinedVector<string_view, 8> members(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    members[i - 1] = ArgS(args, i);
-  }
-
+  auto members = args.subspan(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, members);
   };
@@ -2636,13 +2631,8 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
 
 OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-
-  absl::InlinedVector<string_view, 8> members(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    members[i - 1] = ArgS(args, i);
-  }
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto members = args.subspan(1);
+  auto cb = [key, members](Transaction* t, EngineShard* shard) {
     return OpMScore(t->GetOpArgs(shard), key, members);
   };
 
