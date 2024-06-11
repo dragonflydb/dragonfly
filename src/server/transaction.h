@@ -172,7 +172,7 @@ class Transaction {
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
   explicit Transaction(const Transaction* parent, ShardId shard_id,
-                       std::optional<cluster::SlotId> slot_id, bool is_script_stub = false);
+                       std::optional<cluster::SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);

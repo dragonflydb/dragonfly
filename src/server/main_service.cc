@@ -1338,13 +1338,6 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return false;
   }
 
-  // We need to run manually the tracking callback for stub transactions
-  // in lua scripts because the flow internally is different and they are skipped
-  // leading to missed notifications
-  if (trans && trans->IsUnderScriptStub()) {
-    trans->MaybeInvokeTrackingCb();
-  }
-
   auto cid_name = cid->name();
   if ((!trans && cid_name != "MULTI") || (trans && !trans->IsMulti())) {
     // Each time we execute a command we need to increase the sequence number in
@@ -1987,9 +1980,8 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
     tx->PrepareMultiForScheduleSingleHop(*sid, tx->GetDbIndex(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
-      const bool is_script_stub = true;
       boost::intrusive_ptr<Transaction> stub_tx =
-          new Transaction{tx, *sid, slot_checker.GetUniqueSlotId(), is_script_stub};
+          new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};
       cntx->transaction = stub_tx.get();
 
       result = interpreter->RunFunction(eval_args.sha, &error);

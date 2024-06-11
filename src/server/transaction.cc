@@ -140,12 +140,11 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
 }
 
 Transaction::Transaction(const Transaction* parent, ShardId shard_id,
-                         std::optional<cluster::SlotId> slot_id, bool is_script_stub)
+                         std::optional<cluster::SlotId> slot_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
-      unique_shard_id_{shard_id},
-      is_script_stub_{is_script_stub} {
+      unique_shard_id_{shard_id} {
   if (parent->multi_) {
     multi_->mode = parent->multi_->mode;
   } else {
@@ -1251,6 +1250,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto result = cb(this, shard);
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard, result);
+  MaybeInvokeTrackingCb();
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;
