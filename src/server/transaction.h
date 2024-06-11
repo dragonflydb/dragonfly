@@ -364,10 +364,6 @@ class Transaction {
     tracking_cb_ = std::move(f);
   }
 
-  bool IsUnderScriptStub() const {
-    return is_script_stub_;
-  }
-
   void MaybeInvokeTrackingCb() {
     if (tracking_cb_) {
       tracking_cb_(this);
@@ -651,7 +647,6 @@ class Transaction {
   } stats_;
 
   std::function<void(Transaction* trans)> tracking_cb_;
-  bool is_script_stub_ = false;
 
  private:
   struct TLTmpSpace {
