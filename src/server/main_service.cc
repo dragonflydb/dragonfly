@@ -1413,10 +1413,6 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   for (auto args : args_list) {
     ToUpper(&args[0]);
     const auto [cid, tail_args] = FindCmd(args);
-    // disable squashing for client commands
-    if (cid && cid->name() == "CLIENT") {
-      break;
-    }
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible

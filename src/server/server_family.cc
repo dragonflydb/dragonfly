@@ -462,7 +462,7 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
 
   CmdArgParser parser{args};
-  if (!parser.HasAtLeast(1) || args.size() > 2)
+  if (!parser.HasAtLeast(1) || args.size() > 3)
     return cntx->SendError(kSyntaxErr);
 
   bool is_on = false;
@@ -474,11 +474,23 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kSyntaxErr);
   }
 
+  bool noloop = false;
+
   if (parser.HasNext()) {
     if (parser.Check("OPTIN").IgnoreCase()) {
       option = Tracking::OPTIN;
     } else if (parser.Check("OPTOUT").IgnoreCase()) {
       option = Tracking::OPTOUT;
+    } else if (parser.Check("NOLOOP").IgnoreCase()) {
+      noloop = true;
+    } else {
+      return cntx->SendError(kSyntaxErr);
+    }
+  }
+
+  if (parser.HasNext()) {
+    if (!noloop && parser.Check("NOLOOP").IgnoreCase()) {
+      noloop = true;
     } else {
       return cntx->SendError(kSyntaxErr);
     }
@@ -487,8 +499,10 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
   if (is_on) {
     ++cntx->subscriptions;
   }
+
   cntx->conn_state.tracking_info_.SetClientTracking(is_on);
   cntx->conn_state.tracking_info_.SetOption(option);
+  cntx->conn_state.tracking_info_.SetNoLoop(noloop);
   return cntx->SendOk();
 }
 
