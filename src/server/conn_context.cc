@@ -270,7 +270,12 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
     return false;
   }
 
-  return !optin_ || (seq_num_ == (1 + caching_seq_num_));
+  if (option_ == NONE) {
+    return true;
+  }
+
+  const bool match = (seq_num_ == (1 + caching_seq_num_));
+  return option_ == OPTIN ? match : !match;
 }
 
 }  // namespace dfly

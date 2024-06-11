@@ -212,6 +212,14 @@ TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
   resp = Run({"CLIENT", "TRACKING", "ON"});
   EXPECT_THAT(resp.GetString(), "OK");
 
+  resp = Run({"CLIENT", "CACHING", "YES"});
+  EXPECT_THAT(
+      resp, ErrArg("ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode"));
+
+  resp = Run({"CLIENT", "CACHING", "NO"});
+  EXPECT_THAT(
+      resp, ErrArg("ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode"));
+
   // case 3. turn off client tracking
   resp = Run({"CLIENT", "TRACKING", "OFF"});
   EXPECT_THAT(resp.GetString(), "OK");
@@ -348,7 +356,6 @@ TEST_F(ServerFamilyTest, ClientTrackingMultiOptin) {
   Run({"SET", "TMP", "10"});
   Run({"CLIENT", "CACHING", "YES"});
   Run({"GET", "FOO"});
-  Run({"CLIENT", "CACHING", "NO"});
   Run({"GET", "BAR"});
   Run({"EXEC"});
 
@@ -358,7 +365,51 @@ TEST_F(ServerFamilyTest, ClientTrackingMultiOptin) {
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 5);
   Run({"SET", "BAR", "10"});
   Run({"GET", "BAR"});
-  EXPECT_EQ(InvalidationMessagesLen("IO0"), 5);
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 6);
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingOptout) {
+  Run({"HELLO", "3"});
+  // Check stickiness
+  Run({"CLIENT", "TRACKING", "ON", "OPTOUT"});
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "BAR"});
+  Run({"GET", "BAR"});
+  Run({"SET", "BAR", "FOO"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+
+  // Switch off tracking for a single command
+  Run({"CLIENT", "CACHING", "NO"});
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "BAR"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+}
+
+TEST_F(ServerFamilyTest, ClientTrackingMultiOptout) {
+  Run({"HELLO", "3"});
+  // Check stickiness
+  Run({"CLIENT", "TRACKING", "ON", "OPTOUT"});
+
+  Run({"MULTI"});
+  Run({"GET", "FOO"});
+  Run({"SET", "TMP", "10"});
+  Run({"GET", "FOOBAR"});
+  Run({"EXEC"});
+
+  Run({"SET", "FOO", "10"});
+  Run({"SET", "FOOBAR", "10"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
+
+  // CACHING enclosed in MULTI
+  Run({"MULTI"});
+  Run({"CLIENT", "CACHING", "NO"});
+  Run({"GET", "TMP"});
+  Run({"GET", "TMP_TMP"});
+  Run({"SET", "TMP", "10"});
+  Run({"SET", "TMP_TMP", "10"});
+  Run({"EXEC"});
+
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 2);
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingUpdateKey) {
