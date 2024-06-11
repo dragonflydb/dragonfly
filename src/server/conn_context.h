@@ -210,6 +210,10 @@ struct ConnectionState {
       option_ = option;
     }
 
+    void SetNoLoop(bool noloop) {
+      noloop_ = noloop;
+    }
+
     // Check if the keys should be tracked. Result adheres to the state machine described above.
     bool ShouldTrackKeys() const;
 
@@ -235,6 +239,7 @@ struct ConnectionState {
    private:
     // a flag indicating whether the client has turned on client tracking.
     bool tracking_enabled_ = false;
+    bool noloop_ = false;
     Options option_ = NONE;
     // sequence number
     size_t seq_num_ = 0;

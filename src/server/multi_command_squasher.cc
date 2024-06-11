@@ -80,7 +80,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
       (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
 
-  if (cmd->Cid()->name() == "CLIENT") {
+  if (cmd->Cid()->name() == "CLIENT" || cntx_->conn_state.tracking_info_.IsTrackingOn()) {
     return SquashResult::NOT_SQUASHED;
   }
 
