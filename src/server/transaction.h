@@ -364,6 +364,12 @@ class Transaction {
     tracking_cb_ = std::move(f);
   }
 
+  void MaybeInvokeTrackingCb() {
+    if (tracking_cb_) {
+      tracking_cb_(this);
+    }
+  }
+
   // Remove once BZPOP is stabilized
   std::string DEBUGV18_BlockInfo() {
     return "claimed=" + std::to_string(blocking_barrier_.IsClaimed()) +

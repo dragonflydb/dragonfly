@@ -6,6 +6,7 @@
 
 #include <absl/strings/match.h>
 
+#include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -447,4 +448,21 @@ TEST_F(ServerFamilyTest, ClientTrackingNonTransactionalBug) {
 
   Run({"CLUSTER", "SLOTS"});
 }
+
+TEST_F(ServerFamilyTest, ClientTrackingLuaBug) {
+  Run({"HELLO", "3"});
+  // Check stickiness
+  Run({"CLIENT", "TRACKING", "ON"});
+  using namespace std::string_literals;
+  std::string eval = R"(redis.call('get', 'foo'); redis.call('set', 'foo', 'bar'); )";
+  Run({"EVAL", absl::StrCat(eval, "return 1"), "1", "foo"});
+  Run({"PING"});
+
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+  absl::StrAppend(&eval, R"(redis.call('get', 'oof'); redis.call('set', 'oof', 'bar'); return 1)");
+  Run({"EVAL", eval, "2", "foo", "oof"});
+  Run({"PING"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 3);
+}
+
 }  // namespace dfly

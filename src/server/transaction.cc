@@ -665,9 +665,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
-    if (tracking_cb_) {
-      tracking_cb_(this);
-    }
+    MaybeInvokeTrackingCb();
   }
 }
 
@@ -1252,6 +1250,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto result = cb(this, shard);
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard, result);
+  MaybeInvokeTrackingCb();
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;
