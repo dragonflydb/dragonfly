@@ -186,7 +186,14 @@ struct ConnectionState {
   // If seq_num == caching_seq_num + 1 then we know that we should Track().
   class ClientTracking {
    public:
-    enum Options : uint8_t { NONE, OPTIN, OPTOUT };
+    enum Options : uint8_t {
+      NONE,   // NO subcommand, that is no OPTIN and no OUTPUT was used when CLIENT TRACKING was
+              // called. We track all keys of read commands.
+      OPTIN,  // OPTIN was used with CLIENT TRACKING. We only track keys of read commands preceded
+              // by CACHING TRUE command.
+      OPTOUT  // OPTOUT was used with CLIENT TRACKING. We track all keys of read commands except the
+              // ones preceded by a CACHING FALSE command.
+    };
 
     // Sets to true when CLIENT TRACKING is ON
     void SetClientTracking(bool is_on) {

@@ -274,13 +274,8 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
     return true;
   }
 
-  if (option_ == OPTIN) {
-    return seq_num_ == (1 + caching_seq_num_);
-  }
-
-  // Inverse because OPTOUT is the opposite of OPTIN so when these are equal
-  // it means we should not track
-  return !(seq_num_ == (1 + caching_seq_num_));
+  const bool match = (seq_num_ == (1 + caching_seq_num_));
+  return option_ == OPTIN ? match : !match;
 }
 
 }  // namespace dfly
