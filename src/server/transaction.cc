@@ -140,11 +140,12 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
 }
 
 Transaction::Transaction(const Transaction* parent, ShardId shard_id,
-                         std::optional<cluster::SlotId> slot_id)
+                         std::optional<cluster::SlotId> slot_id, bool is_script_stub)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
-      unique_shard_id_{shard_id} {
+      unique_shard_id_{shard_id},
+      is_script_stub_{is_script_stub} {
   if (parent->multi_) {
     multi_->mode = parent->multi_->mode;
   } else {
@@ -665,9 +666,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
-    if (tracking_cb_) {
-      tracking_cb_(this);
-    }
+    MaybeInvokeTrackingCb();
   }
 }
 

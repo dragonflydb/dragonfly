@@ -172,7 +172,7 @@ class Transaction {
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
   explicit Transaction(const Transaction* parent, ShardId shard_id,
-                       std::optional<cluster::SlotId> slot_id);
+                       std::optional<cluster::SlotId> slot_id, bool is_script_stub = false);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(DbIndex index, CmdArgList args);
@@ -362,6 +362,16 @@ class Transaction {
 
   void SetTrackingCallback(std::function<void(Transaction* trans)> f) {
     tracking_cb_ = std::move(f);
+  }
+
+  bool IsUnderScriptStub() const {
+    return is_script_stub_;
+  }
+
+  void MaybeInvokeTrackingCb() {
+    if (tracking_cb_) {
+      tracking_cb_(this);
+    }
   }
 
   // Remove once BZPOP is stabilized
@@ -641,6 +651,7 @@ class Transaction {
   } stats_;
 
   std::function<void(Transaction* trans)> tracking_cb_;
+  bool is_script_stub_ = false;
 
  private:
   struct TLTmpSpace {

@@ -447,4 +447,17 @@ TEST_F(ServerFamilyTest, ClientTrackingNonTransactionalBug) {
 
   Run({"CLUSTER", "SLOTS"});
 }
+
+TEST_F(ServerFamilyTest, ClientTrackingLuaBug) {
+  Run({"HELLO", "3"});
+  // Check stickiness
+  Run({"CLIENT", "TRACKING", "ON"});
+  using namespace std::string_literals;
+  Run({"EVAL", R"(redis.call('get', 'foo'); redis.call('set', 'foo', 'bar'); return 1)", "1",
+       "foo"});
+  Run({"PING"});
+
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 1);
+}
+
 }  // namespace dfly
