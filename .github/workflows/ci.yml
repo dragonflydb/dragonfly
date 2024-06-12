@@ -57,6 +57,8 @@ jobs:
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
+      # Seems that docker by default prohibits running iouring syscalls
+      options: --security-opt seccomp=unconfined
       volumes:
         - /:/hostroot
       options: --sysctl "net.ipv6.conf.all.disable_ipv6=0"
