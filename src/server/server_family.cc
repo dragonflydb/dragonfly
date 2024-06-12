@@ -456,27 +456,87 @@ void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, Connec
 }
 
 void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() != 1)
-    return cntx->SendError(kSyntaxErr);
-
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (!rb->IsResp3())
     return cntx->SendError(
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
 
-  ToUpper(&args[0]);
-  string_view state = ArgS(args, 0);
-  bool is_on;
-  if (state == "ON") {
+  CmdArgParser parser{args};
+  if (!parser.HasAtLeast(1) || args.size() > 3)
+    return cntx->SendError(kSyntaxErr);
+
+  bool is_on = false;
+  using Tracking = ConnectionState::ClientTracking;
+  Tracking::Options option = Tracking::NONE;
+  if (parser.Check("ON").IgnoreCase()) {
     is_on = true;
-  } else if (state == "OFF") {
-    is_on = false;
+  } else if (!parser.Check("OFF").IgnoreCase()) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  bool noloop = false;
+
+  if (parser.HasNext()) {
+    if (parser.Check("OPTIN").IgnoreCase()) {
+      option = Tracking::OPTIN;
+    } else if (parser.Check("OPTOUT").IgnoreCase()) {
+      option = Tracking::OPTOUT;
+    } else if (parser.Check("NOLOOP").IgnoreCase()) {
+      noloop = true;
+    } else {
+      return cntx->SendError(kSyntaxErr);
+    }
+  }
+
+  if (parser.HasNext()) {
+    if (!noloop && parser.Check("NOLOOP").IgnoreCase()) {
+      noloop = true;
+    } else {
+      return cntx->SendError(kSyntaxErr);
+    }
+  }
+
+  if (is_on) {
+    ++cntx->subscriptions;
+  }
+
+  cntx->conn_state.tracking_info_.SetClientTracking(is_on);
+  cntx->conn_state.tracking_info_.SetOption(option);
+  cntx->conn_state.tracking_info_.SetNoLoop(noloop);
+  return cntx->SendOk();
+}
+
+void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (!rb->IsResp3())
+    return cntx->SendError(
+        "Client caching is currently not supported for RESP2. Please use RESP3.");
+
+  if (args.size() != 1) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  using Tracking = ConnectionState::ClientTracking;
+  CmdArgParser parser{args};
+  if (parser.Check("YES").IgnoreCase()) {
+    if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
+      return cntx->SendError(
+          "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
+    }
+  } else if (parser.Check("NO").IgnoreCase()) {
+    if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTOUT)) {
+      return cntx->SendError(
+          "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
+    }
+    cntx->conn_state.tracking_info_.ResetCachingSequenceNumber();
   } else {
     return cntx->SendError(kSyntaxErr);
   }
 
-  cntx->conn()->SetClientTrackingSwitch(is_on);
-  return cntx->SendOk();
+  bool is_multi = cntx->transaction && cntx->transaction->IsMulti();
+  cntx->conn_state.tracking_info_.SetCachingSequenceNumber(is_multi);
+
+  cntx->SendOk();
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, ConnectionContext* cntx) {
@@ -770,10 +830,14 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
   string flag_dir = GetFlag(FLAGS_dir);
   if (IsCloudPath(flag_dir)) {
+#ifdef WITH_AWS
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
     snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
         absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
         absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
+#else
+    LOG(ERROR) << "Compiled without AWS support";
+#endif
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -949,10 +1013,6 @@ void ServerFamily::SnapshotScheduling() {
   const std::optional<cron::cronexpr> cron_expr = InferSnapshotCronExpr();
   if (!cron_expr) {
     return;
-  }
-  if (shard_set->IsTieringEnabled()) {
-    LOG(ERROR) << "Snapshot not allowed when using tiering.  Exiting..";
-    exit(1);
   }
 
   const auto loading_check_interval = std::chrono::seconds(10);
@@ -1399,10 +1459,6 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
                                                Transaction* trans, bool ignore_state) {
-  if (shard_set->IsTieringEnabled()) {
-    return GenericError{make_error_code(errc::operation_not_permitted),
-                        StrCat("Can not save database in tiering mode")};
-  }
   auto state = service_.GetGlobalState();
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
   if (!ignore_state && (state != GlobalState::ACTIVE)) {
@@ -1541,7 +1597,7 @@ void ServerFamily::SendInvalidationMessages() const {
     facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
     if (fc) {
       ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
-      if (cntx->conn()->IsTrackingOn()) {
+      if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
         facade::Connection::InvalidationMessage x;
         x.invalidate_due_to_flush = true;
         cntx->conn()->SendInvalidationMessageAsync(x);
@@ -1632,6 +1688,8 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientTracking(sub_args, cntx);
   } else if (sub_cmd == "KILL") {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), cntx);
+  } else if (sub_cmd == "CACHING") {
+    return ClientCaching(sub_args, cntx);
   }
 
   if (sub_cmd == "SETINFO") {
@@ -2071,6 +2129,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_commands_processed", conn_stats.command_cnt);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
+    append("total_pipelined_squashed_commands", conn_stats.squashed_commands);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);

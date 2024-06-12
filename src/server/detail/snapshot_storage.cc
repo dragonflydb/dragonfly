@@ -5,21 +5,25 @@
 
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
+
+#ifdef WITH_AWS
 #include <aws/core/auth/AWSCredentialsProvider.h>
 #include <aws/s3/S3Client.h>
 #include <aws/s3/model/ListObjectsV2Request.h>
 #include <aws/s3/model/PutObjectRequest.h>
+
+#include "util/aws/aws.h"
+#include "util/aws/credentials_provider_chain.h"
+#include "util/aws/s3_endpoint_provider.h"
+#include "util/aws/s3_read_file.h"
+#include "util/aws/s3_write_file.h"
+#endif
 
 #include <regex>
 
 #include "base/logging.h"
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
-#include "util/aws/aws.h"
-#include "util/aws/credentials_provider_chain.h"
-#include "util/aws/s3_endpoint_provider.h"
-#include "util/aws/s3_read_file.h"
-#include "util/aws/s3_write_file.h"
 #include "util/fibers/fiber_file.h"
 
 namespace dfly {
@@ -173,6 +177,7 @@ io::Result<std::vector<std::string>, GenericError> FileSnapshotStorage::LoadPath
   return paths;
 }
 
+#ifdef WITH_AWS
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
                                            bool ec2_metadata, bool sign_payload) {
   shard_set->pool()->GetNextProactor()->Await([&] {
@@ -375,6 +380,7 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
   } while (!continuation_token.empty());
   return keys;
 }
+#endif
 
 #ifdef __linux__
 io::Result<size_t> LinuxWriteWrapper::WriteSome(const iovec* v, uint32_t len) {

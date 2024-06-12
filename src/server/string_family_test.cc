@@ -209,6 +209,16 @@ TEST_F(StringFamilyTest, SetHugeKey) {
   Run({"del", key});
 }
 
+TEST_F(StringFamilyTest, MSetLong) {
+  vector<string> command({"mset"});
+  for (unsigned i = 0; i < 12000; ++i) {
+    command.push_back(StrCat("key", i));
+    command.push_back(StrCat("val", i));
+  }
+  auto resp = Run(absl::MakeSpan(command));
+  EXPECT_EQ(resp, "OK");
+}
+
 TEST_F(StringFamilyTest, MGetSet) {
   Run({"mset", "z", "0"});         // single key
   auto resp = Run({"mget", "z"});  // single key

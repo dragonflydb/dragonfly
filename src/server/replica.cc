@@ -23,7 +23,6 @@ extern "C" {
 #include <utility>
 
 #include "base/logging.h"
-#include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "server/error.h"
 #include "server/journal/executor.h"

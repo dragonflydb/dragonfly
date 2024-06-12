@@ -141,8 +141,7 @@ bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& 
     return false;
   }
 
-  DbContext context{.db_index = index, .time_now_ms = GetCurrentTimeMs()};
-  auto res = db_slice.AddNew(context, key, std::move(pv), expire_ms);
+  auto res = db_slice.AddNew(DbContext{index, GetCurrentTimeMs()}, key, std::move(pv), expire_ms);
   return res.ok();
 }
 
@@ -540,7 +539,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   }
 
   cursor >>= 10;
-  DbContext db_cntx{.db_index = cntx->conn_state.db_index, .time_now_ms = GetCurrentTimeMs()};
+  DbContext db_cntx{cntx->conn_state.db_index, GetCurrentTimeMs()};
 
   do {
     ess->Await(sid, [&] {
@@ -1529,7 +1528,7 @@ void GenericFamily::RandomKey(CmdArgList args, ConnectionContext* cntx) {
 
   absl::BitGen bitgen;
   atomic_size_t candidates_counter{0};
-  DbContext db_cntx{.db_index = cntx->conn_state.db_index};
+  DbContext db_cntx{cntx->conn_state.db_index, GetCurrentTimeMs()};
   ScanOpts scan_opts;
   scan_opts.limit = 3;  // number of entries per shard
   std::vector<StringVec> candidates_collection(shard_set->size());

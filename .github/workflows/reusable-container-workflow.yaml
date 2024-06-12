@@ -150,7 +150,7 @@ jobs:
 
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
         name: Build release image for arm64
-        uses: docker/build-push-action@v3
+        uses: docker/build-push-action@v5
         with:
             context: .
             platforms: linux/arm64

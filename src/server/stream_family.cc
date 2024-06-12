@@ -2368,7 +2368,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       // We do not use transactional xemantics for xinfo since it's informational command.
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
+        DbContext db_context{cntx->db_index(), GetCurrentTimeMs()};
         return OpListGroups(db_context, key, shard);
       };
 
@@ -2437,8 +2437,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
-        return OpStreams(db_context, key, shard, full, count);
+        return OpStreams(DbContext{cntx->db_index(), GetCurrentTimeMs()}, key, shard, full, count);
       };
 
       auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -2566,9 +2565,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
       auto cb = [&]() {
-        EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{.db_index = cntx->db_index(), .time_now_ms = GetCurrentTimeMs()};
-        return OpConsumers(db_context, shard, stream_name, group_name);
+        return OpConsumers(DbContext{cntx->db_index(), GetCurrentTimeMs()}, EngineShard::tlocal(),
+                           stream_name, group_name);
       };
 
       OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));
@@ -3075,14 +3073,23 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
   int resolved_streams = 0;
   vector<RecordVec> results(opts->stream_ids.size());
   for (size_t i = 0; i < xread_resp.size(); i++) {
-    ShardId sid = tx->GetUniqueShardCnt() > 1 ? i : tx->GetUniqueShard();
-    vector<RecordVec> sub_results = xread_resp[i];
+    vector<RecordVec>& sub_results = xread_resp[i];
+    ShardId sid = xread_resp.size() < shard_set->size() ? tx->GetUniqueShard() : i;
+    if (!tx->IsActive(sid)) {
+      DCHECK(sub_results.empty());
+      continue;
+    }
 
-    for (size_t j = 0; j < sub_results.size(); j++) {
+    ShardArgs shard_args = cntx->transaction->GetShardArgs(sid);
+    DCHECK_EQ(shard_args.Size(), sub_results.size());
+
+    auto shard_args_it = shard_args.begin();
+    for (size_t j = 0; j < sub_results.size(); j++, ++shard_args_it) {
       if (sub_results[j].empty())
         continue;
+
       resolved_streams++;
-      results[tx->ReverseArgIndex(sid, j) - opts->streams_arg] = std::move(sub_results[j]);
+      results[shard_args_it.index() - opts->streams_arg] = std::move(sub_results[j]);
     }
   }
 
@@ -3336,7 +3343,7 @@ constexpr uint32_t kXAutoClaim = WRITE | STREAM | FAST;
 void StreamFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
-  constexpr auto kReadFlags = CO::READONLY | CO::BLOCKING | CO::REVERSE_MAPPING | CO::VARIADIC_KEYS;
+  constexpr auto kReadFlags = CO::READONLY | CO::BLOCKING | CO::VARIADIC_KEYS;
   *registry << CI{"XADD", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::kXAdd}.HFUNC(XAdd)
             << CI{"XCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
             << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)

@@ -1,4 +1,5 @@
 import pytest
+import logging
 import os
 import glob
 import asyncio
@@ -7,6 +8,7 @@ import redis
 from redis import asyncio as aioredis
 from pathlib import Path
 import boto3
+from .instance import RedisServer
 
 from . import dfly_args
 from .utility import wait_available_async, chunked, is_saving
@@ -122,6 +124,32 @@ async def test_dbfilenames(
         async with df_server.client() as client:
             await wait_available_async(client)
             assert await StaticSeeder.capture(client) == start_capture
+
+
+@pytest.mark.asyncio
+@dfly_args({**BASIC_ARGS, "proactor_threads": 4, "dbfilename": "test-redis-load-rdb"})
+async def test_redis_load_snapshot(
+    async_client: aioredis.Redis, df_server, redis_local_server: RedisServer, tmp_dir: Path
+):
+    """
+    Test redis server loading dragonfly snapshot rdb format
+    """
+    await StaticSeeder(
+        **LIGHTWEIGHT_SEEDER_ARGS, types=["STRING", "LIST", "SET", "HASH", "ZSET"]
+    ).run(async_client)
+
+    await async_client.execute_command("SAVE", "rdb")
+    dbsize = await async_client.dbsize()
+
+    await async_client.connection_pool.disconnect()
+    df_server.stop()
+
+    redis_local_server.start(dir=tmp_dir, dbfilename="test-redis-load-rdb.rdb")
+    await asyncio.sleep(1)
+    c_master = aioredis.Redis(port=redis_local_server.port)
+    await c_master.ping()
+
+    assert await c_master.dbsize() == dbsize
 
 
 @pytest.mark.slow
@@ -376,3 +404,43 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     while await is_saving(async_client):
         await asyncio.sleep(0.1)
     await async_client.execute_command("SAVE")
+
+
+@dfly_args(
+    {
+        **BASIC_ARGS,
+        "proactor_threads": 4,
+        "dbfilename": "tiered-entries",
+        "tiered_prefix": "/tmp/tiering_test_backing",
+        "tiered_offload_threshold": "0.0",  # ask offloading loop to offload as much as possible
+    }
+)
+async def test_tiered_entries(async_client: aioredis.Redis):
+    """This test makes sure tieried entries are correctly persisted"""
+
+    # With variance 4: 512 - 8192 we include small and large values
+    await StaticSeeder(key_target=5000, data_size=1024, variance=4, types=["STRING"]).run(
+        async_client
+    )
+
+    # Compute the capture, this brings all items back to memory... so we'll wait for offloading
+    start_capture = await StaticSeeder.capture(async_client)
+
+    # Wait until the total_stashes counter stops increasing, meaning offloading finished
+    last_writes, current_writes = 0, -1
+    while last_writes != current_writes:
+        await asyncio.sleep(0.1)
+        last_writes = current_writes
+        current_writes = (await async_client.info("TIERED"))["tiered_total_stashes"]
+
+    # Save + flush + load
+    await async_client.execute_command("SAVE", "DF")
+    assert await async_client.flushall()
+    await async_client.execute_command(
+        "DEBUG",
+        "LOAD",
+        "tiered-entries-summary.dfs",
+    )
+
+    # Compare captures
+    assert await StaticSeeder.capture(async_client) == start_capture

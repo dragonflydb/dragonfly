@@ -465,16 +465,18 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
       continue;
 
     switch (field_info.type) {
-      case SchemaField::TAG:
-        indices_[field_ident] = make_unique<TagIndex>(mr);
-        break;
       case SchemaField::TEXT:
         indices_[field_ident] = make_unique<TextIndex>(mr);
         break;
       case SchemaField::NUMERIC:
         indices_[field_ident] = make_unique<NumericIndex>(mr);
         break;
-      case SchemaField::VECTOR:
+      case SchemaField::TAG: {
+        const auto& tparams = std::get<SchemaField::TagParams>(field_info.special_params);
+        indices_[field_ident] = make_unique<TagIndex>(mr, tparams);
+        break;
+      }
+      case SchemaField::VECTOR: {
         unique_ptr<BaseVectorIndex> vector_index;
 
         DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
@@ -487,6 +489,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
 
         indices_[field_ident] = std::move(vector_index);
         break;
+      }
     }
   }
 }

@@ -8,33 +8,6 @@ from .instance import DflyInstanceFactory
 from .proxy import Proxy
 
 
-class RedisServer:
-    def __init__(self, port):
-        self.port = port
-        self.proc = None
-
-    def start(self):
-        self.proc = subprocess.Popen(
-            [
-                "redis-server-6.2.11",
-                f"--port {self.port}",
-                "--save ''",
-                "--appendonly no",
-                "--protected-mode no",
-                "--repl-diskless-sync yes",
-                "--repl-diskless-sync-delay 0",
-            ]
-        )
-        logging.debug(self.proc.args)
-
-    def stop(self):
-        self.proc.terminate()
-        try:
-            self.proc.wait(timeout=10)
-        except Exception as e:
-            pass
-
-
 # Checks that master redis and dragonfly replica are synced by writing a random key to master
 # and waiting for it to exist in replica. Foreach db in 0..dbcount-1.
 async def await_synced(c_master: aioredis.Redis, c_replica: aioredis.Redis, dbcount=1):
@@ -69,19 +42,6 @@ async def check_data(seeder, replicas, c_replicas):
     for replica, c_replica in zip(replicas, c_replicas):
         await wait_available_async(c_replica)
         assert await seeder.compare(capture, port=replica.port)
-
-
-@pytest.fixture(scope="function")
-def redis_server(port_picker) -> RedisServer:
-    s = RedisServer(port_picker.get_available_port())
-    try:
-        s.start()
-    except FileNotFoundError as e:
-        pytest.skip("Redis server not found")
-        return None
-    time.sleep(1)
-    yield s
-    s.stop()
 
 
 full_sync_replication_specs = [

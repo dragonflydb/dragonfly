@@ -405,6 +405,8 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kClusterDisabled);
   }
 
+  VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
+
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
   args.remove_prefix(1);  // remove subcommand name
@@ -505,11 +507,12 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   lock_guard gu(set_config_mu);
 
-  RemoveOutgoingMigrations(new_config->GetFinishedOutgoingMigrations(tl_cluster_config));
+  VLOG(1) << "Setting new cluster config: " << json_str;
+  auto out_migrations_slots = RemoveOutgoingMigrations(new_config, tl_cluster_config);
   RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
 
-  lock_guard config_update_lk(
-      config_update_mu_);  // to prevent simultaneous update config from outgoing migration
+  // Prevent simultaneous config update from outgoing migration
+  lock_guard config_update_lk(config_update_mu_);
 
   SlotRanges enable_slots, disable_slots;
 
@@ -562,6 +565,10 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
+    deleted_slots.insert(deleted_slots.end(), out_migrations_slots.begin(),
+                         out_migrations_slots.end());
+    LOG_IF(INFO, !deleted_slots.empty())
+        << "Flushing newly unowned slots: " << SlotRange::ToString(deleted_slots);
     DeleteSlots(deleted_slots);
     WriteFlushSlotsToJournal(deleted_slots);
   }
@@ -731,8 +738,11 @@ std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
   return nullptr;
 }
 
-void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& migrations) {
+SlotRanges ClusterFamily::RemoveOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
+                                                   shared_ptr<ClusterConfig> old_config) {
+  auto migrations = new_config->GetFinishedOutgoingMigrations(old_config);
   lock_guard lk(migration_mu_);
+  SlotRanges removed_slots;
   for (const auto& m : migrations) {
     auto it = std::find_if(outgoing_migration_jobs_.begin(), outgoing_migration_jobs_.end(),
                            [&m](const auto& om) {
@@ -742,13 +752,20 @@ void ClusterFamily::RemoveOutgoingMigrations(const std::vector<MigrationInfo>& m
     DCHECK(it != outgoing_migration_jobs_.end());
     DCHECK(it->get() != nullptr);
     OutgoingMigration& migration = *it->get();
-    LOG(INFO) << "Outgoing migration cancelled: slots " << SlotRange::ToString(migration.GetSlots())
-              << " to " << migration.GetHostIp() << ":" << migration.GetPort();
+    const auto& slots = migration.GetSlots();
+    removed_slots.insert(removed_slots.end(), slots.begin(), slots.end());
+    LOG(INFO) << "Outgoing migration cancelled: slots " << SlotRange::ToString(slots) << " to "
+              << migration.GetHostIp() << ":" << migration.GetPort();
     migration.Finish();
     outgoing_migration_jobs_.erase(it);
   }
 
+  // Flush non-owned migrations
+  SlotSet migration_slots(removed_slots);
+  SlotSet removed = migration_slots.GetRemovedSlots(new_config->GetOwnedSlots());
+
   // Flushing of removed slots is done outside this function.
+  return removed.ToSlotRanges();
 }
 
 namespace {
@@ -774,6 +791,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
   // all fibers has migration shared_ptr so we don't need to join it and can erase
   jobs.erase(it);
 
+  // TODO make it outside in one run with other slots that should be flushed
   if (!removed.Empty()) {
     auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
     LOG_IF(WARNING, migration->GetState() == MigrationState::C_FINISHED)

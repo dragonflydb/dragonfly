@@ -265,4 +265,23 @@ void ConnectionState::ExecInfo::ClearWatched() {
   watched_existed = 0;
 }
 
+bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
+  if (!IsTrackingOn()) {
+    return false;
+  }
+
+  if (noloop_ == true) {
+    // Once we implement REDIRECT this should return true since noloop
+    // without it only affects the current connection
+    return false;
+  }
+
+  if (option_ == NONE) {
+    return true;
+  }
+
+  const bool match = (seq_num_ == (1 + caching_seq_num_));
+  return option_ == OPTIN ? match : !match;
+}
+
 }  // namespace dfly

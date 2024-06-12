@@ -180,9 +180,6 @@ class Transaction {
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
 
-  // Map arg_index from GetShardArgs slice to index in original command slice from InitByArgs.
-  size_t ReverseArgIndex(ShardId shard_id, size_t arg_index) const;
-
   // Execute transaction hop. If conclude is true, it is removed from the pending queue.
   void Execute(RunnableType cb, bool conclude);
 
@@ -308,7 +305,7 @@ class Transaction {
   bool IsGlobal() const;
 
   DbContext GetDbContext() const {
-    return DbContext{.db_index = db_index_, .time_now_ms = time_now_ms_};
+    return DbContext{db_index_, time_now_ms_};
   }
 
   DbIndex GetDbIndex() const {
@@ -363,6 +360,16 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
+  void SetTrackingCallback(std::function<void(Transaction* trans)> f) {
+    tracking_cb_ = std::move(f);
+  }
+
+  void MaybeInvokeTrackingCb() {
+    if (tracking_cb_) {
+      tracking_cb_(this);
+    }
+  }
+
   // Remove once BZPOP is stabilized
   std::string DEBUGV18_BlockInfo() {
     return "claimed=" + std::to_string(blocking_barrier_.IsClaimed()) +
@@ -397,8 +404,8 @@ class Transaction {
     // Set when the shard is prepared for another hop. Sync point. Cleared when execution starts.
     std::atomic_bool is_armed = false;
 
-    uint32_t arg_start = 0;  // Subspan in kv_args_ with local arguments.
-    uint32_t arg_count = 0;
+    uint32_t slice_start = 0;  // Subspan in kv_args_ with local arguments.
+    uint32_t slice_count = 0;
 
     // span into kv_fp_
     uint32_t fp_start = 0;
@@ -408,7 +415,7 @@ class Transaction {
     TxQueue::Iterator pq_pos = TxQueue::kEnd;
 
     // Index of key relative to args in shard that the shard was woken up after blocking wait.
-    uint16_t wake_key_pos = UINT16_MAX;
+    uint32_t wake_key_pos = UINT32_MAX;
 
     // Irrational stats purely for debugging purposes.
     struct Stats {
@@ -434,13 +441,13 @@ class Transaction {
     bool concluding = false;
 
     unsigned cmd_seq_num = 0;  // used for debugging purposes.
+    unsigned shard_journal_cnt;
 
     // The shard_journal_write vector variable is used to determine the number of shards
     // involved in a multi-command transaction. This information is utilized by replicas when
     // executing multi-command. For every write to a shard journal, the corresponding index in the
     // vector is marked as true.
     absl::InlinedVector<bool, 4> shard_journal_write;
-    unsigned shard_journal_cnt;
   };
 
   enum CoordinatorState : uint8_t {
@@ -451,13 +458,11 @@ class Transaction {
 
   // Auxiliary structure used during initialization
   struct PerShardCache {
-    std::vector<std::string_view> args;
-    std::vector<uint32_t> original_index;
+    std::vector<IndexSlice> slices;
     unsigned key_step = 1;
 
     void Clear() {
-      args.clear();
-      original_index.clear();
+      slices.clear();
     }
   };
 
@@ -496,8 +501,7 @@ class Transaction {
   void BuildShardIndex(const KeyIndex& keys, std::vector<PerShardCache>* out);
 
   // Init shard data from shard index.
-  void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args,
-                     bool rev_mapping);
+  void InitShardData(absl::Span<const PerShardCache> shard_index, size_t num_args);
 
   // Store all key index keys in args_. Used only for single shard initialization.
   void StoreKeysInArgs(const KeyIndex& key_index);
@@ -596,10 +600,11 @@ class Transaction {
   // TODO: explore dense packing
   absl::InlinedVector<PerShardData, 4> shard_data_;
 
-  // Stores keys/values of the transaction partitioned by shards.
+  // Stores slices of key/values partitioned by shards.
+  // Slices reference full_args_.
   // We need values as well since we reorder keys, and we need to know what value corresponds
   // to what key.
-  absl::InlinedVector<std::string_view, 4> kv_args_;
+  absl::InlinedVector<IndexSlice, 4> args_slices_;
 
   // Fingerprints of keys, precomputed once during the transaction initialization.
   absl::InlinedVector<LockFp, 4> kv_fp_;
@@ -609,9 +614,6 @@ class Transaction {
 
   // Set if a NO_AUTOJOURNAL command asked to enable auto journal again
   bool re_enabled_auto_journal_ = false;
-
-  // Reverse argument mapping for ReverseArgIndex to convert from shard index to original index.
-  std::vector<uint32_t> reverse_index_;
 
   RunnableType* cb_ptr_ = nullptr;    // Run on shard threads
   const CommandId* cid_ = nullptr;    // Underlying command
@@ -643,6 +645,8 @@ class Transaction {
     size_t schedule_attempts = 0;
     ShardId coordinator_index = 0;
   } stats_;
+
+  std::function<void(Transaction* trans)> tracking_cb_;
 
  private:
   struct TLTmpSpace {

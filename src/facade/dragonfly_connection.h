@@ -61,6 +61,10 @@ class Connection : public util::Connection {
              ServiceInterface* service);
   ~Connection();
 
+  // A callback called by Listener::OnConnectionStart in the same thread where
+  // HandleRequests will run.
+  void OnConnectionStart();
+
   using BreakerCb = std::function<void(uint32_t)>;
   using ShutdownCb = std::function<void()>;
   using ShutdownHandle = unsigned;
@@ -214,7 +218,6 @@ class Connection : public util::Connection {
     uint32_t client_id_;
   };
 
- public:
   // Add PubMessage to dispatch queue.
   // Virtual because behavior is overridden in test_utils.
   virtual void SendPubMessageAsync(PubMessage);
@@ -236,11 +239,6 @@ class Connection : public util::Connection {
   // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
   // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
   void EnsureAsyncMemoryBudget();
-
-  // Register hook that is executed on connection shutdown.
-  ShutdownHandle RegisterShutdownHook(ShutdownCb cb);
-
-  void UnregisterShutdownHook(ShutdownHandle id);
 
   // Register hook that is executen when the connection breaks.
   void RegisterBreakHook(BreakerCb breaker_cb);
@@ -297,10 +295,6 @@ class Connection : public util::Connection {
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
   void RequestAsyncMigration(util::fb2::ProactorBase* dest);
 
-  void SetClientTrackingSwitch(bool is_on);
-
-  bool IsTrackingOn() const;
-
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file combining requests from all the connections in
   // that thread. A noop if the thread is already logging.
@@ -326,18 +320,28 @@ class Connection : public util::Connection {
   struct DispatchCleanup;
   struct Shutdown;
 
-  // Keeps track of total per-thread sizes of dispatch queues to
-  // limit memory taken up by messages from PUBLISH commands and slow down clients
-  // producing them to quickly via EnsureAsyncMemoryBudget.
+  // Keeps track of total per-thread sizes of dispatch queues to limit memory taken up by messages
+  // in these queues.
   struct QueueBackpressure {
-    // Block until memory usage is below limit, can be called from any thread
+    // Block until subscriber memory usage is below limit, can be called from any thread.
     void EnsureBelowLimit();
 
+    bool IsPipelineBufferOverLimit(size_t size) const {
+      return size >= pipeline_buffer_limit;
+    }
+
+    // Used by publisher/subscriber actors to make sure we do not publish too many messages
+    // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
     util::fb2::EventCount ec;
     std::atomic_size_t subscriber_bytes = 0;
 
-    size_t subscriber_thread_limit = 0;  // cached flag subscriber_thread_limit
-    size_t pipeline_cache_limit = 0;     // cached flag pipeline_cache_limit
+    // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
+    // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
+    util::fb2::CondVarAny pipeline_cnd;
+
+    size_t publish_buffer_limit = 0;   // cached flag publish_buffer_limit
+    size_t pipeline_cache_limit = 0;   // cached flag pipeline_cache_limit
+    size_t pipeline_buffer_limit = 0;  // cached flag for buffer size in bytes
   };
 
  private:
@@ -354,14 +358,15 @@ class Connection : public util::Connection {
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
 
-  // Dispatch Redis or MC command. `has_more` should indicate whether the buffer has more commands
+  // Dispatches a single (Redis or MC) command.
+  // `has_more` should indicate whether the io buffer has more commands
   // (pipelining in progress). Performs async dispatch if forced (already in async mode) or if
   // has_more is true, otherwise uses synchronous dispatch.
-  void DispatchCommand(bool has_more, absl::FunctionRef<void()> sync_dispatch,
-                       absl::FunctionRef<MessageHandle()> async_dispatch);
+  void DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
+                      absl::FunctionRef<MessageHandle()> cmd_msg_cb);
 
   // Handles events from dispatch queue.
-  void DispatchFiber(util::FiberSocketBase* peer);
+  void ExecutionFiber(util::FiberSocketBase* peer);
 
   void SendAsync(MessageHandle msg);
 
@@ -399,9 +404,10 @@ class Connection : public util::Connection {
 
  private:
   void DecreaseStatsOnClose();
+  void BreakOnce(uint32_t ev_mask);
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
-  util::fb2::EventCount evc_;             // dispatch queue waker
+  util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
   size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued async commands in dispatch_q
@@ -420,14 +426,16 @@ class Connection : public util::Connection {
   ServiceInterface* service_;
 
   time_t creation_time_, last_interaction_;
-
   Phase phase_ = SETUP;
   std::string name_;
 
   unsigned parser_error_ = 0;
 
+  // amount of times we enqued requests asynchronously during the same async_fiber_epoch_.
+  unsigned async_streak_len_ = 0;
+  uint64_t async_fiber_epoch_ = 0;
+
   BreakerCb breaker_cb_;
-  std::unique_ptr<Shutdown> shutdown_cb_;
 
   // Used by redis parser to avoid allocations
   RespVec tmp_parse_args_;
@@ -438,7 +446,7 @@ class Connection : public util::Connection {
 
   // Pointer to corresponding queue backpressure struct.
   // Needed for access from different threads by EnsureAsyncMemoryBudget().
-  QueueBackpressure* queue_backpressure_;
+  QueueBackpressure* queue_backpressure_ = nullptr;
 
   util::fb2::ProactorBase* migration_request_ = nullptr;
 
@@ -450,12 +458,13 @@ class Connection : public util::Connection {
   static thread_local QueueBackpressure tl_queue_backpressure_;
 
   // a flag indicating whether the client has turned on client tracking.
-  bool tracking_enabled_ = false;
-  bool skip_next_squashing_ = false;  // Forcefully skip next squashing
+  bool tracking_enabled_ : 1;
+  bool skip_next_squashing_ : 1;  // Forcefully skip next squashing
 
   // Connection migration vars, see RequestAsyncMigration() above.
-  bool migration_enabled_ = false;
-  bool is_http_ = false;
+  bool migration_enabled_ : 1;
+  bool migration_in_process_ : 1;
+  bool is_http_ : 1;
 };
 
 }  // namespace facade

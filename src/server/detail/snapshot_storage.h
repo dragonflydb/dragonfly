@@ -3,7 +3,9 @@
 
 #pragma once
 
+#ifdef WITH_AWS
 #include <aws/s3/S3Client.h>
+#endif
 
 #include <filesystem>
 #include <string>
@@ -70,6 +72,7 @@ class FileSnapshotStorage : public SnapshotStorage {
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
 };
 
+#ifdef WITH_AWS
 class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
   AwsS3SnapshotStorage(const std::string& endpoint, bool https, bool ec2_metadata,
@@ -104,6 +107,7 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 
 // Returns bucket_name, obj_path for an s3 path.
 std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_view path);
+#endif
 
 #ifdef __linux__
 // takes ownership over the file.

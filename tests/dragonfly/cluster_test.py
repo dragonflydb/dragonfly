@@ -144,7 +144,7 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
             return
         else:
             logging.debug(f"SLOT-MIGRATION-STATUS is {response}, not {status}")
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
     raise RuntimeError("Timeout to achieve migrations status")
 
 
@@ -1177,11 +1177,6 @@ async def test_cluster_fuzzymigration(
     seeder = df_seeder_factory.create(keys=keys, port=nodes[0].instance.port, cluster_mode=True)
     await seeder.run(target_deviation=0.1)
 
-    fill_task = asyncio.create_task(seeder.run())
-
-    # some  time fo seeder
-    await asyncio.sleep(0.5)
-
     # Counter that pushes values to a list
     async def list_counter(key, client: aioredis.RedisCluster):
         for i in itertools.count(start=1):
@@ -1196,9 +1191,6 @@ async def test_cluster_fuzzymigration(
         asyncio.create_task(list_counter(key, conn))
         for key, conn in zip(counter_keys, counter_connections)
     ]
-
-    seeder.stop()
-    await fill_task
 
     # Generate capture, capture ignores counter keys
     capture = await seeder.capture()
@@ -1237,6 +1229,7 @@ async def test_cluster_fuzzymigration(
         keeping = node.slots[num_outgoing:]
         node.next_slots.extend(keeping)
 
+    logging.debug("start migrations")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     iterations = 0
@@ -1244,7 +1237,7 @@ async def test_cluster_fuzzymigration(
         is_all_finished = True
         for node in nodes:
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-            print(states)
+            logging.debug(states)
             is_all_finished = is_all_finished and (
                 all("FINISHED" in s for s in states) or states == "NO_STATE"
             )
@@ -1257,22 +1250,16 @@ async def test_cluster_fuzzymigration(
 
         await asyncio.sleep(0.1)
 
-    # Stop counters
     for counter in counters:
         counter.cancel()
 
     # clean migrations
     for node in nodes:
         node.migrations = []
-
-    # TODO this config should be pushed with new slots
-    # Push new config
-    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-
-    # Transfer nodes
-    for node in nodes:
         node.slots = node.next_slots
-        node.new_slots = []
+
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     # Check counter consistency
     cluster_client = aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port)
@@ -1316,21 +1303,15 @@ async def test_cluster_config_reapply(df_local_factory: DflyInstanceFactory):
     logging.debug("Migrating slots 6000-8000")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    while "FINISHED" not in await nodes[1].admin_client.execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
-    ):
-        logging.debug("SLOT-MIGRATION-STATUS is not FINISHED")
-        await asyncio.sleep(0.05)
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    assert await nodes[0].admin_client.dbsize() == SIZE
-    assert await nodes[1].admin_client.dbsize() == SIZE
+    assert [SIZE, SIZE] == [await node.client.dbsize() for node in nodes]
 
     logging.debug("Reapply config with migration")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await asyncio.sleep(0.1)
-    assert await nodes[0].admin_client.dbsize() == SIZE
-    assert await nodes[1].admin_client.dbsize() == SIZE
+    assert [SIZE, SIZE] == [await node.client.dbsize() for node in nodes]
 
     logging.debug("Finalizing migration")
     nodes[0].migrations = []
@@ -1339,10 +1320,11 @@ async def test_cluster_config_reapply(df_local_factory: DflyInstanceFactory):
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     logging.debug("Migration finalized")
 
-    await asyncio.sleep(0.1)
-    assert [0, SIZE] == [await node.admin_client.dbsize() for node in nodes]
+    await asyncio.sleep(1)
+    assert [0, SIZE] == [await node.client.dbsize() for node in nodes]
+
     for i in range(SIZE):
-        assert str(i) == await nodes[1].admin_client.get(f"{{key50}}:{i}")
+        assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
 
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
@@ -1364,8 +1346,8 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     SIZE = 10_000
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     for i in range(SIZE):
-        assert await nodes[0].admin_client.set(f"{{key50}}:{i}", i)  # key50 belongs to slot 6686
-    assert [SIZE, 0] == [await node.admin_client.dbsize() for node in nodes]
+        assert await nodes[0].client.set(f"{{key50}}:{i}", i)  # key50 belongs to slot 6686
+    assert [SIZE, 0] == [await node.client.dbsize() for node in nodes]
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(6000, 8000)], nodes[1].id)
@@ -1376,13 +1358,13 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     logging.debug("Cancelling migration")
     nodes[0].migrations = []
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-    assert SIZE == await nodes[0].admin_client.dbsize()
+    assert SIZE == await nodes[0].client.dbsize()
     while True:
-        db_size = await nodes[1].admin_client.dbsize()
+        db_size = await nodes[1].client.dbsize()
         if 0 == db_size:
             break
         logging.debug(f"target dbsize is {db_size}")
-        logging.debug(await nodes[1].admin_client.execute_command("KEYS", "*"))
+        logging.debug(await nodes[1].client.execute_command("KEYS", "*"))
         await asyncio.sleep(0.1)
 
     logging.debug("Reissuing migration")
@@ -1391,7 +1373,7 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     )
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
-    assert [SIZE, SIZE] == [await node.admin_client.dbsize() for node in nodes]
+    assert [SIZE, SIZE] == [await node.client.dbsize() for node in nodes]
 
     logging.debug("Finalizing migration")
     nodes[0].migrations = []
@@ -1400,12 +1382,12 @@ async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     logging.debug("Migration finalized")
 
-    while 0 != await nodes[0].admin_client.dbsize():
+    while 0 != await nodes[0].client.dbsize():
         logging.debug(f"wait until source dbsize is empty")
         await asyncio.sleep(0.1)
 
     for i in range(SIZE):
-        assert str(i) == await nodes[1].admin_client.get(f"{{key50}}:{i}")
+        assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
 
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 

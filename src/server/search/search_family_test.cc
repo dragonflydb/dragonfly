@@ -88,6 +88,24 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_EQ(Run({"ft._list"}), "idx-3");
 }
 
+TEST_F(SearchFamilyTest, AlterIndex) {
+  Run({"hset", "d:1", "color", "blue", "cost", "150"});
+  Run({"hset", "d:2", "color", "green", "cost", "200"});
+
+  Run({"ft.create", "idx-1", "ON", "HASH"});
+
+  EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "color", "tag"}), "OK");
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@color:{blue}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@color:{green}"}), AreDocIds("d:2"));
+
+  EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "cost", "numeric"}), "OK");
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[0 100]"}), kNoResults);
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[100 300]"}), AreDocIds("d:1", "d:2"));
+
+  EXPECT_THAT(Run({"ft.alter", "idx-2", "schema", "add", "price", "numeric"}),
+              ErrArg("Index not found"));
+}
+
 TEST_F(SearchFamilyTest, InfoIndex) {
   EXPECT_EQ(
       Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"}),
@@ -305,6 +323,21 @@ TEST_F(SearchFamilyTest, Tags) {
               AreDocIds("d:1", "d:2", "d:3", "d:4", "d:5"));
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue | green}"}),
               AreDocIds("d:1", "d:2", "d:3", "d:5", "d:6"));
+}
+
+TEST_F(SearchFamilyTest, TagOptions) {
+  Run({"hset", "d:1", "color", "    red/   green // bLUe   "});
+  Run({"hset", "d:2", "color", "blue   /// GReeN   "});
+  Run({"hset", "d:3", "color", "grEEn // yellow   //"});
+  Run({"hset", "d:4", "color", "  /blue/green/  "});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag", "casesensitive",
+                 "separator", "/"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{green}"}), AreDocIds("d:1", "d:4"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{GReeN}"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), AreDocIds("d:2", "d:4"));
 }
 
 TEST_F(SearchFamilyTest, Numbers) {

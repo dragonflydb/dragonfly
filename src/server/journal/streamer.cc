@@ -83,6 +83,8 @@ void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
 
     bool written = false;
     cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+      db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
+                                               DbSlice::Iterator::FromPrime(it), snapshot_version_);
       if (WriteBucket(it)) {
         written = true;
       }

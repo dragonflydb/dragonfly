@@ -15,6 +15,7 @@ class ConnectionContext;
 
 class SearchFamily {
   static void FtCreate(CmdArgList args, ConnectionContext* cntx);
+  static void FtAlter(CmdArgList args, ConnectionContext* cntx);
   static void FtDropIndex(CmdArgList args, ConnectionContext* cntx);
   static void FtInfo(CmdArgList args, ConnectionContext* cntx);
   static void FtList(CmdArgList args, ConnectionContext* cntx);

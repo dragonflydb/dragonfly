@@ -334,7 +334,7 @@ will eventually unblock when it disconnects.
 
 
 @pytest.mark.slow
-@dfly_args({"proactor_threads": "1", "subscriber_thread_limit": "100"})
+@dfly_args({"proactor_threads": "1", "publish_buffer_limit": "100"})
 async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port, limit=10)
     writer.write(b"SUBSCRIBE channel\r\n")
@@ -772,6 +772,7 @@ async def test_tls_when_read_write_is_interleaved(
     server: DflyInstance = df_local_factory.create(
         port=1211, **with_ca_tls_server_args, proactor_threads=1
     )
+    # TODO(kostas): to fix the deadlock in the test
     server.start()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -787,18 +788,23 @@ async def test_tls_when_read_write_is_interleaved(
         ssl_version=ssl.PROTOCOL_TLSv1_2,
     )
     ssl_sock.connect(("127.0.0.1", server.port))
+    ssl_sock.settimeout(0.1)
 
     tmp = "f" * 1000
     message = f"SET foo {tmp}\r\n".encode()
     ssl_sock.send(message)
 
-    for i in range(0, 100000):
-        res = random.randint(1, 4)
-        message = b""
-        for j in range(0, res):
-            message = message + b"GET foo\r\n"
-        ssl_sock.send(message)
-        ssl_sock.do_handshake()
+    try:
+        for i in range(0, 100_000):
+            res = random.randint(1, 4)
+            message = b""
+            for j in range(0, res):
+                message = message + b"GET foo\r\n"
+            ssl_sock.send(message)
+            ssl_sock.do_handshake()
+    except:
+        # We might have filled the socket buffer, causing further sending will fail
+        pass
 
     # This deadlocks
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)

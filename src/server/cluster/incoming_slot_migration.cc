@@ -133,7 +133,8 @@ bool IncomingSlotMigration::Join() {
 }
 
 void IncomingSlotMigration::Cancel() {
-  LOG(INFO) << "Cancelling incoming migration of slots " << SlotRange::ToString(slots_);
+  string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
+  LOG(INFO) << log_state << " incoming migration of slots " << SlotRange::ToString(slots_);
   cntx_.Cancel();
 
   for (auto& flow : shard_flows_) {
@@ -147,6 +148,7 @@ void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* sou
   state_.store(MigrationState::C_SYNC);
 
   shard_flows_[shard]->Start(&cntx_, source, bc_);
+  VLOG(1) << "Incoming slot migration flow for shard: " << shard << " finished";
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {
