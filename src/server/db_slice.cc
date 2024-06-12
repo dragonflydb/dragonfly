@@ -459,10 +459,11 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
         for (const auto& ccb : change_cb_) {
-          ccb.second(cntx.db_index, bit);
+          auto cb = ccb;  // we need a copy of shared_ptr to prevent it removing during callback
+          cb->second(cntx.db_index, bit);
         }
       };
-      db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
+      db.prime.CVCUponBump(change_cb_.back()->first, res.it, bump_cb);
     }
     auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{fetched_items_});
     if (bump_it != res.it) {  // the item was bumped
@@ -525,7 +526,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   // It's a new entry.
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
   for (const auto& ccb : change_cb_) {
-    ccb.second(cntx.db_index, key);
+    auto cb = ccb;  // we need a copy of shared_ptr to prevent it removing during callback
+    cb->second(cntx.db_index, key);
   }
 
   // In case we are loading from rdb file or replicating we want to disable conservative memory
@@ -976,7 +978,8 @@ void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
 
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
   for (const auto& ccb : change_cb_) {
-    ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
+    auto cb = ccb;  // we need a copy of shared_ptr to prevent it removing during callback
+    cb->second(db_ind, ChangeReq{it.GetInnerIt()});
   }
 
   // If the value has a pending stash, cancel it before any modification are applied.
@@ -1089,7 +1092,8 @@ void DbSlice::ExpireAllIfNeeded() {
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   uint64_t ver = NextVersion();
-  change_cb_.emplace_back(ver, std::move(cb));
+  change_cb_.emplace_back(
+      std::make_shared<std::pair<uint64_t, ChangeCallback>>(ver, std::move(cb)));
   return ver;
 }
 
@@ -1100,13 +1104,14 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
   for (const auto& ccb : change_cb_) {
-    uint64_t cb_version = ccb.first;
+    auto cb = ccb;  // we need a copy of shared_ptr to prevent it removing during callback
+    uint64_t cb_version = cb->first;
     DCHECK_LE(cb_version, upper_bound);
     if (cb_version == upper_bound) {
       return;
     }
     if (bucket_version < cb_version) {
-      ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
+      cb->second(db_ind, ChangeReq{it.GetInnerIt()});
     }
   }
 }
@@ -1114,7 +1119,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
   for (auto it = change_cb_.begin(); it != change_cb_.end(); ++it) {
-    if (it->first == id) {
+    if ((*it)->first == id) {
       change_cb_.erase(it);
       return;
     }

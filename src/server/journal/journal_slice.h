@@ -47,7 +47,6 @@ class JournalSlice {
   void UnregisterOnChange(uint32_t);
 
   bool HasRegisteredCallbacks() const {
-    std::shared_lock lk(cb_mu_);
     return !change_cb_arr_.empty();
   }
 
@@ -62,8 +61,7 @@ class JournalSlice {
   std::optional<base::RingBuffer<JournalItem>> ring_buffer_;
   base::IoBuf ring_serialize_buf_;
 
-  mutable util::fb2::SharedMutex cb_mu_;
-  std::vector<std::pair<uint32_t, ChangeCallback>> change_cb_arr_ ABSL_GUARDED_BY(cb_mu_);
+  std::vector<std::shared_ptr<std::pair<uint32_t, ChangeCallback>>> change_cb_arr_;
 
   LSN lsn_ = 1;
 

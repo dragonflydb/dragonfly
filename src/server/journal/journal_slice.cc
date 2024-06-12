@@ -187,27 +187,26 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
 
   // TODO: Remove the callbacks, replace with notifiers
   {
-    std::shared_lock lk(cb_mu_);
     DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
              << " num callbacks: " << change_cb_arr_.size();
 
     for (const auto& k_v : change_cb_arr_) {
-      k_v.second(*item, await);
+      auto cb = k_v;  // we need a copy of shared_ptr to prevent it removing during callback
+      cb->second(*item, await);
     }
   }
 }
 
 uint32_t JournalSlice::RegisterOnChange(ChangeCallback cb) {
-  lock_guard lk(cb_mu_);
   uint32_t id = next_cb_id_++;
-  change_cb_arr_.emplace_back(id, std::move(cb));
+  change_cb_arr_.emplace_back(
+      std::make_shared<std::pair<uint32_t, ChangeCallback>>(id, std::move(cb)));
   return id;
 }
 
 void JournalSlice::UnregisterOnChange(uint32_t id) {
-  lock_guard lk(cb_mu_);
   auto it = find_if(change_cb_arr_.begin(), change_cb_arr_.end(),
-                    [id](const auto& e) { return e.first == id; });
+                    [id](const auto& e) { return e->first == id; });
   CHECK(it != change_cb_arr_.end());
   change_cb_arr_.erase(it);
 }
