@@ -312,7 +312,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 
   shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
-  DCHECK_EQ(full_args_.size() % key_index.step, 0u);
+  DCHECK_EQ(full_args_.size() % key_index.step, 0u) << full_args_;
 
   // Safe, because flow below is not preemptive.
   auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());

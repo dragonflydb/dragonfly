@@ -78,8 +78,10 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
     return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
-  if ((opt_mask() & CO::INTERLEAVED_KEYS) && (tail_args.size() % 2) != 0) {
-    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  if ((opt_mask() & CO::INTERLEAVED_KEYS)) {
+    if ((name() == "JSON.MSET" && tail_args.size() % 3 != 0) ||
+        (name() == "MSET" && tail_args.size() % 2 != 0))
+      return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
   if (validator_)
