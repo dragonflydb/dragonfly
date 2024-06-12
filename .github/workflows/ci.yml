@@ -58,10 +58,9 @@ jobs:
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       # Seems that docker by default prohibits running iouring syscalls
-      options: --security-opt seccomp=unconfined
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       volumes:
         - /:/hostroot
-      options: --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
