@@ -37,6 +37,7 @@ jobs:
 
     container:
       image: ghcr.io/romange/benchmark-dev:latest
+      options: --security-opt seccomp=unconfined
 
     permissions:
       id-token: write

@@ -28,6 +28,7 @@ jobs:
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
+      options: --security-opt seccomp=unconfined
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
