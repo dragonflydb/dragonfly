@@ -52,7 +52,7 @@ runs:
 
     - name: Run PyTests replication test
       id: second
-      if: ${{ inputs.run-only-on-ubuntu-latest == 'true' || (inputs.run-only-on-ubuntu-latest == 'false' && matrix.runner == 'ubuntu-latest') }}
+      if: ${{ (inputs.run-only-on-ubuntu-latest == 'true' && matrix.runner == 'ubuntu-latest') || (inputs.run-only-on-ubuntu-latest == 'false' }}
       shell: bash
       run: |
         echo "Running PyTests replication test"
