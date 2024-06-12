@@ -50,32 +50,8 @@ class User final {
     bool allow_all_keys{false};
   };
 
-  struct CategoryChange {
-    uint32_t category;
-
-    // Customization point to make it hashable with absl containers
-    template <typename H> friend H AbslHashValue(H h, const CategoryChange& c) {
-      return H::combine(std::move(h), c.category);
-    }
-
-    friend bool operator==(CategoryChange c1, CategoryChange c2) {
-      return c1.category == c2.category;
-    }
-  };
-
-  struct CommandChange {
-    size_t family = 0;
-    uint64_t bit_index = 0;
-
-    // Customization point to make it hashable with absl containers
-    template <typename H> friend H AbslHashValue(H h, const CommandChange& c) {
-      return H::combine(std::move(h), c.family + c.bit_index);
-    }
-
-    friend bool operator==(CommandChange c1, CommandChange c2) {
-      return (c1.family == c2.family) && (c1.bit_index == c2.bit_index);
-    }
-  };
+  using CategoryChange = uint32_t;
+  using CommandChange = std::pair<size_t, uint64_t>;
 
   struct ChangeMetadata {
     Sign sign;

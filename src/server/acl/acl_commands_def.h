@@ -91,7 +91,6 @@ inline const std::vector<std::string> REVERSE_CATEGORY_INDEX_TABLE{
 // bit index to index in the REVERSE_CATEGORY_INDEX_TABLE
 using CategoryToIdxStore = absl::flat_hash_map<uint32_t, uint32_t>;
 
-// inline const CategoryToIdxStore& CategoryToIdx(CategoryToIdxStore store = {}) {
 inline const CategoryToIdxStore& CategoryToIdx(CategoryToIdxStore store = {}) {
   static CategoryToIdxStore cat_idx = std::move(store);
   return cat_idx;
@@ -139,7 +138,7 @@ inline void BuildIndexers(RevCommandsIndexStore families, CommandRegistry* cmd_r
         }
         auto family = cid.GetFamily();
         auto bit_index = cid.GetBitIndex();
-        index[cat_name][family] = index[cat_name][family] | bit_index;
+        index[cat_name][family] |= bit_index;
       }
     }
   });

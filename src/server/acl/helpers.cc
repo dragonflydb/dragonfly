@@ -99,12 +99,13 @@ std::string AclCatAndCommandToString(const User::CategoryChanges& cat,
 
   auto cat_visitor = [&result](const CategoryAndMetadata& val) {
     const auto& [change, meta] = val;
-    absl::StrAppend(&result, AclCatToString(change.category, meta.sign), " ");
+    absl::StrAppend(&result, AclCatToString(change, meta.sign), " ");
   };
 
   auto cmd_visitor = [&result](const CommandAndMetadata& val) {
     const auto& [change, meta] = val;
-    absl::StrAppend(&result, AclCommandToString(change.family, change.bit_index, meta.sign), " ");
+    const auto [family, bit_index] = change;
+    absl::StrAppend(&result, AclCommandToString(family, bit_index, meta.sign), " ");
   };
 
   Overloaded visitor{cat_visitor, cmd_visitor};
