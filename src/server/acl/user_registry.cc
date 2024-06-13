@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "base/flags.h"
+#include "facade/acl_commands_def.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_commands_def.h"
 
@@ -71,29 +72,13 @@ UserRegistry::UserWithWriteLock::UserWithWriteLock(std::unique_lock<fb2::SharedM
     : user(user), exists(exists), registry_lk_(std::move(lk)) {
 }
 
-UserRegistry::UserWithWriteLock UserRegistry::MaybeAddAndUpdateWithLock(std::string_view username,
-                                                                        User::UpdateRequest req) {
-  std::unique_lock<fb2::SharedMutex> lock(mu_);
-  const bool exists = registry_.contains(username);
-  auto& user = registry_[username];
-  user.Update(std::move(req));
-  return {std::move(lock), user, exists};
-}
-
 User::UpdateRequest UserRegistry::DefaultUserUpdateRequest() const {
-  User::UpdateRequest::CommandsUpdateType tmp(NumberOfFamilies());
-  size_t id = 0;
-  for (auto& elem : tmp) {
-    elem = {User::Sign::PLUS, id++, acl::ALL_COMMANDS};
-  }
   std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
   auto key = User::UpdateKey{"~*", KeyOp::READ_WRITE, true, false};
-  return {{}, {acl}, true, false, std::move(tmp), {std::move(key)}};
+  return {{}, true, false, {std::move(acl)}, {std::move(key)}};
 }
 
 void UserRegistry::Init() {
-  // Add default user
-  User::UpdateRequest::CommandsUpdateType tmp(NumberOfFamilies());
   // if there exists an acl file to load from, requirepass
   // will not overwrite the default's user password loaded from
   // that file. Loading the default's user password from a file

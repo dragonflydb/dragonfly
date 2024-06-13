@@ -153,6 +153,12 @@ class ShardArgs {
       return *this;
     }
 
+    Iterator operator++(int) {
+      Iterator copy = *this;
+      operator++();
+      return copy;
+    }
+
     size_t index() const {
       return index_it_->first + delta_;
     }

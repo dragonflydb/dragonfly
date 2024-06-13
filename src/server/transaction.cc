@@ -312,7 +312,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 
   shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
-  DCHECK_EQ(full_args_.size() % key_index.step, 0u);
+  DCHECK_EQ(full_args_.size() % key_index.step, 0u) << full_args_;
 
   // Safe, because flow below is not preemptive.
   auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());
@@ -665,9 +665,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
-    if (tracking_cb_) {
-      tracking_cb_(this);
-    }
+    MaybeInvokeTrackingCb();
   }
 }
 
@@ -1252,6 +1250,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto result = cb(this, shard);
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard, result);
+  MaybeInvokeTrackingCb();
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;
