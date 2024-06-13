@@ -114,18 +114,9 @@ void OutgoingMigration::Finish(bool is_error) {
 
   shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
-      while (true) {
-        auto& flow = slot_migrations_[shard->shard_id()];
-        if (flow == nullptr) {
-          // We must wait for `flow` to initialize so that we can Cancel() it, otherwise it won't
-          // be cancelled.
-          LOG_EVERY_N(INFO, 100) << "Waiting for flow creation before cancelling it";
-          ThisFiber::SleepFor(100ms);
-          continue;
-        }
-        flow->Cancel();
-        break;
-      }
+      auto& flow = slot_migrations_[shard->shard_id()];
+      CHECK(flow != nullptr);
+      flow->Cancel();
     }
   });
 }
@@ -192,6 +183,13 @@ void OutgoingMigration::SyncFb() {
         server_family_->journal()->StartInThread();
         slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
             &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal());
+      }
+    });
+
+    // Start migrations in a separate hop to make sure that Finish() is called only after all
+    // migrations are created (see #3139)
+    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+      if (auto* shard = EngineShard::tlocal(); shard) {
         auto& migration = *slot_migrations_[shard->shard_id()];
         migration.Sync(cf_->MyID(), shard->shard_id());
         if (migration.GetError()) {
