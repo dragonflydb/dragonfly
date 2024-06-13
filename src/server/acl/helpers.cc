@@ -12,64 +12,113 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
+#include "core/overloaded.h"
+#include "facade/acl_commands_def.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/user.h"
 #include "server/common.h"
 
 namespace dfly::acl {
 
-std::string AclCatToString(uint32_t acl_category) {
-  std::string tmp;
+namespace {
 
+std::string AclCatToString(uint32_t acl_category, User::Sign sign) {
+  std::string res = sign == User::Sign::PLUS ? "+@" : "-@";
   if (acl_category == acl::ALL) {
-    return "+@ALL";
+    absl::StrAppend(&res, "ALL");
+    return res;
   }
 
-  if (acl_category == acl::NONE) {
-    return "+@NONE";
-  }
-
-  const std::string prefix = "+@";
-  const std::string postfix = " ";
-
-  for (uint32_t i = 0; i < 32; ++i) {
-    uint32_t cat_bit = 1ULL << i;
-    if (acl_category & cat_bit) {
-      absl::StrAppend(&tmp, prefix, REVERSE_CATEGORY_INDEX_TABLE[i], postfix);
-    }
-  }
-
-  tmp.pop_back();
-
-  return tmp;
+  const auto& index = CategoryToIdx().at(acl_category);
+  absl::StrAppend(&res, REVERSE_CATEGORY_INDEX_TABLE[index]);
+  return res;
 }
 
-std::string AclCommandToString(const std::vector<uint64_t>& acl_category) {
+std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) {
+  // This is constant but can be optimized with an indexer
+  const auto& rev_index = CommandsRevIndexer();
+  std::string res;
+  std::string prefix = (sign == User::Sign::PLUS) ? "+" : "-";
+  if (mask == ALL_COMMANDS) {
+    for (const auto& cmd : rev_index[family]) {
+      absl::StrAppend(&res, prefix, cmd, " ");
+    }
+    res.pop_back();
+    return res;
+  }
+
+  size_t pos = 0;
+  while (mask != 0) {
+    ++pos;
+    mask = mask >> 1;
+  }
+  --pos;
+  absl::StrAppend(&res, prefix, rev_index[family][pos]);
+  return res;
+}
+
+struct CategoryAndMetadata {
+  User::CategoryChange change;
+  User::ChangeMetadata metadata;
+};
+
+struct CommandAndMetadata {
+  User::CommandChange change;
+  User::ChangeMetadata metadata;
+};
+
+using MergeResult = std::vector<std::variant<CategoryAndMetadata, CommandAndMetadata>>;
+
+}  // namespace
+
+// Merge Category and Command changes and sort them by global order seq_no
+MergeResult MergeTables(const User::CategoryChanges& categories,
+                        const User::CommandChanges& commands) {
+  MergeResult result;
+  for (auto [cat, meta] : categories) {
+    result.push_back(CategoryAndMetadata{cat, meta});
+  }
+
+  for (auto [cmd, meta] : commands) {
+    result.push_back(CommandAndMetadata{cmd, meta});
+  }
+
+  std::sort(result.begin(), result.end(), [](const auto& l, const auto& r) {
+    auto fetch = [](const auto& l) { return l.metadata.seq_no; };
+    return std::visit(fetch, l) < std::visit(fetch, r);
+  });
+
+  return result;
+}
+
+std::string AclCatAndCommandToString(const User::CategoryChanges& cat,
+                                     const User::CommandChanges& cmds) {
   std::string result;
 
-  const std::string prefix = "+";
-  const std::string postfix = " ";
-  const auto& rev_index = CommandsRevIndexer();
-  bool all = true;
+  auto tables = MergeTables(cat, cmds);
 
-  size_t family_id = 0;
-  for (auto family : acl_category) {
-    for (uint64_t i = 0; i < 64; ++i) {
-      const uint64_t cmd_bit = 1ULL << i;
-      if (family & cmd_bit && i < rev_index[family_id].size()) {
-        absl::StrAppend(&result, prefix, rev_index[family_id][i], postfix);
-        continue;
-      }
-      if (i < rev_index[family_id].size()) {
-        all = false;
-      }
-    }
-    ++family_id;
+  auto cat_visitor = [&result](const CategoryAndMetadata& val) {
+    const auto& [change, meta] = val;
+    absl::StrAppend(&result, AclCatToString(change, meta.sign), " ");
+  };
+
+  auto cmd_visitor = [&result](const CommandAndMetadata& val) {
+    const auto& [change, meta] = val;
+    const auto [family, bit_index] = change;
+    absl::StrAppend(&result, AclCommandToString(family, bit_index, meta.sign), " ");
+  };
+
+  Overloaded visitor{cat_visitor, cmd_visitor};
+
+  for (auto change : tables) {
+    std::visit(visitor, change);
   }
 
   if (!result.empty()) {
     result.pop_back();
   }
-  return all ? "+ALL" : result;
+
+  return result;
 }
 
 std::string PrettyPrintSha(std::string_view pass, bool all) {
@@ -157,21 +206,8 @@ std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) {
   return {};
 }
 
-bool IsIndexAllCommandsFlag(size_t index) {
-  return index == std::numeric_limits<size_t>::max();
-}
-
 std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
                                                  const CommandRegistry& registry) {
-  const auto all_commands = std::pair<size_t, uint64_t>{std::numeric_limits<size_t>::max(), 0};
-  if (command == "+ALL") {
-    return {all_commands, true};
-  }
-
-  if (command == "-ALL") {
-    return {all_commands, false};
-  }
-
   if (absl::StartsWith(command, "+")) {
     auto res = registry.Find(command.substr(1));
     if (!res) {
@@ -281,7 +317,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
       using Sign = User::Sign;
       using Val = std::pair<Sign, uint32_t>;
       auto val = add ? Val{Sign::PLUS, *cat} : Val{Sign::MINUS, *cat};
-      req.categories.push_back(val);
+      req.updates.push_back(val);
       continue;
     }
 
@@ -292,10 +328,9 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
 
     using Sign = User::Sign;
     using Val = User::UpdateRequest::CommandsValueType;
-    ;
     auto [index, bit] = *cmd;
     auto val = sign ? Val{Sign::PLUS, index, bit} : Val{Sign::MINUS, index, bit};
-    req.commands.push_back(val);
+    req.updates.push_back(val);
   }
 
   return req;

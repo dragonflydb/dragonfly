@@ -17,9 +17,8 @@
 
 namespace dfly::acl {
 
-std::string AclCatToString(uint32_t acl_category);
-
-std::string AclCommandToString(const std::vector<uint64_t>& acl_category);
+std::string AclCatAndCommandToString(const User::CategoryChanges& cat,
+                                     const User::CommandChanges& cmds);
 
 std::string PrettyPrintSha(std::string_view pass, bool all = false);
 

@@ -59,6 +59,7 @@ TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
     : facade::Connection(protocol, nullptr, nullptr, nullptr), sink_(sink) {
   cc_.reset(new dfly::ConnectionContext(sink_, this));
   SetSocket(ProactorBase::me()->CreateSocket());
+  OnConnectionStart();
 }
 
 void TestConnection::SendPubMessageAsync(PubMessage pmsg) {

@@ -5,7 +5,6 @@
 #pragma once
 
 #include "server/db_slice.h"
-#include "server/io_utils.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
@@ -14,39 +13,58 @@ namespace dfly {
 
 // Buffered single-shard journal streamer that listens for journal changes with a
 // journal listener and writes them to a destination sink in a separate fiber.
-class JournalStreamer : protected BufferedStreamerBase {
+class JournalStreamer {
  public:
-  JournalStreamer(journal::Journal* journal, Context* cntx)
-      : BufferedStreamerBase{cntx->GetCancellation()}, cntx_{cntx}, journal_{journal} {
-  }
+  JournalStreamer(journal::Journal* journal, Context* cntx);
+  virtual ~JournalStreamer();
 
   // Self referential.
   JournalStreamer(const JournalStreamer& other) = delete;
   JournalStreamer(JournalStreamer&& other) = delete;
 
   // Register journal listener and start writer in fiber.
-  virtual void Start(io::Sink* dest, bool send_lsn);
+  virtual void Start(io::AsyncSink* dest, bool send_lsn);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
   virtual void Cancel();
 
-  using BufferedStreamerBase::GetTotalBufferCapacities;
+  size_t GetTotalBufferCapacities() const;
 
- private:
-  // Writer fiber that steals buffer contents and writes them to dest.
-  void WriterFb(io::Sink* dest);
+ protected:
+  // TODO: we copy the string on each write because JournalItem may be passed to multiple
+  // streamers so we can not move it. However, if we would either wrap JournalItem in shared_ptr
+  // or wrap JournalItem::data in shared_ptr, we can avoid the cost of copying strings.
+  // Also, for small strings it's more peformant to copy to the intermediate buffer than
+  // to issue an io operation.
+  void Write(std::string_view str);
+
+  // Blocks the if the consumer if not keeping up.
+  void ThrottleIfNeeded();
+
   virtual bool ShouldWrite(const journal::JournalItem& item) const {
-    return true;
+    return !IsStopped();
   }
 
-  Context* cntx_;
+  void WaitForInflightToComplete();
 
-  uint32_t journal_cb_id_{0};
+ private:
+  void OnCompletion(std::error_code ec, size_t len);
+
+  bool IsStopped() const {
+    return cntx_->IsCancelled();
+  }
+
+  bool IsStalled() const;
+
   journal::Journal* journal_;
+  Context* cntx_;
+  io::AsyncSink* dest_ = nullptr;
+  std::vector<uint8_t> pending_buf_;
+  size_t in_flight_bytes_ = 0;
   time_t last_lsn_time_ = 0;
-
-  util::fb2::Fiber write_fb_{};
+  util::fb2::EventCount waker_;
+  uint32_t journal_cb_id_{0};
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
@@ -56,7 +74,7 @@ class RestoreStreamer : public JournalStreamer {
   RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal, Context* cntx);
   ~RestoreStreamer() override;
 
-  void Start(io::Sink* dest, bool send_lsn = false) override;
+  void Start(io::AsyncSink* dest, bool send_lsn = false) override;
   // Cancel() must be called if Start() is called
   void Cancel() override;
 
@@ -80,7 +98,7 @@ class RestoreStreamer : public JournalStreamer {
   DbSlice* db_slice_;
   uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
-  Cancellation fiber_cancellation_;
+  bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
 };
 

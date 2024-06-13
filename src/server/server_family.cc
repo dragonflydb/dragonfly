@@ -462,20 +462,35 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
 
   CmdArgParser parser{args};
-  if (!parser.HasAtLeast(1) || args.size() > 2)
+  if (!parser.HasAtLeast(1) || args.size() > 3)
     return cntx->SendError(kSyntaxErr);
 
   bool is_on = false;
-  bool optin = false;
+  using Tracking = ConnectionState::ClientTracking;
+  Tracking::Options option = Tracking::NONE;
   if (parser.Check("ON").IgnoreCase()) {
     is_on = true;
   } else if (!parser.Check("OFF").IgnoreCase()) {
     return cntx->SendError(kSyntaxErr);
   }
 
+  bool noloop = false;
+
   if (parser.HasNext()) {
     if (parser.Check("OPTIN").IgnoreCase()) {
-      optin = true;
+      option = Tracking::OPTIN;
+    } else if (parser.Check("OPTOUT").IgnoreCase()) {
+      option = Tracking::OPTOUT;
+    } else if (parser.Check("NOLOOP").IgnoreCase()) {
+      noloop = true;
+    } else {
+      return cntx->SendError(kSyntaxErr);
+    }
+  }
+
+  if (parser.HasNext()) {
+    if (!noloop && parser.Check("NOLOOP").IgnoreCase()) {
+      noloop = true;
     } else {
       return cntx->SendError(kSyntaxErr);
     }
@@ -484,8 +499,10 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
   if (is_on) {
     ++cntx->subscriptions;
   }
+
   cntx->conn_state.tracking_info_.SetClientTracking(is_on);
-  cntx->conn_state.tracking_info_.SetOptin(optin);
+  cntx->conn_state.tracking_info_.SetOption(option);
+  cntx->conn_state.tracking_info_.SetNoLoop(noloop);
   return cntx->SendOk();
 }
 
@@ -499,15 +516,25 @@ void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kSyntaxErr);
   }
 
+  using Tracking = ConnectionState::ClientTracking;
   CmdArgParser parser{args};
   if (parser.Check("YES").IgnoreCase()) {
-    bool is_multi = cntx->transaction && cntx->transaction->IsMulti();
-    cntx->conn_state.tracking_info_.SetCachingSequenceNumber(is_multi);
+    if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
+      return cntx->SendError(
+          "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
+    }
   } else if (parser.Check("NO").IgnoreCase()) {
+    if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTOUT)) {
+      return cntx->SendError(
+          "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
+    }
     cntx->conn_state.tracking_info_.ResetCachingSequenceNumber();
   } else {
     return cntx->SendError(kSyntaxErr);
   }
+
+  bool is_multi = cntx->transaction && cntx->transaction->IsMulti();
+  cntx->conn_state.tracking_info_.SetCachingSequenceNumber(is_multi);
 
   cntx->SendOk();
 }
@@ -2102,6 +2129,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_commands_processed", conn_stats.command_cnt);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
+    append("total_pipelined_squashed_commands", conn_stats.squashed_commands);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);

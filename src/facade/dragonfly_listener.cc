@@ -325,6 +325,8 @@ void Listener::OnConnectionStart(util::Connection* conn) {
   facade::Connection* facade_conn = static_cast<facade::Connection*>(conn);
   VLOG(1) << "Opening connection " << facade_conn->GetClientId();
 
+  facade_conn->OnConnectionStart();
+
   absl::base_internal::SpinLockHolder lock{&mutex_};
   int32_t prev_cnt = per_thread_[id].num_connections++;
   ++conn_cnt_;
