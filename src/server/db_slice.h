@@ -546,7 +546,7 @@ class DbSlice {
   // Used in temporary computations in Acquire/Release.
   mutable absl::flat_hash_set<uint64_t> uniq_fps_;
 
-  mutable util::fb2::Mutex cb_mu_;  // to prevent removing callback during call
+  mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
   // ordered from the smallest to largest version.
   std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
 

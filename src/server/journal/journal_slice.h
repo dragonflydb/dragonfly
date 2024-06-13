@@ -61,7 +61,7 @@ class JournalSlice {
   std::optional<base::RingBuffer<JournalItem>> ring_buffer_;
   base::IoBuf ring_serialize_buf_;
 
-  mutable util::fb2::Mutex cb_mu_;  // to prevent removing callback during call
+  mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
   std::list<std::pair<uint32_t, ChangeCallback>> change_cb_arr_;
 
   LSN lsn_ = 1;

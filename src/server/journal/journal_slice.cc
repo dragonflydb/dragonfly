@@ -187,7 +187,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
 
   // TODO: Remove the callbacks, replace with notifiers
   {
-    lock_guard lk(cb_mu_);
+    std::shared_lock lk(cb_mu_);
     DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
              << " num callbacks: " << change_cb_arr_.size();
 

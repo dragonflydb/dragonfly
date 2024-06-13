@@ -1095,7 +1095,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
 
-  lock_guard lk(cb_mu_);
+  std::shared_lock lk(cb_mu_);
   for (const auto& ccb : change_cb_) {
     uint64_t cb_version = ccb.first;
     DCHECK_LE(cb_version, upper_bound);
@@ -1505,7 +1505,7 @@ void DbSlice::OnCbFinish() {
 }
 
 void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
-  lock_guard lk(cb_mu_);
+  std::shared_lock lk(cb_mu_);
   for (const auto& ccb : change_cb_) {
     ccb.second(id, cr);
   }
