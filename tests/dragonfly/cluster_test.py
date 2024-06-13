@@ -1027,6 +1027,53 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_flushall_during_migration(
+    df_local_factory: DflyInstanceFactory, df_seeder_factory
+):
+    # Check data migration from one node to another
+    instances = [
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        for i in range(2)
+    ]
+
+    df_local_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    seeder = df_seeder_factory.create(keys=3000, port=nodes[0].instance.port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(3000, 9000)], nodes[1].id)
+    )
+
+    logging.debug("Start migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert "FINISHED" not in await nodes[0].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
+    ), "Weak test case - finished migration too early"
+
+    await nodes[0].client.execute_command("flushall")
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
+
+    logging.debug("Finalizing migration")
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    logging.debug("Migration finalized")
+
+    assert await nodes[0].client.dbsize() == 0
+    assert await nodes[1].client.dbsize() == 0
+    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     # Check data migration from one node to another
     instances = [

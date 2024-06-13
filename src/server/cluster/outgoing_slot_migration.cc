@@ -58,17 +58,11 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
-    // Check if migration was cancelled while we yielded so far.
-    if (cancelled_) {
-      return;
-    }
-
     streamer_.Start(Sock());
   }
 
   void Cancel() {
     streamer_.Cancel();
-    cancelled_ = true;
   }
 
   void Finalize() {
@@ -81,7 +75,6 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
  private:
   RestoreStreamer streamer_;
-  bool cancelled_ = false;
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)

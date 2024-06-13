@@ -78,10 +78,12 @@ class RestoreStreamer : public JournalStreamer {
   void WriteCommand(journal::Entry::Payload cmd_payload);
 
   DbSlice* db_slice_;
+  DbTableArray db_array_;
   uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
   Cancellation fiber_cancellation_;
   bool snapshot_finished_ = false;
+  util::FiberSocketBase* dest_ = nullptr;
 };
 
 }  // namespace dfly

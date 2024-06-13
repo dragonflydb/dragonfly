@@ -64,9 +64,15 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
                                  Context* cntx)
     : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
+  db_array_ = slice->databases();
 }
 
 void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
+  dest_ = static_cast<util::FiberSocketBase*>(dest);
+  if (fiber_cancellation_.IsCancelled()) {
+    return;
+  }
+
   VLOG(1) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
@@ -75,7 +81,7 @@ void RestoreStreamer::Start(io::Sink* dest, bool send_lsn) {
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;
-  PrimeTable* pt = &db_slice_->databases()[0]->prime;
+  PrimeTable* pt = &db_array_[0]->prime;
 
   do {
     if (fiber_cancellation_.IsCancelled())
@@ -116,14 +122,21 @@ RestoreStreamer::~RestoreStreamer() {
 void RestoreStreamer::Cancel() {
   auto sver = snapshot_version_;
   snapshot_version_ = 0;  // to prevent double cancel in another fiber
+  fiber_cancellation_.Cancel();
   if (sver != 0) {
-    fiber_cancellation_.Cancel();
     db_slice_->UnregisterOnChange(sver);
     JournalStreamer::Cancel();
   }
 }
 
 bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
+  if (item.cmd == "FLUSHALL" || item.cmd == "FLUSHDB") {
+    // On FLUSH* we restart the migration
+    CHECK(dest_ != nullptr);
+    dest_->Shutdown(SHUT_RDWR);
+    return false;
+  }
+
   if (!item.slot.has_value()) {
     return false;
   }
