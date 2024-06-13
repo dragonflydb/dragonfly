@@ -406,7 +406,6 @@ GenericError Context::ReportErrorInternal(GenericError&& err) {
 
   if (err_handler_)
     err_handler_fb_ = fb2::Fiber("report_internal_error", err_handler_, err_);
-
   Cancellation::Cancel();
   return err_;
 }
