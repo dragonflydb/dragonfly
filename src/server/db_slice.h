@@ -523,6 +523,8 @@ class DbSlice {
     return version_++;
   }
 
+  void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
+
  private:
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
@@ -544,8 +546,9 @@ class DbSlice {
   // Used in temporary computations in Acquire/Release.
   mutable absl::flat_hash_set<uint64_t> uniq_fps_;
 
+  mutable util::fb2::Mutex cb_mu_;  // to prevent removing callback during call
   // ordered from the smallest to largest version.
-  std::vector<std::shared_ptr<std::pair<uint64_t, ChangeCallback>>> change_cb_;
+  std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   mutable absl::flat_hash_set<CompactObjectView> fetched_items_;
