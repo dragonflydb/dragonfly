@@ -6,13 +6,21 @@
 
 #include <absl/functional/bind_front.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
+
+using namespace facade;
+
+ABSL_FLAG(uint32_t, replication_stream_timeout, 500,
+          "Time in milliseconds to wait for the replication output buffer go below "
+          "the throttle limit.");
+ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
+          "Time to wait for the replication output buffer go below the throttle limit");
 
 namespace dfly {
 using namespace util;
 using namespace journal;
-using namespace facade;
 
 namespace {
 
@@ -20,12 +28,15 @@ iovec IoVec(io::Bytes src) {
   return iovec{const_cast<uint8_t*>(src.data()), src.size()};
 }
 
-constexpr chrono::steady_clock::duration kSinkThrottleTime = 500ms;
+constexpr size_t kFlushThreshold = 2_KB;
+uint32_t replication_stream_output_limit_cached = 64_KB;
 
 }  // namespace
 
 JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
     : journal_(journal), cntx_(cntx) {
+  // cache the flag to avoid accessing it later.
+  replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
 }
 
 JournalStreamer::~JournalStreamer() {
@@ -65,7 +76,6 @@ void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
 
 void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
-  cntx_->Cancel();
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
   WaitForInflightToComplete();
@@ -74,8 +84,6 @@ void JournalStreamer::Cancel() {
 size_t JournalStreamer::GetTotalBufferCapacities() const {
   return in_flight_bytes_ + pending_buf_.capacity();
 }
-
-constexpr size_t kFlushThreshold = 2_KB;
 
 void JournalStreamer::Write(std::string_view str) {
   DCHECK(!str.empty());
@@ -149,11 +157,15 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (IsStopped() || !IsStalled())
     return;
 
-  auto next = chrono::steady_clock::now() + kSinkThrottleTime;
+  auto next = chrono::steady_clock::now() +
+              chrono::milliseconds(absl::GetFlag(FLAGS_replication_stream_timeout));
+  auto inflight_start = in_flight_bytes_;
+
   std::cv_status status =
       waker_.await_until([this]() { return !IsStalled() || IsStopped(); }, next);
   if (status == std::cv_status::timeout) {
-    LOG(WARNING) << "Stream timed out, inflight bytes " << in_flight_bytes_;
+    LOG(WARNING) << "Stream timed out, inflight bytes start: " << inflight_start
+                 << ", end: " << in_flight_bytes_;
     cntx_->ReportError(make_error_code(errc::stream_timeout));
   }
 }
@@ -169,7 +181,7 @@ void JournalStreamer::WaitForInflightToComplete() {
 }
 
 bool JournalStreamer::IsStalled() const {
-  return in_flight_bytes_ >= 64_KB;
+  return in_flight_bytes_ >= replication_stream_output_limit_cached;
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
