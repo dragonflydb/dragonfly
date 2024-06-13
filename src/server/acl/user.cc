@@ -9,6 +9,7 @@
 #include <limits>
 
 #include "absl/strings/escaping.h"
+#include "core/overloaded.h"
 #include "server/acl/helpers.h"
 
 namespace dfly::acl {
@@ -33,20 +34,28 @@ void User::Update(UpdateRequest&& req) {
     SetPasswordHash(*req.password, req.is_hashed);
   }
 
-  for (auto [sign, category] : req.categories) {
+  auto cat_visitor = [this](UpdateRequest::CategoryValueType cat) {
+    auto [sign, category] = cat;
     if (sign == Sign::PLUS) {
-      SetAclCategories(category);
-      continue;
+      SetAclCategoriesAndIncrSeq(category);
+      return;
     }
-    UnsetAclCategories(category);
-  }
+    UnsetAclCategoriesAndIncrSeq(category);
+  };
 
-  for (auto [sign, index, bit_index] : req.commands) {
+  auto cmd_visitor = [this](UpdateRequest::CommandsValueType cmd) {
+    auto [sign, index, bit_index] = cmd;
     if (sign == Sign::PLUS) {
-      SetAclCommands(index, bit_index);
-      continue;
+      SetAclCommandsAndIncrSeq(index, bit_index);
+      return;
     }
-    UnsetAclCommands(index, bit_index);
+    UnsetAclCommandsAndIncrSeq(index, bit_index);
+  };
+
+  Overloaded visitor{cat_visitor, cmd_visitor};
+
+  for (auto req : req.updates) {
+    std::visit(visitor, req);
   }
 
   if (!req.keys.empty()) {
@@ -78,17 +87,42 @@ bool User::HasPassword(std::string_view password) const {
   return *password_hash_ == StringSHA256(password);
 }
 
-void User::SetAclCategories(uint32_t cat) {
+void User::SetAclCategoriesAndIncrSeq(uint32_t cat) {
   acl_categories_ |= cat;
+  if (cat == acl::ALL) {
+    SetAclCommands(std::numeric_limits<size_t>::max(), 0);
+  } else {
+    auto id = CategoryToIdx().at(cat);
+    std::string_view name = REVERSE_CATEGORY_INDEX_TABLE[id];
+    const auto& commands_group = CategoryToCommandsIndex().at(name);
+    for (size_t fam_id = 0; fam_id < commands_group.size(); ++fam_id) {
+      SetAclCommands(fam_id, commands_group[fam_id]);
+    }
+  }
+
+  CategoryChange change{cat};
+  cat_changes_[change] = ChangeMetadata{Sign::PLUS, seq_++};
 }
 
-void User::UnsetAclCategories(uint32_t cat) {
-  SetAclCategories(cat);
+void User::UnsetAclCategoriesAndIncrSeq(uint32_t cat) {
   acl_categories_ ^= cat;
+  if (cat == acl::ALL) {
+    UnsetAclCommands(std::numeric_limits<size_t>::max(), 0);
+  } else {
+    auto id = CategoryToIdx().at(cat);
+    std::string_view name = REVERSE_CATEGORY_INDEX_TABLE[id];
+    const auto& commands_group = CategoryToCommandsIndex().at(name);
+    for (size_t fam_id = 0; fam_id < commands_group.size(); ++fam_id) {
+      UnsetAclCommands(fam_id, commands_group[fam_id]);
+    }
+  }
+
+  CategoryChange change{cat};
+  cat_changes_[change] = ChangeMetadata{Sign::MINUS, seq_++};
 }
 
 void User::SetAclCommands(size_t index, uint64_t bit_index) {
-  if (IsIndexAllCommandsFlag(index)) {
+  if (index == std::numeric_limits<size_t>::max()) {
     for (auto& family : commands_) {
       family = ALL_COMMANDS;
     }
@@ -97,8 +131,14 @@ void User::SetAclCommands(size_t index, uint64_t bit_index) {
   commands_[index] |= bit_index;
 }
 
+void User::SetAclCommandsAndIncrSeq(size_t index, uint64_t bit_index) {
+  SetAclCommands(index, bit_index);
+  CommandChange change{index, bit_index};
+  cmd_changes_[change] = ChangeMetadata{Sign::PLUS, seq_++};
+}
+
 void User::UnsetAclCommands(size_t index, uint64_t bit_index) {
-  if (IsIndexAllCommandsFlag(index)) {
+  if (index == std::numeric_limits<size_t>::max()) {
     for (auto& family : commands_) {
       family = NONE_COMMANDS;
     }
@@ -106,6 +146,12 @@ void User::UnsetAclCommands(size_t index, uint64_t bit_index) {
   }
   SetAclCommands(index, bit_index);
   commands_[index] ^= bit_index;
+}
+
+void User::UnsetAclCommandsAndIncrSeq(size_t index, uint64_t bit_index) {
+  UnsetAclCommands(index, bit_index);
+  CommandChange change{index, bit_index};
+  cmd_changes_[change] = ChangeMetadata{Sign::MINUS, seq_++};
 }
 
 uint32_t User::AclCategory() const {
@@ -136,6 +182,14 @@ std::string_view User::Password() const {
 
 const AclKeys& User::Keys() const {
   return keys_;
+}
+
+const User::CategoryChanges& User::CatChanges() const {
+  return cat_changes_;
+}
+
+const User::CommandChanges& User::CmdChanges() const {
+  return cmd_changes_;
 }
 
 void User::SetKeyGlobs(std::vector<UpdateKey> keys) {

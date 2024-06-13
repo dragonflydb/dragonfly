@@ -77,8 +77,6 @@ class UserRegistry {
     std::unique_lock<util::fb2::SharedMutex> registry_lk_;
   };
 
-  UserWithWriteLock MaybeAddAndUpdateWithLock(std::string_view username, User::UpdateRequest req);
-
   User::UpdateRequest DefaultUserUpdateRequest() const;
 
  private:
