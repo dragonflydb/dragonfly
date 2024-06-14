@@ -695,11 +695,12 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
 
   for (const auto& m : incoming_migrations_jobs_) {
     // TODO add error status
-    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(), "");
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(),
+                  m->GetErrorStr());
   }
-  for (const auto& migration : outgoing_migration_jobs_) {
-    append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
-                  migration->GetKeyCount(), migration->GetErrorStr());
+  for (const auto& m : outgoing_migration_jobs_) {
+    append_answer("out", m->GetMigrationInfo().node_id, node_id, m->GetState(), m->GetKeyCount(),
+                  m->GetErrorStr());
   }
 
   if (reply.empty()) {
@@ -786,8 +787,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
   SlotSet migration_slots(migration->GetSlots());
   SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
-  // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
-  migration->Cancel();
+  migration->Stop();
   // all fibers has migration shared_ptr so we don't need to join it and can erase
   jobs.erase(it);
 
@@ -877,7 +877,6 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
   auto migration = GetIncomingMigration(source_id);
   if (!migration) {
-    // TODO process error when migration is canceled
     return cntx->SendError(kIdNotFound);
   }
 
@@ -916,7 +915,6 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
                            [source_id](const auto& m) { return m.node_id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
-    // TODO process error if migration was canceled
     return cntx->SendLong(OutgoingMigration::kInvalidAttempt);
   }
 
