@@ -78,8 +78,10 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
     return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
-  if ((opt_mask() & CO::INTERLEAVED_KEYS) && (tail_args.size() % 2) != 0) {
-    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  if ((opt_mask() & CO::INTERLEAVED_KEYS)) {
+    if ((name() == "JSON.MSET" && tail_args.size() % 3 != 0) ||
+        (name() == "MSET" && tail_args.size() % 2 != 0))
+      return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
   if (validator_)
@@ -129,7 +131,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
-  if (!is_sub_command) {
+  if (!is_sub_command || absl::StartsWith(cmd.name(), "ACL")) {
     cmd.SetBitIndex(1ULL << bit_index_);
     family_of_commands_.back().push_back(std::string(k));
     ++bit_index_;

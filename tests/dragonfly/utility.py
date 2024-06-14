@@ -233,7 +233,7 @@ class CommandGenerator:
         ValueType.SET: "SADD",
         ValueType.HSET: "HMSET",
         ValueType.ZSET: "ZADD",
-        ValueType.JSON: "JSON.SET",
+        ValueType.JSON: "JSON.MSET",
     }
 
     def gen_grow_cmd(self):
@@ -242,7 +242,7 @@ class CommandGenerator:
         """
         # TODO: Implement COPY in Dragonfly.
         t = self.random_type()
-        if t == ValueType.STRING:
+        if t in [ValueType.STRING, ValueType.JSON]:
             count = random.randint(1, self.max_multikey)
         else:
             count = 1

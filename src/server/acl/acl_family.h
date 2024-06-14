@@ -49,7 +49,7 @@ class AclFamily final {
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads
   using Commands = std::vector<uint64_t>;
-  void StreamUpdatesToAllProactorConnections(const std::string& user, uint32_t update_cat,
+  void StreamUpdatesToAllProactorConnections(const std::string& user,
                                              const Commands& update_commands,
                                              const AclKeys& update_keys);
 

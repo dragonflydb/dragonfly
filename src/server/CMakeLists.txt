@@ -52,7 +52,7 @@ add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc channel_store.cc
             detail/save_stages_controller.cc
             detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
-            zset_family.cc version.cc bitops_family.cc container_utils.cc io_utils.cc
+            zset_family.cc version.cc bitops_family.cc container_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc
             ${DF_SEARCH_SRCS}
             ${DF_LINUX_SRCS}
@@ -117,7 +117,6 @@ cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
-cxx_test(acl/user_registry_test dfly_test_lib LABELS DFLY)
 cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)
@@ -135,4 +134,4 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
                  redis_parser_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test hll_family_test
-                 cluster_config_test cluster_family_test user_registry_test acl_family_test)
+                 cluster_config_test cluster_family_test acl_family_test)

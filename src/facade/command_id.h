@@ -7,7 +7,6 @@
 #include <string_view>
 
 #include "facade/facade_types.h"
-#include "server/acl/acl_commands_def.h"
 
 namespace facade {
 
