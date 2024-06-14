@@ -1644,7 +1644,6 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     if (is_authorized) {
       cntx->authed_username = username;
       auto cred = registry->GetCredentials(username);
-      cntx->acl_categories = cred.acl_categories;
       cntx->acl_commands = cred.acl_commands;
       cntx->keys = std::move(cred.keys);
       cntx->authenticated = true;
@@ -2586,7 +2585,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
-  ConnectionContext ctxt{&sink, nullptr};
+  ConnectionContext ctxt{&sink, nullptr, {}};
   ctxt.skip_acl_validation = true;
 
   StringVec replicaof_params{string(host), string(port)};

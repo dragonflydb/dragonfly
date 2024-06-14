@@ -110,7 +110,6 @@ class ConnectionContext {
 
   // TODO fix inherit actual values from default
   std::string authed_username{"default"};
-  uint32_t acl_categories{dfly::acl::ALL};
   std::vector<uint64_t> acl_commands;
   // keys
   dfly::acl::AclKeys keys{{}, true};
