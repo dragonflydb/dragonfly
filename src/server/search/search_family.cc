@@ -74,6 +74,23 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
       continue;
     }
 
+    if (parser->Check("EF_CONSTRUCTION").ExpectTail(1)) {
+      params.hnsw_ef_construction = parser->Next<size_t>();
+      continue;
+    }
+
+    if (parser->Check("EF_RUNTIME").ExpectTail(1)) {
+      parser->Next<size_t>();
+      LOG(WARNING) << "EF_RUNTIME not supported";
+      continue;
+    }
+
+    if (parser->Check("EPSILON").ExpectTail(1)) {
+      parser->Next<double>();
+      LOG(WARNING) << "EPSILON not supported";
+      continue;
+    }
+
     parser->Skip(2);
   }
 
