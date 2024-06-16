@@ -71,7 +71,7 @@ class GenericFamily {
   static void RandomKey(CmdArgList args, ConnectionContext* cntx);
   static void FieldTtl(CmdArgList args, ConnectionContext* cntx);
 
-  static OpResult<void> RenameGeneric(CmdArgList args, bool skip_exist_dest,
+  static OpResult<void> RenameGeneric(CmdArgList args, bool destination_should_not_exist,
                                       ConnectionContext* cntx);
   static void TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
 
