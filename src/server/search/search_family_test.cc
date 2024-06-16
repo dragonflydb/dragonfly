@@ -679,4 +679,10 @@ TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
                                  IsUnordArray(IsArray("even", "true"))));
 }
 
+TEST_F(SearchFamilyTest, Vector) {
+  auto resp = Run({"ft.create", "ann", "ON", "HASH", "SCHEMA", "vector", "VECTOR", "HNSW", "8",
+                   "TYPE", "FLOAT32", "DIM", "100", "distance_metric", "cosine", "M", "64"});
+  EXPECT_EQ(resp, "OK");
+}
+
 }  // namespace dfly
