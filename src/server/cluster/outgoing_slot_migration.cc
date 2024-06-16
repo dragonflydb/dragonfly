@@ -87,6 +87,13 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
 
 OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
+
+  // Destroy each flow in its dedicated thread, because we could be the last owner of the db tables
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      slot_migrations_[shard->shard_id()].reset();
+    }
+  });
 }
 
 bool OutgoingMigration::ChangeState(MigrationState new_state) {
@@ -119,11 +126,21 @@ MigrationState OutgoingMigration::GetState() const {
   return state_;
 }
 
+void OutgoingMigration::ClearSlotRanges() {
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      shard->db_slice().FlushSlots(GetSlots());
+    }
+  });
+}
+
 void OutgoingMigration::SyncFb() {
   VLOG(1) << "Starting outgoing migration fiber for migration " << migration_info_.ToString();
 
   // we retry starting migration until "cancel" is happened
   while (GetState() != MigrationState::C_FINISHED) {
+    ClearSlotRanges();  // Clear any previously copied keys for this migration
+
     if (!ChangeState(MigrationState::C_CONNECTING)) {
       break;
     }

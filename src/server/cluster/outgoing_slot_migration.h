@@ -75,6 +75,8 @@ class OutgoingMigration : private ProtocolClient {
 
   bool ChangeState(MigrationState new_state) ABSL_LOCKS_EXCLUDED(state_mu_);
 
+  void ClearSlotRanges();
+
  private:
   MigrationInfo migration_info_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
