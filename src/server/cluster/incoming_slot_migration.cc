@@ -5,6 +5,7 @@
 #include "server/cluster/incoming_slot_migration.h"
 
 #include "absl/cleanup/cleanup.h"
+#include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "cluster_utility.h"
 #include "server/error.h"
@@ -24,8 +25,11 @@ using namespace facade;
 // It is created per shard on the target node to initiate FLOW step.
 class ClusterShardMigration {
  public:
-  ClusterShardMigration(uint32_t shard_id, Service* service)
-      : source_shard_id_(shard_id), socket_(nullptr), executor_(service) {
+  ClusterShardMigration(uint32_t shard_id, Service* service, IncomingSlotMigration* in_migration)
+      : source_shard_id_(shard_id),
+        socket_(nullptr),
+        executor_(service),
+        in_migration_(in_migration) {
   }
 
   void Start(Context* cntx, util::FiberSocketBase* source, util::fb2::BlockingCounter bc) {
@@ -44,7 +48,7 @@ class ClusterShardMigration {
     while (!cntx->IsCancelled()) {
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
-        // TODO add error processing
+        in_migration_->ReportError(GenericError("No tx data"));
         VLOG(1) << "No tx data";
         break;
       }
@@ -93,8 +97,12 @@ class ClusterShardMigration {
       executor_.Execute(tx_data.dbid, tx_data.command);
     } else {
       // TODO check which global commands should be supported
-      CHECK(false) << "We don't support command: " << ToSV(tx_data.command.cmd_args[0])
-                   << "in cluster migration process.";
+      std::string error =
+          absl::StrCat("We don't support command: ", ToSV(tx_data.command.cmd_args[0]),
+                       " in cluster migration process.");
+      LOG(ERROR) << error;
+      cntx->ReportError(error);
+      in_migration_->ReportError(error);
     }
   }
 
@@ -103,6 +111,7 @@ class ClusterShardMigration {
   util::fb2::Mutex mu_;
   util::FiberSocketBase* socket_ ABSL_GUARDED_BY(mu_);
   JournalExecutor executor_;
+  IncomingSlotMigration* in_migration_;
 };
 
 IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
@@ -114,7 +123,7 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
       bc_(shards_num) {
   shard_flows_.resize(shards_num);
   for (unsigned i = 0; i < shards_num; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(i, &service_));
+    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this));
   }
 }
 
@@ -129,16 +138,19 @@ bool IncomingSlotMigration::Join() {
     return true;
   }
   LOG(WARNING) << "Can't join migration in time";
+  ReportError(GenericError("Can't join migration in time"));
   return false;
 }
 
-void IncomingSlotMigration::Cancel() {
+void IncomingSlotMigration::Stop() {
   string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << SlotRange::ToString(slots_);
   cntx_.Cancel();
 
   for (auto& flow : shard_flows_) {
-    flow->Cancel();
+    if (auto err = flow->Cancel(); err) {
+      VLOG(1) << "Error during flow Stop: " << err;
+    }
   }
   bc_->Cancel();
 }
