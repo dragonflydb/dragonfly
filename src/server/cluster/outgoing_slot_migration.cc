@@ -109,23 +109,25 @@ bool OutgoingMigration::ChangeState(MigrationState new_state) {
 void OutgoingMigration::Finish(bool is_error) {
   bool should_cancel_flows = false;
 
-  std::lock_guard lk(state_mu_);
-  switch (state_) {
-    case MigrationState::C_FINISHED:
-      return;  // Already finished, nothing else to do
+  {
+    std::lock_guard lk(state_mu_);
+    switch (state_) {
+      case MigrationState::C_FINISHED:
+        return;  // Already finished, nothing else to do
 
-    case MigrationState::C_NO_STATE:
-    case MigrationState::C_CONNECTING:
-      should_cancel_flows = false;
-      break;
+      case MigrationState::C_NO_STATE:
+      case MigrationState::C_CONNECTING:
+        should_cancel_flows = false;
+        break;
 
-    case MigrationState::C_SYNC:
-    case MigrationState::C_ERROR:
-      should_cancel_flows = true;
-      break;
+      case MigrationState::C_SYNC:
+      case MigrationState::C_ERROR:
+        should_cancel_flows = true;
+        break;
+    }
+
+    state_ = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
   }
-
-  state_ = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
 
   if (should_cancel_flows) {
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
