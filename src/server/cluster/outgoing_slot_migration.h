@@ -77,7 +77,11 @@ class OutgoingMigration : private ProtocolClient {
 
  private:
   MigrationInfo migration_info_;
+
+  // Only use after Wait()ing for guard below
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
+  util::fb2::EmbeddedBlockingCounter slot_migrations_init_guard_;
+
   ServerFamily* server_family_;
   ClusterFamily* cf_;
   dfly::GenericError last_error_;

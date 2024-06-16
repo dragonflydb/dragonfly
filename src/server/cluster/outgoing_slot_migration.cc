@@ -88,6 +88,7 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
     : ProtocolClient(info.ip, info.port),
       migration_info_(std::move(info)),
       slot_migrations_(shard_set->size()),
+      slot_migrations_init_guard_(shard_set->size()),
       server_family_(sf),
       cf_(cf) {
 }
@@ -112,6 +113,7 @@ void OutgoingMigration::Finish(bool is_error) {
     return;
   }
 
+  slot_migrations_init_guard_.Wait();
   shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
       auto& flow = slot_migrations_[shard->shard_id()];
@@ -181,18 +183,13 @@ void OutgoingMigration::SyncFb() {
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (auto* shard = EngineShard::tlocal(); shard) {
         server_family_->journal()->StartInThread();
-        slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
+        auto& migration = slot_migrations_[shard->shard_id()];
+        DCHECK(migration == nullptr);
+        migration = std::make_unique<SliceSlotMigration>(
             &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal());
-      }
-    });
-
-    // Start migrations in a separate hop to make sure that Finish() is called only after all
-    // migrations are created (see #3139)
-    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-      if (auto* shard = EngineShard::tlocal(); shard) {
-        auto& migration = *slot_migrations_[shard->shard_id()];
-        migration.Sync(cf_->MyID(), shard->shard_id());
-        if (migration.GetError()) {
+        slot_migrations_init_guard_.Dec();  // Must be done before Finish(), as it blocks on it
+        migration->Sync(cf_->MyID(), shard->shard_id());
+        if (migration->GetError()) {
           Finish(true);
         }
       }
@@ -251,13 +248,13 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     pause_fb_opt->JoinIfNeeded();
   });
 
+  slot_migrations_init_guard_.Wait();
   auto cb = [this](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
       VLOG(1) << "FINALIZE outgoing migration" << shard->shard_id();
       slot_migrations_[shard->shard_id()]->Finalize();
     }
   };
-
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID(), " ", attempt);
@@ -308,12 +305,15 @@ void OutgoingMigration::Start() {
 }
 
 bool OutgoingMigration::CheckFlowsForErrors() {
+  slot_migrations_init_guard_.Wait();
+
   for (const auto& flow : slot_migrations_) {
     if (flow->GetError()) {
       cntx_.ReportError(flow->GetError());
       return true;
     }
   }
+
   return false;
 }
 
