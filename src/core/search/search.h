@@ -32,7 +32,7 @@ struct SchemaField {
     size_t dim = 0u;                              // dimension of knn vectors
     VectorSimilarity sim = VectorSimilarity::L2;  // similarity type
     size_t capacity = 1000;                       // initial capacity
-
+    size_t hnsw_ef_construction = 200;
     size_t hnsw_m = 16;
   };
 

@@ -24,7 +24,7 @@ class IncomingSlotMigration {
   ~IncomingSlotMigration();
 
   // process data from FDLYMIGRATE FLOW cmd
-  // executes until Cancel called or connection closed
+  // executes until Stop called or connection closed
   void StartFlow(uint32_t shard, util::FiberSocketBase* source);
 
   // Waits until all flows got FIN opcode.
@@ -32,7 +32,8 @@ class IncomingSlotMigration {
   // After Join we still can get data due to error situation
   [[nodiscard]] bool Join();
 
-  void Cancel();
+  // Stop migrations, can be called even after migration is finished
+  void Stop();
 
   MigrationState GetState() const {
     return state_.load();
@@ -46,6 +47,16 @@ class IncomingSlotMigration {
     return source_id_;
   }
 
+  void ReportError(dfly::GenericError err) {
+    std::lock_guard lk(error_mu_);
+    last_error_ = err;
+  }
+
+  std::string GetErrorStr() const {
+    std::lock_guard lk(error_mu_);
+    return last_error_.Format();
+  }
+
   size_t GetKeyCount() const;
 
  private:
@@ -55,6 +66,9 @@ class IncomingSlotMigration {
   SlotRanges slots_;
   std::atomic<MigrationState> state_ = MigrationState::C_NO_STATE;
   Context cntx_;
+  mutable util::fb2::Mutex error_mu_;
+  dfly::GenericError last_error_ ABSL_GUARDED_BY(error_mu_);
+
   // when migration is finished we need to store number of migrated keys
   // because new request can add or remove keys and we get incorrect statistic
   size_t keys_number_ = 0;

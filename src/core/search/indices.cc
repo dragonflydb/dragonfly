@@ -196,9 +196,12 @@ const float* FlatVectorIndex::Get(DocId doc) const {
 
 struct HnswlibAdapter {
   HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{MakeSpace(params.dim, params.sim)}, world_{GetSpacePtr(), params.capacity,
-                                                          params.hnsw_m, 200,
-                                                          100,           true} {
+      : space_{MakeSpace(params.dim, params.sim)}, world_{GetSpacePtr(),
+                                                          params.capacity,
+                                                          params.hnsw_m,
+                                                          params.hnsw_ef_construction,
+                                                          100 /* seed*/,
+                                                          true} {
   }
 
   void Add(float* data, DocId id) {

@@ -25,12 +25,12 @@ namespace {
 std::string AclCatToString(uint32_t acl_category, User::Sign sign) {
   std::string res = sign == User::Sign::PLUS ? "+@" : "-@";
   if (acl_category == acl::ALL) {
-    absl::StrAppend(&res, "ALL");
+    absl::StrAppend(&res, "all");
     return res;
   }
 
   const auto& index = CategoryToIdx().at(acl_category);
-  absl::StrAppend(&res, REVERSE_CATEGORY_INDEX_TABLE[index]);
+  absl::StrAppend(&res, absl::AsciiStrToLower(REVERSE_CATEGORY_INDEX_TABLE[index]));
   return res;
 }
 
@@ -41,7 +41,7 @@ std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) {
   std::string prefix = (sign == User::Sign::PLUS) ? "+" : "-";
   if (mask == ALL_COMMANDS) {
     for (const auto& cmd : rev_index[family]) {
-      absl::StrAppend(&res, prefix, cmd, " ");
+      absl::StrAppend(&res, prefix, absl::AsciiStrToLower(cmd), " ");
     }
     res.pop_back();
     return res;
@@ -53,7 +53,7 @@ std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) {
     mask = mask >> 1;
   }
   --pos;
-  absl::StrAppend(&res, prefix, rev_index[family][pos]);
+  absl::StrAppend(&res, prefix, absl::AsciiStrToLower(rev_index[family][pos]));
   return res;
 }
 

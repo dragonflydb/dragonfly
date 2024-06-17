@@ -6,6 +6,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/flags/internal/flag.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -47,15 +48,15 @@ TEST_F(AclFamilyTest, AclSetUser) {
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
   EXPECT_THAT(
-      vec, UnorderedElementsAre("user default on nopass +@ALL ~*", "user vlad off nopass -@ALL"));
+      vec, UnorderedElementsAre("user default on nopass ~* +@all", "user vlad off nopass -@all"));
 
   resp = Run({"ACL", "SETUSER", "vlad", "+ACL"});
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "LIST"});
   vec = resp.GetVec();
-  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL ~*",
-                                        "user vlad off nopass -@ALL +ACL"));
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* +@all",
+                                        "user vlad off nopass -@all +acl"));
 }
 
 TEST_F(AclFamilyTest, AclDelUser) {
@@ -82,7 +83,7 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"ACL", "LIST"});
-  EXPECT_THAT(resp.GetString(), "user default on nopass +@ALL ~*");
+  EXPECT_THAT(resp.GetString(), "user default on nopass ~* +@all");
 
   Run({"ACL", "SETUSER", "michael", "ON"});
   Run({"ACL", "SETUSER", "kobe", "ON"});
@@ -103,9 +104,9 @@ TEST_F(AclFamilyTest, AclList) {
 
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
-  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass +@ALL ~*",
-                                        "user kostas off d74ff0ee8da3b98 -@ALL +@ADMIN",
-                                        "user adi off d74ff0ee8da3b98 -@ALL +@FAST"));
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* +@all",
+                                        "user kostas off d74ff0ee8da3b98 -@all +@admin",
+                                        "user adi off d74ff0ee8da3b98 -@all +@fast"));
 }
 
 TEST_F(AclFamilyTest, AclAuth) {
@@ -154,16 +155,18 @@ TEST_F(AclFamilyTest, TestAllCategories) {
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass +@ALL ~*",
-                                       absl::StrCat("user kostas off nopass -@ALL ", "+@", cat)));
+                  UnorderedElementsAre("user default on nopass ~* +@all",
+                                       absl::StrCat("user kostas off nopass -@all ", "+@",
+                                                    absl::AsciiStrToLower(cat))));
 
       resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-@", cat)});
       EXPECT_THAT(resp, "OK");
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass +@ALL ~*",
-                                       absl::StrCat("user kostas off nopass -@ALL ", "-@", cat)));
+                  UnorderedElementsAre("user default on nopass ~* +@all",
+                                       absl::StrCat("user kostas off nopass -@all ", "-@",
+                                                    absl::AsciiStrToLower(cat))));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
       EXPECT_THAT(resp, IntArg(1));
@@ -201,16 +204,18 @@ TEST_F(AclFamilyTest, TestAllCommands) {
       EXPECT_THAT(resp, "OK");
 
       resp = Run({"ACL", "LIST"});
-      EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass +@ALL ~*",
-                                                      absl::StrCat("user kostas off nopass -@ALL ",
-                                                                   "+", command_name)));
+      EXPECT_THAT(resp.GetVec(),
+                  UnorderedElementsAre("user default on nopass ~* +@all",
+                                       absl::StrCat("user kostas off nopass -@all ", "+",
+                                                    absl::AsciiStrToLower(command_name))));
 
       resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-", command_name)});
 
       resp = Run({"ACL", "LIST"});
-      EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass +@ALL ~*",
-                                                      absl::StrCat("user kostas off nopass ",
-                                                                   "-@ALL ", "-", command_name)));
+      EXPECT_THAT(resp.GetVec(),
+                  UnorderedElementsAre("user default on nopass ~* +@all",
+                                       absl::StrCat("user kostas off nopass ", "-@all ", "-",
+                                                    absl::AsciiStrToLower(command_name))));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
       EXPECT_THAT(resp, IntArg(1));
@@ -259,7 +264,7 @@ TEST_F(AclFamilyTest, TestGetUser) {
   EXPECT_THAT(vec[2], "passwords");
   EXPECT_TRUE(vec[3].GetVec().empty());
   EXPECT_THAT(vec[4], "commands");
-  EXPECT_THAT(vec[5], "+@ALL");
+  EXPECT_THAT(vec[5], "+@all");
   EXPECT_THAT(vec[6], "keys");
   EXPECT_THAT(vec[7], "~*");
 
@@ -271,7 +276,7 @@ TEST_F(AclFamilyTest, TestGetUser) {
   EXPECT_THAT(kvec[2], "passwords");
   EXPECT_TRUE(kvec[3].GetVec().empty());
   EXPECT_THAT(kvec[4], "commands");
-  EXPECT_THAT(kvec[5], "-@ALL +@STRING +HSET");
+  EXPECT_THAT(kvec[5], "-@all +@string +hset");
 }
 
 TEST_F(AclFamilyTest, TestDryRun) {

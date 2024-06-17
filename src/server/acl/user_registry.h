@@ -42,12 +42,6 @@ class UserRegistry {
   // kills already existing connections from the removed user
   bool RemoveUser(std::string_view username);
 
-  struct UserCredentials {
-    uint32_t acl_categories{0};
-    std::vector<uint64_t> acl_commands;
-    AclKeys keys;
-  };
-
   // Acquires a read lock
   UserCredentials GetCredentials(std::string_view username) const;
 
