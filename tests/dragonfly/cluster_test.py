@@ -1054,7 +1054,7 @@ async def test_cluster_flushall_during_migration(
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    seeder = df_seeder_factory.create(keys=3000, port=nodes[0].instance.port, cluster_mode=True)
+    seeder = df_seeder_factory.create(keys=10_000, port=nodes[0].instance.port, cluster_mode=True)
     await seeder.run(target_deviation=0.1)
 
     nodes[0].migrations.append(
@@ -1069,7 +1069,7 @@ async def test_cluster_flushall_during_migration(
     ), "Weak test case - finished migration too early"
 
     await nodes[0].client.execute_command("flushall")
-    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
     logging.debug("Finalizing migration")
     nodes[0].migrations = []
@@ -1079,8 +1079,13 @@ async def test_cluster_flushall_during_migration(
     logging.debug("Migration finalized")
 
     assert await nodes[0].client.dbsize() == 0
-    # TODO: This is an issue in Dragonfly, fix it and then uncomment:
-    # assert await nodes[1].client.dbsize() == 0
+
+    async def empty_target():
+        count = await nodes[1].client.dbsize()
+        logging.debug(f"Got {count} entries in target node db")
+        return count == 0
+
+    await assert_eventually(empty_target)
 
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
