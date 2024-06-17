@@ -627,6 +627,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   DCHECK_EQ(shard, EngineShard::tlocal());
 
   RunnableResult result;
+  auto change_callback_lock = shard->db_slice().GetChangeCbLock();
   try {
     result = (*cb_ptr_)(this, shard);
 
@@ -664,6 +665,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
+    change_callback_lock.unlock();
     MaybeInvokeTrackingCb();
   }
 }
@@ -1247,9 +1249,11 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   DCHECK_EQ(unique_shard_cnt_, 1u);
 
   auto* shard = EngineShard::tlocal();
+  auto change_callback_lock = shard->db_slice().GetChangeCbLock();
   auto result = cb(this, shard);
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard, result);
+  change_callback_lock.unlock();
   MaybeInvokeTrackingCb();
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it

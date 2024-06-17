@@ -469,6 +469,11 @@ class DbSlice {
   void PerformDeletion(Iterator del_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
+  // this is workaround to execute callbacks for db_slice and journal atomically
+  [[nodiscard]] auto GetChangeCbLock() const {
+    return std::shared_lock(cb_mu_);
+  }
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
@@ -546,9 +551,9 @@ class DbSlice {
   // Used in temporary computations in Acquire/Release.
   mutable absl::flat_hash_set<uint64_t> uniq_fps_;
 
-  mutable util::fb2::SharedMutex cb_mu_;  // to prevent removing callback during call
+  mutable util::fb2::SharedMutex cb_mu_;
   // ordered from the smallest to largest version.
-  std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
+  std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   mutable absl::flat_hash_set<CompactObjectView> fetched_items_;

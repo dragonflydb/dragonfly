@@ -1083,7 +1083,13 @@ void DbSlice::ExpireAllIfNeeded() {
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   uint64_t ver = NextVersion();
-  // mutex lock isn't needed due to iterators are not invalidated
+
+  // TODO rewrite this logic to be more clear
+  // this mutex lock is needed to check that this method is not called simultaneously with
+  // change_cb_ calls and journal_slice::change_cb_arr_ calls.
+  // It can be unlocked anytime because DbSlice::RegisterOnChange
+  // and journal_slice::RegisterOnChange calls without preemption
+  std::lock_guard lk(cb_mu_);
   change_cb_.emplace_back(ver, std::move(cb));
   return ver;
 }
@@ -1095,7 +1101,6 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
 
-  std::shared_lock lk(cb_mu_);
   for (const auto& ccb : change_cb_) {
     uint64_t cb_version = ccb.first;
     DCHECK_LE(cb_version, upper_bound);
@@ -1505,7 +1510,6 @@ void DbSlice::OnCbFinish() {
 }
 
 void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
-  std::shared_lock lk(cb_mu_);
   for (const auto& ccb : change_cb_) {
     ccb.second(id, cr);
   }

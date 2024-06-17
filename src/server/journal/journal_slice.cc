@@ -191,13 +191,8 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
              << " num callbacks: " << change_cb_arr_.size();
 
-    auto callbacks_num = change_cb_arr_.size();
     for (const auto& k_v : change_cb_arr_) {
       k_v.second(*item, await);
-      --callbacks_num;
-      // durin calbacks call we can add one more callback so we need to prevent call it
-      if (callbacks_num == 0)
-        break;
     }
   }
 }
