@@ -279,12 +279,12 @@ class Context : protected Cancellation {
   // Report error.
   GenericError ReportErrorInternal(GenericError&& err);
 
- private:
   GenericError err_;
-  mutable util::fb2::Mutex mu_;
-
   ErrHandler err_handler_;
   util::fb2::Fiber err_handler_fb_;
+
+  // We use regular mutexes to be able to call ReportError directly from I/O callbacks.
+  mutable std::mutex err_mu_;  // protects err_ and err_handler_
 };
 
 struct ScanOpts {
