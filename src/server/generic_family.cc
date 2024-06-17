@@ -148,19 +148,21 @@ bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& 
   return res.ok();
 }
 
-class Renamer;
-
 class RestoreArgs {
  private:
-  static constexpr int64_t NO_EXPIRATION = 0;
+  static constexpr time_t NO_EXPIRATION = 0;
 
-  int64_t expiration_ = NO_EXPIRATION;
+  time_t expiration_ = NO_EXPIRATION;
   bool abs_time_ = false;
   bool replace_ = false;  // if true, over-ride existing key
 
-  friend class Renamer;
-
  public:
+  RestoreArgs() = default;
+
+  RestoreArgs(time_t expiration, bool abs_time, bool replace)
+      : expiration_(expiration), abs_time_(abs_time), replace_(replace) {
+  }
+
   constexpr bool Replace() const {
     return replace_;
   }
@@ -258,35 +260,39 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
 
 class Renamer {
  public:
-  Renamer(std::string_view src_key, std::string_view dest_key, unsigned shard_count)
-      : src_key_(src_key),
+  Renamer(Transaction* t, std::string_view src_key, std::string_view dest_key, unsigned shard_count)
+      : transaction_(t),
+        src_key_(src_key),
         dest_key_(dest_key),
         src_sid_(Shard(src_key, shard_count)),
         dest_sid_(Shard(dest_key, shard_count)) {
   }
 
-  void Initialize(Transaction* t);
-
-  OpResult<void> status() const {
+  OpResult<void> Status() const {
     return status_;
   };
 
-  void Finalize(Transaction* t, bool destination_should_not_exist);
+  void Rename(bool destination_should_not_exist);
 
  private:
-  bool KeyExists(Transaction* t, EngineShard* shard, std::string_view key);
-  OpStatus SerializeSrc(Transaction* t, EngineShard* shard);
+  void FetchData();
+  void FinalizeRename();
+
+  bool KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const;
+  void SerializeSrc(Transaction* t, EngineShard* shard);
 
   OpStatus DelSrc(Transaction* t, EngineShard* shard);
   OpStatus DeserializeDest(Transaction* t, EngineShard* shard);
 
   struct SerializedValue {
     std::string value;
-    int64_t expire_ts;
+    time_t expire_ts;
     bool sticky;
   };
 
  private:
+  Transaction* const transaction_;
+
   const std::string_view src_key_;
   const std::string_view dest_key_;
   const ShardId src_sid_;
@@ -300,7 +306,25 @@ class Renamer {
   OpResult<void> status_;
 };
 
-void Renamer::Initialize(Transaction* t) {
+void Renamer::Rename(bool destination_should_not_exist) {
+  FetchData();
+
+  if (!src_found_) {
+    status_ = OpStatus::KEY_NOTFOUND;
+    transaction_->Conclude();
+    return;
+  }
+
+  if (dest_found_ && destination_should_not_exist) {
+    status_ = OpStatus::KEY_EXISTS;
+    transaction_->Conclude();
+    return;
+  }
+
+  FinalizeRename();
+}
+
+void Renamer::FetchData() {
   auto cb = [this](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
     DCHECK_EQ(1u, args.Size());
@@ -308,10 +332,7 @@ void Renamer::Initialize(Transaction* t) {
     const ShardId shard_id = shard->shard_id();
 
     if (shard_id == src_sid_) {
-      src_found_ = KeyExists(t, shard, src_key_);
-      if (src_found_) {
-        return SerializeSrc(t, shard);
-      }
+      SerializeSrc(t, shard);
     }
 
     if (shard_id == dest_sid_) {
@@ -321,22 +342,10 @@ void Renamer::Initialize(Transaction* t) {
     return OpStatus::OK;
   };
 
-  t->Execute(std::move(cb), false);
-};
+  transaction_->Execute(std::move(cb), false);
+}
 
-void Renamer::Finalize(Transaction* t, bool destination_should_not_exist) {
-  if (!src_found_) {
-    status_ = OpStatus::KEY_NOTFOUND;
-    t->Conclude();
-    return;
-  }
-
-  if (dest_found_ && destination_should_not_exist) {
-    status_ = OpStatus::KEY_EXISTS;
-    t->Conclude();
-    return;
-  }
-
+void Renamer::FinalizeRename() {
   auto cb = [this](Transaction* t, EngineShard* shard) {
     const ShardId shard_id = shard->shard_id();
 
@@ -351,28 +360,29 @@ void Renamer::Finalize(Transaction* t, bool destination_should_not_exist) {
     return OpStatus::OK;
   };
 
-  t->Execute(std::move(cb), true);
+  transaction_->Execute(std::move(cb), true);
 }
 
-bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) {
+bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const {
   auto& db_slice = shard->db_slice();
   auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
   return IsValid(it);
 }
 
-OpStatus Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
-  auto dump_res = OpDump(t->GetOpArgs(shard), src_key_);
-
-  RETURN_ON_BAD_STATUS(dump_res);
-
+void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
   auto& db_slice = shard->db_slice();
   auto [it, exp_it] = db_slice.FindReadOnly(t->GetDbContext(), src_key_);
 
-  serialized_value_.value = std::move(dump_res.value());
-  serialized_value_.expire_ts = db_slice.ExpireTime(exp_it);
-  serialized_value_.sticky = it->first.IsSticky();
+  src_found_ = IsValid(it);
+  if (!src_found_) {
+    return;
+  }
 
-  return OpStatus::OK;
+  DVLOG(1) << "Rename: key '" << src_key_ << "' successfully found, going to dump it";
+
+  io::StringSink sink;
+  SerializerBase::DumpObject(it->second, &sink);
+  serialized_value_ = {std::move(sink).str(), db_slice.ExpireTime(exp_it), it->first.IsSticky()};
 }
 
 OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
@@ -380,6 +390,8 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
   auto& it = res.it;
 
   CHECK(IsValid(it));
+
+  DVLOG(1) << "Rename: removing the key '" << src_key_;
 
   res.post_updater.Run();
   CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
@@ -395,15 +407,11 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   auto res = db_slice.FindMutable(t->GetDbContext(), dest_key_);
 
   auto& dest_it = res.it;
-  const bool is_prior_list = IsValid(dest_it) && dest_it->second.ObjType() == OBJ_LIST;
 
   int rdb_version = 0;
   CHECK(VerifyFooter(serialized_value_.value, &rdb_version));
 
-  RestoreArgs restore_args;
-  restore_args.expiration_ = serialized_value_.expire_ts;
-  restore_args.abs_time_ = true;
-  restore_args.replace_ = true;
+  RestoreArgs restore_args{serialized_value_.expire_ts, true, true};
 
   auto restore_res =
       OnRestore(t->GetOpArgs(shard), dest_key_, serialized_value_.value, restore_args, rdb_version);
@@ -412,17 +420,18 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   dest_it = db_slice.FindMutable(t->GetDbContext(), dest_key_).it;
   dest_it->first.SetSticky(serialized_value_.sticky);
 
-  if (!is_prior_list && dest_it->second.ObjType() == OBJ_LIST && shard->blocking_controller()) {
-    shard->blocking_controller()->AwakeWatched(t->GetDbIndex(), dest_key_);
+  auto bc = shard->blocking_controller();
+  if (bc) {
+    bc->AwakeWatched(t->GetDbIndex(), dest_key_);
   }
 
   if (shard->journal()) {
     OpArgs op_args = t->GetOpArgs(shard);
 
-    auto time = absl::StrCat(serialized_value_.expire_ts);
+    auto expire_str = absl::StrCat(serialized_value_.expire_ts);
     RecordJournal(op_args, "RESTORE"sv,
-                  ArgSlice{dest_key_, time, serialized_value_.value, "REPLACE"sv, "ABSTTL"sv}, 2,
-                  true);
+                  ArgSlice{dest_key_, expire_str, serialized_value_.value, "REPLACE"sv, "ABSTTL"sv},
+                  2, true);
     if (dest_it->first.IsSticky()) {
       RecordJournal(op_args, "STICK"sv, ArgSlice{dest_key_}, 2, true);
     }
@@ -1379,12 +1388,9 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool destination_sh
 
   unsigned shard_count = shard_set->size();
 
-  Renamer renamer{key[0], key[1], shard_count};
-
-  renamer.Initialize(transaction);
-  renamer.Finalize(transaction, destination_should_not_exist);
-
-  return renamer.status();
+  Renamer renamer{transaction, key[0], key[1], shard_count};
+  renamer.Rename(destination_should_not_exist);
+  return renamer.Status();
 }
 
 void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
