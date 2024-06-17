@@ -29,7 +29,7 @@ bool UserRegistry::RemoveUser(std::string_view username) {
   return registry_.erase(username);
 }
 
-UserRegistry::UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
+UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
   std::shared_lock<fb2::SharedMutex> lock(mu_);
   auto it = registry_.find(username);
   if (it == registry_.end()) {

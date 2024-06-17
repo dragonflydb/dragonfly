@@ -1568,10 +1568,12 @@ bool RequirePrivilegedAuth() {
 
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
-  ConnectionContext* res = new ConnectionContext{peer, owner};
+  auto cred = user_registry_.GetCredentials("default");
+  ConnectionContext* res = new ConnectionContext{peer, owner, std::move(cred)};
 
   if (peer->IsUDS()) {
     res->req_auth = false;
+    res->skip_acl_validation = true;
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
