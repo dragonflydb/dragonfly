@@ -142,4 +142,11 @@ TEST_F(SearchParserTest, Numeric) {
   NEXT_EQ(TOK_TERM, string, "22");
 }
 
+TEST_F(SearchParserTest, KNN) {
+  SetInput("*=>[KNN 1 @vector field_vec]");
+  NEXT_TOK(TOK_STAR);
+  NEXT_TOK(TOK_ARROW);
+  NEXT_TOK(TOK_LBRACKET);
+}
+
 }  // namespace dfly::search
