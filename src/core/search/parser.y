@@ -174,5 +174,5 @@ tag_list:
 void
 dfly::search::Parser::error(const location_type& l, const string& m)
 {
-  cerr << l << ": " << m << '\n';
+  driver->Error(l, m);
 }
