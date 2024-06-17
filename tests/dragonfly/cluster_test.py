@@ -1112,12 +1112,12 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
         await nodes[0].admin_client.execute_command(
             "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
         )
-    ).startswith(f"""out {nodes[1].id} FINISHED keys:7""")
+    ).startswith(f"out {nodes[1].id} FINISHED keys:7")
     assert (
         await nodes[1].admin_client.execute_command(
             "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
         )
-    ).startswith(f"""in {nodes[0].id} FINISHED keys:7""")
+    ).startswith(f"in {nodes[0].id} FINISHED keys:7")
 
     nodes[0].migrations = []
     nodes[0].slots = [(0, 2999)]
