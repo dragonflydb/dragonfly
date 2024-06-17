@@ -23,10 +23,7 @@ void CapturingReplyBuilder::SendError(std::string_view str, std::string_view typ
 
 void CapturingReplyBuilder::SendError(ErrorReply error) {
   SKIP_LESS(ReplyMode::ONLY_ERR);
-
-  string message =
-      visit([](auto&& str) -> string { return string{std::move(str)}; }, error.message);
-  Capture(Error{std::move(message), error.kind});
+  Capture(Error{error.ToSv(), error.kind});
 }
 
 void CapturingReplyBuilder::SendMGetResponse(MGetResponse resp) {

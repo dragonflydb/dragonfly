@@ -22,22 +22,13 @@ void AppendSuffix(string* dest) {
   absl::StrAppend(dest, "]");
 }
 
-template <typename C> string Concat(const C& list) {
-  string res;
-  for (auto arg : list) {
-    absl::StrAppend(&res, "'");
-    absl::StrAppend(&res, facade::ToSV(arg));
-    absl::StrAppend(&res, "',");
-  }
-  return res;
-}
-
 string Entry::ToString() const {
   string rv = absl::StrCat("{op=", opcode, ", dbid=", dbid);
 
   if (HasPayload()) {
     AppendPrefix(payload.cmd, &rv);
-    rv += visit([](const auto& list) { return Concat(list); }, payload.args);
+    for (string_view arg : base::it::Wrap(facade::kToSV, payload.args))
+      absl::StrAppend(&rv, "'", facade::ToSV(arg), "',");
     AppendSuffix(&rv);
   } else {
     absl::StrAppend(&rv, ", empty");

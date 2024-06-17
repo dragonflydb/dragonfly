@@ -55,7 +55,7 @@ inline std::string_view ToSV(const std::string& slice) {
 
 inline std::string_view ToSV(std::string&& slice) = delete;
 
-constexpr auto kToSV = [](auto v) { return ToSV(v); };
+constexpr auto kToSV = [](auto&& v) { return ToSV(std::forward<decltype(v)>(v)); };
 
 inline std::string_view ArgS(CmdArgList args, size_t i) {
   auto arg = args[i];
@@ -72,7 +72,7 @@ struct ArgRange {
   ArgRange(ArgRange& range) : ArgRange((const ArgRange&)range) {
   }
 
-  template <typename T> ArgRange(T&& span) : span(span) {
+  template <typename T> ArgRange(T&& span) : span(std::forward<T>(span)) {
   }
 
   size_t Size() const {
@@ -166,7 +166,7 @@ struct ErrorReply {
   }
 
   std::string_view ToSv() const {
-    return std::visit([](auto& str) { return std::string_view(str); }, message);
+    return std::visit(kToSV, message);
   }
 
   std::variant<std::string, std::string_view> message;

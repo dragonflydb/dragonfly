@@ -140,8 +140,7 @@ void SinkReplyBuilder::SendError(ErrorReply error) {
   if (error.status)
     return SendError(*error.status);
 
-  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
-  SendError(message_sv, error.kind);
+  SendError(error.ToSv(), error.kind);
 }
 
 void SinkReplyBuilder::SendError(OpStatus status) {

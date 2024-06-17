@@ -1655,15 +1655,15 @@ OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
   if (!res_it)
     return res_it.status();
 
-  // TODO
-  MScoreResponse scores(0);
+  MScoreResponse scores(members.Size());
 
   const detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
   sds& tmp_str = op_args.shard->tmp_str1;
 
-  for (auto [i, member] : base::it::WithIndex(members.Range())) {
+  size_t i = 0;
+  for (string_view member : members.Range()) {
     tmp_str = sdscpylen(tmp_str, member.data(), member.size());
-    scores[i] = GetZsetScore(robj_wrapper, tmp_str);
+    scores[i++] = GetZsetScore(robj_wrapper, tmp_str);
   }
 
   return scores;

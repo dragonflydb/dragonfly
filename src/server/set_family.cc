@@ -4,8 +4,6 @@
 
 #include "server/set_family.h"
 
-#include <algorithm>
-
 extern "C" {
 #include "redis/intset.h"
 #include "redis/redis_aux.h"

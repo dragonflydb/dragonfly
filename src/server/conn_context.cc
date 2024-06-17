@@ -143,14 +143,15 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   ChannelStoreUpdater csu{pattern, to_add, conn, uint32_t(tid)};
 
   // Gather all the channels we need to subscribe to / remove.
-  for (auto [i, channel] : base::it::WithIndex(ArgS(args))) {
+  size_t i = 0;
+  for (string_view channel : ArgS(args)) {
     if (to_add && local_store.emplace(channel).second)
       csu.Record(channel);
     else if (!to_add && local_store.erase(channel) > 0)
       csu.Record(channel);
 
     if (to_reply)
-      result[i] = sinfo.SubscriptionCount();
+      result[i++] = sinfo.SubscriptionCount();
   }
 
   csu.Apply();
