@@ -140,8 +140,7 @@ void SinkReplyBuilder::SendError(ErrorReply error) {
   if (error.status)
     return SendError(*error.status);
 
-  string_view message_sv = visit([](auto&& str) -> string_view { return str; }, error.message);
-  SendError(message_sv, error.kind);
+  SendError(error.ToSv(), error.kind);
 }
 
 void SinkReplyBuilder::SendError(OpStatus status) {
@@ -262,14 +261,6 @@ void MCReplyBuilder::SendSetSkipped() {
 
 void MCReplyBuilder::SendNotFound() {
   SendSimpleString("NOT_FOUND");
-}
-
-size_t RedisReplyBuilder::WrappedStrSpan::Size() const {
-  return visit([](auto arr) { return arr.size(); }, (const StrSpan&)*this);
-}
-
-string_view RedisReplyBuilder::WrappedStrSpan::operator[](size_t i) const {
-  return visit([i](auto arr) { return string_view{arr[i]}; }, (const StrSpan&)*this);
 }
 
 char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len) {
@@ -504,12 +495,9 @@ void RedisReplyBuilder::SendMGetResponse(MGetResponse resp) {
 }
 
 void RedisReplyBuilder::SendSimpleStrArr(StrSpan arr) {
-  WrappedStrSpan warr{arr};
-
-  string res = absl::StrCat("*", warr.Size(), kCRLF);
-
-  for (unsigned i = 0; i < warr.Size(); i++)
-    StrAppend(&res, "+", warr[i], kCRLF);
+  string res = absl::StrCat("*", arr.Size(), kCRLF);
+  for (std::string_view str : arr)
+    StrAppend(&res, "+", str, kCRLF);
 
   SendRaw(res);
 }
@@ -523,16 +511,15 @@ void RedisReplyBuilder::SendEmptyArray() {
 }
 
 void RedisReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
-  WrappedStrSpan warr{arr};
-
-  if (type == ARRAY && warr.Size() == 0) {
+  if (type == ARRAY && arr.Size() == 0) {
     SendRaw("*0\r\n");
     return;
   }
 
-  auto cb = [&](size_t i) { return warr[i]; };
-
-  SendStringArrInternal(warr.Size(), std::move(cb), type);
+  auto cb = [&](size_t i) {
+    return visit([i](auto& span) { return facade::ToSV(span[i]); }, arr.span);
+  };
+  SendStringArrInternal(arr.Size(), std::move(cb), type);
 }
 
 void RedisReplyBuilder::StartArray(unsigned len) {

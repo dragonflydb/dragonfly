@@ -12,6 +12,7 @@
 #include <string_view>
 #include <variant>
 
+#include "base/iterator.h"
 #include "facade/op_status.h"
 
 namespace facade {
@@ -37,6 +38,8 @@ enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };
 using MutableSlice = absl::Span<char>;
 using CmdArgList = absl::Span<MutableSlice>;
 using CmdArgVec = std::vector<MutableSlice>;
+using ArgSlice = absl::Span<const std::string_view>;
+using OwnedArgSlice = absl::Span<const std::string>;
 
 inline std::string_view ToSV(MutableSlice slice) {
   return std::string_view{slice.data(), slice.size()};
@@ -46,6 +49,50 @@ inline std::string_view ToSV(std::string_view slice) {
   return slice;
 }
 
+inline std::string_view ToSV(const std::string& slice) {
+  return slice;
+}
+
+inline std::string_view ToSV(std::string&& slice) = delete;
+
+constexpr auto kToSV = [](auto&& v) { return ToSV(std::forward<decltype(v)>(v)); };
+
+inline std::string_view ArgS(CmdArgList args, size_t i) {
+  auto arg = args[i];
+  return {arg.data(), arg.size()};
+}
+
+inline auto ArgS(CmdArgList args) {
+  return base::it::Transform(kToSV, base::it::Range{args.begin(), args.end()});
+}
+
+struct ArgRange {
+  ArgRange(ArgRange&&) = default;
+  ArgRange(const ArgRange&) = default;
+  ArgRange(ArgRange& range) : ArgRange((const ArgRange&)range) {
+  }
+
+  template <typename T> ArgRange(T&& span) : span(std::forward<T>(span)) {
+  }
+
+  size_t Size() const {
+    return std::visit([](const auto& span) { return span.size(); }, span);
+  }
+
+  auto Range() const {
+    return base::it::Wrap(kToSV, span);
+  }
+
+  auto begin() const {
+    return Range().first;
+  }
+
+  auto end() const {
+    return Range().second;
+  }
+
+  std::variant<CmdArgList, ArgSlice, OwnedArgSlice> span;
+};
 struct ConnectionStats {
   size_t read_buf_capacity = 0;                // total capacity of input buffers
   uint64_t dispatch_queue_entries = 0;         // total number of dispatch queue entries
@@ -120,7 +167,7 @@ struct ErrorReply {
   }
 
   std::string_view ToSv() const {
-    return std::visit([](auto& str) { return std::string_view(str); }, message);
+    return std::visit(kToSV, message);
   }
 
   std::variant<std::string, std::string_view> message;
@@ -130,11 +177,6 @@ struct ErrorReply {
 
 inline MutableSlice ToMSS(absl::Span<uint8_t> span) {
   return MutableSlice{reinterpret_cast<char*>(span.data()), span.size()};
-}
-
-inline std::string_view ArgS(CmdArgList args, size_t i) {
-  auto arg = args[i];
-  return std::string_view(arg.data(), arg.size());
 }
 
 constexpr inline unsigned long long operator""_MB(unsigned long long x) {

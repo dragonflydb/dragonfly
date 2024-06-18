@@ -40,6 +40,13 @@ using SetType = pair<void*, unsigned>;
 
 namespace {
 
+// Possible sources of new set entries
+using NewEntries = std::variant<CmdArgList, ArgSlice, absl::flat_hash_set<std::string_view>>;
+
+auto EntriesRange(const NewEntries& entries) {
+  return base::it::Wrap(facade::kToSV, entries);
+}
+
 constexpr uint32_t kMaxIntSetEntries = 256;
 
 bool IsDenseEncoding(const CompactObj& co) {
@@ -67,7 +74,7 @@ intset* IntsetAddSafe(string_view val, intset* is, bool* success, bool* added) {
   return is;
 }
 
-pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, ArgSlice vals, CompactObj* set) {
+pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, facade::ArgRange vals, CompactObj* set) {
   unsigned removed = 0;
   bool isempty = false;
   DCHECK(IsDenseEncoding(*set));
@@ -76,7 +83,7 @@ pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, ArgSlice vals, CompactObj* s
     StringSet* ss = ((StringSet*)set->RObjPtr());
     ss->set_time(now_sec);
 
-    for (auto member : vals) {
+    for (string_view member : vals) {
       removed += ss->Erase(member);
     }
 
@@ -86,7 +93,8 @@ pair<unsigned, bool> RemoveStrSet(uint32_t now_sec, ArgSlice vals, CompactObj* s
   return make_pair(removed, isempty);
 }
 
-unsigned AddStrSet(const DbContext& db_context, ArgSlice vals, uint32_t ttl_sec, CompactObj* dest) {
+unsigned AddStrSet(const DbContext& db_context, const NewEntries& vals, uint32_t ttl_sec,
+                   CompactObj* dest) {
   unsigned res = 0;
   DCHECK(IsDenseEncoding(*dest));
 
@@ -96,7 +104,7 @@ unsigned AddStrSet(const DbContext& db_context, ArgSlice vals, uint32_t ttl_sec,
 
     ss->set_time(time_now);
 
-    for (auto member : vals) {
+    for (auto member : EntriesRange(vals)) {
       res += ss->Add(member, ttl_sec);
     }
   }
@@ -109,7 +117,8 @@ void InitStrSet(CompactObj* set) {
 }
 
 // returns (removed, isempty)
-pair<unsigned, bool> RemoveSet(const DbContext& db_context, ArgSlice vals, CompactObj* set) {
+pair<unsigned, bool> RemoveSet(const DbContext& db_context, facade::ArgRange vals,
+                               CompactObj* set) {
   bool isempty = false;
   unsigned removed = 0;
 
@@ -117,7 +126,7 @@ pair<unsigned, bool> RemoveSet(const DbContext& db_context, ArgSlice vals, Compa
     intset* is = (intset*)set->RObjPtr();
     long long llval;
 
-    for (auto val : vals) {
+    for (string_view val : vals) {
       if (!string2ll(val.data(), val.size(), &llval)) {
         continue;
       }
@@ -134,11 +143,11 @@ pair<unsigned, bool> RemoveSet(const DbContext& db_context, ArgSlice vals, Compa
   return make_pair(removed, isempty);
 }
 
-void InitSet(ArgSlice vals, CompactObj* set) {
+void InitSet(const NewEntries& vals, CompactObj* set) {
   bool int_set = true;
   long long intv;
 
-  for (auto v : vals) {
+  for (string_view v : EntriesRange(vals)) {
     if (!string2ll(v.data(), v.size(), &intv)) {
       int_set = false;
       break;
@@ -245,8 +254,8 @@ int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view me
 }
 
 void FindInSet(StringVec& memberships, const DbContext& db_context, const SetType& st,
-               const vector<string_view>& members) {
-  for (const auto& member : members) {
+               facade::ArgRange members) {
+  for (string_view member : members) {
     bool status = IsInSet(db_context, st, member);
     memberships.emplace_back(to_string(status));
   }
@@ -458,17 +467,18 @@ SvArray ToSvArray(const absl::flat_hash_set<std::string_view>& set) {
 }
 
 // if overwrite is true then OpAdd writes vals into the key and discards its previous value.
-OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice vals, bool overwrite,
-                         bool journal_update) {
+OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewEntries& vals,
+                         bool overwrite, bool journal_update) {
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
+  auto vals_it = EntriesRange(vals);
 
   VLOG(2) << "OpAdd(" << key << ")";
 
   // overwrite - meaning we run in the context of 2-hop operation and we want
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
-  if (overwrite && vals.empty()) {
+  if (overwrite && (vals_it.begin() == vals_it.end())) {
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     db_slice.Del(op_args.db_cntx.db_index, it);
     if (journal_update && op_args.shard->journal()) {
@@ -502,7 +512,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     intset* is = (intset*)inner_obj;
     bool success = true;
 
-    for (auto val : vals) {
+    for (auto val : vals_it) {
       bool added = false;
       is = IntsetAddSafe(val, is, &success, &added);
       res += added;
@@ -534,16 +544,17 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, ArgSlice v
     if (overwrite) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     }
-    vector<string_view> mapped(vals.size() + 1);
+    size_t size = visit([](auto& c) { return c.size(); }, vals);
+    vector<string_view> mapped(size + 1);
     mapped[0] = key;
-    std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
+    std::copy(vals_it.begin(), vals_it.end(), mapped.begin() + 1);
     RecordJournal(op_args, "SADD"sv, mapped);
   }
   return res;
 }
 
 OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
-                           ArgSlice vals) {
+                           const NewEntries& vals) {
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
 
@@ -573,12 +584,12 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
     CHECK(IsDenseEncoding(co));
   }
 
-  uint32_t res = AddStrSet(op_args.db_cntx, std::move(vals), ttl_sec, &co);
+  uint32_t res = AddStrSet(op_args.db_cntx, vals, ttl_sec, &co);
 
   return res;
 }
 
-OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ArgSlice& vals,
+OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange vals,
                          bool journal_rewrite) {
   auto* es = op_args.shard;
   auto& db_slice = es->db_slice();
@@ -596,7 +607,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ArgSlice&
     CHECK(db_slice.Del(op_args.db_cntx.db_index, find_res->it));
   }
   if (journal_rewrite && op_args.shard->journal()) {
-    vector<string_view> mapped(vals.size() + 1);
+    vector<string_view> mapped(vals.Size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
     RecordJournal(op_args, "SREM"sv, mapped);
@@ -655,10 +666,11 @@ OpStatus Mover::OpMutate(Transaction* t, EngineShard* es) {
   OpArgs op_args = t->GetOpArgs(es);
   for (auto k : largs) {
     if (k == src_) {
-      CHECK_EQ(1u, OpRem(op_args, k, {member_}, journal_rewrite_).value());  // must succeed.
+      CHECK_EQ(1u,
+               OpRem(op_args, k, ArgSlice{member_}, journal_rewrite_).value());  // must succeed.
     } else {
       DCHECK_EQ(k, dest_);
-      OpAdd(op_args, k, {member_}, false, journal_rewrite_);
+      OpAdd(op_args, k, ArgSlice(&member_, 1), false, journal_rewrite_);
     }
   }
 
@@ -933,16 +945,17 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
   StringVec result = RandMemberSet(db_cntx, co, generator, picks_count);
 
   // Remove selected members
-  std::vector<std::string_view> members_to_remove{result.begin(), result.end()};
-  bool is_empty = RemoveSet(db_cntx, members_to_remove, &co).second;
+  bool is_empty = RemoveSet(db_cntx, result, &co).second;
   find_res->post_updater.Run();
 
   CHECK(!is_empty);
 
   // Replicate as SREM with removed keys, because SPOP is not deterministic.
   if (op_args.shard->journal()) {
-    members_to_remove.insert(members_to_remove.begin(), key);
-    RecordJournal(op_args, "SREM"sv, members_to_remove);
+    vector<string_view> mapped(result.size() + 1);
+    mapped[0] = key;
+    copy(result.begin(), result.end(), mapped.begin() + 1);
+    RecordJournal(op_args, "SREM"sv, mapped);
   }
 
   return result;
@@ -978,14 +991,10 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
 
 void SAdd(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  vector<string_view> vals(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    vals[i - 1] = ArgS(args, i);
-  }
-  ArgSlice arg_slice{vals.data(), vals.size()};
+  auto values = args.subspan(1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, arg_slice, false, false);
+  auto cb = [key, values](Transaction* t, EngineShard* shard) {
+    return OpAdd(t->GetOpArgs(shard), key, values, false, false);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1022,11 +1031,7 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
 
 void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-
-  vector<string_view> vals(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    vals[i - 1] = ArgS(args, i);
-  }
+  auto vals = args.subspan(1);
 
   StringVec memberships;
   memberships.reserve(vals.size());
@@ -1071,14 +1076,10 @@ void SMove(CmdArgList args, ConnectionContext* cntx) {
 
 void SRem(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  vector<string_view> vals(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    vals[i - 1] = ArgS(args, i);
-  }
-  ArgSlice span{vals.data(), vals.size()};
+  auto vals = args.subspan(1);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRem(t->GetOpArgs(shard), key, span, false);
+  auto cb = [key, vals](Transaction* t, EngineShard* shard) {
+    return OpRem(t->GetOpArgs(shard), key, vals, false);
   };
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
@@ -1223,17 +1224,17 @@ void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  SvArray result = ToSvArray(rsv.value());
+  size_t result_size = rsv.value().size();
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
-      OpAdd(t->GetOpArgs(shard), dest_key, result, true, true);
+      OpAdd(t->GetOpArgs(shard), dest_key, std::move(rsv.value()), true, true);
     }
 
     return OpStatus::OK;
   };
 
   cntx->transaction->Execute(std::move(store_cb), true);
-  cntx->SendLong(result.size());
+  cntx->SendLong(result_size);
 }
 
 void SMembers(CmdArgList args, ConnectionContext* cntx) {
@@ -1424,18 +1425,17 @@ void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  SvArray result = ToSvArray(unionset.value());
-
+  size_t result_size = unionset.value().size();
   auto store_cb = [&](Transaction* t, EngineShard* shard) {
     if (shard->shard_id() == dest_shard) {
-      OpAdd(t->GetOpArgs(shard), dest_key, result, true, true);
+      OpAdd(t->GetOpArgs(shard), dest_key, std::move(unionset.value()), true, true);
     }
 
     return OpStatus::OK;
   };
 
   cntx->transaction->Execute(std::move(store_cb), true);
-  cntx->SendLong(result.size());
+  cntx->SendLong(result_size);
 }
 
 void SScan(CmdArgList args, ConnectionContext* cntx) {
@@ -1491,15 +1491,9 @@ void SAddEx(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kInvalidIntErr);
   }
 
-  vector<string_view> vals(args.size() - 2);
-  for (size_t i = 2; i < args.size(); ++i) {
-    vals[i - 2] = ArgS(args, i);
-  }
-
-  ArgSlice arg_slice{vals.data(), vals.size()};
-
+  auto vals = args.subspan(2);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, arg_slice);
+    return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));

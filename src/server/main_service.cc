@@ -407,24 +407,21 @@ void InterpreterReplier::SendMGetResponse(MGetResponse resp) {
 }
 
 void InterpreterReplier::SendSimpleStrArr(StrSpan arr) {
-  WrappedStrSpan warr{arr};
-  explr_->OnArrayStart(warr.Size());
-  for (unsigned i = 0; i < warr.Size(); i++)
-    explr_->OnString(warr[i]);
+  explr_->OnArrayStart(arr.Size());
+  for (string_view str : arr)
+    explr_->OnString(str);
   explr_->OnArrayEnd();
 }
 
 void InterpreterReplier::SendNullArray() {
-  SendSimpleStrArr({});
+  SendSimpleStrArr(ArgSlice{});
   PostItem();
 }
 
 void InterpreterReplier::SendStringArr(StrSpan arr, CollectionType) {
-  WrappedStrSpan warr{arr};
-  size_t size = warr.Size();
-  explr_->OnArrayStart(size);
-  for (size_t i = 0; i < size; i++)
-    explr_->OnString(warr[i]);
+  explr_->OnArrayStart(arr.Size());
+  for (string_view str : arr)
+    explr_->OnString(str);
   explr_->OnArrayEnd();
   PostItem();
 }
@@ -1662,8 +1659,8 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
-  for (size_t i = 0; i < args.size(); i++) {
-    exec_info.watched_keys.emplace_back(cntx->db_index(), ArgS(args, i));
+  for (std::string_view key : ArgS(args)) {
+    exec_info.watched_keys.emplace_back(cntx->db_index(), key);
   }
 
   return cntx->SendOk();
@@ -2341,12 +2338,10 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
 }
 
 void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
-  int channels_size = args.size();
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(channels_size * 2);
+  rb->StartArray(args.size() * 2);
 
-  for (auto i = 0; i < channels_size; i++) {
-    auto channel = ArgS(args, i);
+  for (string_view channel : ArgS(args)) {
     rb->SendBulkString(channel);
     rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
   }
