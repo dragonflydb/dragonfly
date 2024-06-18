@@ -455,8 +455,14 @@ TEST_F(SearchFamilyTest, TestReturn) {
   resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "nothere"});
   EXPECT_THAT(resp, MatchEntry("k0", "nothere", ""));
 
+  // Checl implcit __vector_score is provided
+  float score = 20;
+  resp = Run({"ft.search", "i1", "@justA:0 => [KNN 20 @vector $vector]", "SORTBY", "__vector_score",
+              "DESC", "RETURN", "1", "longA", "PARAMS", "2", "vector", floatsv(&score)});
+  EXPECT_THAT(resp, MatchEntry("k0", "longA", "0"));
+
   // Check sort doesn't shadow knn return alias
-  const float score = 20;
+  score = 20;
   resp = Run({"ft.search", "i1", "@justA:0 => [KNN 20 @vector $vector AS vec_return]", "SORTBY",
               "vec_return", "DESC", "RETURN", "1", "vec_return", "PARAMS", "2", "vector",
               floatsv(&score)});
