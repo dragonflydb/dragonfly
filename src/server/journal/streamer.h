@@ -23,7 +23,7 @@ class JournalStreamer {
   JournalStreamer(JournalStreamer&& other) = delete;
 
   // Register journal listener and start writer in fiber.
-  virtual void Start(io::AsyncSink* dest, bool send_lsn);
+  virtual void Start(util::FiberSocketBase* dest, bool send_lsn);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
@@ -74,7 +74,7 @@ class RestoreStreamer : public JournalStreamer {
   RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal, Context* cntx);
   ~RestoreStreamer() override;
 
-  void Start(io::AsyncSink* dest, bool send_lsn = false) override;
+  void Start(util::FiberSocketBase* dest, bool send_lsn = false) override;
   // Cancel() must be called if Start() is called
   void Cancel() override;
 

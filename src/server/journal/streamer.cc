@@ -44,7 +44,7 @@ JournalStreamer::~JournalStreamer() {
   VLOG(1) << "~JournalStreamer";
 }
 
-void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
+void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
   journal_cb_id_ =
@@ -191,8 +191,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 }
 
-void RestoreStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
-  dest_ = static_cast<util::FiberSocketBase*>(dest);
+void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   if (fiber_cancelled_)
     return;
 
