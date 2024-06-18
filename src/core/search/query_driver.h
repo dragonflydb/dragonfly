@@ -52,6 +52,8 @@ class QueryDriver {
     return scanner_.get();
   }
 
+  void Error(const Parser::location_type& loc, std::string_view msg);
+
  public:
   Parser::location_type location;
 
