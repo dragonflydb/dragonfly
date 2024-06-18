@@ -62,9 +62,24 @@ TEST_F(AclFamilyTest, AclSetUser) {
 
   resp = Run({"ACL", "LIST"});
   vec = resp.GetVec();
-  EXPECT_THAT(vec,
-              UnorderedElementsAre("user default on nopass ~* +@all",
-                                   "user vlad on #a6864eb339b0e1f #d74ff0ee8da3b98 -@all +acl"));
+  EXPECT_THAT(vec.size(), 2);
+  auto contains_vlad = [](const auto& vec) {
+    const std::string default_user = "user default on nopass ~* +@all";
+    const std::string a_permutation = "user vlad on #a6864eb339b0e1f #d74ff0ee8da3b98 -@all +acl";
+    const std::string b_permutation = "user vlad on #d74ff0ee8da3b98 #a6864eb339b0e1f -@all +acl";
+    std::string_view other;
+    if (vec[0] == default_user) {
+      other = vec[1].GetView();
+    } else if (vec[1] == default_user) {
+      other = vec[0].GetView();
+    } else {
+      return false;
+    }
+
+    return other == a_permutation || other == b_permutation;
+  };
+
+  EXPECT_THAT(contains_vlad(vec), true);
 
   resp = Run({"AUTH", "vlad", "pass"});
   EXPECT_THAT(resp, "OK");
@@ -83,9 +98,8 @@ TEST_F(AclFamilyTest, AclSetUser) {
 
   resp = Run({"ACL", "LIST"});
   vec = resp.GetVec();
-  EXPECT_THAT(vec,
-              UnorderedElementsAre("user default on nopass ~* +@all",
-                                   "user vlad on #a6864eb339b0e1f #d74ff0ee8da3b98 -@all +acl"));
+  EXPECT_THAT(vec.size(), 2);
+  EXPECT_THAT(contains_vlad(vec), true);
 
   resp = Run({"ACL", "SETUSER", "vlad", "resetpass"});
   EXPECT_THAT(resp, "OK");
