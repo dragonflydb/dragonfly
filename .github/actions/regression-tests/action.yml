@@ -26,7 +26,7 @@ runs:
   # timeout-minutes: 20
   steps:
     - name: Run PyTests
-      id: first
+      id: main
       shell: bash
       run: |
         ls -l ${GITHUB_WORKSPACE}/
@@ -37,37 +37,11 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        timeout 20m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report --json-report-file=report.json dragonfly --ignore=dragonfly/replication_test.py --log-cli-level=INFO || code=$?
+        timeout 40m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
           echo "TIMEDOUT=1">> "$GITHUB_OUTPUT";
-          exit 1
-        fi
-
-        # when a test fails in pytest it returns 1 but there are other return codes as well so we just check if the code is non zero
-        if [[ $code -ne 0 ]]; then
-          exit 1
-        fi
-
-    - name: Run PyTests replication test
-      id: second
-      if: ${{ (inputs.run-only-on-ubuntu-latest == 'true' && matrix.runner == 'ubuntu-latest') || inputs.run-only-on-ubuntu-latest == 'false' }}
-      shell: bash
-      run: |
-        echo "Running PyTests replication test"
-        cd ${GITHUB_WORKSPACE}/tests
-        # used by PyTests
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
-
-
-        timeout 20m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report \
-          --json-report-file=rep1_report.json dragonfly/replication_test.py --log-cli-level=INFO \
-          --df alsologtostderr $1 $2 || code=$?
-
-        # timeout returns 124 if we exceeded the timeout duration
-        if [[ $code -eq 124 ]]; then
-          echo "TIMEDOUT=1">> "$GITHUB_OUTPUT"
           exit 1
         fi
 
@@ -106,14 +80,7 @@ runs:
         }
         cd ${GITHUB_WORKSPACE}/tests
         failed_tests=""
-        # The order in of if is important, and expected to be the oposite order of the pytest run.
-        # As github runner will not run the next step if the pytest failed, we start from the last
-        # report file and if exist we get the failed test from the pytest run, if there are any.
-        if [ -f rep2_report.json ]; then
-          failed_tests=$(get_failed_tests rep2_report.json)
-        elif [ -f rep1_report.json ]; then
-          failed_tests=$(get_failed_tests rep1_report.json)
-        elif [ -f report.json ]; then
+        if [ -f report.json ]; then
           failed_tests=$(get_failed_tests report.json)
         fi
 

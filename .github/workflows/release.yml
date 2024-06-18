@@ -131,7 +131,6 @@ jobs:
       with:
         dfly-executable: dragonfly-x86_64
         gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
-        run-only-on-ubuntu-latest: true
         build-folder-name: ${{ env.RELEASE_DIR }}
     - name: Save artifacts
       run: |
