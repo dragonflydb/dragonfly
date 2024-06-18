@@ -160,13 +160,22 @@ std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command) {
   return ParseKeyResult{std::string(key), op};
 }
 
-std::optional<std::string> MaybeParsePassword(std::string_view command, bool hashed) {
+std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, bool hashed) {
+  using UpPass = User::UpdatePass;
   if (command == "nopass") {
-    return std::string(command);
+    return UpPass{"", false, true};
+  }
+
+  if (command == "resetpass") {
+    return UpPass{"", false, false, true};
   }
 
   if (command[0] == '>' || (hashed && command[0] == '#')) {
-    return std::string(command.substr(1));
+    return UpPass{std::string(command.substr(1))};
+  }
+
+  if (command[0] == '<') {
+    return UpPass{std::string(command.substr(1)), true};
   }
 
   return {};
@@ -261,10 +270,8 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(facade::ArgRange a
 
   for (std::string_view arg : args) {
     if (auto pass = MaybeParsePassword(facade::ToSV(arg), hashed); pass) {
-      if (req.password) {
-        return ErrorReply("Only one password is allowed");
-      }
-      req.password = std::move(pass);
+      req.passwords.push_back(std::move(*pass));
+
       if (hashed && absl::StartsWith(facade::ToSV(arg), "#")) {
         req.is_hashed = hashed;
       }
@@ -346,4 +353,16 @@ std::string AclKeysToString(const AclKeys& keys) {
   return result;
 }
 
+std::string PasswordsToString(const absl::flat_hash_set<std::string>& passwords, bool nopass,
+                              bool full_sha) {
+  if (nopass) {
+    return "nopass ";
+  }
+  std::string result;
+  for (const auto& pass : passwords) {
+    absl::StrAppend(&result, "#", PrettyPrintSha(pass, full_sha), " ");
+  }
+
+  return result;
+}
 }  // namespace dfly::acl
