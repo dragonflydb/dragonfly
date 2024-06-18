@@ -192,6 +192,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
 }
 
 void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
+  dest_ = dest;
   if (fiber_cancelled_)
     return;
 
