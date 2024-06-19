@@ -21,11 +21,6 @@ void CapturingReplyBuilder::SendError(std::string_view str, std::string_view typ
   Capture(Error{str, type});
 }
 
-void CapturingReplyBuilder::SendError(ErrorReply error) {
-  SKIP_LESS(ReplyMode::ONLY_ERR);
-  Capture(Error{error.ToSv(), error.kind});
-}
-
 void CapturingReplyBuilder::SendMGetResponse(MGetResponse resp) {
   SKIP_LESS(ReplyMode::FULL);
   Capture(std::move(resp));
