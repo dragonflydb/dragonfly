@@ -24,12 +24,12 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
 
  public:
   void SendError(std::string_view str, std::string_view type = {}) override;
-  void SendError(ErrorReply error) override;
   void SendMGetResponse(MGetResponse resp) override;
 
   // SendStored -> SendSimpleString("OK")
   // SendSetSkipped -> SendNull()
   void SendError(OpStatus status) override;
+  using RedisReplyBuilder::SendError;
 
   void SendNullArray() override;
   void SendEmptyArray() override;
