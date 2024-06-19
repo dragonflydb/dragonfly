@@ -10,6 +10,8 @@ extern "C" {
 #include "redis/util.h"
 }
 
+#include <absl/container/fixed_array.h>
+
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
@@ -25,25 +27,27 @@ bool Matches(string_view pattern, string_view channel) {
 
 // Build functor for sending messages to connection
 auto BuildSender(string_view channel, facade::ArgRange messages) {
+  absl::FixedArray<string_view, 1> views(messages.Size());
   size_t messages_size = accumulate(messages.begin(), messages.end(), 0,
                                     [](int sum, string_view str) { return sum + str.size(); });
   auto buf = shared_ptr<char[]>{new char[channel.size() + messages_size]};
   {
     memcpy(buf.get(), channel.data(), channel.size());
     char* ptr = buf.get() + channel.size();
+
+    size_t i = 0;
     for (string_view message : messages) {
       memcpy(ptr, message.data(), message.size());
+      views[i++] = {ptr, message.size()};
       ptr += message.size();
     }
   }
 
-  return [channel, buf = std::move(buf), messages](facade::Connection* conn, string pattern) {
-    size_t offset = channel.size();
-    for (std::string_view message : messages) {
-      conn->SendPubMessageAsync({std::move(pattern), buf, string_view{buf.get(), channel.size()},
-                                 string_view{buf.get() + offset, message.size()}});
-      offset += message.size();
-    }
+  return [channel, buf = std::move(buf), views = std::move(views)](facade::Connection* conn,
+                                                                   string pattern) {
+    string_view channel_view{buf.get(), channel.size()};
+    for (std::string_view message_view : views)
+      conn->SendPubMessageAsync({std::move(pattern), buf, channel_view, message_view});
   };
 }
 
