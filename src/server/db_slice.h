@@ -470,8 +470,13 @@ class DbSlice {
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
   // this is workaround to execute callbacks for db_slice and journal atomically
-  [[nodiscard]] auto GetChangeCbLock() const {
-    return std::shared_lock(cb_mu_);
+  void LockChangeCb() const {
+    return cb_mu_.lock_shared();
+  }
+
+  // this is workaround to execute callbacks for db_slice and journal atomically
+  void UnlockChangeCb() const {
+    return cb_mu_.unlock_shared();
   }
 
  private:
