@@ -38,9 +38,14 @@ ABSL_FLAG(int, master_reconnect_timeout_ms, 1000,
           "Timeout for re-establishing connection to a replication master");
 ABSL_FLAG(bool, replica_partial_sync, true,
           "Use partial sync to reconnect when a replica connection is interrupted.");
-ABSL_FLAG(bool, replica_reconnect_on_master_restart, false,
-          "When in replica mode, and master restarts, break replication from master.");
+ABSL_FLAG(bool, break_replication_on_master_restart, false,
+          "When in replica mode, and master restarts, break replication from master to avoid "
+          "flushing the replica's data.");
 ABSL_DECLARE_FLAG(int32_t, port);
+
+// TODO: Remove this flag on release >= 1.22
+ABSL_RETIRED_FLAG(bool, replica_reconnect_on_master_restart, false,
+                  "When in replica mode, and master restarts, break replication from master.");
 
 namespace dfly {
 
@@ -303,7 +308,7 @@ std::error_code Replica::HandleCapaDflyResp() {
   // If we're syncing a different replication ID, drop the saved LSNs.
   string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
   if (master_context_.master_repl_id != master_repl_id) {
-    if (absl::GetFlag(FLAGS_replica_reconnect_on_master_restart) &&
+    if (absl::GetFlag(FLAGS_break_replication_on_master_restart) &&
         !master_context_.master_repl_id.empty()) {
       LOG(ERROR) << "Encountered different master repl id (" << master_repl_id << " vs "
                  << master_context_.master_repl_id << ")";
