@@ -48,6 +48,9 @@ class JournalStreamer {
 
   void WaitForInflightToComplete();
 
+  util::FiberSocketBase* dest_ = nullptr;
+  Context* cntx_;
+
  private:
   void OnCompletion(std::error_code ec, size_t len);
 
@@ -58,8 +61,6 @@ class JournalStreamer {
   bool IsStalled() const;
 
   journal::Journal* journal_;
-  Context* cntx_;
-  io::AsyncSink* dest_ = nullptr;
   std::vector<uint8_t> pending_buf_;
   size_t in_flight_bytes_ = 0;
   time_t last_lsn_time_ = 0;
@@ -101,7 +102,6 @@ class RestoreStreamer : public JournalStreamer {
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
-  util::FiberSocketBase* dest_ = nullptr;
 };
 
 }  // namespace dfly

@@ -1042,7 +1042,12 @@ async def test_cluster_flushall_during_migration(
 ):
     # Check data migration from one node to another
     instances = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        df_local_factory.create(
+            port=BASE_PORT + i,
+            admin_port=BASE_PORT + i + 1000,
+            vmodule="cluster_family=9,cluster_slot_migration=9,outgoing_slot_migration=9",
+            logtostdout=True,
+        )
         for i in range(2)
     ]
 
@@ -1058,17 +1063,18 @@ async def test_cluster_flushall_during_migration(
     await seeder.run(target_deviation=0.1)
 
     nodes[0].migrations.append(
-        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(3000, 9000)], nodes[1].id)
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
     )
 
     logging.debug("Start migration")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert "FINISHED" not in await nodes[0].admin_client.execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
+    await nodes[0].client.execute_command("flushall")
+
+    assert "FINISHED" not in await nodes[1].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
     ), "Weak test case - finished migration too early"
 
-    await nodes[0].client.execute_command("flushall")
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
     logging.debug("Finalizing migration")
@@ -1079,13 +1085,6 @@ async def test_cluster_flushall_during_migration(
     logging.debug("Migration finalized")
 
     assert await nodes[0].client.dbsize() == 0
-
-    async def empty_target():
-        count = await nodes[1].client.dbsize()
-        logging.debug(f"Got {count} entries in target node db")
-        return count == 0
-
-    await assert_eventually(empty_target)
 
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 

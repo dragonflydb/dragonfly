@@ -840,7 +840,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   lock_guard lk(migration_mu_);
   auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
-  LOG_IF(WARNING, was_removed) << "Reinit was happen for migration from:" << source_id;
+  LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
       std::move(source_id), &server_family_->service(), std::move(slots), flows_num));

@@ -34,7 +34,7 @@ uint32_t replication_stream_output_limit_cached = 64_KB;
 }  // namespace
 
 JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
-    : journal_(journal), cntx_(cntx) {
+    : cntx_(cntx), journal_(journal) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
 }
@@ -192,7 +192,6 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
 }
 
 void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
-  dest_ = dest;
   if (fiber_cancelled_)
     return;
 
@@ -260,6 +259,7 @@ bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
   if (item.cmd == "FLUSHALL" || item.cmd == "FLUSHDB") {
     // On FLUSH* we restart the migration
     CHECK(dest_ != nullptr);
+    cntx_->ReportError("FLUSH command during migration");
     dest_->Shutdown(SHUT_RDWR);
     return false;
   }
