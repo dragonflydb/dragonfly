@@ -5,7 +5,7 @@
 #pragma once
 
 #include "base/flags.h"
-#include "facade/op_status.h"
+#include "facade/facade_types.h"
 #include "server/common.h"
 #include "server/table.h"
 
@@ -17,6 +17,7 @@ class ProactorPool;
 
 namespace dfly {
 
+using facade::ErrorReply;
 using facade::OpResult;
 using facade::OpStatus;
 
@@ -71,13 +72,13 @@ class GenericFamily {
   static void RandomKey(CmdArgList args, ConnectionContext* cntx);
   static void FieldTtl(CmdArgList args, ConnectionContext* cntx);
 
-  static OpResult<void> RenameGeneric(CmdArgList args, bool destination_should_not_exist,
-                                      ConnectionContext* cntx);
+  static ErrorReply RenameGeneric(CmdArgList args, bool destination_should_not_exist,
+                                  ConnectionContext* cntx);
   static void TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
 
   static OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, std::string_view key);
   static OpResult<void> OpRen(const OpArgs& op_args, std::string_view from, std::string_view to,
-                              bool skip_exists);
+                              bool destination_should_not_exist);
   static OpStatus OpMove(const OpArgs& op_args, std::string_view key, DbIndex target_db);
 };
 

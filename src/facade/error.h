@@ -33,6 +33,7 @@ extern const char kInvalidNumericResult[];
 extern const char kClusterNotConfigured[];
 extern const char kLoadingErr[];
 extern const char kUndeclaredKeyErr[];
+extern const char kInvalidDumpValueErr[];
 
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];

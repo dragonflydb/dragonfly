@@ -4,12 +4,10 @@
 
 #include "server/generic_family.h"
 
+#include <boost/operators.hpp>
 #include <optional>
 
-#include "absl/types/span.h"
 #include "facade/reply_builder.h"
-#include "glog/logging.h"
-#include "server/table.h"
 
 extern "C" {
 #include "redis/crc64.h"
@@ -47,29 +45,33 @@ namespace {
 
 constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
 
-bool VerifyFooter(std::string_view msg, int* rdb_version) {
+std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
   if (msg.size() <= DUMP_FOOTER_SIZE) {
     LOG(WARNING) << "got restore payload that is too short - " << msg.size();
-    return false;
+    return std::nullopt;
   }
-  const uint8_t* footer =
-      reinterpret_cast<const uint8_t*>(msg.data()) + (msg.size() - DUMP_FOOTER_SIZE);
-  uint16_t version = (*(footer + 1) << 8 | (*footer));
-  *rdb_version = version;
+
+  const std::uint8_t* footer =
+      reinterpret_cast<const std::uint8_t*>(msg.data()) + (msg.size() - DUMP_FOOTER_SIZE);
+  const RdbVersion version = (*(footer + 1) << 8 | (*footer));
+
   if (version > RDB_VERSION) {
     LOG(WARNING) << "got restore payload with illegal version - supporting version up to "
                  << RDB_VERSION << " got version " << version;
-    return false;
+    return std::nullopt;
   }
+
   uint64_t expected_cs =
       crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
   uint64_t actual_cs = absl::little_endian::Load64(footer + sizeof(version));
+
   if (actual_cs != expected_cs) {
     LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
                  << actual_cs;
-    return false;
+    return std::nullopt;
   }
-  return true;
+
+  return version;
 }
 
 class InMemSource : public ::io::Source {
@@ -101,12 +103,12 @@ class InMemSource : public ::io::Source {
 
 class RdbRestoreValue : protected RdbLoaderBase {
  public:
-  RdbRestoreValue(int rdb_version) {
+  RdbRestoreValue(RdbVersion rdb_version) {
     rdb_version_ = rdb_version;
   }
 
-  bool Add(std::string_view payload, std::string_view key, DbSlice& db_slice, DbIndex index,
-           uint64_t expire_ms);
+  std::optional<DbSlice::ItAndUpdater> Add(std::string_view payload, std::string_view key,
+                                           DbSlice& db_slice, DbIndex index, uint64_t expire_ms);
 
  private:
   std::optional<OpaqueObj> Parse(std::string_view payload);
@@ -130,22 +132,26 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view 
   }
 }
 
-bool RdbRestoreValue::Add(std::string_view data, std::string_view key, DbSlice& db_slice,
-                          DbIndex index, uint64_t expire_ms) {
+std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
+                                                          std::string_view key, DbSlice& db_slice,
+                                                          DbIndex index, uint64_t expire_ms) {
   auto opaque_res = Parse(data);
   if (!opaque_res) {
-    return false;
+    return std::nullopt;
   }
 
   PrimeValue pv;
   if (auto ec = FromOpaque(*opaque_res, &pv); ec) {
     // we failed - report and exit
     LOG(WARNING) << "error while trying to save data: " << ec;
-    return false;
+    return std::nullopt;
   }
 
   auto res = db_slice.AddNew(DbContext{index, GetCurrentTimeMs()}, key, std::move(pv), expire_ms);
-  return res.ok();
+  if (res) {
+    return std::move(res.value());
+  }
+  return std::nullopt;
 }
 
 class RestoreArgs {
@@ -253,11 +259,6 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
 
 OpStatus OpPersist(const OpArgs& op_args, string_view key);
 
-OpResult<std::string> OpDump(const OpArgs& op_args, string_view key);
-
-OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
-                         RestoreArgs restore_args, int rdb_version);
-
 class Renamer {
  public:
   Renamer(Transaction* t, std::string_view src_key, std::string_view dest_key, unsigned shard_count)
@@ -268,11 +269,7 @@ class Renamer {
         dest_sid_(Shard(dest_key, shard_count)) {
   }
 
-  OpResult<void> Status() const {
-    return status_;
-  };
-
-  void Rename(bool destination_should_not_exist);
+  ErrorReply Rename(bool destination_should_not_exist);
 
  private:
   void FetchData();
@@ -286,6 +283,7 @@ class Renamer {
 
   struct SerializedValue {
     std::string value;
+    std::optional<RdbVersion> version;
     time_t expire_ts;
     bool sticky;
   };
@@ -302,26 +300,28 @@ class Renamer {
   bool dest_found_ = false;
 
   SerializedValue serialized_value_;
-
-  OpResult<void> status_;
 };
 
-void Renamer::Rename(bool destination_should_not_exist) {
+ErrorReply Renamer::Rename(bool destination_should_not_exist) {
   FetchData();
 
   if (!src_found_) {
-    status_ = OpStatus::KEY_NOTFOUND;
     transaction_->Conclude();
-    return;
+    return OpStatus::KEY_NOTFOUND;
+  }
+
+  if (!serialized_value_.version) {
+    transaction_->Conclude();
+    return ErrorReply{kInvalidDumpValueErr};
   }
 
   if (dest_found_ && destination_should_not_exist) {
-    status_ = OpStatus::KEY_EXISTS;
     transaction_->Conclude();
-    return;
+    return OpStatus::KEY_EXISTS;
   }
 
   FinalizeRename();
+  return OpStatus::OK;
 }
 
 void Renamer::FetchData() {
@@ -382,7 +382,10 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
 
   io::StringSink sink;
   SerializerBase::DumpObject(it->second, &sink);
-  serialized_value_ = {std::move(sink).str(), db_slice.ExpireTime(exp_it), it->first.IsSticky()};
+
+  auto rdb_version = GetRdbVersion(sink.str());
+  serialized_value_ = {std::move(sink).str(), rdb_version, db_slice.ExpireTime(exp_it),
+                       it->first.IsSticky()};
 }
 
 OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
@@ -396,43 +399,59 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
   res.post_updater.Run();
   CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
   if (shard->journal()) {
-    RecordJournal(t->GetOpArgs(shard), "DEL", ArgSlice{src_key_}, 2);
+    RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_}, 2);
   }
 
   return OpStatus::OK;
 }
 
 OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
-  auto& db_slice = shard->db_slice();
-  auto res = db_slice.FindMutable(t->GetDbContext(), dest_key_);
-
-  auto& dest_it = res.it;
-
-  int rdb_version = 0;
-  CHECK(VerifyFooter(serialized_value_.value, &rdb_version));
-
+  OpArgs op_args = t->GetOpArgs(shard);
   RestoreArgs restore_args{serialized_value_.expire_ts, true, true};
 
-  auto restore_res =
-      OnRestore(t->GetOpArgs(shard), dest_key_, serialized_value_.value, restore_args, rdb_version);
-  RETURN_ON_BAD_STATUS(restore_res);
+  if (!restore_args.UpdateExpiration(op_args.db_cntx.time_now_ms)) {
+    return OpStatus::OUT_OF_RANGE;
+  }
 
-  dest_it = db_slice.FindMutable(t->GetDbContext(), dest_key_).it;
-  dest_it->first.SetSticky(serialized_value_.sticky);
+  auto& db_slice = shard->db_slice();
+  auto dest_res = db_slice.FindMutable(op_args.db_cntx, dest_key_);
 
-  auto bc = shard->blocking_controller();
-  if (bc) {
-    bc->AwakeWatched(t->GetDbIndex(), dest_key_);
+  if (dest_found_) {
+    DVLOG(1) << "Rename: deleting the destiny key '" << dest_key_;
+    dest_res.post_updater.Run();
+    CHECK(db_slice.Del(op_args.db_cntx.db_index, dest_res.it));
+  }
+
+  if (restore_args.Expired()) {
+    VLOG(1) << "Rename: the new key '" << dest_key_ << "' already expired, will not save the value";
+
+    if (dest_found_ && shard->journal()) {  // We need to delete old dest_key_ from replica
+      RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
+    }
+
+    return OpStatus::OK;
+  }
+
+  RdbRestoreValue loader(serialized_value_.version.value());
+  auto restored_dest_it = loader.Add(serialized_value_.value, dest_key_, db_slice,
+                                     op_args.db_cntx.db_index, restore_args.ExpirationTime());
+
+  if (restored_dest_it) {
+    auto& dest_it = restored_dest_it->it;
+    dest_it->first.SetSticky(serialized_value_.sticky);
+
+    auto bc = shard->blocking_controller();
+    if (bc) {
+      bc->AwakeWatched(t->GetDbIndex(), dest_key_);
+    }
   }
 
   if (shard->journal()) {
-    OpArgs op_args = t->GetOpArgs(shard);
-
     auto expire_str = absl::StrCat(serialized_value_.expire_ts);
     RecordJournal(op_args, "RESTORE"sv,
                   ArgSlice{dest_key_, expire_str, serialized_value_.value, "REPLACE"sv, "ABSTTL"sv},
                   2, true);
-    if (dest_it->first.IsSticky()) {
+    if (serialized_value_.sticky) {
       RecordJournal(op_args, "STICK"sv, ArgSlice{dest_key_}, 2, true);
     }
     RecordJournalFinish(op_args, 2);
@@ -473,7 +492,7 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
 }
 
 OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
-                         RestoreArgs restore_args, int rdb_version) {
+                         RestoreArgs restore_args, RdbVersion rdb_version) {
   if (!restore_args.UpdateExpiration(op_args.db_cntx.time_now_ms)) {
     return OpStatus::OUT_OF_RANGE;
   }
@@ -504,9 +523,9 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
   }
 
   RdbRestoreValue loader(rdb_version);
-
-  return loader.Add(payload, key, db_slice, op_args.db_cntx.db_index,
-                    restore_args.ExpirationTime());
+  auto res =
+      loader.Add(payload, key, db_slice, op_args.db_cntx.db_index, restore_args.ExpirationTime());
+  return res.has_value();
 }
 
 bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, string* scratch,
@@ -1154,9 +1173,10 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
 void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view serialized_value = ArgS(args, 2);
-  int rdb_version = 0;
-  if (!VerifyFooter(serialized_value, &rdb_version)) {
-    return cntx->SendError("ERR DUMP payload version or checksum are wrong");
+
+  auto rdb_version = GetRdbVersion(serialized_value);
+  if (!rdb_version) {
+    return cntx->SendError(kInvalidDumpValueErr);
   }
 
   OpResult<RestoreArgs> restore_args = RestoreArgs::TryFrom(args);
@@ -1169,7 +1189,8 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OnRestore(t->GetOpArgs(shard), key, serialized_value, restore_args.value(), rdb_version);
+    return OnRestore(t->GetOpArgs(shard), key, serialized_value, restore_args.value(),
+                     rdb_version.value());
   };
 
   OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1178,7 +1199,7 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
     if (result.value()) {
       return cntx->SendOk();
     } else {
-      return cntx->SendError("Bad data format");
+      return cntx->SendError("Bad data formatasdfasdf");
     }
   } else {
     switch (result.status()) {
@@ -1250,19 +1271,25 @@ void GenericFamily::Move(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void GenericFamily::Rename(CmdArgList args, ConnectionContext* cntx) {
-  OpResult<void> st = RenameGeneric(args, false, cntx);
-  cntx->SendError(st.status());
+  auto reply = RenameGeneric(args, false, cntx);
+  cntx->SendError(reply);
 }
 
 void GenericFamily::RenameNx(CmdArgList args, ConnectionContext* cntx) {
-  OpResult<void> st = RenameGeneric(args, true, cntx);
-  OpStatus status = st.status();
-  if (status == OpStatus::OK) {
+  auto reply = RenameGeneric(args, true, cntx);
+
+  if (!reply.status) {
+    cntx->SendError(reply);
+    return;
+  }
+
+  OpStatus st = reply.status.value();
+  if (st == OpStatus::OK) {
     cntx->SendLong(1);
-  } else if (status == OpStatus::KEY_EXISTS) {
+  } else if (st == OpStatus::KEY_EXISTS) {
     cntx->SendLong(0);
   } else {
-    cntx->SendError(status);
+    cntx->SendError(reply);
   }
 }
 
@@ -1370,8 +1397,8 @@ void GenericFamily::Time(CmdArgList args, ConnectionContext* cntx) {
   rb->SendLong(now_usec % 1000000);
 }
 
-OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool destination_should_not_exist,
-                                            ConnectionContext* cntx) {
+ErrorReply GenericFamily::RenameGeneric(CmdArgList args, bool destination_should_not_exist,
+                                        ConnectionContext* cntx) {
   string_view key[2] = {ArgS(args, 0), ArgS(args, 1)};
 
   Transaction* transaction = cntx->transaction;
@@ -1383,14 +1410,11 @@ OpResult<void> GenericFamily::RenameGeneric(CmdArgList args, bool destination_sh
     };
     OpResult<void> result = transaction->ScheduleSingleHopT(std::move(cb));
 
-    return result;
+    return result.status();
   }
 
-  unsigned shard_count = shard_set->size();
-
-  Renamer renamer{transaction, key[0], key[1], shard_count};
-  renamer.Rename(destination_should_not_exist);
-  return renamer.Status();
+  Renamer renamer{transaction, key[0], key[1], shard_set->size()};
+  return renamer.Rename(destination_should_not_exist);
 }
 
 void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
