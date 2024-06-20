@@ -458,9 +458,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     if (!change_cb_.empty()) {
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
-        for (const auto& ccb : change_cb_) {
-          ccb.second(cntx.db_index, bit);
-        }
+        CallChangeCallbacks(cntx.db_index, bit);
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
@@ -524,9 +522,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   // It's a new entry.
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
-  for (const auto& ccb : change_cb_) {
-    ccb.second(cntx.db_index, key);
-  }
+  CallChangeCallbacks(cntx.db_index, key);
 
   // In case we are loading from rdb file or replicating we want to disable conservative memory
   // checks (inside PrimeEvictionPolicy::CanGrow) and reject insertions only after we pass max
@@ -975,9 +971,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   FiberAtomicGuard fg;
 
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
-  for (const auto& ccb : change_cb_) {
-    ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
-  }
+  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
 
   // If the value has a pending stash, cancel it before any modification are applied.
   // Note: we don't delete offloaded values before updates, because a read-modify operation (like
@@ -1089,6 +1083,13 @@ void DbSlice::ExpireAllIfNeeded() {
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
   uint64_t ver = NextVersion();
+
+  // TODO rewrite this logic to be more clear
+  // this mutex lock is needed to check that this method is not called simultaneously with
+  // change_cb_ calls and journal_slice::change_cb_arr_ calls.
+  // It can be unlocked anytime because DbSlice::RegisterOnChange
+  // and journal_slice::RegisterOnChange calls without preemption
+  std::lock_guard lk(cb_mu_);
   change_cb_.emplace_back(ver, std::move(cb));
   return ver;
 }
@@ -1099,6 +1100,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
   // change_cb_ is ordered by version.
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
+
   for (const auto& ccb : change_cb_) {
     uint64_t cb_version = ccb.first;
     DCHECK_LE(cb_version, upper_bound);
@@ -1113,6 +1115,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
+  lock_guard lk(cb_mu_);  // we need to wait until callback is finished before remove it
   for (auto it = change_cb_.begin(); it != change_cb_.end(); ++it) {
     if (it->first == id) {
       change_cb_.erase(it);
@@ -1504,6 +1507,12 @@ void DbSlice::OnCbFinish() {
   // TBD update bumpups logic we can not clear now after cb finish as cb can preempt
   // btw what do we do with inline?
   fetched_items_.clear();
+}
+
+void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
+  for (const auto& ccb : change_cb_) {
+    ccb.second(id, cr);
+  }
 }
 
 }  // namespace dfly
