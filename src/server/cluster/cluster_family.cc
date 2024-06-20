@@ -687,7 +687,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
       reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
-                                   " keys:", keys_number, " errors: ", error));
+                                   " keys:", keys_number, " errors:", error));
     }
   };
 
