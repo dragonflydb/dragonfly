@@ -1149,6 +1149,53 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_migration_with_key_ttl(df_local_factory):
+    instances = [
+        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
+        for i in range(2)
+    ]
+
+    df_local_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await nodes[0].client.execute_command("set k_with_ttl v1 EX 2")
+    await nodes[0].client.execute_command("set k_without_ttl v2")
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
+    )
+    logging.debug("Start migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    logging.debug("finalize migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert await nodes[1].client.execute_command("get k_with_ttl") == "v1"
+    assert await nodes[1].client.execute_command("get k_without_ttl") == "v2"
+    assert await nodes[1].client.execute_command("ttl k_with_ttl") > 0
+    assert await nodes[1].client.execute_command("ttl k_without_ttl") == -1
+
+    await asyncio.sleep(2)  # Force expiration
+
+    assert await nodes[1].client.execute_command("get k_with_ttl") == None
+    assert await nodes[1].client.execute_command("get k_without_ttl") == "v2"
+    assert await nodes[1].client.execute_command("ttl k_with_ttl") == -2
+    assert await nodes[1].client.execute_command("ttl k_without_ttl") == -1
+
+    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
+
+
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_network_disconnect_during_migration(df_local_factory, df_seeder_factory):
     instances = [
