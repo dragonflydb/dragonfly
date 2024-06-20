@@ -4,13 +4,12 @@
 
 #pragma once
 
-#include <string>
 #include <system_error>
 
 #include "io/io.h"
 #include "server/tiering/common.h"
 #include "server/tiering/external_alloc.h"
-#include "server/tiering/io_mgr.h"
+#include "util/fibers/uring_file.h"
 
 namespace dfly::tiering {
 
@@ -45,9 +44,14 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
-  size_t pending_ops_ = 0;
-  size_t max_size_;
-  IoMgr io_mgr_;
+  std::error_code Grow(off_t grow_size);
+
+ private:
+  off_t size_, max_size_;
+  size_t pending_ops_ = 0;  // number of ongoing ops for safe shutdown
+  bool grow_pending_ = false;
+  std::unique_ptr<util::fb2::LinuxFile> backing_file_;
+
   ExternalAllocator alloc_;
 };
 

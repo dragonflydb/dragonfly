@@ -11,6 +11,7 @@
 #include "io/io.h"
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
+#include "util/fibers/fibers.h"
 namespace dfly::tiering {
 
 namespace {
