@@ -15,7 +15,7 @@ set_property(SOURCE dfly_main.cc APPEND PROPERTY COMPILE_DEFINITIONS
 
 if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     SET(TX_LINUX_SRCS tiering/disk_storage.cc tiering/op_manager.cc tiering/small_bins.cc
-      tiering/io_mgr.cc tiering/external_alloc.cc)
+      tiering/external_alloc.cc)
 
     add_executable(dfly_bench dfly_bench.cc)
     cxx_link(dfly_bench dfly_facade fibers2 absl::random_random)
