@@ -25,6 +25,8 @@ class Service;
 
 class DecompressImpl;
 
+using RdbVersion = std::uint16_t;
+
 class RdbLoaderBase {
  protected:
   RdbLoaderBase();
@@ -170,7 +172,7 @@ class RdbLoaderBase {
   std::unique_ptr<DecompressImpl> decompress_impl_;
   JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
-  int rdb_version_ = RDB_VERSION;
+  RdbVersion rdb_version_ = RDB_VERSION;
 };
 
 class RdbLoader : protected RdbLoaderBase {

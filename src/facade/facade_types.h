@@ -163,7 +163,7 @@ struct ErrorReply {
                       std::string_view kind = {})  // to resolve ambiguity of constructors above
       : message{std::string_view{msg}}, kind{kind} {
   }
-  explicit ErrorReply(OpStatus status) : message{}, kind{}, status{status} {
+  ErrorReply(OpStatus status) : message{}, kind{}, status{status} {
   }
 
   std::string_view ToSv() const {
