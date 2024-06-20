@@ -44,7 +44,7 @@ ABSL_FLAG(bool, break_replication_on_master_restart, false,
 ABSL_DECLARE_FLAG(int32_t, port);
 
 // TODO: Remove this flag on release >= 1.22
-ABSL_FLAG(bool, replica_reconnect_on_master_restart, true,
+ABSL_FLAG(bool, replica_reconnect_on_master_restart, false,
           "Deprecated - please use --break_replication_on_master_restart.");
 
 namespace dfly {
