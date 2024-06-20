@@ -689,16 +689,16 @@ async def test_rewrites(df_local_factory):
 
         await c_master.set("renamekey", "1000", px=50000)
         await skip_cmd()
-        # Check RENAME turns into DEL SET and PEXPIREAT
+        # Check RENAME turns into DEL and RESTORE
         await check_list_ooo(
             "RENAME renamekey renamed",
-            [r"DEL renamekey", r"SET renamed 1000", r"PEXPIREAT renamed (.*?)"],
+            [r"DEL renamekey", r"RESTORE renamed (.*?) (.*?) REPLACE ABSTTL"],
         )
         await check_expire("renamed")
-        # Check RENAMENX turns into DEL SET and PEXPIREAT
+        # Check RENAMENX turns into DEL and RESTORE
         await check_list_ooo(
             "RENAMENX renamed renamekey",
-            [r"DEL renamed", r"SET renamekey 1000", r"PEXPIREAT renamekey (.*?)"],
+            [r"DEL renamed", r"RESTORE renamekey (.*?) (.*?) REPLACE ABSTTL"],
         )
         await check_expire("renamekey")
 
