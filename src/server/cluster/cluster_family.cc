@@ -791,15 +791,11 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
 
   // TODO make it outside in one run with other slots that should be flushed
   if (!removed.Empty()) {
-    auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
+    auto removed_ranges = removed.ToSlotRanges();
     LOG_IF(WARNING, migration->GetState() == MigrationState::C_FINISHED)
         << "Flushing slots of removed FINISHED migration " << migration->GetSourceID()
-        << ", slots: " << SlotRange::ToString(*removed_ranges);
-    shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
-      if (EngineShard* shard = EngineShard::tlocal(); shard) {
-        shard->db_slice().FlushSlots(*removed_ranges);
-      }
-    });
+        << ", slots: " << SlotRange::ToString(removed_ranges);
+    DeleteSlots(removed_ranges);
   }
 
   return true;
@@ -844,7 +840,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   lock_guard lk(migration_mu_);
   auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
-  LOG_IF(WARNING, was_removed) << "Reinit was happen for migration from:" << source_id;
+  LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
       std::move(source_id), &server_family_->service(), std::move(slots), flows_num));

@@ -165,6 +165,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     item = &dummy;
     item->opcode = entry.opcode;
     item->lsn = lsn_++;
+    item->cmd = entry.payload.cmd;
     item->slot = entry.slot;
 
     io::BufSink buf_sink{&ring_serialize_buf_};

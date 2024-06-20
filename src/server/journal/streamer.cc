@@ -34,7 +34,7 @@ uint32_t replication_stream_output_limit_cached = 64_KB;
 }  // namespace
 
 JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
-    : journal_(journal), cntx_(cntx) {
+    : cntx_(cntx), journal_(journal) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
 }
@@ -44,7 +44,7 @@ JournalStreamer::~JournalStreamer() {
   VLOG(1) << "~JournalStreamer";
 }
 
-void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
+void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
   journal_cb_id_ =
@@ -188,9 +188,13 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
                                  Context* cntx)
     : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
+  db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 }
 
-void RestoreStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
+void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
+  if (fiber_cancelled_)
+    return;
+
   VLOG(1) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
@@ -199,7 +203,7 @@ void RestoreStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;
-  PrimeTable* pt = &db_slice_->databases()[0]->prime;
+  PrimeTable* pt = &db_array_[0]->prime;
 
   do {
     if (fiber_cancelled_)
@@ -244,14 +248,22 @@ RestoreStreamer::~RestoreStreamer() {
 void RestoreStreamer::Cancel() {
   auto sver = snapshot_version_;
   snapshot_version_ = 0;  // to prevent double cancel in another fiber
+  fiber_cancelled_ = true;
   if (sver != 0) {
-    fiber_cancelled_ = true;
     db_slice_->UnregisterOnChange(sver);
     JournalStreamer::Cancel();
   }
 }
 
 bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
+  if (item.cmd == "FLUSHALL" || item.cmd == "FLUSHDB") {
+    // On FLUSH* we restart the migration
+    CHECK(dest_ != nullptr);
+    cntx_->ReportError("FLUSH command during migration");
+    dest_->Shutdown(SHUT_RDWR);
+    return false;
+  }
+
   if (!item.slot.has_value()) {
     return false;
   }

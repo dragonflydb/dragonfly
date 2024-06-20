@@ -58,17 +58,11 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
-    // Check if migration was cancelled while we yielded so far.
-    if (cancelled_) {
-      return;
-    }
-
     streamer_.Start(Sock());
   }
 
   void Cancel() {
     streamer_.Cancel();
-    cancelled_ = true;
   }
 
   void Finalize() {
@@ -81,7 +75,6 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
  private:
   RestoreStreamer streamer_;
-  bool cancelled_ = false;
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
@@ -94,6 +87,13 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
 
 OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
+
+  // Destroy each flow in its dedicated thread, because we could be the last owner of the db tables
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      slot_migrations_[shard->shard_id()].reset();
+    }
+  });
 }
 
 bool OutgoingMigration::ChangeState(MigrationState new_state) {
