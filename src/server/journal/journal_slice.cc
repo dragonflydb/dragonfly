@@ -199,13 +199,14 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
 }
 
 uint32_t JournalSlice::RegisterOnChange(ChangeCallback cb) {
-  lock_guard lk(cb_mu_);
+  // mutex lock isn't needed due to iterators are not invalidated
   uint32_t id = next_cb_id_++;
   change_cb_arr_.emplace_back(id, std::move(cb));
   return id;
 }
 
 void JournalSlice::UnregisterOnChange(uint32_t id) {
+  // we need to wait until callback is finished before remove it
   lock_guard lk(cb_mu_);
   auto it = find_if(change_cb_arr_.begin(), change_cb_arr_.end(),
                     [id](const auto& e) { return e.first == id; });
