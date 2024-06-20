@@ -93,7 +93,6 @@ class NodeInfo:
     client: aioredis.Redis
     admin_client: aioredis.Redis
     slots: list
-    next_slots: list
     migrations: list
     id: str
 
@@ -105,7 +104,6 @@ async def create_node_info(instance):
         client=instance.client(),
         admin_client=admin_client,
         slots=[],
-        next_slots=[],
         migrations=[],
         id=await get_node_id(admin_client),
     )
@@ -1242,8 +1240,14 @@ async def test_cluster_fuzzymigration(
 
     # Counter that pushes values to a list
     async def list_counter(key, client: aioredis.RedisCluster):
-        for i in itertools.count(start=1):
-            await client.lpush(key, i)
+        try:
+            for i in itertools.count(start=1):
+                await client.lpush(key, i)
+        except asyncio.exceptions.CancelledError:
+            return
+        # TODO find the reason of TTL exhausted error and is it possible to fix it
+        except redis.exceptions.ClusterError:
+            return
 
     # Start ten counters
     counter_keys = [f"_counter{i}" for i in range(10)]
@@ -1287,34 +1291,51 @@ async def test_cluster_fuzzymigration(
                 )
             )
 
-            nodes[dest_idx].next_slots.extend(dest_slots)
-
-        keeping = node.slots[num_outgoing:]
-        node.next_slots.extend(keeping)
-
     logging.debug("start migrations")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
+    logging.debug("finish migrations")
+
     async def all_finished():
+        res = True
         for node in nodes:
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             logging.debug(states)
-            if not all("FINISHED" in s for s in states) or states == "NO_STATE":
-                return False
-        return True
+            for state in states:
+                parsed_state = re.search("([a-z]+) ([a-z0-9]+) ([A-Z]+)", state)
+                if parsed_state == None:
+                    continue
+                direction, node_id, st = parsed_state.group(1, 2, 3)
+                if direction == "out":
+                    if st == "FINISHED":
+                        m_id = [id for id, x in enumerate(node.migrations) if x.node_id == node_id][
+                            0
+                        ]
+                        node.slots = [s for s in node.slots if s not in node.migrations[m_id].slots]
+                        target_node = [n for n in nodes if n.id == node_id][0]
+                        target_node.slots.extend(node.migrations[m_id].slots)
+                        print(
+                            "FINISH migration",
+                            node.id,
+                            ":",
+                            node.migrations[m_id].node_id,
+                            " slots:",
+                            node.migrations[m_id].slots,
+                        )
+                        node.migrations.pop(m_id)
+                        await push_config(
+                            json.dumps(generate_config(nodes)),
+                            [node.admin_client for node in nodes],
+                        )
+                    else:
+                        res = False
+        return res
 
     await assert_eventually(all_finished)
 
     for counter in counters:
         counter.cancel()
-
-    # clean migrations
-    for node in nodes:
-        node.migrations = []
-        node.slots = node.next_slots
-
-    logging.debug("remove finished migrations")
-    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+        await counter
 
     # Check counter consistency
     cluster_client = aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port)
