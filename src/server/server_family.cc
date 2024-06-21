@@ -2286,6 +2286,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append("master_sync_in_progress", rinfo.full_sync_in_progress);
         append("master_replid", rinfo.master_id);
         append("slave_priority", GetFlag(FLAGS_replica_priority));
+        append("slave_read_only", 1);
       };
       replication_info_cb(replica_->GetInfo());
       for (const auto& replica : cluster_replicas_) {
