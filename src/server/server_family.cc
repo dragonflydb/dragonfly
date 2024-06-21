@@ -132,6 +132,7 @@ ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
+ABSL_DECLARE_FLAG(int, replica_priority);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(cond, m)                                           \
@@ -2284,6 +2285,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
         append("master_sync_in_progress", rinfo.full_sync_in_progress);
         append("master_replid", rinfo.master_id);
+        append("slave_priority", GetFlag(FLAGS_replica_priority));
       };
       replication_info_cb(replica_->GetInfo());
       for (const auto& replica : cluster_replicas_) {
