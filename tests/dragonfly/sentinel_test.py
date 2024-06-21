@@ -230,7 +230,7 @@ async def test_master_failure(df_local_factory, sentinel, port_picker):
     # Simulate master failure.
     master.stop()
 
-    # Verify replica pormoted.
+    # Verify replica promoted.
     await await_for(
         lambda: sentinel.live_master_port(),
         lambda p: p == replica.port,
@@ -285,7 +285,7 @@ async def test_priority_on_failover(df_local_factory, sentinel, port_picker):
     # Simulate master failure.
     master.stop()
 
-    # Verify replica pormoted.
+    # Verify replica promoted.
     await await_for(
         lambda: sentinel.live_master_port(),
         lambda p: p == low_priority_repl.port,
