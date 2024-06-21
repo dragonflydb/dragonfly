@@ -301,7 +301,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
           expire = db_slice_->ExpireTime(eit);
         }
 
-        WriteEntry(key, pv, expire);
+        WriteEntry(key, it->first, pv, expire);
       }
     }
   }
@@ -326,8 +326,9 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   }
 }
 
-void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pv, uint64_t expire_ms) {
-  absl::InlinedVector<string_view, 4> args;
+void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+                                 uint64_t expire_ms) {
+  absl::InlinedVector<string_view, 5> args;
   args.push_back(key);
 
   string expire_str = absl::StrCat(expire_ms);
@@ -338,6 +339,10 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pv, uint64_t
   args.push_back(value_dump_sink.str());
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
+
+  if (pk.IsSticky()) {
+    args.push_back("STICK");
+  }
 
   WriteCommand(journal::Entry::Payload("RESTORE", ArgSlice(args)));
 }

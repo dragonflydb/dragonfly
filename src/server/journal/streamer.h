@@ -93,7 +93,7 @@ class RestoreStreamer : public JournalStreamer {
 
   // Returns whether anything was written
   bool WriteBucket(PrimeTable::bucket_iterator it);
-  void WriteEntry(string_view key, const PrimeValue& pv, uint64_t expire_ms);
+  void WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv, uint64_t expire_ms);
   void WriteCommand(journal::Entry::Payload cmd_payload);
 
   DbSlice* db_slice_;

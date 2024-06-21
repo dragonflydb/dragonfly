@@ -101,6 +101,48 @@ class InMemSource : public ::io::Source {
   return read_total;
 }
 
+class RestoreArgs {
+ private:
+  static constexpr time_t NO_EXPIRATION = 0;
+
+  time_t expiration_ = NO_EXPIRATION;
+  bool abs_time_ = false;
+  bool replace_ = false;  // if true, over-ride existing key
+  bool sticky_ = false;
+
+ public:
+  RestoreArgs() = default;
+
+  RestoreArgs(time_t expiration, bool abs_time, bool replace)
+      : expiration_(expiration), abs_time_(abs_time), replace_(replace) {
+  }
+
+  constexpr bool Replace() const {
+    return replace_;
+  }
+
+  constexpr bool Sticky() const {
+    return sticky_;
+  }
+
+  uint64_t ExpirationTime() const {
+    DCHECK_GE(expiration_, 0);
+    return expiration_;
+  }
+
+  [[nodiscard]] constexpr bool Expired() const {
+    return expiration_ < 0;
+  }
+
+  [[nodiscard]] constexpr bool HasExpiration() const {
+    return expiration_ != NO_EXPIRATION;
+  }
+
+  [[nodiscard]] bool UpdateExpiration(int64_t now_msec);
+
+  static OpResult<RestoreArgs> TryFrom(const CmdArgList& args);
+};
+
 class RdbRestoreValue : protected RdbLoaderBase {
  public:
   RdbRestoreValue(RdbVersion rdb_version) {
@@ -108,7 +150,8 @@ class RdbRestoreValue : protected RdbLoaderBase {
   }
 
   std::optional<DbSlice::ItAndUpdater> Add(std::string_view payload, std::string_view key,
-                                           DbSlice& db_slice, DbIndex index, uint64_t expire_ms);
+                                           DbSlice& db_slice, DbIndex index,
+                                           const RestoreArgs& args);
 
  private:
   std::optional<OpaqueObj> Parse(std::string_view payload);
@@ -134,7 +177,7 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view 
 
 std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
                                                           std::string_view key, DbSlice& db_slice,
-                                                          DbIndex index, uint64_t expire_ms) {
+                                                          DbIndex index, const RestoreArgs& args) {
   auto opaque_res = Parse(data);
   if (!opaque_res) {
     return std::nullopt;
@@ -147,49 +190,14 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
     return std::nullopt;
   }
 
-  auto res = db_slice.AddNew(DbContext{index, GetCurrentTimeMs()}, key, std::move(pv), expire_ms);
+  auto res = db_slice.AddNew(DbContext{index, GetCurrentTimeMs()}, key, std::move(pv),
+                             args.ExpirationTime());
+  res->it->first.SetSticky(args.Sticky());
   if (res) {
     return std::move(res.value());
   }
   return std::nullopt;
 }
-
-class RestoreArgs {
- private:
-  static constexpr time_t NO_EXPIRATION = 0;
-
-  time_t expiration_ = NO_EXPIRATION;
-  bool abs_time_ = false;
-  bool replace_ = false;  // if true, over-ride existing key
-
- public:
-  RestoreArgs() = default;
-
-  RestoreArgs(time_t expiration, bool abs_time, bool replace)
-      : expiration_(expiration), abs_time_(abs_time), replace_(replace) {
-  }
-
-  constexpr bool Replace() const {
-    return replace_;
-  }
-
-  uint64_t ExpirationTime() const {
-    DCHECK_GE(expiration_, 0);
-    return expiration_;
-  }
-
-  [[nodiscard]] constexpr bool Expired() const {
-    return expiration_ < 0;
-  }
-
-  [[nodiscard]] constexpr bool HasExpiration() const {
-    return expiration_ != NO_EXPIRATION;
-  }
-
-  [[nodiscard]] bool UpdateExpiration(int64_t now_msec);
-
-  static OpResult<RestoreArgs> TryFrom(const CmdArgList& args);
-};
 
 [[nodiscard]] bool RestoreArgs::UpdateExpiration(int64_t now_msec) {
   if (HasExpiration()) {
@@ -230,6 +238,8 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
       out_args.replace_ = true;
     } else if (cur_arg == "ABSTTL") {
       out_args.abs_time_ = true;
+    } else if (cur_arg == "STICK") {
+      out_args.sticky_ = true;
     } else if (cur_arg == "IDLETIME" && additional) {
       ++i;
       cur_arg = ArgS(args, i);
@@ -434,7 +444,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
 
   RdbRestoreValue loader(serialized_value_.version.value());
   auto restored_dest_it = loader.Add(serialized_value_.value, dest_key_, db_slice,
-                                     op_args.db_cntx.db_index, restore_args.ExpirationTime());
+                                     op_args.db_cntx.db_index, restore_args);
 
   if (restored_dest_it) {
     auto& dest_it = restored_dest_it->it;
@@ -523,8 +533,7 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
   }
 
   RdbRestoreValue loader(rdb_version);
-  auto res =
-      loader.Add(payload, key, db_slice, op_args.db_cntx.db_index, restore_args.ExpirationTime());
+  auto res = loader.Add(payload, key, db_slice, op_args.db_cntx.db_index, restore_args);
   return res.has_value();
 }
 
