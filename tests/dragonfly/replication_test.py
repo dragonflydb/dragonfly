@@ -1908,6 +1908,7 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     c_replica = replica.client()
     # Check replica of not alowed while loading snapshot
     try:
+        assert "loading:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         assert False
     except aioredis.BusyLoadingError as e:
