@@ -10,6 +10,7 @@
 #include <string_view>
 #include <variant>
 
+#include "absl/container/flat_hash_set.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/user.h"
@@ -23,7 +24,7 @@ std::string AclCatAndCommandToString(const User::CategoryChanges& cat,
 std::string PrettyPrintSha(std::string_view pass, bool all = false);
 
 // When hashed is true, we allow passwords that start with both # and >
-std::optional<std::string> MaybeParsePassword(std::string_view command, bool hashed = false);
+std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, bool hashed = false);
 
 std::optional<bool> MaybeParseStatus(std::string_view command);
 
@@ -55,4 +56,8 @@ struct ParseKeyResult {
 std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command);
 
 std::string AclKeysToString(const AclKeys& keys);
+
+std::string PasswordsToString(const absl::flat_hash_set<std::string>& passwords, bool nopass,
+                              bool full_sha);
+
 }  // namespace dfly::acl
