@@ -136,8 +136,8 @@ struct HnswVectorIndex : public BaseVectorIndex {
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k) const;
-  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k,
+  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
+  std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
                                            const std::vector<DocId>& allowed) const;
 
  private:
