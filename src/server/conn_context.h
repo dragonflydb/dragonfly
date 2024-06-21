@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include "acl/acl_commands_def.h"
+#include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
 #include "server/common.h"
@@ -265,7 +266,7 @@ struct ConnectionState {
 
 class ConnectionContext : public facade::ConnectionContext {
  public:
-  ConnectionContext(::io::Sink* stream, facade::Connection* owner);
+  ConnectionContext(::io::Sink* stream, facade::Connection* owner, dfly::acl::UserCredentials cred);
 
   ConnectionContext(const ConnectionContext* owner, Transaction* tx,
                     facade::CapturingReplyBuilder* crb);

@@ -35,22 +35,15 @@ void JournalWriter::Write(std::string_view sv) {
   sink_->Write(io::Buffer(sv));
 }
 
-// element count, total size
-template <typename C> pair<size_t, size_t> SliceSize(const C& list) {
-  size_t res = 0, count = 0;
-  for (auto a : list) {
-    res += a.size();
-    ++count;
-  }
-  return {count, res};
-}
-
 void JournalWriter::Write(const journal::Entry::Payload& payload) {
   if (payload.cmd.empty())
     return;
 
-  auto [num_elems, size] =
-      std::visit([](const auto& list) { return SliceSize(list); }, payload.args);
+  size_t num_elems = 0, size = 0;
+  for (string_view str : base::it::Wrap(facade::kToSV, payload.args)) {
+    num_elems++;
+    size += str.size();
+  };
 
   Write(1 + num_elems);
 
@@ -58,13 +51,8 @@ void JournalWriter::Write(const journal::Entry::Payload& payload) {
   Write(cmd_size);
   Write(payload.cmd);
 
-  std::visit(
-      [this](const auto& list) {
-        for (auto v : list) {
-          this->Write(v);
-        }
-      },
-      payload.args);
+  for (string_view str : base::it::Wrap(facade::kToSV, payload.args))
+    this->Write(str);
 }
 
 void JournalWriter::Write(const journal::Entry& entry) {

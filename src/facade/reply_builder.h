@@ -79,8 +79,8 @@ class SinkReplyBuilder {
   }
 
   virtual void SendError(std::string_view str, std::string_view type = {}) = 0;  // MC and Redis
-  virtual void SendError(ErrorReply error);
   virtual void SendError(OpStatus status);
+  void SendError(ErrorReply error);
 
   virtual void SendStored() = 0;  // Reply for set commands.
   virtual void SendSetSkipped() = 0;
@@ -203,7 +203,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   enum VerbatimFormat { TXT, MARKDOWN };
 
-  using StrSpan = std::variant<absl::Span<const std::string>, absl::Span<const std::string_view>>;
+  using StrSpan = facade::ArgRange;
 
   RedisReplyBuilder(::io::Sink* stream);
 
@@ -241,12 +241,6 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   virtual void StartCollection(unsigned len, CollectionType type);
 
   static char* FormatDouble(double val, char* dest, unsigned dest_len);
-
- protected:
-  struct WrappedStrSpan : public StrSpan {
-    size_t Size() const;
-    std::string_view operator[](size_t index) const;
-  };
 
  private:
   void SendStringArrInternal(size_t size, absl::FunctionRef<std::string_view(unsigned)> producer,

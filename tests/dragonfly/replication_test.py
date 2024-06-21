@@ -57,10 +57,6 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 async def test_replication_all(
     df_local_factory: DflyInstanceFactory, t_master, t_replicas, seeder_config, stream_target, mode
 ):
-    # Temporary disable the test until it passes reliably with cache mode.
-    if mode:
-        pytest.skip()
-
     if mode:
         mode["maxmemory"] = str(t_master * 256) + "mb"
 
@@ -693,16 +689,16 @@ async def test_rewrites(df_local_factory):
 
         await c_master.set("renamekey", "1000", px=50000)
         await skip_cmd()
-        # Check RENAME turns into DEL SET and PEXPIREAT
+        # Check RENAME turns into DEL and RESTORE
         await check_list_ooo(
             "RENAME renamekey renamed",
-            [r"DEL renamekey", r"SET renamed 1000", r"PEXPIREAT renamed (.*?)"],
+            [r"DEL renamekey", r"RESTORE renamed (.*?) (.*?) REPLACE ABSTTL"],
         )
         await check_expire("renamed")
-        # Check RENAMENX turns into DEL SET and PEXPIREAT
+        # Check RENAMENX turns into DEL and RESTORE
         await check_list_ooo(
             "RENAMENX renamed renamekey",
-            [r"DEL renamed", r"SET renamekey 1000", r"PEXPIREAT renamekey (.*?)"],
+            [r"DEL renamed", r"RESTORE renamekey (.*?) (.*?) REPLACE ABSTTL"],
         )
         await check_expire("renamekey")
 
@@ -2168,7 +2164,7 @@ async def test_replica_reconnect(df_local_factory, break_conn):
     # Connect replica to master
     master = df_local_factory.create(proactor_threads=1)
     replica = df_local_factory.create(
-        proactor_threads=1, replica_reconnect_on_master_restart=break_conn
+        proactor_threads=1, break_replication_on_master_restart=break_conn
     )
     df_local_factory.start_all([master, replica])
 

@@ -660,8 +660,6 @@ static string_view StateToStr(MigrationState state) {
       return "ERROR"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
-    case MigrationState::C_MAX_INVALID:
-      break;
   }
   DCHECK(false) << "Unknown State value " << static_cast<underlying_type_t<MigrationState>>(state);
   return "UNDEFINED_STATE"sv;
@@ -689,17 +687,18 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
       reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
-                                   " keys:", keys_number, " errors: ", error));
+                                   " keys:", keys_number, " errors:", error));
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
     // TODO add error status
-    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(), "");
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(),
+                  m->GetErrorStr());
   }
-  for (const auto& migration : outgoing_migration_jobs_) {
-    append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
-                  migration->GetKeyCount(), migration->GetErrorStr());
+  for (const auto& m : outgoing_migration_jobs_) {
+    append_answer("out", m->GetMigrationInfo().node_id, node_id, m->GetState(), m->GetKeyCount(),
+                  m->GetErrorStr());
   }
 
   if (reply.empty()) {
@@ -786,22 +785,17 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
   SlotSet migration_slots(migration->GetSlots());
   SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
-  // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
-  migration->Cancel();
+  migration->Stop();
   // all fibers has migration shared_ptr so we don't need to join it and can erase
   jobs.erase(it);
 
   // TODO make it outside in one run with other slots that should be flushed
   if (!removed.Empty()) {
-    auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
+    auto removed_ranges = removed.ToSlotRanges();
     LOG_IF(WARNING, migration->GetState() == MigrationState::C_FINISHED)
         << "Flushing slots of removed FINISHED migration " << migration->GetSourceID()
-        << ", slots: " << SlotRange::ToString(*removed_ranges);
-    shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
-      if (EngineShard* shard = EngineShard::tlocal(); shard) {
-        shard->db_slice().FlushSlots(*removed_ranges);
-      }
-    });
+        << ", slots: " << SlotRange::ToString(removed_ranges);
+    DeleteSlots(removed_ranges);
   }
 
   return true;
@@ -846,7 +840,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   lock_guard lk(migration_mu_);
   auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
-  LOG_IF(WARNING, was_removed) << "Reinit was happen for migration from:" << source_id;
+  LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
       std::move(source_id), &server_family_->service(), std::move(slots), flows_num));
@@ -877,7 +871,6 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
   auto migration = GetIncomingMigration(source_id);
   if (!migration) {
-    // TODO process error when migration is canceled
     return cntx->SendError(kIdNotFound);
   }
 
@@ -916,7 +909,6 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
                            [source_id](const auto& m) { return m.node_id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
-    // TODO process error if migration was canceled
     return cntx->SendLong(OutgoingMigration::kInvalidAttempt);
   }
 

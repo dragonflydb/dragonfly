@@ -319,7 +319,7 @@ struct BasicSearch {
 
     // Skip sorting again for KNN queries, reverse if needed will be applied on aggregation
     if (auto knn = get_if<AstKnnNode>(&node.filter->Variant());
-        knn && knn->score_alias == node.field) {
+        knn && (knn->score_alias == node.field || "__vector_score" == node.field)) {
       return sub_results;
     }
 

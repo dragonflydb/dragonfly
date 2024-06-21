@@ -1544,31 +1544,9 @@ std::enable_if_t<UV, unsigned> Segment<Key, Value, Policy>::CVCOnBump(uint64_t v
     result_bid[result++] = bid;
   }
   const uint8_t target_bid = BucketIndex(hash);
-  const auto& target = bucket_[target_bid];
+  result_bid[result++] = target_bid;
   const uint8_t probing_bid = NextBid(target_bid);
-  const auto& probing = bucket_[probing_bid];
-
-  unsigned stash_pos = bid - kBucketNum;
-  uint8_t fp_hash = hash & kFpMask;
-
-  auto find_stash = [&](unsigned, unsigned pos) {
-    return stash_pos == pos ? slot : BucketType::kNanSlot;
-  };
-
-  auto do_fun = [&result, &result_bid, fp_hash, find_stash](auto& target, auto target_bid,
-                                                            bool probe) {
-    if (target.HasStashOverflow()) {
-      result_bid[result++] = target_bid;
-    } else {
-      SlotId slot_id = target.IterateStash(fp_hash, probe, find_stash).second;
-      if (slot_id != BucketType::kNanSlot) {
-        result_bid[result++] = target_bid;
-      }
-    }
-  };
-
-  do_fun(target, target_bid, false);
-  do_fun(probing, probing_bid, true);
+  result_bid[result++] = probing_bid;
 
   return result;
 }

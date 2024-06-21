@@ -41,7 +41,6 @@ jobs:
         with:
           dfly-executable: dragonfly
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
-          run-only-on-ubuntu-latest: false
           build-folder-name: build
           # This expression serves as a ternary operator, i.e. if the condition holds it returns
           # 'not NON_EXISTING_MARK' otherwise not opt_only.

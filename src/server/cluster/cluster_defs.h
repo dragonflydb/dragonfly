@@ -81,7 +81,6 @@ enum class MigrationState : uint8_t {
   C_SYNC,
   C_ERROR,
   C_FINISHED,
-  C_MAX_INVALID = std::numeric_limits<uint8_t>::max()
 };
 
 SlotId KeySlot(std::string_view key);

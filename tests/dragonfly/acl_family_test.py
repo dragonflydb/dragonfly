@@ -12,61 +12,61 @@ from . import dfly_args
 @pytest.mark.asyncio
 async def test_acl_setuser(async_client):
     await async_client.execute_command("ACL SETUSER kostas")
-    result = await async_client.execute_command("ACL LIST")
+    result = await async_client.execute_command("ACL list")
     assert 2 == len(result)
-    assert "user kostas off nopass -@ALL" in result
+    assert "user kostas off nopass -@all" in result
 
     await async_client.execute_command("ACL SETUSER kostas ON")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ALL" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@all" in result
 
     await async_client.execute_command("ACL SETUSER kostas +@list +@string +@admin")
-    result = await async_client.execute_command("ACL LIST")
+    result = await async_client.execute_command("ACL list")
     # TODO consider printing to lowercase
-    assert "user kostas on nopass -@ALL +@LIST +@STRING +@ADMIN" in result
+    assert "user kostas on nopass -@all +@list +@string +@admin" in result
 
     await async_client.execute_command("ACL SETUSER kostas -@list -@admin")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ALL +@STRING -@LIST -@ADMIN" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@all +@string -@list -@admin" in result
 
     # mix and match
     await async_client.execute_command("ACL SETUSER kostas +@list -@string")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ALL -@ADMIN +@LIST -@STRING" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@all -@admin +@list -@string" in result
 
     # mix and match interleaved
     await async_client.execute_command("ACL SETUSER kostas +@set -@set +@set")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ALL -@ADMIN +@LIST -@STRING +@SET" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@all -@admin +@list -@string +@set" in result
 
     await async_client.execute_command("ACL SETUSER kostas +@all")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ADMIN +@LIST -@STRING +@SET +@ALL" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@admin +@list -@string +@set +@all" in result
 
     # commands
     await async_client.execute_command("ACL SETUSER kostas +set +get +hset")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ADMIN +@LIST -@STRING +@SET +@ALL +SET +GET +HSET" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@admin +@list -@string +@set +@all +set +get +hset" in result
 
     await async_client.execute_command("ACL SETUSER kostas -set -get +hset")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ADMIN +@LIST -@STRING +@SET +@ALL -SET -GET +HSET" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@admin +@list -@string +@set +@all -set -get +hset" in result
 
     # interleaved
     await async_client.execute_command("ACL SETUSER kostas -hset +get -get -@all")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ADMIN +@LIST -@STRING +@SET -SET -HSET -GET -@ALL" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@admin +@list -@string +@set -set -hset -get -@all" in result
 
     # interleaved with categories
     await async_client.execute_command("ACL SETUSER kostas +@string +get -get +set")
-    result = await async_client.execute_command("ACL LIST")
-    assert "user kostas on nopass -@ADMIN +@LIST +@SET -HSET -@ALL +@STRING -GET +SET" in result
+    result = await async_client.execute_command("ACL list")
+    assert "user kostas on nopass -@admin +@list +@set -hset -@all +@string -get +set" in result
 
 
 @pytest.mark.asyncio
 async def test_acl_categories(async_client):
     await async_client.execute_command(
-        "ACL SETUSER vlad ON >mypass -@ALL +@string +@list +@connection ~*"
+        "ACL SETUSER vlad ON >mypass -@all +@string +@list +@connection ~*"
     )
 
     result = await async_client.execute_command("AUTH vlad mypass")
@@ -116,7 +116,7 @@ async def test_acl_categories(async_client):
 
 @pytest.mark.asyncio
 async def test_acl_commands(async_client):
-    await async_client.execute_command("ACL SETUSER random ON >mypass -@ALL +set +get ~*")
+    await async_client.execute_command("ACL SETUSER random ON >mypass -@all +set +get ~*")
 
     result = await async_client.execute_command("AUTH random mypass")
     assert result == "OK"
@@ -177,7 +177,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_local_factory):
     for x in range(33):
         await client.execute_command(f"SET x{x} {x}")
 
-    # ADMIN revokes permissions
+    # admin revokes permissions
     res = await admin_client.execute_command("ACL SETUSER kk -@string")
     assert res == b"OK"
 
@@ -330,22 +330,22 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
     client = df.client()
 
     await client.execute_command("ACL LOAD")
-    result = await client.execute_command("ACL LIST")
+    result = await client.execute_command("ACL list")
     assert 2 == len(result)
-    assert "user MrFoo on ea71c25a7a60224 -@ALL" in result
-    assert "user default on nopass +@ALL ~*" in result
+    assert "user MrFoo on ea71c25a7a60224 -@all" in result
+    assert "user default on nopass ~* +@all" in result
     await client.execute_command("ACL DELUSER MrFoo")
 
-    await client.execute_command("ACL SETUSER roy ON >mypass +@STRING +HSET")
-    await client.execute_command("ACL SETUSER shahar >mypass +@SET")
-    await client.execute_command("ACL SETUSER vlad +@STRING ~foo ~bar*")
+    await client.execute_command("ACL SETUSER roy ON >mypass +@string +hset")
+    await client.execute_command("ACL SETUSER shahar >mypass +@set")
+    await client.execute_command("ACL SETUSER vlad ~foo ~bar* +@string")
 
-    result = await client.execute_command("ACL LIST")
+    result = await client.execute_command("ACL list")
     assert 4 == len(result)
-    assert "user roy on ea71c25a7a60224 -@ALL +@STRING +HSET" in result
-    assert "user shahar off ea71c25a7a60224 -@ALL +@SET" in result
-    assert "user vlad off nopass -@ALL +@STRING ~foo ~bar*" in result
-    assert "user default on nopass +@ALL ~*" in result
+    assert "user roy on ea71c25a7a60224 -@all +@string +hset" in result
+    assert "user shahar off ea71c25a7a60224 -@all +@set" in result
+    assert "user vlad off nopass ~foo ~bar* -@all +@string" in result
+    assert "user default on nopass ~* +@all" in result
 
     result = await client.execute_command("ACL DELUSER shahar")
     assert result == 1
@@ -354,11 +354,11 @@ async def test_good_acl_file(df_local_factory, tmp_dir):
 
     result = await client.execute_command("ACL LOAD")
 
-    result = await client.execute_command("ACL LIST")
+    result = await client.execute_command("ACL list")
     assert 3 == len(result)
-    assert "user roy on ea71c25a7a60224 -@ALL +@STRING +HSET" in result
-    assert "user vlad off nopass -@ALL +@STRING ~foo ~bar*" in result
-    assert "user default on nopass +@ALL ~*" in result
+    assert "user roy on ea71c25a7a60224 -@all +@string +hset" in result
+    assert "user vlad off nopass ~foo ~bar* -@all +@string" in result
+    assert "user default on nopass ~* +@all" in result
 
     await client.close()
 
@@ -387,7 +387,7 @@ async def test_acl_log(async_client):
     res = await async_client.execute_command("SET mykey 22")
 
     with pytest.raises(redis.exceptions.ResponseError):
-        await async_client.execute_command("HSET mk kk 22")
+        await async_client.execute_command("hset mk kk 22")
 
     res = await async_client.execute_command("ACL LOG")
     assert 1 == len(res)
@@ -447,7 +447,7 @@ async def test_require_pass(df_local_factory):
 
 @pytest.mark.asyncio
 async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
-    acl_file_content = "USER roy ON #ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@STRING +@FAST +HSET\nUSER john on nopass +@string"
+    acl_file_content = "USER roy ON #ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@string +@fast +hset\nUSER john on nopass +@string"
 
     acl = create_temp_file(acl_file_content, tmp_dir)
 
@@ -455,7 +455,7 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
 
     await async_client.execute_command("ACL LOAD")
 
-    result = await async_client.execute_command("ACL LIST")
+    result = await async_client.execute_command("ACL list")
     assert 3 == len(result)
 
     result = await async_client.execute_command("AUTH roy mypass")
@@ -536,3 +536,20 @@ async def test_acl_keys(async_client):
     # reject because bonus key does not match
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command("ZUNIONSTORE destkey 2 barz1 barz2")
+
+
+@pytest.mark.asyncio
+async def default_user_bug(df_local_factory):
+    df.start()
+
+    client = aioredis.Redis(port=df.port)
+
+    await async_client.execute_command("ACL SETUSER default -@all")
+    await client.close()
+
+    client = aioredis.Redis(port=df.port)
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await client.execute_command("SET foo bar")
+
+    await client.close()

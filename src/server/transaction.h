@@ -132,7 +132,8 @@ class Transaction {
   using RunnableType = absl::FunctionRef<RunnableResult(Transaction* t, EngineShard*)>;
 
   // Provides keys to block on for specific shard.
-  using WaitKeysProvider = std::function<ShardArgs(Transaction*, EngineShard* shard)>;
+  using WaitKeysProvider =
+      std::function<std::variant<ShardArgs, ArgSlice>(Transaction*, EngineShard* shard)>;
 
   // Modes in which a multi transaction can run.
   enum MultiMode {
@@ -525,12 +526,13 @@ class Transaction {
   void RunCallback(EngineShard* shard);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
-  OpStatus WatchInShard(const ShardArgs& keys, EngineShard* shard, KeyReadyChecker krc);
+  OpStatus WatchInShard(std::variant<ShardArgs, ArgSlice> keys, EngineShard* shard,
+                        KeyReadyChecker krc);
 
   // Expire blocking transaction, unlock keys and unregister it from the blocking controller
   void ExpireBlocking(WaitKeysProvider wcb);
 
-  void ExpireShardCb(const ShardArgs& wkeys, EngineShard* shard);
+  void ExpireShardCb(std::variant<ShardArgs, ArgSlice> keys, EngineShard* shard);
 
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);

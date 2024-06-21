@@ -5,6 +5,7 @@
 #include "server/tx_base.h"
 
 #include "base/logging.h"
+#include "facade/facade_types.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -29,8 +30,8 @@ void RecordJournal(const OpArgs& op_args, string_view cmd, const ShardArgs& args
                                 false);
 }
 
-void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args, uint32_t shard_cnt,
-                   bool multi_commands) {
+void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice args,
+                   uint32_t shard_cnt, bool multi_commands) {
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
   op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, multi_commands,
                                 false);

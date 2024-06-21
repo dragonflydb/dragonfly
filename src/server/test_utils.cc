@@ -57,7 +57,8 @@ static vector<string> SplitLines(const std::string& src) {
 
 TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
     : facade::Connection(protocol, nullptr, nullptr, nullptr), sink_(sink) {
-  cc_.reset(new dfly::ConnectionContext(sink_, this));
+  cc_.reset(new dfly::ConnectionContext(sink_, this, {}));
+  cc_->skip_acl_validation = true;
   SetSocket(ProactorBase::me()->CreateSocket());
   OnConnectionStart();
 }

@@ -25,12 +25,12 @@ namespace {
 std::string AclCatToString(uint32_t acl_category, User::Sign sign) {
   std::string res = sign == User::Sign::PLUS ? "+@" : "-@";
   if (acl_category == acl::ALL) {
-    absl::StrAppend(&res, "ALL");
+    absl::StrAppend(&res, "all");
     return res;
   }
 
   const auto& index = CategoryToIdx().at(acl_category);
-  absl::StrAppend(&res, REVERSE_CATEGORY_INDEX_TABLE[index]);
+  absl::StrAppend(&res, absl::AsciiStrToLower(REVERSE_CATEGORY_INDEX_TABLE[index]));
   return res;
 }
 
@@ -41,7 +41,7 @@ std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) {
   std::string prefix = (sign == User::Sign::PLUS) ? "+" : "-";
   if (mask == ALL_COMMANDS) {
     for (const auto& cmd : rev_index[family]) {
-      absl::StrAppend(&res, prefix, cmd, " ");
+      absl::StrAppend(&res, prefix, absl::AsciiStrToLower(cmd), " ");
     }
     res.pop_back();
     return res;
@@ -53,7 +53,7 @@ std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) {
     mask = mask >> 1;
   }
   --pos;
-  absl::StrAppend(&res, prefix, rev_index[family][pos]);
+  absl::StrAppend(&res, prefix, absl::AsciiStrToLower(rev_index[family][pos]));
   return res;
 }
 
@@ -254,13 +254,12 @@ MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames
 
 using facade::ErrorReply;
 
-template <typename T>
-std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
+std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(facade::ArgRange args,
                                                               const CommandRegistry& registry,
                                                               bool hashed, bool has_all_keys) {
   User::UpdateRequest req;
 
-  for (auto& arg : args) {
+  for (std::string_view arg : args) {
     if (auto pass = MaybeParsePassword(facade::ToSV(arg), hashed); pass) {
       if (req.password) {
         return ErrorReply("Only one password is allowed");
@@ -291,18 +290,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
       continue;
     }
 
-    std::string buffer;
-    std::string_view command;
-    if constexpr (std::is_same_v<T, facade::CmdArgList>) {
-      ToUpper(&arg);
-      command = facade::ToSV(arg);
-    } else {
-      // Guaranteed SSO because commands are small
-      buffer = arg;
-      absl::Span<char> view{buffer.data(), buffer.size()};
-      ToUpper(&view);
-      command = buffer;
-    }
+    std::string command = absl::AsciiStrToUpper(arg);
 
     if (auto status = MaybeParseStatus(command); status) {
       if (req.is_active) {
@@ -337,14 +325,6 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
 }
 
 using facade::CmdArgList;
-
-template std::variant<User::UpdateRequest, ErrorReply>
-ParseAclSetUser<std::vector<std::string_view>&>(std::vector<std::string_view>&,
-                                                const CommandRegistry& registry, bool hashed,
-                                                bool has_all_keys);
-
-template std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser<CmdArgList>(
-    CmdArgList args, const CommandRegistry& registry, bool hashed, bool has_all_keys);
 
 std::string AclKeysToString(const AclKeys& keys) {
   if (keys.all_keys) {

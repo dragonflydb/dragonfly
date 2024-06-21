@@ -24,4 +24,10 @@ struct AclKeys {
   bool all_keys = false;
 };
 
+struct UserCredentials {
+  uint32_t acl_categories{0};
+  std::vector<uint64_t> acl_commands;
+  AclKeys keys;
+};
+
 }  // namespace dfly::acl
