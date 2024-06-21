@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/hash/hash.h"
 #include "server/acl/acl_commands_def.h"
 
@@ -30,8 +31,16 @@ class User final {
     bool reset_keys = false;
   };
 
+  struct UpdatePass {
+    std::string password;
+    // Set to denote remove password
+    bool unset{false};
+    bool nopass{false};
+    bool reset_password{false};
+  };
+
   struct UpdateRequest {
-    std::optional<std::string> password{};
+    std::vector<UpdatePass> passwords;
 
     std::optional<bool> is_active{};
 
@@ -48,6 +57,8 @@ class User final {
     std::vector<UpdateKey> keys;
     bool reset_all_keys{false};
     bool allow_all_keys{false};
+    // TODO allow reset all
+    // bool reset_all{false};
   };
 
   using CategoryChange = uint32_t;
@@ -80,7 +91,9 @@ class User final {
 
   bool IsActive() const;
 
-  std::string_view Password() const;
+  const absl::flat_hash_set<std::string>& Passwords() const;
+
+  bool HasNopass() const;
 
   // Selector maps a command string (like HSET, SET etc) to
   // its respective ID within the commands vector.
@@ -111,13 +124,19 @@ class User final {
 
   // For passwords
   void SetPasswordHash(std::string_view password, bool is_hashed);
+  void UnsetPassword(std::string_view password);
 
   // For ACL key globs
   void SetKeyGlobs(std::vector<UpdateKey> keys);
 
-  // when optional is empty, the special `nopass` password is implied
-  // password hashed with xx64
-  std::optional<std::string> password_hash_;
+  // Set NOPASS and remove all passwords
+  void SetNopass();
+
+  // Passwords for each user
+  absl::flat_hash_set<std::string> password_hashes_;
+  // if `nopass` is used
+  bool nopass_ = false;
+
   uint32_t acl_categories_{NONE};
   // Each element index in the vector corresponds to a familly of commands
   // Each bit in the uin64_t field at index id, corresponds to a specific
