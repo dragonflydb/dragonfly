@@ -87,11 +87,14 @@ void UserRegistry::Init() {
   auto default_user = DefaultUserUpdateRequest();
   auto maybe_password = absl::GetFlag(FLAGS_requirepass);
   if (!maybe_password.empty()) {
+    default_user.passwords.front().password = std::move(maybe_password);
     default_user.passwords.front().nopass = false;
   } else if (const char* env_var = getenv("DFLY_PASSWORD"); env_var) {
     default_user.passwords.front().password = env_var;
+    default_user.passwords.front().nopass = false;
   } else if (const char* env_var = getenv("DFLY_requirepass"); env_var) {
     default_user.passwords.front().password = env_var;
+    default_user.passwords.front().nopass = false;
   }
   MaybeAddAndUpdate("default", std::move(default_user));
 }
