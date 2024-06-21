@@ -12,7 +12,6 @@ from .seeder import StaticSeeder
 BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiering_test_backing"}
 
 
-# @pytest.mark.slow
 @pytest.mark.opt_only
 @dfly_args(BASIC_ARGS)
 async def test_basic_memory_usage(async_client: aioredis.Redis):
@@ -29,10 +28,10 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     info = await async_client.info("ALL")
     assert info["num_entries"] == 200_000
 
-    assert info["tiered_entries"] > 95_000  # some remain in unfilled small bins
+    assert info["tiered_entries"] > 195_000  # some remain in unfilled small bins
     assert (
-        info["tiered_allocated_bytes"] > 95_000 * 2048 * 0.8
-    )  # just to be sure because it fluctuates
+        info["tiered_allocated_bytes"] > 195_000 * 2048 * 0.8
+    )  # 0.8 just to be sure because it fluctuates due to variance
 
     assert info["used_memory"] < 50 * 1024 * 1024
     assert (
@@ -40,7 +39,6 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     )  # the grown table itself takes up lots of space
 
 
-# @pytest.mark.slow
 @pytest.mark.opt_only
 @dfly_args(
     {
