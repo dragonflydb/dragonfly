@@ -1149,7 +1149,7 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
-@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cache_mode": "true"})
 async def test_migration_with_key_ttl(df_local_factory):
     instances = [
         df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
@@ -1166,6 +1166,8 @@ async def test_migration_with_key_ttl(df_local_factory):
 
     await nodes[0].client.execute_command("set k_with_ttl v1 EX 2")
     await nodes[0].client.execute_command("set k_without_ttl v2")
+    await nodes[0].client.execute_command("set k_sticky v3")
+    assert await nodes[0].client.execute_command("stick k_sticky") == 1
 
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
@@ -1183,8 +1185,10 @@ async def test_migration_with_key_ttl(df_local_factory):
 
     assert await nodes[1].client.execute_command("get k_with_ttl") == "v1"
     assert await nodes[1].client.execute_command("get k_without_ttl") == "v2"
+    assert await nodes[1].client.execute_command("get k_sticky") == "v3"
     assert await nodes[1].client.execute_command("ttl k_with_ttl") > 0
     assert await nodes[1].client.execute_command("ttl k_without_ttl") == -1
+    assert await nodes[1].client.execute_command("stick k_sticky") == 0  # Sticky bit already set
 
     await asyncio.sleep(2)  # Force expiration
 
@@ -1192,6 +1196,7 @@ async def test_migration_with_key_ttl(df_local_factory):
     assert await nodes[1].client.execute_command("get k_without_ttl") == "v2"
     assert await nodes[1].client.execute_command("ttl k_with_ttl") == -2
     assert await nodes[1].client.execute_command("ttl k_without_ttl") == -1
+    assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
