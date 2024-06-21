@@ -42,6 +42,9 @@ ABSL_FLAG(bool, break_replication_on_master_restart, false,
           "When in replica mode, and master restarts, break replication from master to avoid "
           "flushing the replica's data.");
 ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_FLAG(
+    int, replica_priority, 100,
+    "Published by info command for sentinel to pick replica based on score during a failover");
 
 // TODO: Remove this flag on release >= 1.22
 ABSL_FLAG(bool, replica_reconnect_on_master_restart, false,
