@@ -248,20 +248,6 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   return new_val;
 }
 
-int64_t AbsExpiryToTtl(int64_t abs_expiry_time, bool as_milli) {
-  using std::chrono::duration_cast;
-  using std::chrono::milliseconds;
-  using std::chrono::seconds;
-  using std::chrono::system_clock;
-
-  if (as_milli) {
-    return abs_expiry_time -
-           duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-  } else {
-    return abs_expiry_time - duration_cast<seconds>(system_clock::now().time_since_epoch()).count();
-  }
-}
-
 // Returns true if keys were set, false otherwise.
 OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   DCHECK(!args.Empty() && args.Size() % 2 == 0);
@@ -750,32 +736,17 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
         return builder->SendError(InvalidExpireTime("set"));
       }
 
-      bool is_ms = (opt[0] == 'P');
+      DbSlice::ExpireParams expiry{
+          .value = int_arg,
+          .unit = (opt[0] == 'P') ? TimeUnit::MSEC : TimeUnit::SEC,
+          .absolute = absl::EndsWith(opt, "AT"),
+      };
 
-      // for []AT we need to take expiration time as absolute from the value
-      // given check here and if the time is in the past, return OK but don't
-      // set it Note that the time pass here for PXAT is in milliseconds, we
-      // must not change it!
-      if (absl::EndsWith(opt, "AT")) {
-        int_arg = AbsExpiryToTtl(int_arg, is_ms);
-        if (int_arg < 0) {
-          // this happened in the past, just return, for some reason Redis
-          // reports OK in this case
-          return builder->SendStored();
-        }
-      }
+      // Redis reports just OK in this case
+      if (expiry.IsExpired(GetCurrentTimeMs()))
+        return builder->SendStored();
 
-      if (is_ms) {
-        if (int_arg > kMaxExpireDeadlineMs) {
-          int_arg = kMaxExpireDeadlineMs;
-        }
-      } else {
-        if (int_arg > kMaxExpireDeadlineSec) {
-          int_arg = kMaxExpireDeadlineSec;
-        }
-        int_arg *= 1000;
-      }
-      sparams.expire_after_ms = int_arg;
+      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(GetCurrentTimeMs(), true);
     } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {
       sparams.memcache_flags = parser.Next<uint16_t>();
     } else {
@@ -1124,17 +1095,8 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-  if (seconds) {
-    if (unit_vals > kMaxExpireDeadlineSec) {
-      unit_vals = kMaxExpireDeadlineSec;
-    }
-    sparams.expire_after_ms = uint64_t(unit_vals) * 1000;
-  } else {
-    if (unit_vals > kMaxExpireDeadlineMs) {
-      unit_vals = kMaxExpireDeadlineMs;
-    }
-    sparams.expire_after_ms = unit_vals;
-  }
+  sparams.expire_after_ms =
+      DbSlice::ExpireParams::Cap(unit_vals * (seconds ? 1000 : 1), TimeUnit::MSEC);
 
   cntx->SendError(SetGeneric(cntx, sparams, key, value));
 }
