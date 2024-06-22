@@ -867,8 +867,8 @@ void GenericFamily::PexpireAt(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
   DbSlice::ExpireParams params{.value = int_arg,
-                               .absolute = true,
                                .unit = TimeUnit::MSEC,
+                               .absolute = true,
                                .expire_options = expire_options.value()};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
