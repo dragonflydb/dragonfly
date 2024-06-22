@@ -912,42 +912,26 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
 }
 
 void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
-  int64_t int_arg = 0;
 
-  for (size_t i = 1; i < args.size(); i++) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
-
-    if (cur_arg == "EX" || cur_arg == "PX" || cur_arg == "EXAT" || cur_arg == "PXAT") {
-      i++;
-      if (i >= args.size()) {
-        return cntx->SendError(kSyntaxErr);
-      }
-
-      string_view ex = ArgS(args, i);
-      if (!absl::SimpleAtoi(ex, &int_arg)) {
-        return cntx->SendError(kInvalidIntErr);
+  while (parser.ToUpper().HasNext()) {
+    if (base::_in(parser.Peek(), {"EX", "PX", "EXAT", "PXAT"})) {
+      auto [ex, int_arg] = parser.Next<string_view, int64_t>();
+      if (auto err = parser.Error(); err) {
+        return cntx->SendError(err->MakeReply());
       }
 
       if (int_arg <= 0) {
         return cntx->SendError(InvalidExpireTime("getex"));
       }
 
-      if (cur_arg == "EXAT" || cur_arg == "PXAT") {
-        exp_params.absolute = true;
-      }
-
+      exp_params.absolute = base::_in(ex, {"EXAT", "PXAT"});
       exp_params.value = int_arg;
-      if (cur_arg == "EX" || cur_arg == "EXAT") {
-        exp_params.unit = TimeUnit::SEC;
-      } else {
-        exp_params.unit = TimeUnit::MSEC;
-      }
-    } else if (cur_arg == "PERSIST") {
+      exp_params.unit = ex[0] == 'P' ? TimeUnit::MSEC : TimeUnit::SEC;
+    } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
     } else {
       return cntx->SendError(kSyntaxErr);
