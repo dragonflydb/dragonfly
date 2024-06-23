@@ -22,7 +22,7 @@ jobs:
                   app.kubernetes.io/created-by: "dragonfly-operator"
                 name: "dragonfly-sample"
               spec:
-                image: "ghcr.io/dragonflydb/dragonfly-weekly:latest"
+                image: "docker.dragonflydb.io/dragonflydb/dragonfly"
                 args: ["--cache_mode"]
                 replicas: 2
                 resources:
@@ -89,11 +89,14 @@ jobs:
           kubectl wait -n ${{ steps.setup.outputs.namespace }} pods --selector app=dragonfly-sample --for condition=Ready --timeout=120s
           kubectl describe -n ${{ steps.setup.outputs.namespace }} pod dragonfly-sample-0
 
-      - name: Run Benchmark
+      - name: Run Memtier
         shell: bash
         run: |
           kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
 
+      - name: Wait for memtier benchmark
+        shell: bash
+        run: |
           while true; do
             if kubectl wait --for=condition=complete --timeout=0 -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null; then
               job_result=0
@@ -152,3 +155,16 @@ jobs:
           set -x
           kubectl delete namespace ${{ steps.setup.outputs.namespace }}
           kubectl delete namespace dragonfly-operator-system
+
+      - name: Send notification on failure
+        if: failure()
+        shell: bash
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Benchmark tests failed.\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'
