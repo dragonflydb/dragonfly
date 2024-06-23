@@ -19,8 +19,8 @@ def main():
     def is_zero_lag(replication_state):
         return replication_state["lag"] == 0
 
-    # Wait for 30 seconds for lag to be zero
-    for _ in range(30):
+    # Wait for 60 seconds for lag to be zero
+    for _ in range(60):
         if is_zero_lag(replication_state):
             break
         time.sleep(1)
