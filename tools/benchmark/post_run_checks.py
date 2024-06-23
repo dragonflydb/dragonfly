@@ -26,7 +26,11 @@ def main():
         time.sleep(1)
         replication_state = client.info("replication")["slave0"]
 
-    assert replication_state["lag"] == 0, f"Lag is bad, expected 0, got {replication_state['lag']}"
+    if replication_state["lag"] != 0:
+        print(f"Lag is bad, expected 0, got {replication_state['lag']}")
+        info = client.info("all")
+        print(f"Info all output: {info}")
+        assert False
 
 
 if __name__ == "__main__":

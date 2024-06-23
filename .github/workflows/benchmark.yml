@@ -23,7 +23,7 @@ jobs:
                 name: "dragonfly-sample"
               spec:
                 image: "docker.dragonflydb.io/dragonflydb/dragonfly"
-                args: ["--cache_mode"]
+                args: ["--cache_mode", "--vmodule=replica=2"]
                 replicas: 2
                 resources:
                   requests:
@@ -89,12 +89,17 @@ jobs:
           kubectl wait -n ${{ steps.setup.outputs.namespace }} pods --selector app=dragonfly-sample --for condition=Ready --timeout=120s
           kubectl describe -n ${{ steps.setup.outputs.namespace }} pod dragonfly-sample-0
 
-      - name: Run Memtier
+      - name: Run Memtier Benchmark
         shell: bash
         run: |
           kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
 
-      - name: Wait for memtier benchmark
+      #- name: Version upgrade
+      #  shell: bash
+      #  run: |
+      #    kubectl patch dragonfly dragonfly-sample --type merge -p '{"spec":{"image":"ghcr.io/dragonflydb/dragonfly-weekly:latest"}}'
+
+      - name: Wait for Memtier Benchmark
         shell: bash
         run: |
           while true; do
