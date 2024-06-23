@@ -23,7 +23,7 @@ jobs:
                 name: "dragonfly-sample"
               spec:
                 image: "docker.dragonflydb.io/dragonflydb/dragonfly"
-                args: ["--cache_mode", "--vmodule=replica=2"]
+                args: ["--cache_mode"]
                 replicas: 2
                 resources:
                   requests:
