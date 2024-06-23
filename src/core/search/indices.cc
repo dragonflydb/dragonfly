@@ -195,6 +195,9 @@ const float* FlatVectorIndex::Get(DocId doc) const {
 }
 
 struct HnswlibAdapter {
+  // Default setting of hnswlib/hnswalg
+  constexpr static size_t kDefaultEfRuntime = 10;
+
   HnswlibAdapter(const SchemaField::VectorParams& params)
       : space_{MakeSpace(params.dim, params.sim)}, world_{GetSpacePtr(),
                                                           params.capacity,
@@ -215,7 +218,7 @@ struct HnswlibAdapter {
   }
 
   vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
-    world_.setEf(ef.value_or(10));
+    world_.setEf(ef.value_or(kDefaultEfRuntime));
     return QueueToVec(world_.searchKnn(target, k));
   }
 
@@ -231,8 +234,8 @@ struct HnswlibAdapter {
       const vector<DocId>* allowed;
     };
 
+    world_.setEf(ef.value_or(kDefaultEfRuntime));
     BinsearchFilter filter{&allowed};
-    world_.setEf(ef.value_or(10));
     return QueueToVec(world_.searchKnn(target, k, &filter));
   }
 
