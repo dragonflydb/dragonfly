@@ -23,7 +23,14 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
         key_target=200_000, data_size=2048, variance=8, samples=100, types=["STRING"]
     )
     await seeder.run(async_client)
-    await asyncio.sleep(0.5)
+
+    # Wait for tiering stashes
+    with async_timeout.timeout(5):
+        while True:
+            info = await async_client.info("ALL")
+            if info["tiered_entries"] > 195_000:
+                break
+            await asyncio.sleep(0.2)
 
     info = await async_client.info("ALL")
     assert info["num_entries"] == 200_000
