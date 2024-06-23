@@ -94,10 +94,12 @@ jobs:
         run: |
           kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
 
-      #- name: Version upgrade
-      #  shell: bash
-      #  run: |
-      #    kubectl patch dragonfly dragonfly-sample --type merge -p '{"spec":{"image":"ghcr.io/dragonflydb/dragonfly-weekly:latest"}}'
+      - name: Version upgrade
+        shell: bash
+        run: |
+          # benchmark is running, wait for 30 seconds before version upgrade
+          sleep 30
+          kubectl patch dragonfly dragonfly-sample --type merge -p '{"spec":{"image":"ghcr.io/dragonflydb/dragonfly-weekly:latest"}}'
 
       - name: Wait for Memtier Benchmark
         shell: bash
