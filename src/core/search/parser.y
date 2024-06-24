@@ -34,6 +34,7 @@
 #define yylex driver->scanner()->Lex
 
 using namespace std;
+
 }
 
 %parse-param { QueryDriver *driver  }
@@ -46,18 +47,19 @@ using namespace std;
 %define api.token.prefix {TOK_}
 
 %token
-  LPAREN   "("
-  RPAREN   ")"
-  STAR     "*"
-  ARROW    "=>"
-  COLON    ":"
-  LBRACKET "["
-  RBRACKET "]"
-  LCURLBR  "{"
-  RCURLBR  "}"
-  OR_OP    "|"
-  KNN      "KNN"
-  AS       "AS"
+  LPAREN      "("
+  RPAREN      ")"
+  STAR        "*"
+  ARROW       "=>"
+  COLON       ":"
+  LBRACKET    "["
+  RBRACKET    "]"
+  LCURLBR     "{"
+  RCURLBR     "}"
+  OR_OP       "|"
+  KNN         "KNN"
+  AS          "AS"
+  EF_RUNTIME  "EF_RUNTIME"
 ;
 
 %token AND_OP
@@ -81,6 +83,7 @@ using namespace std;
 
 %nterm <AstKnnNode> knn_query
 %nterm <std::string> opt_knn_alias
+%nterm <std::optional<size_t>> opt_ef_runtime
 
 %printer { yyo << $$; } <*>;
 
@@ -93,12 +96,16 @@ final_query:
       { driver->Set(AstKnnNode(std::move($1), std::move($3))); }
 
 knn_query:
-  LBRACKET KNN UINT32 FIELD TERM opt_knn_alias RBRACKET
-    { $$ = AstKnnNode($3, $4, BytesToFtVector($5), $6); }
+  LBRACKET KNN UINT32 FIELD TERM opt_knn_alias opt_ef_runtime RBRACKET
+    { $$ = AstKnnNode($3, $4, BytesToFtVector($5), $6, $7); }
 
 opt_knn_alias:
   AS TERM { $$ = std::move($2); }
   | { $$ = std::string{}; }
+
+opt_ef_runtime:
+  /* empty */ { $$ = std::nullopt; }
+  | EF_RUNTIME UINT32 { $$ = $2; }
 
 filter:
   search_expr               { $$ = std::move($1); }

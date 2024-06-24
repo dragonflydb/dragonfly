@@ -58,12 +58,13 @@ AstTagsNode::AstTagsNode(AstExpr&& l, std::string tag) {
 }
 
 AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
-                       std::string_view score_alias)
+                       std::string_view score_alias, std::optional<size_t> ef_runtime)
     : filter{nullptr},
       limit{limit},
       field{field.substr(1)},
       vec{std::move(vec)},
-      score_alias{score_alias} {
+      score_alias{score_alias},
+      ef_runtime{ef_runtime} {
 }
 
 AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
@@ -72,3 +73,9 @@ AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
 }
 
 }  // namespace dfly::search
+
+namespace std {
+ostream& operator<<(ostream& os, optional<size_t> o) {
+  return os;
+}
+}  // namespace std

@@ -74,7 +74,8 @@ struct AstTagsNode {
 struct AstKnnNode {
   AstKnnNode() = default;
   AstKnnNode(uint32_t limit, std::string_view field, OwnedFtVector vec,
-             std::string_view score_alias);
+             std::string_view score_alias, std::optional<size_t> ef_runtime);
+
   AstKnnNode(AstNode&& sub, AstKnnNode&& self);
 
   friend std::ostream& operator<<(std::ostream& stream, const AstKnnNode& matrix) {
@@ -86,6 +87,7 @@ struct AstKnnNode {
   std::string field;
   OwnedFtVector vec;
   std::string score_alias;
+  std::optional<float> ef_runtime;
 };
 
 struct AstSortNode {
@@ -115,4 +117,6 @@ using AstExpr = AstNode;
 }  // namespace search
 }  // namespace dfly
 
-namespace std {}  // namespace std
+namespace std {
+ostream& operator<<(ostream& os, optional<size_t> o);
+}

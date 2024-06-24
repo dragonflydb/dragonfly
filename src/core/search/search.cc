@@ -353,9 +353,10 @@ struct BasicSearch {
 
   void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
     if (indices_->GetAllDocs().size() == sub_results.Size())
-      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit);
+      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
     else
-      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, sub_results.Take());
+      knn_distances_ =
+          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take());
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
