@@ -458,13 +458,14 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
 
   if (shard->journal()) {
     auto expire_str = absl::StrCat(serialized_value_.expire_ts);
-    RecordJournal(op_args, "RESTORE"sv,
-                  ArgSlice{dest_key_, expire_str, serialized_value_.value, "REPLACE"sv, "ABSTTL"sv},
-                  2, true);
+
+    absl::InlinedVector<std::string_view, 6> args(
+        {dest_key_, expire_str, serialized_value_.value, "REPLACE"sv, "ABSTTL"sv});
     if (serialized_value_.sticky) {
-      RecordJournal(op_args, "STICK"sv, ArgSlice{dest_key_}, 2, true);
+      args.push_back("STICK"sv);
     }
-    RecordJournalFinish(op_args, 2);
+
+    RecordJournal(op_args, "RESTORE"sv, args, 2);
   }
 
   return OpStatus::OK;
