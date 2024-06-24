@@ -2243,49 +2243,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   string_view channel = ArgS(args, 0);
-  string_view msg = ArgS(args, 1);
+  string_view messages[] = {ArgS(args, 1)};
 
   auto* cs = ServerState::tlocal()->channel_store();
-  vector<ChannelStore::Subscriber> subscribers = cs->FetchSubscribers(channel);
-  int num_published = subscribers.size();
-  if (!subscribers.empty()) {
-    // Make sure neither of the threads limits is reached.
-    // This check actually doesn't reserve any memory ahead and doesn't prevent the buffer
-    // from eventually filling up, especially if multiple clients are unblocked simultaneously,
-    // but is generally good enough to limit too fast producers.
-    // Most importantly, this approach allows not blocking and not awaiting in the dispatch below,
-    // thus not adding any overhead to backpressure checks.
-    optional<uint32_t> last_thread;
-    for (auto& sub : subscribers) {
-      DCHECK_LE(last_thread.value_or(0), sub.Thread());
-      if (last_thread && *last_thread == sub.Thread())  // skip same thread
-        continue;
-
-      if (sub.EnsureMemoryBudget())  // Invalid pointers are skipped
-        last_thread = sub.Thread();
-    }
-
-    auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
-    auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
-    memcpy(buf.get(), channel.data(), channel.size());
-    memcpy(buf.get() + channel.size(), msg.data(), msg.size());
-
-    auto cb = [subscribers_ptr, buf, channel, msg](unsigned idx, util::ProactorBase*) {
-      auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
-                            ChannelStore::Subscriber::ByThreadId);
-
-      while (it != subscribers_ptr->end() && it->Thread() == idx) {
-        if (auto* ptr = it->Get(); ptr) {
-          ptr->SendPubMessageAsync(
-              {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
-        }
-        it++;
-      }
-    };
-    shard_set->pool()->DispatchBrief(std::move(cb));
-  }
-
-  cntx->SendLong(num_published);
+  cntx->SendLong(cs->SendMessages(channel, messages));
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {

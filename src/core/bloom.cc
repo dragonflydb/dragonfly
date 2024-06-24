@@ -8,6 +8,7 @@
 #include <absl/numeric/bits.h>
 #include <xxhash.h>
 
+#include <algorithm>
 #include <cmath>
 
 #include "base/logging.h"

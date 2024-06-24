@@ -410,6 +410,32 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
     await async_pool.disconnect()
 
 
+@dfly_args({"notify_keyspace_events": "Ex"})
+async def test_keyspace_events(async_client: aioredis.Redis):
+    pclient = async_client.pubsub()
+    await pclient.subscribe("__keyevent@0__:expired")
+
+    keys = []
+    for i in range(10, 50):
+        keys.append(f"k{i}")
+        await async_client.set(keys[-1], "X", px=200 + i * 10)
+
+    # We don't support immediate expiration:
+    # keys += ['immediate']
+    # await async_client.set(keys[-1], 'Y', exat=123) # expired 50 years ago
+
+    events = []
+    async for message in pclient.listen():
+        if message["type"] == "subscribe":
+            continue
+
+        events.append(message)
+        if len(events) >= len(keys):
+            break
+
+    assert set(ev["data"] for ev in events) == set(keys)
+
+
 async def test_big_command(df_server, size=8 * 1024):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
 
