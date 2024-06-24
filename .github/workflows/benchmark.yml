@@ -99,7 +99,7 @@ jobs:
         run: |
           # benchmark is running, wait for 30 seconds before version upgrade
           sleep 30
-          kubectl patch dragonfly -n ${{ steps.setup.outputs.namespace }} --type merge -p '{"spec":{"image":"ghcr.io/dragonflydb/dragonfly-weekly:latest"}}'
+          kubectl patch dragonfly dragonfly-sample -n ${{ steps.setup.outputs.namespace }}  --type merge -p '{"spec":{"image":"ghcr.io/dragonflydb/dragonfly-weekly:latest"}}'
 
       - name: Wait for Memtier Benchmark
         shell: bash
@@ -164,7 +164,7 @@ jobs:
           kubectl delete namespace dragonfly-operator-system
 
       - name: Send notification on failure
-        if: failure()
+        if: failure() && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
