@@ -410,7 +410,7 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
     await async_pool.disconnect()
 
 
-@dfly_args({"expiration_keyspace_events": "true"})
+@dfly_args({"notify_keyspace_events": "Ex"})
 async def test_keyspace_events(async_client: aioredis.Redis):
     pclient = async_client.pubsub()
     await pclient.subscribe("__keyevent@0__:expired")

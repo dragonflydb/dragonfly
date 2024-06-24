@@ -34,7 +34,8 @@ ABSL_FLAG(double, table_growth_margin, 0.4,
           "Prevents table from growing if number of free slots x average object size x this ratio "
           "is larger than memory budget.");
 
-ABSL_FLAG(bool, expiration_keyspace_events, false, "Send keyspace events for expiration");
+ABSL_FLAG(std::string, notify_keyspace_events, "",
+          "notify-keyspace-events. Only Ex is supported for now");
 
 namespace dfly {
 
@@ -269,7 +270,11 @@ DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
   soft_budget_limit_ = (0.3 * max_memory_limit / shard_set->size());
-  expired_keys_events_recording_ = GetFlag(FLAGS_expiration_keyspace_events);
+
+  std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
+  LOG_IF(FATAL, !keyspace_events.empty() && keyspace_events != "Ex")
+      << "Only Ex is currently supported";
+  expired_keys_events_recording_ = !keyspace_events.empty();
 }
 
 DbSlice::~DbSlice() {
