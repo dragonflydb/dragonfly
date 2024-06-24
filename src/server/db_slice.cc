@@ -1406,7 +1406,6 @@ void DbSlice::ClearEntriesOnFlush(absl::Span<const DbIndex> indices, const DbTab
 
     // Wait for delete operations to finish in sync
     while (!async && db_ptr->stats.tiered_entries > 0) {
-      VLOG(0) << db_ptr->stats.tiered_entries;
       LOG_EVERY_T(ERROR, 0.5) << "Long wait for tiered entry delete on flush";
       ThisFiber::SleepFor(1ms);
     }

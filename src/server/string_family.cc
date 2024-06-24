@@ -1277,7 +1277,13 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  auto res = cntx->transaction->ScheduleSingleHopT(cb);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (res.ok())
+    rb->SendLong(GetResult(std::move(*res)));
+  else
+    rb->SendError(res.status());
 }
 
 /* CL.THROTTLE <key> <max_burst> <count per period> <period> [<quantity>] */
