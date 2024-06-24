@@ -272,8 +272,10 @@ DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
   soft_budget_limit_ = (0.3 * max_memory_limit / shard_set->size());
 
   std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
-  LOG_IF(FATAL, !keyspace_events.empty() && keyspace_events != "Ex")
-      << "Only Ex is currently supported";
+  if (!keyspace_events.empty() && keyspace_events != "Ex") {
+    LOG(ERROR) << "Only Ex is currently supported";
+    exit(0);
+  }
   expired_keys_events_recording_ = !keyspace_events.empty();
 }
 
