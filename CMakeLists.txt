@@ -38,7 +38,7 @@ find_package(OpenSSL)
 option(WITH_ASAN "Enable -fsanitize=address" OFF)
 if (SUPPORT_ASAN AND WITH_ASAN)
   message(STATUS "address sanitizer enabled")
-  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address -fno-sanitize-address-use-after-scope")
+  set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address")
 endif()
 
 option(WITH_USAN "Enable -fsanitize=undefined" OFF)
