@@ -83,8 +83,7 @@ jobs:
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ctest -E json_family_test -V -L DFLY
-            ASAN_OPTIONS=detect_stack_use_after_return=0 ./json_family_test
+            ctest -V -L DFLY
 
       - name: Send notifications on failure
         if: failure()
