@@ -1897,7 +1897,7 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     replica = df_local_factory.create(dbfilename=f"dump_{tmp_file_name}")
     df_local_factory.start_all([master, replica])
 
-    seeder = SeederV2(keys=40000)
+    seeder = SeederV2(key_target=40000)
     c_replica = replica.client()
     await seeder.run(c_replica, target_deviation=0.1)
     dbsize = await c_replica.dbsize()
