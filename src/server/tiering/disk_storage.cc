@@ -181,7 +181,7 @@ DiskStorage::Stats DiskStorage::GetStats() const {
 std::error_code DiskStorage::Grow(off_t grow_size) {
   off_t start = size_;
 
-  if (off_t(alloc_.capacity()) + grow_size >= max_size_)
+  if (off_t(alloc_.capacity()) + grow_size > max_size_)
     return std::make_error_code(std::errc::no_space_on_device);
 
   if (std::exchange(grow_pending_, true))
