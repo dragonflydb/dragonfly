@@ -1897,9 +1897,9 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     replica = df_local_factory.create(dbfilename=f"dump_{tmp_file_name}")
     df_local_factory.start_all([master, replica])
 
-    seeder = df_seeder_factory.create(port=replica.port, keys=40000)
-    await seeder.run(target_deviation=0.1)
+    seeder = SeederV2(keys=40000)
     c_replica = replica.client()
+    await seeder.run(c_replica, target_deviation=0.1)
     dbsize = await c_replica.dbsize()
     assert dbsize >= 30000
 
@@ -1908,6 +1908,12 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     c_replica = replica.client()
     # Check replica of not alowed while loading snapshot
     try:
+        # If this fails adjust `keys` and the `assert dbsize >= 30000` above.
+        # Keep in mind that if the assert False is triggered below, it doesn't mean
+        # that there is a bug because it could be the case that while executing
+        # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
+        # is no longer in loading state and the assertion false is triggered.
+        assert "loading:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         assert False
     except aioredis.BusyLoadingError as e:
