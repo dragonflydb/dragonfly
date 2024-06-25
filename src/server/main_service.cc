@@ -1226,7 +1226,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   dfly_cntx->cid = cid;
 
   if (!InvokeCmd(cid, args_no_cmd, dfly_cntx)) {
-    dfly_cntx->reply_builder()->SendError("Internal Error");
+    dfly_cntx->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
@@ -1756,7 +1756,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   BorrowedInterpreter interpreter{cntx};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
-    return rb->SendError(res.error().Format(), facade::kScriptErrType);
+    return cntx->SendError(res.error().Format(), facade::kScriptErrType);
 
   string sha{std::move(res.value())};
 
@@ -2035,7 +2035,7 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   if (!cntx->conn_state.exec_info.IsCollecting()) {
-    return rb->SendError("DISCARD without MULTI");
+    return cntx->SendError("DISCARD without MULTI");
   }
 
   MultiCleanup(cntx);
@@ -2146,15 +2146,15 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   // Check basic invariants
   if (!exec_info.IsCollecting()) {
-    return rb->SendError("EXEC without MULTI");
+    return cntx->SendError("EXEC without MULTI");
   }
 
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
-    return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
+    return cntx->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
   }
 
   if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
-    return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
+    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {

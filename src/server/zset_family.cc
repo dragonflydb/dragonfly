@@ -1357,7 +1357,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   DVLOG(1) << "result for " << transaction->DebugId() << " is " << popped_key.status();
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
-      return rb->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
@@ -1784,7 +1784,7 @@ void ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_
   } else if (add_result.status() == OpStatus::SKIPPED) {
     rb->SendNull();
   } else if (add_result->is_nan) {
-    rb->SendError(kScoreNaN);
+    cntx->SendError(kScoreNaN);
   } else {
     if (zparams.flags & ZADD_IN_INCR) {
       rb->SendDouble(add_result->new_score);
@@ -2053,7 +2053,7 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (add_result->is_nan) {
-    return rb->SendError(kScoreNaN);
+    return cntx->SendError(kScoreNaN);
   }
 
   rb->SendDouble(add_result->new_score);
@@ -2239,7 +2239,7 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
       }
       i += 2;
     } else {
-      return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
+      return cntx->SendError(absl::StrCat("unsupported option ", cur_arg));
     }
   }
   ZRangeGeneric(std::move(args), range_params, cntx);
@@ -2260,7 +2260,7 @@ void ZSetFamily::ZRevRange(CmdArgList args, ConnectionContext* cntx) {
     if (cur_arg == "WITHSCORES") {
       range_params.with_scores = true;
     } else {
-      return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
+      return cntx->SendError(absl::StrCat("unsupported option ", cur_arg));
     }
   }
 
@@ -2409,7 +2409,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -2424,7 +2424,7 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    rb->SendError(kWrongTypeErr);
+    cntx->SendError(kWrongTypeErr);
   } else if (!result) {
     rb->SendNull();
   } else {
@@ -2481,7 +2481,7 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(k);
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -2576,7 +2576,7 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendNull();
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
