@@ -1283,7 +1283,7 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1476,7 +1476,7 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(k);
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 

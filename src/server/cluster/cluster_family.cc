@@ -585,12 +585,12 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
   do {
     auto sid = parser.Next<uint32_t>();
     if (sid > kMaxSlotNum)
-      return rb->SendError("Invalid slot id");
+      return cntx->SendError("Invalid slot id");
     slots_stats.emplace_back(sid, SlotStats{});
   } while (parser.HasNext());
 
   if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   fb2::Mutex mu;
 
@@ -675,7 +675,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   if (parser.HasNext()) {
     node_id = parser.Next<std::string_view>();
     if (auto err = parser.Error(); err) {
-      return rb->SendError(err->MakeReply());
+      return cntx->SendError(err->MakeReply());
     }
   }
 

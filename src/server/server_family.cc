@@ -1407,7 +1407,7 @@ void ServerFamily::OnClose(ConnectionContext* cntx) {
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
   if (!section.empty()) {
-    return cntx->reply_builder()->SendError("");
+    return cntx->SendError("");
   }
   string info;
 

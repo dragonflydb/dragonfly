@@ -520,10 +520,10 @@ void DebugCmd::Replica(CmdArgList args) {
       }
       return;
     } else {
-      return rb->SendError("I am master");
+      return cntx_->SendError("I am master");
     }
   }
-  return rb->SendError(UnknownSubCmd("replica", "DEBUG"));
+  return cntx_->SendError(UnknownSubCmd("replica", "DEBUG"));
 }
 
 void DebugCmd::Load(string_view filename) {

@@ -1439,7 +1439,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1510,7 +1510,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
       SendJsonValue(rb, it);
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1793,7 +1793,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1865,7 +1865,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1916,7 +1916,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(*result);
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1944,7 +1944,7 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(*result);
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1992,7 +1992,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
       rb->SendNullArray();
     } else {
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
     }
   }
 }
@@ -2112,7 +2112,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     if (result == facade::OpStatus::KEY_NOTFOUND) {
       rb->SendNull();  // Match Redis
     } else {
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
     }
   }
 }
