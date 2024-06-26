@@ -386,6 +386,7 @@ def pytest_exception_interact(node, call, report):
 # at the end respecting the evaluation order mentioned above
 @pytest.fixture(autouse=True, scope="session")
 def run_before_and_after_test():
+    logging.info("Session start for run_before_and_after_test")
     # Setup: at the start of the session
     last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
 

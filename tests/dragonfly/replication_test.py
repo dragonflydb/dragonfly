@@ -114,6 +114,7 @@ async def wait_for_replicas_state(*clients, state="stable_sync", timeout=0.05):
 #    await disconnect_clients(c_master, *c_replicas)
 #
 
+
 # async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
 #    role = await c_replica.role()
 #    if role[0] != "replica" or role[3] != "stable_sync":
@@ -124,27 +125,28 @@ async def wait_for_replicas_state(*clients, state="stable_sync", timeout=0.05):
 #    return r_offset == m_offset
 #
 #
-# async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
-#    logging.debug("Waiting for replicas to finish")
-#
-#    waiting_for = list(c_replicas)
-#    start = time.time()
-#    while (time.time() - start) < timeout:
-#        if not waiting_for:
-#            return
-#        await asyncio.sleep(0.2)
-#        m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
-#        finished_list = await asyncio.gather(
-#            *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
-#        )
-#
-#        # Remove clients that finished from waiting list
-#        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
-#
-#    first_r: aioredis.Redis = waiting_for[0]
-#    logging.error("Replica not finished, role %s", await first_r.role())
-#    raise RuntimeError("Not all replicas finished in time!")
-#
+async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
+    logging.debug("Waiting for replicas to finish")
+
+    waiting_for = list(c_replicas)
+    start = time.time()
+    while (time.time() - start) < timeout:
+        if not waiting_for:
+            return
+        await asyncio.sleep(0.2)
+        m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
+        finished_list = await asyncio.gather(
+            *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
+        )
+
+        # Remove clients that finished from waiting list
+        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
+
+    first_r: aioredis.Redis = waiting_for[0]
+    logging.error("Replica not finished, role %s", await first_r.role())
+    raise RuntimeError("Not all replicas finished in time!")
+
+
 #
 # """
 # Test disconnecting replicas during different phases while constantly streaming changes to master.
