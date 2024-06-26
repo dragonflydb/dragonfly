@@ -114,7 +114,6 @@ def df_local_factory(df_factory: DflyInstanceFactory):
     factory = DflyInstanceFactory(df_factory.params, df_factory.args)
     yield factory
 
-    logging.error(f"STOPPINGGGGGGGGGGGGGGGGGGGGGGGGGGG")
     factory.stop_all()
 
 
@@ -350,10 +349,13 @@ def copy_failed_logs_and_clean_tmp_folder():
         # copy to failed folder
         shutil.copy(file.rstrip("\n"), failed_path)
 
+    # Clean up everything
     last_log_file = open("/tmp/failed_list.txt", "w").close()
+    last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
 
 
 def pytest_exception_interact(node, call, report):
+    logging.info("TEST")
     if report.failed:
         # To print the test that currently failed
         last_log_file = open("/tmp/last_test_log_files.txt", "r")
@@ -365,9 +367,9 @@ def pytest_exception_interact(node, call, report):
             failed_list.write(file)
             file = file.rstrip("\n")
             logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
-        # clean it such subsequent calls to pytest work as expected
-        last_log_file = open("/tmp/failed_list.txt", "w")
-        last_log_file.close()
+
+        # Clean it
+        last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
         global TEST_FAILED
         TEST_FAILED = True
 
@@ -385,8 +387,7 @@ def pytest_exception_interact(node, call, report):
 @pytest.fixture(autouse=True, scope="session")
 def run_before_and_after_test():
     # Setup: at the start of the session
-    last_log_file = open("/tmp/last_test_log_files.txt", "w")
-    last_log_file.close()
+    last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
 
     yield  # this is where the testing happens
 
