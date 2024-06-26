@@ -175,7 +175,7 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
-  return {alloc_.allocated_bytes(), alloc_.capacity()};
+  return {alloc_.allocated_bytes(), alloc_.capacity(), static_cast<size_t>(max_size_)};
 }
 
 std::error_code DiskStorage::Grow(off_t grow_size) {
