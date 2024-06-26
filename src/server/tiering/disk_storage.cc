@@ -11,6 +11,7 @@
 #include "io/io_buf.h"
 #include "server/error.h"
 #include "server/tiering/common.h"
+#include "server/tiering/external_alloc.h"
 #include "util/fibers/uring_proactor.h"
 
 using namespace ::dfly::tiering::literals;
@@ -165,7 +166,10 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
     backing_file_->WriteFixedAsync(buf.bytes, offset, *buf.buf_idx, std::move(io_cb));
   else
     backing_file_->WriteAsync(buf.bytes, offset, std::move(io_cb));
-  if (alloc_.allocated_bytes() > (size_ * 0.85) && !grow_pending_) {
+
+  // Grow in advance if needed and possible
+  if (alloc_.allocated_bytes() > (size_ * 0.85) &&
+      size_ + ExternalAllocator::kExtAlignment < static_cast<size_t>(max_size_) && !grow_pending_) {
     auto ec = Grow(265_MB);
     LOG_IF(ERROR, ec) << "Could not call grow :" << ec.message();
     return ec;
@@ -174,7 +178,8 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
-  return {alloc_.allocated_bytes(), alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_};
+  return {alloc_.allocated_bytes(), alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_,
+          static_cast<size_t>(max_size_)};
 }
 
 std::error_code DiskStorage::Grow(off_t grow_size) {
