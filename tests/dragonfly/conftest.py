@@ -29,6 +29,8 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 DATABASE_INDEX = 0
 
+TEST_FAILED = False
+
 
 @pytest.fixture(scope="session")
 def tmp_dir():
@@ -111,6 +113,8 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
 def df_local_factory(df_factory: DflyInstanceFactory):
     factory = DflyInstanceFactory(df_factory.params, df_factory.args)
     yield factory
+
+    logging.error(f"STOPPINGGGGGGGGGGGGGGGGGGGGGGGGGGG")
     factory.stop_all()
 
 
@@ -334,38 +338,64 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
     return args
 
 
-def copy_failed_logs_and_clean_tmp_folder(report):
+def copy_failed_logs_and_clean_tmp_folder():
     failed_path = "/tmp/failed"
     path_exists = os.path.exists(failed_path)
     if not path_exists:
         os.makedirs(failed_path)
 
-    if os.path.isfile("/tmp/last_test_log_files.txt"):
-        last_log_file = open("/tmp/last_test_log_files.txt", "r")
-        files = last_log_file.readlines()
-        logging.error(f"Test failed {report.nodeid} with logs: ")
-        for file in files:
-            # copy to failed folder
-            file = file.rstrip("\n")
-            logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
-            shutil.copy(file, failed_path)
+    last_log_file = open("/tmp/failed_list.txt", "r")
+    files = last_log_file.readlines()
+    for file in files:
+        # copy to failed folder
+        shutil.copy(file.rstrip("\n"), failed_path)
+
+    last_log_file = open("/tmp/failed_list.txt", "w").close()
 
 
 def pytest_exception_interact(node, call, report):
     if report.failed:
-        copy_failed_logs_and_clean_tmp_folder(report)
+        # To print the test that currently failed
+        last_log_file = open("/tmp/last_test_log_files.txt", "r")
+        # Global tracking of all failed tests/logs
+        failed_list = open("/tmp/failed_list.txt", "a")
+        files = last_log_file.readlines()
+        logging.error(f"Test failed {report.nodeid} with logs: ")
+        for file in files:
+            failed_list.write(file)
+            file = file.rstrip("\n")
+            logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
+        # clean it such subsequent calls to pytest work as expected
+        last_log_file = open("/tmp/failed_list.txt", "w")
+        last_log_file.close()
+        global TEST_FAILED
+        TEST_FAILED = True
 
 
-@pytest.fixture(autouse=True)
+# Double consider any change to this function because the order
+# of SetUp and TearDown might cause improper copy of the logs
+# because the instance has not yet stopped. For example, df_factory
+# has session scope so it won't be called unless the session has ended.
+# On the other hand, df_local_factory has function scope, and therefore
+# it is executed strictly before this (so the instance is stoped and we can
+# safely copy the logs without loosing some of them).
+# autouse means that this is run for all tests in the module.
+# scope="session" allows to create the file only once and clean it
+# at the end respecting the evaluation order mentioned above
+@pytest.fixture(autouse=True, scope="session")
 def run_before_and_after_test():
-    # Setup: logic before any of the test starts
-    # Empty the log on each run
+    # Setup: at the start of the session
     last_log_file = open("/tmp/last_test_log_files.txt", "w")
     last_log_file.close()
 
     yield  # this is where the testing happens
 
-    # Teardown
+    global TEST_FAILED
+    # Teardown at the end of the session
+    logging.info(f"Session end for run_before_and_after_test")
+    if TEST_FAILED:
+        logging.info(f"Copying failed tests to /tmp/failed")
+        copy_failed_logs_and_clean_tmp_folder()
 
 
 @pytest.fixture(scope="function")
