@@ -42,6 +42,8 @@ std::error_code OpManager::Open(std::string_view file) {
 
 void OpManager::Close() {
   storage_.Close();
+  DCHECK(pending_stash_ver_.empty());
+  DCHECK(pending_reads_.empty());
 }
 
 void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
@@ -79,7 +81,11 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
   auto io_cb = [this, version, id = std::move(id)](DiskSegment segment, std::error_code ec) {
     ProcessStashed(Borrowed(id), version, segment, ec);
   };
-  return storage_.Stash(buf_view, std::move(io_cb));
+
+  auto ec = storage_.Stash(buf_view, std::move(io_cb));
+  if (ec)
+    pending_stash_ver_.erase(ToOwned(id_ref));
+  return ec;
 }
 
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
