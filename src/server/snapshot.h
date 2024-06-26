@@ -171,6 +171,8 @@ class SliceSnapshot {
     size_t savecb_calls = 0;
     size_t keys_total = 0;
   } stats_;
+
+  bool bucket_ser_in_progress_ = false;
 };
 
 }  // namespace dfly
