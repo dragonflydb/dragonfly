@@ -355,7 +355,6 @@ def copy_failed_logs_and_clean_tmp_folder():
 
 
 def pytest_exception_interact(node, call, report):
-    logging.info("TEST")
     if report.failed:
         # To print the test that currently failed
         last_log_file = open("/tmp/last_test_log_files.txt", "r")
@@ -398,6 +397,20 @@ def run_before_and_after_test():
     if TEST_FAILED:
         logging.info(f"Copying failed tests to /tmp/failed")
         copy_failed_logs_and_clean_tmp_folder()
+
+
+# The only issue here is that this also clears the logs for session wide fixtures which
+# could be problematic for tests that failed way later in the session. Example:
+# suppose a session fixture like dragonfly_factory run by 3 individual tests
+# First one instantiates the dragonfly instance and writes its log path in the
+# last_test_log_files.txt. Second test then clears this, and third one fails without any logs.
+# This problem existed before but luckilly so far hasn't come up. There is no really good fix for
+# this as it's hard to track which test used which fixture when it failed, since we only interact
+# with the failed test via the pytest hook pytest_exception_interact.
+@pytest.fixture(autouse=True, scope="function")
+def clean_up_per_test():
+    last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
+    yield
 
 
 @pytest.fixture(scope="function")
