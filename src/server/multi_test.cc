@@ -1089,6 +1089,11 @@ TEST_F(MultiEvalTest, MultiAndEval) {
   Run({"exec"});
 
   Run({"eval", "return redis.call('set', 'x', 'y1')", "1", "x"});
+
+  Run({"multi"});
+  Run({"eval", "return 'OK';", "0"});
+  auto resp = Run({"exec"});
+  EXPECT_EQ(resp, "OK");
 }
 
 }  // namespace dfly
