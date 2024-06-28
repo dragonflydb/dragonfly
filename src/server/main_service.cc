@@ -704,7 +704,7 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
   bool transactional = contains_global;
   if (!transactional) {
     for (const auto& scmd : exec_info.body) {
-      // We can only tell if eval is transctional based on they keycount
+      // We can only tell if eval is transactional based on they keycount
       if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
         CmdArgVec arg_vec{};
         StoredCmd cmd = scmd;

@@ -1083,6 +1083,11 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
 }
 
 TEST_F(MultiEvalTest, MultiAndEval) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
+    GTEST_SKIP() << "Skipped MultiAndEval test because multi_exec_mode is non atomic";
+    return;
+  }
+
   // We had a bug in borrowing interpreters which caused a crash in this scenario
   Run({"multi"});
   Run({"eval", "return redis.call('set', 'x', 'y1')", "1", "x"});
