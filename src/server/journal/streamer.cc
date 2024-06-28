@@ -280,9 +280,7 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
 }
 
 bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
-  // Can't switch fibers because that could invalidate iterator or cause bucket splits which may
-  // move keys between buckets.
-  FiberAtomicGuard fg;
+  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
 
   bool written = false;
 
@@ -312,7 +310,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
-  FiberAtomicGuard fg;
+  { std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_); }
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {

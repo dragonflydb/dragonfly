@@ -102,6 +102,8 @@ class RestoreStreamer : public JournalStreamer {
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
+
+  util::fb2::Mutex bucket_ser_mu_;
 };
 
 }  // namespace dfly
