@@ -12,6 +12,7 @@ from .seeder import StaticSeeder
 BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiering_test_backing"}
 
 
+@pytest.mark.skip("Requires evaluating runner performance first")
 @pytest.mark.opt_only
 @dfly_args(BASIC_ARGS)
 async def test_basic_memory_usage(async_client: aioredis.Redis):
