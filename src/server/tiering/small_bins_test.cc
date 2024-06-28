@@ -100,7 +100,8 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
   }
 }
 
-TEST_F(SmallBinsTest, Bug3240) {
+TEST_F(SmallBinsTest, UpdateStatsAfterDelete) {
+  // caused https://github.com/dragonflydb/dragonfly/issues/3240
   for (unsigned i = 0; i < 10; i++) {
     auto spilled_bin = bins_.Stash(0, absl::StrCat("k", i), SmallString(128));
     ASSERT_FALSE(spilled_bin);
