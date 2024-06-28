@@ -609,10 +609,16 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   DbContext db_cntx{cntx->conn_state.db_index, GetCurrentTimeMs()};
 
   do {
-    ess->Await(sid, [&] {
+    auto cb = [&] {
       OpArgs op_args{EngineShard::tlocal(), 0, db_cntx};
       OpScan(op_args, scan_opts, &cursor, keys);
-    });
+    };
+
+    // Avoid deadlocking, if called from shard queue script
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid)
+      cb();
+    else
+      ess->Await(sid, cb);
 
     if (cursor == 0) {
       ++sid;
