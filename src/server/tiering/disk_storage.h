@@ -19,6 +19,7 @@ class DiskStorage {
   struct Stats {
     size_t allocated_bytes = 0;
     size_t capacity_bytes = 0;
+    size_t max_size = 0;
   };
 
   using ReadCb = std::function<void(std::string_view, std::error_code)>;

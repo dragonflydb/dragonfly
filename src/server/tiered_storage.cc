@@ -311,7 +311,9 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
 }
 
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
-  return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize;
+  auto stats = op_manager_->GetStats().disk_stats;
+  return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize &&
+         stats.allocated_bytes + pv.Size() + tiering::kPageSize < stats.max_size;
 }
 
 TieredStats TieredStorage::GetStats() const {
@@ -347,9 +349,14 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   if (SliceSnapshot::IsSnaphotInProgress())
     return;
 
+  auto stats = op_manager_->GetStats();
+  if (stats.disk_stats.allocated_bytes + 100 * tiering::kPageSize > stats.disk_stats.max_size) {
+    offloading_cursor_ = 0;
+    return;
+  }
+
   PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
-  int stash_limit =
-      absl::GetFlag(FLAGS_tiered_storage_write_depth) - op_manager_->GetStats().pending_stash_cnt;
+  int stash_limit = absl::GetFlag(FLAGS_tiered_storage_write_depth) - stats.pending_stash_cnt;
   if (stash_limit <= 0)
     return;
 
