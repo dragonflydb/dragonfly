@@ -371,6 +371,7 @@ async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Red
 
 
 async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_connections=100):
+    df_server.hook_logs_to_test()
     # TODO: I am not how to customize the max connections for the pool.
     async_pool = aioredis.ConnectionPool(
         host="localhost",
@@ -437,6 +438,7 @@ async def test_keyspace_events(async_client: aioredis.Redis):
 
 
 async def test_big_command(df_server, size=8 * 1024):
+    df_server.hook_logs_to_test()
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
 
     writer.write(f"SET a {'v'*size}\n".encode())
