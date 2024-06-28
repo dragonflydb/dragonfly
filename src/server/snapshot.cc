@@ -8,6 +8,8 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
+#include <mutex>
+
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "server/db_slice.h"
@@ -16,6 +18,7 @@
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
 #include "server/tiered_storage.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -235,29 +238,27 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
-  ++stats_.savecb_calls;
+  // We need to block if serialization is in progress
+  {
+    std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
+    ++stats_.savecb_calls;
 
-  uint64_t v = it.GetVersion();
-  auto check = [&](auto v) {
-    if (v >= snapshot_version_) {
-      // either has been already serialized or added after snapshotting started.
-      DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
-               << " at " << v;
-      ++stats_.skipped;
+    auto check = [&](auto v) {
+      if (v >= snapshot_version_) {
+        // either has been already serialized or added after snapshotting started.
+        DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
+                 << " at " << v;
+        ++stats_.skipped;
+        return false;
+      }
       return true;
-    }
-    return false;
-  };
+    };
 
-  if (check(v))
-    return false;
-
-  while (bucket_ser_in_progress_) {
-    ThisFiber::Yield();
+    uint64_t v = it.GetVersion();
+    if (!check(v))
+      return false;
   }
-  // Could be that we just serialized the bucket so we can skip it
-  if (check(v))
-    return false;
+
   db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
@@ -266,19 +267,14 @@ bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
 }
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  // Must be atomic because after we call it.snapshot_version_ we're starting
-  // to send incremental updates instead of serializing the whole bucket: We must not
-  // send the update until the initial SerializeBucket is called.
-  // Relying on the atomicity of SerializeBucket is Ok here because only one thread may handle this
-  // bucket.
-  FiberAtomicGuard fg;
+  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
+
   DCHECK_LT(it.GetVersion(), snapshot_version_);
 
-  bucket_ser_in_progress_ = true;
   // traverse physical bucket and write it into string file.
   serialize_bucket_running_ = true;
+  it.SetVersion(snapshot_version_);
   unsigned result = 0;
-  auto og = it;
 
   while (!it.is_done()) {
     ++result;
@@ -286,8 +282,6 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
     SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
     ++it;
   }
-  og.SetVersion(snapshot_version_);
-  bucket_ser_in_progress_ = false;
   serialize_bucket_running_ = false;
   return result;
 }
@@ -347,19 +341,9 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  FiberAtomicGuard fg;
+  { std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_); }
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
-
-  if (bit && (bit->GetVersion() >= snapshot_version_)) {
-    return;
-  }
-
-  // If a bucket is being serialized we need to block
-  // maybe worth adding it on an event queue?
-  while (bucket_ser_in_progress_) {
-    ThisFiber::Yield();
-  }
 
   if (bit) {
     if (bit->GetVersion() < snapshot_version_) {

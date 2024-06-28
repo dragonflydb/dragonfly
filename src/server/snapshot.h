@@ -14,6 +14,7 @@
 #include "server/rdb_save.h"
 #include "server/table.h"
 #include "util/fibers/future.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -172,7 +173,7 @@ class SliceSnapshot {
     size_t keys_total = 0;
   } stats_;
 
-  bool bucket_ser_in_progress_ = false;
+  util::fb2::Mutex bucket_ser_mu_;
 };
 
 }  // namespace dfly
