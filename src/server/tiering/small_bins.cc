@@ -16,13 +16,22 @@
 #include "server/tx_base.h"
 
 namespace dfly::tiering {
+using namespace std;
+
+namespace {
+
+// See FlushBin() for format details
+size_t StashedValueSize(string_view value) {
+  return 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
+}
+
+}  // namespace
 
 std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
                                                      std::string_view value) {
   DCHECK_LT(value.size(), 2_KB);
 
-  // See FlushBin() for format details
-  size_t value_bytes = 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
+  size_t value_bytes = StashedValueSize(value);
 
   std::optional<FilledBin> filled_bin;
   if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
@@ -113,8 +122,14 @@ std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId
 
 std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view key) {
   std::pair<DbIndex, std::string> key_pair{dbid, key};
+  auto it = current_bin_.find(key_pair);
 
-  if (current_bin_.erase(key_pair)) {
+  if (it != current_bin_.end()) {
+    size_t stashed_size = StashedValueSize(it->second);
+    DCHECK_GE(current_bin_bytes_, stashed_size);
+
+    current_bin_bytes_ -= stashed_size;
+    current_bin_.erase(it);
     return std::nullopt;
   }
 
