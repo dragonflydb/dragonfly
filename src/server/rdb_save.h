@@ -210,7 +210,7 @@ class RdbSerializer : public SerializerBase {
   // Returns the serialized rdb_type or the error.
   // expire_ms = 0 means no expiry.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
-                                DbIndex dbid);
+                                DbIndex dbid, std::function<void(size_t)> flush_fun);
 
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing

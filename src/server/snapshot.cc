@@ -10,6 +10,7 @@
 
 #include <mutex>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "server/db_slice.h"
@@ -19,6 +20,8 @@
 #include "server/rdb_save.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
+
+ABSL_FLAG(size_t, flush_limit_save_entries, 0, "Byte limit to flush while serializing entries");
 
 namespace dfly {
 
@@ -38,6 +41,15 @@ SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMod
     : db_slice_(slice), dest_(dest), compression_mode_(compression_mode) {
   db_array_ = slice->databases();
   tl_slice_snapshots.insert(this);
+  const auto flush_limit = absl::GetFlag(FLAGS_flush_limit_save_entries);
+  if (flush_limit != 0) {
+    flush_fun_ = [this, flush_limit](size_t bytes_serialized) {
+      if (bytes_serialized > flush_limit) {
+        auto serialized = Serialize();
+        VLOG(2) << "FlushedToChannel " << serialized << " bytes";
+      }
+    };
+  }
 }
 
 SliceSnapshot::~SliceSnapshot() {
@@ -305,24 +317,13 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     delayed_entries_.push_back({db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time});
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
-    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
+    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx, flush_fun_);
     CHECK(res);
     ++type_freq_map_[*res];
   }
 }
 
-bool SliceSnapshot::PushSerializedToChannel(bool force) {
-  // Bucket serialization might have accumulated some delayed values.
-  // Because we can finally block in this function, we'll await and serialize them
-  while (!delayed_entries_.empty()) {
-    auto& entry = delayed_entries_.back();
-    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid);
-    delayed_entries_.pop_back();
-  }
-
-  if (!force && serializer_->SerializedLen() < 4096)
-    return false;
-
+size_t SliceSnapshot::Serialize() {
   io::StringFile sfile;
   serializer_->FlushToSink(&sfile);
 
@@ -335,6 +336,24 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
   DbRecord db_rec{.id = id, .value = std::move(sfile.val)};
 
   dest_->Push(std::move(db_rec));
+  return serialized;
+}
+
+bool SliceSnapshot::PushSerializedToChannel(bool force) {
+  // Bucket serialization might have accumulated some delayed values.
+  // Because we can finally block in this function, we'll await and serialize them
+  while (!delayed_entries_.empty()) {
+    auto& entry = delayed_entries_.back();
+    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid, {});
+    delayed_entries_.pop_back();
+  }
+
+  if (!force && serializer_->SerializedLen() < 4096)
+    return false;
+
+  auto serialized = Serialize();
+  if (serialized == 0)
+    return false;
 
   VLOG(2) << "PushSerializedToChannel " << serialized << " bytes";
   return true;

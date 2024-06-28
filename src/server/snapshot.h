@@ -117,6 +117,9 @@ class SliceSnapshot {
   // Return if pushed.
   bool PushSerializedToChannel(bool force);
 
+  // Helper function that flushes the serilized items into the RecordStream
+  size_t Serialize();
+
  public:
   uint64_t snapshot_version() const {
     return snapshot_version_;
@@ -174,6 +177,7 @@ class SliceSnapshot {
   } stats_;
 
   util::fb2::Mutex bucket_ser_mu_;
+  std::function<void(size_t)> flush_fun_;
 };
 
 }  // namespace dfly
