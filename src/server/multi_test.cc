@@ -396,13 +396,13 @@ TEST_F(MultiTest, Eval) {
   resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
   EXPECT_THAT(resp, "42");
 
-  Run({"script", "flush"});
+  Run({"script", "flush"});  // Reset global flag from autocorrect
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "bar"});
   EXPECT_THAT(resp, ErrArg("undeclared"));
   ASSERT_FALSE(service_->IsLocked(0, "foo"));
 
-  Run({"script", "flush"});
+  Run({"script", "flush"});  // Reset global flag from autocorrect
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
   EXPECT_THAT(resp, "42");
@@ -459,6 +459,11 @@ TEST_F(MultiTest, Eval) {
                  "1", "foo"}),
             "42");
   fb.Join();
+
+  // Call multi-shard command scan from single shard mode
+  resp = Run({"eval", "return redis.call('scan', '0'); ", "1", "key"});
+  EXPECT_EQ(resp.GetVec()[0], "0");
+  EXPECT_EQ(resp.GetVec()[1].type, RespExpr::Type::ARRAY);
 }
 #endif
 
