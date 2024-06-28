@@ -30,11 +30,17 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   }
 
   current_bin_bytes_ += value_bytes;
-  current_bin_.emplace(std::make_pair(dbid, key), value);
+
+  bool inserted = current_bin_.emplace(std::make_pair(dbid, key), value).second;
+  CHECK(inserted);
+  DVLOG(2) << "current_bin_bytes: " << current_bin_bytes_
+           << ", current_bin_size:" << current_bin_.size();
   return filled_bin;
 }
 
 SmallBins::FilledBin SmallBins::FlushBin() {
+  DCHECK_GT(current_bin_.size(), 0u);
+
   std::string out;
   out.resize(current_bin_bytes_ + 2);
 
@@ -67,18 +73,22 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   }
 
   current_bin_bytes_ = 0;
-  current_bin_.erase(current_bin_.begin(), current_bin_.end());
+  current_bin_.clear();
 
   return {id, std::move(out)};
 }
 
 SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment) {
-  auto key_list = pending_bins_.extract(id);
-  DCHECK_GT(key_list.mapped().size(), 0u);
+  DVLOG(1) << "ReportStashed " << id;
+
+  DCHECK(pending_bins_.contains(id));
+  auto seg_map_node = pending_bins_.extract(id);
+  const auto& seg_map = seg_map_node.mapped();
+  DCHECK_GT(seg_map.size(), 0u) << id;
 
   uint16_t bytes = 0;
   SmallBins::KeySegmentList list;
-  for (auto& [key, sub_segment] : key_list.mapped()) {
+  for (auto& [key, sub_segment] : seg_map) {
     bytes += sub_segment.length;
 
     DiskSegment real_segment{segment.offset + sub_segment.offset, sub_segment.length};
