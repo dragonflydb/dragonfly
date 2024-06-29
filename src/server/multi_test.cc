@@ -396,7 +396,7 @@ TEST_F(MultiTest, Eval) {
   resp = Run({"eval", "return redis.call('get', 'foo')", "0"});
   EXPECT_THAT(resp, "42");
 
-  Run({"script", "flush"});  // Reset global flag from autocorrect
+  Run({"script", "flush"});  // Reset global flag due to lua_allow_undeclared_auto_correct effect
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "bar"});
   EXPECT_THAT(resp, ErrArg("undeclared"));
