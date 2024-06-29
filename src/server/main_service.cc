@@ -704,7 +704,16 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
   bool transactional = contains_global;
   if (!transactional) {
     for (const auto& scmd : exec_info.body) {
-      transactional |= scmd.Cid()->IsTransactional();
+      // We can only tell if eval is transactional based on they keycount
+      if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
+        CmdArgVec arg_vec{};
+        StoredCmd cmd = scmd;
+        cmd.Fill(&arg_vec);
+        auto keys = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
+        transactional |= (keys && keys.value().num_args() > 0);
+      } else {
+        transactional |= scmd.Cid()->IsTransactional();
+      }
       contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
 
       // We can't run no-key-transactional commands in lock-ahead mode currently,

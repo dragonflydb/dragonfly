@@ -15,7 +15,7 @@
 
 using namespace ::dfly::tiering::literals;
 
-ABSL_FLAG(bool, backing_file_direct, false, "If true uses O_DIRECT to open backing files");
+ABSL_FLAG(bool, backing_file_direct, true, "If true uses O_DIRECT to open backing files");
 
 ABSL_FLAG(uint64_t, registered_buffer_size, 512_KB,
           "Size of registered buffer for IoUring fixed read/writes");
@@ -37,16 +37,6 @@ UringBuf AllocateTmpBuf(size_t size) {
 void DestroyTmpBuf(UringBuf buf) {
   DCHECK(!buf.buf_idx);
   ::operator delete[](buf.bytes.data(), std::align_val_t(kPageSize));
-}
-
-UringBuf PrepareBuf(size_t size) {
-  DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
-  auto* up = static_cast<UringProactor*>(ProactorBase::me());
-
-  if (auto borrowed = up->RequestBuffer(size); borrowed)
-    return *borrowed;
-  else
-    return AllocateTmpBuf(size);
 }
 
 void ReturnBuf(UringBuf buf) {
@@ -103,6 +93,8 @@ std::error_code DiskStorage::Open(std::string_view path) {
 
 void DiskStorage::Close() {
   using namespace std::chrono_literals;
+
+  // TODO: to fix this polling.
   while (pending_ops_ > 0 || grow_pending_)
     util::ThisFiber::SleepFor(10ms);
 
@@ -175,7 +167,7 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
-  return {alloc_.allocated_bytes(), alloc_.capacity()};
+  return {alloc_.allocated_bytes(), alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_};
 }
 
 std::error_code DiskStorage::Grow(off_t grow_size) {
@@ -194,6 +186,18 @@ std::error_code DiskStorage::Grow(off_t grow_size) {
   size_ += grow_size;
   alloc_.AddStorage(start, grow_size);
   return {};
+}
+
+UringBuf DiskStorage::PrepareBuf(size_t size) {
+  DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
+  auto* up = static_cast<UringProactor*>(ProactorBase::me());
+
+  if (auto borrowed = up->RequestBuffer(size); borrowed) {
+    ++reg_buf_alloc_cnt_;
+    return *borrowed;
+  }
+  ++heap_buf_alloc_cnt_;
+  return AllocateTmpBuf(size);
 }
 
 }  // namespace dfly::tiering

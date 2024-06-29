@@ -66,6 +66,8 @@ struct TieredStats {
   size_t total_cancels = 0;
   size_t total_deletes = 0;
   size_t total_defrags = 0;
+  size_t total_registered_buf_allocs = 0;
+  size_t total_heap_buf_allocs = 0;
 
   size_t allocated_bytes = 0;
   size_t capacity_bytes = 0;
