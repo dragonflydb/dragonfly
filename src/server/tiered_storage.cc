@@ -331,6 +331,8 @@ TieredStats TieredStorage::GetStats() const {
     stats.pending_stash_cnt = op_stats.pending_stash_cnt;
     stats.allocated_bytes = op_stats.disk_stats.allocated_bytes;
     stats.capacity_bytes = op_stats.disk_stats.capacity_bytes;
+    stats.total_heap_buf_allocs = op_stats.disk_stats.heap_buf_alloc_count;
+    stats.total_registered_buf_allocs = op_stats.disk_stats.registered_buf_alloc_count;
   }
 
   {  // SmallBins stats
