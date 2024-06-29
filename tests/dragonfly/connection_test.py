@@ -12,6 +12,7 @@ import async_timeout
 from dataclasses import dataclass
 from aiohttp import ClientSession
 
+from .utility import tick_timer
 from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
@@ -309,9 +310,9 @@ async def test_pubsub_subcommand_for_numsub(async_client: aioredis.Redis):
     await asyncio.gather(*(resub(s, False, "chan1") for s in subs1))
 
     # Make sure numsub drops to 0
-    with async_timeout.timeout(1):
-        while (await async_client.pubsub_numsub("chan1"))[0][1] > 0:
-            await asyncio.sleep(0.05)
+    async for numsub, breaker in tick_timer(lambda: async_client.pubsub_numsub("chan1")):
+        with breaker:
+            assert numsub[0][1] == 0
 
     # Check empty numsub
     assert await async_client.pubsub_numsub() == []

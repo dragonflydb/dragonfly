@@ -7,6 +7,7 @@ import redis.asyncio as aioredis
 
 from . import dfly_args
 from .seeder import StaticSeeder
+from .utility import info_tick_timer
 
 
 BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiering_test_backing"}
@@ -25,12 +26,9 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     await seeder.run(async_client)
 
     # Wait for tiering stashes
-    with async_timeout.timeout(5):
-        while True:
-            info = await async_client.info("ALL")
-            if info["tiered_entries"] > 195_000:
-                break
-            await asyncio.sleep(0.2)
+    async for info, breaker in info_tick_timer(async_client, section="TIERED"):
+        with breaker:
+            assert info["tiered_entries"] > 195_000
 
     info = await async_client.info("ALL")
     assert info["num_entries"] == 200_000
