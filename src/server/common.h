@@ -69,12 +69,15 @@ struct TieredStats {
   uint64_t total_registered_buf_allocs = 0;
   uint64_t total_heap_buf_allocs = 0;
 
+  // How many times the system did not perform Stash call (disjoint with total_stashes).
+  uint64_t total_stash_overflows = 0;
+
   size_t allocated_bytes = 0;
   size_t capacity_bytes = 0;
 
   uint32_t pending_read_cnt = 0;
   uint32_t pending_stash_cnt = 0;
-  uint64_t stash_stalls_cnt = 0;
+
   uint64_t small_bins_cnt = 0;
   uint64_t small_bins_entries_cnt = 0;
   size_t small_bins_filling_bytes = 0;

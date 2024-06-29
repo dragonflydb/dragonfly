@@ -274,13 +274,10 @@ template util::fb2::Future<size_t> TieredStorage::Modify(DbIndex dbid, std::stri
 void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
   DCHECK(!value->IsExternal() && !value->HasIoPending());
 
-  // TODO: Do we break atomicity assumptions by yielding here?
+  // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
+  // with a lot of underutilized disk space.
   if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_) {
-    ThisFiber::SleepFor(10us);  // add some back pressure.
-  }
-
-  if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_) {
-    ++stash_stalls_cnt_;
+    ++stash_overflow_cnt_;
     return;
   }
 
@@ -353,7 +350,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.small_bins_filling_bytes = bins_stats.current_bin_bytes;
   }
 
-  stats.stash_stalls_cnt = stash_stalls_cnt_;
+  stats.total_stash_overflows = stash_overflow_cnt_;
   return stats;
 }
 
