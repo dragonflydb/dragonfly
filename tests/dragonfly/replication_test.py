@@ -2114,13 +2114,6 @@ async def test_start_replicating_while_save(df_local_factory):
     await disconnect_clients(c_master, *[c_replica])
 
 
-async def is_replicaiton_conn_down(conn):
-    role = await conn.execute_command("INFO REPLICATION")
-    # fancy of way of extracting the field master_link_status
-    is_down = role.split("\r\n")[4].split(":")[1]
-    return is_down == "down"
-
-
 @pytest.mark.asyncio
 async def test_user_acl_replication(df_local_factory):
     master = df_local_factory.create(proactor_threads=4)
@@ -2142,11 +2135,9 @@ async def test_user_acl_replication(df_local_factory):
 
     # revoke acl's from tmp
     await c_master.execute_command("ACL SETUSER tmp -replconf")
-    async with async_timeout.timeout(5):
-        while True:
-            if await is_replicaiton_conn_down(c_replica):
-                break
-            await asyncio.sleep(1)
+    async for info, breaker in info_tick_timer(c_replica, section="REPLICATION"):
+        with breaker:
+            assert info["master_link_status"] == "down"
 
     await c_master.execute_command("SET bar foo")
 
@@ -2180,13 +2171,12 @@ async def test_replica_reconnect(df_local_factory, break_conn):
     await c_master.execute_command("set k 12345")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
-
-    assert not await is_replicaiton_conn_down(c_replica)
+    assert (await c_replica.info("REPLICATION"))["master_link_status"] == "up"
 
     # kill existing master, create master with different repl_id but same port
     master_port = master.port
     master.stop()
-    assert await is_replicaiton_conn_down(c_replica)
+    assert (await c_replica.info("REPLICATION"))["master_link_status"] == "down"
 
     master = df_local_factory.create(proactor_threads=1, port=master_port)
     df_local_factory.start_all([master])
@@ -2198,14 +2188,14 @@ async def test_replica_reconnect(df_local_factory, break_conn):
         assert await c_replica.execute_command("get k") == "12345"
         assert await c_master.execute_command("set k 6789")
         assert await c_replica.execute_command("get k") == "12345"
-        assert await is_replicaiton_conn_down(c_replica)
+        assert (await c_replica.info("REPLICATION"))["master_link_status"] == "down"
     else:
         assert await c_master.execute_command("get k") == None
         assert await c_replica.execute_command("get k") == None
         assert await c_master.execute_command("set k 6789")
         await check_all_replicas_finished([c_replica], c_master)
         assert await c_replica.execute_command("get k") == "6789"
-        assert not await is_replicaiton_conn_down(c_replica)
+        assert (await c_replica.info("REPLICATION"))["master_link_status"] == "up"
 
     # Force re-replication, assert that it worked
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
