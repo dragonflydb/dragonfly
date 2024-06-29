@@ -28,7 +28,7 @@
 ABSL_FLAG(bool, tiered_storage_cache_fetched, true,
           "WIP: Load results of offloaded reads to memory");
 
-ABSL_FLAG(size_t, tiered_storage_write_depth, 50,
+ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
           "Maximum number of concurrent stash requests issued by background offload");
 
 namespace dfly {
@@ -217,6 +217,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 TieredStorage::TieredStorage(DbSlice* db_slice, size_t max_size)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
+  write_depth_limit_ = absl::GetFlag(FLAGS_tiered_storage_write_depth);
 }
 
 TieredStorage::~TieredStorage() {
@@ -272,6 +273,16 @@ template util::fb2::Future<size_t> TieredStorage::Modify(DbIndex dbid, std::stri
 
 void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
   DCHECK(!value->IsExternal() && !value->HasIoPending());
+
+  // TODO: Do we break atomicity assumptions by yielding here?
+  if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_) {
+    ThisFiber::SleepFor(10us);  // add some back pressure.
+  }
+
+  if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_) {
+    ++stash_stalls_cnt_;
+    return;
+  }
 
   string buf;
   string_view value_sv = value->GetSlice(&buf);
@@ -342,6 +353,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.small_bins_filling_bytes = bins_stats.current_bin_bytes;
   }
 
+  stats.stash_stalls_cnt = stash_stalls_cnt_;
   return stats;
 }
 
@@ -350,8 +362,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
     return;
 
   PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
-  int stash_limit =
-      absl::GetFlag(FLAGS_tiered_storage_write_depth) - op_manager_->GetStats().pending_stash_cnt;
+  int stash_limit = write_depth_limit_ - op_manager_->GetStats().pending_stash_cnt;
   if (stash_limit <= 0)
     return;
 

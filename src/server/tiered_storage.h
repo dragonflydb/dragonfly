@@ -77,6 +77,8 @@ class TieredStorage {
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
+  unsigned write_depth_limit_ = 10;
+  uint64_t stash_stalls_cnt_ = 0;
 };
 
 }  // namespace dfly
