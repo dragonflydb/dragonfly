@@ -309,7 +309,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   Finish(is_error);
   if (!is_error) {
     keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
-    cf_->UpdateConfig(migration_info_.slot_ranges, false);
+    cf_->ApplyMigrationSlotRangeToConfig(migration_info_.node_id, migration_info_.slot_ranges,
+                                         false);
     VLOG(1) << "Config is updated for " << cf_->MyID();
   }
   return true;

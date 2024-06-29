@@ -31,7 +31,8 @@ class ClusterFamily {
   // Returns a thread-local pointer.
   ClusterConfig* cluster_config();
 
-  void UpdateConfig(const std::vector<SlotRange>& slots, bool enable);
+  void ApplyMigrationSlotRangeToConfig(std::string_view node_id, const SlotRanges& slots,
+                                       bool is_outgoing);
 
   const std::string& MyID() const {
     return id_;
@@ -97,7 +98,8 @@ class ClusterFamily {
  private:
   ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
-  mutable util::fb2::Mutex config_update_mu_;
+  // Guards set configuration, so that we won't handle 2 in parallel.
+  mutable util::fb2::Mutex set_config_mu;
 
   std::string id_;
 
