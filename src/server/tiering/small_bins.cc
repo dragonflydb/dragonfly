@@ -82,7 +82,9 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   }
 
   current_bin_bytes_ = 0;
-  current_bin_.clear();
+
+  // erase does not shrink, unlike clear().
+  current_bin_.erase(current_bin_.begin(), current_bin_.end());
 
   return {id, std::move(out)};
 }
