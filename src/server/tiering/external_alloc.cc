@@ -143,8 +143,7 @@ struct Page {
 
   // need some mapping function to map from block_size to real_block_size given Page class.
   BinIdx bin_idx;
-  bool segment_inuse;  // true if segment allocated this page.
-  bool freepages_inuse;
+  uint8_t segment_inuse : 1;  // true if segment allocated this page.
   uint8_t reserved[3];
 
   // can be computed via free_blocks.count().
@@ -154,7 +153,7 @@ struct Page {
   // We can not use c'tor because we use the trick in segment where we allocate more pages
   // than SegmentDescr declares.
   void Reset(uint8_t new_id) {
-    static_assert(sizeof(Page) == 56);
+    static_assert(sizeof(Page) == 48);
 
     memset(&id, 0, sizeof(Page) - offsetof(Page, id));
     id = new_id;
@@ -292,7 +291,7 @@ class ExternalAllocator::SegmentDescr {
     auto FindPageSegment() -> Page* {
       for (uint32_t i = 0; i < capacity; ++i) {
         if (!pages[i].segment_inuse) {
-          pages[i].segment_inuse = true;
+          pages[i].segment_inuse = 1;
           ++used;
           return pages + i;
         }
@@ -343,8 +342,8 @@ int64_t ExternalAllocator::Malloc(size_t sz) {
   Page* page = free_pages_[bin_idx];
 
   // Pop from free list until first non-empty page or tail
-  for (; page->available == 0 && page->next_free != nullptr; page = page->next_free)
-    page->freepages_inuse = false;
+  while (page->available == 0 && page->next_free != nullptr)
+    page = page->next_free;
   free_pages_[bin_idx] = page;
 
   if (page->available == 0) {  // empty page.
@@ -359,7 +358,6 @@ int64_t ExternalAllocator::Malloc(size_t sz) {
 
     free_pages_[bin_idx] = page;
     page->Init(pc, bin_idx);
-    page->freepages_inuse = true;
   }
 
   DCHECK(page->available);
@@ -403,7 +401,6 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   if (page->available == blocks_num) {
     FreePage(page, seg, block_size);
   } else if (page->available == 1) {
-    page->freepages_inuse = true;
     page->next_free = free_pages_[page->bin_idx];
     free_pages_[page->bin_idx] = page;
   }
@@ -509,8 +506,7 @@ void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, size_t block_s
     }
   }
 
-  page->segment_inuse = false;
-  page->freepages_inuse = false;
+  page->segment_inuse = 0;
   page->available = 0;
   page->next_free = nullptr;
 
