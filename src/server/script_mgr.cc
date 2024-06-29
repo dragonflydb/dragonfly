@@ -146,7 +146,7 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
 
   auto res = Insert(body, interpreter);
   if (!res)
-    return rb->SendError(res.error().Format());
+    return cntx->SendError(res.error().Format());
 
   // Schedule empty callback inorder to journal command via transaction framework.
   cntx->transaction->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });

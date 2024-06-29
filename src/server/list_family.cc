@@ -735,7 +735,7 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
       break;
 
     default:
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
       break;
   }
 }
@@ -776,7 +776,7 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
       break;
 
     default:
-      return rb->SendError(op_res.status());
+      return cntx->SendError(op_res.status());
       break;
   }
 }
@@ -819,7 +819,7 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
       break;
 
     default:
-      return rb->SendError(op_res.status());
+      return cntx->SendError(op_res.status());
       break;
   }
 }
@@ -1034,7 +1034,7 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   } else {
     rb->SendNull();
   }
@@ -1217,13 +1217,13 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
-      return rb->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED:
       // TODO: proper error for moved
-      return rb->SendError("-MOVED");
+      return cntx->SendError("-MOVED");
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
   }
@@ -1277,7 +1277,7 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
     case OpStatus::KEY_NOTFOUND:
       return rb->SendNull();
     case OpStatus::WRONG_TYPE:
-      return rb->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     default:;
   }
 

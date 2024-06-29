@@ -2402,7 +2402,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         }
         return;
       }
-      return rb->SendError(result.status());
+      return cntx->SendError(result.status());
     } else if (sub_cmd == "STREAM") {
       int full = 0;
       size_t count = 10;  // default count for xinfo streams
@@ -2560,7 +2560,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         }
         return;
       }
-      return rb->SendError(sinfo.status());
+      return cntx->SendError(sinfo.status());
     } else if (sub_cmd == "CONSUMERS") {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
@@ -2584,12 +2584,12 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         return;
       }
       if (result.status() == OpStatus::INVALID_VALUE) {
-        return rb->SendError(NoGroupError(stream_name, group_name));
+        return cntx->SendError(NoGroupError(stream_name, group_name));
       }
-      return rb->SendError(result.status());
+      return cntx->SendError(result.status());
     }
   }
-  return rb->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
+  return cntx->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
 }
 
 void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
@@ -2996,7 +2996,7 @@ std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, R
   });
 
   if (detailed_err.has_value()) {
-    rb->SendError(*detailed_err);
+    cntx->SendError(*detailed_err);
     return std::nullopt;
   }
 
@@ -3043,7 +3043,7 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
     auto has_entries = HasEntries(opts, *last_ids);
     if (!has_entries.has_value()) {
       cntx->transaction->Conclude();
-      rb->SendError(has_entries.error());
+      cntx->SendError(has_entries.error());
       return;
     }
 
@@ -3221,7 +3221,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     return rb->SendEmptyArray();
   }
-  return rb->SendError(result.status());
+  return cntx->SendError(result.status());
 }
 
 void StreamFamily::XAck(CmdArgList args, ConnectionContext* cntx) {

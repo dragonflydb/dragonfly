@@ -33,7 +33,7 @@ class OkService : public ServiceInterface {
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                   ConnectionContext* cntx) final {
-    cntx->reply_builder()->SendError("");
+    cntx->SendError("");
   }
 
   ConnectionContext* CreateContext(util::FiberSocketBase* peer, Connection* owner) final {

@@ -47,17 +47,11 @@ class ConnectionContext {
     return res;
   }
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) {
-    rbuilder_->SendError(str, type);
-  }
+  virtual void SendError(std::string_view str, std::string_view type = std::string_view{});
 
-  void SendError(ErrorReply error) {
-    rbuilder_->SendError(error);
-  }
+  virtual void SendError(ErrorReply error);
 
-  void SendError(OpStatus status) {
-    rbuilder_->SendError(status);
-  }
+  virtual void SendError(OpStatus status);
 
   void SendStored() {
     rbuilder_->SendStored();
