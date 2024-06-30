@@ -424,7 +424,7 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
         **BASIC_ARGS,
         "proactor_threads": 4,
         "dbfilename": "tiered-entries",
-        "tiered_prefix": "/tmp/tiering_test_backing",
+        "tiered_prefix": "tiering-test-backing",
         "tiered_offload_threshold": "0.0",  # ask offloading loop to offload as much as possible
     }
 )
@@ -454,6 +454,49 @@ async def test_tiered_entries(async_client: aioredis.Redis):
         "LOAD",
         "tiered-entries-summary.dfs",
     )
+
+    # Compare captures
+    assert await StaticSeeder.capture(async_client) == start_capture
+
+
+@pytest.mark.skip("Too heavy")
+@pytest.mark.opt_only
+@dfly_args(
+    {
+        **BASIC_ARGS,
+        "proactor_threads": 4,
+        "maxmemory": "1G",
+        "dbfilename": "tiered-entries",
+        "tiered_prefix": "tiering-test-backing",
+        "tiered_offload_threshold": "0.5",  # ask to keep below 0.5 * 1G
+        "tiered_storage_write_depth": 5000,
+    }
+)
+async def test_tiered_entries_throttle(async_client: aioredis.Redis):
+    """This test makes sure tieried entries are correctly persisted"""
+    await StaticSeeder(key_target=600_000, data_size=4096, variance=1, types=["STRING"]).run(
+        async_client
+    )
+
+    # Compute the capture, this brings all items back to memory... so we'll wait for offloading
+    start_capture = await StaticSeeder.capture(async_client)
+
+    # Save + flush + load
+    await async_client.execute_command("SAVE", "DF")
+    assert await async_client.flushall()
+
+    load_task = asyncio.create_task(
+        async_client.execute_command(
+            "DEBUG",
+            "LOAD",
+            "tiered-entries-summary.dfs",
+        )
+    )
+
+    while not load_task.done():
+        info = await async_client.info("ALL")
+        assert info["used_memory"] < 600e6  # less than 600mb,
+        await asyncio.sleep(0.05)
 
     # Compare captures
     assert await StaticSeeder.capture(async_client) == start_capture

@@ -1917,8 +1917,9 @@ struct RdbLoader::ObjSettings {
 };
 
 RdbLoader::RdbLoader(Service* service)
-    : service_{service}, script_mgr_{service == nullptr ? nullptr : service->script_mgr()} {
-  shard_buf_.reset(new ItemsBuf[shard_set->size()]);
+    : service_{service},
+      script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
+      shard_buf_{shard_set->size()} {
 }
 
 RdbLoader::~RdbLoader() {
@@ -2421,8 +2422,17 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 
   auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
     this->LoadItemsBuffer(indx, ib);
+
+    // Block, if tiered storage is active, but can't keep up
+    while (EngineShard::tlocal()->ShouldThrottleForTiering()) {
+      this->blocked_shards_.fetch_add(memory_order_relaxed);  // stop adding items to shard queue
+      ThisFiber::SleepFor(100us);
+      this->blocked_shards_.fetch_sub(memory_order_relaxed);
+    }
   };
 
+  while (blocked_shards_.load(memory_order_relaxed) > 0)
+    ThisFiber::SleepFor(100us);
   shard_set->Add(sid, std::move(cb));
 }
 
