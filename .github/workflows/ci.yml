@@ -23,6 +23,9 @@ jobs:
         run: |
           python -m pip install pre-commit
           python -m pip freeze --local
+          lsblk -l
+          echo "sda rotational = $(cat /sys/block/sda/queue/rotational)"
+          echo "sdb rotational = $(cat /sys/block/sdb/queue/rotational)"
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pre-commit
@@ -31,13 +34,9 @@ jobs:
         run: pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
         shell: bash
   build:
-    # The CMake configure and build commands are platform agnostic and should work equally
-    # well on Windows or Mac.  You can convert this to a matrix build if you need
-    # cross-platform coverage.
-    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
-    runs-on: ubuntu-latest
     strategy:
       matrix:
+        runner: [ubuntu-latest]
         # Test of these containers
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
         build-type: [Debug, Release]
@@ -48,6 +47,12 @@ jobs:
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
+            runner: ubuntu-latest
+        exclude:
+          - container: "alpine-dev:latest"
+            runner: Larger-CI-Arm
+
+    runs-on: ${{matrix.runner}}
     timeout-minutes: 60
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -61,6 +66,7 @@ jobs:
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
       volumes:
         - /:/hostroot
+        - /mnt:/mnt
       credentials:
         username: ${{ github.repository_owner }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -74,6 +80,7 @@ jobs:
           uname -a
           cmake --version
           mkdir -p ${GITHUB_WORKSPACE}/build
+          mount
 
           echo "===================Before freeing up space ============================================"
           df -h
@@ -83,7 +90,8 @@ jobs:
           rm -rf /hostroot/opt/ghc
           echo "===================After freeing up space ============================================"
           df -h
-
+          touch /mnt/foo
+          ls -la /mnt/foo
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.4
 
@@ -180,6 +188,7 @@ jobs:
 
   lint-test-chart:
     runs-on: ubuntu-latest
+    needs: [build]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/lint-test-chart
