@@ -340,12 +340,6 @@ ExternalAllocator::~ExternalAllocator() {
 int64_t ExternalAllocator::Malloc(size_t sz) {
   uint8_t bin_idx = ToBinIdx(sz);
   Page* page = free_pages_[bin_idx];
-
-  // Pop from free list until first non-empty page or tail
-  while (page->available == 0 && page->next_free != nullptr)
-    page = page->next_free;
-  free_pages_[bin_idx] = page;
-
   if (page->available == 0) {  // empty page.
     PageClass pc = detail::ClassFromSize(sz);
     if (pc == PageClass::LARGE_P) {
@@ -361,11 +355,12 @@ int64_t ExternalAllocator::Malloc(size_t sz) {
   }
 
   DCHECK(page->available);
-
   size_t pos = FindFirst(page->free_blocks);
-
   page->free_blocks.flip(pos);
-  --page->available;
+
+  if (--page->available == 0)  // Remove empty page from freelist
+    free_pages_[bin_idx] = page->next_free ? page->next_free : &empty_page;
+
   allocated_bytes_ += ToBlockSize(page->bin_idx);
   SegmentDescr* seg = ToSegDescr(page);
   return seg->BlockOffset(page, pos);
@@ -401,6 +396,7 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   if (page->available == blocks_num) {
     FreePage(page, seg, block_size);
   } else if (page->available == 1) {
+    DCHECK_NE(page, free_pages_[page->bin_idx]);
     page->next_free = free_pages_[page->bin_idx];
     free_pages_[page->bin_idx] = page;
   }
