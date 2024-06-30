@@ -1357,7 +1357,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
   DVLOG(1) << "result for " << transaction->DebugId() << " is " << popped_key.status();
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
-      return rb->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
@@ -1604,7 +1604,7 @@ OpResult<unsigned> OpLexCount(const OpArgs& op_args, string_view key,
   return count;
 }
 
-OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, ArgSlice members) {
+OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange members) {
   auto& db_slice = op_args.shard->db_slice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
@@ -1649,21 +1649,21 @@ OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view mem
   return *res;
 }
 
-OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key, ArgSlice members) {
+OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
+                                  facade::ArgRange members) {
   auto res_it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
 
-  MScoreResponse scores(members.size());
+  MScoreResponse scores(members.Size());
 
   const detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
   sds& tmp_str = op_args.shard->tmp_str1;
 
-  for (size_t i = 0; i < members.size(); i++) {
-    const auto& m = members[i];
-
-    tmp_str = sdscpylen(tmp_str, m.data(), m.size());
-    scores[i] = GetZsetScore(robj_wrapper, tmp_str);
+  size_t i = 0;
+  for (string_view member : members.Range()) {
+    tmp_str = sdscpylen(tmp_str, member.data(), member.size());
+    scores[i++] = GetZsetScore(robj_wrapper, tmp_str);
   }
 
   return scores;
@@ -1784,7 +1784,7 @@ void ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_
   } else if (add_result.status() == OpStatus::SKIPPED) {
     rb->SendNull();
   } else if (add_result->is_nan) {
-    rb->SendError(kScoreNaN);
+    cntx->SendError(kScoreNaN);
   } else {
     if (zparams.flags & ZADD_IN_INCR) {
       rb->SendDouble(add_result->new_score);
@@ -2053,7 +2053,7 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (add_result->is_nan) {
-    return rb->SendError(kScoreNaN);
+    return cntx->SendError(kScoreNaN);
   }
 
   rb->SendDouble(add_result->new_score);
@@ -2239,7 +2239,7 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
       }
       i += 2;
     } else {
-      return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
+      return cntx->SendError(absl::StrCat("unsupported option ", cur_arg));
     }
   }
   ZRangeGeneric(std::move(args), range_params, cntx);
@@ -2260,7 +2260,7 @@ void ZSetFamily::ZRevRange(CmdArgList args, ConnectionContext* cntx) {
     if (cur_arg == "WITHSCORES") {
       range_params.with_scores = true;
     } else {
-      return cntx->reply_builder()->SendError(absl::StrCat("unsupported option ", cur_arg));
+      return cntx->SendError(absl::StrCat("unsupported option ", cur_arg));
     }
   }
 
@@ -2362,12 +2362,7 @@ void ZSetFamily::ZRemRangeByLex(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZRem(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-
-  absl::InlinedVector<string_view, 8> members(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    members[i - 1] = ArgS(args, i);
-  }
-
+  auto members = args.subspan(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, members);
   };
@@ -2414,7 +2409,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -2429,7 +2424,7 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
-    rb->SendError(kWrongTypeErr);
+    cntx->SendError(kWrongTypeErr);
   } else if (!result) {
     rb->SendNull();
   } else {
@@ -2486,7 +2481,7 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(k);
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -2581,7 +2576,7 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendNull();
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -2636,13 +2631,8 @@ void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cn
 
 OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-
-  absl::InlinedVector<string_view, 8> members(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    members[i - 1] = ArgS(args, i);
-  }
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto members = args.subspan(1);
+  auto cb = [key, members](Transaction* t, EngineShard* shard) {
     return OpMScore(t->GetOpArgs(shard), key, members);
   };
 

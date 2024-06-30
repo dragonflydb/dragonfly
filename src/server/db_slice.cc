@@ -9,6 +9,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "generic_family.h"
+#include "server/channel_store.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -32,6 +33,9 @@ ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
 ABSL_FLAG(double, table_growth_margin, 0.4,
           "Prevents table from growing if number of free slots x average object size x this ratio "
           "is larger than memory budget.");
+
+ABSL_FLAG(std::string, notify_keyspace_events, "",
+          "notify-keyspace-events. Only Ex is supported for now");
 
 namespace dfly {
 
@@ -204,9 +208,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
     // log the evicted keys to journal.
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
-      ArgSlice delete_args(&key, 1);
-      journal->RecordEntry(0, journal::Op::EXPIRED, cntx_.db_index, 1, cluster::KeySlot(key),
-                           Payload("DEL", delete_args), false);
+      RecordExpiry(cntx_.db_index, key);
     }
 
     db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
@@ -268,6 +270,13 @@ DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
   soft_budget_limit_ = (0.3 * max_memory_limit / shard_set->size());
+
+  std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
+  if (!keyspace_events.empty() && keyspace_events != "Ex") {
+    LOG(ERROR) << "Only Ex is currently supported";
+    exit(0);
+  }
+  expired_keys_events_recording_ = !keyspace_events.empty();
 }
 
 DbSlice::~DbSlice() {
@@ -458,9 +467,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     if (!change_cb_.empty()) {
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
-        for (const auto& ccb : change_cb_) {
-          ccb.second(cntx.db_index, bit);
-        }
+        CallChangeCallbacks(cntx.db_index, bit);
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
@@ -524,9 +531,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   // It's a new entry.
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << cntx.db_index;
-  for (const auto& ccb : change_cb_) {
-    ccb.second(cntx.db_index, key);
-  }
+  CallChangeCallbacks(cntx.db_index, key);
 
   // In case we are loading from rdb file or replicating we want to disable conservative memory
   // checks (inside PrimeEvictionPolicy::CanGrow) and reject insertions only after we pass max
@@ -975,9 +980,7 @@ void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   FiberAtomicGuard fg;
 
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
-  for (const auto& ccb : change_cb_) {
-    ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
-  }
+  CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
 
   // If the value has a pending stash, cancel it before any modification are applied.
   // Note: we don't delete offloaded values before updates, because a read-modify operation (like
@@ -1047,10 +1050,14 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
                << ", expire table size: " << db->expire.size()
                << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
   }
+
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
     RecordExpiry(cntx.db_index, key);
   }
+
+  if (expired_keys_events_recording_)
+    db->expired_keys_events_.emplace_back(key);
 
   auto obj_type = it->second.ObjType();
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
@@ -1088,8 +1095,18 @@ void DbSlice::ExpireAllIfNeeded() {
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
+  // TODO rewrite this logic to be more clear
+  // this mutex lock is needed to check that this method is not called simultaneously with
+  // change_cb_ calls and journal_slice::change_cb_arr_ calls.
+  // It can be unlocked anytime because DbSlice::RegisterOnChange
+  // and journal_slice::RegisterOnChange calls without preemption
+  std::lock_guard lk(cb_mu_);
+
   uint64_t ver = NextVersion();
   change_cb_.emplace_back(ver, std::move(cb));
+  DCHECK(std::is_sorted(change_cb_.begin(), change_cb_.end(),
+                        [](auto& a, auto& b) { return a.first < b.first; }));
+
   return ver;
 }
 
@@ -1099,6 +1116,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
   // change_cb_ is ordered by version.
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
+
   for (const auto& ccb : change_cb_) {
     uint64_t cb_version = ccb.first;
     DCHECK_LE(cb_version, upper_bound);
@@ -1113,6 +1131,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
+  lock_guard lk(cb_mu_);  // we need to wait until callback is finished before remove it
   for (auto it = change_cb_.begin(); it != change_cb_.end(); ++it) {
     if (it->first == id) {
       change_cb_.erase(it);
@@ -1157,6 +1176,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     }
   }
 
+  // Send and clear accumulated expired key events
+  if (auto& events = db_arr_[cntx.db_index]->expired_keys_events_; !events.empty()) {
+    ChannelStore* store = ServerState::tlocal()->channel_store();
+    store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"), events);
+    events.clear();
+  }
+
   return result;
 }
 
@@ -1185,6 +1211,8 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
   string tmp;
   int32_t starting_segment_id = rand() % num_segments;
   size_t used_memory_before = owner_->UsedMemory();
+
+  bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
   vector<string> keys_to_journal;
 
   {
@@ -1213,9 +1241,8 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
           if (lt.Find(LockTag(key)).has_value())
             continue;
 
-          if (auto journal = owner_->journal(); journal) {
-            keys_to_journal.push_back(string(key));
-          }
+          if (record_keys)
+            keys_to_journal.emplace_back(key);
 
           PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
           ++evicted;
@@ -1233,12 +1260,12 @@ void DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t increase_goal_bytes
 finish:
   // send the deletion to the replicas.
   // fiber preemption could happen in this phase.
-  if (auto journal = owner_->journal(); journal) {
-    for (string_view key : keys_to_journal) {
-      ArgSlice delete_args(&key, 1);
-      journal->RecordEntry(0, journal::Op::EXPIRED, db_ind, 1, cluster::KeySlot(key),
-                           Payload("DEL", delete_args), false);
-    }
+  for (string_view key : keys_to_journal) {
+    if (auto journal = owner_->journal(); journal)
+      RecordExpiry(db_ind, key);
+
+    if (expired_keys_events_recording_)
+      db_table->expired_keys_events_.emplace_back(key);
   }
 
   auto time_finish = absl::GetCurrentTimeNanos();
@@ -1504,6 +1531,12 @@ void DbSlice::OnCbFinish() {
   // TBD update bumpups logic we can not clear now after cb finish as cb can preempt
   // btw what do we do with inline?
   fetched_items_.clear();
+}
+
+void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
+  for (const auto& ccb : change_cb_) {
+    ccb.second(id, cr);
+  }
 }
 
 }  // namespace dfly

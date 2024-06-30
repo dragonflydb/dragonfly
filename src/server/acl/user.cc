@@ -8,6 +8,7 @@
 
 #include <limits>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/escaping.h"
 #include "core/overloaded.h"
 #include "server/acl/helpers.h"
@@ -30,8 +31,20 @@ User::User() {
 }
 
 void User::Update(UpdateRequest&& req) {
-  if (req.password) {
-    SetPasswordHash(*req.password, req.is_hashed);
+  for (auto& pass : req.passwords) {
+    if (pass.nopass) {
+      SetNopass();
+      continue;
+    }
+    if (pass.unset) {
+      UnsetPassword(pass.password);
+      continue;
+    }
+    if (pass.reset_password) {
+      password_hashes_.clear();
+      continue;
+    }
+    SetPasswordHash(pass.password, req.is_hashed);
   }
 
   auto cat_visitor = [this](UpdateRequest::CategoryValueType cat) {
@@ -68,23 +81,23 @@ void User::Update(UpdateRequest&& req) {
 }
 
 void User::SetPasswordHash(std::string_view password, bool is_hashed) {
-  if (password == "nopass") {
-    return;
-  }
-
+  nopass_ = false;
   if (is_hashed) {
-    password_hash_ = absl::HexStringToBytes(password);
+    password_hashes_.insert(absl::HexStringToBytes(password));
     return;
   }
-  password_hash_ = StringSHA256(password);
+  password_hashes_.insert(StringSHA256(password));
+}
+
+void User::UnsetPassword(std::string_view password) {
+  password_hashes_.erase(StringSHA256(password));
 }
 
 bool User::HasPassword(std::string_view password) const {
-  if (!password_hash_) {
+  if (nopass_) {
     return true;
   }
-  // hash password and compare
-  return *password_hash_ == StringSHA256(password);
+  return password_hashes_.contains(StringSHA256(password));
 }
 
 void User::SetAclCategoriesAndIncrSeq(uint32_t cat) {
@@ -174,10 +187,12 @@ bool User::IsActive() const {
   return is_active_;
 }
 
-static const std::string_view default_pass = "nopass";
+const absl::flat_hash_set<std::string>& User::Passwords() const {
+  return password_hashes_;
+}
 
-std::string_view User::Password() const {
-  return password_hash_ ? *password_hash_ : default_pass;
+bool User::HasNopass() const {
+  return nopass_;
 }
 
 const AclKeys& User::Keys() const {
@@ -204,6 +219,11 @@ void User::SetKeyGlobs(std::vector<UpdateKey> keys) {
       keys_.key_globs.push_back({std::move(key.key), key.op});
     }
   }
+}
+
+void User::SetNopass() {
+  nopass_ = true;
+  password_hashes_.clear();
 }
 
 }  // namespace dfly::acl

@@ -319,7 +319,7 @@ struct BasicSearch {
 
     // Skip sorting again for KNN queries, reverse if needed will be applied on aggregation
     if (auto knn = get_if<AstKnnNode>(&node.filter->Variant());
-        knn && knn->score_alias == node.field) {
+        knn && (knn->score_alias == node.field || "__vector_score" == node.field)) {
       return sub_results;
     }
 
@@ -353,9 +353,10 @@ struct BasicSearch {
 
   void SearchKnnHnsw(HnswVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
     if (indices_->GetAllDocs().size() == sub_results.Size())
-      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit);
+      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime);
     else
-      knn_distances_ = vec_index->Knn(knn.vec.first.get(), knn.limit, sub_results.Take());
+      knn_distances_ =
+          vec_index->Knn(knn.vec.first.get(), knn.limit, knn.ef_runtime, sub_results.Take());
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`

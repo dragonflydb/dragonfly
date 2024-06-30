@@ -23,6 +23,7 @@
 #include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
@@ -774,13 +775,13 @@ OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
 
 // Retruns array of string lengths after a successful operation.
 OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, string_view path,
-                                       JsonPathV2 expression, const vector<string_view>& strs) {
+                                       JsonPathV2 expression, facade::ArgRange strs) {
   vector<OptSizeT> vec;
   OpStatus status;
   auto cb = [&](const auto&, JsonType* val) {
     if (val->is_string()) {
       string new_val = val->as_string();
-      for (auto& str : strs) {
+      for (string_view str : strs) {
         new_val += str;
       }
 
@@ -1129,7 +1130,8 @@ OpResult<vector<OptLong>> OpArrIndex(const OpArgs& op_args, string_view key, Jso
 }
 
 // Returns string vector that represents the query result of each supplied key.
-vector<OptString> OpJsonMGet(JsonPathV2 expression, const Transaction* t, EngineShard* shard) {
+vector<OptString> OpJsonMGet(const JsonPathV2& expression, const Transaction* t,
+                             EngineShard* shard) {
   ShardArgs args = t->GetShardArgs(shard->shard_id());
   DCHECK(!args.Empty());
   vector<OptString> response(args.Size());
@@ -1289,6 +1291,40 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   return operation_result;
 }
 
+OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
+  DCHECK_EQ(args.Size() % 3, 0u);
+
+  OpStatus result = OpStatus::OK;
+  size_t stored = 0;
+  for (auto it = args.begin(); it != args.end();) {
+    string_view key = *(it++);
+    string_view path = *(it++);
+    string_view value = *(it++);
+    if (auto res = OpSet(op_args, key, path, value, false, false); !res.ok()) {
+      result = res.status();
+      break;
+    }
+
+    stored++;
+  }
+
+  // Replicate custom journal, see OpMSet
+  if (auto journal = op_args.shard->journal(); journal) {
+    if (stored * 3 == args.Size()) {
+      RecordJournal(op_args, "JSON.MSET", args, op_args.tx->GetUniqueShardCnt());
+      DCHECK_EQ(result, OpStatus::OK);
+      return result;
+    }
+
+    string_view cmd = stored == 0 ? "PING" : "JSON.MSET";
+    vector<string_view> store_args(args.begin(), args.end());
+    store_args.resize(stored * 3);
+    RecordJournal(op_args, cmd, store_args, op_args.tx->GetUniqueShardCnt());
+  }
+
+  return result;
+}
+
 // Implements the recursive algorithm from
 // https://datatracker.ietf.org/doc/html/rfc7386#section-2
 void RecursiveMerge(const JsonType& patch, JsonType* dest) {
@@ -1403,7 +1439,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1414,16 +1450,19 @@ void JsonFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(facade::WrongNumArgsError("json.mset"));
   }
 
-  return cntx->SendError("Not implemented");
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  AggregateStatus status;
+  auto cb = [&status](Transaction* t, EngineShard* shard) {
+    auto op_args = t->GetOpArgs(shard);
     ShardArgs args = t->GetShardArgs(shard->shard_id());
-    (void)args;  // TBD
+    if (auto result = OpMSet(op_args, args); result != OpStatus::OK)
+      status = result;
     return OpStatus::OK;
   };
 
-  Transaction* trans = cntx->transaction;
-  trans->ScheduleSingleHop(cb);
+  cntx->transaction->ScheduleSingleHop(cb);
+
+  if (*status != OpStatus::OK)
+    return cntx->SendError(*status);
   cntx->SendOk();
 }
 
@@ -1471,7 +1510,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
       SendJsonValue(rb, it);
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1530,7 +1569,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    mget_resp[sid] = OpJsonMGet(*ParseJsonPath(path), t, shard);
+    mget_resp[sid] = OpJsonMGet(expression, t, shard);
     return OpStatus::OK;
   };
 
@@ -1754,7 +1793,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1783,14 +1822,11 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
 
   JsonPathV2 expression = PARSE_PATHV2(path);
-
-  vector<string_view> strs;
-  for (size_t i = 2; i < args.size(); ++i) {
-    strs.emplace_back(ArgS(args, i));
-  }
+  auto strs = args.subspan(2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrAppend(t->GetOpArgs(shard), key, path, std::move(expression), strs);
+    return OpStrAppend(t->GetOpArgs(shard), key, path, std::move(expression),
+                       facade::ArgRange{strs});
   };
 
   Transaction* trans = cntx->transaction;
@@ -1829,7 +1865,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1880,7 +1916,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(*result);
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1908,7 +1944,7 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(*result);
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1956,7 +1992,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
       rb->SendNullArray();
     } else {
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
     }
   }
 }
@@ -2076,7 +2112,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     if (result == facade::OpStatus::KEY_NOTFOUND) {
       rb->SendNull();  // Match Redis
     } else {
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
     }
   }
 }

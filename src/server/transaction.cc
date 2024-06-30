@@ -257,10 +257,9 @@ void Transaction::PrepareMultiFps(CmdArgList keys) {
   auto& tag_fps = multi_->tag_fps;
 
   tag_fps.reserve(keys.size());
-  for (MutableSlice key : keys) {
-    string_view sv = facade::ToSV(key);
-    ShardId sid = Shard(sv, shard_set->size());
-    tag_fps.emplace(sid, LockTag(sv).Fingerprint());
+  for (string_view str : ArgS(keys)) {
+    ShardId sid = Shard(str, shard_set->size());
+    tag_fps.emplace(sid, LockTag(str).Fingerprint());
   }
 }
 
@@ -312,7 +311,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   }
 
   shard_data_.resize(shard_set->size());  // shard_data isn't sparse, so we must allocate for all :(
-  DCHECK_EQ(full_args_.size() % key_index.step, 0u);
+  DCHECK_EQ(full_args_.size() % key_index.step, 0u) << full_args_;
 
   // Safe, because flow below is not preemptive.
   auto& shard_index = tmp_space.GetShardIndex(shard_data_.size());
@@ -628,6 +627,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   DCHECK_EQ(shard, EngineShard::tlocal());
 
   RunnableResult result;
+  shard->db_slice().LockChangeCb();
   try {
     result = (*cb_ptr_)(this, shard);
 
@@ -665,7 +665,10 @@ void Transaction::RunCallback(EngineShard* shard) {
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
+    shard->db_slice().UnlockChangeCb();
     MaybeInvokeTrackingCb();
+  } else {
+    shard->db_slice().UnlockChangeCb();
   }
 }
 
@@ -1213,7 +1216,8 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
   return result;
 }
 
-OpStatus Transaction::WatchInShard(const ShardArgs& keys, EngineShard* shard, KeyReadyChecker krc) {
+OpStatus Transaction::WatchInShard(BlockingController::Keys keys, EngineShard* shard,
+                                   KeyReadyChecker krc) {
   auto& sd = shard_data_[SidToId(shard->shard_id())];
 
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
@@ -1221,12 +1225,12 @@ OpStatus Transaction::WatchInShard(const ShardArgs& keys, EngineShard* shard, Ke
   sd.local_mask &= ~OUT_OF_ORDER;
 
   shard->EnsureBlockingController()->AddWatched(keys, std::move(krc), this);
-  DVLOG(2) << "WatchInShard " << DebugId() << ", first_key:" << keys.Front();
+  DVLOG(2) << "WatchInShard " << DebugId();
 
   return OpStatus::OK;
 }
 
-void Transaction::ExpireShardCb(const ShardArgs& wkeys, EngineShard* shard) {
+void Transaction::ExpireShardCb(BlockingController::Keys keys, EngineShard* shard) {
   // Blocking transactions don't release keys when suspending, release them now.
   auto lock_args = GetLockArgs(shard->shard_id());
   shard->db_slice().Release(LockMode(), lock_args);
@@ -1234,7 +1238,7 @@ void Transaction::ExpireShardCb(const ShardArgs& wkeys, EngineShard* shard) {
   auto& sd = shard_data_[SidToId(shard->shard_id())];
   sd.local_mask &= ~KEYLOCK_ACQUIRED;
 
-  shard->blocking_controller()->FinalizeWatched(wkeys, this);
+  shard->blocking_controller()->FinalizeWatched(keys, this);
   DCHECK(!shard->blocking_controller()->awakened_transactions().contains(this));
 
   // Resume processing of transaction queue
@@ -1247,9 +1251,11 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   DCHECK_EQ(unique_shard_cnt_, 1u);
 
   auto* shard = EngineShard::tlocal();
+  shard->db_slice().LockChangeCb();
   auto result = cb(this, shard);
   shard->db_slice().OnCbFinish();
   LogAutoJournalOnShard(shard, result);
+  shard->db_slice().UnlockChangeCb();
   MaybeInvokeTrackingCb();
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it

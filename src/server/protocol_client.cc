@@ -155,6 +155,8 @@ ProtocolClient::ProtocolClient(ServerContext context) : server_context_(std::mov
 }
 
 ProtocolClient::~ProtocolClient() {
+  cntx_.JoinErrorHandler();
+
   // FIXME: We should close the socket explictly outside of the destructor. This currently
   // breaks test_cancel_replication_immediately.
   if (sock_) {

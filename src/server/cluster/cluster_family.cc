@@ -434,8 +434,6 @@ void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
 }
 
 namespace {
-// Guards set configuration, so that we won't handle 2 in parallel.
-util::fb2::Mutex set_config_mu;
 
 void DeleteSlots(const SlotRanges& slots_ranges) {
   if (slots_ranges.empty()) {
@@ -511,9 +509,6 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   auto out_migrations_slots = RemoveOutgoingMigrations(new_config, tl_cluster_config);
   RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
 
-  // Prevent simultaneous config update from outgoing migration
-  lock_guard config_update_lk(config_update_mu_);
-
   SlotRanges enable_slots, disable_slots;
 
   {
@@ -542,14 +537,14 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 
   // Ignore blocked commands because we filter them with CancelBlockingOnThread
   DispatchTracker tracker{server_family_->GetNonPriviligedListeners(), cntx->conn(),
-                          false /* ignore paused */, true /* ignore blocked */};
+                          true /* ignore paused */, true /* ignore blocked */};
 
   auto blocking_filter = [&new_config](ArgSlice keys) {
     bool moved = any_of(keys.begin(), keys.end(), [&](auto k) { return !new_config->IsMySlot(k); });
     return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
   };
 
-  auto cb = [this, &tracker, &new_config, blocking_filter](util::ProactorBase* pb) {
+  auto cb = [this, &tracker, &new_config, blocking_filter](util::ProactorBase*) {
     server_family_->CancelBlockingOnThread(blocking_filter);
     tl_cluster_config = new_config;
     tracker.TrackOnThread();
@@ -585,12 +580,12 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
   do {
     auto sid = parser.Next<uint32_t>();
     if (sid > kMaxSlotNum)
-      return rb->SendError("Invalid slot id");
+      return cntx->SendError("Invalid slot id");
     slots_stats.emplace_back(sid, SlotStats{});
   } while (parser.HasNext());
 
   if (auto err = parser.Error(); err)
-    return rb->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
 
   fb2::Mutex mu;
 
@@ -660,8 +655,6 @@ static string_view StateToStr(MigrationState state) {
       return "ERROR"sv;
     case MigrationState::C_FINISHED:
       return "FINISHED"sv;
-    case MigrationState::C_MAX_INVALID:
-      break;
   }
   DCHECK(false) << "Unknown State value " << static_cast<underlying_type_t<MigrationState>>(state);
   return "UNDEFINED_STATE"sv;
@@ -677,7 +670,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   if (parser.HasNext()) {
     node_id = parser.Next<std::string_view>();
     if (auto err = parser.Error(); err) {
-      return rb->SendError(err->MakeReply());
+      return cntx->SendError(err->MakeReply());
     }
   }
 
@@ -689,17 +682,18 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
       reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
-                                   " keys:", keys_number, " errors: ", error));
+                                   " keys:", keys_number, " errors:", error));
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
     // TODO add error status
-    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(), "");
+    append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(),
+                  m->GetErrorStr());
   }
-  for (const auto& migration : outgoing_migration_jobs_) {
-    append_answer("out", migration->GetMigrationInfo().node_id, node_id, migration->GetState(),
-                  migration->GetKeyCount(), migration->GetErrorStr());
+  for (const auto& m : outgoing_migration_jobs_) {
+    append_answer("out", m->GetMigrationInfo().node_id, node_id, m->GetState(), m->GetKeyCount(),
+                  m->GetErrorStr());
   }
 
   if (reply.empty()) {
@@ -786,22 +780,17 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
   SlotSet migration_slots(migration->GetSlots());
   SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
-  // First cancel socket, then flush slots, so that new entries won't arrive after we flush.
-  migration->Cancel();
+  migration->Stop();
   // all fibers has migration shared_ptr so we don't need to join it and can erase
   jobs.erase(it);
 
   // TODO make it outside in one run with other slots that should be flushed
   if (!removed.Empty()) {
-    auto removed_ranges = make_shared<SlotRanges>(removed.ToSlotRanges());
+    auto removed_ranges = removed.ToSlotRanges();
     LOG_IF(WARNING, migration->GetState() == MigrationState::C_FINISHED)
         << "Flushing slots of removed FINISHED migration " << migration->GetSourceID()
-        << ", slots: " << SlotRange::ToString(*removed_ranges);
-    shard_set->pool()->DispatchOnAll([removed_ranges](unsigned, ProactorBase*) {
-      if (EngineShard* shard = EngineShard::tlocal(); shard) {
-        shard->db_slice().FlushSlots(*removed_ranges);
-      }
-    });
+        << ", slots: " << SlotRange::ToString(removed_ranges);
+    DeleteSlots(removed_ranges);
   }
 
   return true;
@@ -846,7 +835,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   lock_guard lk(migration_mu_);
   auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
-  LOG_IF(WARNING, was_removed) << "Reinit was happen for migration from:" << source_id;
+  LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
       std::move(source_id), &server_family_->service(), std::move(slots), flows_num));
@@ -877,7 +866,6 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
   auto migration = GetIncomingMigration(source_id);
   if (!migration) {
-    // TODO process error when migration is canceled
     return cntx->SendError(kIdNotFound);
   }
 
@@ -891,14 +879,36 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
   migration->StartFlow(shard_id, cntx->conn()->socket());
 }
 
-void ClusterFamily::UpdateConfig(const std::vector<SlotRange>& slots, bool enable) {
-  lock_guard gu(config_update_mu_);
+void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
+                                                    const SlotRanges& slots, bool is_incoming) {
+  lock_guard gu(set_config_mu);
+  lock_guard lk(migration_mu_);
+  bool is_migration_valid = false;
+  if (is_incoming) {
+    for (const auto& mj : incoming_migrations_jobs_) {
+      if (mj->GetSourceID() == node_id) {
+        // TODO add compare for slots
+        is_migration_valid = true;
+      }
+    }
+  } else {
+    for (const auto& mj : outgoing_migration_jobs_) {
+      if (mj->GetMigrationInfo().node_id == node_id) {
+        // TODO add compare for slots
+        is_migration_valid = true;
+      }
+    }
+  }
+  if (!is_migration_valid)
+    return;
 
-  auto new_config = enable ? tl_cluster_config->CloneWithChanges(slots, {})
-                           : tl_cluster_config->CloneWithChanges({}, slots);
+  auto new_config = is_incoming ? tl_cluster_config->CloneWithChanges(slots, {})
+                                : tl_cluster_config->CloneWithChanges({}, slots);
 
-  shard_set->pool()->AwaitFiberOnAll(
-      [&new_config](util::ProactorBase* pb) { tl_cluster_config = new_config; });
+  // we don't need to use DispatchTracker here because for IncomingMingration we don't have
+  // connectionas that should be tracked and for Outgoing migration we do it under Pause
+  server_family_->service().proactor_pool().AwaitFiberOnAll(
+      [&new_config](util::ProactorBase*) { tl_cluster_config = new_config; });
   DCHECK(tl_cluster_config != nullptr);
 }
 
@@ -916,7 +926,6 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
                            [source_id](const auto& m) { return m.node_id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
-    // TODO process error if migration was canceled
     return cntx->SendLong(OutgoingMigration::kInvalidAttempt);
   }
 
@@ -930,7 +939,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
 
   VLOG(1) << "Migration is joined for " << source_id;
 
-  UpdateConfig(migration->GetSlots(), true);
+  ApplyMigrationSlotRangeToConfig(migration->GetSourceID(), migration->GetSlots(), true);
   VLOG(1) << "Config is updated for " << MyID();
 
   return cntx->SendLong(attempt);

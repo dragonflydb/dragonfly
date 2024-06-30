@@ -263,54 +263,43 @@ int64_t AbsExpiryToTtl(int64_t abs_expiry_time, bool as_milli) {
 }
 
 // Returns true if keys were set, false otherwise.
-void OpMSet(const OpArgs& op_args, const ShardArgs& args, atomic_bool* success) {
+OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   DCHECK(!args.Empty() && args.Size() % 2 == 0);
 
   SetCmd::SetParams params;
   SetCmd sg(op_args, false);
 
-  size_t index = 0;
-  bool partial = false;
-  for (auto it = args.begin(); it != args.end(); ++it) {
-    string_view key = *it;
-    ++it;
-    string_view value = *it;
-    DVLOG(1) << "MSet " << key << ":" << value;
-    if (sg.Set(params, key, value) != OpStatus::OK) {  // OOM for example.
-      success->store(false);
-      partial = true;
+  OpStatus result = OpStatus::OK;
+  size_t stored = 0;
+  for (auto it = args.begin(); it != args.end();) {
+    string_view key = *(it++);
+    string_view value = *(it++);
+    if (auto status = sg.Set(params, key, value); status != OpStatus::OK) {
+      result = status;
       break;
     }
-    index += 2;
+
+    stored++;
   }
 
+  // Above loop could have parial success (e.g. OOM), so replicate only what was
+  // changed
   if (auto journal = op_args.shard->journal(); journal) {
-    // We write a custom journal because an OOM in the above loop could lead to partial success, so
-    // we replicate only what was changed.
-    if (partial) {
-      string_view cmd;
-      ArgSlice cmd_args;
-      vector<string_view> store_args(index);
-      if (index == 0) {
-        // All shards must record the tx was executed for the replica to execute it, so we send a
-        // PING in case nothing was changed
-        cmd = "PING";
-      } else {
-        // journal [0, i)
-        cmd = "MSET";
-        unsigned i = 0;
-        for (string_view arg : args) {
-          store_args[i++] = arg;
-          if (i >= store_args.size())
-            break;
-        }
-        cmd_args = absl::MakeSpan(store_args);
-      }
-      RecordJournal(op_args, cmd, cmd_args, op_args.tx->GetUniqueShardCnt());
-    } else {
+    if (stored * 2 == args.Size()) {
       RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
+      DCHECK_EQ(result, OpStatus::OK);
+      return result;
     }
+
+    // Even without changes, we have to send a dummy command like PING for the
+    // replica to ack
+    string_view cmd = stored == 0 ? "PING" : "MSET";
+    vector<string_view> store_args(args.begin(), args.end());
+    store_args.resize(stored * 2);
+    RecordJournal(op_args, cmd, store_args, op_args.tx->GetUniqueShardCnt());
   }
+
+  return result;
 }
 
 // emission_interval_ms assumed to be positive
@@ -451,7 +440,8 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, bool f
 
     auto& resp = response.resp_arr[i].emplace();
 
-    // Copy to buffer or trigger tiered read that will eventually write to buffer
+    // Copy to buffer or trigger tiered read that will eventually write to
+    // buffer
     if (it->second.IsExternal()) {
       wait_bc->Add(1);
       auto cb = [next, wait_bc](const string& v) mutable {
@@ -481,7 +471,8 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, bool f
   return response;
 }
 
-// Extend key with value, either prepend or append. Return size of stored string after modification
+// Extend key with value, either prepend or append. Return size of stored string
+// after modification
 OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_args,
                                                               std::string_view key,
                                                               std::string_view value,
@@ -672,7 +663,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
                       PrimeValue* pv) {
   EngineShard* shard = op_args_.shard;
 
-  // Currently we always offload
+  // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
   if (auto* ts = shard->tiered_storage(); ts && ts->ShouldStash(*pv)) {
     ts->Stash(op_args_.db_cntx.db_index, key, pv);
   }
@@ -745,29 +736,31 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       auto [opt, int_arg] = parser.Next<string_view, int64_t>();
 
       if (auto err = parser.Error(); err) {
-        return builder->SendError(err->MakeReply());
+        return cntx->SendError(err->MakeReply());
       }
 
       // We can set expiry only once.
       if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
-        return builder->SendError(kSyntaxErr);
+        return cntx->SendError(kSyntaxErr);
 
       sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
 
       // Since PXAT/EXAT can change this, we need to check this ahead
       if (int_arg <= 0) {
-        return builder->SendError(InvalidExpireTime("set"));
+        return cntx->SendError(InvalidExpireTime("set"));
       }
 
       bool is_ms = (opt[0] == 'P');
 
-      // for []AT we need to take expiration time as absolute from the value given
-      // check here and if the time is in the past, return OK but don't set it
-      // Note that the time pass here for PXAT is in milliseconds, we must not change it!
+      // for []AT we need to take expiration time as absolute from the value
+      // given check here and if the time is in the past, return OK but don't
+      // set it Note that the time pass here for PXAT is in milliseconds, we
+      // must not change it!
       if (absl::EndsWith(opt, "AT")) {
         int_arg = AbsExpiryToTtl(int_arg, is_ms);
         if (int_arg < 0) {
-          // this happened in the past, just return, for some reason Redis reports OK in this case
+          // this happened in the past, just return, for some reason Redis
+          // reports OK in this case
           return builder->SendStored();
         }
       }
@@ -794,14 +787,14 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
   }
 
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
 
   if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
       has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
-    return builder->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   StringValue prev;
@@ -823,7 +816,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (result == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
+    return cntx->SendError(kOutOfMemory);
   }
 
   DCHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
@@ -843,7 +836,8 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   // This is the same as calling the "Set" function, only in this case we are
   // change the value only if the key does not exist. Otherwise the function
   // will not modify it. in which case it would return 0
-  // it would return to the caller 1 in case the key did not exists and was added
+  // it would return to the caller 1 in case the key did not exists and was
+  // added
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
@@ -857,7 +851,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
     return builder->SendLong(1);  // this means that we successfully set the value
   }
   if (results == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
+    return cntx->SendError(kOutOfMemory);
   }
   CHECK_EQ(results, OpStatus::SKIPPED);  // in this case it must be skipped!
   return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
@@ -1099,10 +1093,10 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
       builder->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
-      builder->SendError(kInvalidIntErr);
+      cntx->SendError(kInvalidIntErr);
       break;
     case OpStatus::OUT_OF_RANGE:
-      builder->SendError(kIncrOverflow);
+      cntx->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
       reinterpret_cast<MCReplyBuilder*>(builder)->SendNotFound();
@@ -1168,7 +1162,8 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   // wait for all tiered reads to finish
   tiering_bc->Wait();
 
-  // reorder the responses back according to the order of their corresponding keys.
+  // reorder the responses back according to the order of their corresponding
+  // keys.
   SinkReplyBuilder::MGetResponse res(args.size());
 
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
@@ -1208,18 +1203,21 @@ void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
     LOG(INFO) << "MSET/" << transaction->GetUniqueShardCnt() << str;
   }
 
-  atomic_bool success = true;
+  AggregateStatus result;
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
-    OpMSet(t->GetOpArgs(shard), args, &success);
+    if (auto status = OpMSet(t->GetOpArgs(shard), args); status != OpStatus::OK)
+      result = status;
     return OpStatus::OK;
   };
 
-  OpStatus status = transaction->ScheduleSingleHop(std::move(cb));
-  if (success.load()) {
+  if (auto status = transaction->ScheduleSingleHop(std::move(cb)); status != OpStatus::OK)
+    result = status;
+
+  if (*result == OpStatus::OK) {
     cntx->SendOk();
   } else {
-    cntx->SendError(status);
+    cntx->SendError(*result);
   }
 }
 
@@ -1245,18 +1243,19 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
   transaction->Execute(std::move(cb), false);
   const bool to_skip = exists.load(memory_order_relaxed);
 
-  atomic_bool success = true;
+  AggregateStatus result;
   auto epilog_cb = [&](Transaction* t, EngineShard* shard) {
     if (to_skip)
       return OpStatus::OK;
 
     auto args = t->GetShardArgs(shard->shard_id());
-    OpMSet(t->GetOpArgs(shard), std::move(args), &success);
+    if (auto status = OpMSet(t->GetOpArgs(shard), args); status != OpStatus::OK)
+      result = status;
     return OpStatus::OK;
   };
   transaction->Execute(std::move(epilog_cb), true);
 
-  cntx->SendLong(to_skip || !success.load() ? 0 : 1);
+  cntx->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
 void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
@@ -1343,13 +1342,13 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
  *  1. Whether the action was limited:
  *   - 0 indicates the action is allowed.
  *   - 1 indicates that the action was limited/blocked.
- *  2. The total limit of the key (max_burst + 1). This is equivalent to the common
- * X-RateLimit-Limit HTTP header.
+ *  2. The total limit of the key (max_burst + 1). This is equivalent to the
+ * common X-RateLimit-Limit HTTP header.
  *  3. The remaining limit of the key. Equivalent to X-RateLimit-Remaining.
- *  4. The number of seconds until the user should retry, and always -1 if the action was allowed.
- * Equivalent to Retry-After.
- *  5. The number of seconds until the limit will reset to its maximum capacity. Equivalent to
- * X-RateLimit-Reset.
+ *  4. The number of seconds until the user should retry, and always -1 if the
+ * action was allowed. Equivalent to Retry-After.
+ *  5. The number of seconds until the limit will reset to its maximum capacity.
+ * Equivalent to X-RateLimit-Reset.
  */
 void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   const string_view key = ArgS(args, 0);

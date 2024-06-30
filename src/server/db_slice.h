@@ -469,6 +469,14 @@ class DbSlice {
   void PerformDeletion(Iterator del_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
+  void LockChangeCb() const {
+    return cb_mu_.lock_shared();
+  }
+
+  void UnlockChangeCb() const {
+    return cb_mu_.unlock_shared();
+  }
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
@@ -523,6 +531,8 @@ class DbSlice {
     return version_++;
   }
 
+  void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
+
  private:
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
@@ -544,6 +554,12 @@ class DbSlice {
   // Used in temporary computations in Acquire/Release.
   mutable absl::flat_hash_set<uint64_t> uniq_fps_;
 
+  // To ensure correct data replication, we must serialize the buckets that each running command
+  // will modify, followed by serializing the command to the journal. We use a mutex to prevent
+  // interleaving between bucket and journal registrations, and the command execution with its
+  // journaling. LockChangeCb is called before the callback, and UnlockChangeCb is called after
+  // journaling is completed. Register to bucket and journal changes is also does without preemption
+  mutable util::fb2::SharedMutex cb_mu_;
   // ordered from the smallest to largest version.
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
@@ -552,6 +568,9 @@ class DbSlice {
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
+
+  // Record whenever a key expired to DbTable::expired_keys_events_ for keyspace notifications
+  bool expired_keys_events_recording_ = true;
 
   struct Hash {
     size_t operator()(const facade::Connection::WeakRef& c) const {

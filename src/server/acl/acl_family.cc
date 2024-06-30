@@ -64,19 +64,18 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
 
   for (const auto& [username, user] : registry) {
     std::string buffer = "user ";
-    const std::string_view pass = user.Password();
-    const std::string password = pass == "nopass" ? "nopass" : PrettyPrintSha(pass);
-
-    const std::string acl_cat_and_commands =
-        AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
+    const std::string password = PasswordsToString(user.Passwords(), user.HasNopass(), false);
 
     const std::string acl_keys = AclKeysToString(user.Keys());
     const std::string maybe_space_com = acl_keys.empty() ? "" : " ";
 
+    const std::string acl_cat_and_commands =
+        AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
+
     using namespace std::string_view_literals;
 
-    absl::StrAppend(&buffer, username, " ", user.IsActive() ? "on "sv : "off "sv, password, " ",
-                    acl_cat_and_commands, maybe_space_com, acl_keys);
+    absl::StrAppend(&buffer, username, " ", user.IsActive() ? "on "sv : "off "sv, password,
+                    acl_keys, maybe_space_com, acl_cat_and_commands);
 
     cntx->SendSimpleString(buffer);
   }
@@ -196,18 +195,18 @@ std::string AclFamily::RegistryToString() const {
   std::string result;
   for (auto& [username, user] : registry) {
     std::string command = "USER ";
-    const std::string_view pass = user.Password();
-    const std::string password =
-        pass == "nopass" ? "nopass " : absl::StrCat("#", PrettyPrintSha(pass, true), " ");
-    const std::string acl_cat_and_commands =
-        AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
+    const std::string password = PasswordsToString(user.Passwords(), user.HasNopass(), true);
+
     const std::string acl_keys = AclKeysToString(user.Keys());
     const std::string maybe_space = acl_keys.empty() ? "" : " ";
+
+    const std::string acl_cat_and_commands =
+        AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
 
     using namespace std::string_view_literals;
 
     absl::StrAppend(&result, command, username, " ", user.IsActive() ? "ON "sv : "OFF "sv, password,
-                    acl_cat_and_commands, maybe_space, acl_keys, "\n");
+                    acl_keys, maybe_space, acl_cat_and_commands, "\n");
   }
 
   return result;
@@ -279,7 +278,7 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
   std::vector<User::UpdateRequest> requests;
 
   for (auto& cmds : *materialized) {
-    auto req = ParseAclSetUser<std::vector<std::string_view>&>(cmds, *cmd_registry_, true);
+    auto req = ParseAclSetUser(cmds, *cmd_registry_, true);
     if (std::holds_alternative<ErrorReply>(req)) {
       auto error = std::move(std::get<ErrorReply>(req));
       LOG(WARNING) << "Error while parsing aclfile: " << error.ToSv();
@@ -493,7 +492,10 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   }
   auto& user = registry.find(username)->second;
   std::string status = user.IsActive() ? "on" : "off";
-  auto pass = user.Password();
+  auto pass = PasswordsToString(user.Passwords(), user.HasNopass(), false);
+  if (!pass.empty()) {
+    pass.pop_back();
+  }
 
   auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(8);
@@ -507,7 +509,7 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   }
 
   rb->SendSimpleString("passwords");
-  if (pass != "nopass") {
+  if (pass != "nopass" && !pass.empty()) {
     rb->SendSimpleString(pass);
   } else {
     rb->SendEmptyArray();
@@ -645,7 +647,7 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
   registry_ = registry;
   config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
     User::UpdateRequest rqst;
-    rqst.password = flag.CurrentValue();
+    rqst.passwords.push_back({flag.CurrentValue()});
     registry_->MaybeAddAndUpdate("default", std::move(rqst));
     return true;
   });

@@ -25,12 +25,12 @@ namespace {
 std::string AclCatToString(uint32_t acl_category, User::Sign sign) {
   std::string res = sign == User::Sign::PLUS ? "+@" : "-@";
   if (acl_category == acl::ALL) {
-    absl::StrAppend(&res, "ALL");
+    absl::StrAppend(&res, "all");
     return res;
   }
 
   const auto& index = CategoryToIdx().at(acl_category);
-  absl::StrAppend(&res, REVERSE_CATEGORY_INDEX_TABLE[index]);
+  absl::StrAppend(&res, absl::AsciiStrToLower(REVERSE_CATEGORY_INDEX_TABLE[index]));
   return res;
 }
 
@@ -41,7 +41,7 @@ std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) {
   std::string prefix = (sign == User::Sign::PLUS) ? "+" : "-";
   if (mask == ALL_COMMANDS) {
     for (const auto& cmd : rev_index[family]) {
-      absl::StrAppend(&res, prefix, cmd, " ");
+      absl::StrAppend(&res, prefix, absl::AsciiStrToLower(cmd), " ");
     }
     res.pop_back();
     return res;
@@ -53,7 +53,7 @@ std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) {
     mask = mask >> 1;
   }
   --pos;
-  absl::StrAppend(&res, prefix, rev_index[family][pos]);
+  absl::StrAppend(&res, prefix, absl::AsciiStrToLower(rev_index[family][pos]));
   return res;
 }
 
@@ -160,13 +160,22 @@ std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command) {
   return ParseKeyResult{std::string(key), op};
 }
 
-std::optional<std::string> MaybeParsePassword(std::string_view command, bool hashed) {
+std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, bool hashed) {
+  using UpPass = User::UpdatePass;
   if (command == "nopass") {
-    return std::string(command);
+    return UpPass{"", false, true};
+  }
+
+  if (command == "resetpass") {
+    return UpPass{"", false, false, true};
   }
 
   if (command[0] == '>' || (hashed && command[0] == '#')) {
-    return std::string(command.substr(1));
+    return UpPass{std::string(command.substr(1))};
+  }
+
+  if (command[0] == '<') {
+    return UpPass{std::string(command.substr(1)), true};
   }
 
   return {};
@@ -254,18 +263,15 @@ MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames
 
 using facade::ErrorReply;
 
-template <typename T>
-std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
+std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(facade::ArgRange args,
                                                               const CommandRegistry& registry,
                                                               bool hashed, bool has_all_keys) {
   User::UpdateRequest req;
 
-  for (auto& arg : args) {
+  for (std::string_view arg : args) {
     if (auto pass = MaybeParsePassword(facade::ToSV(arg), hashed); pass) {
-      if (req.password) {
-        return ErrorReply("Only one password is allowed");
-      }
-      req.password = std::move(pass);
+      req.passwords.push_back(std::move(*pass));
+
       if (hashed && absl::StartsWith(facade::ToSV(arg), "#")) {
         req.is_hashed = hashed;
       }
@@ -291,18 +297,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
       continue;
     }
 
-    std::string buffer;
-    std::string_view command;
-    if constexpr (std::is_same_v<T, facade::CmdArgList>) {
-      ToUpper(&arg);
-      command = facade::ToSV(arg);
-    } else {
-      // Guaranteed SSO because commands are small
-      buffer = arg;
-      absl::Span<char> view{buffer.data(), buffer.size()};
-      ToUpper(&view);
-      command = buffer;
-    }
+    std::string command = absl::AsciiStrToUpper(arg);
 
     if (auto status = MaybeParseStatus(command); status) {
       if (req.is_active) {
@@ -338,14 +333,6 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(T args,
 
 using facade::CmdArgList;
 
-template std::variant<User::UpdateRequest, ErrorReply>
-ParseAclSetUser<std::vector<std::string_view>&>(std::vector<std::string_view>&,
-                                                const CommandRegistry& registry, bool hashed,
-                                                bool has_all_keys);
-
-template std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser<CmdArgList>(
-    CmdArgList args, const CommandRegistry& registry, bool hashed, bool has_all_keys);
-
 std::string AclKeysToString(const AclKeys& keys) {
   if (keys.all_keys) {
     return "~*";
@@ -366,4 +353,16 @@ std::string AclKeysToString(const AclKeys& keys) {
   return result;
 }
 
+std::string PasswordsToString(const absl::flat_hash_set<std::string>& passwords, bool nopass,
+                              bool full_sha) {
+  if (nopass) {
+    return "nopass ";
+  }
+  std::string result;
+  for (const auto& pass : passwords) {
+    absl::StrAppend(&result, "#", PrettyPrintSha(pass, full_sha), " ");
+  }
+
+  return result;
+}
 }  // namespace dfly::acl

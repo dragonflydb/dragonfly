@@ -10,6 +10,7 @@
 #include <string_view>
 #include <variant>
 
+#include "absl/container/flat_hash_set.h"
 #include "facade/facade_types.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/user.h"
@@ -23,7 +24,7 @@ std::string AclCatAndCommandToString(const User::CategoryChanges& cat,
 std::string PrettyPrintSha(std::string_view pass, bool all = false);
 
 // When hashed is true, we allow passwords that start with both # and >
-std::optional<std::string> MaybeParsePassword(std::string_view command, bool hashed = false);
+std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, bool hashed = false);
 
 std::optional<bool> MaybeParseStatus(std::string_view command);
 
@@ -36,9 +37,9 @@ using OptCommand = std::optional<std::pair<size_t, uint64_t>>;
 std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
                                                  const CommandRegistry& registry);
 
-template <typename T>
 std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
-    T args, const CommandRegistry& registry, bool hashed = false, bool has_all_keys = false);
+    facade::ArgRange args, const CommandRegistry& registry, bool hashed = false,
+    bool has_all_keys = false);
 
 using MaterializedContents = std::optional<std::vector<std::vector<std::string_view>>>;
 
@@ -55,4 +56,8 @@ struct ParseKeyResult {
 std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command);
 
 std::string AclKeysToString(const AclKeys& keys);
+
+std::string PasswordsToString(const absl::flat_hash_set<std::string>& passwords, bool nopass,
+                              bool full_sha);
+
 }  // namespace dfly::acl

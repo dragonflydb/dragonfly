@@ -59,8 +59,8 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
     }
 
     if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
-      params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
-                                  search::VectorSimilarity::COSINE);
+      params.sim = parser->ToUpper().Switch("L2", search::VectorSimilarity::L2, "COSINE",
+                                            search::VectorSimilarity::COSINE);
       continue;
     }
 
@@ -71,6 +71,23 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
 
     if (parser->Check("M").ExpectTail(1)) {
       params.hnsw_m = parser->Next<size_t>();
+      continue;
+    }
+
+    if (parser->Check("EF_CONSTRUCTION").ExpectTail(1)) {
+      params.hnsw_ef_construction = parser->Next<size_t>();
+      continue;
+    }
+
+    if (parser->Check("EF_RUNTIME").ExpectTail(1)) {
+      parser->Next<size_t>();
+      LOG(WARNING) << "EF_RUNTIME not supported";
+      continue;
+    }
+
+    if (parser->Check("EPSILON").ExpectTail(1)) {
+      parser->Next<double>();
+      LOG(WARNING) << "EPSILON not supported";
       continue;
     }
 
@@ -141,8 +158,15 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
       params = ParseTagParams(&parser);
     } else if (*type == search::SchemaField::VECTOR) {
       auto vector_params = ParseVectorParams(&parser);
-      if (!parser.HasError() && vector_params.dim == 0) {
-        cntx->SendError("Knn vector dimension cannot be zero");
+      if (parser.HasError()) {
+        auto err = *parser.Error();
+        VLOG(1) << "Could not parse vector param " << err.index;
+        cntx->SendError("Parse error of vector parameters", kSyntaxErrType);
+        return nullopt;
+      }
+
+      if (vector_params.dim == 0) {
+        cntx->SendError("Knn vector dimension cannot be zero", kSyntaxErrType);
         return nullopt;
       }
       params = vector_params;

@@ -6,6 +6,7 @@
 
 #include "base/logging.h"
 #include "core/heap_size.h"
+#include "facade/acl_commands_def.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
@@ -80,18 +81,31 @@ const CommandId* StoredCmd::Cid() const {
   return cid_;
 }
 
-ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* owner)
+ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* owner,
+                                     acl::UserCredentials cred)
     : facade::ConnectionContext(stream, owner) {
   if (owner) {
     skip_acl_validation = owner->IsPrivileged();
   }
-  acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
+
+  keys = std::move(cred.keys);
+  if (cred.acl_commands.empty()) {
+    acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);
+  } else {
+    acl_commands = std::move(cred.acl_commands);
+  }
 }
 
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
                                      facade::CapturingReplyBuilder* crb)
     : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
-  acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::ALL_COMMANDS);
+  if (owner) {
+    acl_commands = owner->acl_commands;
+    keys = owner->keys;
+    skip_acl_validation = owner->skip_acl_validation;
+  } else {
+    acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);
+  }
   if (tx) {  // If we have a carrier transaction, this context is used for squashing
     DCHECK(owner);
     conn_state.db_index = owner->conn_state.db_index;
@@ -143,15 +157,15 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
   ChannelStoreUpdater csu{pattern, to_add, conn, uint32_t(tid)};
 
   // Gather all the channels we need to subscribe to / remove.
-  for (size_t i = 0; i < args.size(); ++i) {
-    string_view channel = ArgS(args, i);
+  size_t i = 0;
+  for (string_view channel : ArgS(args)) {
     if (to_add && local_store.emplace(channel).second)
       csu.Record(channel);
     else if (!to_add && local_store.erase(channel) > 0)
       csu.Record(channel);
 
     if (to_reply)
-      result[i] = sinfo.SubscriptionCount();
+      result[i++] = sinfo.SubscriptionCount();
   }
 
   csu.Apply();
@@ -249,6 +263,29 @@ size_t ConnectionState::UsedMemory() const {
 
 size_t ConnectionContext::UsedMemory() const {
   return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(conn_state);
+}
+
+void ConnectionContext::SendError(std::string_view str, std::string_view type) {
+  string_view name = cid ? cid->name() : string_view{};
+
+  VLOG(1) << "Sending error " << str << " " << type << " during " << name;
+  facade::ConnectionContext::SendError(str, type);
+}
+
+void ConnectionContext::SendError(facade::ErrorReply error) {
+  string_view name = cid ? cid->name() : string_view{};
+
+  VLOG(1) << "Sending error " << error.ToSv() << " during " << name;
+  facade::ConnectionContext::SendError(std::move(error));
+}
+
+void ConnectionContext::SendError(facade::OpStatus status) {
+  if (status != facade::OpStatus::OK) {
+    string_view name = cid ? cid->name() : string_view{};
+    VLOG(1) << "Sending error " << status << " during " << name;
+  }
+
+  facade::ConnectionContext::SendError(status);
 }
 
 void ConnectionState::ExecInfo::Clear() {

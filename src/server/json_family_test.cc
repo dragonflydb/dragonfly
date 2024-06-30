@@ -952,6 +952,11 @@ TEST_F(JsonFamilyTest, MGet) {
   resp = Run({"JSON.SET", "json2", ".", json[1]});
   ASSERT_THAT(resp, "OK");
 
+#ifndef SANITIZERS
+  resp = Run({"JSON.MGET", "json1", "??INNNNVALID??"});
+  EXPECT_THAT(resp, ErrArg("Unknown token"));
+#endif
+
   resp = Run({"JSON.MGET", "json1", "json2", "json3", "$.address.country"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   EXPECT_THAT(resp.GetVec(),
@@ -1082,18 +1087,20 @@ TEST_F(JsonFamilyTest, Set) {
 }
 
 TEST_F(JsonFamilyTest, MSet) {
-  GTEST_SKIP() << "Not implemented";
-  string json = R"(
-    {"a":{"a":1, "b":2, "c":3}}
-  )";
+  string json1 = R"({"a":{"a":1,"b":2,"c":3}})";
+  string json2 = R"({"a":{"a":4,"b":5,"c":6}})";
 
   auto resp = Run({"JSON.MSET", "j1", "$"});
   EXPECT_THAT(resp, ErrArg("wrong number"));
-  resp = Run({"JSON.MSET", "j1", "$", json, "j3", "$"});
+  resp = Run({"JSON.MSET", "j1", "$", json1, "j3", "$"});
   EXPECT_THAT(resp, ErrArg("wrong number"));
 
-  resp = Run({"JSON.MSET", "j1", "$", json, "j3", "$", json});
+  resp = Run({"JSON.MSET", "j1", "$", json1, "j2", "$", json2, "j3", "$", json1, "j4", "$", json2});
   EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.MGET", "j1", "j2", "j3", "j4", "$"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("[" + json1 + "]", "[" + json2 + "]", "[" + json1 + "]",
+                                         "[" + json2 + "]"));
 }
 
 TEST_F(JsonFamilyTest, Merge) {

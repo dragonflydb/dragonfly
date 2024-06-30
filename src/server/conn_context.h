@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include "acl/acl_commands_def.h"
+#include "facade/acl_commands_def.h"
 #include "facade/conn_context.h"
 #include "facade/reply_capture.h"
 #include "server/common.h"
@@ -265,7 +266,7 @@ struct ConnectionState {
 
 class ConnectionContext : public facade::ConnectionContext {
  public:
-  ConnectionContext(::io::Sink* stream, facade::Connection* owner);
+  ConnectionContext(::io::Sink* stream, facade::Connection* owner, dfly::acl::UserCredentials cred);
 
   ConnectionContext(const ConnectionContext* owner, Transaction* tx,
                     facade::CapturingReplyBuilder* crb);
@@ -297,6 +298,10 @@ class ConnectionContext : public facade::ConnectionContext {
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   size_t UsedMemory() const override;
+
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
+  void SendError(facade::ErrorReply error) override;
+  void SendError(facade::OpStatus status) override;
 
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext

@@ -4,13 +4,13 @@
 
 #pragma once
 
-#include <string>
 #include <system_error>
 
 #include "io/io.h"
 #include "server/tiering/common.h"
 #include "server/tiering/external_alloc.h"
-#include "server/tiering/io_mgr.h"
+#include "util/fibers/uring_file.h"
+#include "util/fibers/uring_proactor.h"  // for UringBuf
 
 namespace dfly::tiering {
 
@@ -20,6 +20,8 @@ class DiskStorage {
   struct Stats {
     size_t allocated_bytes = 0;
     size_t capacity_bytes = 0;
+    uint64_t heap_buf_alloc_count = 0;
+    uint64_t registered_buf_alloc_count = 0;
   };
 
   using ReadCb = std::function<void(std::string_view, std::error_code)>;
@@ -45,9 +47,18 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
-  size_t pending_ops_ = 0;
-  size_t max_size_;
-  IoMgr io_mgr_;
+  std::error_code Grow(off_t grow_size);
+  util::fb2::UringBuf PrepareBuf(size_t len);
+
+  off_t size_, max_size_;
+  size_t pending_ops_ = 0;  // number of ongoing ops for safe shutdown
+
+  // how many times we allocate registered/heap buffers.
+  uint64_t heap_buf_alloc_cnt_ = 0, reg_buf_alloc_cnt_ = 0;
+
+  bool grow_pending_ = false;
+  std::unique_ptr<util::fb2::LinuxFile> backing_file_;
+
   ExternalAllocator alloc_;
 };
 

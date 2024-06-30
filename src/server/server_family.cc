@@ -132,6 +132,7 @@ ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
+ABSL_DECLARE_FLAG(int, replica_priority);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(cond, m)                                           \
@@ -1406,7 +1407,7 @@ void ServerFamily::OnClose(ConnectionContext* cntx) {
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
   if (!section.empty()) {
-    return cntx->reply_builder()->SendError("");
+    return cntx->SendError("");
   }
   string info;
 
@@ -1644,7 +1645,6 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     if (is_authorized) {
       cntx->authed_username = username;
       auto cred = registry->GetCredentials(username);
-      cntx->acl_categories = cred.acl_categories;
       cntx->acl_commands = cred.acl_commands;
       cntx->keys = std::move(cred.keys);
       cntx->authenticated = true;
@@ -2175,7 +2175,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_total_fetches", m.tiered_stats.total_fetches);
     append("tiered_total_cancels", m.tiered_stats.total_cancels);
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
-    append("tiered_total_deletes", m.tiered_stats.total_defrags);
+    append("tiered_total_stash_overflows", m.tiered_stats.total_stash_overflows);
+    append("tiered_heap_buf_allocations", m.tiered_stats.total_heap_buf_allocs);
+    append("tiered_registered_buf_allocations", m.tiered_stats.total_registered_buf_allocs);
 
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
@@ -2285,6 +2287,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
         append("master_sync_in_progress", rinfo.full_sync_in_progress);
         append("master_replid", rinfo.master_id);
+        append("slave_priority", GetFlag(FLAGS_replica_priority));
+        append("slave_read_only", 1);
       };
       replication_info_cb(replica_->GetInfo());
       for (const auto& replica : cluster_replicas_) {
@@ -2586,7 +2590,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
-  ConnectionContext ctxt{&sink, nullptr};
+  ConnectionContext ctxt{&sink, nullptr, {}};
   ctxt.skip_acl_validation = true;
 
   StringVec replicaof_params{string(host), string(port)};

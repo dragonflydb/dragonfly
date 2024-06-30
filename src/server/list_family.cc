@@ -158,22 +158,6 @@ struct CircularMessages {
 // Used to recover logs for BLPOP failures. See OpBPop.
 thread_local CircularMessages debugMessages{50};
 
-// A bit awkward translation from a single key to ShardArgs.
-// We create a mutable slice (which will never be mutated) from the key, then we create
-// a CmdArgList of size 1 that references mslice and finally
-// we reference the first element in the CmdArgList via islice.
-struct SingleArg {
-  MutableSlice mslice;
-  IndexSlice islice{0, 1};
-
-  SingleArg(string_view arg) : mslice(const_cast<char*>(arg.data()), arg.size()) {
-  }
-
-  ShardArgs Get() {
-    return ShardArgs{CmdArgList{&mslice, 1}, absl::MakeSpan(&islice, 1)};
-  }
-};
-
 class BPopPusher {
  public:
   BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir);
@@ -318,7 +302,7 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
 }
 
 OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir dir,
-                          bool skip_notexist, ArgSlice vals, bool journal_rewrite) {
+                          bool skip_notexist, facade::ArgRange vals, bool journal_rewrite) {
   EngineShard* es = op_args.shard;
   DbSlice::AddOrFindResult res;
 
@@ -350,7 +334,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   // Left push is LIST_HEAD.
   int pos = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
 
-  for (auto v : vals) {
+  for (string_view v : vals) {
     es->tmp_str1 = sdscpylen(es->tmp_str1, v.data(), v.size());
     quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
   }
@@ -368,7 +352,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
   if (journal_rewrite && op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPUSH" : "RPUSH";
-    vector<string_view> mapped(vals.size() + 1);
+    vector<string_view> mapped(vals.Size() + 1);
     mapped[0] = key;
     std::copy(vals.begin(), vals.end(), mapped.begin() + 1);
     RecordJournal(op_args, command, mapped, 2);
@@ -456,17 +440,14 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
         string_view val{find_res[0].value()};
         DVLOG(1) << "Pushing value: " << val << " to list: " << dest;
 
-        ArgSlice span{&val, 1};
-        OpPush(op_args, key, dest_dir, false, span, true);
+        OpPush(op_args, key, dest_dir, false, ArgSlice{val}, true);
 
         // blocking_controller does not have to be set with non-blocking transactions.
         if (shard->blocking_controller()) {
           // hack, again. since we hacked which queue we are waiting on (see RunPair)
           // we must clean-up src key here manually. See RunPair why we do this.
           // in short- we suspended on "src" on both shards.
-
-          SingleArg single_arg{src};
-          shard->blocking_controller()->FinalizeWatched(single_arg.Get(), t);
+          shard->blocking_controller()->FinalizeWatched(ArgSlice({src}), t);
         }
       } else {
         DVLOG(1) << "Popping value from list: " << key;
@@ -754,7 +735,7 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
       break;
 
     default:
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
       break;
   }
 }
@@ -795,7 +776,7 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
       break;
 
     default:
-      return rb->SendError(op_res.status());
+      return cntx->SendError(op_res.status());
       break;
   }
 }
@@ -838,7 +819,7 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
       break;
 
     default:
-      return rb->SendError(op_res.status());
+      return cntx->SendError(op_res.status());
       break;
   }
 }
@@ -891,8 +872,7 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
     return op_res;
   }
 
-  SingleArg single_arg{pop_key_};
-  auto wcb = [&](Transaction* t, EngineShard* shard) { return single_arg.Get(); };
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice(&pop_key_, 1); };
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {
@@ -919,13 +899,11 @@ OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
     return op_res;
   }
 
-  SingleArg single_arg(this->pop_key_);
-
   // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
-  auto wcb = [&](Transaction* t, EngineShard* shard) { return single_arg.Get(); };
+  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice(&this->pop_key_, 1); };
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {
@@ -1056,7 +1034,7 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   } else {
     rb->SendNull();
   }
@@ -1239,13 +1217,13 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
-      return rb->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED:
       // TODO: proper error for moved
-      return rb->SendError("-MOVED");
+      return cntx->SendError("-MOVED");
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
   }
@@ -1255,13 +1233,9 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
 void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
                              ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
-  vector<std::string_view> vals(args.size() - 1);
-  for (size_t i = 1; i < args.size(); ++i) {
-    vals[i - 1] = ArgS(args, i);
-  }
-  absl::Span<std::string_view> span{vals.data(), vals.size()};
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, span, false);
+    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1303,7 +1277,7 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
     case OpStatus::KEY_NOTFOUND:
       return rb->SendNull();
     case OpStatus::WRONG_TYPE:
-      return rb->SendError(kWrongTypeErr);
+      return cntx->SendError(kWrongTypeErr);
     default:;
   }
 

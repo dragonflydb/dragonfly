@@ -57,10 +57,6 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 async def test_replication_all(
     df_local_factory: DflyInstanceFactory, t_master, t_replicas, seeder_config, stream_target, mode
 ):
-    # Temporary disable the test until it passes reliably with cache mode.
-    if mode:
-        pytest.skip()
-
     if mode:
         mode["maxmemory"] = str(t_master * 256) + "mb"
 
@@ -693,16 +689,16 @@ async def test_rewrites(df_local_factory):
 
         await c_master.set("renamekey", "1000", px=50000)
         await skip_cmd()
-        # Check RENAME turns into DEL SET and PEXPIREAT
+        # Check RENAME turns into DEL and RESTORE
         await check_list_ooo(
             "RENAME renamekey renamed",
-            [r"DEL renamekey", r"SET renamed 1000", r"PEXPIREAT renamed (.*?)"],
+            [r"DEL renamekey", r"RESTORE renamed (.*?) (.*?) REPLACE ABSTTL"],
         )
         await check_expire("renamed")
-        # Check RENAMENX turns into DEL SET and PEXPIREAT
+        # Check RENAMENX turns into DEL and RESTORE
         await check_list_ooo(
             "RENAMENX renamed renamekey",
-            [r"DEL renamed", r"SET renamekey 1000", r"PEXPIREAT renamekey (.*?)"],
+            [r"DEL renamed", r"RESTORE renamekey (.*?) (.*?) REPLACE ABSTTL"],
         )
         await check_expire("renamekey")
 
@@ -1901,17 +1897,23 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
     replica = df_local_factory.create(dbfilename=f"dump_{tmp_file_name}")
     df_local_factory.start_all([master, replica])
 
-    seeder = df_seeder_factory.create(port=replica.port, keys=30000)
-    await seeder.run(target_deviation=0.1)
+    seeder = SeederV2(key_target=40000)
     c_replica = replica.client()
+    await seeder.run(c_replica, target_deviation=0.1)
     dbsize = await c_replica.dbsize()
-    assert dbsize >= 9000
+    assert dbsize >= 30000
 
     replica.stop()
     replica.start()
     c_replica = replica.client()
     # Check replica of not alowed while loading snapshot
     try:
+        # If this fails adjust `keys` and the `assert dbsize >= 30000` above.
+        # Keep in mind that if the assert False is triggered below, it doesn't mean
+        # that there is a bug because it could be the case that while executing
+        # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
+        # is no longer in loading state and the assertion false is triggered.
+        assert "loading:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         assert False
     except aioredis.BusyLoadingError as e:
@@ -2112,13 +2114,6 @@ async def test_start_replicating_while_save(df_local_factory):
     await disconnect_clients(c_master, *[c_replica])
 
 
-async def is_replicaiton_conn_down(conn):
-    role = await conn.execute_command("INFO REPLICATION")
-    # fancy of way of extracting the field master_link_status
-    is_down = role.split("\r\n")[4].split(":")[1]
-    return is_down == "down"
-
-
 @pytest.mark.asyncio
 async def test_user_acl_replication(df_local_factory):
     master = df_local_factory.create(proactor_threads=4)
@@ -2140,11 +2135,9 @@ async def test_user_acl_replication(df_local_factory):
 
     # revoke acl's from tmp
     await c_master.execute_command("ACL SETUSER tmp -replconf")
-    async with async_timeout.timeout(5):
-        while True:
-            if await is_replicaiton_conn_down(c_replica):
-                break
-            await asyncio.sleep(1)
+    async for info, breaker in info_tick_timer(c_replica, section="REPLICATION"):
+        with breaker:
+            assert info["master_link_status"] == "down"
 
     await c_master.execute_command("SET bar foo")
 
@@ -2168,7 +2161,7 @@ async def test_replica_reconnect(df_local_factory, break_conn):
     # Connect replica to master
     master = df_local_factory.create(proactor_threads=1)
     replica = df_local_factory.create(
-        proactor_threads=1, replica_reconnect_on_master_restart=break_conn
+        proactor_threads=1, break_replication_on_master_restart=break_conn
     )
     df_local_factory.start_all([master, replica])
 
@@ -2178,13 +2171,12 @@ async def test_replica_reconnect(df_local_factory, break_conn):
     await c_master.execute_command("set k 12345")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
-
-    assert not await is_replicaiton_conn_down(c_replica)
+    assert (await c_replica.info("REPLICATION"))["master_link_status"] == "up"
 
     # kill existing master, create master with different repl_id but same port
     master_port = master.port
     master.stop()
-    assert await is_replicaiton_conn_down(c_replica)
+    assert (await c_replica.info("REPLICATION"))["master_link_status"] == "down"
 
     master = df_local_factory.create(proactor_threads=1, port=master_port)
     df_local_factory.start_all([master])
@@ -2196,14 +2188,14 @@ async def test_replica_reconnect(df_local_factory, break_conn):
         assert await c_replica.execute_command("get k") == "12345"
         assert await c_master.execute_command("set k 6789")
         assert await c_replica.execute_command("get k") == "12345"
-        assert await is_replicaiton_conn_down(c_replica)
+        assert (await c_replica.info("REPLICATION"))["master_link_status"] == "down"
     else:
         assert await c_master.execute_command("get k") == None
         assert await c_replica.execute_command("get k") == None
         assert await c_master.execute_command("set k 6789")
         await check_all_replicas_finished([c_replica], c_master)
         assert await c_replica.execute_command("get k") == "6789"
-        assert not await is_replicaiton_conn_down(c_replica)
+        assert (await c_replica.info("REPLICATION"))["master_link_status"] == "up"
 
     # Force re-replication, assert that it worked
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")

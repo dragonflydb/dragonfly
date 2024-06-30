@@ -12,6 +12,7 @@ import async_timeout
 from dataclasses import dataclass
 from aiohttp import ClientSession
 
+from .utility import tick_timer
 from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
@@ -309,9 +310,9 @@ async def test_pubsub_subcommand_for_numsub(async_client: aioredis.Redis):
     await asyncio.gather(*(resub(s, False, "chan1") for s in subs1))
 
     # Make sure numsub drops to 0
-    with async_timeout.timeout(1):
-        while (await async_client.pubsub_numsub("chan1"))[0][1] > 0:
-            await asyncio.sleep(0.05)
+    async for numsub, breaker in tick_timer(lambda: async_client.pubsub_numsub("chan1")):
+        with breaker:
+            assert numsub[0][1] == 0
 
     # Check empty numsub
     assert await async_client.pubsub_numsub() == []
@@ -408,6 +409,32 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
     await asyncio.gather(*(subscribe_worker() for _ in range(max_connections - 10)))
     await pub_task
     await async_pool.disconnect()
+
+
+@dfly_args({"notify_keyspace_events": "Ex"})
+async def test_keyspace_events(async_client: aioredis.Redis):
+    pclient = async_client.pubsub()
+    await pclient.subscribe("__keyevent@0__:expired")
+
+    keys = []
+    for i in range(10, 50):
+        keys.append(f"k{i}")
+        await async_client.set(keys[-1], "X", px=200 + i * 10)
+
+    # We don't support immediate expiration:
+    # keys += ['immediate']
+    # await async_client.set(keys[-1], 'Y', exat=123) # expired 50 years ago
+
+    events = []
+    async for message in pclient.listen():
+        if message["type"] == "subscribe":
+            continue
+
+        events.append(message)
+        if len(events) >= len(keys):
+            break
+
+    assert set(ev["data"] for ev in events) == set(keys)
 
 
 async def test_big_command(df_server, size=8 * 1024):

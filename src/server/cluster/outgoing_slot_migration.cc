@@ -58,17 +58,11 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
-    // Check if migration was cancelled while we yielded so far.
-    if (cancelled_) {
-      return;
-    }
-
     streamer_.Start(Sock());
   }
 
   void Cancel() {
     streamer_.Cancel();
-    cancelled_ = true;
   }
 
   void Finalize() {
@@ -81,7 +75,6 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
  private:
   RestoreStreamer streamer_;
-  bool cancelled_ = false;
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
@@ -94,6 +87,13 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
 
 OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
+
+  // Destroy each flow in its dedicated thread, because we could be the last owner of the db tables
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      slot_migrations_[shard->shard_id()].reset();
+    }
+  });
 }
 
 bool OutgoingMigration::ChangeState(MigrationState new_state) {
@@ -107,14 +107,34 @@ bool OutgoingMigration::ChangeState(MigrationState new_state) {
 }
 
 void OutgoingMigration::Finish(bool is_error) {
-  const auto new_state = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
-  if (ChangeState(new_state)) {
+  bool should_cancel_flows = false;
+
+  {
+    std::lock_guard lk(state_mu_);
+    switch (state_) {
+      case MigrationState::C_FINISHED:
+        return;  // Already finished, nothing else to do
+
+      case MigrationState::C_NO_STATE:
+      case MigrationState::C_CONNECTING:
+        should_cancel_flows = false;
+        break;
+
+      case MigrationState::C_SYNC:
+      case MigrationState::C_ERROR:
+        should_cancel_flows = true;
+        break;
+    }
+
+    state_ = is_error ? MigrationState::C_ERROR : MigrationState::C_FINISHED;
+  }
+
+  if (should_cancel_flows) {
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (const auto* shard = EngineShard::tlocal(); shard) {
         auto& flow = slot_migrations_[shard->shard_id()];
-        if (flow != nullptr) {
-          flow->Cancel();
-        }
+        CHECK(flow != nullptr);
+        flow->Cancel();
       }
     });
   }
@@ -173,18 +193,24 @@ void OutgoingMigration::SyncFb() {
       continue;
     }
 
+    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+      if (auto* shard = EngineShard::tlocal(); shard) {
+        server_family_->journal()->StartInThread();
+        slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
+            &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal());
+      }
+    });
+
     if (!ChangeState(MigrationState::C_SYNC)) {
       break;
     }
 
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (auto* shard = EngineShard::tlocal(); shard) {
-        server_family_->journal()->StartInThread();
-        slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
-            &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal());
-        auto& migration = *slot_migrations_[shard->shard_id()];
-        migration.Sync(cf_->MyID(), shard->shard_id());
-        if (migration.GetError()) {
+        auto& migration = slot_migrations_[shard->shard_id()];
+        CHECK(migration != nullptr);
+        migration->Sync(cf_->MyID(), shard->shard_id());
+        if (migration->GetError()) {
           Finish(true);
         }
       }
@@ -283,7 +309,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   Finish(is_error);
   if (!is_error) {
     keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
-    cf_->UpdateConfig(migration_info_.slot_ranges, false);
+    cf_->ApplyMigrationSlotRangeToConfig(migration_info_.node_id, migration_info_.slot_ranges,
+                                         false);
     VLOG(1) << "Config is updated for " << cf_->MyID();
   }
   return true;

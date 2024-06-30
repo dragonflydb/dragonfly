@@ -40,6 +40,51 @@ def batch_fill_data(client, gen, batch_size=100):
         client.mset({k: v for k, v, in group})
 
 
+async def tick_timer(func, timeout=5, step=0.1):
+    """
+    Async generator with automatic break when all asserts pass
+
+    for object, breaker in tick_timer():
+        with breaker:
+            assert conditions on object
+
+    If the generator times out, the last failed assert is raised
+    """
+
+    class ticker_breaker:
+        def __init__(self):
+            self.exc = None
+            self.entered = False
+
+        def __enter__(self):
+            self.entered = True
+
+        def __exit__(self, exc_type, exc_value, trace):
+            if exc_value:
+                self.exc = exc_value
+                return True
+
+    last_error = None
+    start = time.time()
+    while time.time() - start < timeout:
+        breaker = ticker_breaker()
+        yield (await func(), breaker)
+        if breaker.entered and not breaker.exc:
+            return
+
+        last_error = breaker.exc
+        await asyncio.sleep(step)
+
+    if last_error:
+        raise RuntimeError("Timed out!") from last_error
+    raise RuntimeError("Timed out!")
+
+
+async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
+    async for x in tick_timer(lambda: client.info(section), **kwargs):
+        yield x
+
+
 async def wait_available_async(client: aioredis.Redis, timeout=10):
     """Block until instance exits loading phase"""
     its = 0
@@ -233,7 +278,7 @@ class CommandGenerator:
         ValueType.SET: "SADD",
         ValueType.HSET: "HMSET",
         ValueType.ZSET: "ZADD",
-        ValueType.JSON: "JSON.SET",
+        ValueType.JSON: "JSON.MSET",
     }
 
     def gen_grow_cmd(self):
@@ -242,7 +287,7 @@ class CommandGenerator:
         """
         # TODO: Implement COPY in Dragonfly.
         t = self.random_type()
-        if t == ValueType.STRING:
+        if t in [ValueType.STRING, ValueType.JSON]:
             count = random.randint(1, self.max_multikey)
         else:
             count = 1

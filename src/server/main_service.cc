@@ -407,24 +407,21 @@ void InterpreterReplier::SendMGetResponse(MGetResponse resp) {
 }
 
 void InterpreterReplier::SendSimpleStrArr(StrSpan arr) {
-  WrappedStrSpan warr{arr};
-  explr_->OnArrayStart(warr.Size());
-  for (unsigned i = 0; i < warr.Size(); i++)
-    explr_->OnString(warr[i]);
+  explr_->OnArrayStart(arr.Size());
+  for (string_view str : arr)
+    explr_->OnString(str);
   explr_->OnArrayEnd();
 }
 
 void InterpreterReplier::SendNullArray() {
-  SendSimpleStrArr({});
+  SendSimpleStrArr(ArgSlice{});
   PostItem();
 }
 
 void InterpreterReplier::SendStringArr(StrSpan arr, CollectionType) {
-  WrappedStrSpan warr{arr};
-  size_t size = warr.Size();
-  explr_->OnArrayStart(size);
-  for (size_t i = 0; i < size; i++)
-    explr_->OnString(warr[i]);
+  explr_->OnArrayStart(arr.Size());
+  for (string_view str : arr)
+    explr_->OnString(str);
   explr_->OnArrayEnd();
   PostItem();
 }
@@ -707,7 +704,16 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
   bool transactional = contains_global;
   if (!transactional) {
     for (const auto& scmd : exec_info.body) {
-      transactional |= scmd.Cid()->IsTransactional();
+      // We can only tell if eval is transactional based on they keycount
+      if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
+        CmdArgVec arg_vec{};
+        StoredCmd cmd = scmd;
+        cmd.Fill(&arg_vec);
+        auto keys = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
+        transactional |= (keys && keys.value().num_args() > 0);
+      } else {
+        transactional |= scmd.Cid()->IsTransactional();
+      }
       contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
 
       // We can't run no-key-transactional commands in lock-ahead mode currently,
@@ -1229,7 +1235,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   dfly_cntx->cid = cid;
 
   if (!InvokeCmd(cid, args_no_cmd, dfly_cntx)) {
-    dfly_cntx->reply_builder()->SendError("Internal Error");
+    dfly_cntx->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
 
@@ -1568,10 +1574,12 @@ bool RequirePrivilegedAuth() {
 
 facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
-  ConnectionContext* res = new ConnectionContext{peer, owner};
+  auto cred = user_registry_.GetCredentials("default");
+  ConnectionContext* res = new ConnectionContext{peer, owner, std::move(cred)};
 
   if (peer->IsUDS()) {
     res->req_auth = false;
+    res->skip_acl_validation = true;
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
@@ -1660,8 +1668,8 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
-  for (size_t i = 0; i < args.size(); i++) {
-    exec_info.watched_keys.emplace_back(cntx->db_index(), ArgS(args, i));
+  for (std::string_view key : ArgS(args)) {
+    exec_info.watched_keys.emplace_back(cntx->db_index(), key);
   }
 
   return cntx->SendOk();
@@ -1757,7 +1765,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
   BorrowedInterpreter interpreter{cntx};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
-    return rb->SendError(res.error().Format(), facade::kScriptErrType);
+    return cntx->SendError(res.error().Format(), facade::kScriptErrType);
 
   string sha{std::move(res.value())};
 
@@ -2036,7 +2044,7 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
   if (!cntx->conn_state.exec_info.IsCollecting()) {
-    return rb->SendError("DISCARD without MULTI");
+    return cntx->SendError("DISCARD without MULTI");
   }
 
   MultiCleanup(cntx);
@@ -2147,15 +2155,15 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   // Check basic invariants
   if (!exec_info.IsCollecting()) {
-    return rb->SendError("EXEC without MULTI");
+    return cntx->SendError("EXEC without MULTI");
   }
 
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
-    return rb->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
+    return cntx->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
   }
 
   if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
-    return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
+    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
@@ -2244,49 +2252,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
   string_view channel = ArgS(args, 0);
-  string_view msg = ArgS(args, 1);
+  string_view messages[] = {ArgS(args, 1)};
 
   auto* cs = ServerState::tlocal()->channel_store();
-  vector<ChannelStore::Subscriber> subscribers = cs->FetchSubscribers(channel);
-  int num_published = subscribers.size();
-  if (!subscribers.empty()) {
-    // Make sure neither of the threads limits is reached.
-    // This check actually doesn't reserve any memory ahead and doesn't prevent the buffer
-    // from eventually filling up, especially if multiple clients are unblocked simultaneously,
-    // but is generally good enough to limit too fast producers.
-    // Most importantly, this approach allows not blocking and not awaiting in the dispatch below,
-    // thus not adding any overhead to backpressure checks.
-    optional<uint32_t> last_thread;
-    for (auto& sub : subscribers) {
-      DCHECK_LE(last_thread.value_or(0), sub.Thread());
-      if (last_thread && *last_thread == sub.Thread())  // skip same thread
-        continue;
-
-      if (sub.EnsureMemoryBudget())  // Invalid pointers are skipped
-        last_thread = sub.Thread();
-    }
-
-    auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
-    auto buf = shared_ptr<char[]>{new char[channel.size() + msg.size()]};
-    memcpy(buf.get(), channel.data(), channel.size());
-    memcpy(buf.get() + channel.size(), msg.data(), msg.size());
-
-    auto cb = [subscribers_ptr, buf, channel, msg](unsigned idx, util::ProactorBase*) {
-      auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
-                            ChannelStore::Subscriber::ByThreadId);
-
-      while (it != subscribers_ptr->end() && it->Thread() == idx) {
-        if (auto* ptr = it->Get(); ptr) {
-          ptr->SendPubMessageAsync(
-              {std::move(it->pattern), std::move(buf), channel.size(), msg.size()});
-        }
-        it++;
-      }
-    };
-    shard_set->pool()->DispatchBrief(std::move(cb));
-  }
-
-  cntx->SendLong(num_published);
+  cntx->SendLong(cs->SendMessages(channel, messages));
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
@@ -2339,12 +2308,10 @@ void Service::PubsubPatterns(ConnectionContext* cntx) {
 }
 
 void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
-  int channels_size = args.size();
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(channels_size * 2);
+  rb->StartArray(args.size() * 2);
 
-  for (auto i = 0; i < channels_size; i++) {
-    auto channel = ArgS(args, i);
+  for (string_view channel : ArgS(args)) {
     rb->SendBulkString(channel);
     rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
   }

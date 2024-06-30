@@ -95,6 +95,7 @@ struct JournalItem {
   LSN lsn;
   Op opcode;
   std::string data;
+  std::string_view cmd;
   std::optional<cluster::SlotId> slot;
 };
 

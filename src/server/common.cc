@@ -258,13 +258,15 @@ bool ParseDouble(string_view src, double* value) {
 #define ADD(x) (x) += o.x
 
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 96);
+  static_assert(sizeof(TieredStats) == 112);
 
   ADD(total_stashes);
   ADD(total_fetches);
   ADD(total_cancels);
   ADD(total_deletes);
   ADD(total_defrags);
+  ADD(total_heap_buf_allocs);
+  ADD(total_registered_buf_allocs);
 
   ADD(allocated_bytes);
   ADD(capacity_bytes);
@@ -354,11 +356,12 @@ std::string GenericError::Format() const {
 }
 
 Context::~Context() {
-  JoinErrorHandler();
+  DCHECK(!err_handler_fb_.IsJoinable());
+  err_handler_fb_.JoinIfNeeded();
 }
 
 GenericError Context::GetError() const {
-  std::lock_guard lk(mu_);
+  std::lock_guard lk(err_mu_);
   return err_;
 }
 
@@ -371,15 +374,19 @@ void Context::Cancel() {
 }
 
 void Context::Reset(ErrHandler handler) {
-  std::lock_guard lk{mu_};
-  JoinErrorHandler();
+  fb2::Fiber fb;
+
+  unique_lock lk{err_mu_};
   err_ = {};
   err_handler_ = std::move(handler);
   Cancellation::flag_.store(false, std::memory_order_relaxed);
+  fb.swap(err_handler_fb_);
+  lk.unlock();
+  fb.JoinIfNeeded();
 }
 
 GenericError Context::SwitchErrorHandler(ErrHandler handler) {
-  std::lock_guard lk{mu_};
+  std::lock_guard lk{err_mu_};
   if (!err_) {
     // No need to check for the error handler - it can't be running
     // if no error is set.
@@ -389,14 +396,18 @@ GenericError Context::SwitchErrorHandler(ErrHandler handler) {
 }
 
 void Context::JoinErrorHandler() {
-  if (err_handler_fb_.IsJoinable())
-    err_handler_fb_.Join();
+  fb2::Fiber fb;
+  unique_lock lk{err_mu_};
+  fb.swap(err_handler_fb_);
+  lk.unlock();
+  fb.JoinIfNeeded();
 }
 
 GenericError Context::ReportErrorInternal(GenericError&& err) {
-  std::lock_guard lk{mu_};
+  lock_guard lk{err_mu_};
   if (err_)
     return err_;
+
   err_ = std::move(err);
 
   // This context is either new or was Reset, where the handler was joined
@@ -404,9 +415,9 @@ GenericError Context::ReportErrorInternal(GenericError&& err) {
 
   DVLOG(1) << "ReportError: " << err_.Format();
 
+  // We can move err_handler_ because it should run at most once.
   if (err_handler_)
-    err_handler_fb_ = fb2::Fiber("report_internal_error", err_handler_, err_);
-
+    err_handler_fb_ = fb2::Fiber("report_internal_error", std::move(err_handler_), err_);
   Cancellation::Cancel();
   return err_;
 }

@@ -49,7 +49,7 @@ class OutgoingMigration : private ProtocolClient {
     return migration_info_;
   }
 
-  const std::string GetErrorStr() const {
+  std::string GetErrorStr() const {
     return last_error_.Format();
   }
 
