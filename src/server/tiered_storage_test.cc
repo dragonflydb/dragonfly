@@ -213,6 +213,7 @@ TEST_F(TieredStorageTest, FlushAll) {
   auto reader = pp_->at(0)->LaunchFiber([&] {
     while (!done) {
       Run("reader", {"GET", absl::StrCat("k", rand() % kNum)});
+      util::ThisFiber::Yield();
     }
   });
 
