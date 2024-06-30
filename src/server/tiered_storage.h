@@ -67,6 +67,9 @@ class TieredStorage {
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv) const;
 
+  // Percentage (0-1) of currently used storage_write_depth for ongoing stashes
+  float WriteDepthUsage() const;
+
   TieredStats GetStats() const;
 
   // Run offloading loop until i/o device is loaded or all entries were traversed
@@ -78,7 +81,9 @@ class TieredStorage {
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
   unsigned write_depth_limit_ = 10;
-  uint64_t stash_overflow_cnt_ = 0;
+  struct {
+    uint64_t stash_overflow_cnt = 0;
+  } stats_;
 };
 
 }  // namespace dfly
