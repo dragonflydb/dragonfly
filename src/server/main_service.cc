@@ -967,7 +967,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
-                           CmdArgList args, Transaction* trans) {
+                           CmdArgList args, Transaction* trans, string_view* out_key) {
   Transaction::MultiMode multi_mode = trans->GetMultiMode();
 
   // We either scheduled on all shards or re-schedule for each operation,
@@ -985,15 +985,21 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
 
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    LockTag tag{ArgS(args, i)};
+    string_view key = ArgS(args, i);
+    LockTag tag{key};
     if (!locked_tags.contains(tag)) {
-      VLOG(1) << "Key " << string_view(tag) << " is not declared for command " << cid->name();
+      *out_key = key;
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
-  if (key_index.bonus && !locked_tags.contains(LockTag{ArgS(args, *key_index.bonus)}))
-    return OpStatus::KEY_NOTFOUND;
+  if (key_index.bonus) {
+    string_view key = ArgS(args, *key_index.bonus);
+    if (!locked_tags.contains(LockTag{key})) {
+      *out_key = key;
+      return OpStatus::KEY_NOTFOUND;
+    }
+  }
 
   return OpStatus::OK;
 }
@@ -1122,11 +1128,14 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   }
 
   if (under_script && cid->IsTransactional()) {
-    OpStatus status =
-        CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, dfly_cntx.transaction);
+    string_view failed_key;
+    OpStatus status = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args,
+                                        dfly_cntx.transaction, &failed_key);
 
-    if (status == OpStatus::KEY_NOTFOUND)
-      return ErrorReply(kUndeclaredKeyErr);
+    if (status == OpStatus::KEY_NOTFOUND) {
+      VLOG(1) << "Key " << failed_key << " is not declared for command " << cid->name();
+      return ErrorReply(absl::StrCat(kUndeclaredKeyErr, ", key: ", failed_key));
+    }
 
     if (status != OpStatus::OK)
       return ErrorReply{status};
