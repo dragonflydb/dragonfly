@@ -28,9 +28,10 @@ ABSL_FLAG(uint16_t, p, 6379, "Server port");
 ABSL_FLAG(uint32_t, c, 20, "Number of connections per thread");
 ABSL_FLAG(uint32_t, qps, 20, "QPS schedule at which the generator sends requests to the server");
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
+ABSL_FLAG(uint32_t, d, 16, "Value size in bytes ");
 ABSL_FLAG(string, h, "localhost", "server hostname/ip");
 ABSL_FLAG(uint64_t, key_minimum, 0, "Min value for keys used");
-ABSL_FLAG(uint64_t, key_maximum, 10'000, "Max value for keys used");
+ABSL_FLAG(uint64_t, key_maximum, 50'000'000, "Max value for keys used");
 ABSL_FLAG(string, key_prefix, "key:", "keys prefix");
 ABSL_FLAG(string, key_dist, "U", "U for uniform, N for normal, Z for zipfian");
 ABSL_FLAG(double, zipf_alpha, 0.99, "zipfian alpha parameter");
@@ -77,10 +78,13 @@ class CommandGenerator {
   string command_;
   string cmd_;
   std::vector<size_t> key_indices_;
+  string value_;
 };
 
 CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
   command_ = GetFlag(FLAGS_command);
+  value_ = string(GetFlag(FLAGS_d), 'a');
+
   if (command_.empty()) {
     pair<string, string> ratio_str = absl::StrSplit(GetFlag(FLAGS_ratio), ':');
     CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set_));
@@ -100,8 +104,7 @@ string CommandGenerator::operator()() {
     key = (*keygen_)();
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
-      // TODO: value size
-      absl::StrAppend(&cmd_, "set ", key, " val\r\n");
+      absl::StrAppend(&cmd_, "set ", key, " ", value_, "\r\n");
     } else {
       absl::StrAppend(&cmd_, "get ", key, "\r\n");
     }
@@ -359,7 +362,9 @@ int main(int argc, char* argv[]) {
   uint32_t num_reqs = GetFlag(FLAGS_n);
 
   CONSOLE_INFO << "Running all threads, sending " << num_reqs << " requests at a rate of "
-               << GetFlag(FLAGS_qps) << "qps, i.e. request every " << interval / 1000 << "us";
+               << GetFlag(FLAGS_qps) << " qps per connection, i.e. request every "
+               << interval / 1000 << "us";
+  CONSOLE_INFO << "Overall scheduled QPS: " << qps * pp->size() * GetFlag(FLAGS_c);
 
   const absl::Time start_time = absl::Now();
   pp->AwaitFiberOnAll([&](auto* p) { client->Run(interval); });
@@ -375,7 +380,7 @@ int main(int argc, char* argv[]) {
     client.reset();
   });
 
-  CONSOLE_INFO << "Summary, all times are in usec:\n" << hist.ToString();
+  CONSOLE_INFO << "Latency summary, all times are in usec:\n" << hist.ToString();
 
   pp->Stop();
 
