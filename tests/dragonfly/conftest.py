@@ -141,7 +141,7 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
         print("Cluster clients left: ", len(clients_left))
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="function")
 def connection(df_server: DflyInstance):
     return redis.Connection(port=df_server.port)
 
