@@ -329,7 +329,7 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  bool Del(DbIndex db_ind, Iterator it);
+  bool Del(Context cntx, Iterator it);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 

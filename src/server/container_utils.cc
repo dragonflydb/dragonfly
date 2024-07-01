@@ -61,7 +61,7 @@ OpResult<string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_ty
   string key;
   auto cb = [&](Transaction* t, EngineShard* shard) -> Transaction::RunnableResult {
     auto args = t->GetShardArgs(shard->shard_id());
-    auto ff_res = FindFirstReadOnly(shard->db_slice(), t->GetDbContext(), args, req_obj_type);
+    auto ff_res = FindFirstReadOnly(t->GetCurrentDbSlice(), t->GetDbContext(), args, req_obj_type);
 
     if (ff_res == OpStatus::WRONG_TYPE)
       return OpStatus::WRONG_TYPE;
@@ -97,7 +97,7 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     auto args = t->GetShardArgs(shard->shard_id());
-    auto ff_res = FindFirstReadOnly(shard->db_slice(), t->GetDbContext(), args, req_obj_type);
+    auto ff_res = FindFirstReadOnly(t->GetCurrentDbSlice(), t->GetDbContext(), args, req_obj_type);
     if (ff_res) {
       find_res[shard->shard_id()] =
           FFResult{ff_res->first->first.AsRef(), ff_res->second, shard->shard_id()};
@@ -337,9 +337,10 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   }
 
   auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
-  const auto key_checker = [req_obj_type](EngineShard* owner, const DbContext& context,
-                                          Transaction*, std::string_view key) -> bool {
-    return owner->db_slice().FindReadOnly(context, key, req_obj_type).ok();
+  auto ns = &trans->GetNamespace();
+  const auto key_checker = [req_obj_type, ns](EngineShard* owner, const DbContext& context,
+                                              Transaction*, std::string_view key) -> bool {
+    return ns->GetCurrentDbSlice().FindReadOnly(context, key, req_obj_type).ok();
   };
 
   auto status = trans->WaitOnWatch(limit_tp, std::move(wcb), key_checker, block_flag, pause_flag);

@@ -67,7 +67,7 @@ void ConvertToDenseIfNeeded(string* hll) {
 }
 
 OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
 
   string hll;
 
@@ -138,7 +138,7 @@ void PFAdd(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
 
   auto it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (it.ok()) {
@@ -173,7 +173,8 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys
   try {
     vector<string> values;
     for (string_view key : keys) {
-      auto it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+      auto it =
+          op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
       if (it.ok()) {
         string hll;
         it.value()->second.GetString(&hll);
@@ -280,7 +281,7 @@ OpResult<int> PFMergeInternal(CmdArgList args, ConnectionContext* cntx) {
   auto set_cb = [&](Transaction* t, EngineShard* shard) {
     string_view key = ArgS(args, 0);
     const OpArgs& op_args = t->GetOpArgs(shard);
-    auto& db_slice = op_args.shard->db_slice();
+    auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
     auto op_res = db_slice.AddOrFind(t->GetDbContext(), key);
     RETURN_ON_BAD_STATUS(op_res);
     auto& res = *op_res;

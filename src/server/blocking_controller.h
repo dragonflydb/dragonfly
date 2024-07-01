@@ -15,10 +15,11 @@
 namespace dfly {
 
 class Transaction;
+class Namespace;
 
 class BlockingController {
  public:
-  explicit BlockingController(EngineShard* owner);
+  explicit BlockingController(EngineShard* owner, Namespace* ns);
   ~BlockingController();
 
   using Keys = std::variant<ShardArgs, ArgSlice>;
@@ -60,6 +61,7 @@ class BlockingController {
   // void NotifyConvergence(Transaction* tx);
 
   EngineShard* owner_;
+  Namespace* ns_;
 
   absl::flat_hash_map<DbIndex, std::unique_ptr<DbWatchTable>> watched_dbs_;
 

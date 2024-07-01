@@ -804,7 +804,7 @@ TEST_F(StringFamilyTest, SetWithHashtagsNoCluster) {
   auto fb = ExpectUsedKeys({"{key}1"});
   EXPECT_EQ(Run({"set", "{key}1", "val1"}), "OK");
   fb.Join();
-  EXPECT_FALSE(service_->IsLocked(0, "{key}1"));
+  EXPECT_FALSE(IsLocked(0, "{key}1"));
 
   fb = ExpectUsedKeys({"{key}2"});
   EXPECT_EQ(Run({"set", "{key}2", "val2"}), "OK");
