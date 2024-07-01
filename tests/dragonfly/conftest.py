@@ -29,6 +29,8 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 DATABASE_INDEX = 0
 
+TEST_FAILED = False
+
 
 @pytest.fixture(scope="session")
 def tmp_dir():
@@ -102,6 +104,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     )
 
     factory = DflyInstanceFactory(params, args)
+
     yield factory
     factory.stop_all()
 
@@ -111,6 +114,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
 def df_local_factory(df_factory: DflyInstanceFactory):
     factory = DflyInstanceFactory(df_factory.params, df_factory.args)
     yield factory
+
     factory.stop_all()
 
 
@@ -193,6 +197,8 @@ async def async_pool(df_server: DflyInstance):
         decode_responses=True,
         max_connections=32,
     )
+    # See clean_up_per_test() function below
+    df_server.hook_logs_to_test()
     yield pool
     await pool.disconnect(inuse_connections=True)
 
@@ -254,6 +260,7 @@ def port_picker():
 
 @pytest.fixture(scope="function")
 def memcached_client(df_server: DflyInstance):
+    df_server.hook_logs_to_test()
     client = pymemcache.Client(f"127.0.0.1:{df_server.mc_port}", default_noreply=False)
 
     yield client
@@ -334,38 +341,121 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
     return args
 
 
-def copy_failed_logs_and_clean_tmp_folder(report):
+def copy_failed_logs_and_clean_tmp_folder():
     failed_path = "/tmp/failed"
     path_exists = os.path.exists(failed_path)
     if not path_exists:
         os.makedirs(failed_path)
 
-    if os.path.isfile("/tmp/last_test_log_files.txt"):
-        last_log_file = open("/tmp/last_test_log_files.txt", "r")
-        files = last_log_file.readlines()
-        logging.error(f"Test failed {report.nodeid} with logs: ")
-        for file in files:
-            # copy to failed folder
-            file = file.rstrip("\n")
-            logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
-            shutil.copy(file, failed_path)
+    last_log_file = open("/tmp/failed_list.txt", "r")
+    files = last_log_file.readlines()
+    for file in files:
+        # copy to failed folder
+        shutil.copy(file.rstrip("\n"), failed_path)
+
+    # Clean up everything
+    last_log_file = open("/tmp/failed_list.txt", "w").close()
+    last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
 
 
 def pytest_exception_interact(node, call, report):
     if report.failed:
-        copy_failed_logs_and_clean_tmp_folder(report)
+        # To print the test that currently failed
+        last_log_file = open("/tmp/last_test_log_files.txt", "r")
+        # Global tracking of all failed tests/logs
+        failed_list = open("/tmp/failed_list.txt", "a")
+        files = last_log_file.readlines()
+        logging.error(f"Test failed {report.nodeid} with logs: ")
+        for file in files:
+            failed_list.write(file)
+            file = file.rstrip("\n")
+            logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
+
+        # Clean it
+        last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
+        global TEST_FAILED
+        TEST_FAILED = True
 
 
-@pytest.fixture(autouse=True)
+# Double consider any change to this function because the order
+# of SetUp and TearDown might cause improper copy of the logs since
+# the instance has not yet stopped. Consider changing run_before_and_after_test
+# from session to function scope and imagine a test failing. What will happen on failure,
+# is that pytest will first call this function, copy the contents of the logs to a failed
+# folder and then call instance `stop()` effectively throwing away some of the log contents.
+# For cases like that we need to defer copying the logs contents at the end of the session
+# where all the failed logs are available and dragonfly instances are offline. For that
+# we use double bufferring to keep the failed logs per test. When an assertion triggers
+# we copy the `log names` of the test to the session buffer/file failed_list.txt. We then
+# let dragonfly shut down properly such that the log files contain the full logs. When the
+# pytest session ends we finally copy the log contents for each file mentioned in the session
+# file/buffer and upload them on the CI
+@pytest.fixture(autouse=True, scope="session")
 def run_before_and_after_test():
-    # Setup: logic before any of the test starts
-    # Empty the log on each run
-    last_log_file = open("/tmp/last_test_log_files.txt", "w")
-    last_log_file.close()
+    logging.info("Session start for run_before_and_after_test")
+    # Setup: at the start of the session
+    last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
 
     yield  # this is where the testing happens
 
-    # Teardown
+    global TEST_FAILED
+    # Teardown at the end of the session
+    logging.info(f"Session end for run_before_and_after_test")
+    if TEST_FAILED:
+        logging.info(f"Copying failed tests to /tmp/failed")
+        copy_failed_logs_and_clean_tmp_folder()
+
+
+# The only issue here is that this also clears the logs for session wide fixtures which behave
+# differently if a decorator like dfly_args is used. This behaviour is summarized below:
+#
+# 1. df_server is a session wide fixture used without @dfly_args decorator. Usage example:
+#
+#   async def test_a(df_server):
+#     //blah blah
+#
+#   async def test_b(df_server):
+#     //blah blah
+#
+# There is one dragonfly server, started when test_a starts and destroyed after test_b finishes.
+#
+# 2.df_server used with @dfly_args decorator. Usage example:
+#
+#   @dfly_args({"proactor_threads": 4})
+#   async def test_a(df_server):
+#     //blah blah
+#
+#   @dfly_args({"proactor_threads": 4})
+#   async def test_b(df_server):
+#     //blah blah
+#
+#   Even though the decorator args are the same and the fixture df_server is session wide, we
+#   create two dragonfly instances. One at the start of test_a and one at the start of test_b.
+#   This is the only case that does not cause issues, since the logs are properly registered
+#   per test case.
+#
+# 3. df_server used via async_client
+#
+#   async def test_a(async_client):
+#     //blah blah
+#
+#   We reuse the same df_server as case (1) above.
+#
+# 2 of the 3 cases above create issues because the server is created once at the start of the session
+# but the contents of last_test_log_files are updated per test and per dragonfly instance created.
+# To fix this, we introduce a function `hook_logs_to_test` in dfly_instance to reintroduce them on
+# test cases that use session wide instances. This function is called when `async_client` or
+# `instance.client()` member function is used. For the former case, `async_client` has function scope
+# which allows us to hook the session wide log names and associate them per test case that uses them.
+# This solves (3). For the later, notice that all of our tests use `instance.client()` to access
+# the client. Therefore, we also call `hook_logs_to_test` each time we request a client from an
+# instance. It's a no-op if the logs are already registered (that is, the df_server had local scope).
+# This solves case (1). For all other cases we can hook them explicitly at the begining of the test
+# with `hook_logs_to_test` and we now have all the logs under all the corner cases above.
+@pytest.fixture(autouse=True, scope="function")
+def clean_up_per_test():
+    last_log_file = open("/tmp/last_test_log_files.txt", "w").close()
+    yield
 
 
 @pytest.fixture(scope="function")

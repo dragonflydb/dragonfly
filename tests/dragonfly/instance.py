@@ -91,6 +91,7 @@ class DflyInstance:
 
     def client(self, *args, **kwargs) -> RedisClient:
         host = "localhost" if self["bind"] is None else self["bind"]
+        self.hook_logs_to_test()
         return RedisClient(host=host, port=self.port, decode_responses=True, *args, **kwargs)
 
     def admin_client(self, *args, **kwargs) -> RedisClient:
@@ -315,6 +316,22 @@ class DflyInstance:
                 if matcher.search(line):
                     return True
         return False
+
+    # no-op if logs are already registered for the test in last_test_log_files.txt
+    # For information of why this is needed see conftest.py clean_up_per_test()
+    # function
+    def hook_logs_to_test(self):
+        last_log_file = open("/tmp/last_test_log_files.txt", "a+")
+        logs_set = {}
+        files = last_log_file.readlines()
+        for line in files:
+            logs_set.add(line.rstrip("\n"))
+
+        for log in self.log_files:
+            if log not in logs_set:
+                last_log_file.write(log + "\n")
+
+        last_log_file.close()
 
 
 class DflyInstanceFactory:
