@@ -967,18 +967,18 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
-OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const CommandId* cid,
-                           CmdArgList args, Transaction* trans) {
+optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info,
+                                       const CommandId* cid, CmdArgList args, Transaction* trans) {
   Transaction::MultiMode multi_mode = trans->GetMultiMode();
 
   // We either scheduled on all shards or re-schedule for each operation,
   // so we are not restricted to any keys.
   if (multi_mode == Transaction::GLOBAL || multi_mode == Transaction::NON_ATOMIC)
-    return OpStatus::OK;
+    return nullopt;
 
   OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
   if (!key_index_res)
-    return key_index_res.status();
+    return ErrorReply{key_index_res.status()};
 
   // TODO: Switch to transaction internal locked keys once single hop multi transactions are merged
   // const auto& locked_keys = trans->GetMultiKeys();
@@ -986,17 +986,21 @@ OpStatus CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info, const C
 
   const auto& key_index = *key_index_res;
   for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    LockTag tag{ArgS(args, i)};
+    string_view key = ArgS(args, i);
+    LockTag tag{key};
     if (!locked_tags.contains(tag)) {
-      VLOG(1) << "Key " << string_view(tag) << " is not declared for command " << cid->name();
-      return OpStatus::KEY_NOTFOUND;
+      return ErrorReply(absl::StrCat(kUndeclaredKeyErr, ", key: ", key));
     }
   }
 
-  if (key_index.bonus && !locked_tags.contains(LockTag{ArgS(args, *key_index.bonus)}))
-    return OpStatus::KEY_NOTFOUND;
+  if (key_index.bonus) {
+    string_view key = ArgS(args, *key_index.bonus);
+    if (!locked_tags.contains(LockTag{key})) {
+      return ErrorReply(absl::StrCat(kUndeclaredKeyErr, ", key: ", key));
+    }
+  }
 
-  return OpStatus::OK;
+  return nullopt;
 }
 
 static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
@@ -1123,14 +1127,14 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   }
 
   if (under_script && cid->IsTransactional()) {
-    OpStatus status =
+    auto err =
         CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, dfly_cntx.transaction);
 
-    if (status == OpStatus::KEY_NOTFOUND)
-      return ErrorReply(kUndeclaredKeyErr);
-
-    if (status != OpStatus::OK)
-      return ErrorReply{status};
+    if (err.has_value()) {
+      VLOG(1) << "CheckKeysDeclared failed with error " << err->ToSv() << " for command "
+              << cid->name();
+      return err.value();
+    }
   }
 
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
