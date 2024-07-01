@@ -356,7 +356,7 @@ bool EngineShard::DoDefrag() {
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
-  if (namespace == nullptr || !namespaces->IsInitialized()) {
+  if (namespaces == nullptr || !namespaces->IsInitialized()) {
     return util::ProactorBase::kOnIdleMaxLevel;
   }
 
