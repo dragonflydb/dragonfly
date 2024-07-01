@@ -666,6 +666,9 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
       return;
     }
 
+    if (namespaces == nullptr || !namespaces->IsInitialized())
+      continue;
+
     Heartbeat();
 
     if (runs_global_periodic) {
