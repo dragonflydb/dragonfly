@@ -23,11 +23,11 @@ def run_cluster_mgr(args):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
-async def test_cluster_mgr(df_local_factory):
+async def test_cluster_mgr(df_factory):
     NODES = 3
-    masters = [df_local_factory.create(port=BASE_PORT + i) for i in range(NODES)]
-    replicas = [df_local_factory.create(port=BASE_PORT + 100 + i) for i in range(NODES)]
-    df_local_factory.start_all([*masters, *replicas])
+    masters = [df_factory.create(port=BASE_PORT + i) for i in range(NODES)]
+    replicas = [df_factory.create(port=BASE_PORT + 100 + i) for i in range(NODES)]
+    df_factory.start_all([*masters, *replicas])
 
     # Initialize a cluster (all slots belong to node 0)
     assert run_cluster_mgr(["--action=config_single_remote", f"--target_port={BASE_PORT}"])

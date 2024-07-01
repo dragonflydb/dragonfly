@@ -97,7 +97,7 @@ async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
     ],
 )
 async def test_dbfilenames(
-    df_local_factory, tmp_dir: Path, save_type: str, dbfilename: str, pattern: str
+    df_factory, tmp_dir: Path, save_type: str, dbfilename: str, pattern: str
 ):
     df_args = {**BASIC_ARGS, "dbfilename": dbfilename, "port": 1111}
 
@@ -106,7 +106,7 @@ async def test_dbfilenames(
 
     start_capture = None
 
-    with df_local_factory.create(**df_args) as df_server:
+    with df_factory.create(**df_args) as df_server:
         async with df_server.client() as client:
             await wait_available_async(client)
 
@@ -120,7 +120,7 @@ async def test_dbfilenames(
     assert file is not None
     assert os.path.basename(file).startswith(dbfilename.split("{{")[0])
 
-    with df_local_factory.create(**df_args) as df_server:
+    with df_factory.create(**df_args) as df_server:
         async with df_server.client() as client:
             await wait_available_async(client)
             assert await StaticSeeder.capture(client) == start_capture
@@ -220,11 +220,11 @@ async def test_parallel_snapshot(async_client):
     assert save_successes == 1, "Only one SAVE must be successful"
 
 
-async def test_path_escapes(df_local_factory):
+async def test_path_escapes(df_factory):
     """Test that we don't allow path escapes. We just check that df_server.start()
     fails because we don't have a much better way to test that."""
 
-    df_server = df_local_factory.create(dbfilename="../../../../etc/passwd")
+    df_server = df_factory.create(dbfilename="../../../../etc/passwd")
     try:
         df_server.start()
         assert False, "Server should not start correctly"

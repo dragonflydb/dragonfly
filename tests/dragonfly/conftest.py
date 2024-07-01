@@ -77,7 +77,7 @@ def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
     return args_dict
 
 
-@pytest.fixture(scope="session", params=[{}])
+@pytest.fixture(scope="function", params=[{}])
 def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     """
     Create an instance factory with supplied params.
@@ -106,15 +106,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     factory.stop_all()
 
 
-# Differs from df_factory in that its scope is function
 @pytest.fixture(scope="function")
-def df_local_factory(df_factory: DflyInstanceFactory):
-    factory = DflyInstanceFactory(df_factory.params, df_factory.args)
-    yield factory
-    factory.stop_all()
-
-
-@pytest.fixture(scope="session")
 def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
     """
     Start the default Dragonfly server that will be used for the default pools

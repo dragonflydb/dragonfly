@@ -27,8 +27,8 @@ def export_dfly_password() -> str:
         yield pwd
 
 
-async def test_password(df_local_factory, export_dfly_password):
-    with df_local_factory.create() as dfly:
+async def test_password(df_factory, export_dfly_password):
+    with df_factory.create() as dfly:
         # Expect password form environment variable
         with pytest.raises(redis.exceptions.AuthenticationError):
             async with aioredis.Redis(port=dfly.port) as client:
@@ -38,7 +38,7 @@ async def test_password(df_local_factory, export_dfly_password):
 
     # --requirepass should take precedence over environment variable
     requirepass = "requirepass"
-    with df_local_factory.create(requirepass=requirepass) as dfly:
+    with df_factory.create(requirepass=requirepass) as dfly:
         # Expect password form flag
         with pytest.raises(redis.exceptions.AuthenticationError):
             async with aioredis.Redis(port=dfly.port, password=export_dfly_password) as client:
@@ -79,16 +79,16 @@ async def test_txq_ooo(async_client: aioredis.Redis, df_server):
     )
 
 
-async def test_arg_from_environ_overwritten_by_cli(df_local_factory):
+async def test_arg_from_environ_overwritten_by_cli(df_factory):
     with EnvironCntx(DFLY_port="6378"):
-        with df_local_factory.create(port=6377):
+        with df_factory.create(port=6377):
             client = aioredis.Redis(port=6377)
             await client.ping()
 
 
-async def test_arg_from_environ(df_local_factory):
+async def test_arg_from_environ(df_factory):
     with EnvironCntx(DFLY_requirepass="pass"):
-        with df_local_factory.create() as dfly:
+        with df_factory.create() as dfly:
             # Expect password from environment variable
             with pytest.raises(redis.exceptions.AuthenticationError):
                 client = aioredis.Redis(port=dfly.port)
@@ -98,17 +98,17 @@ async def test_arg_from_environ(df_local_factory):
             await client.ping()
 
 
-async def test_unknown_dfly_env(df_local_factory, export_dfly_password):
+async def test_unknown_dfly_env(df_factory, export_dfly_password):
     with EnvironCntx(DFLY_abcdef="xyz"):
         with pytest.raises(DflyStartException):
-            dfly = df_local_factory.create()
+            dfly = df_factory.create()
             dfly.start()
 
 
-async def test_restricted_commands(df_local_factory):
+async def test_restricted_commands(df_factory):
     # Restrict GET and SET, then verify non-admin clients are blocked from
     # using these commands, though admin clients can use them.
-    with df_local_factory.create(restricted_commands="get,set", admin_port=1112) as server:
+    with df_factory.create(restricted_commands="get,set", admin_port=1112) as server:
         async with aioredis.Redis(port=server.port) as client:
             with pytest.raises(redis.exceptions.ResponseError):
                 await client.get("foo")
@@ -122,11 +122,11 @@ async def test_restricted_commands(df_local_factory):
 
 
 @pytest.mark.asyncio
-async def test_reply_guard_oom(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(
+async def test_reply_guard_oom(df_factory, df_seeder_factory):
+    master = df_factory.create(
         proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
     )
-    df_local_factory.start_all([master])
+    df_factory.start_all([master])
     c_master = master.client()
     await c_master.execute_command("DEBUG POPULATE 6000 size 44000")
 

@@ -55,21 +55,21 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
 async def test_replication_all(
-    df_local_factory: DflyInstanceFactory, t_master, t_replicas, seeder_config, stream_target, mode
+    df_factory: DflyInstanceFactory, t_master, t_replicas, seeder_config, stream_target, mode
 ):
     if mode:
         mode["maxmemory"] = str(t_master * 256) + "mb"
 
-    master = df_local_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **mode)
+    master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **mode)
     replicas = [
-        df_local_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
+        df_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
     from_admin_port = random.choice([True, False])
 
     # Start instances and connect clients
-    df_local_factory.start_all([master] + replicas)
+    df_factory.start_all([master] + replicas)
     c_master = master.client()
     c_replicas = [replica.client() for replica in replicas]
 
@@ -180,7 +180,7 @@ disconnect_cases = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
 async def test_disconnect_replica(
-    df_local_factory: DflyInstanceFactory,
+    df_factory: DflyInstanceFactory,
     df_seeder_factory,
     t_master,
     t_crash_fs,
@@ -188,9 +188,9 @@ async def test_disconnect_replica(
     t_disonnect,
     n_keys,
 ):
-    master = df_local_factory.create(proactor_threads=t_master)
+    master = df_factory.create(proactor_threads=t_master)
     replicas = [
-        (df_local_factory.create(proactor_threads=t), crash_fs)
+        (df_factory.create(proactor_threads=t), crash_fs)
         for i, (t, crash_fs) in enumerate(
             chain(
                 zip(t_crash_fs, repeat(DISCONNECT_CRASH_FULL_SYNC)),
@@ -205,7 +205,7 @@ async def test_disconnect_replica(
     c_master = master.client(single_connection_client=True)
 
     # Start replicas and create clients
-    df_local_factory.start_all([replica for replica, _ in replicas])
+    df_factory.start_all([replica for replica, _ in replicas])
 
     c_replicas = [(replica, replica.client(), crash_type) for replica, crash_type in replicas]
 
@@ -317,12 +317,12 @@ master_crash_cases = [
 @pytest.mark.slow
 @pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
 async def test_disconnect_master(
-    df_local_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys
+    df_factory, df_seeder_factory, t_master, t_replicas, n_random_crashes, n_keys
 ):
-    master = df_local_factory.create(port=1111, proactor_threads=t_master)
-    replicas = [df_local_factory.create(proactor_threads=t) for i, t in enumerate(t_replicas)]
+    master = df_factory.create(port=1111, proactor_threads=t_master)
+    replicas = [df_factory.create(proactor_threads=t) for i, t in enumerate(t_replicas)]
 
-    df_local_factory.start_all(replicas)
+    df_factory.start_all(replicas)
     c_replicas = [replica.client() for replica in replicas]
 
     seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
@@ -386,12 +386,10 @@ rotating_master_cases = [(4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))]
 @pytest.mark.asyncio
 @pytest.mark.slow
 @pytest.mark.parametrize("t_replica, t_masters, seeder_config", rotating_master_cases)
-async def test_rotating_masters(
-    df_local_factory, df_seeder_factory, t_replica, t_masters, seeder_config
-):
-    replica = df_local_factory.create(proactor_threads=t_replica)
-    masters = [df_local_factory.create(proactor_threads=t) for i, t in enumerate(t_masters)]
-    df_local_factory.start_all([replica] + masters)
+async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_masters, seeder_config):
+    replica = df_factory.create(proactor_threads=t_replica)
+    masters = [df_factory.create(proactor_threads=t) for i, t in enumerate(t_masters)]
+    df_factory.start_all([replica] + masters)
 
     seeders = [df_seeder_factory.create(port=m.port, **seeder_config) for m in masters]
 
@@ -423,9 +421,7 @@ async def test_rotating_masters(
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_cancel_replication_immediately(
-    df_local_factory, df_seeder_factory: DflySeederFactory
-):
+async def test_cancel_replication_immediately(df_factory, df_seeder_factory: DflySeederFactory):
     """
     Issue 100 replication commands. This checks that the replication state
     machine can handle cancellation well.
@@ -435,9 +431,9 @@ async def test_cancel_replication_immediately(
     """
     COMMANDS_TO_ISSUE = 100
 
-    replica = df_local_factory.create()
-    master = df_local_factory.create()
-    df_local_factory.start_all([replica, master])
+    replica = df_factory.create()
+    master = df_factory.create()
+    df_factory.start_all([replica, master])
 
     seeder = df_seeder_factory.create(port=master.port)
     c_replica = replica.client(socket_timeout=80)
@@ -483,9 +479,9 @@ Check replica keys at the end.
 
 
 @pytest.mark.asyncio
-async def test_flushall(df_local_factory):
-    master = df_local_factory.create(proactor_threads=4)
-    replica = df_local_factory.create(proactor_threads=2)
+async def test_flushall(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=2)
 
     master.start()
     replica.start()
@@ -534,12 +530,12 @@ Test journal rewrites.
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
-async def test_rewrites(df_local_factory):
+async def test_rewrites(df_factory):
     CLOSE_TIMESTAMP = int(time.time()) + 100
     CLOSE_TIMESTAMP_MS = CLOSE_TIMESTAMP * 1000
 
-    master = df_local_factory.create()
-    replica = df_local_factory.create()
+    master = df_factory.create()
+    replica = df_factory.create()
 
     master.start()
     replica.start()
@@ -710,11 +706,11 @@ Test automatic replication of expiry.
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
-async def test_expiry(df_local_factory: DflyInstanceFactory, n_keys=1000):
-    master = df_local_factory.create()
-    replica = df_local_factory.create()
+async def test_expiry(df_factory: DflyInstanceFactory, n_keys=1000):
+    master = df_factory.create()
+    replica = df_factory.create()
 
-    df_local_factory.start_all([master, replica])
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -780,10 +776,10 @@ async def test_expiry(df_local_factory: DflyInstanceFactory, n_keys=1000):
 
 
 @dfly_args({"proactor_threads": 4})
-async def test_simple_scripts(df_local_factory: DflyInstanceFactory):
-    master = df_local_factory.create()
-    replicas = [df_local_factory.create() for _ in range(2)]
-    df_local_factory.start_all([master] + replicas)
+async def test_simple_scripts(df_factory: DflyInstanceFactory):
+    master = df_factory.create()
+    replicas = [df_factory.create() for _ in range(2)]
+    df_factory.start_all([master] + replicas)
 
     c_replicas = [replica.client() for replica in replicas]
     c_master = master.client()
@@ -851,11 +847,11 @@ return 'OK'
 @pytest.mark.skip(reason="Failing")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, num_ops, num_keys, num_par, flags", script_cases)
-async def test_scripts(df_local_factory, t_master, t_replicas, num_ops, num_keys, num_par, flags):
-    master = df_local_factory.create(proactor_threads=t_master)
-    replicas = [df_local_factory.create(proactor_threads=t) for i, t in enumerate(t_replicas)]
+async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_par, flags):
+    master = df_factory.create(proactor_threads=t_master)
+    replicas = [df_factory.create(proactor_threads=t) for i, t in enumerate(t_replicas)]
 
-    df_local_factory.start_all([master] + replicas)
+    df_factory.start_all([master] + replicas)
 
     c_master = master.client()
     c_replicas = [replica.client() for replica in replicas]
@@ -884,15 +880,13 @@ async def test_scripts(df_local_factory, t_master, t_replicas, num_ops, num_keys
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
-async def test_auth_master(df_local_factory, n_keys=20):
+async def test_auth_master(df_factory, n_keys=20):
     masterpass = "requirepass"
     replicapass = "replicapass"
-    master = df_local_factory.create(requirepass=masterpass)
-    replica = df_local_factory.create(
-        logtostdout=True, masterauth=masterpass, requirepass=replicapass
-    )
+    master = df_factory.create(requirepass=masterpass)
+    replica = df_factory.create(logtostdout=True, masterauth=masterpass, requirepass=replicapass)
 
-    df_local_factory.start_all([master, replica])
+    df_factory.start_all([master, replica])
 
     c_master = master.client(password=masterpass)
     c_replica = replica.client(password=replicapass)
@@ -918,11 +912,11 @@ SCRIPT_TEMPLATE = "return {}"
 
 
 @dfly_args({"proactor_threads": 2})
-async def test_script_transfer(df_local_factory):
-    master = df_local_factory.create()
-    replica = df_local_factory.create()
+async def test_script_transfer(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
 
-    df_local_factory.start_all([master, replica])
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -952,11 +946,11 @@ async def test_script_transfer(df_local_factory):
 
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
-async def test_role_command(df_local_factory, n_keys=20):
-    master = df_local_factory.create()
-    replica = df_local_factory.create()
+async def test_role_command(df_factory, n_keys=20):
+    master = df_factory.create()
+    replica = df_factory.create()
 
-    df_local_factory.start_all([master, replica])
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -1029,12 +1023,10 @@ async def assert_lag_condition(inst, client, condition):
 
 @dfly_args({"proactor_threads": 2})
 @pytest.mark.asyncio
-async def test_replication_info(
-    df_local_factory: DflyInstanceFactory, df_seeder_factory, n_keys=2000
-):
-    master = df_local_factory.create()
-    replica = df_local_factory.create(logtostdout=True, replication_acks_interval=100)
-    df_local_factory.start_all([master, replica])
+async def test_replication_info(df_factory: DflyInstanceFactory, df_seeder_factory, n_keys=2000):
+    master = df_factory.create()
+    replica = df_factory.create(logtostdout=True, replication_acks_interval=100)
+    df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
 
@@ -1064,11 +1056,11 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_flushall_in_full_sync(df_local_factory):
-    master = df_local_factory.create(proactor_threads=4)
-    replica = df_local_factory.create(proactor_threads=2)
+async def test_flushall_in_full_sync(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=2)
 
-    df_local_factory.start_all([master, replica])
+    df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
 
@@ -1125,11 +1117,11 @@ redis.call('SET', 'A', 'ErrroR')
 
 
 @pytest.mark.asyncio
-async def test_readonly_script(df_local_factory):
-    master = df_local_factory.create(proactor_threads=2, logtostdout=True)
-    replica = df_local_factory.create(proactor_threads=2, logtostdout=True)
+async def test_readonly_script(df_factory):
+    master = df_factory.create(proactor_threads=2, logtostdout=True)
+    replica = df_factory.create(proactor_threads=2, logtostdout=True)
 
-    df_local_factory.start_all([master, replica])
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -1158,15 +1150,15 @@ take_over_cases = [
 
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 @pytest.mark.asyncio
-async def test_take_over_counters(df_local_factory, master_threads, replica_threads):
-    master = df_local_factory.create(
+async def test_take_over_counters(df_factory, master_threads, replica_threads):
+    master = df_factory.create(
         proactor_threads=master_threads,
         logtostderr=True,
     )
-    replica1 = df_local_factory.create(proactor_threads=replica_threads)
-    replica2 = df_local_factory.create(proactor_threads=replica_threads)
-    replica3 = df_local_factory.create(proactor_threads=replica_threads)
-    df_local_factory.start_all([master, replica1, replica2, replica3])
+    replica1 = df_factory.create(proactor_threads=replica_threads)
+    replica2 = df_factory.create(proactor_threads=replica_threads)
+    replica3 = df_factory.create(proactor_threads=replica_threads)
+    df_factory.start_all([master, replica1, replica2, replica3])
     c_master = master.client()
     c1 = replica1.client()
     c_blocking = master.client()
@@ -1219,16 +1211,16 @@ async def test_take_over_counters(df_local_factory, master_threads, replica_thre
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 @pytest.mark.asyncio
 async def test_take_over_seeder(
-    request, df_local_factory, df_seeder_factory, master_threads, replica_threads
+    request, df_factory, df_seeder_factory, master_threads, replica_threads
 ):
     tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
-    master = df_local_factory.create(
+    master = df_factory.create(
         proactor_threads=master_threads,
         dbfilename=f"dump_{tmp_file_name}",
         logtostderr=True,
     )
-    replica = df_local_factory.create(proactor_threads=replica_threads)
-    df_local_factory.start_all([master, replica])
+    replica = df_factory.create(proactor_threads=replica_threads)
+    df_factory.start_all([master, replica])
 
     seeder = df_seeder_factory.create(port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
 
@@ -1265,13 +1257,13 @@ async def test_take_over_seeder(
 
 @pytest.mark.parametrize("master_threads, replica_threads", [[4, 4]])
 @pytest.mark.asyncio
-async def test_take_over_read_commands(df_local_factory, master_threads, replica_threads):
-    master = df_local_factory.create(
+async def test_take_over_read_commands(df_factory, master_threads, replica_threads):
+    master = df_factory.create(
         proactor_threads=master_threads,
         logtostderr=True,
     )
-    replica = df_local_factory.create(proactor_threads=replica_threads)
-    df_local_factory.start_all([master, replica])
+    replica = df_factory.create(proactor_threads=replica_threads)
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     await c_master.execute_command("SET foo bar")
@@ -1304,10 +1296,10 @@ async def test_take_over_read_commands(df_local_factory, master_threads, replica
 
 
 @pytest.mark.asyncio
-async def test_take_over_timeout(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=2, logtostderr=True)
-    replica = df_local_factory.create(proactor_threads=2)
-    df_local_factory.start_all([master, replica])
+async def test_take_over_timeout(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=2, logtostderr=True)
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
 
     seeder = df_seeder_factory.create(port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
 
@@ -1354,14 +1346,14 @@ replication_cases = [(8, 8)]
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replica", replication_cases)
 async def test_no_tls_on_admin_port(
-    df_local_factory: DflyInstanceFactory,
+    df_factory: DflyInstanceFactory,
     df_seeder_factory,
     t_master,
     t_replica,
     with_tls_server_args,
 ):
     # 1. Spin up dragonfly without tls, debug populate
-    master = df_local_factory.create(
+    master = df_factory.create(
         no_tls_on_admin_port="true",
         admin_port=ADMIN_PORT,
         **with_tls_server_args,
@@ -1375,7 +1367,7 @@ async def test_no_tls_on_admin_port(
     assert 100 == db_size
 
     # 2. Spin up a replica and initiate a REPLICAOF
-    replica = df_local_factory.create(
+    replica = df_factory.create(
         no_tls_on_admin_port="true",
         admin_port=ADMIN_PORT + 1,
         **with_tls_server_args,
@@ -1405,7 +1397,7 @@ replication_cases = [(8, 8, False), (8, 8, True)]
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replica, test_admin_port", replication_cases)
 async def test_tls_replication(
-    df_local_factory,
+    df_factory,
     df_seeder_factory,
     t_master,
     t_replica,
@@ -1414,7 +1406,7 @@ async def test_tls_replication(
     with_ca_tls_client_args,
 ):
     # 1. Spin up dragonfly tls enabled, debug populate
-    master = df_local_factory.create(
+    master = df_factory.create(
         tls_replication="true",
         **with_ca_tls_server_args,
         port=1111,
@@ -1434,7 +1426,7 @@ async def test_tls_replication(
     proxy_task = asyncio.create_task(proxy.serve())
 
     # 2. Spin up a replica and initiate a REPLICAOF
-    replica = df_local_factory.create(
+    replica = df_factory.create(
         tls_replication="true",
         **with_ca_tls_server_args,
         proactor_threads=t_replica,
@@ -1469,12 +1461,12 @@ async def test_tls_replication(
     await proxy.close(proxy_task)
 
 
-async def test_ipv6_replication(df_local_factory: DflyInstanceFactory):
+async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""
-    master = df_local_factory.create(proactor_threads=1, bind="::1", port=1111)
-    replica = df_local_factory.create(proactor_threads=1, bind="::1", port=1112)
+    master = df_factory.create(proactor_threads=1, bind="::1", port=1111)
+    replica = df_factory.create(proactor_threads=1, bind="::1", port=1112)
 
-    df_local_factory.start_all([master, replica])
+    df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
 
@@ -1498,9 +1490,9 @@ async def wait_for_replica_status(
 
 
 @pytest.mark.asyncio
-async def test_replicaof_flag(df_local_factory):
+async def test_replicaof_flag(df_factory):
     # tests --replicaof works under normal conditions
-    master = df_local_factory.create(
+    master = df_factory.create(
         proactor_threads=2,
     )
 
@@ -1511,7 +1503,7 @@ async def test_replicaof_flag(df_local_factory):
     db_size = await c_master.dbsize()
     assert 1 == db_size
 
-    replica = df_local_factory.create(
+    replica = df_factory.create(
         proactor_threads=2,
         replicaof=f"localhost:{master.port}",  # start to replicate master
     )
@@ -1533,10 +1525,10 @@ async def test_replicaof_flag(df_local_factory):
 
 
 @pytest.mark.asyncio
-async def test_replicaof_flag_replication_waits(df_local_factory):
+async def test_replicaof_flag_replication_waits(df_factory):
     # tests --replicaof works when we launch replication before the master
     BASE_PORT = 1111
-    replica = df_local_factory.create(
+    replica = df_factory.create(
         proactor_threads=2,
         replicaof=f"localhost:{BASE_PORT}",  # start to replicate master
     )
@@ -1554,7 +1546,7 @@ async def test_replicaof_flag_replication_waits(df_local_factory):
     assert info["master_link_status"] == "down"
 
     # set up master
-    master = df_local_factory.create(
+    master = df_factory.create(
         port=BASE_PORT,
         proactor_threads=2,
     )
@@ -1577,9 +1569,9 @@ async def test_replicaof_flag_replication_waits(df_local_factory):
 
 
 @pytest.mark.asyncio
-async def test_replicaof_flag_disconnect(df_local_factory):
+async def test_replicaof_flag_disconnect(df_factory):
     # test stopping replication when started using --replicaof
-    master = df_local_factory.create(
+    master = df_factory.create(
         proactor_threads=2,
     )
 
@@ -1592,7 +1584,7 @@ async def test_replicaof_flag_disconnect(df_local_factory):
     db_size = await c_master.dbsize()
     assert 1 == db_size
 
-    replica = df_local_factory.create(
+    replica = df_factory.create(
         proactor_threads=2,
         replicaof=f"localhost:{master.port}",  # start to replicate master
     )
@@ -1618,13 +1610,13 @@ async def test_replicaof_flag_disconnect(df_local_factory):
 
 
 @pytest.mark.asyncio
-async def test_df_crash_on_memcached_error(df_local_factory):
-    master = df_local_factory.create(
+async def test_df_crash_on_memcached_error(df_factory):
+    master = df_factory.create(
         memcached_port=11211,
         proactor_threads=2,
     )
 
-    replica = df_local_factory.create(
+    replica = df_factory.create(
         memcached_port=master.mc_port + 1,
         proactor_threads=2,
     )
@@ -1650,13 +1642,13 @@ async def test_df_crash_on_memcached_error(df_local_factory):
 
 
 @pytest.mark.asyncio
-async def test_df_crash_on_replicaof_flag(df_local_factory):
-    master = df_local_factory.create(
+async def test_df_crash_on_replicaof_flag(df_factory):
+    master = df_factory.create(
         proactor_threads=2,
     )
     master.start()
 
-    replica = df_local_factory.create(proactor_threads=2, replicaof=f"127.0.0.1:{master.port}")
+    replica = df_factory.create(proactor_threads=2, replicaof=f"127.0.0.1:{master.port}")
     replica.start()
 
     c_master = master.client()
@@ -1675,11 +1667,11 @@ async def test_df_crash_on_replicaof_flag(df_local_factory):
     replica.stop()
 
 
-async def test_network_disconnect(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=6)
-    replica = df_local_factory.create(proactor_threads=4)
+async def test_network_disconnect(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=6)
+    replica = df_factory.create(proactor_threads=4)
 
-    df_local_factory.start_all([replica, master])
+    df_factory.start_all([replica, master])
     seeder = df_seeder_factory.create(port=master.port)
 
     async with replica.client() as c_replica:
@@ -1709,11 +1701,11 @@ async def test_network_disconnect(df_local_factory, df_seeder_factory):
     replica.stop()
 
 
-async def test_network_disconnect_active_stream(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=4, shard_repl_backlog_len=4000)
-    replica = df_local_factory.create(proactor_threads=4)
+async def test_network_disconnect_active_stream(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=4, shard_repl_backlog_len=4000)
+    replica = df_factory.create(proactor_threads=4)
 
-    df_local_factory.start_all([replica, master])
+    df_factory.start_all([replica, master])
     seeder = df_seeder_factory.create(port=master.port)
 
     async with replica.client() as c_replica, master.client() as c_master:
@@ -1751,11 +1743,11 @@ async def test_network_disconnect_active_stream(df_local_factory, df_seeder_fact
     replica.stop()
 
 
-async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=4, shard_repl_backlog_len=1)
-    replica = df_local_factory.create(proactor_threads=4)
+async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=4, shard_repl_backlog_len=1)
+    replica = df_factory.create(proactor_threads=4)
 
-    df_local_factory.start_all([replica, master])
+    df_factory.start_all([replica, master])
     seeder = df_seeder_factory.create(port=master.port)
 
     async with replica.client() as c_replica, master.client() as c_master:
@@ -1798,11 +1790,11 @@ async def test_network_disconnect_small_buffer(df_local_factory, df_seeder_facto
     assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
-async def test_search(df_local_factory):
-    master = df_local_factory.create(proactor_threads=4)
-    replica = df_local_factory.create(proactor_threads=4)
+async def test_search(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
 
-    df_local_factory.start_all([master, replica])
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -1848,10 +1840,10 @@ async def test_search(df_local_factory):
 
 # @pytest.mark.slow
 @pytest.mark.asyncio
-async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(proactor_threads=4)
-    replica = df_local_factory.create(proactor_threads=4)
-    df_local_factory.start_all([master, replica])
+async def test_client_pause_with_replica(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
 
     seeder = df_seeder_factory.create(port=master.port)
 
@@ -1891,11 +1883,11 @@ async def test_client_pause_with_replica(df_local_factory, df_seeder_factory):
     await disconnect_clients(c_master, c_replica)
 
 
-async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
+async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
-    master = df_local_factory.create()
-    replica = df_local_factory.create(dbfilename=f"dump_{tmp_file_name}")
-    df_local_factory.start_all([master, replica])
+    master = df_factory.create()
+    replica = df_factory.create(dbfilename=f"dump_{tmp_file_name}")
+    df_factory.start_all([master, replica])
 
     seeder = SeederV2(key_target=40000)
     c_replica = replica.client()
@@ -1928,12 +1920,12 @@ async def test_replicaof_reject_on_load(df_local_factory, df_seeder_factory):
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_eviction_propagation(df_local_factory):
-    master = df_local_factory.create(
+async def test_heartbeat_eviction_propagation(df_factory):
+    master = df_factory.create(
         proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
     )
-    replica = df_local_factory.create(proactor_threads=1)
-    df_local_factory.start_all([master, replica])
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -1966,16 +1958,16 @@ async def test_heartbeat_eviction_propagation(df_local_factory):
 
 @pytest.mark.skip(reason="Test is flaky")
 @pytest.mark.asyncio
-async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_factory):
-    master = df_local_factory.create(
+async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
+    master = df_factory.create(
         proactor_threads=2,
         cache_mode="true",
         maxmemory="512mb",
         logtostdout="true",
         enable_heartbeat_eviction="false",
     )
-    replica = df_local_factory.create(proactor_threads=2)
-    df_local_factory.start_all([master, replica])
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -2004,15 +1996,15 @@ async def test_policy_based_eviction_propagation(df_local_factory, df_seeder_fac
 
 
 @pytest.mark.asyncio
-async def test_journal_doesnt_yield_issue_2500(df_local_factory, df_seeder_factory):
+async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     """
     Issues many SETEX commands through a Lua script so that no yields are done between them.
     In parallel, connect a replica, so that these SETEX commands write their custom journal log.
     This makes sure that no Fiber context switch while inside a shard callback.
     """
-    master = df_local_factory.create()
-    replica = df_local_factory.create()
-    df_local_factory.start_all([master, replica])
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -2059,12 +2051,12 @@ async def test_journal_doesnt_yield_issue_2500(df_local_factory, df_seeder_facto
 
 
 @pytest.mark.asyncio
-async def test_saving_replica(df_local_factory):
+async def test_saving_replica(df_factory):
     tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
 
-    master = df_local_factory.create(proactor_threads=1)
-    replica = df_local_factory.create(proactor_threads=1, dbfilename=f"dump_{tmp_file_name}")
-    df_local_factory.start_all([master, replica])
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1, dbfilename=f"dump_{tmp_file_name}")
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -2088,12 +2080,12 @@ async def test_saving_replica(df_local_factory):
 
 
 @pytest.mark.asyncio
-async def test_start_replicating_while_save(df_local_factory):
+async def test_start_replicating_while_save(df_factory):
     tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
 
-    master = df_local_factory.create(proactor_threads=4)
-    replica = df_local_factory.create(proactor_threads=4, dbfilename=f"dump_{tmp_file_name}")
-    df_local_factory.start_all([master, replica])
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4, dbfilename=f"dump_{tmp_file_name}")
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -2115,10 +2107,10 @@ async def test_start_replicating_while_save(df_local_factory):
 
 
 @pytest.mark.asyncio
-async def test_user_acl_replication(df_local_factory):
-    master = df_local_factory.create(proactor_threads=4)
-    replica = df_local_factory.create(proactor_threads=4)
-    df_local_factory.start_all([master, replica])
+async def test_user_acl_replication(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     await c_master.execute_command("ACL SETUSER tmp >tmp ON +ping +dfly +replconf")
@@ -2149,7 +2141,7 @@ async def test_user_acl_replication(df_local_factory):
 
 @pytest.mark.parametrize("break_conn", [False, True])
 @pytest.mark.asyncio
-async def test_replica_reconnect(df_local_factory, break_conn):
+async def test_replica_reconnect(df_factory, break_conn):
     """
     Test replica does not connect to master if master restarted
     step1: create master and replica
@@ -2159,11 +2151,9 @@ async def test_replica_reconnect(df_local_factory, break_conn):
     step5: check replica replicates master
     """
     # Connect replica to master
-    master = df_local_factory.create(proactor_threads=1)
-    replica = df_local_factory.create(
-        proactor_threads=1, break_replication_on_master_restart=break_conn
-    )
-    df_local_factory.start_all([master, replica])
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1, break_replication_on_master_restart=break_conn)
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_replica = replica.client()
@@ -2178,8 +2168,8 @@ async def test_replica_reconnect(df_local_factory, break_conn):
     master.stop()
     assert (await c_replica.info("REPLICATION"))["master_link_status"] == "down"
 
-    master = df_local_factory.create(proactor_threads=1, port=master_port)
-    df_local_factory.start_all([master])
+    master = df_factory.create(proactor_threads=1, port=master_port)
+    df_factory.start_all([master])
     await asyncio.sleep(1)  # We sleep for 0.5s in replica.cc before reconnecting
 
     # Assert that replica did not reconnected to master with different repl_id
