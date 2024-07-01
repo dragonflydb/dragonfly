@@ -86,13 +86,15 @@ class RestoreStreamer : public JournalStreamer {
   }
 
  private:
-  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
+  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req)
+      ABSL_LOCKS_EXCLUDED(bucket_ser_mu_);
   bool ShouldWrite(const journal::JournalItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(cluster::SlotId slot_id) const;
 
   // Returns whether anything was written
-  bool WriteBucket(PrimeTable::bucket_iterator it);
+  bool WriteBucketNoLock(PrimeTable::bucket_iterator it)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(bucket_ser_mu_);
   void WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv, uint64_t expire_ms);
   void WriteCommand(journal::Entry::Payload cmd_payload);
 

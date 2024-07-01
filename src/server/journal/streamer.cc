@@ -6,9 +6,12 @@
 
 #include <absl/functional/bind_front.h>
 
+#include <mutex>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
+#include "util/fibers/synchronization.h"
 
 using namespace facade;
 
@@ -211,9 +214,11 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
 
     bool written = false;
     cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+      std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
+
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
-      if (WriteBucket(it)) {
+      if (WriteBucketNoLock(it)) {
         written = true;
       }
     });
@@ -279,9 +284,7 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
-  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
-
+bool RestoreStreamer::WriteBucketNoLock(PrimeTable::bucket_iterator it) {
   bool written = false;
 
   if (it.GetVersion() < snapshot_version_) {
@@ -310,16 +313,16 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
-  { std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_); }
+  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    WriteBucket(*bit);
+    WriteBucketNoLock(*bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
       DCHECK_LT(it.GetVersion(), snapshot_version_);
-      WriteBucket(it);
+      WriteBucketNoLock(it);
     });
   }
 }

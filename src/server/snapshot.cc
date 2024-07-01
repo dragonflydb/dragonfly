@@ -239,25 +239,23 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
   // We need to block if serialization is in progress
-  {
-    std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
-    ++stats_.savecb_calls;
+  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
+  ++stats_.savecb_calls;
 
-    auto check = [&](auto v) {
-      if (v >= snapshot_version_) {
-        // either has been already serialized or added after snapshotting started.
-        DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
-                 << " at " << v;
-        ++stats_.skipped;
-        return false;
-      }
-      return true;
-    };
-
-    uint64_t v = it.GetVersion();
-    if (!check(v))
+  auto check = [&](auto v) {
+    if (v >= snapshot_version_) {
+      // either has been already serialized or added after snapshotting started.
+      DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
+               << " at " << v;
+      ++stats_.skipped;
       return false;
-  }
+    }
+    return true;
+  };
+
+  uint64_t v = it.GetVersion();
+  if (!check(v))
+    return false;
 
   db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
@@ -267,8 +265,6 @@ bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
 }
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
-
   DCHECK_LT(it.GetVersion(), snapshot_version_);
 
   // traverse physical bucket and write it into string file.
@@ -341,7 +337,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  { std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_); }
+  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 
