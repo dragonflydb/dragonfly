@@ -26,6 +26,7 @@ ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(bool, tiered_storage_cache_fetched);
 ABSL_DECLARE_FLAG(bool, backing_file_direct);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
+ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 
 namespace dfly {
 
@@ -41,6 +42,7 @@ class TieredStorageTest : public BaseFamilyTest {
       exit(0);
     }
 
+    absl::SetFlag(&FLAGS_tiered_storage_write_depth, 15000);
     absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_storage_test");
     absl::SetFlag(&FLAGS_tiered_storage_cache_fetched, true);
     absl::SetFlag(&FLAGS_backing_file_direct, true);
@@ -211,6 +213,7 @@ TEST_F(TieredStorageTest, FlushAll) {
   auto reader = pp_->at(0)->LaunchFiber([&] {
     while (!done) {
       Run("reader", {"GET", absl::StrCat("k", rand() % kNum)});
+      util::ThisFiber::Yield();
     }
   });
 

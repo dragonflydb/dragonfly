@@ -69,7 +69,7 @@ jobs:
 
   build-macos:
     if: false
-    runs-on: macos-12
+    runs-on: macos-13
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -87,13 +87,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew uninstall --formula node kotlin harfbuzz sbt selenium-server imagemagick \
-              gradle maven openjdk postgresql r ant mongodb-community@5.0 mongosh \
-              node@18 php composer
 
-          # Preven updating these packages that bring in dependencies that sometimes break
-          # the update
-          brew pin azure-cli jpeg-xl aom lima pipx gcc
           # Remove Python3 symlinks in /usr/local/bin as workaround to brew update issues
           # https://github.com/actions/setup-python/issues/577
           rm /usr/local/bin/2to3* || :
@@ -103,7 +97,6 @@ jobs:
           brew update && brew install ninja boost openssl automake gcc zstd bison c-ares \
               autoconf libtool automake
 
-          # brew info icu4c
           mkdir -p $GITHUB_WORKSPACE/build
 
       - name: Configure & Build
@@ -111,14 +104,12 @@ jobs:
           cd $GITHUB_WORKSPACE/build
 
           export PATH=/usr/local/opt/bison/bin:$PATH
-          which gcc
-          which gcc-13
+          gcc-12 --version
 
           bison --version
 
-
           echo "*************************** START BUILDING **************************************"
-          CC=gcc-13 CXX=g++-13 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
+          CC=gcc-12 CXX=g++-12 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache
 
           ninja src/all

@@ -51,7 +51,8 @@ TEST_F(ExternalAllocatorTest, Basic) {
 
   ext_alloc_.AddStorage(0, kSegSize);
   EXPECT_EQ(0, ext_alloc_.Malloc(kMinBlockSize - 96));         //  page0: 1
-  EXPECT_EQ(kMinBlockSize, ext_alloc_.Malloc(kMinBlockSize));  // page0: 2
+  EXPECT_EQ(kMinBlockSize, ext_alloc_.Malloc(kMinBlockSize));  //  page0: 2
+
   constexpr auto kAnotherLen = kMinBlockSize * 2 - 10;
   size_t offset2 = ext_alloc_.Malloc(kAnotherLen);  // page1: 1
   EXPECT_EQ(offset2, 1_MB);                         // another page.
@@ -59,8 +60,9 @@ TEST_F(ExternalAllocatorTest, Basic) {
   ext_alloc_.Free(offset2, kAnotherLen);         // should return the page to the segment.
   EXPECT_EQ(offset2, ext_alloc_.Malloc(16_KB));  // another page.  page1: 1
 
-  ext_alloc_.Free(0, kMinBlockSize - 96);              // page0: 1
-  ext_alloc_.Free(kMinBlockSize, kMinBlockSize);       // page0: 0
+  ext_alloc_.Free(0, kMinBlockSize - 96);         // page0: 1
+  ext_alloc_.Free(kMinBlockSize, kMinBlockSize);  // page0: 0
+
   EXPECT_EQ(0, ext_alloc_.Malloc(kMinBlockSize * 2));  // page0
 }
 
@@ -115,6 +117,33 @@ TEST_F(ExternalAllocatorTest, Classes) {
   ASSERT_GT(offs3, 0);
 
   EXPECT_EQ(1_MB + 4_KB, ExternalAllocator::GoodSize(1_MB + 1));
+}
+
+// Fill up the allocator until it has to grow, remove 90% and make sure it has free space even with
+// extreme fragmentation
+TEST_F(ExternalAllocatorTest, EmptyFull) {
+  const int kAllocSize = kMinBlockSize;
+  ext_alloc_.AddStorage(0, 2 * kSegSize);
+
+  // Fill up the allocator
+  vector<int64_t> offsets;
+  int64_t offset;
+  do {
+    offset = ext_alloc_.Malloc(kAllocSize);
+    if (offset >= 0)
+      offsets.push_back(offset);
+  } while (offset >= 0);
+
+  // Keep only 10%, free 90%
+  for (size_t i = 0; i < offsets.size(); i++) {
+    if (i % 10 == 0)
+      continue;
+    ext_alloc_.Free(offsets[i], kAllocSize);
+  }
+
+  // Expect to succeed adding 10% without growing
+  for (size_t i = 0; i < offsets.size() / 10; i++)
+    EXPECT_GT(ext_alloc_.Malloc(kAllocSize), 0u);
 }
 
 }  // namespace dfly::tiering
