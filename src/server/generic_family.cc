@@ -1357,6 +1357,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   }
   cntx->conn_state.db_index = index;
   auto cb = [cntx, index](EngineShard* shard) {
+    CHECK(cntx->ns != nullptr);
     auto& db_slice = cntx->ns->GetCurrentDbSlice();
     db_slice.ActivateDb(index);
     return OpStatus::OK;
