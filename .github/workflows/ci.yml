@@ -36,7 +36,6 @@ jobs:
   build:
     strategy:
       matrix:
-        runner: [ubuntu-latest]
         # Test of these containers
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
         build-type: [Debug, Release]
@@ -47,12 +46,8 @@ jobs:
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
-            runner: ubuntu-latest
-        exclude:
-          - container: "alpine-dev:latest"
-            runner: Larger-CI-Arm
 
-    runs-on: ${{matrix.runner}}
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       SCCACHE_GHA_ENABLED: "true"
