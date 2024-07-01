@@ -65,6 +65,7 @@ bool Namespaces::IsInitialized() const {
 }
 
 Namespace& Namespaces::GetDefaultNamespace() const {
+  CHECK(this != nullptr);
   CHECK(default_namespace_ != nullptr);
   return *default_namespace_;
 }

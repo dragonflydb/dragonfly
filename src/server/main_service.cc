@@ -818,8 +818,10 @@ Service::Service(ProactorPool* pp)
 
   CHECK(shard_set == nullptr);
   shard_set = new EngineShardSet(pp);
+
   CHECK(namespaces == nullptr);
   namespaces = new Namespaces();
+  atomic_thread_fence(memory_order_release);
 
   // We support less than 1024 threads and we support less than 1024 shards.
   // For example, Scan uses 10 bits in cursor to encode shard id it currently traverses.
