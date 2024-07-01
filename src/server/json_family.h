@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "core/wrapped_json_path.h"
 #include "server/common.h"
 #include "server/engine_shard_set.h"
 
