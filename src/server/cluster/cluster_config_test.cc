@@ -96,7 +96,7 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidEmpty) {
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {
   EXPECT_EQ(ClusterConfig::CreateFromConfig(
-                kMyId, {{.slot_ranges = {{.start = 0, .end = 16000}},
+                kMyId, {{.slot_ranges = std::vector<SlotRange>{{.start = 0, .end = 16000}},
                          .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
                          .replicas = {},
                          .migrations = {}}}),
@@ -105,11 +105,11 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidDoubleBookedSlot) {
   EXPECT_EQ(ClusterConfig::CreateFromConfig(
-                kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
+                kMyId, {{.slot_ranges = std::vector<SlotRange>{{.start = 0, .end = 0x3FFF}},
                          .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
                          .replicas = {},
                          .migrations = {}},
-                        {.slot_ranges = {{.start = 0, .end = 0}},
+                        {.slot_ranges = std::vector<SlotRange>{{.start = 0, .end = 0}},
                          .master = {.id = "other2", .ip = "192.168.0.101", .port = 7001},
                          .replicas = {},
                          .migrations = {}}}),
@@ -118,7 +118,7 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidDoubleBookedSlot) {
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidSlotId) {
   EXPECT_EQ(ClusterConfig::CreateFromConfig(
-                kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF + 1}},
+                kMyId, {{.slot_ranges = std::vector<SlotRange>{{.start = 0, .end = 0x3FFF + 1}},
                          .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
                          .replicas = {},
                          .migrations = {}}}),
@@ -127,7 +127,7 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidSlotId) {
 
 TEST_F(ClusterConfigTest, ConfigSetOk) {
   auto config = ClusterConfig::CreateFromConfig(
-      kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
+      kMyId, {{.slot_ranges = std::vector<SlotRange>{{.start = 0, .end = 0x3FFF}},
                .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
                .replicas = {},
                .migrations = {}}});
@@ -139,7 +139,7 @@ TEST_F(ClusterConfigTest, ConfigSetOk) {
 
 TEST_F(ClusterConfigTest, ConfigSetOkWithReplica) {
   auto config = ClusterConfig::CreateFromConfig(
-      kMyId, {{.slot_ranges = {{.start = 0, .end = 0x3FFF}},
+      kMyId, {{.slot_ranges = std::vector<SlotRange>{{.start = 0, .end = 0x3FFF}},
                .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
                .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}},
                .migrations = {}}});
@@ -150,21 +150,21 @@ TEST_F(ClusterConfigTest, ConfigSetOkWithReplica) {
 
 TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
   auto config = ClusterConfig::CreateFromConfig(
-      kMyId, {{.slot_ranges = {{.start = 0, .end = 5'000}},
+      kMyId, {{.slot_ranges = std::vector<SlotRange>{{.start = 0, .end = 5'000}},
                .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
                .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}},
                .migrations = {}},
-              {.slot_ranges = {{.start = 5'001, .end = 10'000}},
+              {.slot_ranges = std::vector<SlotRange>{{.start = 5'001, .end = 10'000}},
                .master = {.id = kMyId, .ip = "192.168.0.102", .port = 7002},
                .replicas = {{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003}},
                .migrations = {}},
-              {.slot_ranges = {{.start = 10'001, .end = 0x3FFF}},
+              {.slot_ranges = std::vector<SlotRange>{{.start = 10'001, .end = 0x3FFF}},
                .master = {.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
                .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}},
                .migrations = {}}});
   EXPECT_NE(config, nullptr);
   SlotSet owned_slots = config->GetOwnedSlots();
-  EXPECT_EQ(owned_slots.ToSlotRanges().size(), 1);
+  EXPECT_EQ(owned_slots.ToSlotRanges().Size(), 1);
   EXPECT_EQ(owned_slots.Count(), 5'000);
 
   {
@@ -481,8 +481,8 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
   auto config1 = ClusterConfig::CreateFromConfig("id0", config_str);
   EXPECT_EQ(
       config1->GetNewOutgoingMigrations(nullptr),
-      (std::vector<MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .node_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+      (std::vector<MigrationInfo>{{.slot_ranges = std::vector<SlotRange>{{7000, 8000}},
+                                   .node_info = {.id = "id1", .ip = "127.0.0.1", .port = 9001}}}));
 
   EXPECT_TRUE(config1->GetFinishedOutgoingMigrations(nullptr).empty());
   EXPECT_TRUE(config1->GetNewIncomingMigrations(nullptr).empty());
@@ -491,8 +491,8 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
   auto config2 = ClusterConfig::CreateFromConfig("id1", config_str);
   EXPECT_EQ(
       config2->GetNewIncomingMigrations(nullptr),
-      (std::vector<MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .node_id = "id0", .ip = "127.0.0.1", .port = 9001}}));
+      (std::vector<MigrationInfo>{{.slot_ranges = std::vector<SlotRange>{{7000, 8000}},
+                                   .node_info = {.id = "id0", .ip = "127.0.0.1", .port = 9001}}}));
 
   EXPECT_TRUE(config2->GetFinishedOutgoingMigrations(nullptr).empty());
   EXPECT_TRUE(config2->GetNewOutgoingMigrations(nullptr).empty());
@@ -523,16 +523,16 @@ TEST_F(ClusterConfigTest, ConfigSetMigrations) {
 
   EXPECT_EQ(
       config4->GetFinishedOutgoingMigrations(config1),
-      (std::vector<MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .node_id = "id1", .ip = "127.0.0.1", .port = 9001}}));
+      (std::vector<MigrationInfo>{{.slot_ranges = std::vector<SlotRange>{{7000, 8000}},
+                                   .node_info = {.id = "id1", .ip = "127.0.0.1", .port = 9001}}}));
   EXPECT_TRUE(config4->GetNewIncomingMigrations(config1).empty());
   EXPECT_TRUE(config4->GetFinishedIncomingMigrations(config1).empty());
   EXPECT_TRUE(config4->GetNewOutgoingMigrations(config1).empty());
 
   EXPECT_EQ(
       config5->GetFinishedIncomingMigrations(config2),
-      (std::vector<MigrationInfo>{
-          {.slot_ranges = {{7000, 8000}}, .node_id = "id0", .ip = "127.0.0.1", .port = 9001}}));
+      (std::vector<MigrationInfo>{{.slot_ranges = std::vector<SlotRange>{{7000, 8000}},
+                                   .node_info = {.id = "id0", .ip = "127.0.0.1", .port = 9001}}}));
   EXPECT_TRUE(config5->GetNewIncomingMigrations(config2).empty());
   EXPECT_TRUE(config5->GetFinishedOutgoingMigrations(config2).empty());
   EXPECT_TRUE(config5->GetNewOutgoingMigrations(config2).empty());
@@ -589,7 +589,7 @@ TEST_F(ClusterConfigTest, SlotSetAPI) {
     ss.Set(5010, true);
     EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5010, 5010}}));
 
-    ss.Set({SlotRange{5000, 5100}}, true);
+    ss.Set(std::vector<SlotRange>{{5000, 5100}}, true);
     EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5000, 5100}}));
 
     ss.Set(5050, false);
@@ -598,7 +598,7 @@ TEST_F(ClusterConfigTest, SlotSetAPI) {
     ss.Set(5500, false);
     EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5000, 5049}, {5051, 5100}}));
 
-    ss.Set({SlotRange{5090, 5100}}, false);
+    ss.Set(std::vector<SlotRange>{{5090, 5100}}, false);
     EXPECT_EQ(ss.ToSlotRanges(), SlotRanges({{0, 2000}, {5000, 5049}, {5051, 5089}}));
 
     SlotSet ss1(SlotRanges({{1001, 2000}}));

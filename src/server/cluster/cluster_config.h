@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "src/server/cluster/slot_set.h"
-#include "src/server/common.h"
 
 namespace dfly::cluster {
 

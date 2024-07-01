@@ -144,7 +144,7 @@ bool IncomingSlotMigration::Join() {
 
 void IncomingSlotMigration::Stop() {
   string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
-  LOG(INFO) << log_state << " incoming migration of slots " << SlotRange::ToString(slots_);
+  LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
   cntx_.Cancel();
 
   for (auto& flow : shard_flows_) {
@@ -156,11 +156,10 @@ void IncomingSlotMigration::Stop() {
 }
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
-  VLOG(1) << "Start flow for shard: " << shard;
   state_.store(MigrationState::C_SYNC);
 
   shard_flows_[shard]->Start(&cntx_, source, bc_);
-  VLOG(1) << "Incoming slot migration flow for shard: " << shard << " finished";
+  VLOG(1) << "Incoming flow: " << shard << " finished for " << source_id_;
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {

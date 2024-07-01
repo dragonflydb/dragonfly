@@ -3,6 +3,9 @@ extern "C" {
 #include "redis/crc16.h"
 }
 
+#include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_defs.h"
@@ -13,6 +16,30 @@ using namespace std;
 ABSL_FLAG(string, cluster_mode, "", "Cluster mode supported. Default: \"\"");
 
 namespace dfly::cluster {
+std::string SlotRange::ToString() const {
+  return absl::StrCat("[", start, ", ", end, "]");
+}
+
+SlotRanges::SlotRanges(std::vector<SlotRange> ranges) : ranges_(std::move(ranges)) {
+  std::sort(ranges_.begin(), ranges_.end());
+}
+
+void SlotRanges::Extend(const SlotRanges& sr) {
+  ranges_.insert(ranges_.end(), sr.ranges_.begin(), sr.ranges_.end());
+  std::sort(ranges_.begin(), ranges_.end());
+}
+
+std::string SlotRanges::ToString() const {
+  return absl::StrJoin(ranges_, ", ", [](std::string* out, SlotRange range) {
+    absl::StrAppend(out, range.ToString());
+  });
+}
+
+std::string MigrationInfo::ToString() const {
+  return absl::StrCat(node_info.id, ",", node_info.ip, ":", node_info.port, " (",
+                      slot_ranges.ToString(), ")");
+}
+
 namespace {
 enum class ClusterMode {
   kUninitialized,

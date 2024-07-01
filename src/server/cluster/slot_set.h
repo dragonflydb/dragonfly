@@ -68,7 +68,7 @@ class SlotSet {
   }
 
   SlotRanges ToSlotRanges() const {
-    SlotRanges res;
+    std::vector<SlotRange> res;
 
     for (SlotId i = 0; i < kSlotsNumber; ++i) {
       if (!slots_->test(i)) {
