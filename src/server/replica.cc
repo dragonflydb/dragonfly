@@ -196,7 +196,7 @@ void Replica::MainReplicationFb() {
       // Give a lower timeout for connect, because we're
       ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_reconnect_timeout_ms) * 1ms, &cntx_);
       if (ec) {
-        LOG(ERROR) << "Error connecting to " << server().Description() << " " << ec;
+        LOG(WARNING) << "Error connecting to " << server().Description() << " " << ec;
         continue;
       }
       VLOG(1) << "Replica socket connected";
