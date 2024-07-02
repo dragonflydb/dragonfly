@@ -14,6 +14,7 @@
 #include "server/rdb_save.h"
 #include "server/table.h"
 #include "util/fibers/future.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -92,18 +93,20 @@ class SliceSnapshot {
   void IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut);
 
   // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(PrimeIterator it);
+  bool BucketSaveCb(PrimeIterator it) ABSL_LOCKS_EXCLUDED(bucket_ser_mu_);
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.
-  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
+  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it)
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(bucket_ser_mu_);
 
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                       std::optional<uint64_t> expire, RdbSerializer* serializer);
 
   // DbChange listener
-  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
+  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req)
+      ABSL_LOCKS_EXCLUDED(bucket_ser_mu_);
 
   // Journal listener
   void OnJournalEntry(const journal::JournalItem& item, bool unused_await_arg);
@@ -171,6 +174,8 @@ class SliceSnapshot {
     size_t savecb_calls = 0;
     size_t keys_total = 0;
   } stats_;
+
+  util::fb2::Mutex bucket_ser_mu_;
 };
 
 }  // namespace dfly
