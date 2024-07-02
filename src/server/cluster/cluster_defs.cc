@@ -9,6 +9,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_defs.h"
+#include "slot_set.h"
 #include "src/server/common.h"
 
 using namespace std;
@@ -24,9 +25,11 @@ SlotRanges::SlotRanges(std::vector<SlotRange> ranges) : ranges_(std::move(ranges
   std::sort(ranges_.begin(), ranges_.end());
 }
 
-void SlotRanges::Extend(const SlotRanges& sr) {
-  ranges_.insert(ranges_.end(), sr.ranges_.begin(), sr.ranges_.end());
-  std::sort(ranges_.begin(), ranges_.end());
+void SlotRanges::Merge(const SlotRanges& sr) {
+  // TODO rewrite it
+  SlotSet slots(*this);
+  slots.Set(sr, true);
+  ranges_ = std::move(slots.ToSlotRanges().ranges_);
 }
 
 std::string SlotRanges::ToString() const {

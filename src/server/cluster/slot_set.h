@@ -81,7 +81,7 @@ class SlotSet {
       }
     }
 
-    return res;
+    return SlotRanges(res);
   }
 
  private:

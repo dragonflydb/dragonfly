@@ -58,6 +58,7 @@ class ClusterConfig {
 
   ClusterConfig() = default;
 
+  std::string my_id_;
   ClusterShardInfos config_;
 
   SlotSet my_slots_;

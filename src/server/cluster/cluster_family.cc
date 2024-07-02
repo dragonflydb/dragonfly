@@ -79,7 +79,7 @@ ClusterConfig* ClusterFamily::cluster_config() {
 }
 
 ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
-  ClusterShardInfo info{.slot_ranges = std::vector<SlotRange>{{.start = 0, .end = kMaxSlotNum}},
+  ClusterShardInfo info{.slot_ranges = SlotRanges({{.start = 0, .end = kMaxSlotNum}}),
                         .master = {},
                         .replicas = {},
                         .migrations = {}};
@@ -517,12 +517,12 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     // set_config_mu is unlocked and even if we apply the same changes 2 times it's not a problem
     for (const auto& m : incoming_migrations_jobs_) {
       if (m->GetState() == MigrationState::C_FINISHED) {
-        enable_slots.Extend(m->GetSlots());
+        enable_slots.Merge(m->GetSlots());
       }
     }
     for (const auto& m : outgoing_migration_jobs_) {
       if (m->GetState() == MigrationState::C_FINISHED) {
-        disable_slots.Extend(m->GetSlots());
+        disable_slots.Merge(m->GetSlots());
       }
     }
   }
@@ -558,7 +558,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   SlotSet after = tl_cluster_config->GetOwnedSlots();
   if (ServerState::tlocal()->is_master) {
     auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
-    deleted_slots.Extend(out_migrations_slots);
+    deleted_slots.Merge(out_migrations_slots);
     DeleteSlots(deleted_slots);
     LOG_IF(INFO, !deleted_slots.Empty())
         << "Flushing newly unowned slots: " << deleted_slots.ToString();
@@ -627,7 +627,7 @@ void ClusterFamily::DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cn
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  DeleteSlots(slot_ranges);
+  DeleteSlots(SlotRanges(std::move(slot_ranges)));
 
   return cntx->SendOk();
 }
@@ -744,7 +744,7 @@ SlotRanges ClusterFamily::RemoveOutgoingMigrations(shared_ptr<ClusterConfig> new
     DCHECK(it->get() != nullptr);
     OutgoingMigration& migration = *it->get();
     const auto& slots = migration.GetSlots();
-    removed_slots.Extend(slots);
+    removed_slots.Merge(slots);
     LOG(INFO) << "Outgoing migration cancelled: slots " << slots.ToString() << " to "
               << migration.GetHostIp() << ":" << migration.GetPort();
     migration.Finish();
@@ -835,7 +835,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
-      std::move(source_id), &server_family_->service(), std::move(slots), flows_num));
+      std::move(source_id), &server_family_->service(), SlotRanges(std::move(slots)), flows_num));
 
   return cntx->SendOk();
 }
@@ -900,7 +900,7 @@ void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
     }
   }
   if (!is_migration_valid) {
-    LOG(WARNING) << "Config wasb't updated for slots ranges: " << slots.ToString() << " for "
+    LOG(WARNING) << "Config wasn't updated for slots ranges: " << slots.ToString() << " for "
                  << MyID() << " : " << node_id;
     return;
   }

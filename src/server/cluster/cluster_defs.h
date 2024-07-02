@@ -25,7 +25,7 @@ struct SlotRange {
     return start == r.start && end == r.end;
   }
 
-  bool operator<(const SlotRange& r) {
+  bool operator<(const SlotRange& r) const noexcept {
     return start < r.start || (start == r.start && end < r.end);
   }
 
@@ -43,7 +43,7 @@ struct SlotRange {
 class SlotRanges {
  public:
   SlotRanges() = default;
-  SlotRanges(std::vector<SlotRange> ranges);
+  explicit SlotRanges(std::vector<SlotRange> ranges);
 
   bool Contains(SlotId id) const noexcept {
     for (const auto& sr : ranges_) {
@@ -61,7 +61,7 @@ class SlotRanges {
     return ranges_.empty();
   }
 
-  void Extend(const SlotRanges& sr);
+  void Merge(const SlotRanges& sr);
 
   bool operator==(const SlotRanges& r) const noexcept {
     return ranges_ == r.ranges_;
@@ -69,12 +69,12 @@ class SlotRanges {
 
   std::string ToString() const;
 
-  friend auto begin(const SlotRanges& sr) noexcept {
-    return sr.ranges_.cbegin();
+  auto begin() const noexcept {
+    return ranges_.cbegin();
   }
 
-  friend auto end(const SlotRanges& sr) noexcept {
-    return sr.ranges_.cend();
+  auto end() const noexcept {
+    return ranges_.cend();
   }
 
  private:
@@ -84,7 +84,7 @@ class SlotRanges {
 struct ClusterNodeInfo {
   std::string id;
   std::string ip;
-  std::uint16_t port = 0;
+  uint16_t port = 0;
 
   bool operator==(const ClusterNodeInfo& r) const noexcept {
     return port == r.port && ip == r.ip && id == r.id;

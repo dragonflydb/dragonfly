@@ -90,6 +90,7 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
 
   shared_ptr<ClusterConfig> result(new ClusterConfig());
 
+  result->my_id_ = my_id;
   result->config_ = config;
 
   for (const auto& shard : result->config_) {
@@ -149,7 +150,7 @@ optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
     ranges.push_back({.start = start.value(), .end = end.value()});
   }
 
-  return ranges;
+  return SlotRanges(ranges);
 }
 
 optional<ClusterNodeInfo> ParseClusterNode(const JsonType& json) {
@@ -317,10 +318,13 @@ ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
 
   for (const auto& shard : config_) {
     if (shard.slot_ranges.Contains(id)) {
-      // during migration process more probable that data is already moved
-      for (const auto& m : shard.migrations) {
-        if (m.slot_ranges.Contains(id)) {
-          return m.node_info;
+      if (shard.master.id == my_id_) {
+        // The only reason why this function call and shard.master == my_id_ is the slot was
+        // migrated
+        for (const auto& m : shard.migrations) {
+          if (m.slot_ranges.Contains(id)) {
+            return m.node_info;
+          }
         }
       }
       return shard.master;
