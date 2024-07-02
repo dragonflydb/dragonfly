@@ -722,6 +722,15 @@ void EngineShard::TEST_EnableHeartbeat() {
   });
 }
 
+bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula justification
+  if (!tiered_storage_)
+    return false;
+
+  size_t tiering_redline =
+      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
+  return UsedMemory() > tiering_redline && tiered_storage_->WriteDepthUsage() > 0.3;
+}
+
 auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
   const TxQueue* queue = txq();
 
