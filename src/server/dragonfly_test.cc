@@ -563,12 +563,12 @@ TEST_F(DflyEngineTest, Bug468) {
   resp = Run({"exec"});
   ASSERT_THAT(resp, ErrArg("not an integer"));
 
-  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+  ASSERT_FALSE(IsLocked(0, "foo"));
 
   resp = Run({"eval", "return redis.call('set', 'foo', 'bar', 'EX', 'moo')", "1", "foo"});
   ASSERT_THAT(resp, ErrArg("not an integer"));
 
-  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+  ASSERT_FALSE(IsLocked(0, "foo"));
 }
 
 TEST_F(DflyEngineTest, Bug496) {
@@ -577,7 +577,7 @@ TEST_F(DflyEngineTest, Bug496) {
     if (shard == nullptr)
       return;
 
-    auto& db = shard->db_slice();
+    auto& db = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
 
     int cb_hits = 0;
     uint32_t cb_id =

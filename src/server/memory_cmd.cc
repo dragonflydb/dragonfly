@@ -24,6 +24,7 @@
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
+#include "server/transaction.h"
 
 using namespace std;
 using namespace facade;
@@ -241,7 +242,7 @@ void PushMemoryUsageStats(const base::IoBuf::MemoryUsage& mem, string_view prefi
 void MemoryCmd::Stats() {
   vector<pair<string, size_t>> stats;
   stats.reserve(25);
-  auto server_metrics = owner_->GetMetrics();
+  auto server_metrics = owner_->GetMetrics(cntx_->ns);
 
   // RSS
   stats.push_back({"rss_bytes", rss_mem_current.load(memory_order_relaxed)});
@@ -354,7 +355,7 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
 void MemoryCmd::Usage(std::string_view key) {
   ShardId sid = Shard(key, shard_set->size());
   ssize_t memory_usage = shard_set->pool()->at(sid)->AwaitBrief([key, this]() -> ssize_t {
-    auto& db_slice = EngineShard::tlocal()->db_slice();
+    auto& db_slice = cntx_->ns->GetCurrentDbSlice();
     auto [pt, exp_t] = db_slice.GetTables(cntx_->db_index());
     PrimeIterator it = pt->Find(key);
     if (IsValid(it)) {

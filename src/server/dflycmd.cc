@@ -73,7 +73,7 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
 
 struct TransactionGuard {
   static OpStatus ExitGuardCb(Transaction* t, EngineShard* shard) {
-    shard->db_slice().SetExpireAllowed(true);
+    t->GetCurrentDbSlice().SetExpireAllowed(true);
     return OpStatus::OK;
   };
 
@@ -81,7 +81,7 @@ struct TransactionGuard {
     t->Execute(
         [disable_expirations](Transaction* t, EngineShard* shard) {
           if (disable_expirations) {
-            shard->db_slice().SetExpireAllowed(!disable_expirations);
+            t->GetCurrentDbSlice().SetExpireAllowed(!disable_expirations);
           }
           return OpStatus::OK;
         },
@@ -101,7 +101,7 @@ OpStatus WaitReplicaFlowToCatchup(absl::Time end_time, shared_ptr<DflyCmd::Repli
                                   EngineShard* shard) {
   // We don't want any writes to the journal after we send the `PING`,
   // and expirations could ruin that.
-  shard->db_slice().SetExpireAllowed(false);
+  namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetExpireAllowed(false);
   shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {}, true);
 
   FlowInfo* flow = &replica->flows[shard->shard_id()];
@@ -422,8 +422,9 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "AwaitCurrentDispatches done";
 
   absl::Cleanup([] {
-    shard_set->RunBriefInParallel(
-        [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    shard_set->RunBriefInParallel([](EngineShard* shard) {
+      namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetExpireAllowed(true);
+    });
     VLOG(2) << "Enable expiration";
   });
 
@@ -455,7 +456,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   cntx->transaction->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
-    shard->db_slice().ExpireAllIfNeeded();
+    t->GetCurrentDbSlice().ExpireAllIfNeeded();
     return OpStatus::OK;
   });
 

@@ -10,6 +10,7 @@
 
 #include "base/logging.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -102,7 +103,7 @@ bool BlockingController::DbWatchTable::UnwatchTx(string_view key, Transaction* t
   return res;
 }
 
-BlockingController::BlockingController(EngineShard* owner) : owner_(owner) {
+BlockingController::BlockingController(EngineShard* owner, Namespace* ns) : owner_(owner), ns_(ns) {
 }
 
 BlockingController::~BlockingController() {
@@ -153,6 +154,7 @@ void BlockingController::NotifyPending() {
   CHECK(tx == nullptr) << tx->DebugId();
 
   DbContext context;
+  context.ns = ns_;
   context.time_now_ms = GetCurrentTimeMs();
 
   for (DbIndex index : awakened_indices_) {

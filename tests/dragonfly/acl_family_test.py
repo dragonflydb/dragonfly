@@ -2,7 +2,7 @@ import pytest
 import redis
 from redis import asyncio as aioredis
 from .instance import DflyInstanceFactory
-from .utility import disconnect_clients
+from .utility import *
 import tempfile
 import asyncio
 import os
@@ -536,6 +536,43 @@ async def test_acl_keys(async_client):
     # reject because bonus key does not match
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command("ZUNIONSTORE destkey 2 barz1 barz2")
+
+
+@pytest.mark.asyncio
+async def test_namespaces(df_local_factory):
+    df = df_local_factory.create()
+    df.start()
+
+    admin = aioredis.Redis(port=df.port)
+    assert await admin.execute_command("SET foo admin") == b"OK"
+    assert await admin.execute_command("GET foo") == b"admin"
+
+    # Create ns space named 'ns1'
+    await admin.execute_command("ACL SETUSER adi TENANT:ns1 ON >adi_pass +@all ~*")
+
+    adi = aioredis.Redis(port=df.port)
+    assert await adi.execute_command("AUTH adi adi_pass") == b"OK"
+    assert await adi.execute_command("SET foo bar") == b"OK"
+    assert await adi.execute_command("GET foo") == b"bar"
+    assert await admin.execute_command("GET foo") == b"admin"
+
+    # Adi and Shahar are on the same team
+    await admin.execute_command("ACL SETUSER shahar TENANT:ns1 ON >shahar_pass +@all ~*")
+
+    shahar = aioredis.Redis(port=df.port)
+    assert await shahar.execute_command("AUTH shahar shahar_pass") == b"OK"
+    assert await shahar.execute_command("GET foo") == b"bar"
+    assert await shahar.execute_command("SET foo bar2") == b"OK"
+    assert await adi.execute_command("GET foo") == b"bar2"
+
+    # Roman is a CTO, he has his own private space
+    await admin.execute_command("ACL SETUSER roman TENANT:ns2 ON >roman_pass +@all ~*")
+
+    roman = aioredis.Redis(port=df.port)
+    assert await roman.execute_command("AUTH roman roman_pass") == b"OK"
+    assert await roman.execute_command("GET foo") == None
+
+    await close_clients(admin, adi, shahar, roman)
 
 
 @pytest.mark.asyncio

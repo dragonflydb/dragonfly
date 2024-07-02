@@ -181,6 +181,13 @@ std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, boo
   return {};
 }
 
+std::optional<std::string> MaybeParseNamespace(std::string_view command) {
+  if (absl::StartsWith(command, "TENANT:")) {
+    return std::string(command.substr(7));
+  }
+  return {};
+}
+
 std::optional<bool> MaybeParseStatus(std::string_view command) {
   if (command == "ON") {
     return true;
@@ -304,6 +311,11 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(facade::ArgRange a
         return ErrorReply("Multiple ON/OFF are not allowed");
       }
       req.is_active = *status;
+      continue;
+    }
+
+    if (auto ns = MaybeParseNamespace(command); ns) {
+      req.ns = ns;
       continue;
     }
 

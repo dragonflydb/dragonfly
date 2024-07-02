@@ -21,6 +21,7 @@
 #include "server/cluster/cluster_utility.h"
 #include "server/common.h"
 #include "server/journal/types.h"
+#include "server/namespaces.h"
 #include "server/table.h"
 #include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
@@ -29,6 +30,7 @@ namespace dfly {
 
 class EngineShard;
 class BlockingController;
+class DbSlice;
 
 using facade::OpResult;
 using facade::OpStatus;
@@ -176,7 +178,7 @@ class Transaction {
                        std::optional<cluster::SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
-  OpStatus InitByArgs(DbIndex index, CmdArgList args);
+  OpStatus InitByArgs(Namespace* ns, DbIndex index, CmdArgList args);
 
   // Get command arguments for specific shard. Called from shard thread.
   ShardArgs GetShardArgs(ShardId sid) const;
@@ -221,10 +223,11 @@ class Transaction {
   void PrepareSquashedMultiHop(const CommandId* cid, absl::FunctionRef<bool(ShardId)> enabled);
 
   // Start multi in GLOBAL mode.
-  void StartMultiGlobal(DbIndex dbid);
+  void StartMultiGlobal(Namespace* ns, DbIndex dbid);
 
   // Start multi in LOCK_AHEAD mode with given keys.
-  void StartMultiLockedAhead(DbIndex dbid, CmdArgList keys, bool skip_scheduling = false);
+  void StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
+                             bool skip_scheduling = false);
 
   // Start multi in NON_ATOMIC mode.
   void StartMultiNonAtomic();
@@ -306,8 +309,14 @@ class Transaction {
   bool IsGlobal() const;
 
   DbContext GetDbContext() const {
-    return DbContext{db_index_, time_now_ms_};
+    return DbContext{namespace_, db_index_, time_now_ms_};
   }
+
+  Namespace& GetNamespace() const {
+    return *namespace_;
+  }
+
+  DbSlice& GetCurrentDbSlice() const;
 
   DbIndex GetDbIndex() const {
     return db_index_;
@@ -323,7 +332,7 @@ class Transaction {
   // Prepares for running ScheduleSingleHop() for a single-shard multi tx.
   // It is safe to call ScheduleSingleHop() after calling this method, but the callback passed
   // to it must not block.
-  void PrepareMultiForScheduleSingleHop(ShardId sid, DbIndex db, CmdArgList args);
+  void PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, DbIndex db, CmdArgList args);
 
   // Write a journal entry to a shard journal with the given payload. When logging a non-automatic
   // journal command, multiple journal entries may be necessary. In this case, call with set
@@ -487,7 +496,7 @@ class Transaction {
   };
 
   // Init basic fields and reset re-usable.
-  void InitBase(DbIndex dbid, CmdArgList args);
+  void InitBase(Namespace* ns, DbIndex dbid, CmdArgList args);
 
   // Init as a global transaction.
   void InitGlobal();
@@ -526,7 +535,7 @@ class Transaction {
   void RunCallback(EngineShard* shard);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
-  OpStatus WatchInShard(std::variant<ShardArgs, ArgSlice> keys, EngineShard* shard,
+  OpStatus WatchInShard(Namespace* ns, std::variant<ShardArgs, ArgSlice> keys, EngineShard* shard,
                         KeyReadyChecker krc);
 
   // Expire blocking transaction, unlock keys and unregister it from the blocking controller
@@ -623,6 +632,7 @@ class Transaction {
 
   TxId txid_{0};
   bool global_{false};
+  Namespace* namespace_{nullptr};
   DbIndex db_index_{0};
   uint64_t time_now_ms_{0};
 

@@ -102,7 +102,7 @@ class Service : public facade::ServiceInterface {
   }
 
   // Used by tests.
-  bool IsLocked(DbIndex db_index, std::string_view key) const;
+  bool IsLocked(Namespace* ns, DbIndex db_index, std::string_view key) const;
   bool IsShardSetLocked() const;
 
   util::ProactorPool& proactor_pool() {

@@ -47,7 +47,7 @@ add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
-            protocol_client.cc
+            protocol_client.cc namespaces.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
             detail/save_stages_controller.cc
             detail/snapshot_storage.cc

@@ -109,8 +109,8 @@ TEST_F(MultiTest, Multi) {
   resp = Run({"get", kKey4});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
 
-  ASSERT_FALSE(service_->IsLocked(0, kKey1));
-  ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(IsLocked(0, kKey1));
+  ASSERT_FALSE(IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
@@ -129,8 +129,8 @@ TEST_F(MultiTest, MultiGlobalCommands) {
   ASSERT_THAT(Run({"select", "2"}), "OK");
   ASSERT_THAT(Run({"get", "key"}), "val");
 
-  ASSERT_FALSE(service_->IsLocked(0, "key"));
-  ASSERT_FALSE(service_->IsLocked(2, "key"));
+  ASSERT_FALSE(IsLocked(0, "key"));
+  ASSERT_FALSE(IsLocked(2, "key"));
 }
 
 TEST_F(MultiTest, HitMissStats) {
@@ -181,8 +181,8 @@ TEST_F(MultiTest, MultiSeq) {
   ASSERT_EQ(resp, "QUEUED");
   resp = Run({"exec"});
 
-  ASSERT_FALSE(service_->IsLocked(0, kKey1));
-  ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(IsLocked(0, kKey1));
+  ASSERT_FALSE(IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
 
   ASSERT_THAT(resp, ArrLen(3));
@@ -237,8 +237,8 @@ TEST_F(MultiTest, MultiConsistent) {
   mset_fb.Join();
   fb.Join();
 
-  ASSERT_FALSE(service_->IsLocked(0, kKey1));
-  ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(IsLocked(0, kKey1));
+  ASSERT_FALSE(IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
@@ -312,9 +312,9 @@ TEST_F(MultiTest, MultiRename) {
   resp = Run({"exec"});
   EXPECT_EQ(resp, "OK");
 
-  EXPECT_FALSE(service_->IsLocked(0, kKey1));
-  EXPECT_FALSE(service_->IsLocked(0, kKey2));
-  EXPECT_FALSE(service_->IsLocked(0, kKey4));
+  EXPECT_FALSE(IsLocked(0, kKey1));
+  EXPECT_FALSE(IsLocked(0, kKey2));
+  EXPECT_FALSE(IsLocked(0, kKey4));
   EXPECT_FALSE(service_->IsShardSetLocked());
 }
 
@@ -366,8 +366,8 @@ TEST_F(MultiTest, FlushDb) {
 
   fb0.Join();
 
-  ASSERT_FALSE(service_->IsLocked(0, kKey1));
-  ASSERT_FALSE(service_->IsLocked(0, kKey4));
+  ASSERT_FALSE(IsLocked(0, kKey1));
+  ASSERT_FALSE(IsLocked(0, kKey4));
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
@@ -400,17 +400,17 @@ TEST_F(MultiTest, Eval) {
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "bar"});
   EXPECT_THAT(resp, ErrArg("undeclared"));
-  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+  ASSERT_FALSE(IsLocked(0, "foo"));
 
   Run({"script", "flush"});  // Reset global flag from autocorrect
 
   resp = Run({"eval", "return redis.call('get', 'foo')", "1", "foo"});
   EXPECT_THAT(resp, "42");
-  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+  ASSERT_FALSE(IsLocked(0, "foo"));
 
   resp = Run({"eval", "return redis.call('get', KEYS[1])", "1", "foo"});
   EXPECT_THAT(resp, "42");
-  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+  ASSERT_FALSE(IsLocked(0, "foo"));
   ASSERT_FALSE(service_->IsShardSetLocked());
 
   resp = Run({"eval", "return 77", "2", "foo", "zoo"});
@@ -451,7 +451,7 @@ TEST_F(MultiTest, Eval) {
                  "1", "foo"}),
             "42");
 
-  auto condition = [&]() { return service_->IsLocked(0, "foo"); };
+  auto condition = [&]() { return IsLocked(0, "foo"); };
   auto fb = ExpectConditionWithSuspension(condition);
   EXPECT_EQ(Run({"eval",
                  R"(redis.call('set', 'foo', '42')
@@ -974,7 +974,7 @@ TEST_F(MultiTest, TestLockedKeys) {
     GTEST_SKIP() << "Skipped TestLockedKeys test because multi_exec_mode is not lock ahead";
     return;
   }
-  auto condition = [&]() { return service_->IsLocked(0, "key1") && service_->IsLocked(0, "key2"); };
+  auto condition = [&]() { return IsLocked(0, "key1") && IsLocked(0, "key2"); };
   auto fb = ExpectConditionWithSuspension(condition);
 
   EXPECT_EQ(Run({"multi"}), "OK");
@@ -983,8 +983,8 @@ TEST_F(MultiTest, TestLockedKeys) {
   EXPECT_EQ(Run({"mset", "key1", "val3", "key1", "val4"}), "QUEUED");
   EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK", "OK")));
   fb.Join();
-  EXPECT_FALSE(service_->IsLocked(0, "key1"));
-  EXPECT_FALSE(service_->IsLocked(0, "key2"));
+  EXPECT_FALSE(IsLocked(0, "key1"));
+  EXPECT_FALSE(IsLocked(0, "key2"));
 }
 
 TEST_F(MultiTest, EvalExpiration) {

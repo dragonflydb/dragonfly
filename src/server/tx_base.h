@@ -14,6 +14,7 @@ namespace dfly {
 
 class EngineShard;
 class Transaction;
+class Namespace;
 
 using DbIndex = uint16_t;
 using ShardId = uint16_t;
@@ -57,17 +58,17 @@ struct KeyIndex {
 };
 
 struct DbContext {
+  Namespace* ns = nullptr;
   DbIndex db_index = 0;
   uint64_t time_now_ms = 0;
 };
 
 struct OpArgs {
-  EngineShard* shard;
-  const Transaction* tx;
+  EngineShard* shard = nullptr;
+  const Transaction* tx = nullptr;
   DbContext db_cntx;
 
-  OpArgs() : shard(nullptr), tx(nullptr) {
-  }
+  OpArgs() = default;
 
   OpArgs(EngineShard* s, const Transaction* tx, const DbContext& cntx)
       : shard(s), tx(tx), db_cntx(cntx) {
