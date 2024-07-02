@@ -65,7 +65,7 @@ bool Namespaces::IsInitialized() const {
 }
 
 Namespace& Namespaces::GetDefaultNamespace() const {
-  CHECK(this != nullptr);
+  CHECK(const_cast<Namespaces*>(this) != nullptr);  // Remove compiler warning
   CHECK(default_namespace_ != nullptr);
   return *default_namespace_;
 }
