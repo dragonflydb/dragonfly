@@ -469,7 +469,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
         "dbfilename": "tiered-entries",
         "tiered_prefix": "tiering-test-backing",
         "tiered_offload_threshold": "0.5",  # ask to keep below 0.5 * 1G
-        "tiered_storage_write_depth": 5000,
+        "tiered_storage_write_depth": 50,
     }
 )
 async def test_tiered_entries_throttle(async_client: aioredis.Redis):
@@ -495,6 +495,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
     while not load_task.done():
         info = await async_client.info("ALL")
+        # print(info["used_memory_human"], info["used_memory_rss_human"])
         assert info["used_memory"] < 600e6  # less than 600mb,
         await asyncio.sleep(0.05)
 
