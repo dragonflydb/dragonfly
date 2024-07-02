@@ -383,9 +383,11 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   PrimeTable::Cursor start_cursor{};
 
   // Loop while we haven't traversed all entries or reached our stash io device limit.
+  // Keep number of iterations below resonable limit to keep datastore always responsive
+  size_t iterations = 0;
   do {
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
-  } while (offloading_cursor_ != start_cursor && stash_limit > 0);
+  } while (offloading_cursor_ != start_cursor && stash_limit > 0 && iterations++ < 500);
 }
 
 }  // namespace dfly
