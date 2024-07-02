@@ -53,7 +53,7 @@ full_sync_replication_specs = [
 
 @pytest.mark.parametrize("t_replicas, seeder_config", full_sync_replication_specs)
 async def test_replication_full_sync(
-    df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker
+    df_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker
 ):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
@@ -62,7 +62,7 @@ async def test_replication_full_sync(
     seeder = df_seeder_factory.create(port=master.port, **seeder_config)
     await seeder.run(target_deviation=0.1)
 
-    replica = df_local_factory.create(
+    replica = df_factory.create(
         port=port_picker.get_available_port(), proactor_threads=t_replicas[0]
     )
     replica.start()
@@ -88,13 +88,13 @@ stable_sync_replication_specs = [
 
 @pytest.mark.parametrize("t_replicas, seeder_config", stable_sync_replication_specs)
 async def test_replication_stable_sync(
-    df_local_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker
+    df_factory, df_seeder_factory, redis_server, t_replicas, seeder_config, port_picker
 ):
     master = redis_server
     c_master = aioredis.Redis(port=master.port)
     assert await c_master.ping()
 
-    replica = df_local_factory.create(
+    replica = df_factory.create(
         port=port_picker.get_available_port(), proactor_threads=t_replicas[0]
     )
     replica.start()
@@ -126,7 +126,7 @@ replication_specs = [
 
 @pytest.mark.parametrize("t_replicas, seeder_config", replication_specs)
 async def test_redis_replication_all(
-    df_local_factory: DflyInstanceFactory,
+    df_factory: DflyInstanceFactory,
     df_seeder_factory,
     redis_server,
     t_replicas,
@@ -138,7 +138,7 @@ async def test_redis_replication_all(
     assert await c_master.ping()
 
     replicas = [
-        df_local_factory.create(port=port_picker.get_available_port(), proactor_threads=t)
+        df_factory.create(port=port_picker.get_available_port(), proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
@@ -147,7 +147,7 @@ async def test_redis_replication_all(
     await seeder.run(target_deviation=0.1)
 
     # Start replicas
-    df_local_factory.start_all(replicas)
+    df_factory.start_all(replicas)
 
     c_replicas = [replica.client() for replica in replicas]
 
@@ -189,7 +189,7 @@ master_disconnect_cases = [
 
 @pytest.mark.parametrize("t_replicas, t_disconnect, seeder_config", master_disconnect_cases)
 async def test_redis_master_restart(
-    df_local_factory,
+    df_factory,
     df_seeder_factory,
     redis_server,
     t_replicas,
@@ -202,7 +202,7 @@ async def test_redis_master_restart(
     assert await c_master.ping()
 
     replicas = [
-        df_local_factory.create(port=port_picker.get_available_port(), proactor_threads=t)
+        df_factory.create(port=port_picker.get_available_port(), proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
@@ -211,7 +211,7 @@ async def test_redis_master_restart(
     await seeder.run(target_deviation=0.1)
 
     # Start replicas
-    df_local_factory.start_all(replicas)
+    df_factory.start_all(replicas)
 
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 
@@ -259,7 +259,7 @@ master_disconnect_cases = [
 
 @pytest.mark.parametrize("t_replicas, seeder_config", master_disconnect_cases)
 async def test_disconnect_master(
-    df_local_factory,
+    df_factory,
     df_seeder_factory,
     redis_server,
     t_replicas,
@@ -275,7 +275,7 @@ async def test_disconnect_master(
     proxy_task = asyncio.create_task(proxy.serve())
 
     replicas = [
-        df_local_factory.create(port=port_picker.get_available_port(), proactor_threads=t)
+        df_factory.create(port=port_picker.get_available_port(), proactor_threads=t)
         for i, t in enumerate(t_replicas)
     ]
 
@@ -284,7 +284,7 @@ async def test_disconnect_master(
     await seeder.run(target_deviation=0.1)
 
     # Start replicas
-    df_local_factory.start_all(replicas)
+    df_factory.start_all(replicas)
 
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
 

@@ -129,8 +129,8 @@ async def test_acl_commands(async_client):
 
 
 @pytest.mark.asyncio
-async def test_acl_cat_commands_multi_exec_squash(df_local_factory):
-    df = df_local_factory.create(multi_exec_squash=True, port=1111)
+async def test_acl_cat_commands_multi_exec_squash(df_factory):
+    df = df_factory.create(multi_exec_squash=True, port=1111)
 
     df.start()
 
@@ -305,10 +305,10 @@ def create_temp_file(content, tmp_dir):
 
 @pytest.mark.asyncio
 @dfly_args({"port": 1111})
-async def test_bad_acl_file(df_local_factory, tmp_dir):
+async def test_bad_acl_file(df_factory, tmp_dir):
     acl = create_temp_file("ACL SETUSER kostas ON >mypass +@WRONG", tmp_dir)
 
-    df = df_local_factory.create(aclfile=acl)
+    df = df_factory.create(aclfile=acl)
 
     df.start()
 
@@ -322,9 +322,9 @@ async def test_bad_acl_file(df_local_factory, tmp_dir):
 
 @pytest.mark.asyncio
 @dfly_args({"port": 1111})
-async def test_good_acl_file(df_local_factory, tmp_dir):
+async def test_good_acl_file(df_factory, tmp_dir):
     acl = create_temp_file("USER MrFoo ON >mypass", tmp_dir)
-    df = df_local_factory.create(aclfile=acl)
+    df = df_factory.create(aclfile=acl)
 
     df.start()
     client = df.client()
@@ -416,8 +416,8 @@ async def test_acl_log(async_client):
 
 @pytest.mark.asyncio
 @dfly_args({"port": 1111, "admin_port": 1112, "requirepass": "mypass"})
-async def test_require_pass(df_local_factory):
-    df = df_local_factory.create()
+async def test_require_pass(df_factory):
+    df = df_factory.create()
     df.start()
 
     client = aioredis.Redis(port=df.port)
@@ -539,7 +539,7 @@ async def test_acl_keys(async_client):
 
 
 @pytest.mark.asyncio
-async def default_user_bug(df_local_factory):
+async def default_user_bug(df_factory):
     df.start()
 
     client = aioredis.Redis(port=df.port)
