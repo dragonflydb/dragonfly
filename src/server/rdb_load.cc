@@ -5,6 +5,7 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/tiered_storage.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -2449,7 +2450,8 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* p
 }
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
-  DbSlice& db_slice = EngineShard::tlocal()->db_slice();
+  EngineShard* es = EngineShard::tlocal();
+  DbSlice& db_slice = es->db_slice();
   DbContext db_cntx{db_ind, GetCurrentTimeMs()};
 
   for (const auto* item : ib) {
@@ -2476,6 +2478,9 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (!res.is_new) {
       LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
+
+    if (auto* ts = es->tiered_storage(); ts && ts->ShouldStash(res.it->second))
+      ts->Stash(db_cntx.db_index, item->key, &res.it->second);
   }
 
   for (auto* item : ib) {

@@ -498,5 +498,5 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
         assert info["used_memory"] < 600e6  # less than 600mb,
         await asyncio.sleep(0.05)
 
-    # Compare captures
+    await load_task
     assert await StaticSeeder.capture(async_client) == start_capture
