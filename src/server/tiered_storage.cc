@@ -272,7 +272,7 @@ template util::fb2::Future<size_t> TieredStorage::Modify(DbIndex dbid, std::stri
                                                          std::function<size_t(std::string*)> modf);
 
 void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
-  DCHECK(!value->IsExternal() && !value->HasIoPending());
+  CHECK(!value->IsExternal() && !value->HasIoPending());
 
   // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
   // with a lot of underutilized disk space.
@@ -296,7 +296,7 @@ void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
   }
 
   if (ec) {
-    VLOG(1) << "Stash failed immediately" << ec.message();
+    LOG(ERROR) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
   }
 }

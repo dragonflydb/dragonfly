@@ -10,7 +10,9 @@ extern "C" {
 
 using namespace std;
 
-ABSL_FLAG(string, cluster_mode, "", "Cluster mode supported. Default: \"\"");
+ABSL_FLAG(string, cluster_mode, "",
+          "Cluster mode supported. Possible values are "
+          "'emulated', 'yes' or ''");
 
 namespace dfly::cluster {
 namespace {
