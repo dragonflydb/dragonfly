@@ -2426,9 +2426,9 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 
     // Block, if tiered storage is active, but can't keep up
     while (EngineShard::tlocal()->ShouldThrottleForTiering()) {
-      this->blocked_shards_.fetch_add(memory_order_relaxed);  // stop adding items to shard queue
+      this->blocked_shards_.fetch_add(1, memory_order_relaxed);  // stop adding items to shard queue
       ThisFiber::SleepFor(100us);
-      this->blocked_shards_.fetch_sub(memory_order_relaxed);
+      this->blocked_shards_.fetch_sub(1, memory_order_relaxed);
     }
   };
 
@@ -2479,8 +2479,8 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
 
-    if (auto* ts = es->tiered_storage(); ts && ts->ShouldStash(res.it->second))
-      ts->Stash(db_cntx.db_index, item->key, &res.it->second);
+    if (auto* ts = es->tiered_storage(); ts)
+      ts->TryStash(db_cntx.db_index, item->key, &res.it->second);
   }
 
   for (auto* item : ib) {
