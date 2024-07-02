@@ -96,6 +96,7 @@ const char kClusterNotConfigured[] = "Cluster is not yet configured";
 const char kLoadingErr[] = "-LOADING Dragonfly is loading the dataset in memory";
 const char kUndeclaredKeyErr[] = "script tried accessing undeclared key";
 const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong";
+const char kErrorOccuredErr[] = "An error occured. Please check the logs";
 
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
