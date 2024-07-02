@@ -892,6 +892,7 @@ void Transaction::DispatchHop() {
   use_count_.fetch_add(run_cnt, memory_order_relaxed);  // for each pointer from poll_cb
 
   auto poll_cb = [this] {
+    CHECK(namespace_ != nullptr);
     EngineShard::tlocal()->PollExecution("exec_cb", this);
     DVLOG(3) << "ptr_release " << DebugId();
     intrusive_ptr_release(this);  // against use_count_.fetch_add above.

@@ -2550,6 +2550,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
+  cntx.ns = &namespaces->GetDefaultNamespace();
 
   // Avoid deleting local crb
   absl::Cleanup cntx_clean = [&cntx] { cntx.Inject(nullptr); };
