@@ -1041,7 +1041,7 @@ async def test_cluster_flushall_during_migration(
         df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
-            vmodule="cluster_family=9,cluster_slot_migration=9,outgoing_slot_migration=9",
+            vmodule="cluster_family=9,cluster_slot_migration=9,outgoing_slot_migration=9,incoming_slot_migration=9",
             logtostdout=True,
         )
         for i in range(2)
@@ -1265,7 +1265,7 @@ async def test_cluster_fuzzymigration(
         df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
-            vmodule="cluster_family=9,cluster_slot_migration=9",
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
         )
         for i in range(node_count)
     ]
@@ -1291,9 +1291,6 @@ async def test_cluster_fuzzymigration(
             for i in itertools.count(start=1):
                 await client.lpush(key, i)
         except asyncio.exceptions.CancelledError:
-            return
-        # TODO find the reason of TTL exhausted error and is it possible to fix it
-        except redis.exceptions.ClusterError:
             return
 
     # Start ten counters
@@ -1347,7 +1344,8 @@ async def test_cluster_fuzzymigration(
         res = True
         for node in nodes:
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-            logging.debug(states)
+            if states != "NO_STATE":
+                logging.debug(states)
             for state in states:
                 parsed_state = re.search("([a-z]+) ([a-z0-9]+) ([A-Z]+)", state)
                 if parsed_state == None:
