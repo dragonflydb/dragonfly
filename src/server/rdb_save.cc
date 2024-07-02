@@ -333,7 +333,8 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
 
 // Called by snapshot
 io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
-                                             uint64_t expire_ms, DbIndex dbid) {
+                                             uint64_t expire_ms, DbIndex dbid,
+                                             std::function<void(size_t)> flush_fun) {
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   SelectDb(dbid);
 
@@ -368,6 +369,10 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   if (auto ec = SaveValue(pv); ec) {
     LOG(ERROR) << "Problems saving value for key " << key << " in dbid=" << dbid;
     return make_unexpected(ec);
+  }
+
+  if (flush_fun) {
+    flush_fun(SerializedLen());
   }
 
   return rdb_type;

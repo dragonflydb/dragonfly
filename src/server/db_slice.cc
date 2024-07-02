@@ -455,7 +455,6 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     return OpStatus::WRONG_TYPE;
   }
 
-  FiberAtomicGuard fg;
   if (res.it->second.HasExpire()) {  // check expiry state
     res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
@@ -977,8 +976,6 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 }
 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
-  FiberAtomicGuard fg;
-
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
   CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
 
@@ -1108,7 +1105,6 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 }
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
-  FiberAtomicGuard fg;
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
