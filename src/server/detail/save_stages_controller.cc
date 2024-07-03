@@ -255,7 +255,7 @@ void SaveStagesController::SaveDfs() {
 
   // Save shard files.
   auto cb = [this](Transaction* t, EngineShard* shard) {
-    auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
+    auto& db_slice = Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice();
     // a hack to avoid deadlock in Transaction::RunCallback(...)
     db_slice.UnlockChangeCb();
     SaveDfsSingle(shard);
@@ -300,7 +300,7 @@ void SaveStagesController::SaveRdb() {
 
   auto cb = [snapshot = snapshot.get()](Transaction* t, EngineShard* shard) {
     // a hack to avoid deadlock in Transaction::RunCallback(...)
-    auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
+    auto& db_slice = Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice();
     db_slice.UnlockChangeCb();
     snapshot->StartInShard(shard);
     db_slice.LockChangeCb();
@@ -409,7 +409,7 @@ void SaveStagesController::CloseCb(unsigned index) {
   }
 
   if (auto* es = EngineShard::tlocal(); use_dfs_format_ && es)
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().ResetUpdateEvents();
+    Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice().ResetUpdateEvents();
 }
 
 void SaveStagesController::RunStage(void (SaveStagesController::*cb)(unsigned)) {

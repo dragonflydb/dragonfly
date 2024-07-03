@@ -36,8 +36,8 @@ class Namespace {
 
 class Namespaces {
  public:
-  Namespaces() = default;
-  ~Namespaces();
+  static void Destroy();
+  static Namespaces& Get();
 
   void Init();
   bool IsInitialized() const;
@@ -46,11 +46,12 @@ class Namespaces {
   Namespace& GetOrInsert(std::string_view ns);
 
  private:
+  Namespaces() = default;
+  ~Namespaces();
+
   util::fb2::Mutex mu_{};
   absl::node_hash_map<std::string, Namespace> namespaces_ ABSL_GUARDED_BY(mu_);
   Namespace* default_namespace_ = nullptr;
 };
-
-extern Namespaces* namespaces;
 
 }  // namespace dfly
