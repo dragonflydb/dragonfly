@@ -15,14 +15,14 @@ from .utility import *
         ("STRING", 6_000_000, 1000, 1),
     ],
 )
-async def test_rss_used_mem_gap(df_local_factory, type, keys, val_size, elements):
+async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
     # Create a Dragonfly and fill it up with `type` until it reaches `min_rss`, then make sure that
     # the gap between used_memory and rss is no more than `max_unaccounted_ratio`.
     min_rss = 5 * 1024 * 1024 * 1024  # 5gb
     max_unaccounted = 200 * 1024 * 1024  # 200mb
 
-    df_server = df_local_factory.create()
-    df_local_factory.start_all([df_server])
+    df_server = df_factory.create()
+    df_factory.start_all([df_server])
     client = df_server.client()
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 

@@ -32,10 +32,11 @@ extern "C" {
 using namespace std;
 
 ABSL_FLAG(string, tiered_prefix, "",
-          "Experimental flag. Enables tiered storage if set. "
+          "Enables tiered storage if set. "
           "The string denotes the path and prefix of the files "
           " associated with tiered storage. Stronly advised to use "
-          "high performance NVME ssd disks for this.");
+          "high performance NVME ssd disks for this. Also, seems that pipeline_squash does "
+          "not work well with tiered storage, so it's advised to set it to 0.");
 
 ABSL_FLAG(dfly::MemoryBytesFlag, tiered_max_file_size, dfly::MemoryBytesFlag{},
           "Limit on maximum file size that is used by the database for tiered storage. "

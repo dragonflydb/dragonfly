@@ -4,10 +4,7 @@
 
 #pragma once
 
-#include <absl/strings/str_cat.h>
-#include <absl/strings/str_join.h>
-
-#include <memory>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,45 +21,85 @@ struct SlotRange {
   SlotId start = 0;
   SlotId end = 0;
 
-  bool operator==(const SlotRange& r) const {
+  bool operator==(const SlotRange& r) const noexcept {
     return start == r.start && end == r.end;
   }
-  bool IsValid() {
+
+  bool operator<(const SlotRange& r) const noexcept {
+    return start < r.start || (start == r.start && end < r.end);
+  }
+
+  bool IsValid() const noexcept {
     return start <= end && start <= kMaxSlotId && end <= kMaxSlotId;
   }
 
-  std::string ToString() const {
-    return absl::StrCat("[", start, ", ", end, "]");
+  bool Contains(SlotId id) const noexcept {
+    return id >= start && id <= end;
   }
 
-  static std::string ToString(const std::vector<SlotRange>& ranges) {
-    return absl::StrJoin(ranges, ", ", [](std::string* out, SlotRange range) {
-      absl::StrAppend(out, range.ToString());
-    });
-  }
+  std::string ToString() const;
 };
 
-using SlotRanges = std::vector<SlotRange>;
+class SlotRanges {
+ public:
+  SlotRanges() = default;
+  explicit SlotRanges(std::vector<SlotRange> ranges);
+
+  bool Contains(SlotId id) const noexcept {
+    for (const auto& sr : ranges_) {
+      if (sr.Contains(id))
+        return true;
+    }
+    return false;
+  }
+
+  size_t Size() const noexcept {
+    return ranges_.size();
+  }
+
+  bool Empty() const noexcept {
+    return ranges_.empty();
+  }
+
+  void Merge(const SlotRanges& sr);
+
+  bool operator==(const SlotRanges& r) const noexcept {
+    return ranges_ == r.ranges_;
+  }
+
+  std::string ToString() const;
+
+  auto begin() const noexcept {
+    return ranges_.cbegin();
+  }
+
+  auto end() const noexcept {
+    return ranges_.cend();
+  }
+
+ private:
+  std::vector<SlotRange> ranges_;
+};
 
 struct ClusterNodeInfo {
   std::string id;
   std::string ip;
   uint16_t port = 0;
+
+  bool operator==(const ClusterNodeInfo& r) const noexcept {
+    return port == r.port && ip == r.ip && id == r.id;
+  }
 };
 
 struct MigrationInfo {
-  std::vector<SlotRange> slot_ranges;
-  std::string node_id;
-  std::string ip;
-  uint16_t port = 0;
+  SlotRanges slot_ranges;
+  ClusterNodeInfo node_info;
 
-  bool operator==(const MigrationInfo& r) const {
-    return ip == r.ip && port == r.port && slot_ranges == r.slot_ranges && node_id == r.node_id;
+  bool operator==(const MigrationInfo& r) const noexcept {
+    return node_info == r.node_info && slot_ranges == r.slot_ranges;
   }
 
-  std::string ToString() const {
-    return absl::StrCat(node_id, ",", ip, ":", port, " (", SlotRange::ToString(slot_ranges), ")");
-  }
+  std::string ToString() const;
 };
 
 struct ClusterShardInfo {

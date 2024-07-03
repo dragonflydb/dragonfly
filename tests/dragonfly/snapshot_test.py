@@ -9,6 +9,7 @@ from redis import asyncio as aioredis
 from pathlib import Path
 import boto3
 from .instance import RedisServer
+from random import randint as rand
 
 from . import dfly_args
 from .utility import wait_available_async, chunked, is_saving
@@ -37,11 +38,15 @@ def find_main_file(path: Path, pattern):
         dict(key_target=1000, data_size=5_000, variance=10, samples=10),
     ],
 )
-@dfly_args({**BASIC_ARGS, "proactor_threads": 4, "dbfilename": "test-consistency"})
-async def test_consistency(async_client: aioredis.Redis, format: str, seeder_opts: dict):
+@dfly_args({**BASIC_ARGS, "proactor_threads": 4})
+async def test_consistency(df_factory, format: str, seeder_opts: dict):
     """
     Test consistency over a large variety of data with different sizes
     """
+    dbfilename = f"test-consistency{rand(0, 5000)}"
+    instance = df_factory.create(dbfilename=dbfilename)
+    instance.start()
+    async_client = instance.client()
     await StaticSeeder(**seeder_opts).run(async_client)
 
     start_capture = await StaticSeeder.capture(async_client)
@@ -52,21 +57,25 @@ async def test_consistency(async_client: aioredis.Redis, format: str, seeder_opt
     await async_client.execute_command(
         "DEBUG",
         "LOAD",
-        "test-consistency.rdb" if format == "RDB" else "test-consistency-summary.dfs",
+        f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
 
     assert (await StaticSeeder.capture(async_client)) == start_capture
 
 
 @pytest.mark.parametrize("format", FILE_FORMATS)
-@dfly_args({**BASIC_ARGS, "proactor_threads": 4, "dbfilename": "test-multidb"})
-async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
+@dfly_args({**BASIC_ARGS, "proactor_threads": 4})
+async def test_multidb(df_factory, format: str):
     """
     Test serialization of multiple logical databases
     """
+    dbfilename = f"test-multidb{rand(0, 5000)}"
+    instance = df_factory.create(dbfilename=dbfilename)
+    instance.start()
+    async_client = instance.client()
     start_captures = []
     for dbid in range(10):
-        db_client = df_server.client(db=dbid)
+        db_client = instance.client(db=dbid)
         await StaticSeeder(key_target=1000).run(db_client)
         start_captures.append(await StaticSeeder.capture(db_client))
 
@@ -76,11 +85,11 @@ async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
     await async_client.execute_command(
         "DEBUG",
         "LOAD",
-        "test-multidb.rdb" if format == "RDB" else "test-multidb-summary.dfs",
+        f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
 
     for dbid in range(10):
-        db_client = df_server.client(db=dbid)
+        db_client = instance.client(db=dbid)
         assert (await StaticSeeder.capture(db_client)) == start_captures[dbid]
 
 
@@ -97,7 +106,7 @@ async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
     ],
 )
 async def test_dbfilenames(
-    df_local_factory, tmp_dir: Path, save_type: str, dbfilename: str, pattern: str
+    df_factory, tmp_dir: Path, save_type: str, dbfilename: str, pattern: str
 ):
     df_args = {**BASIC_ARGS, "dbfilename": dbfilename, "port": 1111}
 
@@ -106,7 +115,7 @@ async def test_dbfilenames(
 
     start_capture = None
 
-    with df_local_factory.create(**df_args) as df_server:
+    with df_factory.create(**df_args) as df_server:
         async with df_server.client() as client:
             await wait_available_async(client)
 
@@ -120,7 +129,7 @@ async def test_dbfilenames(
     assert file is not None
     assert os.path.basename(file).startswith(dbfilename.split("{{")[0])
 
-    with df_local_factory.create(**df_args) as df_server:
+    with df_factory.create(**df_args) as df_server:
         async with df_server.client() as client:
             await wait_available_async(client)
             assert await StaticSeeder.capture(client) == start_capture
@@ -220,11 +229,11 @@ async def test_parallel_snapshot(async_client):
     assert save_successes == 1, "Only one SAVE must be successful"
 
 
-async def test_path_escapes(df_local_factory):
+async def test_path_escapes(df_factory):
     """Test that we don't allow path escapes. We just check that df_server.start()
     fails because we don't have a much better way to test that."""
 
-    df_server = df_local_factory.create(dbfilename="../../../../etc/passwd")
+    df_server = df_factory.create(dbfilename="../../../../etc/passwd")
     try:
         df_server.start()
         assert False, "Server should not start correctly"
@@ -366,7 +375,11 @@ class TestDflySnapshotOnShutdown:
 
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @dfly_args({**BASIC_ARGS, "dbfilename": "info-while-snapshot"})
-async def test_infomemory_while_snapshoting(async_client: aioredis.Redis, format: str):
+async def test_infomemory_while_snapshoting(df_factory, format: str):
+    dbfilename = f"test-consistency{rand(0, 5000)}"
+    instance = df_factory.create(dbfilename=dbfilename)
+    instance.start()
+    async_client = instance.client()
     await async_client.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
 
     async def save():

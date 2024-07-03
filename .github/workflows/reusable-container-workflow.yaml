@@ -67,7 +67,7 @@ jobs:
 
       - if: inputs.fetch_release
         name: Fetch release asset
-        uses: dsaltares/fetch-gh-release-asset@1.1.0
+        uses: dsaltares/fetch-gh-release-asset@1.1.2
         with:
           version: "tags/${{ inputs.release_version }}"
           regex: true

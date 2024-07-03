@@ -40,8 +40,16 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
 
   current_bin_bytes_ += value_bytes;
 
-  bool inserted = current_bin_.emplace(std::make_pair(dbid, key), value).second;
-  CHECK(inserted);
+  auto [it, inserted] = current_bin_.emplace(std::make_pair(dbid, key), value);
+  if (!inserted) {
+    LOG(ERROR) << "Duplicate key " << key << " dbid " << dbid;
+    LOG(ERROR) << "Values are same: " << int(it->second == value);
+    for (const auto& [key, _] : current_bin_) {
+      LOG(ERROR) << "Existing ones: " << key.first << " " << key.second;
+    }
+
+    LOG(FATAL) << "Crashing!";
+  }
   DVLOG(2) << "current_bin_bytes: " << current_bin_bytes_
            << ", current_bin_size:" << current_bin_.size();
   return filled_bin;

@@ -277,6 +277,7 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
   ADD(small_bins_cnt);
   ADD(small_bins_entries_cnt);
   ADD(small_bins_filling_bytes);
+  ADD(total_stash_overflows);
 
   return *this;
 }

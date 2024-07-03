@@ -36,7 +36,6 @@ jobs:
   build:
     strategy:
       matrix:
-        runner: [ubuntu-latest]
         # Test of these containers
         container: ["ubuntu-dev:20", "alpine-dev:latest"]
         build-type: [Debug, Release]
@@ -47,12 +46,8 @@ jobs:
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
-            runner: ubuntu-latest
-        exclude:
-          - container: "alpine-dev:latest"
-            runner: Larger-CI-Arm
 
-    runs-on: ${{matrix.runner}}
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -93,10 +88,10 @@ jobs:
           touch /mnt/foo
           ls -la /mnt/foo
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.4
+        uses: mozilla-actions/sccache-action@v0.0.5
 
       - name: Configure Cache Env
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -183,8 +178,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: regression_logs
-          path: /tmp/failed/*
-
+          path: |
+            /tmp/**/*
+            /tmp/*
 
   lint-test-chart:
     runs-on: ubuntu-latest

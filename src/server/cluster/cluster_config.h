@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "src/server/cluster/slot_set.h"
-#include "src/server/common.h"
 
 namespace dfly::cluster {
 
@@ -59,6 +58,7 @@ class ClusterConfig {
 
   ClusterConfig() = default;
 
+  std::string my_id_;
   ClusterShardInfos config_;
 
   SlotSet my_slots_;
