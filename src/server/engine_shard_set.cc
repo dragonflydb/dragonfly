@@ -593,10 +593,6 @@ void EngineShard::RemoveContTx(Transaction* tx) {
 }
 
 void EngineShard::Heartbeat() {
-  if (namespaces == nullptr || !namespaces->IsInitialized()) {
-    return;
-  }
-
   CacheStats();
 
   if (IsReplica())  // Never run expiration on replica.
@@ -623,7 +619,11 @@ void EngineShard::Heartbeat() {
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
-  // TODO: iterate over namespaces
+  // TODO: iterate over all namespaces
+  if (namespaces == nullptr || !namespaces->IsInitialized()) {
+    return;
+  }
+
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))
@@ -704,6 +704,10 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
 }
 
 void EngineShard::CacheStats() {
+  if (namespaces == nullptr || !namespaces->IsInitialized()) {
+    return;
+  }
+
   // mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
   mi_stats_merge();
 
