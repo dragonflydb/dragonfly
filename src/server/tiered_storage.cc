@@ -293,7 +293,7 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
     ec = op_manager_->Stash(id, value_sv);
   } else if (auto bin = bins_->Stash(dbid, key, value_sv); bin) {
     id = bin->first;
-    ec = op_manager_->Stash(bin->first, bin->second);
+    ec = op_manager_->Stash(id, bin->second);
   }
 
   if (ec) {

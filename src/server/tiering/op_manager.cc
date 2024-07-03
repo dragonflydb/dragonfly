@@ -82,6 +82,7 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
     ProcessStashed(Borrowed(id), version, segment, ec);
   };
 
+  // May block due to blocking call to Grow.
   auto ec = storage_.Stash(buf_view, std::move(io_cb));
   if (ec)
     pending_stash_ver_.erase(ToOwned(id_ref));
