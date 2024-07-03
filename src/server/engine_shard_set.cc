@@ -296,7 +296,7 @@ bool EngineShard::DoDefrag() {
   const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   // TODO: enable tiered storage on non-default db slice
-  DbSlice& slice = Namespaces::Get().GetDefaultNamespace().GetDbSlice(shard_->shard_id());
+  DbSlice& slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_->shard_id());
 
   // If we moved to an invalid db, skip as long as it's not the last one
   while (!slice.IsDbValid(defrag_state_.dbid) && defrag_state_.dbid + 1 < slice.db_array_size())
@@ -326,7 +326,7 @@ bool EngineShard::DoDefrag() {
       }
     });
     traverses_count++;
-  } while (traverses_count < kMaxTraverses && cur && Namespaces::Get().IsInitialized());
+  } while (traverses_count < kMaxTraverses && cur && namespaces.IsInitialized());
 
   defrag_state_.UpdateScanState(cur.value());
 
@@ -357,7 +357,7 @@ bool EngineShard::DoDefrag() {
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
-  if (!Namespaces::Get().IsInitialized()) {
+  if (!namespaces.IsInitialized()) {
     return util::ProactorBase::kOnIdleMaxLevel;
   }
 
@@ -441,7 +441,7 @@ void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
         << "Only ioring based backing storage is supported. Exiting...";
 
     // TODO: enable tiered storage on non-default namespace
-    DbSlice& db_slice = Namespaces::Get().GetDefaultNamespace().GetDbSlice(shard_id());
+    DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
     auto* shard = EngineShard::tlocal();
     shard->tiered_storage_ = make_unique<TieredStorage>(&db_slice, max_file_size);
     error_code ec = shard->tiered_storage_->Open(backing_prefix);
@@ -621,11 +621,11 @@ void EngineShard::Heartbeat() {
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
   // TODO: iterate over all namespaces
-  if (!Namespaces::Get().IsInitialized()) {
+  if (!namespaces.IsInitialized()) {
     return;
   }
 
-  DbSlice& db_slice = Namespaces::Get().GetDefaultNamespace().GetDbSlice(shard_id());
+  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))
       continue;
@@ -667,7 +667,7 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
       return;
     }
 
-    if (!Namespaces::Get().IsInitialized())
+    if (!namespaces.IsInitialized())
       continue;
 
     Heartbeat();
@@ -705,7 +705,9 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
 }
 
 void EngineShard::CacheStats() {
-  if (!Namespaces::Get().IsInitialized()) {
+  FiberAtomicGuard guard;
+
+  if (!namespaces.IsInitialized()) {
     return;
   }
 
@@ -714,7 +716,7 @@ void EngineShard::CacheStats() {
 
   // Used memory for this shard.
   size_t used_mem = UsedMemory();
-  DbSlice& db_slice = Namespaces::Get().GetDefaultNamespace().GetDbSlice(shard_id());
+  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   cached_stats[db_slice.shard_id()].used_memory.store(used_mem, memory_order_relaxed);
   ssize_t free_mem = max_memory_limit - used_mem_current.load(memory_order_relaxed);
 
@@ -757,7 +759,7 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
   info.tx_total = queue->size();
   unsigned max_db_id = 0;
 
-  auto& db_slice = Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice();
+  auto& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
 
   do {
     auto value = queue->At(cur);
@@ -878,7 +880,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
     }
   });
 
-  Namespaces::Get().Init();
+  namespaces.Init();
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
@@ -907,7 +909,7 @@ void EngineShardSet::TEST_EnableHeartBeat() {
 
 void EngineShardSet::TEST_EnableCacheMode() {
   RunBlockingInParallel([](EngineShard* shard) {
-    Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice().TEST_EnableCacheMode();
+    namespaces.GetDefaultNamespace().GetCurrentDbSlice().TEST_EnableCacheMode();
   });
 }
 

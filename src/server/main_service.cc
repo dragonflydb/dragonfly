@@ -516,8 +516,7 @@ void Topkeys(const http::QueryArgs& args, HttpContext* send) {
     vector<string> rows(shard_set->size());
 
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
-      for (const auto& db :
-           Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice().databases()) {
+      for (const auto& db : namespaces.GetDefaultNamespace().GetCurrentDbSlice().databases()) {
         if (db->top_keys.IsEnabled()) {
           is_enabled = true;
           for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
@@ -820,8 +819,6 @@ Service::Service(ProactorPool* pp)
   CHECK(shard_set == nullptr);
   shard_set = new EngineShardSet(pp);
 
-  Namespaces::Get();  // Creates instance
-
   // We support less than 1024 threads and we support less than 1024 shards.
   // For example, Scan uses 10 bits in cursor to encode shard id it currently traverses.
   CHECK_LT(pp->size(), kMaxThreadSize);
@@ -835,7 +832,7 @@ Service::Service(ProactorPool* pp)
 Service::~Service() {
   delete shard_set;
   shard_set = nullptr;
-  Namespaces::Destroy();
+  namespaces.Clear();
 }
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
@@ -915,7 +912,7 @@ void Service::Shutdown() {
 
   ChannelStore::Destroy();
 
-  Namespaces::Destroy();
+  namespaces.Clear();
 
   shard_set->Shutdown();
 
@@ -1593,7 +1590,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   auto cred = user_registry_.GetCredentials("default");
   ConnectionContext* res = new ConnectionContext{peer, owner, std::move(cred)};
-  res->ns = &Namespaces::Get().GetOrInsert("");
+  res->ns = &namespaces.GetOrInsert("");
 
   if (peer->IsUDS()) {
     res->req_auth = false;
@@ -2458,7 +2455,7 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
-  Metrics m = server_family_.GetMetrics(&Namespaces::Get().GetDefaultNamespace());
+  Metrics m = server_family_.GetMetrics(&namespaces.GetDefaultNamespace());
   DbStats db_stats;
   for (const auto& s : m.db_stats) {
     db_stats += s;

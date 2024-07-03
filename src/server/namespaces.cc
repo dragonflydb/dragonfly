@@ -44,25 +44,26 @@ BlockingController* Namespace::GetBlockingController(ShardId sid) {
   return shard_blocking_controller_[sid].get();
 }
 
-static atomic<Namespaces*> namespaces;
-
-Namespaces& Namespaces::Get() {
-  // This method is NOT SAFE in that it could create 2 instances if issued in parallel.
-  // It is expected to be called before any race could happen, in the process init path.
-  Namespaces* ns = namespaces.load();
-  if (ns == nullptr) {
-    ns = new Namespaces();
-    namespaces.store(ns);
-  }
-  return *ns;
-}
-
-void Namespaces::Destroy() {
-  Namespaces* ns = namespaces.exchange(nullptr);
-  delete ns;
-}
+Namespaces namespaces;
 
 Namespaces::~Namespaces() {
+  Clear();
+}
+
+void Namespaces::Init() {
+  DCHECK(default_namespace_ == nullptr);
+  default_namespace_ = &GetOrInsert("");
+}
+
+bool Namespaces::IsInitialized() const {
+  return default_namespace_ != nullptr;
+}
+
+void Namespaces::Clear() {
+  std::lock_guard guard(mu_);
+
+  namespaces.default_namespace_ = nullptr;
+
   if (namespaces_.empty()) {
     return;
   }
@@ -73,15 +74,8 @@ Namespaces::~Namespaces() {
       ns.second.shard_db_slices_[es->shard_id()].reset();
     }
   });
-}
 
-void Namespaces::Init() {
-  DCHECK(default_namespace_ == nullptr);
-  default_namespace_ = &GetOrInsert("");
-}
-
-bool Namespaces::IsInitialized() const {
-  return default_namespace_ != nullptr;
+  namespaces.namespaces_.clear();
 }
 
 Namespace& Namespaces::GetDefaultNamespace() const {

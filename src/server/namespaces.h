@@ -36,22 +36,22 @@ class Namespace {
 
 class Namespaces {
  public:
-  static void Destroy();
-  static Namespaces& Get();
+  Namespaces() = default;
+  ~Namespaces();
 
   void Init();
   bool IsInitialized() const;
+  void Clear();  // Thread unsafe, use in tear-down or tests
 
   Namespace& GetDefaultNamespace() const;  // No locks
   Namespace& GetOrInsert(std::string_view ns);
 
  private:
-  Namespaces() = default;
-  ~Namespaces();
-
   util::fb2::Mutex mu_{};
   absl::node_hash_map<std::string, Namespace> namespaces_ ABSL_GUARDED_BY(mu_);
   Namespace* default_namespace_ = nullptr;
 };
+
+extern Namespaces namespaces;
 
 }  // namespace dfly

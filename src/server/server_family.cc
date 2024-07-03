@@ -1345,7 +1345,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
-    PrintPrometheusMetrics(this->GetMetrics(&Namespaces::Get().GetDefaultNamespace()),
+    PrintPrometheusMetrics(this->GetMetrics(&namespaces.GetDefaultNamespace()),
                            this->dfly_cmd_.get(), &resp);
 
     return send->Invoke(std::move(resp));
@@ -1425,7 +1425,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   double utime = dbl_time(ru.ru_utime);
   double systime = dbl_time(ru.ru_stime);
 
-  Metrics m = GetMetrics(&Namespaces::Get().GetDefaultNamespace());
+  Metrics m = GetMetrics(&namespaces.GetDefaultNamespace());
 
   ADD_LINE(pid, getpid());
   ADD_LINE(uptime, m.uptime);
@@ -1455,7 +1455,7 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
-  trans->InitByArgs(&Namespaces::Get().GetDefaultNamespace(), 0, {});
+  trans->InitByArgs(&namespaces.GetDefaultNamespace(), 0, {});
   return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
@@ -1648,7 +1648,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
       auto cred = registry->GetCredentials(username);
       cntx->acl_commands = cred.acl_commands;
       cntx->keys = std::move(cred.keys);
-      cntx->ns = &Namespaces::Get().GetOrInsert(cred.ns);
+      cntx->ns = &namespaces.GetOrInsert(cred.ns);
       cntx->authenticated = true;
       return cntx->SendOk();
     }
@@ -2592,7 +2592,7 @@ void ServerFamily::ReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::Replicate(string_view host, string_view port) {
   io::NullSink sink;
   ConnectionContext cntx{&sink, nullptr, {}};
-  cntx.ns = &Namespaces::Get().GetDefaultNamespace();
+  cntx.ns = &namespaces.GetDefaultNamespace();
   cntx.skip_acl_validation = true;
 
   StringVec replicaof_params{string(host), string(port)};

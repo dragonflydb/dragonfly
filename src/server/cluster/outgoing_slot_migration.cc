@@ -197,7 +197,7 @@ void OutgoingMigration::SyncFb() {
 
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (auto* shard = EngineShard::tlocal(); shard) {
-        DbSlice& db_slice = Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice();
+        DbSlice& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
         server_family_->journal()->StartInThread();
         slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
             &db_slice, server(), migration_info_.slot_ranges, server_family_->journal());
@@ -260,8 +260,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt =
-      Pause(server_family_->GetNonPriviligedListeners(), &Namespaces::Get().GetDefaultNamespace(),
-            nullptr, ClientPause::WRITE, is_pause_in_progress);
+      Pause(server_family_->GetNonPriviligedListeners(), &namespaces.GetDefaultNamespace(), nullptr,
+            ClientPause::WRITE, is_pause_in_progress);
 
   if (!pause_fb_opt) {
     LOG(WARNING) << "Cluster migration finalization time out";
