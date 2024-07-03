@@ -21,6 +21,7 @@
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 
@@ -445,7 +446,7 @@ void DeleteSlots(const SlotRanges& slots_ranges) {
     if (shard == nullptr)
       return;
 
-    shard->db_slice().FlushSlots(slots_ranges);
+    Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice().FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
@@ -593,7 +594,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 
     lock_guard lk(mu);
     for (auto& [slot, data] : slots_stats) {
-      data += shard->db_slice().GetSlotStats(slot);
+      data += Namespaces::Get().GetDefaultNamespace().GetCurrentDbSlice().GetSlotStats(slot);
     }
   };
 

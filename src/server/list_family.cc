@@ -178,7 +178,7 @@ class BPopPusher {
 std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, ListDir dir) {
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
 
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = t->GetCurrentDbSlice();
   auto it_res = db_slice.FindMutable(t->GetDbContext(), key, OBJ_LIST);
 
   if (!it_res) {
@@ -206,14 +206,15 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   std::string value = ListPop(dir, ql);
   it_res->post_updater.Run();
 
+  OpArgs op_args = t->GetOpArgs(shard);
   if (quicklistCount(ql) == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
     absl::StrAppend(debugMessages.Next(), "OpBPop Del: ", key, " by ", t->DebugId());
 
-    CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
+    CHECK(t->GetCurrentDbSlice().Del(op_args.db_cntx, it));
   }
 
-  if (OpArgs op_args = t->GetOpArgs(shard); op_args.shard->journal()) {
+  if (op_args.shard->journal()) {
     string command = dir == ListDir::LEFT ? "LPOP" : "RPOP";
     RecordJournal(op_args, command, ArgSlice{key}, 1);
   }
@@ -223,7 +224,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
                                    ListDir src_dir, ListDir dest_dir) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
   if (!src_res)
     return src_res.status();
@@ -271,7 +272,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   dest_res.post_updater.Run();
 
   if (quicklistCount(src_ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, src_it));
+    CHECK(db_slice.Del(op_args.db_cntx, src_it));
   }
 
   return val;
@@ -280,7 +281,8 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 // Read-only peek operation that determines whether the list exists and optionally
 // returns the first from left/right value without popping it from the list.
 OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool fetch) {
-  auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res =
+      op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res) {
     return it_res.status();
   }
@@ -307,12 +309,13 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   DbSlice::AddOrFindResult res;
 
   if (skip_notexist) {
-    auto tmp_res = es->db_slice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
+    auto tmp_res =
+        op_args.db_cntx.ns->GetCurrentDbSlice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
     if (!tmp_res)
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
     res = std::move(*tmp_res);
   } else {
-    auto op_res = es->db_slice().AddOrFind(op_args.db_cntx, key);
+    auto op_res = op_args.db_cntx.ns->GetCurrentDbSlice().AddOrFind(op_args.db_cntx, key);
     RETURN_ON_BAD_STATUS(op_res);
     res = std::move(*op_res);
   }
@@ -340,11 +343,12 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   }
 
   if (res.is_new) {
-    if (es->blocking_controller()) {
+    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
+    if (blocking_controller) {
       string tmp;
       string_view key = res.it->first.GetSlice(&tmp);
 
-      es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, key);
+      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
       absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", key, " by ",
                       op_args.tx->DebugId());
     }
@@ -363,7 +367,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, uint32_t count,
                           bool return_results, bool journal_rewrite) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -391,7 +395,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
 
   if (quicklistCount(ql) == 0) {
     absl::StrAppend(debugMessages.Next(), "OpPop Del: ", key, " by ", op_args.tx->DebugId());
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
+    CHECK(db_slice.Del(op_args.db_cntx, it));
   }
 
   if (op_args.shard->journal() && journal_rewrite) {
@@ -443,11 +447,12 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
         OpPush(op_args, key, dest_dir, false, ArgSlice{val}, true);
 
         // blocking_controller does not have to be set with non-blocking transactions.
-        if (shard->blocking_controller()) {
+        auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
+        if (blocking_controller) {
           // hack, again. since we hacked which queue we are waiting on (see RunPair)
           // we must clean-up src key here manually. See RunPair why we do this.
           // in short- we suspended on "src" on both shards.
-          shard->blocking_controller()->FinalizeWatched(ArgSlice({src}), t);
+          blocking_controller->FinalizeWatched(ArgSlice({src}), t);
         }
       } else {
         DVLOG(1) << "Popping value from list: " << key;
@@ -464,7 +469,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 }
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
-  auto res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 
@@ -474,7 +479,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
 }
 
 OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index) {
-  auto res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
   quicklist* ql = GetQL(res.value()->second);
@@ -498,7 +503,8 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
 
 OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
                                  std::string_view element, int rank, int count, int max_len) {
-  auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res =
+      op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res.ok())
     return it_res.status();
 
@@ -541,7 +547,7 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
 
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
                        InsertParam insert_param) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -573,7 +579,7 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
 }
 
 OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view elem, long count) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -608,14 +614,14 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   quicklistReleaseIterator(qiter);
 
   if (quicklistCount(ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
+    CHECK(db_slice.Del(op_args.db_cntx, it));
   }
 
   return removed;
 }
 
 OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long index) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -632,7 +638,7 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
 }
 
 OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -670,13 +676,13 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   it_res->post_updater.Run();
 
   if (quicklistCount(ql) == 0) {
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, it));
+    CHECK(db_slice.Del(op_args.db_cntx, it));
   }
   return OpStatus::OK;
 }
 
 OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start, long end) {
-  auto res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 
@@ -851,10 +857,11 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
         std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
         RecordJournal(op_args, "LMOVE", arr, 1);
       }
-      if (shard->blocking_controller()) {
+      auto blocking_controller = cntx->ns->GetBlockingController(shard->shard_id());
+      if (blocking_controller) {
         string tmp;
 
-        shard->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, push_key_);
+        blocking_controller->AwakeWatched(op_args.db_cntx.db_index, push_key_);
         absl::StrAppend(debugMessages.Next(), "OpPush AwakeWatched: ", push_key_, " by ",
                         op_args.tx->DebugId());
       }
@@ -874,9 +881,9 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
 
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice(&pop_key_, 1); };
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
+  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction* t,
                               std::string_view key) -> bool {
-    return owner->db_slice().FindReadOnly(context, key, OBJ_LIST).ok();
+    return t->GetCurrentDbSlice().FindReadOnly(context, key, OBJ_LIST).ok();
   };
   // Block
   auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &(cntx->blocked), &(cntx->paused));
@@ -905,9 +912,9 @@ OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
   // This allows us to run Transaction::Execute on watched transactions in both shards.
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice(&this->pop_key_, 1); };
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
+  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction* t,
                               std::string_view key) -> bool {
-    return owner->db_slice().FindReadOnly(context, key, OBJ_LIST).ok();
+    return t->GetCurrentDbSlice().FindReadOnly(context, key, OBJ_LIST).ok();
   };
 
   if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked, &cntx->paused);

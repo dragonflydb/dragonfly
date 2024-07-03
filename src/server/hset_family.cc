@@ -166,7 +166,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 };
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(op_res);
   if (!op_res) {
@@ -280,7 +280,8 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
    * of returning no or very few elements. (taken from redis code at db.c line 904 */
   constexpr size_t INTERATION_FACTOR = 10;
 
-  auto find_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
+  auto find_res =
+      op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
 
   if (!find_res) {
     DVLOG(1) << "ScanOp: find failed: " << find_res << ", baling out";
@@ -343,7 +344,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
 OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList values) {
   DCHECK(!values.empty());
 
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
 
   if (!it_res)
@@ -397,7 +398,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     if (enc == kEncodingListPack) {
       stats->listpack_blob_cnt--;
     }
-    db_slice.Del(op_args.db_cntx.db_index, it_res->it);
+    db_slice.Del(op_args.db_cntx, it_res->it);
   } else if (enc == kEncodingListPack) {
     stats->listpack_bytes += lpBytes((uint8_t*)pv.RObjPtr());
   }
@@ -408,7 +409,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
 OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, CmdArgList fields) {
   DCHECK(!fields.empty());
 
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
 
   if (!it_res)
@@ -466,7 +467,7 @@ OpResult<vector<OptStr>> OpHMGet(const OpArgs& op_args, std::string_view key, Cm
 }
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
 
   if (it_res) {
@@ -479,7 +480,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
 }
 
 OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
 
   if (!it_res) {
@@ -503,7 +504,7 @@ OpResult<int> OpExist(const OpArgs& op_args, string_view key, string_view field)
 };
 
 OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
   if (!it_res)
     return it_res.status();
@@ -531,7 +532,7 @@ OpResult<string> OpGet(const OpArgs& op_args, string_view key, string_view field
 }
 
 OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_t mask) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
   if (!it_res) {
     if (it_res.status() == OpStatus::KEY_NOTFOUND)
@@ -582,7 +583,7 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
 }
 
 OpResult<size_t> OpStrLen(const OpArgs& op_args, string_view key, string_view field) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_HASH);
 
   if (!it_res) {
@@ -617,7 +618,7 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   DCHECK(!values.empty() && 0 == values.size() % 2);
   VLOG(2) << "OpSet(" << key << ")";
 
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
@@ -1055,7 +1056,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
-    auto& db_slice = shard->db_slice();
+    auto& db_slice = cntx->ns->GetCurrentDbSlice();
     DbContext db_context = t->GetDbContext();
     auto it_res = db_slice.FindReadOnly(db_context, key, OBJ_HASH);
 
@@ -1094,7 +1095,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
       if (string_map->Empty()) {
         auto it_mutable = db_slice.FindMutable(db_context, key, OBJ_HASH);
         it_mutable->post_updater.Run();
-        db_slice.Del(db_context.db_index, it_mutable->it);
+        db_slice.Del(db_context, it_mutable->it);
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
