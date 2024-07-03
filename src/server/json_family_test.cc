@@ -70,16 +70,44 @@ TEST_F(JsonFamilyTest, SetGetBasic) {
   EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 
   resp = Run({"JSON.GET", "json", "store.book[0].category"});
-  EXPECT_EQ(resp, "[\"Fantasy\"]");
+  EXPECT_EQ(resp, "\"Fantasy\"");
 
   resp = Run({"JSON.GET", "json", ".store.book[0].category"});
-  EXPECT_EQ(resp, "[\"Fantasy\"]");
+  EXPECT_EQ(resp, "\"Fantasy\"");
 
   resp = Run({"SET", "xml", xml});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.GET", "xml", "$..*"});
   EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
+}
+
+TEST_F(JsonFamilyTest, GetLegacy) {
+  string json = R"({"name":"Leonard Cohen","lastSeen":1478476800,"loggedOut": true})";
+
+  auto resp = Run({"JSON.SET", "json", "$", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json", "."});  // V1 Response
+  ASSERT_THAT(resp, "{\"lastSeen\":1478476800,\"loggedOut\":true,\"name\":\"Leonard Cohen\"}");
+
+  resp = Run({"JSON.GET", "json", "$"});  // V2 Response
+  ASSERT_THAT(resp, "[{\"lastSeen\":1478476800,\"loggedOut\":true,\"name\":\"Leonard Cohen\"}]");
+
+  resp = Run({"JSON.GET", "json", ".name"});  // V1 Response
+  ASSERT_THAT(resp, "\"Leonard Cohen\"");
+
+  resp = Run({"JSON.GET", "json", "$.name"});  // V2 Response
+  ASSERT_THAT(resp, "[\"Leonard Cohen\"]");
+
+  resp = Run({"JSON.GET", "json", ".name", "$.lastSeen"});  // V2 Response
+  ASSERT_THAT(resp, "{\"$.lastSeen\":[1478476800],\".name\":[\"Leonard Cohen\"]}");
+
+  resp = Run({"JSON.GET", "json", ".name", ".lastSeen"});  // V1 Response
+  ASSERT_THAT(resp, "{\".lastSeen\":1478476800,\".name\":\"Leonard Cohen\"}");
+
+  resp = Run({"JSON.GET", "json", "$.name", "$.lastSeen"});  // V2 Response
+  ASSERT_THAT(resp, "{\"$.lastSeen\":[1478476800],\"$.name\":[\"Leonard Cohen\"]}");
 }
 
 static const string PhonebookJson = R"(
