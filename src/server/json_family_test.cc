@@ -163,7 +163,7 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
 }
 
 TEST_F(JsonFamilyTest, Type) {
-  string json = R"(
+  string json = R"(Type)
     [1, 2.3, "foo", true, null, {}, []]
   )";
 
