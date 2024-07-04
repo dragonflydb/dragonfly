@@ -20,6 +20,7 @@
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "facade/cmd_arg_parser.h"
+#include "facade/error.h"
 #include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
@@ -105,6 +106,56 @@ ParseResult<WrappedJsonPath> ParseJsonPath(std::string_view path) {
 }
 
 }  // namespace json_parser
+
+namespace reply_generic {
+
+template <typename T> void Send(RedisReplyBuilder& rb, T value) = delete;
+
+template <> void Send(RedisReplyBuilder& rb, std::size_t value) {
+  rb.SendLong(value);
+}
+
+template <typename T> void Send(RedisReplyBuilder& rb, const std::optional<T>& opt) {
+  if (opt.has_value()) {
+    Send(rb, opt.value());
+  } else {
+    rb.SendNull();
+  }
+}
+
+template <typename T> void Send(RedisReplyBuilder& rb, const std::vector<T>& vec) {
+  if (vec.empty()) {
+    rb.SendNullArray();
+  } else {
+    rb.StartArray(vec.size());
+    for (auto&& x : vec) {
+      Send(rb, x);
+    }
+  }
+}
+
+template <typename T> void Send(RedisReplyBuilder& rb, JsonCallbackResult<T>& result) {
+  if (result.error_code) {
+    rb.SendError(result.error_code.message(), kSyntaxErrType);  // todo edit
+    return;
+  }
+
+  if (result.IsV1()) {
+    Send(rb, result.AsV1());
+  } else {
+    Send(rb, result.AsV2());
+  }
+}
+
+template <typename T> void Send(RedisReplyBuilder& rb, OpResult<T>& result) {
+  if (result) {
+    Send(rb, result.value());
+  } else {
+    rb.SendError(result.status());
+  }
+}
+
+}  // namespace reply_generic
 
 using JsonPathV2 = variant<json::Path, JsonExpression>;
 using ExprCallback = absl::FunctionRef<void(string_view, const JsonType&)>;
@@ -239,6 +290,39 @@ error_code JsonReplace(JsonType& instance, string_view path, json::MutateCallbac
   expr.evaluate(resources, instance, json_selector_t::path_node_type{}, instance, f,
                 jsonpath::result_options::nodups | jsonpath::result_options::path);
   return ec;
+}
+
+template <typename T>
+OpResult<JsonCallbackResult<T>> UpdateEntry(const OpArgs& op_args, std::string_view key,
+                                            const WrappedJsonPath& json_path,
+                                            JsonPathMutateCallback<T> cb,
+                                            JsonReplaceVerify verify_op = {}) {
+  auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  PrimeValue& pv = it_res->it->second;
+
+  JsonType* json_val = pv.GetJson();
+  DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
+                   << pv.ObjType() << "'";
+  JsonType& json_entry = *json_val;
+
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
+
+  auto mutate_res = json_path.Mutate(json_val, cb);
+  if (mutate_res.error_code) {
+    return mutate_res;  // TODO(continue)
+  }
+
+  // Make sure that we don't have other internal issue with the operation
+  if (verify_op) {
+    verify_op(json_entry);
+  }
+
+  it_res->post_updater.Run();
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+
+  return mutate_res;
 }
 
 // jsoncons version
@@ -837,12 +921,9 @@ OpResult<vector<StringVec>> OpObjKeys(const OpArgs& op_args, string_view key,
   return vec;
 }
 
-// Retruns array of string lengths after a successful operation.
-OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, string_view path,
-                                       JsonPathV2 expression, facade::ArgRange strs) {
-  vector<OptSizeT> vec;
-  OpStatus status;
-  auto cb = [&](const auto&, JsonType* val) {
+auto OpStrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
+                 facade::ArgRange strs) {
+  auto cb = [&](const auto&, JsonType* val) -> MutateCallbackResult<std::optional<std::size_t>> {
     if (val->is_string()) {
       string new_val = val->as_string();
       for (string_view str : strs) {
@@ -850,24 +931,13 @@ OpResult<vector<OptSizeT>> OpStrAppend(const OpArgs& op_args, string_view key, s
       }
 
       *val = new_val;
-      vec.emplace_back(new_val.size());
-    } else {
-      vec.emplace_back(nullopt);
+      return {false, new_val.size()};
     }
-    return false;
+
+    return {false, std::nullopt};
   };
-  if (holds_alternative<json::Path>(expression)) {
-    const json::Path& json_path = std::get<json::Path>(expression);
-    status = UpdateEntry(op_args, key, json_path, cb);
-  } else {
-    status = UpdateEntry(op_args, key, path, cb);
-  }
 
-  if (status != OpStatus::OK) {
-    return status;
-  }
-
-  return vec;
+  return UpdateEntry<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
 }
 
 // Returns the numbers of values cleared.
@@ -1891,22 +1961,17 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
 
-  JsonPathV2 expression = PARSE_PATHV2(path);
+  WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(json_parser::ParseJsonPath(path));
   auto strs = args.subspan(2);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrAppend(t->GetOpArgs(shard), key, path, std::move(expression),
-                       facade::ArgRange{strs});
+    return OpStrAppend(t->GetOpArgs(shard), key, json_path, facade::ArgRange{strs});
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<vector<OptSizeT>> result = trans->ScheduleSingleHopT(std::move(cb));
-
-  if (result) {
-    PrintOptVec(cntx, result);
-  } else {
-    cntx->SendError(result.status());
-  }
+  auto result = trans->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  reply_generic::Send(*rb, result);
 }
 
 void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {

@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <absl/container/inlined_vector.h>
+
+#include <boost/blank.hpp>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -14,15 +17,47 @@
 
 namespace dfly {
 
+using Nothing = boost::blank;
 using JsonExpression = jsoncons::jsonpath::jsonpath_expression<JsonType>;
 
 template <typename T>
 using JsonPathEvaluateCallback = absl::FunctionRef<T(std::string_view, const JsonType&)>;
 
+template <typename T = Nothing> class MutateCallbackResult {
+ public:
+  MutateCallbackResult() = default;
+
+  explicit MutateCallbackResult(bool should_be_deleted_) : should_be_deleted(should_be_deleted_) {
+  }
+
+  MutateCallbackResult(bool should_be_deleted_, T&& value)
+      : should_be_deleted(should_be_deleted_), value_(std::forward<T>(value)) {
+  }
+
+  bool HasValue() const {
+    return value_.has_value();
+  }
+
+  T&& GetValue() && {
+    return std::move(value_).value();
+  }
+
+  bool should_be_deleted;
+
+ private:
+  std::optional<T> value_;
+};
+
+template <typename T>
+using JsonPathMutateCallback =
+    absl::FunctionRef<MutateCallbackResult<T>(std::optional<std::string_view>, JsonType*)>;
+
 template <typename T> class JsonCallbackResult {
  public:
   using JsonV1Result = std::optional<T>;
   using JsonV2Result = std::vector<T>;
+
+  JsonCallbackResult() = default;
 
   explicit JsonCallbackResult(bool legacy_mode_is_enabled)
       : legacy_mode_is_enabled_(legacy_mode_is_enabled) {
@@ -50,6 +85,9 @@ template <typename T> class JsonCallbackResult {
   JsonV2Result& AsV2() {
     return std::get<JsonV2Result>(result_);
   }
+
+ public:
+  std::error_code error_code;
 
  private:
   std::variant<JsonV1Result, JsonV2Result> result_;
@@ -100,6 +138,54 @@ class WrappedJsonPath {
     }
 
     return eval_result;
+  }
+
+  template <typename T>
+  JsonCallbackResult<T> Mutate(JsonType* json_entry, JsonPathMutateCallback<T> cb) const {
+    JsonCallbackResult<T> mutate_result{IsLegacyModePath()};
+
+    auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
+                                                 JsonType* val) -> bool {
+      auto res = cb(path, val);
+      if (res.HasValue()) {
+        mutate_result.AddValue(std::move(res).GetValue());
+      }
+      return res.should_be_deleted;
+    };
+
+    if (HoldsJsonPath()) {
+      const auto& json_path = AsJsonPath();
+      json::MutatePath(json_path, mutate_callback, json_entry);
+    } else {
+      using evaluator_t = jsoncons::jsonpath::detail::jsonpath_evaluator<JsonType, JsonType&>;
+      using value_type = evaluator_t::value_type;
+      using reference = evaluator_t::reference;
+      using json_selector_t = evaluator_t::path_expression_type;
+
+      jsoncons::jsonpath::custom_functions<JsonType> funcs =
+          jsoncons::jsonpath::custom_functions<JsonType>();
+
+      auto& ec = mutate_result.error_code;
+      jsoncons::jsonpath::detail::static_resources<value_type, reference> static_resources(funcs);
+      evaluator_t e;
+
+      json_selector_t expr = e.compile(static_resources, path_.view(), ec);
+      if (ec) {
+        return mutate_result;
+      }
+
+      jsoncons::jsonpath::detail::dynamic_resources<value_type, reference> resources;
+
+      auto f = [&mutate_callback](const jsoncons::jsonpath::basic_path_node<char>& path,
+                                  JsonType& val) {
+        mutate_callback(jsoncons::jsonpath::to_string(path), &val);
+      };
+
+      expr.evaluate(
+          resources, *json_entry, json_selector_t::path_node_type{}, *json_entry, std::move(f),
+          jsoncons::jsonpath::result_options::nodups | jsoncons::jsonpath::result_options::path);
+    }
+    return mutate_result;
   }
 
   bool IsLegacyModePath() const {
