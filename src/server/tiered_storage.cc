@@ -271,14 +271,15 @@ template util::fb2::Future<size_t> TieredStorage::Modify(DbIndex dbid, std::stri
                                                          const PrimeValue& value,
                                                          std::function<size_t(std::string*)> modf);
 
-void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
-  CHECK(!value->IsExternal() && !value->HasIoPending());
+bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
+  if (!ShouldStash(*value))
+    return false;
 
   // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
   // with a lot of underutilized disk space.
   if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_) {
-    ++stash_overflow_cnt_;
-    return;
+    ++stats_.stash_overflow_cnt;
+    return false;
   }
 
   string buf;
@@ -298,7 +299,10 @@ void TieredStorage::Stash(DbIndex dbid, string_view key, PrimeValue* value) {
   if (ec) {
     LOG(ERROR) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
+    return false;
   }
+
+  return true;
 }
 
 void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
@@ -318,8 +322,8 @@ void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* 
   value->SetIoPending(false);
 }
 
-bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
-  return !pv.IsExternal() && pv.ObjType() == OBJ_STRING && pv.Size() >= kMinValueSize;
+float TieredStorage::WriteDepthUsage() const {
+  return 1.0f * op_manager_->GetStats().pending_stash_cnt / write_depth_limit_;
 }
 
 TieredStats TieredStorage::GetStats() const {
@@ -350,7 +354,9 @@ TieredStats TieredStorage::GetStats() const {
     stats.small_bins_filling_bytes = bins_stats.current_bin_bytes;
   }
 
-  stats.total_stash_overflows = stash_overflow_cnt_;
+  {  // Own stats
+    stats.total_stash_overflows = stats_.stash_overflow_cnt;
+  }
   return stats;
 }
 
@@ -358,30 +364,26 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   if (SliceSnapshot::IsSnaphotInProgress())
     return;
 
-  PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
-  int stash_limit = write_depth_limit_ - op_manager_->GetStats().pending_stash_cnt;
-  if (stash_limit <= 0)
-    return;
-
-  std::string tmp;
-  auto cb = [this, dbid, &tmp, &stash_limit](PrimeIterator it) {
-    if (it->second.HasIoPending() || it->second.IsExternal())
-      return;
-
-    if (ShouldStash(it->second)) {
-      Stash(dbid, it->first.GetSlice(&tmp), &it->second);
-      stash_limit--;
-    }
+  auto cb = [this, dbid, tmp = std::string{}](PrimeIterator it) mutable {
+    TryStash(dbid, it->first.GetSlice(&tmp), &it->second);
   };
 
+  PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
   PrimeTable::Cursor start_cursor{};
 
   // Loop while we haven't traversed all entries or reached our stash io device limit.
   // Keep number of iterations below resonable limit to keep datastore always responsive
   size_t iterations = 0;
   do {
+    if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_)
+      break;
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
-  } while (offloading_cursor_ != start_cursor && stash_limit > 0 && iterations++ < 100);
+  } while (offloading_cursor_ != start_cursor && iterations++ < 500);
+}
+
+bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
+  return !pv.IsExternal() && !pv.HasIoPending() && pv.ObjType() == OBJ_STRING &&
+         pv.Size() >= kMinValueSize;
 }
 
 }  // namespace dfly
