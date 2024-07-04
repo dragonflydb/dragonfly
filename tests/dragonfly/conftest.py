@@ -19,7 +19,7 @@ import time
 from copy import deepcopy
 
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from . import PortPicker, dfly_args
@@ -82,6 +82,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     """
     Create an instance factory with supplied params.
     """
+    os.makedirs(os.path.join(gettempdir(), "tiered"), exist_ok=True)
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     path = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/dragonfly"))
 
@@ -327,6 +328,7 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
 
 
 def copy_failed_logs_and_clean_tmp_folder(report):
+    return  # TODO: to fix it first and then enable it.
     failed_path = "/tmp/failed"
     path_exists = os.path.exists(failed_path)
     if not path_exists:

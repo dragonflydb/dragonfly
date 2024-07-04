@@ -10,7 +10,7 @@ from .seeder import StaticSeeder
 from .utility import info_tick_timer
 
 
-BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiering_test_backing"}
+BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiered/backing"}
 
 
 @pytest.mark.skip("Requires evaluating runner performance first")
