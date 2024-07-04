@@ -4,23 +4,13 @@
 
 #pragma once
 
-#include <absl/strings/str_cat.h>
-#include <glog/logging.h>
-
-#include <boost/none.hpp>
-#include <boost/none_t.hpp>
-#include <memory>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <variant>
 
-#include "base/flags.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "core/string_or_view.h"
-#include "helio/io/io.h"
-#include "server/error.h"
 
 namespace dfly {
 
@@ -82,12 +72,6 @@ class WrappedJsonPath {
         path_(std::move(path)),
         is_legacy_mode_path_(is_legacy_mode_path) {
   }
-
-  WrappedJsonPath(const WrappedJsonPath&) = delete;
-  WrappedJsonPath(WrappedJsonPath&&) = default;
-
-  WrappedJsonPath& operator=(const WrappedJsonPath&) = delete;
-  WrappedJsonPath& operator=(WrappedJsonPath&&) = delete;
 
   template <typename T>
   JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb) const {

@@ -21,8 +21,6 @@
 #include "core/json/path.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
-#include "facade/reply_builder.h"
-#include "glog/logging.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
