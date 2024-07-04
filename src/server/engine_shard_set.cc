@@ -625,10 +625,6 @@ void EngineShard::Heartbeat() {
     return;
   }
 
-  if (!namespaces.IsInitialized()) {
-    return;
-  }
-
   DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))
