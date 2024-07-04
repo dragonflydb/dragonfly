@@ -625,6 +625,10 @@ void EngineShard::Heartbeat() {
     return;
   }
 
+  if (!namespaces.IsInitialized()) {
+    return;
+  }
+
   DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))
@@ -667,9 +671,6 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
       return;
     }
 
-    if (!namespaces.IsInitialized())
-      continue;
-
     Heartbeat();
 
     if (runs_global_periodic) {
@@ -705,8 +706,6 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
 }
 
 void EngineShard::CacheStats() {
-  FiberAtomicGuard guard;
-
   if (!namespaces.IsInitialized()) {
     return;
   }
