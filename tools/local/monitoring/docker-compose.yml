@@ -1,10 +1,18 @@
 version: '3.8'
 
 volumes:
-  prometheus_data: {}
-  grafana_data: {}
+  prometheus_data:
+  grafana_data:
+  memcached_data:
 
 services:
+  change_vol_ownership:
+    image: alpine
+    user: root
+    volumes:
+      - memcached_data:/memcached
+    command: chown -R 11211:11211 /memcached
+
   prometheus:
     image: prom/prometheus:v2.45.5
     restart: always
@@ -21,7 +29,25 @@ services:
     extra_hosts:
       - 'host.docker.internal:host-gateway'
     depends_on:
-      - node-exporter
+      node-exporter:
+        condition: service_started
+      change_vol_ownership:
+        condition: service_completed_successfully
+
+  memcached:
+    image: memcached
+    restart: unless-stopped
+    ports:
+      - "11211:11211"
+    command:
+      - '-t 8'
+      - '-m 10000'
+      - '--pidfile=/memcached/memcached.pid'
+    pid: host
+    volumes:
+      - memcached_data:/memcached
+    profiles: [memcached]
+
 
   node-exporter:
     image: prom/node-exporter
@@ -58,6 +84,22 @@ services:
       - 3000:3000
     depends_on:
       - prometheus
+
+  memcached-exporter:
+    image: prom/memcached-exporter
+    container_name: memcached-exporter
+    restart: unless-stopped
+    ports:
+      - "9150:9150"
+    pid: host
+    command:
+      - --memcached.address=memcached:11211
+      - --memcached.pid-file=/memcached/memcached.pid
+    volumes:
+      - memcached_data:/memcached
+    profiles: [memcached]
+    depends_on:
+      - memcached
 
   renderer:
     image: grafana/grafana-image-renderer:latest
