@@ -6,7 +6,6 @@
 
 #include <absl/container/inlined_vector.h>
 
-#include <boost/blank.hpp>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -52,6 +51,21 @@ template <typename T>
 using JsonPathMutateCallback =
     absl::FunctionRef<MutateCallbackResult<T>(std::optional<std::string_view>, JsonType*)>;
 
+namespace details {
+
+template <typename T> void OptionalEmplace(std::optional<T>& optional, T&& value) {
+  optional.emplace(std::forward<T>(value));
+}
+
+template <typename T>
+void OptionalEmplace(std::optional<std::optional<T>>& optional, std::optional<T>&& value) {
+  if (value.has_value()) {
+    optional.emplace(std::forward<std::optional<T>>(value));
+  }
+}
+
+}  // namespace details
+
 template <typename T> class JsonCallbackResult {
  public:
   using JsonV1Result = std::optional<T>;
@@ -68,7 +82,7 @@ template <typename T> class JsonCallbackResult {
 
   void AddValue(T&& value) {
     if (IsV1()) {
-      AsV1().emplace(std::forward<T>(value));
+      details::OptionalEmplace(AsV1(), std::forward<T>(value));
     } else {
       AsV2().emplace_back(std::forward<T>(value));
     }

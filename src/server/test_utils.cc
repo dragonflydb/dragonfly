@@ -402,7 +402,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   last_cmd_dbg_info_ = context->last_command_debug;
 
   RespVec vec = conn_wrapper->ParseResponse(single_response_);
-  if (vec.size() == 1)
+  if (map_single_element_vector_ && vec.size() == 1)
     return vec.front();
   RespVec* new_vec = new RespVec(vec);
   resp_vec_.push_back(new_vec);
