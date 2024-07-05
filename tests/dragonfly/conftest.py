@@ -30,6 +30,28 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 DATABASE_INDEX = 0
 
 
+def pytest_runtest_setup(item):
+    # Create a base directory for logs if it doesn't exist
+    base_log_dir = "/tmp/"
+    os.makedirs(base_log_dir, exist_ok=True)
+
+    # Generate a unique directory name for each test based on its nodeid
+    translator = str.maketrans("", "", ':"')
+    unique_dir = item.nodeid.translate(translator)
+    test_dir = os.path.join(base_log_dir, unique_dir)
+    if os.path.exists(test_dir):
+        shutil.rmtree(test_dir)
+    os.makedirs(test_dir)
+
+    # Attach the directory path to the item for later access
+    item.log_dir = test_dir
+
+    # needs for action.yml to get logs if timedout is happen for test
+    last_logs = open("/tmp/last_test_log_dir.txt", "w")
+    last_logs.write(test_dir)
+    last_logs.close()
+
+
 @pytest.fixture(scope="session")
 def tmp_dir():
     """
@@ -86,6 +108,8 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     path = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/dragonfly"))
 
+    log_directory = getattr(request.node, "log_dir")
+
     args = request.param if request.param else {}
     existing = request.config.getoption("--existing-port")
     existing_admin = request.config.getoption("--existing-admin-port")
@@ -100,6 +124,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         existing_admin_port=int(existing_admin) if existing_admin else None,
         existing_mc_port=int(existing_mc) if existing_mc else None,
         env=test_env,
+        log_dir=log_directory,
     )
 
     factory = DflyInstanceFactory(params, args)
@@ -327,39 +352,41 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
     return args
 
 
-def copy_failed_logs_and_clean_tmp_folder(report):
-    return  # TODO: to fix it first and then enable it.
+def copy_failed_logs_and_clean_tmp_folder(log_dir, report):
     failed_path = "/tmp/failed"
-    path_exists = os.path.exists(failed_path)
-    if not path_exists:
-        os.makedirs(failed_path)
+    if os.path.exists(failed_path):
+        shutil.rmtree(failed_path)
 
-    if os.path.isfile("/tmp/last_test_log_files.txt"):
-        last_log_file = open("/tmp/last_test_log_files.txt", "r")
-        files = last_log_file.readlines()
-        logging.error(f"Test failed {report.nodeid} with logs: ")
-        for file in files:
-            # copy to failed folder
-            file = file.rstrip("\n")
-            logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
-            shutil.copy(file, failed_path)
+    os.makedirs(failed_path)
+
+    logging.error(f"Test failed {report.nodeid} with logs: ")
+    cwd = os.getcwd()
+    onlyfiles = [
+        os.path.join(log_dir, f)
+        for f in os.listdir(log_dir)
+        if os.path.isfile(os.path.join(log_dir, f))
+    ]
+    for file in onlyfiles:
+        # copy to failed folder
+        file = file.rstrip("\n")
+        logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
+        shutil.copy(file, failed_path)
 
 
-def pytest_exception_interact(node, call, report):
-    if report.failed:
-        copy_failed_logs_and_clean_tmp_folder(report)
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
 
+    if report.when == "call":
+        # Store the result of the call phase in the item
+        item.call_outcome = report
 
-@pytest.fixture(autouse=True)
-def run_before_and_after_test():
-    # Setup: logic before any of the test starts
-    # Empty the log on each run
-    last_log_file = open("/tmp/last_test_log_files.txt", "w")
-    last_log_file.close()
-
-    yield  # this is where the testing happens
-
-    # Teardown
+    if report.when == "teardown":
+        log_dir = getattr(item, "log_dir", None)
+        call_outcome = getattr(item, "call_outcome", None)
+        if call_outcome and call_outcome.failed:
+            copy_failed_logs_and_clean_tmp_folder(log_dir, call_outcome)
 
 
 @pytest.fixture(scope="function")
