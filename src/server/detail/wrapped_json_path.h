@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -16,7 +14,7 @@
 
 namespace dfly {
 
-using Nothing = boost::blank;
+class Nothing {};
 using JsonExpression = jsoncons::jsonpath::jsonpath_expression<JsonType>;
 
 template <typename T>
@@ -53,14 +51,14 @@ using JsonPathMutateCallback =
 
 namespace details {
 
-template <typename T> void OptionalEmplace(std::optional<T>& optional, T&& value) {
-  optional.emplace(std::forward<T>(value));
+template <typename T> void OptionalEmplace(T&& value, std::optional<T>* optional) {
+  optional->emplace(std::forward<T>(value));
 }
 
 template <typename T>
-void OptionalEmplace(std::optional<std::optional<T>>& optional, std::optional<T>&& value) {
+void OptionalEmplace(std::optional<T>&& value, std::optional<std::optional<T>>* optional) {
   if (value.has_value()) {
-    optional.emplace(std::forward<std::optional<T>>(value));
+    optional->emplace(std::forward<std::optional<T>>(value));
   }
 }
 
@@ -68,7 +66,10 @@ void OptionalEmplace(std::optional<std::optional<T>>& optional, std::optional<T>
 
 template <typename T> class JsonCallbackResult {
  public:
+  /* In the case of a restricted path (legacy mode), the result consists of a single value */
   using JsonV1Result = std::optional<T>;
+
+  /* In the case of an enhanced path (starts with $), the result is an array of multiple values */
   using JsonV2Result = std::vector<T>;
 
   JsonCallbackResult() = default;
@@ -82,7 +83,7 @@ template <typename T> class JsonCallbackResult {
 
   void AddValue(T&& value) {
     if (IsV1()) {
-      details::OptionalEmplace(AsV1(), std::forward<T>(value));
+      details::OptionalEmplace(std::forward<T>(value), &AsV1());
     } else {
       AsV2().emplace_back(std::forward<T>(value));
     }
@@ -97,6 +98,14 @@ template <typename T> class JsonCallbackResult {
   }
 
   JsonV2Result& AsV2() {
+    return std::get<JsonV2Result>(result_);
+  }
+
+  const JsonV1Result& AsV1() const {
+    return std::get<JsonV1Result>(result_);
+  }
+
+  const JsonV2Result& AsV2() const {
     return std::get<JsonV2Result>(result_);
   }
 

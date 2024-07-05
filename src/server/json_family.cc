@@ -20,7 +20,6 @@
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "facade/cmd_arg_parser.h"
-#include "facade/error.h"
 #include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
@@ -109,49 +108,53 @@ ParseResult<WrappedJsonPath> ParseJsonPath(std::string_view path) {
 
 namespace reply_generic {
 
-template <typename T> void Send(RedisReplyBuilder& rb, T value) = delete;
+template <typename T> void Send(T value, RedisReplyBuilder* rb) = delete;
 
-template <> void Send(RedisReplyBuilder& rb, std::size_t value) {
-  rb.SendLong(value);
+template <> void Send(std::size_t value, RedisReplyBuilder* rb) {
+  rb->SendLong(value);
 }
 
-template <typename T> void Send(RedisReplyBuilder& rb, const std::optional<T>& opt) {
+template <typename T> void Send(const std::optional<T>& opt, RedisReplyBuilder* rb) {
   if (opt.has_value()) {
-    Send(rb, opt.value());
+    Send(opt.value(), rb);
   } else {
-    rb.SendNull();
+    rb->SendNull();
   }
 }
 
-template <typename T> void Send(RedisReplyBuilder& rb, const std::vector<T>& vec) {
+template <typename T> void Send(const std::vector<T>& vec, RedisReplyBuilder* rb) {
   if (vec.empty()) {
-    rb.SendNullArray();
+    rb->SendNullArray();
   } else {
-    rb.StartArray(vec.size());
+    rb->StartArray(vec.size());
     for (auto&& x : vec) {
-      Send(rb, x);
+      Send(x, rb);
     }
   }
 }
 
-template <typename T> void Send(RedisReplyBuilder& rb, JsonCallbackResult<T>& result) {
+template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyBuilder* rb) {
   if (result.error_code) {
-    rb.SendError(result.error_code.message(), kSyntaxErrType);  // todo edit
+    rb->SendError(result.error_code.message());
     return;
   }
 
   if (result.IsV1()) {
-    Send(rb, result.AsV1());
+    /* The specified path was restricted (JSON legacy mode), then the result consists only of a
+     * single value */
+    Send(result.AsV1(), rb);
   } else {
-    Send(rb, result.AsV2());
+    /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
+     * values */
+    Send(result.AsV2(), rb);
   }
 }
 
-template <typename T> void Send(RedisReplyBuilder& rb, OpResult<T>& result) {
+template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb) {
   if (result) {
-    Send(rb, result.value());
+    Send(result.value(), rb);
   } else {
-    rb.SendError(result.status());
+    rb->SendError(result.status());
   }
 }
 
@@ -1971,7 +1974,7 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  reply_generic::Send(*rb, result);
+  reply_generic::Send(result, rb);
 }
 
 void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
