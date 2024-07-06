@@ -28,17 +28,19 @@ from .utility import DflySeederFactory, gen_ca_cert, gen_certificate
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 DATABASE_INDEX = 0
+BASE_LOG_DIR = "/tmp/dragonfly_logs/"
+
+
+def pytest_configure(config):
+    if os.path.exists(BASE_LOG_DIR):
+        shutil.rmtree(BASE_LOG_DIR)
 
 
 def pytest_runtest_setup(item):
-    # Create a base directory for logs if it doesn't exist
-    base_log_dir = "/tmp/"
-    os.makedirs(base_log_dir, exist_ok=True)
-
     # Generate a unique directory name for each test based on its nodeid
-    translator = str.maketrans("", "", ':"')
+    translator = str.maketrans(":[]{}/ ", "_______", "\"'")
     unique_dir = item.nodeid.translate(translator)
-    test_dir = os.path.join(base_log_dir, unique_dir)
+    test_dir = os.path.join(BASE_LOG_DIR, unique_dir)
     if os.path.exists(test_dir):
         shutil.rmtree(test_dir)
     os.makedirs(test_dir)
