@@ -39,10 +39,7 @@ services:
     restart: unless-stopped
     ports:
       - "11211:11211"
-    command:
-      - '-t 8'
-      - '-m 10000'
-      - '--pidfile=/memcached/memcached.pid'
+    command: "-t 8 -m 10000 -c 10000 --pidfile=/memcached/memcached.pid"
     pid: host
     volumes:
       - memcached_data:/memcached
