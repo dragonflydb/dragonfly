@@ -469,7 +469,7 @@ SvArray ToSvArray(const absl::flat_hash_set<std::string_view>& set) {
 // if overwrite is true then OpAdd writes vals into the key and discards its previous value.
 OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewEntries& vals,
                          bool overwrite, bool journal_update) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto vals_it = EntriesRange(vals);
 
   VLOG(2) << "OpAdd(" << key << ")";
@@ -554,7 +554,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
 
 OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
                            const NewEntries& vals) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(op_res);
@@ -589,7 +589,7 @@ OpResult<uint32_t> OpAddEx(const OpArgs& op_args, string_view key, uint32_t ttl_
 
 OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, facade::ArgRange vals,
                          bool journal_rewrite) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
   if (!find_res) {
     return find_res.status();
@@ -711,8 +711,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
   absl::flat_hash_set<string> uniques;
 
   for (; start != end; ++start) {
-    auto find_res =
-        op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
+    auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
     if (find_res) {
       const PrimeValue& pv = find_res.value()->second;
       if (IsDenseEncoding(pv)) {
@@ -737,7 +736,7 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
 // Read-only OpDiff op on sets.
 OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
                            ShardArgs::Iterator end) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   DCHECK(start != end);
   DVLOG(1) << "OpDiff from " << *start;
   auto find_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_SET);
@@ -872,8 +871,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
 }
 
 OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, int count) {
-  auto find_res =
-      op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
+  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
   if (!find_res)
     return find_res.status();
 
@@ -964,8 +962,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
 
 OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cursor,
                            const ScanOpts& scan_op) {
-  auto find_res =
-      op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
+  auto find_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_SET);
 
   if (!find_res)
     return find_res.status();

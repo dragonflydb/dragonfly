@@ -72,7 +72,7 @@ template <typename T> T GetResult(std::variant<T, util::fb2::Future<T>> v) {
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
                               string_view value) {
   VLOG(2) << "SetRange(" << key << ", " << start << ", " << value << ")";
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   size_t range_len = start + value.size();
 
   if (range_len == 0) {
@@ -107,7 +107,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 }
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
@@ -153,7 +153,7 @@ size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bo
 }
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
@@ -163,7 +163,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
 }
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(op_res);
@@ -208,7 +208,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 // if skip_on_missing - returns KEY_NOTFOUND.
 OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
                            bool skip_on_missing) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
 
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
   auto res = db_slice.FindMutable(op_args.db_cntx, key);
@@ -307,7 +307,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view key,
                                        const int64_t limit, const int64_t emission_interval_ms,
                                        const uint64_t quantity) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
 
   if (emission_interval_ms > INT64_MAX / limit) {
     return OpStatus::INVALID_INT;
@@ -478,7 +478,7 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
                                                               std::string_view value,
                                                               bool prepend) {
   auto* shard = op_args.shard;
-  auto it_res = op_args.db_cntx.ns->GetCurrentDbSlice().AddOrFind(op_args.db_cntx, key);
+  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(it_res);
 
   if (it_res->is_new) {
@@ -551,7 +551,7 @@ bool StringValue::IsEmpty() const {
 }
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
-  auto& db_slice = op_args_.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args_.GetDbSlice();
 
   DCHECK(db_slice.IsDbValid(op_args_.db_cntx.db_index));
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
@@ -596,7 +596,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   PrimeValue& prime_value = it->second;
   EngineShard* shard = op_args_.shard;
 
-  auto& db_slice = op_args_.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args_.GetDbSlice();
   uint64_t at_ms =
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
 
@@ -636,7 +636,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
 
 void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
                     std::string_view key, std::string_view value) {
-  auto& db_slice = op_args_.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args_.GetDbSlice();
 
   // Adding new value.
   PrimeValue tvalue{value};
@@ -986,8 +986,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringValue> {
     auto op_args = t->GetOpArgs(shard);
 
-    auto it_res =
-        op_args.db_cntx.ns->GetCurrentDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
+    auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
     if (!it_res)
       return it_res.status();
 
@@ -995,8 +994,8 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
 
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
-      RETURN_ON_BAD_STATUS(op_args.db_cntx.ns->GetCurrentDbSlice().UpdateExpire(
-          op_args.db_cntx, it_res->it, it_res->exp_it, exp_params));
+      RETURN_ON_BAD_STATUS(op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it,
+                                                             it_res->exp_it, exp_params));
     }
 
     // Replicate GETEX as PEXPIREAT or PERSIST

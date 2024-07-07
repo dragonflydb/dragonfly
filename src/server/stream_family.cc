@@ -605,7 +605,7 @@ int StreamTrim(const AddTrimOpts& opts, stream* s) {
 
 OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   DbSlice::AddOrFindResult add_res;
 
   if (opts.no_mkstream) {
@@ -657,7 +657,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
 }
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -801,7 +801,7 @@ stream* GetReadOnlyStream(const CompactObj& cobj) {
 OpResult<vector<pair<string, streamID>>> OpLastIDs(const OpArgs& op_args, const ShardArgs& args) {
   DCHECK(!args.Empty());
 
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
 
   vector<pair<string, streamID>> last_ids;
   for (string_view key : args) {
@@ -866,7 +866,7 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
 }
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1116,7 +1116,7 @@ struct CreateOpts {
 };
 
 OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
   if (!res_it) {
@@ -1163,7 +1163,7 @@ struct FindGroupResult {
 
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto* shard = op_args.shard;
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1452,7 +1452,7 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
 }
 
 OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1490,7 +1490,7 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
 }
 
 OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<streamID> ids) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1919,7 +1919,7 @@ void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_STREAM);
   if (!res_it) {
     if (res_it.status() == OpStatus::KEY_NOTFOUND) {

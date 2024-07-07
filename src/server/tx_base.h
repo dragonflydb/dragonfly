@@ -15,6 +15,7 @@ namespace dfly {
 class EngineShard;
 class Transaction;
 class Namespace;
+class DbSlice;
 
 using DbIndex = uint16_t;
 using ShardId = uint16_t;
@@ -73,6 +74,8 @@ struct OpArgs {
   OpArgs(EngineShard* s, const Transaction* tx, const DbContext& cntx)
       : shard(s), tx(tx), db_cntx(cntx) {
   }
+
+  DbSlice& GetDbSlice() const;
 };
 
 // A strong type for a lock tag. Helps to disambiguate between keys and the parts of the

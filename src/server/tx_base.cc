@@ -9,12 +9,17 @@
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 
 namespace dfly {
 
 using namespace std;
 using Payload = journal::Entry::Payload;
+
+DbSlice& OpArgs::GetDbSlice() const {
+  return db_cntx.ns->GetDbSlice(shard->shard_id());
+}
 
 size_t ShardArgs::Size() const {
   size_t sz = 0;

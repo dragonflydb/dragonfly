@@ -1294,7 +1294,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
            << " with thread ID: " << conn_ref.Thread();
 
-  auto& db_slice = slice_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = slice_args.GetDbSlice();
   // TODO: There is a bug here that we track all arguments instead of tracking only keys.
   for (auto key : args) {
     DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()

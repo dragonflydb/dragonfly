@@ -35,7 +35,7 @@ using AddResult = absl::InlinedVector<OpResult<bool>, 4>;
 using ExistsResult = absl::InlinedVector<bool, 4>;
 
 OpStatus OpReserve(const SbfParams& params, const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   OpResult op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   if (!op_res)
     return op_res.status();
@@ -50,7 +50,7 @@ OpStatus OpReserve(const SbfParams& params, const OpArgs& op_args, string_view k
 
 // Returns true, if item was added, false if it was already "present".
 OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList items) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
 
   OpResult op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   if (!op_res)
@@ -73,7 +73,7 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, string_view key, CmdArgList ite
 }
 
 OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgList items) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   OpResult op_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_SBF);
   if (!op_res)
     return op_res.status();

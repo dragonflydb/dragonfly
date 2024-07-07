@@ -355,7 +355,7 @@ OpResult<bool> BitNewValue(const OpArgs& args, std::string_view key, uint32_t of
                            bool bit_value) {
   EngineShard* shard = args.shard;
   ElementAccess element_access{key, args};
-  auto& db_slice = args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(element_access.Index()));
   bool old_value = false;
 
@@ -446,7 +446,7 @@ OpResult<std::string> CombineResultOp(ShardStringResults result, std::string_vie
 // For bitop not - we cannot accumulate
 OpResult<std::string> RunBitOpNot(const OpArgs& op_args, string_view key) {
   // if we found the value, just return, if not found then skip, otherwise report an error
-  DbSlice& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  DbSlice& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
     return GetString(find_res.value()->second);
@@ -464,7 +464,7 @@ OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args
     return RunBitOpNot(op_args, *start);
   }
 
-  DbSlice& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  DbSlice& db_slice = op_args.GetDbSlice();
   BitsStrVec values;
 
   // collect all the value for this shard

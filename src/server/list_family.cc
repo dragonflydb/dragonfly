@@ -224,7 +224,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
 
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
                                    ListDir src_dir, ListDir dest_dir) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
   if (!src_res)
     return src_res.status();
@@ -281,8 +281,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
 // Read-only peek operation that determines whether the list exists and optionally
 // returns the first from left/right value without popping it from the list.
 OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool fetch) {
-  auto it_res =
-      op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res) {
     return it_res.status();
   }
@@ -309,13 +308,12 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   DbSlice::AddOrFindResult res;
 
   if (skip_notexist) {
-    auto tmp_res =
-        op_args.db_cntx.ns->GetCurrentDbSlice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
+    auto tmp_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
     if (!tmp_res)
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
     res = std::move(*tmp_res);
   } else {
-    auto op_res = op_args.db_cntx.ns->GetCurrentDbSlice().AddOrFind(op_args.db_cntx, key);
+    auto op_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
     RETURN_ON_BAD_STATUS(op_res);
     res = std::move(*op_res);
   }
@@ -367,7 +365,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, uint32_t count,
                           bool return_results, bool journal_rewrite) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -469,7 +467,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 }
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
-  auto res = op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 
@@ -479,7 +477,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
 }
 
 OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index) {
-  auto res = op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
   quicklist* ql = GetQL(res.value()->second);
@@ -503,8 +501,7 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
 
 OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
                                  std::string_view element, int rank, int count, int max_len) {
-  auto it_res =
-      op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res.ok())
     return it_res.status();
 
@@ -547,7 +544,7 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
 
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
                        InsertParam insert_param) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -579,7 +576,7 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
 }
 
 OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view elem, long count) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -621,7 +618,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
 }
 
 OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long index) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -638,7 +635,7 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
 }
 
 OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
-  auto& db_slice = op_args.db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
@@ -682,7 +679,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
 }
 
 OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long start, long end) {
-  auto res = op_args.db_cntx.ns->GetCurrentDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+  auto res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
 
