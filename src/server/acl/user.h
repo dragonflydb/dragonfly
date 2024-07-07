@@ -61,7 +61,7 @@ class User final {
     // TODO allow reset all
     // bool reset_all{false};
 
-    std::optional<std::string> ns{};
+    std::string ns;
   };
 
   using CategoryChange = uint32_t;

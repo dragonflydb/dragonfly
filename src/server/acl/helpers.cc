@@ -182,7 +182,7 @@ std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, boo
 }
 
 std::optional<std::string> MaybeParseNamespace(std::string_view command) {
-  if (absl::StartsWith(command, "NAMESPACE:")) {
+  if (absl::StartsWith(command, "NS:")) {
     return std::string(command.substr(7));
   }
   return {};
@@ -315,7 +315,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(facade::ArgRange a
     }
 
     if (auto ns = MaybeParseNamespace(command); ns) {
-      req.ns = ns;
+      req.ns = *ns;
       continue;
     }
 

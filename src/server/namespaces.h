@@ -17,6 +17,10 @@
 
 namespace dfly {
 
+// A Namespace is a way to separate and isolate different databases in a single instance.
+// It can be used to allow multiple tenants to use the same server without hacks of using a common
+// prefix, or SELECT-ing a different database.
+// Each Namespace contains per-shard DbSlice, as well as a BlockingController.
 class Namespace {
  public:
   explicit Namespace();
@@ -34,6 +38,15 @@ class Namespace {
   friend class Namespaces;
 };
 
+// Namespaces is a registry and container for Namespace instances.
+// Each Namespace has a unique string name, which identifies it in the store.
+// Any attempt to access a non-existing Namespace will first create it, add it to the internal map
+// and will then return it.
+// It is currently impossible to remove a Namespace after it has been created.
+// The default Namespace can be accessed via either GetDefaultNamespace() (which guarantees not to
+// yield), or via the GetOrInsert() with an empty string.
+// The initialization order of this class with the engine shards is slightly subtle, as they have
+// mutual dependencies.
 class Namespaces {
  public:
   Namespaces() = default;

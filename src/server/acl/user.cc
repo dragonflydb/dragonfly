@@ -79,9 +79,7 @@ void User::Update(UpdateRequest&& req) {
     SetIsActive(*req.is_active);
   }
 
-  if (req.ns) {
-    SetNamespace(*req.ns);
-  }
+  SetNamespace(req.ns);
 }
 
 void User::SetPasswordHash(std::string_view password, bool is_hashed) {

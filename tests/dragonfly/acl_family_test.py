@@ -548,7 +548,7 @@ async def test_namespaces(df_factory):
     assert await admin.execute_command("GET foo") == b"admin"
 
     # Create ns space named 'ns1'
-    await admin.execute_command("ACL SETUSER adi NAMESPACE:ns1 ON >adi_pass +@all ~*")
+    await admin.execute_command("ACL SETUSER adi NS:ns1 ON >adi_pass +@all ~*")
 
     adi = aioredis.Redis(port=df.port)
     assert await adi.execute_command("AUTH adi adi_pass") == b"OK"
@@ -557,7 +557,7 @@ async def test_namespaces(df_factory):
     assert await admin.execute_command("GET foo") == b"admin"
 
     # Adi and Shahar are on the same team
-    await admin.execute_command("ACL SETUSER shahar NAMESPACE:ns1 ON >shahar_pass +@all ~*")
+    await admin.execute_command("ACL SETUSER shahar NS:ns1 ON >shahar_pass +@all ~*")
 
     shahar = aioredis.Redis(port=df.port)
     assert await shahar.execute_command("AUTH shahar shahar_pass") == b"OK"
@@ -566,7 +566,7 @@ async def test_namespaces(df_factory):
     assert await adi.execute_command("GET foo") == b"bar2"
 
     # Roman is a CTO, he has his own private space
-    await admin.execute_command("ACL SETUSER roman NAMESPACE:ns2 ON >roman_pass +@all ~*")
+    await admin.execute_command("ACL SETUSER roman NS:ns2 ON >roman_pass +@all ~*")
 
     roman = aioredis.Redis(port=df.port)
     assert await roman.execute_command("AUTH roman roman_pass") == b"OK"
