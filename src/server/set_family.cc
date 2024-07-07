@@ -896,7 +896,7 @@ OpResult<StringVec> OpRandMember(const OpArgs& op_args, std::string_view key, in
 // count - how many elements to pop.
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count) {
   auto& db_cntx = op_args.db_cntx;
-  auto& db_slice = db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindMutable(db_cntx, key, OBJ_SET);
   if (!find_res) {
     return find_res.status();

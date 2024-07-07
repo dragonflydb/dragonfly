@@ -877,7 +877,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
 
 OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
                                          EngineShard* shard) {
-  auto& db_slice = db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = db_cntx.ns->GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1009,7 +1009,7 @@ void GetConsumers(stream* s, streamCG* cg, long long count, GroupInfo* ginfo) {
 
 OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard,
                                int full, size_t count) {
-  auto& db_slice = db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = db_cntx.ns->GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1072,7 +1072,7 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
 
 OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard* shard,
                                            string_view stream_name, string_view group_name) {
-  auto& db_slice = db_cntx.ns->GetCurrentDbSlice();
+  auto& db_slice = db_cntx.ns->GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, stream_name, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -2897,7 +2897,7 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
 
   const auto key_checker = [&opts](EngineShard* owner, const DbContext& context, Transaction* tx,
                                    std::string_view key) -> bool {
-    auto& db_slice = context.ns->GetCurrentDbSlice();
+    auto& db_slice = context.ns->GetDbSlice(owner->shard_id());
     auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
     if (!res_it.ok())
       return false;

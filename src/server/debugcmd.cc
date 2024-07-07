@@ -262,7 +262,7 @@ void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
 }
 
 void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj_hist_map) {
-  auto& db_slice = cntx->ns->GetCurrentDbSlice();
+  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
   unsigned steps = 0;
 
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
@@ -940,8 +940,9 @@ void DebugCmd::Shards() {
 
   vector<ShardInfo> infos(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    auto slice_stats = cntx_->ns->GetCurrentDbSlice().GetStats();
-    auto& stats = infos[shard->shard_id()];
+    auto sid = shard->shard_id();
+    auto slice_stats = cntx_->ns->GetDbSlice(sid).GetStats();
+    auto& stats = infos[sid];
 
     stats.used_memory = shard->UsedMemory();
     for (const auto& db_stats : slice_stats.db_stats) {

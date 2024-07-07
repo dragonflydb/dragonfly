@@ -1358,7 +1358,7 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
   cntx->conn_state.db_index = index;
   auto cb = [cntx, index](EngineShard* shard) {
     CHECK(cntx->ns != nullptr);
-    auto& db_slice = cntx->ns->GetCurrentDbSlice();
+    auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
     db_slice.ActivateDb(index);
     return OpStatus::OK;
   };
@@ -1388,7 +1388,7 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
-    auto& db_slice = cntx->ns->GetCurrentDbSlice();
+    auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
     auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
     if (!it.is_done()) {
       return it->second.ObjType();
@@ -1616,7 +1616,7 @@ void GenericFamily::RandomKey(CmdArgList args, ConnectionContext* cntx) {
   shard_set->RunBriefInParallel(
       [&](EngineShard* shard) {
         auto [prime_table, expire_table] =
-            cntx->ns->GetCurrentDbSlice().GetTables(db_cntx.db_index);
+            cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
         if (prime_table->size() == 0) {
           return;
         }

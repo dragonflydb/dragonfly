@@ -1227,9 +1227,10 @@ void StringFamily::MSetNx(CmdArgList args, ConnectionContext* cntx) {
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
-    auto args = t->GetShardArgs(es->shard_id());
+    auto sid = es->shard_id();
+    auto args = t->GetShardArgs(sid);
     for (auto arg_it = args.begin(); arg_it != args.end(); ++arg_it) {
-      auto it = cntx->ns->GetCurrentDbSlice().FindReadOnly(t->GetDbContext(), *arg_it).it;
+      auto it = cntx->ns->GetDbSlice(sid).FindReadOnly(t->GetDbContext(), *arg_it).it;
       ++arg_it;
       if (IsValid(it)) {
         exists.store(true, memory_order_relaxed);

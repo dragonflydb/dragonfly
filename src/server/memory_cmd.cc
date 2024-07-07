@@ -354,8 +354,8 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
 
 void MemoryCmd::Usage(std::string_view key) {
   ShardId sid = Shard(key, shard_set->size());
-  ssize_t memory_usage = shard_set->pool()->at(sid)->AwaitBrief([key, this]() -> ssize_t {
-    auto& db_slice = cntx_->ns->GetCurrentDbSlice();
+  ssize_t memory_usage = shard_set->pool()->at(sid)->AwaitBrief([key, this, sid]() -> ssize_t {
+    auto& db_slice = cntx_->ns->GetDbSlice(sid);
     auto [pt, exp_t] = db_slice.GetTables(cntx_->db_index());
     PrimeIterator it = pt->Find(key);
     if (IsValid(it)) {

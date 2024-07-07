@@ -1552,7 +1552,7 @@ void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
 
   shard_set->RunBriefInParallel(
       [&](EngineShard* shard) {
-        auto db_size = cntx->ns->GetCurrentDbSlice().DbSize(cntx->conn_state.db_index);
+        auto db_size = cntx->ns->GetDbSlice(shard->shard_id()).DbSize(cntx->conn_state.db_index);
         num_keys.fetch_add(db_size, memory_order_relaxed);
       },
       [](ShardId) { return true; });
