@@ -22,7 +22,7 @@ derivative works, redistribute, and make non-production use of the
 Licensed Work. The Licensor may make an Additional Use Grant, above,
 permitting limited production use.
 
-Effective on the Change Date, or the forth anniversary of the first
+Effective on the Change Date, or the fourth anniversary of the first
 publicly available distribution of a specific version of the Licensed
 Work under this License, whichever comes first, the Licensor hereby
 grants you rights under the terms of the Change License, and the rights
@@ -50,9 +50,10 @@ and all other versions of the Licensed Work.
 
 This License does not grant you any right in any trademark or logo of
 Licensor or its affiliates (provided that you may use a trademark or
-logo of Licensor as expressly required by this License).TO THE EXTENT
-PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON AN “AS IS”
-BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS, EXPRESS
-OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND
-TITLE.
+logo of Licensor as expressly required by this License).
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED
+ON AN “AS IS” BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND
+CONDITIONS, EXPRESS OR IMPLIED, INCLUDING (WITHOUT LIMITATION)
+WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE,
+NON-INFRINGEMENT, AND TITLE.
