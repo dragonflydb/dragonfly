@@ -23,7 +23,7 @@ namespace dfly {
 // Each Namespace contains per-shard DbSlice, as well as a BlockingController.
 class Namespace {
  public:
-  explicit Namespace();
+  Namespace();
 
   DbSlice& GetCurrentDbSlice();
 
