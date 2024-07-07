@@ -310,7 +310,7 @@ class ElementAccess {
 };
 
 std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
-  auto res = context_.ns->GetCurrentDbSlice().FindReadOnly(context_, key_, OBJ_STRING);
+  auto res = context_.ns->GetDbSlice(shard->shard_id()).FindReadOnly(context_, key_, OBJ_STRING);
   if (res.status() == OpStatus::WRONG_TYPE) {
     return {};
   }
@@ -318,7 +318,7 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
 }
 
 OpStatus ElementAccess::Find(EngineShard* shard) {
-  auto op_res = context_.ns->GetCurrentDbSlice().AddOrFind(context_, key_);
+  auto op_res = context_.ns->GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
@@ -1245,7 +1245,7 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, ui
 
 OpResult<std::string> ReadValue(const DbContext& context, std::string_view key,
                                 EngineShard* shard) {
-  DbSlice& db_slice = context.ns->GetCurrentDbSlice();
+  DbSlice& db_slice = context.ns->GetDbSlice(shard->shard_id());
   auto it_res = db_slice.FindReadOnly(context, key, OBJ_STRING);
   if (!it_res.ok()) {
     return it_res.status();
