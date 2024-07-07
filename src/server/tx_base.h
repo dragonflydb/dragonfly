@@ -75,6 +75,7 @@ struct OpArgs {
       : shard(s), tx(tx), db_cntx(cntx) {
   }
 
+  // Convenience method.
   DbSlice& GetDbSlice() const;
 };
 
