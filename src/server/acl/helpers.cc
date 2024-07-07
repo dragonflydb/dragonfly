@@ -182,7 +182,7 @@ std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, boo
 }
 
 std::optional<std::string> MaybeParseNamespace(std::string_view command) {
-  if (absl::StartsWith(command, "NS:")) {
+  if (absl::StartsWith(command, "NAMESPACE:")) {
     return std::string(command.substr(7));
   }
   return {};
