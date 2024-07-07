@@ -1250,7 +1250,6 @@ async def test_take_over_seeder(
     assert await c_replica.execute_command("role") == ["master", []]
     stop_info = True
 
-
     # Need to wait a bit to give time to write the shutdown snapshot
     await asyncio.sleep(1)
     assert master.proc.poll() == 0, "Master process did not exit correctly."
