@@ -19,7 +19,7 @@ import time
 from copy import deepcopy
 
 from pathlib import Path
-from tempfile import TemporaryDirectory, gettempdir
+from tempfile import gettempdir, mkdtemp
 
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from . import PortPicker, dfly_args
@@ -37,9 +37,12 @@ def tmp_dir():
     where the Dragonfly executable will be run and where all test data
     should be stored. The directory will be cleaned up at the end of a session
     """
-    tmp = TemporaryDirectory()
-    yield Path(tmp.name)
-    tmp.cleanup()
+    tmp_name = mkdtemp()
+    yield Path(tmp_name)
+    if os.environ.get("DRAGONFLY_KEEP_TMP"):
+        logging.info(f"Keeping tmp dir {tmp_name}")
+        return
+    os.rmdir(tmp_name)
 
 
 @pytest.fixture(scope="session")

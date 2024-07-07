@@ -59,7 +59,7 @@ void OpManager::Delete(EntryId id) {
   pending_stash_ver_.erase(ToOwned(id));
 }
 
-void OpManager::Delete(DiskSegment segment) {
+void OpManager::DeleteOffloaded(DiskSegment segment) {
   EntryOps* pending_op = nullptr;
 
   auto base_it = pending_reads_.find(segment.ContainingPages().offset);

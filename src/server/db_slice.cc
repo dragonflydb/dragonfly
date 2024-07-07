@@ -708,14 +708,10 @@ void DbSlice::FlushSlots(cluster::SlotRanges slot_ranges) {
 }
 
 void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
-  // Async cleanup can only be performed if no tiered entries exist
-  bool async_cleanup = true;
-  for (DbIndex index : indexes) {
-    async_cleanup &= db_arr_[index]->stats.tiered_entries == 0;
-  }
+  bool clear_tiered = owner_->tiered_storage() != nullptr;
 
-  if (!async_cleanup)
-    ClearEntriesOnFlush(indexes, db_arr_, false);
+  if (clear_tiered)
+    ClearOffloadedEntries(indexes, db_arr_);
 
   DbTableArray flush_db_arr(db_arr_.size());
   for (DbIndex index : indexes) {
@@ -729,9 +725,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   }
 
   CHECK(fetched_items_.empty());
-  auto cb = [this, async_cleanup, indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
-    if (async_cleanup)
-      ClearEntriesOnFlush(indexes, flush_db_arr, true);
+  auto cb = [this, indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
@@ -1408,27 +1402,35 @@ void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
   }
 }
 
-void DbSlice::ClearEntriesOnFlush(absl::Span<const DbIndex> indices, const DbTableArray& db_arr,
-                                  bool async) {
-  for (auto index : indices) {
+void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr) {
+  // Currently being used only for tiered storage.
+  TieredStorage* tiered_storage = shard_owner()->tiered_storage();
+  string scratch;
+  for (DbIndex index : indices) {
     const auto& db_ptr = db_arr[index];
-    if (!db_ptr || db_ptr->stats.tiered_entries == 0)
+    if (!db_ptr)
       continue;
 
     // Delete all tiered entries
     PrimeTable::Cursor cursor;
     do {
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
-        if (it->second.IsExternal())
-          PerformDeletion(it, db_ptr.get());
+        if (it->second.IsExternal()) {
+          tiered_storage->Delete(index, &it->second);
+        } else if (it->second.HasIoPending()) {
+          tiered_storage->CancelStash(index, it->first.GetSlice(&scratch), &it->second);
+        }
       });
-    } while (cursor && db_ptr->stats.tiered_entries > 0);
+    } while (cursor);
 
+    CHECK_EQ(db_ptr->stats.tiered_entries, 0u);
+#if 0
     // Wait for delete operations to finish in sync
     while (!async && db_ptr->stats.tiered_entries > 0) {
       LOG_EVERY_T(ERROR, 0.5) << "Long wait for tiered entry delete on flush";
       ThisFiber::SleepFor(1ms);
     }
+#endif
   }
 }
 
