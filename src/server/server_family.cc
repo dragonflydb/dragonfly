@@ -2258,6 +2258,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("REPLICATION")) {
+    unique_lock lk(replicaof_mu_);
     ServerState& etl = *ServerState::tlocal();
 
     if (etl.is_master) {
@@ -2273,10 +2274,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("master_replid", master_replid_);
     } else {
       append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
-
-      // The replica pointer can still be mutated even while master=true,
-      // we don't want to drop the replica object in this fiber
-      unique_lock lk{replicaof_mu_};
 
       auto replication_info_cb = [&](Replica::Info rinfo) {
         append("master_host", rinfo.host);
@@ -2737,6 +2734,7 @@ err:
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  unique_lock lk(replicaof_mu_);
   ServerState& etl = *ServerState::tlocal();
   if (etl.is_master) {
     rb->StartArray(2);
@@ -2751,7 +2749,6 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     }
 
   } else {
-    unique_lock lk{replicaof_mu_};
     rb->StartArray(4 + cluster_replicas_.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 

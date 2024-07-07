@@ -1229,17 +1229,27 @@ async def test_take_over_seeder(
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
-    async def seed():
-        await seeder.run(target_ops=3000)
+    fill_task = asyncio.create_task(seeder.run())
 
-    fill_task = asyncio.create_task(seed())
+    stop_info = False
+    async def info_task():
+        my_client = replica.client()
+        while not stop_info:
+            info = await my_client.info("replication")
+            asyncio.sleep(0.5)
+
+    info_task = asyncio.create_task(info_task())
 
     # Give the seeder a bit of time.
-    await asyncio.sleep(1)
+    await asyncio.sleep(3)
+    logging.debug("running repltakover")
     await c_replica.execute_command(f"REPLTAKEOVER 5 SAVE")
+    logging.debug("after running repltakover")
     seeder.stop()
 
     assert await c_replica.execute_command("role") == ["master", []]
+    stop_info = True
+
 
     # Need to wait a bit to give time to write the shutdown snapshot
     await asyncio.sleep(1)
