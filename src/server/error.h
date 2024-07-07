@@ -44,6 +44,31 @@ using facade::kWrongTypeErr;
 
 #endif  // RETURN_ON_BAD_STATUS
 
+#ifndef RETURN_UNEXPECTED
+
+#define RETURN_UNEXPECTED(x)       \
+  do {                             \
+    if (!(x)) {                    \
+      return (x).get_unexpected(); \
+    }                              \
+  } while (0)
+
+#endif  // RETURN_UNEXPECTED
+
+#ifndef GET_OR_SEND_UNEXPECTED
+
+#define GET_OR_SEND_UNEXPECTED(expr)     \
+  ({                                     \
+    auto expr_res = (expr);              \
+    if (!expr_res) {                     \
+      cntx->SendError(expr_res.error()); \
+      return;                            \
+    }                                    \
+    std::move(expr_res).value();         \
+  })
+
+#endif  // GET_OR_SEND_UNEXPECTED
+
 namespace rdb {
 
 enum errc {

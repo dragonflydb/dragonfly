@@ -137,6 +137,8 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 
   // If we've run out of space, block and grow as much as needed
   if (offset < 0) {
+    // TODO: To introduce asynchronous call that starts resizing before we reach this step.
+    // Right now we do it synchronously as well (see Grow(256MB) call.)
     RETURN_ON_ERR(Grow(-offset));
 
     offset = alloc_.Malloc(bytes.size());
@@ -163,6 +165,11 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
     backing_file_->WriteFixedAsync(buf.bytes, offset, *buf.buf_idx, std::move(io_cb));
   else
     backing_file_->WriteAsync(buf.bytes, offset, std::move(io_cb));
+  if (alloc_.allocated_bytes() > (size_ * 0.85) && !grow_pending_) {
+    auto ec = Grow(265_MB);
+    LOG_IF(ERROR, ec) << "Could not call grow :" << ec.message();
+    return ec;
+  }
   return {};
 }
 
@@ -176,9 +183,12 @@ std::error_code DiskStorage::Grow(off_t grow_size) {
   if (off_t(alloc_.capacity()) + grow_size > max_size_)
     return std::make_error_code(std::errc::no_space_on_device);
 
-  if (std::exchange(grow_pending_, true))
+  if (std::exchange(grow_pending_, true)) {
+    // TODO: to introduce future like semantics where multiple flow can block on the
+    // ongoing Grow operation.
+    LOG(WARNING) << "Concurrent grow request detected ";
     return std::make_error_code(std::errc::operation_in_progress);
-
+  }
   auto err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, size_, grow_size);
   grow_pending_ = false;
   RETURN_ON_ERR(err);

@@ -748,6 +748,7 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
+    DCHECK(cc_->reply_builder());
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
     if (cc_->reply_builder()->IsSendActive())
       phase_name = "send";
@@ -1103,6 +1104,8 @@ void Connection::OnBreakCb(int32_t mask) {
     LOG(ERROR) << "Unexpected event " << mask;
     return;
   }
+
+  DCHECK(cc_->reply_builder());
 
   VLOG(1) << "[" << id_ << "] Got event " << mask << " " << phase_ << " "
           << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();
