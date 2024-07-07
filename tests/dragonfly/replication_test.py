@@ -2070,7 +2070,7 @@ async def test_saving_replica(df_factory):
 
     save_task = asyncio.create_task(save_replica())
     while not await is_saving(c_replica):  # wait for replica start saving
-        assert "rdb_changes_since_last_success_save:0" in await c_replica.execute_command(
+        assert "rdb_changes_since_last_success_save:0" not in await c_replica.execute_command(
             "info persistence"
         ), "Weak test case, finished saving too quickly"
         await asyncio.sleep(0.1)
@@ -2100,7 +2100,7 @@ async def test_start_replicating_while_save(df_factory):
 
     save_task = asyncio.create_task(save_replica())
     while not await is_saving(c_replica):  # wait for server start saving
-        assert "rdb_changes_since_last_success_save:0" in await c_replica.execute_command(
+        assert "rdb_changes_since_last_success_save:0" not in await c_replica.execute_command(
             "info persistence"
         ), "Weak test case, finished saving too quickly"
         await asyncio.sleep(0.1)
