@@ -104,7 +104,7 @@ class User final {
 
   const AclKeys& Keys() const;
 
-  std::string Namespace() const;
+  const std::string& Namespace() const;
 
   using CategoryChanges = absl::flat_hash_map<CategoryChange, ChangeMetadata>;
   using CommandChanges = absl::flat_hash_map<CommandChange, ChangeMetadata>;

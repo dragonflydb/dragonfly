@@ -99,7 +99,7 @@ void User::SetNamespace(const std::string& ns) {
   namespace_ = ns;
 }
 
-std::string User::Namespace() const {
+const std::string& User::Namespace() const {
   return namespace_;
 }
 

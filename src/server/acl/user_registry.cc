@@ -74,10 +74,13 @@ UserRegistry::UserWithWriteLock::UserWithWriteLock(std::unique_lock<fb2::SharedM
 }
 
 User::UpdateRequest UserRegistry::DefaultUserUpdateRequest() const {
-  std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
-  auto key = User::UpdateKey{"~*", KeyOp::READ_WRITE, true, false};
-  auto pass = std::vector<User::UpdatePass>{{"", false, true}};
-  return {std::move(pass), true, false, {std::move(acl)}, {std::move(key)}};
+  // Assign field by field to supress an annoying compiler warning
+  User::UpdateRequest req;
+  req.passwords = std::vector<User::UpdatePass>{{"", false, true}};
+  req.is_active = true;
+  req.updates = {std::pair<User::Sign, uint32_t>{User::Sign::PLUS, acl::ALL}};
+  req.keys = {User::UpdateKey{"~*", KeyOp::READ_WRITE, true, false}};
+  return req;
 }
 
 void UserRegistry::Init() {
