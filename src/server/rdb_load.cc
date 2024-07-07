@@ -2452,8 +2452,7 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* p
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   EngineShard* es = EngineShard::tlocal();
-  DbSlice& db_slice = es->db_slice();
-  DbContext db_cntx{db_ind, GetCurrentTimeMs()};
+  DbContext db_cntx{&namespaces.GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
   DbSlice& db_slice = db_cntx.ns->GetCurrentDbSlice();
 
   for (const auto* item : ib) {
