@@ -24,6 +24,7 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
+#include "server/detail/wrapped_json_path.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
@@ -54,6 +55,56 @@ using CI = CommandId;
 static const char DefaultJsonPath[] = "$";
 
 namespace {
+
+namespace json_parser {
+
+template <typename T> using ParseResult = io::Result<T, std::string>;
+
+ParseResult<JsonExpression> ParseJsonPathAsExpression(std::string_view path) {
+  std::error_code ec;
+  JsonExpression res = MakeJsonPathExpr(path, ec);
+  if (ec)
+    return nonstd::make_unexpected(kSyntaxErr);
+  return res;
+}
+
+ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, bool is_legacy_mode_path) {
+  if (absl::GetFlag(FLAGS_jsonpathv2)) {
+    auto path_result = json::ParsePath(path.view());
+    RETURN_UNEXPECTED(path_result);
+    return WrappedJsonPath{std::move(path_result).value(), std::move(path), is_legacy_mode_path};
+  }
+
+  auto expr_result = ParseJsonPathAsExpression(path.view());
+  RETURN_UNEXPECTED(expr_result);
+  return WrappedJsonPath{std::move(expr_result).value(), std::move(path), is_legacy_mode_path};
+}
+
+ParseResult<WrappedJsonPath> ParseJsonPathV1(std::string_view path) {
+  if (path == WrappedJsonPath::kV1PathRootElement) {
+    return ParseJsonPath(StringOrView::FromView(WrappedJsonPath::kV2PathRootElement), true);
+  }
+
+  std::string v2_path = absl::StrCat(
+      WrappedJsonPath::kV2PathRootElement, path.front() != '.' && path.front() != '[' ? "." : "",
+      path);  // Convert to V2 path; TODO(path.front() != all kinds of symbols)
+  return ParseJsonPath(StringOrView::FromString(std::move(v2_path)), true);
+}
+
+ParseResult<WrappedJsonPath> ParseJsonPathV2(std::string_view path) {
+  return ParseJsonPath(StringOrView::FromView(path), false);
+}
+
+bool IsJsonPathV2(std::string_view path) {
+  return path.front() == '$';
+}
+
+ParseResult<WrappedJsonPath> ParseJsonPath(std::string_view path) {
+  DCHECK(!path.empty());
+  return IsJsonPathV2(path) ? ParseJsonPathV2(path) : ParseJsonPathV1(path);
+}
+
+}  // namespace json_parser
 
 using JsonPathV2 = variant<json::Path, JsonExpression>;
 using ExprCallback = absl::FunctionRef<void(string_view, const JsonType&)>;
@@ -454,66 +505,79 @@ void SendJsonValue(RedisReplyBuilder* rb, const JsonType& j) {
   }
 }
 
-OpResult<string> OpJsonGet(const OpArgs& op_args, string_view key,
-                           const vector<pair<string_view, optional<JsonPathV2>>>& expressions,
-                           bool should_format, const OptString& indent, const OptString& new_line,
-                           const OptString& space) {
+bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJsonPath>>& paths) {
+  return std::all_of(paths.begin(), paths.end(),
+                     [](auto& parsed_path) { return parsed_path.second.IsLegacyModePath(); });
+}
+
+OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
+                                const vector<pair<string_view, WrappedJsonPath>>& paths,
+                                const std::optional<std::string>& indent,
+                                const std::optional<std::string>& new_line,
+                                const std::optional<std::string>& space) {
   OpResult<JsonType*> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
+  RETURN_ON_BAD_STATUS(result);
 
   const JsonType& json_entry = *(result.value());
-  if (expressions.empty()) {
+  if (paths.empty()) {
     // this implicitly means that we're using $ which
     // means we just brings all values
     return json_entry.to_string();
   }
 
   json_options options;
-  if (should_format) {
-    options.spaces_around_comma(spaces_option::no_spaces)
-        .spaces_around_colon(spaces_option::no_spaces)
-        .object_array_line_splits(line_split_kind::multi_line)
-        .indent_size(1)
-        .new_line_chars("");
+  options.spaces_around_comma(spaces_option::no_spaces)
+      .spaces_around_colon(spaces_option::no_spaces)
+      .object_array_line_splits(line_split_kind::multi_line)
+      .indent_size(0)
+      .new_line_chars("");
 
-    if (indent) {
-      options.indent_chars(*indent);
-    } else {
-      options.indent_size(0);
-    }
-
-    if (new_line) {
-      options.new_line_chars(*new_line);
-    }
-
-    if (space) {
-      options.after_key_chars(*space);
-    }
+  if (indent) {
+    options.indent_size(1);
+    options.indent_chars(*indent);
   }
 
-  auto eval_wrapped = [&json_entry](const optional<JsonPathV2>& expr) -> JsonType {
-    return expr ? visit([&](auto& arg) { return Evaluate(arg, json_entry); }, *expr) : json_entry;
+  if (new_line) {
+    options.new_line_chars(*new_line);
+  }
+
+  if (space) {
+    options.after_key_chars(*space);
+  }
+
+  const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
+
+  auto cb = [](std::string_view, const JsonType& val) { return val; };
+
+  auto eval_wrapped = [&json_entry, &cb, legacy_mode_is_enabled](
+                          const WrappedJsonPath& json_path) -> std::optional<JsonType> {
+    auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, legacy_mode_is_enabled);
+
+    DCHECK(legacy_mode_is_enabled == eval_result.IsV1());
+
+    if (eval_result.IsV1()) {
+      return eval_result.AsV1();
+    }
+
+    return JsonType{eval_result.AsV2()};
   };
 
-  JsonType out{json_object_arg};  // see https://github.com/danielaparker/jsoncons/issues/482
-  if (expressions.size() == 1) {
-    out = eval_wrapped(expressions[0].second);
+  JsonType out{
+      jsoncons::json_object_arg};  // see https://github.com/danielaparker/jsoncons/issues/482
+  if (paths.size() == 1) {
+    auto eval_result = eval_wrapped(paths[0].second);
+    out = std::move(eval_result).value();  // TODO(Print not existing path to the user)
   } else {
-    for (const auto& [expr_str, expr] : expressions) {
-      out[expr_str] = eval_wrapped(expr);
+    for (const auto& [path_str, path] : paths) {
+      auto eval_result = eval_wrapped(path);
+      out[path_str] = std::move(eval_result).value();  // TODO(Print not existing path to the user)
     }
   }
 
-  if (should_format) {
-    json_printable jp(out, options, indenting::indent);
-    std::stringstream ss;
-    jp.dump(ss);
-    return ss.str();
-  }
-
-  return out.as<string>();
+  jsoncons::json_printable jp(out, options, jsoncons::indenting::indent);
+  std::stringstream ss;
+  jp.dump(ss);
+  return ss.str();
 }
 
 OpResult<vector<string>> OpType(const OpArgs& op_args, string_view key, JsonPathV2 expression) {
@@ -2067,8 +2131,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   OptString new_line;
   OptString space;
 
-  // '.' corresponds to the legacy, non-array format and is passed as nullopt.
-  vector<pair<string_view, optional<JsonPathV2>>> expressions;
+  vector<pair<string_view, WrappedJsonPath>> paths;
 
   while (parser.HasNext()) {
     if (parser.Check("SPACE").IgnoreCase().ExpectTail(1)) {
@@ -2084,23 +2147,17 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
       continue;
     }
 
-    optional<JsonPathV2> expr;
-    string_view expr_str = parser.Next();
+    string_view path_str = parser.Next();
+    WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(json_parser::ParseJsonPath(path_str));
 
-    if (expr_str != ".") {
-      JsonPathV2 expression = PARSE_PATHV2(expr_str);
-      expr.emplace(std::move(expression));
-    }
-
-    expressions.emplace_back(expr_str, std::move(expr));
+    paths.emplace_back(path_str, std::move(json_path));
   }
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  bool should_format = (indent || new_line || space);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpJsonGet(t->GetOpArgs(shard), key, expressions, should_format, indent, new_line, space);
+    return OpJsonGet(t->GetOpArgs(shard), key, paths, indent, new_line, space);
   };
 
   Transaction* trans = cntx->transaction;

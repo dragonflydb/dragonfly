@@ -47,3 +47,8 @@ scrape_configs:
       - targets: ['node-exporter:9100']
         labels:
           instance: node
+
+  - job_name: 'memcached-exporter'
+    scrape_interval: 1s
+    static_configs:
+      - targets: ['memcached-exporter:9150']

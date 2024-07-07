@@ -174,6 +174,11 @@ class EngineShard {
 
   void ForceDefrag();
 
+  // Returns true if revelant write operations should throttle to wait for tiering to catch up.
+  // The estimate is based on memory usage crossing tiering redline and the write depth being at
+  // least 50% of allowed max, providing at least some guarantee of progress.
+  bool ShouldThrottleForTiering() const;
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;

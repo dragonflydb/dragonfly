@@ -5,6 +5,7 @@
 #include "server/rdb_load.h"
 
 #include "absl/strings/escaping.h"
+#include "server/tiered_storage.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -1917,8 +1918,9 @@ struct RdbLoader::ObjSettings {
 };
 
 RdbLoader::RdbLoader(Service* service)
-    : service_{service}, script_mgr_{service == nullptr ? nullptr : service->script_mgr()} {
-  shard_buf_.reset(new ItemsBuf[shard_set->size()]);
+    : service_{service},
+      script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
+      shard_buf_{shard_set->size()} {
 }
 
 RdbLoader::~RdbLoader() {
@@ -2422,8 +2424,17 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 
   auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
     this->LoadItemsBuffer(indx, ib);
+
+    // Block, if tiered storage is active, but can't keep up
+    while (EngineShard::tlocal()->ShouldThrottleForTiering()) {
+      this->blocked_shards_.fetch_add(1, memory_order_relaxed);  // stop adding items to shard queue
+      ThisFiber::SleepFor(100us);
+      this->blocked_shards_.fetch_sub(1, memory_order_relaxed);
+    }
   };
 
+  while (blocked_shards_.load(memory_order_relaxed) > 0)
+    ThisFiber::SleepFor(100us);
   shard_set->Add(sid, std::move(cb));
 }
 
@@ -2440,7 +2451,9 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* p
 }
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
-  DbContext db_cntx{&namespaces.GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
+  EngineShard* es = EngineShard::tlocal();
+  DbSlice& db_slice = es->db_slice();
+  DbContext db_cntx{db_ind, GetCurrentTimeMs()};
   DbSlice& db_slice = db_cntx.ns->GetCurrentDbSlice();
 
   for (const auto* item : ib) {
@@ -2467,6 +2480,9 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (!res.is_new) {
       LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
+
+    if (auto* ts = es->tiered_storage(); ts)
+      ts->TryStash(db_cntx.db_index, item->key, &res.it->second);
   }
 
   for (auto* item : ib) {
