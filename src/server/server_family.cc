@@ -2259,9 +2259,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("REPLICATION")) {
     unique_lock lk(replicaof_mu_);
-    ServerState& etl = *ServerState::tlocal();
-
-    if (etl.is_master) {
+    // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
+    // ensuring eventual consistency of is_master. When determining if the server is a replica and
+    // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
+    // insufficient in this scenario.
+    if (!replica_) {
       append("role", "master");
       append("connected_slaves", m.facade_stats.conn_stats.num_replicas);
       const auto& replicas = m.replication_metrics;
@@ -2735,8 +2737,11 @@ err:
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   unique_lock lk(replicaof_mu_);
-  ServerState& etl = *ServerState::tlocal();
-  if (etl.is_master) {
+  // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
+  // ensuring eventual consistency of is_master. When determining if the server is a replica and
+  // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
+  // insufficient in this scenario.
+  if (!replica_) {
     rb->StartArray(2);
     rb->SendBulkString("master");
     auto vec = dfly_cmd_->GetReplicasRoleInfo();
