@@ -10,11 +10,11 @@
 #include "base/pod_array.h"
 #include "core/size_tracking_channel.h"
 #include "io/file.h"
+#include "server/bucket_guard.h"
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
 #include "server/table.h"
 #include "util/fibers/future.h"
-#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -117,10 +117,6 @@ class SliceSnapshot {
   // Return if pushed.
   bool PushSerializedToChannel(bool force);
 
-  // Also sets bucket_ser_in_prrogress to true
-  // Callers must explicitly set
-  void BlockIfSerializationInProgress();
-
  public:
   uint64_t snapshot_version() const {
     return snapshot_version_;
@@ -137,7 +133,7 @@ class SliceSnapshot {
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
-  template <typename T> friend class BucketSerializationGuard;
+  friend class BucketSerializationGuard;
 
  private:
   // An entry whose value must be awaited
@@ -179,8 +175,7 @@ class SliceSnapshot {
     size_t keys_total = 0;
   } stats_;
 
-  util::fb2::CondVarAny bucket_ser_cond_;
-  bool bucket_ser_in_progress_ = false;
+  CondVarWithBoolean bucket_ser_;
 };
 
 }  // namespace dfly

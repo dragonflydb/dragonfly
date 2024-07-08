@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/bucket_guard.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
@@ -85,7 +86,7 @@ class RestoreStreamer : public JournalStreamer {
     return snapshot_finished_;
   }
 
-  template <typename T> friend class BucketSerializationGuard;
+  friend class BucketSerializationGuard;
 
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -105,8 +106,7 @@ class RestoreStreamer : public JournalStreamer {
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
 
-  util::fb2::CondVarAny bucket_ser_cond_;
-  bool bucket_ser_in_progress_ = false;
+  CondVarWithBoolean bucket_ser_;
 };
 
 }  // namespace dfly

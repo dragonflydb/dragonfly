@@ -12,7 +12,6 @@
 
 #include "base/logging.h"
 #include "core/heap_size.h"
-#include "server/bucket_guard.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -239,7 +238,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
-  BucketSerializationGuard guard(this);
+  BucketSerializationGuard guard(&bucket_ser_);
 
   ++stats_.savecb_calls;
 
@@ -340,7 +339,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  BucketSerializationGuard guard(this);
+  BucketSerializationGuard guard(&bucket_ser_);
 
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();

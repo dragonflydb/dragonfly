@@ -6,10 +6,16 @@
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
+
+struct CondVarWithBoolean {
+  util::fb2::CondVarAny bucket_ser_cond_;
+  bool bucket_ser_in_progress_ = false;
+};
+
 // Helper class used to guarantee atomicity between serialization of buckets
-template <typename T> class BucketSerializationGuard {
+class BucketSerializationGuard {
  public:
-  explicit BucketSerializationGuard(T* enclosing) : enclosing_(enclosing) {
+  explicit BucketSerializationGuard(CondVarWithBoolean* enclosing) : enclosing_(enclosing) {
     util::fb2::NoOpLock noop_lk_;
     enclosing_->bucket_ser_cond_.wait(noop_lk_,
                                       [this]() { return !enclosing_->bucket_ser_in_progress_; });
@@ -22,7 +28,7 @@ template <typename T> class BucketSerializationGuard {
   }
 
  private:
-  T* enclosing_;
+  CondVarWithBoolean* enclosing_;
 };
 
 }  // namespace dfly
