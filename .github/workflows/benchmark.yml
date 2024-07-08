@@ -101,9 +101,17 @@ jobs:
           sleep 30
           kubectl patch dragonfly dragonfly-sample -n ${{ steps.setup.outputs.namespace }}  --type merge -p '{"spec":{"image":"ghcr.io/dragonflydb/dragonfly-weekly:latest"}}'
 
-      - name: Wait for Memtier Benchmark
+      - name: Wait for Memtier Benchmark fail
         shell: bash
         run: |
+          # Memtier benchmark run will fail at some point because old master shutdown on version upgrade
+          kubectl wait --for=condition=failed --timeout=120s -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null; then
+          kubectl logs -n ${{ steps.setup.outputs.namespace }} -f jobs/memtier-benchmark
+
+      - name: Run Memtier Benchmark again
+        shell: bash
+        run: |
+          kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
           while true; do
             if kubectl wait --for=condition=complete --timeout=0 -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null; then
               job_result=0
@@ -126,7 +134,7 @@ jobs:
       - name: Server checks
         run: |
           nohup kubectl port-forward -n ${{ steps.setup.outputs.namespace }} service/dragonfly-sample 6379:6379 &
-
+          #TODO how can we check version upgrade finished
           pip install -r tools/requirements.txt
           python3 tools/benchmark/post_run_checks.py
 
