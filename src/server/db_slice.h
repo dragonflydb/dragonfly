@@ -494,10 +494,8 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const cluster::SlotSet& slot_ids);
 
-  // Properly clear db_arr before deleting it. If async is set, it's called from a detached fiber
-  // after swapping the db.
-  void ClearEntriesOnFlush(absl::Span<const DbIndex> indices, const DbTableArray& db_arr,
-                           bool async);
+  // Clear tiered storage entries for the specified indices.
+  void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
   void PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table);
 

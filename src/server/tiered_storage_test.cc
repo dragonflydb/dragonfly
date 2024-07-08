@@ -30,6 +30,13 @@ ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 
 namespace dfly {
 
+using absl::GetFlag;
+using absl::SetFlag;
+
+string BuildString(size_t len, char c = 'A') {
+  return string(len, c);
+}
+
 class TieredStorageTest : public BaseFamilyTest {
  protected:
   TieredStorageTest() {
@@ -37,15 +44,17 @@ class TieredStorageTest : public BaseFamilyTest {
   }
 
   void SetUp() override {
-    if (absl::GetFlag(FLAGS_force_epoll)) {
+    if (GetFlag(FLAGS_force_epoll)) {
       LOG(WARNING) << "Can't run tiered tests on EPOLL";
       exit(0);
     }
 
-    absl::SetFlag(&FLAGS_tiered_storage_write_depth, 15000);
-    absl::SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_storage_test");
-    absl::SetFlag(&FLAGS_tiered_storage_cache_fetched, true);
-    absl::SetFlag(&FLAGS_backing_file_direct, true);
+    SetFlag(&FLAGS_tiered_storage_write_depth, 15000);
+    if (GetFlag(FLAGS_tiered_prefix).empty()) {
+      SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_storage_test");
+    }
+    SetFlag(&FLAGS_tiered_storage_cache_fetched, true);
+    SetFlag(&FLAGS_backing_file_direct, true);
 
     BaseFamilyTest::SetUp();
   }
@@ -54,13 +63,13 @@ class TieredStorageTest : public BaseFamilyTest {
 // Perform simple series of SET, GETSET and GET
 TEST_F(TieredStorageTest, SimpleGetSet) {
   absl::FlagSaver saver;
-  absl::SetFlag(&FLAGS_tiered_offload_threshold, 1.1f);  // disable offloading
+  SetFlag(&FLAGS_tiered_offload_threshold, 1.1f);  // disable offloading
   const int kMin = 256;
   const int kMax = tiering::kPageSize + 10;
 
   // Perform SETs
   for (size_t i = kMin; i < kMax; i++) {
-    Run({"SET", absl::StrCat("k", i), string(i, 'A')});
+    Run({"SET", absl::StrCat("k", i), BuildString(i)});
   }
 
   // Make sure all entries were stashed, except the one not filling a small page
@@ -113,18 +122,18 @@ TEST_F(TieredStorageTest, SimpleAppend) {
   // TODO: use pipelines to issue APPEND/GET/APPEND sequence,
   // currently it's covered only for op_manager_test
   for (size_t sleep : {0, 100, 500, 1000}) {
-    Run({"SET", "k0", string(3000, 'A')});
+    Run({"SET", "k0", BuildString(3000)});
     if (sleep)
       util::ThisFiber::SleepFor(sleep * 1us);
     EXPECT_THAT(Run({"APPEND", "k0", "B"}), IntArg(3001));
-    EXPECT_EQ(Run({"GET", "k0"}), string(3000, 'A') + 'B');
+    EXPECT_EQ(Run({"GET", "k0"}), BuildString(3000) + 'B');
   }
 }
 
 TEST_F(TieredStorageTest, MultiDb) {
   for (size_t i = 0; i < 10; i++) {
     Run({"SELECT", absl::StrCat(i)});
-    Run({"SET", absl::StrCat("k", i), string(3000, char('A' + i))});
+    Run({"SET", absl::StrCat("k", i), BuildString(3000, char('A' + i))});
   }
 
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 10; });
@@ -132,7 +141,7 @@ TEST_F(TieredStorageTest, MultiDb) {
   for (size_t i = 0; i < 10; i++) {
     Run({"SELECT", absl::StrCat(i)});
     EXPECT_EQ(GetMetrics().db_stats[i].tiered_entries, 1);
-    EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), string(3000, char('A' + i)));
+    EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), BuildString(3000, char('A' + i)));
     EXPECT_EQ(GetMetrics().db_stats[i].tiered_entries, 0);
   }
 }
@@ -168,7 +177,7 @@ TEST_F(TieredStorageTest, Defrag) {
 
 TEST_F(TieredStorageTest, BackgroundOffloading) {
   absl::FlagSaver saver;
-  absl::SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
 
   const int kNum = 500;
 
@@ -177,7 +186,7 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
 
   // Stash all values
   for (size_t i = 0; i < kNum; i++) {
-    Run({"SET", absl::StrCat("k", i), string(3000, 'A')});
+    Run({"SET", absl::StrCat("k", i), BuildString(3000)});
   }
 
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
@@ -200,11 +209,11 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
 
 TEST_F(TieredStorageTest, FlushAll) {
   absl::FlagSaver saver;
-  absl::SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
 
   const int kNum = 500;
   for (size_t i = 0; i < kNum; i++) {
-    Run({"SET", absl::StrCat("k", i), string(3000, 'A')});
+    Run({"SET", absl::StrCat("k", i), BuildString(3000)});
   }
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
 
@@ -226,6 +235,20 @@ TEST_F(TieredStorageTest, FlushAll) {
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats.front().tiered_entries, 0u);
   EXPECT_GT(metrics.tiered_stats.total_fetches, 2u);
+}
+
+TEST_F(TieredStorageTest, FlushPending) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+
+  const int kNum = 10;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(256)});
+  }
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_filling_bytes > 0; });
+  Run({"FLUSHALL"});
+  EXPECT_EQ(GetMetrics().tiered_stats.small_bins_filling_bytes, 0u);
 }
 
 }  // namespace dfly
