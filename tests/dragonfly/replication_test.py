@@ -2061,7 +2061,7 @@ async def test_saving_replica(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
+    await c_master.execute_command("DEBUG POPULATE 100000 key 4048 RAND")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
@@ -2070,7 +2070,10 @@ async def test_saving_replica(df_factory):
 
     save_task = asyncio.create_task(save_replica())
     while not await is_saving(c_replica):  # wait for replica start saving
-        asyncio.sleep(0.1)
+        assert "rdb_changes_since_last_success_save:0" not in await c_replica.execute_command(
+            "info persistence"
+        ), "Weak test case, finished saving too quickly"
+        await asyncio.sleep(0.1)
     await c_replica.execute_command("replicaof no one")
     assert await is_saving(c_replica)
     await save_task
@@ -2090,14 +2093,17 @@ async def test_start_replicating_while_save(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_replica.execute_command("DEBUG POPULATE 1000 key 4096 RAND")
+    await c_replica.execute_command("DEBUG POPULATE 100000 key 4096 RAND")
 
     async def save_replica():
         await c_replica.execute_command("save")
 
     save_task = asyncio.create_task(save_replica())
     while not await is_saving(c_replica):  # wait for server start saving
-        asyncio.sleep(0.1)
+        assert "rdb_changes_since_last_success_save:0" not in await c_replica.execute_command(
+            "info persistence"
+        ), "Weak test case, finished saving too quickly"
+        await asyncio.sleep(0.1)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     assert await is_saving(c_replica)
     await save_task

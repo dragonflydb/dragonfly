@@ -215,6 +215,8 @@ class DflyInstance:
         if not self.params.existing_port:
             return_code = self.proc.poll()
             if return_code is not None:
+                # log stdout of the failed process
+                logging.error("Dragonfly process error:\n%s", self.proc.stdout.read().decode())
                 self.proc = None
                 raise DflyStartException(f"Failed to start instance, return code {return_code}")
 

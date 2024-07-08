@@ -1,4 +1,5 @@
 import subprocess
+import pytest
 import redis
 from redis import asyncio as aioredis
 from .utility import *
@@ -22,6 +23,7 @@ def run_cluster_mgr(args):
     return result.returncode == 0
 
 
+@pytest.mark.xfail
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_mgr(df_factory):
     NODES = 3

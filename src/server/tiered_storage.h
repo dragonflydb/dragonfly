@@ -85,6 +85,7 @@ class TieredStorage {
   unsigned write_depth_limit_ = 10;
   struct {
     uint64_t stash_overflow_cnt = 0;
+    uint64_t total_deletes = 0;
   } stats_;
 };
 

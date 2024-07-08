@@ -60,25 +60,11 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_cache_fetched);
   }
 
-  // Called before overriding value with segment
-  void RecordAdded(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
-    stats->AddTypeMemoryUsage(pv.ObjType(), -pv.MallocUsed());
-    stats->tiered_entries++;
-    stats->tiered_used_bytes += segment.length;
-  }
-
-  // Called after setting new value in place of previous segment
-  void RecordDeleted(DbTableStats* stats, const PrimeValue& pv, tiering::DiskSegment segment) {
-    stats->AddTypeMemoryUsage(pv.ObjType(), pv.MallocUsed());
-    stats->tiered_entries--;
-    stats->tiered_used_bytes -= segment.length;
-  }
-
   // Find entry by key in db_slice and store external segment in place of original value.
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
     if (auto pv = Find(key); pv) {
-      RecordAdded(db_slice_->MutableStats(key.first), *pv, segment);
+      RecordAdded(db_slice_->MutableStats(key.first), *pv, segment.length);
 
       pv->SetIoPending(false);
       pv->SetExternal(segment.offset, segment.length);
@@ -113,9 +99,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     if (!value.empty())
       pv->SetString(value);
 
-    RecordDeleted(db_slice_->MutableStats(dbid), *pv, segment);
-
-    (value.empty() ? stats_.total_deletes : stats_.total_fetches)++;
+    RecordDeleted(db_slice_->MutableStats(dbid), *pv, segment.length);
   }
 
   // Find entry by key and store it's up-to-date value in place of external segment.
@@ -129,25 +113,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   // Load all values from bin by their hashes
-  void Defragment(tiering::DiskSegment segment, string_view value) {
-    // Note: Bin could've already been deleted, in that case DeleteBin returns an empty list
-    for (auto [dbid, hash, sub_segment] : ts_->bins_->DeleteBin(segment, value)) {
-      // Search for key with the same hash and value pointing to the same segment.
-      // If it still exists, it must correspond to the value stored in this bin
-      auto predicate = [sub_segment = sub_segment](const PrimeKey& key, const PrimeValue& probe) {
-        return probe.IsExternal() && tiering::DiskSegment{probe.GetExternalSlice()} == sub_segment;
-      };
-      auto it = db_slice_->GetDBTable(dbid)->prime.FindFirst(hash, predicate);
-      if (!IsValid(it))
-        continue;
-
-      stats_.total_defrags++;
-
-      // Cut out relevant part of value and restore it to memory
-      string_view sub_value = value.substr(sub_segment.offset - segment.offset, sub_segment.length);
-      SetInMemory(&it->second, dbid, sub_value, sub_segment);
-    }
-  }
+  void Defragment(tiering::DiskSegment segment, string_view value);
 
   void ReportStashed(EntryId id, tiering::DiskSegment segment, error_code ec) override {
     if (ec) {
@@ -159,21 +125,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   bool ReportFetched(EntryId id, string_view value, tiering::DiskSegment segment,
-                     bool modified) override {
-    if (id == EntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
-      Defragment(segment, value);
-      return true;  // delete
-    }
-
-    if (!modified && !cache_fetched_)
-      return false;
-
-    if (SliceSnapshot::IsSnaphotInProgress())
-      return false;
-
-    SetInMemory(get<OpManager::KeyRef>(id), value, segment);
-    return true;
-  }
+                     bool modified) override;
 
   bool ReportDelete(tiering::DiskSegment segment) override {
     if (OccupiesWholePages(segment.length))
@@ -203,16 +155,69 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     return IsValid(it) ? &it->second : nullptr;
   }
 
+  // Called before overriding value with segment
+  void RecordAdded(DbTableStats* stats, const PrimeValue& pv, size_t tiered_len) {
+    stats->AddTypeMemoryUsage(pv.ObjType(), -pv.MallocUsed());
+    stats->tiered_entries++;
+    stats->tiered_used_bytes += tiered_len;
+  }
+
+  // Called after setting new value in place of previous segment
+  void RecordDeleted(DbTableStats* stats, const PrimeValue& pv, size_t tiered_len) {
+    stats->AddTypeMemoryUsage(pv.ObjType(), pv.MallocUsed());
+    stats->tiered_entries--;
+    stats->tiered_used_bytes -= tiered_len;
+  }
+
   bool cache_fetched_ = false;
 
   struct {
-    size_t total_stashes = 0, total_fetches = 0, total_cancels = 0, total_deletes = 0;
-    size_t total_defrags = 0;  // included in total_fetches
+    size_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
+    size_t total_defrags = 0;
   } stats_;
 
   TieredStorage* ts_;
   DbSlice* db_slice_;
 };
+
+void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, string_view value) {
+  // Note: Bin could've already been deleted, in that case DeleteBin returns an empty list
+  for (auto [dbid, hash, sub_segment] : ts_->bins_->DeleteBin(segment, value)) {
+    // Search for key with the same hash and value pointing to the same segment.
+    // If it still exists, it must correspond to the value stored in this bin
+    auto predicate = [sub_segment = sub_segment](const PrimeKey& key, const PrimeValue& probe) {
+      return probe.IsExternal() && tiering::DiskSegment{probe.GetExternalSlice()} == sub_segment;
+    };
+    auto it = db_slice_->GetDBTable(dbid)->prime.FindFirst(hash, predicate);
+    if (!IsValid(it))
+      continue;
+
+    stats_.total_defrags++;
+
+    // Cut out relevant part of value and restore it to memory
+    string_view sub_value = value.substr(sub_segment.offset - segment.offset, sub_segment.length);
+    SetInMemory(&it->second, dbid, sub_value, sub_segment);
+  }
+}
+
+bool TieredStorage::ShardOpManager::ReportFetched(EntryId id, string_view value,
+                                                  tiering::DiskSegment segment, bool modified) {
+  ++stats_.total_fetches;
+
+  if (id == EntryId{kFragmentedBin}) {  // Generally we read whole bins only for defrag
+    Defragment(segment, value);
+    return true;  // delete
+  }
+
+  if (!modified && !cache_fetched_)
+    return false;
+
+  if (SliceSnapshot::IsSnaphotInProgress())
+    return false;
+
+  SetInMemory(get<OpManager::KeyRef>(id), value, segment);
+  return true;
+}
 
 TieredStorage::TieredStorage(DbSlice* db_slice, size_t max_size)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
@@ -276,7 +281,7 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
     return false;
 
   // This invariant should always hold because ShouldStash tests for IoPending flag.
-  CHECK(!bins_->IsPending(dbid, key));
+  DCHECK(!bins_->IsPending(dbid, key));
 
   // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
   // with a lot of underutilized disk space.
@@ -310,9 +315,11 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
 
 void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   DCHECK(value->IsExternal());
+  ++stats_.total_deletes;
+
   tiering::DiskSegment segment = value->GetExternalSlice();
-  op_manager_->Delete(segment);
-  op_manager_->SetInMemory(value, dbid, "", segment);
+  op_manager_->DeleteOffloaded(segment);
+  op_manager_->SetInMemory(value, dbid, string_view{}, segment);
 }
 
 void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {

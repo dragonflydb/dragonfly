@@ -54,8 +54,8 @@ class OpManager {
   // Delete entry with pending io
   void Delete(EntryId id);
 
-  // Delete offloaded entry
-  void Delete(DiskSegment segment);
+  // Delete offloaded entry located at the segment.
+  void DeleteOffloaded(DiskSegment segment);
 
   // Stash value to be offloaded
   std::error_code Stash(EntryId id, std::string_view value);
