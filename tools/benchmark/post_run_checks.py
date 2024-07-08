@@ -7,6 +7,10 @@ def main():
     max_unaccounted = 200 * 1024 * 1024  # 200mb
 
     client = redis.Redis(decode_responses=True)
+    info = client.info("server")
+    # Check version upgrade finsihed from last released version to last weekly docker build
+    assert info["dragonfly_version"] == "df-HEAD-HASH-NOTFOUND"
+
     info = client.info("memory")
     print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
     assert info["used_memory_rss"] - info["used_memory"] < max_unaccounted
