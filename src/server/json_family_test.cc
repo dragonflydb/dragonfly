@@ -20,11 +20,16 @@ using namespace util;
 
 namespace dfly {
 
-class JsonFamilyTest : public BaseFamilyTest {
+class JsonFamilyTest : public BaseFamilyTest, public ::testing::WithParamInterface<bool> {
  protected:
+  JsonFamilyTest() {
+    SetTestFlag("jsonpathv2", GetParam() ? "true" : "false");
+  }
 };
 
-TEST_F(JsonFamilyTest, SetGetBasic) {
+INSTANTIATE_TEST_SUITE_P(JsonFamilyTest, JsonFamilyTest, ::testing::Values(true, false));
+
+TEST_P(JsonFamilyTest, SetGetBasic) {
   string json = R"(
     {
        "store": {
@@ -82,7 +87,7 @@ TEST_F(JsonFamilyTest, SetGetBasic) {
   EXPECT_THAT(resp, ArgType(RespExpr::ERROR));
 }
 
-TEST_F(JsonFamilyTest, GetLegacy) {
+TEST_P(JsonFamilyTest, GetLegacy) {
   string json = R"({"name":"Leonard Cohen","lastSeen":1478476800,"loggedOut": true})";
 
   auto resp = Run({"JSON.SET", "json", "$", json});
@@ -140,7 +145,7 @@ static const string PhonebookJson = R"(
     }
   )";
 
-TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
+TEST_P(JsonFamilyTest, SetGetFromPhonebook) {
   auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
   ASSERT_THAT(resp, "OK");
 
@@ -190,7 +195,7 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
       R"([st{stt"number":s"212 555-1234",stt"type":s"home"st},st{stt"number":s"646 555-4567",stt"type":s"office"st}s])");
 }
 
-TEST_F(JsonFamilyTest, Type) {
+TEST_P(JsonFamilyTest, Type) {
   string json = R"(
     [1, 2.3, "foo", true, null, {}, []]
   )";
@@ -209,7 +214,7 @@ TEST_F(JsonFamilyTest, Type) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
-TEST_F(JsonFamilyTest, StrLen) {
+TEST_P(JsonFamilyTest, StrLen) {
   string json = R"(
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":3}}
   )";
@@ -236,7 +241,7 @@ TEST_F(JsonFamilyTest, StrLen) {
               ElementsAre(ArgType(RespExpr::NIL), IntArg(1), ArgType(RespExpr::NIL)));
 }
 
-TEST_F(JsonFamilyTest, ObjLen) {
+TEST_P(JsonFamilyTest, ObjLen) {
   string json = R"(
     {"a":{}, "b":{"a":"a"}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":{"a":3,"b":4}}, "e":1}
   )";
@@ -277,7 +282,7 @@ TEST_F(JsonFamilyTest, ObjLen) {
               ElementsAre(IntArg(0), IntArg(1), IntArg(2), IntArg(3), ArgType(RespExpr::NIL)));
 }
 
-TEST_F(JsonFamilyTest, ArrLen) {
+TEST_P(JsonFamilyTest, ArrLen) {
   string json = R"(
     [[], ["a"], ["a", "b"], ["a", "b", "c"]]
   )";
@@ -302,7 +307,7 @@ TEST_F(JsonFamilyTest, ArrLen) {
                                          ArgType(RespExpr::NIL)));
 }
 
-TEST_F(JsonFamilyTest, Toggle) {
+TEST_P(JsonFamilyTest, Toggle) {
   string json = R"(
     {"a":true, "b":false, "c":1, "d":null, "e":"foo", "f":[], "g":{}}
   )";
@@ -332,7 +337,7 @@ TEST_F(JsonFamilyTest, Toggle) {
   EXPECT_EQ(resp, R"([true,false,1,null,"foo",[],{}])");
 }
 
-TEST_F(JsonFamilyTest, NumIncrBy) {
+TEST_P(JsonFamilyTest, NumIncrBy) {
   string json = R"(
     {"e":1.5,"a":1}
   )";
@@ -448,7 +453,7 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   EXPECT_EQ(resp, R"([{"a":"a"},{"a":"a","b":2},{"a":"a","b":"b"},{"a":2,"b":"b","c":4}])");
 }
 
-TEST_F(JsonFamilyTest, NumMultBy) {
+TEST_P(JsonFamilyTest, NumMultBy) {
   string json = R"(
     {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
   )";
@@ -529,7 +534,7 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   EXPECT_EQ(resp, R"([{"a":"a"},{"a":"a","b":2},{"a":"a","b":"b"},{"a":2,"b":"b","c":6}])");
 }
 
-TEST_F(JsonFamilyTest, Del) {
+TEST_P(JsonFamilyTest, Del) {
   string json = R"(
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2,3,4,5]}}
   )";
@@ -601,7 +606,7 @@ TEST_F(JsonFamilyTest, Del) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
-TEST_F(JsonFamilyTest, ObjKeys) {
+TEST_P(JsonFamilyTest, ObjKeys) {
   string json = R"(
     {"a":{}, "b":{"a":"a"}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":{"a":3,"b":4}}, "e":1}
   )";
@@ -667,7 +672,7 @@ TEST_F(JsonFamilyTest, ObjKeys) {
   EXPECT_THAT(arr2[4], ArgType(RespExpr::NIL_ARRAY));
 }
 
-TEST_F(JsonFamilyTest, StrAppend) {
+TEST_P(JsonFamilyTest, StrAppend) {
   string json = R"(
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":3}}
   )";
@@ -742,7 +747,7 @@ TEST_F(JsonFamilyTest, StrAppend) {
   EXPECT_EQ(resp, R"({"a":"foobar","inner":{"a":"byebar"},"inner1":{"a":7}})");
 }
 
-TEST_F(JsonFamilyTest, Clear) {
+TEST_P(JsonFamilyTest, Clear) {
   string json = R"(
     [[], [0], [0,1], [0,1,2], 1, true, null, "d"]
   )";
@@ -782,7 +787,7 @@ TEST_F(JsonFamilyTest, Clear) {
   EXPECT_EQ(resp, R"({})");
 }
 
-TEST_F(JsonFamilyTest, ArrPop) {
+TEST_P(JsonFamilyTest, ArrPop) {
   string json = R"(
     [[6,1,6], [7,2,7], [8,3,8]]
   )";
@@ -798,7 +803,7 @@ TEST_F(JsonFamilyTest, ArrPop) {
   EXPECT_EQ(resp, R"([[6,6],[7,7],[8,8]])");
 }
 
-TEST_F(JsonFamilyTest, ArrTrim) {
+TEST_P(JsonFamilyTest, ArrTrim) {
   string json = R"(
     [[], ["a"], ["a", "b"], ["a", "b", "c"]]
   )";
@@ -855,7 +860,7 @@ TEST_F(JsonFamilyTest, ArrTrim) {
   EXPECT_EQ(resp, R"([3,4])");
 }
 
-TEST_F(JsonFamilyTest, ArrInsert) {
+TEST_P(JsonFamilyTest, ArrInsert) {
   string json = R"(
     [[], ["a"], ["a", "b"]]
   )";
@@ -885,7 +890,7 @@ TEST_F(JsonFamilyTest, ArrInsert) {
   EXPECT_EQ(resp, R"([["b","c","a"],["a","c","b","a"],["a","c","a","b","b"]])");
 }
 
-TEST_F(JsonFamilyTest, ArrAppend) {
+TEST_P(JsonFamilyTest, ArrAppend) {
   string json = R"(
     [[], ["a"], ["a", "b"]]
   )";
@@ -915,7 +920,7 @@ TEST_F(JsonFamilyTest, ArrAppend) {
   EXPECT_EQ(resp, R"({"a":[1,3],"nested":{"a":[1,2,3],"nested2":{"a":42}}})");
 }
 
-TEST_F(JsonFamilyTest, ArrIndex) {
+TEST_P(JsonFamilyTest, ArrIndex) {
   string json = R"(
     [[], ["a"], ["a", "b"], ["a", "b", "c"]]
   )";
@@ -959,7 +964,7 @@ TEST_F(JsonFamilyTest, ArrIndex) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
-TEST_F(JsonFamilyTest, MGet) {
+TEST_P(JsonFamilyTest, MGet) {
   string json[] = {
       R"(
     {"address":{"street":"14 Imber Street","city":"Petah-Tikva","country":"Israel","zipcode":"49511"}}
@@ -1001,7 +1006,7 @@ TEST_F(JsonFamilyTest, MGet) {
   EXPECT_THAT(resp.GetVec(), ElementsAre(R"([1,3])", R"([4,6])"));
 }
 
-TEST_F(JsonFamilyTest, DebugFields) {
+TEST_P(JsonFamilyTest, DebugFields) {
   string json = R"(
     [1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]]
   )";
@@ -1043,7 +1048,7 @@ TEST_F(JsonFamilyTest, DebugFields) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
-TEST_F(JsonFamilyTest, Resp) {
+TEST_P(JsonFamilyTest, Resp) {
   auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
   ASSERT_THAT(resp, "OK");
 
@@ -1064,7 +1069,7 @@ TEST_F(JsonFamilyTest, Resp) {
   EXPECT_THAT(resp, "135.25");
 }
 
-TEST_F(JsonFamilyTest, Set) {
+TEST_P(JsonFamilyTest, Set) {
   string json = R"(
     {"a":{"a":1, "b":2, "c":3}}
   )";
@@ -1114,7 +1119,7 @@ TEST_F(JsonFamilyTest, Set) {
   EXPECT_EQ(resp, R"([{"a":2,"b":8,"c":[1,2,3]}])");
 }
 
-TEST_F(JsonFamilyTest, MSet) {
+TEST_P(JsonFamilyTest, MSet) {
   string json1 = R"({"a":{"a":1,"b":2,"c":3}})";
   string json2 = R"({"a":{"a":4,"b":5,"c":6}})";
 
@@ -1131,7 +1136,7 @@ TEST_F(JsonFamilyTest, MSet) {
                                          "[" + json2 + "]"));
 }
 
-TEST_F(JsonFamilyTest, Merge) {
+TEST_P(JsonFamilyTest, Merge) {
   string json = R"(
   { "a": "b",
     "c": {
