@@ -1232,6 +1232,7 @@ async def test_take_over_seeder(
     fill_task = asyncio.create_task(seeder.run())
 
     stop_info = False
+
     async def info_task():
         my_client = replica.client()
         while not stop_info:
