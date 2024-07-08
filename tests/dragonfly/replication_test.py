@@ -2061,7 +2061,7 @@ async def test_saving_replica(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
+    await c_master.execute_command("DEBUG POPULATE 100000 key 4048 RAND")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
@@ -2093,7 +2093,7 @@ async def test_start_replicating_while_save(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_replica.execute_command("DEBUG POPULATE 10000 key 4096 RAND")
+    await c_replica.execute_command("DEBUG POPULATE 100000 key 4096 RAND")
 
     async def save_replica():
         await c_replica.execute_command("save")
