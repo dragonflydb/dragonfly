@@ -1151,10 +1151,7 @@ take_over_cases = [
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 @pytest.mark.asyncio
 async def test_take_over_counters(df_factory, master_threads, replica_threads):
-    master = df_factory.create(
-        proactor_threads=master_threads,
-        logtostderr=True,
-    )
+    master = df_factory.create(proactor_threads=master_threads)
     replica1 = df_factory.create(proactor_threads=replica_threads)
     replica2 = df_factory.create(proactor_threads=replica_threads)
     replica3 = df_factory.create(proactor_threads=replica_threads)
@@ -1214,11 +1211,7 @@ async def test_take_over_seeder(
     request, df_factory, df_seeder_factory, master_threads, replica_threads
 ):
     tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
-    master = df_factory.create(
-        proactor_threads=master_threads,
-        dbfilename=f"dump_{tmp_file_name}",
-        logtostderr=True,
-    )
+    master = df_factory.create(proactor_threads=master_threads, dbfilename=f"dump_{tmp_file_name}")
     replica = df_factory.create(proactor_threads=replica_threads)
     df_factory.start_all([master, replica])
 
@@ -1268,10 +1261,7 @@ async def test_take_over_seeder(
 @pytest.mark.parametrize("master_threads, replica_threads", [[4, 4]])
 @pytest.mark.asyncio
 async def test_take_over_read_commands(df_factory, master_threads, replica_threads):
-    master = df_factory.create(
-        proactor_threads=master_threads,
-        logtostderr=True,
-    )
+    master = df_factory.create(proactor_threads=master_threads)
     replica = df_factory.create(proactor_threads=replica_threads)
     df_factory.start_all([master, replica])
 
