@@ -133,8 +133,6 @@ class SliceSnapshot {
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
-  friend class BucketSerializationGuard;
-
  private:
   // An entry whose value must be awaited
   struct DelayedEntry {

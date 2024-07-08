@@ -86,8 +86,6 @@ class RestoreStreamer : public JournalStreamer {
     return snapshot_finished_;
   }
 
-  friend class BucketSerializationGuard;
-
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
