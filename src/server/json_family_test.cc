@@ -982,7 +982,7 @@ TEST_F(JsonFamilyTest, MGet) {
 
 #ifndef SANITIZERS
   resp = Run({"JSON.MGET", "json1", "??INNNNVALID??"});
-  EXPECT_THAT(resp, ErrArg("Unknown token"));
+  EXPECT_THAT(resp, ErrArg("ERR syntax error"));
 #endif
 
   resp = Run({"JSON.MGET", "json1", "json2", "json3", "$.address.country"});
