@@ -38,7 +38,7 @@ def pytest_configure(config):
 
 def pytest_runtest_setup(item):
     # Generate a unique directory name for each test based on its nodeid
-    translator = str.maketrans(":[]{}/ ", "_______", "\"'")
+    translator = str.maketrans(":[]{}/ ", "_______", "\"*'")
     unique_dir = item.nodeid.translate(translator)
     test_dir = os.path.join(BASE_LOG_DIR, unique_dir)
     if os.path.exists(test_dir):
