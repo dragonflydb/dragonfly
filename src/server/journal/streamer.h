@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -85,16 +85,16 @@ class RestoreStreamer : public JournalStreamer {
     return snapshot_finished_;
   }
 
+  template <typename T> friend class BucketSerializationGuard;
+
  private:
-  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req)
-      ABSL_LOCKS_EXCLUDED(bucket_ser_mu_);
+  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(cluster::SlotId slot_id) const;
 
   // Returns whether anything was written
-  bool WriteBucketNoLock(PrimeTable::bucket_iterator it)
-      ABSL_EXCLUSIVE_LOCKS_REQUIRED(bucket_ser_mu_);
+  bool WriteBucket(PrimeTable::bucket_iterator it);
   void WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv, uint64_t expire_ms);
   void WriteCommand(journal::Entry::Payload cmd_payload);
 
@@ -105,7 +105,8 @@ class RestoreStreamer : public JournalStreamer {
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
 
-  util::fb2::Mutex bucket_ser_mu_;
+  util::fb2::CondVarAny bucket_ser_cond_;
+  bool bucket_ser_in_progress_ = false;
 };
 
 }  // namespace dfly

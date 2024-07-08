@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -12,6 +12,7 @@
 
 #include "base/logging.h"
 #include "core/heap_size.h"
+#include "server/bucket_guard.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -238,8 +239,8 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
-  // We need to block if serialization is in progress
-  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
+  BucketSerializationGuard guard(this);
+
   ++stats_.savecb_calls;
 
   auto check = [&](auto v) {
@@ -254,13 +255,15 @@ bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
   };
 
   uint64_t v = it.GetVersion();
-  if (!check(v))
+  if (!check(v)) {
     return false;
+  }
 
   db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
   stats_.loop_serialized += SerializeBucket(current_db_, it);
+
   return false;
 }
 
@@ -337,7 +340,8 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
+  BucketSerializationGuard guard(this);
+
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 

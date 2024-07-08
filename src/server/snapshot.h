@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -93,20 +93,18 @@ class SliceSnapshot {
   void IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut);
 
   // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(PrimeIterator it) ABSL_LOCKS_EXCLUDED(bucket_ser_mu_);
+  bool BucketSaveCb(PrimeIterator it);
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.
-  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it)
-      ABSL_EXCLUSIVE_LOCKS_REQUIRED(bucket_ser_mu_);
+  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
 
   // Serialize entry into passed serializer.
   void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                       std::optional<uint64_t> expire, RdbSerializer* serializer);
 
   // DbChange listener
-  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req)
-      ABSL_LOCKS_EXCLUDED(bucket_ser_mu_);
+  void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
 
   // Journal listener
   void OnJournalEntry(const journal::JournalItem& item, bool unused_await_arg);
@@ -118,6 +116,10 @@ class SliceSnapshot {
   // Push regardless of buffer size if force is true.
   // Return if pushed.
   bool PushSerializedToChannel(bool force);
+
+  // Also sets bucket_ser_in_prrogress to true
+  // Callers must explicitly set
+  void BlockIfSerializationInProgress();
 
  public:
   uint64_t snapshot_version() const {
@@ -134,6 +136,8 @@ class SliceSnapshot {
   size_t GetTempBuffersSize() const;
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
+
+  template <typename T> friend class BucketSerializationGuard;
 
  private:
   // An entry whose value must be awaited
@@ -175,7 +179,8 @@ class SliceSnapshot {
     size_t keys_total = 0;
   } stats_;
 
-  util::fb2::Mutex bucket_ser_mu_;
+  util::fb2::CondVarAny bucket_ser_cond_;
+  bool bucket_ser_in_progress_ = false;
 };
 
 }  // namespace dfly
