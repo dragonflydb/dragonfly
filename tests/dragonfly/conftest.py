@@ -42,7 +42,7 @@ def tmp_dir():
     if os.environ.get("DRAGONFLY_KEEP_TMP"):
         logging.info(f"Keeping tmp dir {tmp_name}")
         return
-    os.rmdir(tmp_name)
+    shutil.rmtree(tmp_name, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
