@@ -1447,10 +1447,16 @@ io::Result<JsonPathV2, string> ParsePathV2(string_view path) {
   }
 
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
-    return json::ParsePath(path);
+    auto path_result = json::ParsePath(path);
+    if (!path_result) {
+      VLOG(1) << "Invalid Json path: " << path << ' ' << path_result.error() << std::endl;
+      return nonstd::make_unexpected(kSyntaxErr);
+    }
+    return path_result;
   }
   io::Result<JsonExpression> expr_result = ParseJsonPath(path);
   if (!expr_result) {
+    VLOG(1) << "Invalid Json path: " << path << ' ' << expr_result.error() << std::endl;
     return nonstd::make_unexpected(kSyntaxErr);
   }
   return JsonPathV2(std::move(expr_result.value()));
