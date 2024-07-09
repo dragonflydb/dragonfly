@@ -594,7 +594,7 @@ SortedMap::ScoredArray SortedMap::PopTopScores(unsigned count, bool reverse) {
 
     // We can not delete from score_tree because we are in the middle of the iteration.
     CHECK(score_map->Erase((sds)obj));
-    return true;
+    return true;  // continue with the iteration.
   };
 
   unsigned rank = 0;
