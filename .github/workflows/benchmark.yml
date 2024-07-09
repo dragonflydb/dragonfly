@@ -107,6 +107,7 @@ jobs:
           # Memtier benchmark run will fail at some point because old master shutdown on version upgrade
           kubectl wait --for=condition=failed --timeout=120s -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null
           kubectl logs -n ${{ steps.setup.outputs.namespace }} -f jobs/memtier-benchmark
+          kubectl delete -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark
 
       - name: Run Memtier Benchmark again
         shell: bash
@@ -163,7 +164,7 @@ jobs:
           timeout_minutes: 1
           max_attempts: 3
           command: |
-            kubectl describe dragonflies.dragonflydb.io -n ${{ steps.setup.outputs.namespace }} service/dragonfly-sample
+            kubectl describe dragonflies.dragonflydb.io -n ${{ steps.setup.outputs.namespace }} dragonfly-sample
 
       - name: Scale down to zero
         if: always()
