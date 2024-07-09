@@ -104,7 +104,7 @@ class RestoreStreamer : public JournalStreamer {
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
 
-  CondVarWithBoolean bucket_ser_;
+  ConditionFlag bucket_ser_;
 };
 
 }  // namespace dfly

@@ -173,7 +173,7 @@ class SliceSnapshot {
     size_t keys_total = 0;
   } stats_;
 
-  CondVarWithBoolean bucket_ser_;
+  ConditionFlag bucket_ser_;
 };
 
 }  // namespace dfly

@@ -7,28 +7,27 @@
 
 namespace dfly {
 
-struct CondVarWithBoolean {
-  util::fb2::CondVarAny bucket_ser_cond_;
-  bool bucket_ser_in_progress_ = false;
+struct ConditionFlag {
+  util::fb2::CondVarAny cond_var;
+  bool flag = false;
 };
 
 // Helper class used to guarantee atomicity between serialization of buckets
 class BucketSerializationGuard {
  public:
-  explicit BucketSerializationGuard(CondVarWithBoolean* enclosing) : enclosing_(enclosing) {
+  explicit BucketSerializationGuard(ConditionFlag* enclosing) : enclosing_(enclosing) {
     util::fb2::NoOpLock noop_lk_;
-    enclosing_->bucket_ser_cond_.wait(noop_lk_,
-                                      [this]() { return !enclosing_->bucket_ser_in_progress_; });
-    enclosing_->bucket_ser_in_progress_ = true;
+    enclosing_->cond_var.wait(noop_lk_, [this]() { return !enclosing_->flag; });
+    enclosing_->flag = true;
   }
 
   ~BucketSerializationGuard() {
-    enclosing_->bucket_ser_in_progress_ = false;
-    enclosing_->bucket_ser_cond_.notify_one();
+    enclosing_->flag = false;
+    enclosing_->cond_var.notify_one();
   }
 
  private:
-  CondVarWithBoolean* enclosing_;
+  ConditionFlag* enclosing_;
 };
 
 }  // namespace dfly
