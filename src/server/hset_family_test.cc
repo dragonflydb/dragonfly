@@ -313,6 +313,50 @@ TEST_F(HSetFamilyTest, HSetEx) {
 
   AdvanceTime(500);
   EXPECT_THAT(Run({"HGET", "k", "f"}), ArgType(RespExpr::NIL));
+
+  const std::string_view long_time = "100"sv;
+
+  auto resp = Run({"HSETEX", "k", long_time, "field1", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"HSETEX", "k", long_time, "field1", "new_value"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"HGET", "k", "field1"});
+  EXPECT_THAT(resp, "new_value");  // HSETEX without NX option; value was replaced by new_value
+
+  resp = Run({"HSETEX", "k", long_time, "field2", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"HSETEX", "k", "NX", long_time, "field2", "new_value"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"HGET", "k", "field2"});
+  EXPECT_THAT(resp, "value");  // HSETEX with NX option; value was NOT replaced by new_value
+
+  const std::string_view short_time = "1"sv;
+
+  resp = Run({"HSETEX", "k", long_time, "field3", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"HSETEX", "k", short_time, "field3", "value"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  AdvanceTime(1100);
+  resp = Run({"HGET", "k", "field3"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  // HSETEX without NX option; old expiration time was replaced by a new one
+
+  resp = Run({"HSETEX", "k", long_time, "field4", "value"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"HSETEX", "k", "NX", short_time, "field4", "value"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  AdvanceTime(1100);
+  resp = Run({"HGET", "k", "field4"});
+  EXPECT_THAT(resp,
+              "value");  // HSETEX with NX option; old expiration time was NOT replaced by a new one
 }
 
 TEST_F(HSetFamilyTest, TriggerConvertToStrMap) {

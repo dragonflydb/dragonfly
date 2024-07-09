@@ -714,14 +714,14 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
   }
 }
 
-// HSETEX key tll_sec field value field value ...
+// HSETEX key [NX] tll_sec field value field value ...
 void HSetEx(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() % 2 != 0) {
-    return cntx->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
-  }
-
   string_view key = ArgS(args, 0);
-  string_view ttl_str = ArgS(args, 1);
+
+  std::string_view second_arg = ArgS(args, 1);
+  bool skip_if_exists = second_arg == "NX"sv;
+  string_view ttl_str = skip_if_exists ? ArgS(args, 2) : second_arg;
+
   uint32_t ttl_sec;
   constexpr uint32_t kMaxTtl = (1UL << 26);
 
@@ -729,9 +729,13 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kInvalidIntErr);
   }
 
-  args.remove_prefix(2);
-  OpSetParams op_sp;
-  op_sp.ttl = ttl_sec;
+  args.remove_prefix(2 + static_cast<int>(skip_if_exists));
+
+  if (args.size() % 2 != 0) {
+    return cntx->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
+  }
+
+  OpSetParams op_sp{skip_if_exists, ttl_sec};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, args, op_sp);
