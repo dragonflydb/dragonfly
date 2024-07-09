@@ -215,6 +215,8 @@ class DflyInstance:
         if not self.params.existing_port:
             return_code = self.proc.poll()
             if return_code is not None:
+                # log stdout of the failed process
+                logging.error("Dragonfly process error:\n%s", self.proc.stdout.read().decode())
                 self.proc = None
                 raise DflyStartException(f"Failed to start instance, return code {return_code}")
 
@@ -334,7 +336,7 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1"
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,dflycmd=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
 

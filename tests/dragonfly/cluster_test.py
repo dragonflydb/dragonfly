@@ -250,11 +250,11 @@ def verify_slots_result(port: int, answer: list, replicas) -> bool:
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "emulated"})
-async def test_emulated_cluster_with_replicas(df_local_factory):
-    master = df_local_factory.create(port=BASE_PORT)
-    replicas = [df_local_factory.create(port=BASE_PORT + i, logtostdout=True) for i in range(1, 3)]
+async def test_emulated_cluster_with_replicas(df_factory):
+    master = df_factory.create(port=BASE_PORT)
+    replicas = [df_factory.create(port=BASE_PORT + i, logtostdout=True) for i in range(1, 3)]
 
-    df_local_factory.start_all([master, *replicas])
+    df_factory.start_all([master, *replicas])
 
     c_master = aioredis.Redis(port=master.port)
     master_id = (await c_master.execute_command("dflycluster myid")).decode("utf-8")
@@ -381,9 +381,9 @@ Also add keys to each of them that are *not* moved, and see that they are unaffe
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cluster_node_id": "inigo montoya"})
-async def test_cluster_node_id(df_local_factory: DflyInstanceFactory):
-    node = df_local_factory.create(port=BASE_PORT)
-    df_local_factory.start_all([node])
+async def test_cluster_node_id(df_factory: DflyInstanceFactory):
+    node = df_factory.create(port=BASE_PORT)
+    df_factory.start_all([node])
 
     conn = node.client()
     assert "inigo montoya" == await get_node_id(conn)
@@ -392,14 +392,13 @@ async def test_cluster_node_id(df_local_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFactory):
+async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     # Start and configure cluster with 2 nodes
     nodes = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
-        for i in range(2)
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
 
-    df_local_factory.start_all(nodes)
+    df_factory.start_all(nodes)
 
     c_nodes = [node.client() for node in nodes]
     c_nodes_admin = [node.admin_client() for node in nodes]
@@ -523,11 +522,11 @@ async def test_cluster_slot_ownership_changes(df_local_factory: DflyInstanceFact
 
 # Tests that master commands to the replica are applied regardless of slot ownership
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_replica_sets_non_owned_keys(df_local_factory: DflyInstanceFactory):
+async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFactory):
     # Start and configure cluster with 1 master and 1 replica, both own all slots
-    master = df_local_factory.create(admin_port=BASE_PORT + 1000)
-    replica = df_local_factory.create(admin_port=BASE_PORT + 1001)
-    df_local_factory.start_all([master, replica])
+    master = df_factory.create(admin_port=BASE_PORT + 1000)
+    replica = df_factory.create(admin_port=BASE_PORT + 1001)
+    df_factory.start_all([master, replica])
 
     async with master.client() as c_master, master.admin_client() as c_master_admin, replica.client() as c_replica, replica.admin_client() as c_replica_admin:
         master_id = await get_node_id(c_master_admin)
@@ -633,11 +632,11 @@ async def test_cluster_replica_sets_non_owned_keys(df_local_factory: DflyInstanc
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_flush_slots_after_config_change(df_local_factory: DflyInstanceFactory):
+async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceFactory):
     # Start and configure cluster with 1 master and 1 replica, both own all slots
-    master = df_local_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1000)
-    replica = df_local_factory.create(port=BASE_PORT + 1, admin_port=BASE_PORT + 1001)
-    df_local_factory.start_all([master, replica])
+    master = df_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1000)
+    replica = df_factory.create(port=BASE_PORT + 1, admin_port=BASE_PORT + 1001)
+    df_factory.start_all([master, replica])
 
     c_master = master.client()
     c_master_admin = master.admin_client()
@@ -790,26 +789,26 @@ async def test_cluster_blocking_command(df_server):
 @pytest.mark.parametrize("set_cluster_node_id", [True, False])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_native_client(
-    df_local_factory: DflyInstanceFactory,
+    df_factory: DflyInstanceFactory,
     df_seeder_factory: DflySeederFactory,
     set_cluster_node_id: bool,
 ):
     # Start and configure cluster with 3 masters and 3 replicas
     masters = [
-        df_local_factory.create(
+        df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
             cluster_node_id=f"master{i}" if set_cluster_node_id else "",
         )
         for i in range(3)
     ]
-    df_local_factory.start_all(masters)
+    df_factory.start_all(masters)
     c_masters = [aioredis.Redis(port=master.port) for master in masters]
     c_masters_admin = [master.admin_client() for master in masters]
     master_ids = await asyncio.gather(*(get_node_id(c) for c in c_masters_admin))
 
     replicas = [
-        df_local_factory.create(
+        df_factory.create(
             port=BASE_PORT + 100 + i,
             admin_port=BASE_PORT + i + 1100,
             cluster_node_id=f"replica{i}" if set_cluster_node_id else "",
@@ -817,7 +816,7 @@ async def test_cluster_native_client(
         )
         for i in range(3)
     ]
-    df_local_factory.start_all(replicas)
+    df_factory.start_all(replicas)
     c_replicas = [replica.client() for replica in replicas]
     await asyncio.gather(*(wait_available_async(c) for c in c_replicas))
     c_replicas_admin = [replica.admin_client() for replica in replicas]
@@ -986,14 +985,13 @@ async def test_cluster_native_client(
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_config_consistency(df_local_factory: DflyInstanceFactory):
+async def test_config_consistency(df_factory: DflyInstanceFactory):
     # Check slot migration from one node to another
     instances = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
-        for i in range(2)
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
 
-    df_local_factory.start_all(instances)
+    df_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
     nodes[0].slots = [(0, 5259)]
@@ -1036,20 +1034,20 @@ async def test_config_consistency(df_local_factory: DflyInstanceFactory):
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_flushall_during_migration(
-    df_local_factory: DflyInstanceFactory, df_seeder_factory
+    df_factory: DflyInstanceFactory, df_seeder_factory
 ):
     # Check data migration from one node to another
     instances = [
-        df_local_factory.create(
+        df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
-            vmodule="cluster_family=9,cluster_slot_migration=9,outgoing_slot_migration=9",
+            vmodule="cluster_family=9,cluster_slot_migration=9,outgoing_slot_migration=9,incoming_slot_migration=9",
             logtostdout=True,
         )
         for i in range(2)
     ]
 
-    df_local_factory.start_all(instances)
+    df_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
     nodes[0].slots = [(0, 16383)]
@@ -1088,14 +1086,13 @@ async def test_cluster_flushall_during_migration(
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
+async def test_cluster_data_migration(df_factory: DflyInstanceFactory):
     # Check data migration from one node to another
     instances = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
-        for i in range(2)
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
 
-    df_local_factory.start_all(instances)
+    df_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
     nodes[0].slots = [(0, 9000)]
@@ -1150,13 +1147,12 @@ async def test_cluster_data_migration(df_local_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cache_mode": "true"})
-async def test_migration_with_key_ttl(df_local_factory):
+async def test_migration_with_key_ttl(df_factory):
     instances = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
-        for i in range(2)
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
 
-    df_local_factory.start_all(instances)
+    df_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
     nodes[0].slots = [(0, 16383)]
@@ -1202,13 +1198,12 @@ async def test_migration_with_key_ttl(df_local_factory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_network_disconnect_during_migration(df_local_factory, df_seeder_factory):
+async def test_network_disconnect_during_migration(df_factory, df_seeder_factory):
     instances = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
-        for i in range(2)
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
 
-    df_local_factory.start_all(instances)
+    df_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
     nodes[0].slots = [(0, 16383)]
@@ -1260,21 +1255,21 @@ async def test_network_disconnect_during_migration(df_local_factory, df_seeder_f
 )
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_fuzzymigration(
-    df_local_factory: DflyInstanceFactory,
+    df_factory: DflyInstanceFactory,
     df_seeder_factory,
     node_count: int,
     segments: int,
     keys: int,
 ):
     instances = [
-        df_local_factory.create(
+        df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
-            vmodule="cluster_family=9,cluster_slot_migration=9",
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
         )
         for i in range(node_count)
     ]
-    df_local_factory.start_all(instances)
+    df_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
 
@@ -1296,9 +1291,6 @@ async def test_cluster_fuzzymigration(
             for i in itertools.count(start=1):
                 await client.lpush(key, i)
         except asyncio.exceptions.CancelledError:
-            return
-        # TODO find the reason of TTL exhausted error and is it possible to fix it
-        except redis.exceptions.ClusterError:
             return
 
     # Start ten counters
@@ -1352,7 +1344,8 @@ async def test_cluster_fuzzymigration(
         res = True
         for node in nodes:
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-            logging.debug(states)
+            if states != "NO_STATE":
+                logging.debug(states)
             for state in states:
                 parsed_state = re.search("([a-z]+) ([a-z0-9]+) ([A-Z]+)", state)
                 if parsed_state == None:
@@ -1406,13 +1399,12 @@ async def test_cluster_fuzzymigration(
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_config_reapply(df_local_factory: DflyInstanceFactory):
+async def test_cluster_config_reapply(df_factory: DflyInstanceFactory):
     """Check data migration from one node to another."""
     instances = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
-        for i in range(2)
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
-    df_local_factory.start_all(instances)
+    df_factory.start_all(instances)
 
     nodes = [await create_node_info(instance) for instance in instances]
     nodes[0].slots = [(0, 8000)]
@@ -1458,13 +1450,12 @@ async def test_cluster_config_reapply(df_local_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_migration_cancel(df_local_factory: DflyInstanceFactory):
+async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
     """Check data migration from one node to another."""
     instances = [
-        df_local_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000)
-        for i in range(2)
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
-    df_local_factory.start_all(instances)
+    df_factory.start_all(instances)
 
     nodes = [await create_node_info(instance) for instance in instances]
     nodes[0].slots = [(0, 8000)]
@@ -1537,7 +1528,7 @@ async def await_no_lag(client: aioredis.Redis, timeout=10):
 
 
 @dfly_args({"proactor_threads": 4})
-async def test_replicate_cluster(df_local_factory: DflyInstanceFactory, df_seeder_factory):
+async def test_replicate_cluster(df_factory: DflyInstanceFactory, df_seeder_factory):
     """
     Create dragonfly cluster of 2 nodes.
     Create additional dragonfly server in emulated mode.
@@ -1545,13 +1536,13 @@ async def test_replicate_cluster(df_local_factory: DflyInstanceFactory, df_seede
     Send traffic before replication start and while replicating.
     Promote the replica to master and check data consistency between cluster and single node.
     """
-    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+    replica = df_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
     cluster_nodes = [
-        df_local_factory.create(admin_port=BASE_PORT + i + 1, cluster_mode="yes") for i in range(2)
+        df_factory.create(admin_port=BASE_PORT + i + 1, cluster_mode="yes") for i in range(2)
     ]
 
     # Start instances and connect clients
-    df_local_factory.start_all(cluster_nodes + [replica])
+    df_factory.start_all(cluster_nodes + [replica])
     c_nodes = [node.client() for node in cluster_nodes]
 
     c_replica = replica.client()
@@ -1625,9 +1616,7 @@ async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
 
 
 @dfly_args({"proactor_threads": 4})
-async def test_replicate_disconnect_cluster(
-    df_local_factory: DflyInstanceFactory, df_seeder_factory
-):
+async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_seeder_factory):
     """
     Create dragonfly cluster of 2 nodes and additional dragonfly server in emulated mode.
     Populate the cluster with data
@@ -1636,13 +1625,13 @@ async def test_replicate_disconnect_cluster(
     Promote replica to master
     Compare cluster data and replica data
     """
-    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+    replica = df_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
     cluster_nodes = [
-        df_local_factory.create(admin_port=BASE_PORT + i + 1, cluster_mode="yes") for i in range(2)
+        df_factory.create(admin_port=BASE_PORT + i + 1, cluster_mode="yes") for i in range(2)
     ]
 
     # Start instances and connect clients
-    df_local_factory.start_all(cluster_nodes + [replica])
+    df_factory.start_all(cluster_nodes + [replica])
     c_nodes = [node.client() for node in cluster_nodes]
 
     c_replica = replica.client()
@@ -1743,7 +1732,7 @@ async def await_eq_offset(client: aioredis.Redis, timeout=20):
 
 
 @dfly_args({"proactor_threads": 4})
-async def test_replicate_redis_cluster(redis_cluster, df_local_factory, df_seeder_factory):
+async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_factory):
     """
     Create redis cluster of 3 nodes.
     Create dragonfly server in emulated mode.
@@ -1751,10 +1740,10 @@ async def test_replicate_redis_cluster(redis_cluster, df_local_factory, df_seede
     Send traffic before replication start and while replicating.
     Promote the replica to master and check data consistency between cluster and single dragonfly node.
     """
-    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+    replica = df_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
 
     # Start instances and connect clients
-    df_local_factory.start_all([replica])
+    df_factory.start_all([replica])
 
     redis_cluster_nodes = redis_cluster
     node_clients = [
@@ -1801,9 +1790,7 @@ async def test_replicate_redis_cluster(redis_cluster, df_local_factory, df_seede
 
 
 @dfly_args({"proactor_threads": 4})
-async def test_replicate_disconnect_redis_cluster(
-    redis_cluster, df_local_factory, df_seeder_factory
-):
+async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_seeder_factory):
     """
     Create redis cluster of 3 nodes.
     Create dragonfly server in emulated mode.
@@ -1813,10 +1800,10 @@ async def test_replicate_disconnect_redis_cluster(
     Send more traffic
     Promote the replica to master and check data consistency between cluster and single dragonfly node.
     """
-    replica = df_local_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
+    replica = df_factory.create(admin_port=BASE_PORT, cluster_mode="emulated")
 
     # Start instances and connect clients
-    df_local_factory.start_all([replica])
+    df_factory.start_all([replica])
 
     redis_cluster_nodes = redis_cluster
     node_clients = [

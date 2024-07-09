@@ -143,8 +143,8 @@ def configure_slowlog_parsing(async_client: aioredis.Redis):
 
 @pytest.mark.asyncio
 @dfly_args({"slowlog_log_slower_than": 0, "slowlog_max_len": 3})
-async def test_slowlog_client_name_and_ip(df_local_factory, async_client: aioredis.Redis):
-    df = df_local_factory.create()
+async def test_slowlog_client_name_and_ip(df_factory, async_client: aioredis.Redis):
+    df = df_factory.create()
     df.start()
     expected_clientname = "dragonfly"
 
@@ -162,10 +162,10 @@ async def test_slowlog_client_name_and_ip(df_local_factory, async_client: aiored
 @pytest.mark.asyncio
 @dfly_args({"slowlog_log_slower_than": 0, "slowlog_max_len": 3})
 async def test_blocking_commands_should_not_show_up_in_slow_log(
-    df_local_factory, async_client: aioredis.Redis
+    df_factory, async_client: aioredis.Redis
 ):
     await async_client.slowlog_reset()
-    df = df_local_factory.create()
+    df = df_factory.create()
     df.start()
     async_client = configure_slowlog_parsing(async_client)
 

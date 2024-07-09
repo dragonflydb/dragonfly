@@ -42,6 +42,8 @@ std::error_code OpManager::Open(std::string_view file) {
 
 void OpManager::Close() {
   storage_.Close();
+  DCHECK(pending_stash_ver_.empty());
+  DCHECK(pending_reads_.empty());
 }
 
 void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
@@ -57,15 +59,16 @@ void OpManager::Delete(EntryId id) {
   pending_stash_ver_.erase(ToOwned(id));
 }
 
-void OpManager::Delete(DiskSegment segment) {
-  EntryOps* pending_op = nullptr;
+void OpManager::DeleteOffloaded(DiskSegment segment) {
+  EntryOps* pending_read = nullptr;
 
   auto base_it = pending_reads_.find(segment.ContainingPages().offset);
   if (base_it != pending_reads_.end())
-    pending_op = base_it->second.Find(segment);
+    pending_read = base_it->second.Find(segment);
 
-  if (pending_op) {
-    pending_op->deleting = true;
+  if (pending_read) {
+    // Mark that the read operation must finilize with deletion.
+    pending_read->deleting = true;
   } else if (ReportDelete(segment) && base_it == pending_reads_.end()) {
     storage_.MarkAsFree(segment.ContainingPages());
   }
@@ -79,7 +82,12 @@ std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
   auto io_cb = [this, version, id = std::move(id)](DiskSegment segment, std::error_code ec) {
     ProcessStashed(Borrowed(id), version, segment, ec);
   };
-  return storage_.Stash(buf_view, std::move(io_cb));
+
+  // May block due to blocking call to Grow.
+  auto ec = storage_.Stash(buf_view, std::move(io_cb));
+  if (ec)
+    pending_stash_ver_.erase(ToOwned(id_ref));
+  return ec;
 }
 
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {

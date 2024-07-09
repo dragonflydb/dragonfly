@@ -56,7 +56,8 @@ class TieredStorage {
                               std::function<T(std::string*)> modf);
 
   // Stash value. Sets IO_PENDING flag and unsets it on error or when finished
-  void Stash(DbIndex dbid, std::string_view key, PrimeValue* value);
+  // Returns true if item was scheduled for stashing.
+  bool TryStash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
   // Delete value, must be offloaded (external type)
   void Delete(DbIndex dbid, PrimeValue* value);
@@ -64,8 +65,8 @@ class TieredStorage {
   // Cancel pending stash for value, must have IO_PENDING flag set
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value);
 
-  // Returns if a value should be stashed
-  bool ShouldStash(const PrimeValue& pv) const;
+  // Percentage (0-1) of currently used storage_write_depth for ongoing stashes
+  float WriteDepthUsage() const;
 
   TieredStats GetStats() const;
 
@@ -73,10 +74,19 @@ class TieredStorage {
   void RunOffloading(DbIndex dbid);
 
  private:
+  // Returns if a value should be stashed
+  bool ShouldStash(const PrimeValue& pv) const;
+
+ private:
   PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
+  unsigned write_depth_limit_ = 10;
+  struct {
+    uint64_t stash_overflow_cnt = 0;
+    uint64_t total_deletes = 0;
+  } stats_;
 };
 
 }  // namespace dfly
@@ -121,7 +131,7 @@ class TieredStorage {
     return {};
   }
 
-  void Stash(DbIndex dbid, std::string_view key, PrimeValue* value) {
+  void TryStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
   }
 
   void Delete(PrimeValue* value) {
@@ -130,7 +140,7 @@ class TieredStorage {
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
   }
 
-  bool ShouldStash(const PrimeValue& pv) {
+  bool ShouldStash(const PrimeValue& pv) const {
     return false;
   }
 

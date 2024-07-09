@@ -1407,7 +1407,7 @@ void ServerFamily::OnClose(ConnectionContext* cntx) {
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
   if (!section.empty()) {
-    return cntx->reply_builder()->SendError("");
+    return cntx->SendError("");
   }
   string info;
 
@@ -2175,7 +2175,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_total_fetches", m.tiered_stats.total_fetches);
     append("tiered_total_cancels", m.tiered_stats.total_cancels);
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
-    append("tiered_total_deletes", m.tiered_stats.total_defrags);
+    append("tiered_total_stash_overflows", m.tiered_stats.total_stash_overflows);
+    append("tiered_heap_buf_allocations", m.tiered_stats.total_heap_buf_allocs);
+    append("tiered_registered_buf_allocations", m.tiered_stats.total_registered_buf_allocs);
 
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
@@ -2256,9 +2258,12 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("REPLICATION")) {
-    ServerState& etl = *ServerState::tlocal();
-
-    if (etl.is_master) {
+    unique_lock lk(replicaof_mu_);
+    // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
+    // ensuring eventual consistency of is_master. When determining if the server is a replica and
+    // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
+    // insufficient in this scenario.
+    if (!replica_) {
       append("role", "master");
       append("connected_slaves", m.facade_stats.conn_stats.num_replicas);
       const auto& replicas = m.replication_metrics;
@@ -2271,10 +2276,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("master_replid", master_replid_);
     } else {
       append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
-
-      // The replica pointer can still be mutated even while master=true,
-      // we don't want to drop the replica object in this fiber
-      unique_lock lk{replicaof_mu_};
 
       auto replication_info_cb = [&](Replica::Info rinfo) {
         append("master_host", rinfo.host);
@@ -2735,8 +2736,12 @@ err:
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  ServerState& etl = *ServerState::tlocal();
-  if (etl.is_master) {
+  unique_lock lk(replicaof_mu_);
+  // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
+  // ensuring eventual consistency of is_master. When determining if the server is a replica and
+  // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
+  // insufficient in this scenario.
+  if (!replica_) {
     rb->StartArray(2);
     rb->SendBulkString("master");
     auto vec = dfly_cmd_->GetReplicasRoleInfo();
@@ -2749,7 +2754,6 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     }
 
   } else {
-    unique_lock lk{replicaof_mu_};
     rb->StartArray(4 + cluster_replicas_.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 

@@ -131,22 +131,29 @@ template <size_t N> size_t FindFirst(const std::bitset<N>& bs) {
 */
 namespace detail {
 
+// Page can be exactly in either these 3 states:
+// 1. unitialized - with no blocks being allocated - segment_inuse will be 0 in that case, 1
+// otherwise.
+// 2. Partly utilized by 1 or more blocks, with available > 0 in that case. It must be present in
+// free_pages_ list then.
+// 3. Fully utilized, with available==0, in that case it's not part of free_pages_ list.
 struct Page {
   std::bitset<256> free_blocks;  // bitmask of free blocks (32 bytes).
   uint8_t id;                    // index inside the Segment.pages array.
 
   // need some mapping function to map from block_size to real_block_size given Page class.
-  BinIdx block_size_bin;
+  BinIdx bin_idx;
   uint8_t segment_inuse : 1;  // true if segment allocated this page.
   uint8_t reserved[3];
 
   // can be computed via free_blocks.count().
   uint16_t available;  // in number of blocks.
+  Page* next_free;     // next page in the free_pages_ list
 
   // We can not use c'tor because we use the trick in segment where we allocate more pages
   // than SegmentDescr declares.
   void Reset(uint8_t new_id) {
-    static_assert(sizeof(Page) == 40);
+    static_assert(sizeof(Page) == 48);
 
     memset(&id, 0, sizeof(Page) - offsetof(Page, id));
     id = new_id;
@@ -162,7 +169,7 @@ void Page::Init(PageClass pc, BinIdx bin_id) {
   DCHECK_EQ(available, 0);
   DCHECK(segment_inuse);
 
-  block_size_bin = bin_id;
+  bin_idx = bin_id;
   if (pc == PageClass::LARGE_P) {
     available = 1;
   } else {
@@ -221,7 +228,7 @@ class ExternalAllocator::SegmentDescr {
 
   size_t BlockOffset(const Page* page, unsigned blockpos) {
     return offset_ + page->id * (1 << page_info_.page_shift) +
-           ToBlockSize(page->block_size_bin) * blockpos;
+           ToBlockSize(page->bin_idx) * blockpos;
   }
 
   bool HasFreePages() const {
@@ -333,28 +340,28 @@ ExternalAllocator::~ExternalAllocator() {
 int64_t ExternalAllocator::Malloc(size_t sz) {
   uint8_t bin_idx = ToBinIdx(sz);
   Page* page = free_pages_[bin_idx];
-
   if (page->available == 0) {  // empty page.
     PageClass pc = detail::ClassFromSize(sz);
-
     if (pc == PageClass::LARGE_P) {
       return LargeMalloc(sz);
     }
+
     page = FindPage(pc);
     if (!page)
       return -int64_t(kSegmentSize);
+
     free_pages_[bin_idx] = page;
     page->Init(pc, bin_idx);
   }
 
   DCHECK(page->available);
-
   size_t pos = FindFirst(page->free_blocks);
-
   page->free_blocks.flip(pos);
-  --page->available;
-  allocated_bytes_ += ToBlockSize(page->block_size_bin);
 
+  if (--page->available == 0)  // Remove empty page from freelist
+    free_pages_[bin_idx] = page->next_free ? page->next_free : &empty_page;
+
+  allocated_bytes_ += ToBlockSize(page->bin_idx);
   SegmentDescr* seg = ToSegDescr(page);
   return seg->BlockOffset(page, pos);
 }
@@ -372,7 +379,7 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   Page* page = seg->GetPage(page_id);
   unsigned page_size = (1 << seg->page_shift());
   unsigned block_offs = delta % page_size;
-  unsigned block_size = ToBlockSize(page->block_size_bin);
+  unsigned block_size = ToBlockSize(page->bin_idx);
   unsigned block_id = block_offs / block_size;
   unsigned blocks_num = page_size / block_size;
 
@@ -384,8 +391,14 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   ++page->available;
 
   DCHECK_EQ(page->available, page->free_blocks.count());
+  // If page becomes fully free, return it to segment list, otherwise if it just became non-empty,
+  // then return it to free pages list
   if (page->available == blocks_num) {
     FreePage(page, seg, block_size);
+  } else if (page->available == 1) {
+    DCHECK_NE(page, free_pages_[page->bin_idx]);
+    page->next_free = free_pages_[page->bin_idx];
+    free_pages_[page->bin_idx] = page;
   }
   allocated_bytes_ -= block_size;
 }
@@ -479,11 +492,19 @@ void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, size_t block_s
 
   // Remove fast allocation reference.
   if (free_pages_[bidx] == page) {
-    free_pages_[bidx] = &empty_page;
+    free_pages_[bidx] = page->next_free ? page->next_free : &empty_page;
+  } else {
+    for (auto* cur = free_pages_[bidx]; cur != nullptr; cur = cur->next_free) {
+      if (cur->next_free == page) {
+        cur->next_free = page->next_free;
+        break;
+      }
+    }
   }
 
   page->segment_inuse = 0;
   page->available = 0;
+  page->next_free = nullptr;
 
   if (!owner->HasFreePages()) {
     // Segment was fully booked but now it has a free page.

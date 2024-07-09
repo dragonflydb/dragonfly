@@ -710,7 +710,7 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
     rb->SendStringArr(absl::Span<const string>{*result},
                       is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -822,7 +822,7 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -842,7 +842,7 @@ void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
       rb->SendNull();
     } else {
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
     }
   }
 }
@@ -965,7 +965,7 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(k);
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1149,7 +1149,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     else
       rb->SendEmptyArray();
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 

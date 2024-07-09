@@ -53,7 +53,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs
-          path: /tmp/failed/*
+          path: /tmp/dragonfly.*
 
   lint-test-chart:
     runs-on: ubuntu-latest

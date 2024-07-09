@@ -663,10 +663,9 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
                       PrimeValue* pv) {
   EngineShard* shard = op_args_.shard;
 
-  // Currently we always offload
-  if (auto* ts = shard->tiered_storage(); ts && ts->ShouldStash(*pv)) {
-    ts->Stash(op_args_.db_cntx.db_index, key, pv);
-  }
+  // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
+  if (auto* ts = shard->tiered_storage(); ts)
+    ts->TryStash(op_args_.db_cntx.db_index, key, pv);
 
   if (manual_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
@@ -736,18 +735,18 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       auto [opt, int_arg] = parser.Next<string_view, int64_t>();
 
       if (auto err = parser.Error(); err) {
-        return builder->SendError(err->MakeReply());
+        return cntx->SendError(err->MakeReply());
       }
 
       // We can set expiry only once.
       if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
-        return builder->SendError(kSyntaxErr);
+        return cntx->SendError(kSyntaxErr);
 
       sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
 
       // Since PXAT/EXAT can change this, we need to check this ahead
       if (int_arg <= 0) {
-        return builder->SendError(InvalidExpireTime("set"));
+        return cntx->SendError(InvalidExpireTime("set"));
       }
 
       bool is_ms = (opt[0] == 'P');
@@ -787,14 +786,14 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
   }
 
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
 
   if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
       has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
-    return builder->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   StringValue prev;
@@ -816,7 +815,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (result == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
+    return cntx->SendError(kOutOfMemory);
   }
 
   DCHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
@@ -851,7 +850,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
     return builder->SendLong(1);  // this means that we successfully set the value
   }
   if (results == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
+    return cntx->SendError(kOutOfMemory);
   }
   CHECK_EQ(results, OpStatus::SKIPPED);  // in this case it must be skipped!
   return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
@@ -1093,10 +1092,10 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
       builder->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
-      builder->SendError(kInvalidIntErr);
+      cntx->SendError(kInvalidIntErr);
       break;
     case OpStatus::OUT_OF_RANGE:
-      builder->SendError(kIncrOverflow);
+      cntx->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
       reinterpret_cast<MCReplyBuilder*>(builder)->SendNotFound();

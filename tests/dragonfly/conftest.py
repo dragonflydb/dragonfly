@@ -19,7 +19,7 @@ import time
 from copy import deepcopy
 
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import gettempdir, mkdtemp
 
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from . import PortPicker, dfly_args
@@ -37,9 +37,12 @@ def tmp_dir():
     where the Dragonfly executable will be run and where all test data
     should be stored. The directory will be cleaned up at the end of a session
     """
-    tmp = TemporaryDirectory()
-    yield Path(tmp.name)
-    tmp.cleanup()
+    tmp_name = mkdtemp()
+    yield Path(tmp_name)
+    if os.environ.get("DRAGONFLY_KEEP_TMP"):
+        logging.info(f"Keeping tmp dir {tmp_name}")
+        return
+    shutil.rmtree(tmp_name, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
@@ -77,11 +80,12 @@ def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
     return args_dict
 
 
-@pytest.fixture(scope="session", params=[{}])
+@pytest.fixture(scope="function", params=[{}])
 def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     """
     Create an instance factory with supplied params.
     """
+    os.makedirs(os.path.join(gettempdir(), "tiered"), exist_ok=True)
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     path = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/dragonfly"))
 
@@ -106,15 +110,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     factory.stop_all()
 
 
-# Differs from df_factory in that its scope is function
 @pytest.fixture(scope="function")
-def df_local_factory(df_factory: DflyInstanceFactory):
-    factory = DflyInstanceFactory(df_factory.params, df_factory.args)
-    yield factory
-    factory.stop_all()
-
-
-@pytest.fixture(scope="session")
 def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
     """
     Start the default Dragonfly server that will be used for the default pools
@@ -149,7 +145,7 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
         print("Cluster clients left: ", len(clients_left))
 
 
-@pytest.fixture(scope="class")
+@pytest.fixture(scope="function")
 def connection(df_server: DflyInstance):
     return redis.Connection(port=df_server.port)
 
@@ -335,6 +331,7 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
 
 
 def copy_failed_logs_and_clean_tmp_folder(report):
+    return  # TODO: to fix it first and then enable it.
     failed_path = "/tmp/failed"
     path_exists = os.path.exists(failed_path)
     if not path_exists:

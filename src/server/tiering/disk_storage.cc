@@ -15,7 +15,7 @@
 
 using namespace ::dfly::tiering::literals;
 
-ABSL_FLAG(bool, backing_file_direct, false, "If true uses O_DIRECT to open backing files");
+ABSL_FLAG(bool, backing_file_direct, true, "If true uses O_DIRECT to open backing files");
 
 ABSL_FLAG(uint64_t, registered_buffer_size, 512_KB,
           "Size of registered buffer for IoUring fixed read/writes");
@@ -37,16 +37,6 @@ UringBuf AllocateTmpBuf(size_t size) {
 void DestroyTmpBuf(UringBuf buf) {
   DCHECK(!buf.buf_idx);
   ::operator delete[](buf.bytes.data(), std::align_val_t(kPageSize));
-}
-
-UringBuf PrepareBuf(size_t size) {
-  DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
-  auto* up = static_cast<UringProactor*>(ProactorBase::me());
-
-  if (auto borrowed = up->RequestBuffer(size); borrowed)
-    return *borrowed;
-  else
-    return AllocateTmpBuf(size);
 }
 
 void ReturnBuf(UringBuf buf) {
@@ -103,6 +93,8 @@ std::error_code DiskStorage::Open(std::string_view path) {
 
 void DiskStorage::Close() {
   using namespace std::chrono_literals;
+
+  // TODO: to fix this polling.
   while (pending_ops_ > 0 || grow_pending_)
     util::ThisFiber::SleepFor(10ms);
 
@@ -145,6 +137,8 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 
   // If we've run out of space, block and grow as much as needed
   if (offset < 0) {
+    // TODO: To introduce asynchronous call that starts resizing before we reach this step.
+    // Right now we do it synchronously as well (see Grow(256MB) call.)
     RETURN_ON_ERR(Grow(-offset));
 
     offset = alloc_.Malloc(bytes.size());
@@ -171,22 +165,30 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
     backing_file_->WriteFixedAsync(buf.bytes, offset, *buf.buf_idx, std::move(io_cb));
   else
     backing_file_->WriteAsync(buf.bytes, offset, std::move(io_cb));
+  if (alloc_.allocated_bytes() > (size_ * 0.85) && !grow_pending_) {
+    auto ec = Grow(265_MB);
+    LOG_IF(ERROR, ec) << "Could not call grow :" << ec.message();
+    return ec;
+  }
   return {};
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
-  return {alloc_.allocated_bytes(), alloc_.capacity()};
+  return {alloc_.allocated_bytes(), alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_};
 }
 
 std::error_code DiskStorage::Grow(off_t grow_size) {
   off_t start = size_;
 
-  if (off_t(alloc_.capacity()) + grow_size >= max_size_)
+  if (off_t(alloc_.capacity()) + grow_size > max_size_)
     return std::make_error_code(std::errc::no_space_on_device);
 
-  if (std::exchange(grow_pending_, true))
+  if (std::exchange(grow_pending_, true)) {
+    // TODO: to introduce future like semantics where multiple flow can block on the
+    // ongoing Grow operation.
+    LOG(WARNING) << "Concurrent grow request detected ";
     return std::make_error_code(std::errc::operation_in_progress);
-
+  }
   auto err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, size_, grow_size);
   grow_pending_ = false;
   RETURN_ON_ERR(err);
@@ -194,6 +196,18 @@ std::error_code DiskStorage::Grow(off_t grow_size) {
   size_ += grow_size;
   alloc_.AddStorage(start, grow_size);
   return {};
+}
+
+UringBuf DiskStorage::PrepareBuf(size_t size) {
+  DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
+  auto* up = static_cast<UringProactor*>(ProactorBase::me());
+
+  if (auto borrowed = up->RequestBuffer(size); borrowed) {
+    ++reg_buf_alloc_cnt_;
+    return *borrowed;
+  }
+  ++heap_buf_alloc_cnt_;
+  return AllocateTmpBuf(size);
 }
 
 }  // namespace dfly::tiering

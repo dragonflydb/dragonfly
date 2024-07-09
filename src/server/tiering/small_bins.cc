@@ -16,13 +16,22 @@
 #include "server/tx_base.h"
 
 namespace dfly::tiering {
+using namespace std;
+
+namespace {
+
+// See FlushBin() for format details
+size_t StashedValueSize(string_view value) {
+  return 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
+}
+
+}  // namespace
 
 std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
                                                      std::string_view value) {
   DCHECK_LT(value.size(), 2_KB);
 
-  // See FlushBin() for format details
-  size_t value_bytes = 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
+  size_t value_bytes = StashedValueSize(value);
 
   std::optional<FilledBin> filled_bin;
   if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
@@ -30,11 +39,25 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   }
 
   current_bin_bytes_ += value_bytes;
-  current_bin_.emplace(std::make_pair(dbid, key), value);
+
+  auto [it, inserted] = current_bin_.emplace(std::make_pair(dbid, key), value);
+  if (!inserted) {
+    LOG(ERROR) << "Duplicate key " << key << " dbid " << dbid;
+    LOG(ERROR) << "Values are same: " << int(it->second == value);
+    for (const auto& [key, _] : current_bin_) {
+      LOG(ERROR) << "Existing ones: " << key.first << " " << key.second;
+    }
+
+    LOG(FATAL) << "Crashing!";
+  }
+  DVLOG(2) << "current_bin_bytes: " << current_bin_bytes_
+           << ", current_bin_size:" << current_bin_.size();
   return filled_bin;
 }
 
 SmallBins::FilledBin SmallBins::FlushBin() {
+  DCHECK_GT(current_bin_.size(), 0u);
+
   std::string out;
   out.resize(current_bin_bytes_ + 2);
 
@@ -67,18 +90,24 @@ SmallBins::FilledBin SmallBins::FlushBin() {
   }
 
   current_bin_bytes_ = 0;
+
+  // erase does not shrink, unlike clear().
   current_bin_.erase(current_bin_.begin(), current_bin_.end());
 
   return {id, std::move(out)};
 }
 
 SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment) {
-  auto key_list = pending_bins_.extract(id);
-  DCHECK_GT(key_list.mapped().size(), 0u);
+  DVLOG(1) << "ReportStashed " << id;
+
+  DCHECK(pending_bins_.contains(id));
+  auto seg_map_node = pending_bins_.extract(id);
+  const auto& seg_map = seg_map_node.mapped();
+  DCHECK_GT(seg_map.size(), 0u) << id;
 
   uint16_t bytes = 0;
   SmallBins::KeySegmentList list;
-  for (auto& [key, sub_segment] : key_list.mapped()) {
+  for (auto& [key, sub_segment] : seg_map) {
     bytes += sub_segment.length;
 
     DiskSegment real_segment{segment.offset + sub_segment.offset, sub_segment.length};
@@ -103,8 +132,14 @@ std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId
 
 std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view key) {
   std::pair<DbIndex, std::string> key_pair{dbid, key};
+  auto it = current_bin_.find(key_pair);
 
-  if (current_bin_.erase(key_pair)) {
+  if (it != current_bin_.end()) {
+    size_t stashed_size = StashedValueSize(it->second);
+    DCHECK_GE(current_bin_bytes_, stashed_size);
+
+    current_bin_bytes_ -= stashed_size;
+    current_bin_.erase(it);
     return std::nullopt;
   }
 

@@ -184,7 +184,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
   string_view arg = ArgS(args, 1);
   unsigned num_thread;
   if (!absl::SimpleAtoi(arg, &num_thread)) {
-    return rb->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   if (num_thread < pool->size()) {
@@ -192,7 +192,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
       if (!cntx->conn()->Migrate(pool->at(num_thread))) {
         // Listener::PreShutdown() triggered
         if (cntx->conn()->socket()->IsOpen()) {
-          return rb->SendError(kInvalidState);
+          return cntx->SendError(kInvalidState);
         }
         return;
       }
@@ -201,7 +201,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendOk();
   }
 
-  return rb->SendError(kInvalidIntErr);
+  return cntx->SendError(kInvalidIntErr);
 }
 
 void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
@@ -214,7 +214,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 5) {
     seqid.emplace();
     if (!absl::SimpleAtoi(ArgS(args, 4), &seqid.value())) {
-      return rb->SendError(facade::kInvalidIntErr);
+      return cntx->SendError(facade::kInvalidIntErr);
     }
   }
 
@@ -222,12 +222,12 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
           << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1);
 
   if (master_id != sf_->master_replid()) {
-    return rb->SendError(kBadMasterId);
+    return cntx->SendError(kBadMasterId);
   }
 
   unsigned flow_id;
   if (!absl::SimpleAtoi(flow_id_str, &flow_id) || flow_id >= shard_set->size()) {
-    return rb->SendError(facade::kInvalidIntErr);
+    return cntx->SendError(facade::kInvalidIntErr);
   }
 
   auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, rb);
@@ -236,7 +236,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   unique_lock lk(replica_ptr->mu);
   if (replica_ptr->replica_state != SyncState::PREPARATION)
-    return rb->SendError(kInvalidState);
+    return cntx->SendError(kInvalidState);
 
   // Set meta info on connection.
   cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
@@ -254,7 +254,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
     // Listener::PreShutdown() triggered
     if (cntx->conn()->socket()->IsOpen()) {
-      return rb->SendError(kInvalidState);
+      return cntx->SendError(kInvalidState);
     }
     return;
   }
@@ -311,7 +311,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
 
     // TODO: Send better error
     if (*status != OpStatus::OK)
-      return rb->SendError(kInvalidState);
+      return cntx->SendError(kInvalidState);
   }
 
   LOG(INFO) << "Started sync with replica " << replica_ptr->address << ":"
@@ -349,7 +349,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
     shard_set->RunBlockingInParallel(std::move(cb));
 
     if (*status != OpStatus::OK)
-      return rb->SendError(kInvalidState);
+      return cntx->SendError(kInvalidState);
   }
 
   LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->address << ":"
@@ -436,7 +436,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   if (*status != OpStatus::OK) {
     sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
-    return rb->SendError("Takeover failed!");
+    return cntx->SendError("Takeover failed!");
   }
   cntx->SendOk();
 
