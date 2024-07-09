@@ -321,18 +321,27 @@ void MemoryCmd::MallocStats() {
 void MemoryCmd::ArenaStats(CmdArgList args) {
   uint32_t tid = 0;
   bool backing = false;
+  bool show_arenas = false;
   if (args.size() >= 2) {
     ToUpper(&args[1]);
 
     unsigned tid_indx = 1;
-    if (ArgS(args, tid_indx) == "BACKING") {
-      ++tid_indx;
-      backing = true;
+    if (ArgS(args, tid_indx) == "SHOW") {
+      show_arenas = true;
+    } else {
+      if (ArgS(args, tid_indx) == "BACKING") {
+        ++tid_indx;
+        backing = true;
+      }
+      if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
+        return cntx_->SendError(kInvalidIntErr);
+      }
     }
+  }
 
-    if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
-      return cntx_->SendError(kInvalidIntErr);
-    }
+  if (show_arenas) {
+    mi_debug_show_arenas(true, true, true);
+    return cntx_->reply_builder()->SendOk();
   }
 
   if (backing && tid >= shard_set->pool()->size()) {

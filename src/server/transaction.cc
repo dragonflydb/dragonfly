@@ -181,7 +181,7 @@ void Transaction::InitGlobal() {
 void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShardCache>* out) {
   auto& shard_index = *out;
 
-  auto add = [this, &shard_index](uint32_t sid, uint32_t b, uint32_t e) {
+  auto add = [&shard_index](uint32_t sid, uint32_t b, uint32_t e) {
     auto& slices = shard_index[sid].slices;
     if (!slices.empty() && slices.back().second == b) {
       slices.back().second = e;
