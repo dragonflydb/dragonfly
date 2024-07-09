@@ -119,6 +119,9 @@ jobs:
             exit 1
           fi
 
+      - name: Delete Memtier Benchmark jon
+        shell: bash
+        run: |
           kubectl delete -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark
 
       - name: Run Memtier Benchmark again
