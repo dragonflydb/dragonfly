@@ -1306,8 +1306,6 @@ async def test_cluster_fuzzymigration(
     # Generate capture, capture ignores counter keys
     capture = await seeder.capture()
 
-    assert False
-
     # Generate migration plan
     for node_idx, node in enumerate(nodes):
         random.shuffle(node.slots)

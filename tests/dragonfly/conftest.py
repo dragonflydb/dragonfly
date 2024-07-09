@@ -29,13 +29,19 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 DATABASE_INDEX = 0
 BASE_LOG_DIR = "/tmp/dragonfly_logs/"
+FAILED_PATH = "/tmp/failed/"
 
 
+# runs on pytest start
 def pytest_configure(config):
+    # clean everything
+    if os.path.exists(FAILED_PATH):
+        shutil.rmtree(FAILED_PATH)
     if os.path.exists(BASE_LOG_DIR):
         shutil.rmtree(BASE_LOG_DIR)
 
 
+# runs per test case
 def pytest_runtest_setup(item):
     # Generate a unique directory name for each test based on its nodeid
     translator = str.maketrans(":[]{}/ ", "_______", "\"*'")
@@ -354,27 +360,24 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
     return args
 
 
-def copy_failed_logs_and_clean_tmp_folder(log_dir, report):
-    failed_path = "/tmp/failed"
-    if os.path.exists(failed_path):
-        shutil.rmtree(failed_path)
-
-    os.makedirs(failed_path)
+def copy_failed_logs(log_dir, report):
+    test_failed_path = os.path.join(FAILED_PATH, os.path.basename(log_dir))
+    if not os.path.exists(test_failed_path):
+        os.makedirs(test_failed_path)
 
     logging.error(f"Test failed {report.nodeid} with logs: ")
-    cwd = os.getcwd()
-    onlyfiles = [
-        os.path.join(log_dir, f)
-        for f in os.listdir(log_dir)
-        if os.path.isfile(os.path.join(log_dir, f))
-    ]
-    for file in onlyfiles:
-        # copy to failed folder
-        file = file.rstrip("\n")
-        logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
-        shutil.copy(file, failed_path)
+
+    for f in os.listdir(log_dir):
+        file = os.path.join(log_dir, f)
+        if os.path.isfile(file):
+            file = file.rstrip("\n")
+            logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
+            shutil.copy(file, test_failed_path)
 
 
+# tests results we get on the "call" state
+# but we can not copy logs until "teardown" state because the server isn't stoped
+# so we save result of the "call" state and process it on the "teardown" when the server is stoped
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
@@ -388,7 +391,7 @@ def pytest_runtest_makereport(item, call):
         log_dir = getattr(item, "log_dir", None)
         call_outcome = getattr(item, "call_outcome", None)
         if call_outcome and call_outcome.failed:
-            copy_failed_logs_and_clean_tmp_folder(log_dir, call_outcome)
+            copy_failed_logs(log_dir, call_outcome)
 
 
 @pytest.fixture(scope="function")
