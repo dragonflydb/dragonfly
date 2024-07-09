@@ -116,7 +116,6 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   auto& sinfo = PrepareShardInfo(last_sid, slot_checker.GetUniqueSlotId());
 
-  sinfo.had_writes |= cmd->Cid()->IsWriteOnly();
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
 
@@ -279,10 +278,6 @@ void MultiCommandSquasher::Run() {
 
   // Set last txid.
   cntx_->last_command_debug.clock = cntx_->transaction->txid();
-
-  if (!sharded_.empty())
-    cntx_->transaction->ReportWritesSquashedMulti(
-        [this](ShardId sid) { return sharded_[sid].had_writes; });
 
   // UnlockMulti is a no-op for non-atomic multi transactions,
   // still called for correctness and future changes
