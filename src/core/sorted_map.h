@@ -54,6 +54,9 @@ class SortedMap {
   bool Insert(double score, sds member);
   bool Delete(sds ele);
 
+  // Upper bound size of the set.
+  // Note: Currently we do not allow member expiry in sorted sets, therefore it's exact
+  // But if we decide to add expire, this method will provide an approximation from above.
   size_t Size() const {
     return score_map->UpperBoundSize();
   }
@@ -87,8 +90,11 @@ class SortedMap {
  private:
   using ScoreTree = BPTree<ScoreSds, ScoreSdsPolicy>;
 
+  // hash map from fields to scores.
   ScoreMap* score_map = nullptr;
-  ScoreTree* score_tree = nullptr;  // just a stub for now.
+
+  // sorted tree of (score,field) items.
+  ScoreTree* score_tree = nullptr;
 };
 
 // Used by CompactObject.
