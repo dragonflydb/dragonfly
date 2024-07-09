@@ -115,7 +115,7 @@ jobs:
 
           #kubectl wait --for=condition=failed --timeout=120s -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null
           kubectl logs -n ${{ steps.setup.outputs.namespace }} -f jobs/memtier-benchmark
-          if [[ $job_result -nq 1 ]]; then
+          if [[ $job_result -ne 1 ]]; then
             exit 1
           fi
 
