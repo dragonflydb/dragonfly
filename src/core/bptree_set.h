@@ -79,12 +79,14 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   /// @param rank_start
   /// @param rank_end - inclusive.
   /// @param cb - callback to be called for each item in the range.
+  ///             Should return false to stop iteration.
   bool Iterate(uint32_t rank_start, uint32_t rank_end, std::function<bool(KeyT)> cb) const;
 
   /// @brief Iterates over all items in the range [rank_start, rank_end] by rank in reverse order.
   /// @param rank_start
   /// @param rank_end
-  /// @param cb
+  /// @param cb - callback to be called for each item in the range.
+  ///             Should return false to stop iteration.
   bool IterateReverse(uint32_t rank_start, uint32_t rank_end, std::function<bool(KeyT)> cb) const;
 
   /// @brief Returns the path to the first item in the tree that is greater or equal to key.
@@ -435,7 +437,24 @@ void BPTree<T, Policy>::ToRank(uint32_t rank, BPTreePath* path) const {
   assert(root_ && rank < count_);
   BPTreeNode* node = root_;
 
+  if (rank + 1 == count_) {
+    // Corner case where we search for the node on the right.
+    while (!node->IsLeaf()) {
+      path->Push(node, node->NumItems());
+      node = node->Child(node->NumItems());
+    }
+    path->Push(node, node->NumItems() - 1);
+    return;
+  }
+
   while (!node->IsLeaf()) {
+    // handle common corner case of search of left-most node, and avoid counting sub-tree count.
+    if (rank == 0) {
+      path->Push(node, 0);
+      node = node->Child(0);
+      continue;
+    }
+
     for (unsigned i = 0; i <= node->NumItems(); ++i) {
       uint32_t subtree_cnt = node->GetChildTreeCount(i);
       if (subtree_cnt > rank) {

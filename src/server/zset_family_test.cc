@@ -698,6 +698,9 @@ TEST_F(ZSetFamilyTest, ZPopMin) {
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1"));
 
+  resp = Run({"zpopmin", "key", "0"});
+  ASSERT_THAT(resp, ArrLen(0));
+
   resp = Run({"zpopmin", "key", "2"});
   ASSERT_THAT(resp, ArrLen(4));
   EXPECT_THAT(resp.GetVec(), ElementsAre("b", "2", "c", "3"));
