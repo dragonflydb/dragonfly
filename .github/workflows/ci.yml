@@ -178,8 +178,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: regression_logs
-          path: |
-            /tmp/*
+          path: /tmp/failed/*
 
   lint-test-chart:
     runs-on: ubuntu-latest
