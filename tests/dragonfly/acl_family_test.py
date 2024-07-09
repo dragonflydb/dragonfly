@@ -323,7 +323,11 @@ async def test_bad_acl_file(df_factory, tmp_dir):
 @pytest.mark.asyncio
 @dfly_args({"port": 1111})
 async def test_good_acl_file(df_factory, tmp_dir):
-    acl = create_temp_file("USER MrFoo ON >mypass", tmp_dir)
+    # The hash below is password temp
+    acl = create_temp_file(
+        "USER MrFoo ON #a6864eb339b0e1f6e00d75293a8840abf069a2c0fe82e6e53af6ac099793c1d5 >mypass",
+        tmp_dir,
+    )
     df = df_factory.create(aclfile=acl)
 
     df.start()
@@ -332,8 +336,13 @@ async def test_good_acl_file(df_factory, tmp_dir):
     await client.execute_command("ACL LOAD")
     result = await client.execute_command("ACL list")
     assert 2 == len(result)
-    assert "user MrFoo on #ea71c25a7a60224 -@all" in result
+    assert "user MrFoo on #ea71c25a7a60224 #a6864eb339b0e1f -@all" in result
     assert "user default on nopass ~* +@all" in result
+    await client.execute_command("ACL SETUSER MrFoo +@all")
+    # Check multiple passwords work
+    assert "OK" == await client.execute_command("AUTH mypass")
+    assert "OK" == await client.execute_command("AUTH temp")
+    assert "OK" == await client.execute_command("AUTH default")
     await client.execute_command("ACL DELUSER MrFoo")
 
     await client.execute_command("ACL SETUSER roy ON >mypass +@string +hset")

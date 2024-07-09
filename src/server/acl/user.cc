@@ -44,7 +44,7 @@ void User::Update(UpdateRequest&& req) {
       password_hashes_.clear();
       continue;
     }
-    SetPasswordHash(pass.password, req.is_hashed);
+    SetPasswordHash(pass.password, pass.is_hashed);
   }
 
   auto cat_visitor = [this](UpdateRequest::CategoryValueType cat) {
