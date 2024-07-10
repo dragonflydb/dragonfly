@@ -105,19 +105,8 @@ jobs:
         shell: bash
         run: |
           # Memtier benchmark run will fail at some point because old master shutdown on version upgrade
-          while true; do
-            if kubectl wait --for=condition=failed --timeout=0 -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null; then
-              job_result=1
-              break
-            fi
-            sleep 3
-          done
-
-          #kubectl wait --for=condition=failed --timeout=120s -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null
+          kubectl wait --for=condition=failed --timeout=120s -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null
           kubectl logs -n ${{ steps.setup.outputs.namespace }} -f jobs/memtier-benchmark
-          if [[ $job_result -ne 1 ]]; then
-            exit 1
-          fi
 
       - name: Delete Memtier Benchmark jon
         shell: bash
@@ -128,6 +117,7 @@ jobs:
         shell: bash
         run: |
           kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
+
           while true; do
             if kubectl wait --for=condition=complete --timeout=0 -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null; then
               job_result=0
