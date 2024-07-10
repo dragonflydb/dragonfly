@@ -1200,7 +1200,7 @@ pair<StringOrView, uint8_t> CompactObj::GetRawString() const {
     u_.small_str.Get(&tmp);
     return {StringOrView::FromString(std::move(tmp)), mask_ & kEncMask};
   }
-  LOG(FATAL) << "Should not reach here";
+  LOG(FATAL) << "Unsupported tag for GetRawString(): " << taglen_;
   return {};
 }
 
