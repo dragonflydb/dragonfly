@@ -1186,6 +1186,40 @@ void CompactObj::EncodeString(string_view str) {
   u_.r_obj.SetString(encoded, tl.local_mr);
 }
 
+pair<StringOrView, uint8_t> CompactObj::GetRawString() const {
+  DCHECK(!IsExternal());
+
+  if (taglen_ == ROBJ_TAG) {
+    CHECK_EQ(OBJ_STRING, u_.r_obj.type());
+    DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
+    return {StringOrView::FromView(u_.r_obj.AsView()), mask_ & kEncMask};
+  }
+
+  if (taglen_ == SMALL_TAG) {
+    string tmp;
+    u_.small_str.Get(&tmp);
+    return {StringOrView::FromString(std::move(tmp)), mask_ & kEncMask};
+  }
+  LOG(FATAL) << "Unsupported tag for GetRawString(): " << taglen_;
+  return {};
+}
+
+void CompactObj::SetRawString(std::string_view blob, uint8_t enc_mask) {
+  DCHECK_GT(blob.size(), kInlineLen);
+  // Current implementation assumes that the object is External, and switches to string.
+  CHECK_EQ(taglen_, EXTERNAL_TAG);
+
+  uint8_t mask = (mask_ & ~kEncMask) | enc_mask;
+
+  if (kUseSmallStrings && SmallString::CanAllocate(blob.size())) {
+    SetMeta(SMALL_TAG, mask);
+    tl.small_str_bytes += u_.small_str.Assign(blob);
+  } else {
+    SetMeta(ROBJ_TAG, mask);
+    u_.r_obj.SetString(blob, tl.local_mr);
+  }
+}
+
 size_t CompactObj::DecodedLen(size_t sz) const {
   return ascii_len(sz) - ((mask_ & ASCII1_ENC_BIT) ? 1 : 0);
 }
