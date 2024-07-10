@@ -325,6 +325,9 @@ class CompactObj {
   void SetExternal(size_t offset, size_t sz);
   std::pair<size_t, size_t> GetExternalSlice() const;
 
+  // The opposite of SetExternal, changes the external entry to be an in-memory string.
+  void Materialize(std::string_view str);
+
   // In case this object a single blob, returns number of bytes allocated on heap
   // for that blob. Otherwise returns 0.
   size_t MallocUsed() const;
@@ -374,6 +377,7 @@ class CompactObj {
   }
 
  private:
+  void EncodeString(std::string_view str);
   size_t DecodedLen(size_t sz) const;
 
   bool EqualNonInline(std::string_view sv) const;
