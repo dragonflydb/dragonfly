@@ -273,7 +273,7 @@ std::variant<User::UpdateRequest, ErrorReply> ParseAclSetUser(facade::ArgRange a
       req.passwords.push_back(std::move(*pass));
 
       if (hashed && absl::StartsWith(facade::ToSV(arg), "#")) {
-        req.is_hashed = hashed;
+        req.passwords.back().is_hashed = true;
       }
       continue;
     }
