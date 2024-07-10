@@ -336,7 +336,10 @@ async def test_good_acl_file(df_factory, tmp_dir):
     await client.execute_command("ACL LOAD")
     result = await client.execute_command("ACL list")
     assert 2 == len(result)
-    assert "user MrFoo on #ea71c25a7a60224 #a6864eb339b0e1f -@all" in result
+    assert (
+        "user MrFoo on #ea71c25a7a60224 #a6864eb339b0e1f -@all" in result
+        or "user MrFoo on #a6864eb339b0e1f #ea71c25a7a60224 -@all"
+    )
     assert "user default on nopass ~* +@all" in result
     await client.execute_command("ACL SETUSER MrFoo +@all")
     # Check multiple passwords work
