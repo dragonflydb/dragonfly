@@ -108,9 +108,7 @@ ParseResult<WrappedJsonPath> ParseJsonPath(std::string_view path) {
 
 namespace reply_generic {
 
-template <typename T> void Send(T value, RedisReplyBuilder* rb) = delete;
-
-template <> void Send(std::size_t value, RedisReplyBuilder* rb) {
+void Send(std::size_t value, RedisReplyBuilder* rb) {
   rb->SendLong(value);
 }
 
@@ -134,8 +132,8 @@ template <typename T> void Send(const std::vector<T>& vec, RedisReplyBuilder* rb
 }
 
 template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyBuilder* rb) {
-  if (result.error_code) {
-    rb->SendError(result.error_code.message());
+  if (result.ErrorOccured()) {
+    rb->SendError(result.GetError().message());
     return;
   }
 
@@ -295,7 +293,7 @@ error_code JsonReplace(JsonType& instance, string_view path, json::MutateCallbac
   return ec;
 }
 
-template <typename T>
+template <typename T = Nothing>
 OpResult<JsonCallbackResult<T>> UpdateEntry(const OpArgs& op_args, std::string_view key,
                                             const WrappedJsonPath& json_path,
                                             JsonPathMutateCallback<T> cb,
@@ -308,18 +306,17 @@ OpResult<JsonCallbackResult<T>> UpdateEntry(const OpArgs& op_args, std::string_v
   JsonType* json_val = pv.GetJson();
   DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
                    << pv.ObjType() << "'";
-  JsonType& json_entry = *json_val;
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
   auto mutate_res = json_path.Mutate(json_val, cb);
-  if (mutate_res.error_code) {
-    return mutate_res;  // TODO(continue)
+  if (mutate_res.ErrorOccured()) {
+    return mutate_res;  // TODO(If error occured return or continue)
   }
 
   // Make sure that we don't have other internal issue with the operation
   if (verify_op) {
-    verify_op(json_entry);
+    verify_op(*json_val);
   }
 
   it_res->post_updater.Run();

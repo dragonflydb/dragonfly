@@ -14,7 +14,7 @@
 
 namespace dfly {
 
-class Nothing {};
+using Nothing = std::monostate;
 using JsonExpression = jsoncons::jsonpath::jsonpath_expression<JsonType>;
 
 template <typename T>
@@ -24,11 +24,11 @@ template <typename T = Nothing> class MutateCallbackResult {
  public:
   MutateCallbackResult() = default;
 
-  explicit MutateCallbackResult(bool should_be_deleted_) : should_be_deleted(should_be_deleted_) {
+  explicit MutateCallbackResult(bool should_be_deleted) : should_be_deleted_(should_be_deleted_) {
   }
 
-  MutateCallbackResult(bool should_be_deleted_, T&& value)
-      : should_be_deleted(should_be_deleted_), value_(std::forward<T>(value)) {
+  MutateCallbackResult(bool should_be_deleted, T&& value)
+      : should_be_deleted_(should_be_deleted), value_(std::forward<T>(value)) {
   }
 
   bool HasValue() const {
@@ -39,9 +39,12 @@ template <typename T = Nothing> class MutateCallbackResult {
     return std::move(value_).value();
   }
 
-  bool should_be_deleted;
+  bool ShouldBeDeleted() const {
+    return should_be_deleted_;
+  }
 
  private:
+  bool should_be_deleted_;
   std::optional<T> value_;
 };
 
@@ -51,14 +54,14 @@ using JsonPathMutateCallback =
 
 namespace details {
 
-template <typename T> void OptionalEmplace(T&& value, std::optional<T>* optional) {
-  optional->emplace(std::forward<T>(value));
+template <typename T> void OptionalEmplace(T value, std::optional<T>* optional) {
+  optional->emplace(std::move(value));
 }
 
 template <typename T>
-void OptionalEmplace(std::optional<T>&& value, std::optional<std::optional<T>>* optional) {
+void OptionalEmplace(std::optional<T> value, std::optional<std::optional<T>>* optional) {
   if (value.has_value()) {
-    optional->emplace(std::forward<std::optional<T>>(value));
+    optional->emplace(std::move(value));
   }
 }
 
@@ -81,11 +84,14 @@ template <typename T> class JsonCallbackResult {
     }
   }
 
-  void AddValue(T&& value) {
+  explicit JsonCallbackResult(std::error_code error_code) : error_code_(error_code) {
+  }
+
+  void AddValue(T value) {
     if (IsV1()) {
-      details::OptionalEmplace(std::forward<T>(value), &AsV1());
+      details::OptionalEmplace(std::move(value), &AsV1());
     } else {
-      AsV2().emplace_back(std::forward<T>(value));
+      AsV2().emplace_back(std::move(value));
     }
   }
 
@@ -94,27 +100,37 @@ template <typename T> class JsonCallbackResult {
   }
 
   JsonV1Result& AsV1() {
+    DCHECK(!ErrorOccured());
     return std::get<JsonV1Result>(result_);
   }
 
   JsonV2Result& AsV2() {
+    DCHECK(!ErrorOccured());
     return std::get<JsonV2Result>(result_);
   }
 
   const JsonV1Result& AsV1() const {
+    DCHECK(!ErrorOccured());
     return std::get<JsonV1Result>(result_);
   }
 
   const JsonV2Result& AsV2() const {
+    DCHECK(!ErrorOccured());
     return std::get<JsonV2Result>(result_);
   }
 
- public:
-  std::error_code error_code;
+  bool ErrorOccured() const {
+    return static_cast<bool>(error_code_);
+  }
+
+  const std::error_code& GetError() const {
+    return error_code_;
+  }
 
  private:
   std::variant<JsonV1Result, JsonV2Result> result_;
   bool legacy_mode_is_enabled_;
+  std::error_code error_code_;
 };
 
 class WrappedJsonPath {
@@ -173,40 +189,39 @@ class WrappedJsonPath {
       if (res.HasValue()) {
         mutate_result.AddValue(std::move(res).GetValue());
       }
-      return res.should_be_deleted;
+      return res.ShouldBeDeleted();
     };
 
     if (HoldsJsonPath()) {
       const auto& json_path = AsJsonPath();
       json::MutatePath(json_path, mutate_callback, json_entry);
     } else {
-      using evaluator_t = jsoncons::jsonpath::detail::jsonpath_evaluator<JsonType, JsonType&>;
-      using value_type = evaluator_t::value_type;
-      using reference = evaluator_t::reference;
-      using json_selector_t = evaluator_t::path_expression_type;
+      using namespace jsoncons::jsonpath;
+      using namespace jsoncons::jsonpath::detail;
+      using Evaluator = jsonpath_evaluator<JsonType, JsonType&>;
+      using ValueType = Evaluator::value_type;
+      using Reference = Evaluator::reference;
+      using JsonSelector = Evaluator::path_expression_type;
 
-      jsoncons::jsonpath::custom_functions<JsonType> funcs =
-          jsoncons::jsonpath::custom_functions<JsonType>();
+      custom_functions<JsonType> funcs = custom_functions<JsonType>();
 
-      auto& ec = mutate_result.error_code;
-      jsoncons::jsonpath::detail::static_resources<value_type, reference> static_resources(funcs);
-      evaluator_t e;
+      std::error_code ec;
+      static_resources<ValueType, Reference> static_resources(funcs);
+      Evaluator e;
 
-      json_selector_t expr = e.compile(static_resources, path_.view(), ec);
+      JsonSelector expr = e.compile(static_resources, path_.view(), ec);
       if (ec) {
-        return mutate_result;
+        return JsonCallbackResult<T>{ec};
       }
 
-      jsoncons::jsonpath::detail::dynamic_resources<value_type, reference> resources;
+      dynamic_resources<ValueType, Reference> resources;
 
-      auto f = [&mutate_callback](const jsoncons::jsonpath::basic_path_node<char>& path,
-                                  JsonType& val) {
-        mutate_callback(jsoncons::jsonpath::to_string(path), &val);
+      auto f = [&mutate_callback](const basic_path_node<char>& path, JsonType& val) {
+        mutate_callback(to_string(path), &val);
       };
 
-      expr.evaluate(
-          resources, *json_entry, json_selector_t::path_node_type{}, *json_entry, std::move(f),
-          jsoncons::jsonpath::result_options::nodups | jsoncons::jsonpath::result_options::path);
+      expr.evaluate(resources, *json_entry, JsonSelector::path_node_type{}, *json_entry,
+                    std::move(f), result_options::nodups | result_options::path);
     }
     return mutate_result;
   }
