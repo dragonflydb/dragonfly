@@ -67,7 +67,7 @@ runs:
           mkdir /tmp/failed
           # Copy over the logs of the test that timedout. We need this because the exception/failure
           # handlers do not run when the shell command TIMEOUT sends a SIGTERM to terminate the pytest process.
-          cat /tmp/last_test_log_files.txt | xargs -I {} cp {} /tmp/failed/
+          cat /tmp/last_test_log_dir.txt | xargs -I {} cp -r {}/ /tmp/failed/
         fi
 
     - name: Send notification on failure
