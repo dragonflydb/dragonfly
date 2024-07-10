@@ -119,8 +119,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // Set value to be an in-memory type again, either empty or with a value. Update memory stats
   void Upload(DbIndex dbid, string_view value, size_t serialized_len, PrimeValue* pv) {
-    pv->Reset();
-    pv->SetString(value);
+    pv->Materialize(value);
     RecordDeleted(*pv, serialized_len, GetDbTableStats(dbid));
   }
 

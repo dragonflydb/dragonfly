@@ -185,17 +185,25 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->TEST_EnableHeartbeat(); });
 
   // Stash all values
+  string value = BuildString(3000);
   for (size_t i = 0; i < kNum; i++) {
-    Run({"SET", absl::StrCat("k", i), BuildString(3000)});
+    Run({"SETEX", absl::StrCat("k", i), "100", value});
   }
 
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
   ASSERT_EQ(GetMetrics().tiered_stats.total_stashes, kNum);
   ASSERT_EQ(GetMetrics().db_stats[0].tiered_entries, kNum);
 
-  // Trigger re-fetch
+  // Trigger re-fetch and test TTL is preserved.
   for (size_t i = 0; i < kNum; i++) {
-    Run({"GET", absl::StrCat("k", i)});
+    string key = absl::StrCat("k", i);
+    auto resp = Run({"TTL", key});
+    EXPECT_THAT(resp, IntArg(100));
+
+    resp = Run({"GET", key});
+    EXPECT_EQ(resp, value);
+    resp = Run({"TTL", key});
+    EXPECT_THAT(resp, IntArg(100));
   }
 
   // Wait for offload to do it all again
