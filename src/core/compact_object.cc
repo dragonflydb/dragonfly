@@ -761,52 +761,7 @@ void CompactObj::SetString(std::string_view str) {
     }
   }
 
-  DCHECK_GT(str.size(), kInlineLen);
-
-  string_view encoded = str;
-  bool is_ascii = kUseAsciiEncoding && detail::validate_ascii_fast(str.data(), str.size());
-
-  if (is_ascii) {
-    size_t encode_len = binpacked_len(str.size());
-    size_t rev_len = ascii_len(encode_len);
-
-    if (rev_len == str.size()) {
-      mask |= ASCII2_ENC_BIT;  // str hits its highest bound.
-    } else {
-      CHECK_EQ(str.size(), rev_len - 1) << "Bad ascii encoding for len " << str.size();
-
-      mask |= ASCII1_ENC_BIT;
-    }
-
-    tl.tmp_buf.resize(encode_len);
-    detail::ascii_pack_simd2(str.data(), str.size(), tl.tmp_buf.data());
-    encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), encode_len};
-
-    if (encoded.size() <= kInlineLen) {
-      SetMeta(encoded.size(), mask);
-      detail::ascii_pack(str.data(), str.size(), reinterpret_cast<uint8_t*>(u_.inline_str));
-
-      return;
-    }
-  }
-
-  if (kUseSmallStrings && SmallString::CanAllocate(encoded.size())) {
-    if (taglen_ == 0) {
-      SetMeta(SMALL_TAG, mask);
-      tl.small_str_bytes += u_.small_str.Assign(encoded);
-      return;
-    }
-
-    if (taglen_ == SMALL_TAG && encoded.size() <= u_.small_str.size()) {
-      mask_ = mask;
-      tl.small_str_bytes -= u_.small_str.MallocUsed();
-      tl.small_str_bytes += u_.small_str.Assign(encoded);
-      return;
-    }
-  }
-
-  SetMeta(ROBJ_TAG, mask);
-  u_.r_obj.SetString(encoded, tl.local_mr);
+  EncodeString(str);
 }
 
 string_view CompactObj::GetSlice(string* scratch) const {
@@ -1000,6 +955,13 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   return pair<size_t, size_t>(offset, size_t(u_.ext_ptr.size));
 }
 
+void CompactObj::Materialize(std::string_view str) {
+  CHECK(IsExternal());
+  CHECK_GT(str.size(), 20u);
+
+  EncodeString(str);
+}
+
 void CompactObj::Reset() {
   if (HasAllocated()) {
     Free();
@@ -1172,6 +1134,56 @@ bool CompactObj::CmpEncoded(string_view sv) const {
   }
   LOG(FATAL) << "Unsupported tag " << int(taglen_);
   return false;
+}
+
+void CompactObj::EncodeString(string_view str) {
+  DCHECK_GT(str.size(), kInlineLen);
+
+  uint8_t mask = mask_ & ~kEncMask;
+  string_view encoded = str;
+  bool is_ascii = kUseAsciiEncoding && detail::validate_ascii_fast(str.data(), str.size());
+
+  if (is_ascii) {
+    size_t encode_len = binpacked_len(str.size());
+    size_t rev_len = ascii_len(encode_len);
+
+    if (rev_len == str.size()) {
+      mask |= ASCII2_ENC_BIT;  // str hits its highest bound.
+    } else {
+      CHECK_EQ(str.size(), rev_len - 1) << "Bad ascii encoding for len " << str.size();
+
+      mask |= ASCII1_ENC_BIT;
+    }
+
+    tl.tmp_buf.resize(encode_len);
+    detail::ascii_pack_simd2(str.data(), str.size(), tl.tmp_buf.data());
+    encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), encode_len};
+
+    if (encoded.size() <= kInlineLen) {
+      SetMeta(encoded.size(), mask);
+      detail::ascii_pack(str.data(), str.size(), reinterpret_cast<uint8_t*>(u_.inline_str));
+
+      return;
+    }
+  }
+
+  if (kUseSmallStrings && SmallString::CanAllocate(encoded.size())) {
+    if (taglen_ == 0) {
+      SetMeta(SMALL_TAG, mask);
+      tl.small_str_bytes += u_.small_str.Assign(encoded);
+      return;
+    }
+
+    if (taglen_ == SMALL_TAG && encoded.size() <= u_.small_str.size()) {
+      mask_ = mask;
+      tl.small_str_bytes -= u_.small_str.MallocUsed();
+      tl.small_str_bytes += u_.small_str.Assign(encoded);
+      return;
+    }
+  }
+
+  SetMeta(ROBJ_TAG, mask);
+  u_.r_obj.SetString(encoded, tl.local_mr);
 }
 
 size_t CompactObj::DecodedLen(size_t sz) const {
