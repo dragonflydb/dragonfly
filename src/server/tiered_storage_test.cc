@@ -230,6 +230,7 @@ TEST_F(TieredStorageTest, FlushAll) {
   Run({"FLUSHALL"});
 
   done = true;
+  util::ThisFiber::SleepFor(50ms);
   reader.Join();
 
   auto metrics = GetMetrics();
