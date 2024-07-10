@@ -12,6 +12,7 @@
 #include "base/pmr/memory_resource.h"
 #include "core/json/json_object.h"
 #include "core/small_string.h"
+#include "core/string_or_view.h"
 
 namespace dfly {
 
@@ -375,6 +376,16 @@ class CompactObj {
     t->~T();
     memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
+
+  // returns raw (non-decoded) string together with the encoding mask.
+  // Used to bypass decoding layer.
+  // Precondition: the object is a non-inline string.
+  std::pair<StringOrView, uint8_t> GetRawString() const;
+
+  // (blob, enc_mask) must be the same as returned by GetRawString
+  // NOTE: current implementation assumes that the object is of external type
+  // though the functionality may be extended to other states if needed.
+  void SetRawString(std::string_view blob, uint8_t enc_mask);
 
  private:
   void EncodeString(std::string_view str);
