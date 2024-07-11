@@ -63,17 +63,17 @@ class OpManager {
   Stats GetStats() const;
 
  protected:
-  // Report that a stash succeeded and the entry was stored at the provided segment or failed with
+  // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error
-  virtual void ReportStashed(EntryId id, DiskSegment segment, std::error_code ec) = 0;
+  virtual void NotifyStashed(EntryId id, DiskSegment segment, std::error_code ec) = 0;
 
-  // Report that an entry was successfully fetched. Includes whether entry was modified.
+  // Notify that an entry was successfully fetched. Includes whether entry was modified.
   // Returns true if value needs to be deleted.
-  virtual bool ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
+  virtual bool NotifyFetched(EntryId id, std::string_view value, DiskSegment segment,
                              bool modified) = 0;
 
-  // Report delete. Return true if the filled segment needs to be marked as free.
-  virtual bool ReportDelete(DiskSegment segment) = 0;
+  // Notify delete. Return true if the filled segment needs to be marked as free.
+  virtual bool NotifyDelete(DiskSegment segment) = 0;
 
  protected:
   // Describes pending futures for a single entry

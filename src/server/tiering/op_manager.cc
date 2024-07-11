@@ -69,7 +69,7 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
   if (pending_read) {
     // Mark that the read operation must finilize with deletion.
     pending_read->deleting = true;
-  } else if (ReportDelete(segment) && base_it == pending_reads_.end()) {
+  } else if (NotifyDelete(segment) && base_it == pending_reads_.end()) {
     storage_.MarkAsFree(segment.ContainingPages());
   }
 }
@@ -109,14 +109,14 @@ void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment
   if (auto it = pending_stash_ver_.find(ToOwned(id));
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
-    ReportStashed(id, segment, ec);
+    NotifyStashed(id, segment, ec);
   } else if (!ec) {
     // Throw away the value because it's no longer up-to-date even if no error occured
     storage_.MarkAsFree(segment);
   }
 }
 
-void OpManager::ProcessRead(size_t offset, std::string_view value) {
+void OpManager::ProcessRead(size_t offset, std::string_view page) {
   util::FiberAtomicGuard guard;  // atomically update items, no in-between states should be possible
   ReadOp* info = &pending_reads_.at(offset);
 
@@ -137,20 +137,22 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
   // Report functions in the loop may append items to info->key_ops during the traversal
   for (size_t i = 0; i < info->key_ops.size(); i++) {
     auto& ko = info->key_ops[i];
-    key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+    key_value = page.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
 
     bool modified = false;
     for (auto& cb : ko.callbacks)
       modified |= cb(&key_value);
 
+    bool delete_from_storage = ko.deleting;
+
     // If the item is not being deleted, report is as fetched to be cached potentially.
     // In case it's cached, we might need to delete it.
-    if (!ko.deleting)
-      ko.deleting |= ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified);
+    if (!delete_from_storage)
+      delete_from_storage |= NotifyFetched(Borrowed(ko.id), key_value, ko.segment, modified);
 
     // If the item is being deleted, check if the full page needs to be deleted.
-    if (ko.deleting)
-      deleting_full |= ReportDelete(ko.segment);
+    if (delete_from_storage)
+      deleting_full |= NotifyDelete(ko.segment);
   }
 
   if (deleting_full) {
