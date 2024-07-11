@@ -647,8 +647,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
           int64_t ttl_time = -1;
           string_view ttl_str = ToSV(seg[i + 2].rdb_var);
           if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
-            LOG(ERROR) << "Can't parse hashmap TTL for " << key << ", val=" << val
-                       << ", ttl=" << ttl_str;
+            LOG(ERROR) << "Can't parse hashmap TTL for " << key << ", ttl='" << ttl_str
+                       << "', val=" << val;
             ec_ = RdbError(errc::rdb_file_corrupted);
             return;
           }
