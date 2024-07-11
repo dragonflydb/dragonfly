@@ -10,7 +10,7 @@
 #include "base/pod_array.h"
 #include "core/size_tracking_channel.h"
 #include "io/file.h"
-#include "server/bucket_guard.h"
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
 #include "server/table.h"

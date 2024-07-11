@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "server/bucket_guard.h"
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"

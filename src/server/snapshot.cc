@@ -238,7 +238,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
-  BucketSerializationGuard guard(&bucket_ser_);
+  ConditionGuard guard(&bucket_ser_);
 
   ++stats_.savecb_calls;
 
@@ -339,7 +339,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  BucketSerializationGuard guard(&bucket_ser_);
+  ConditionGuard guard(&bucket_ser_);
 
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
