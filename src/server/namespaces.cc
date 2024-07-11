@@ -60,7 +60,7 @@ bool Namespaces::IsInitialized() const {
 }
 
 void Namespaces::Clear() {
-  std::lock_guard guard(mu_);
+  std::unique_lock guard(mu_);
 
   namespaces.default_namespace_ = nullptr;
 
@@ -84,8 +84,20 @@ Namespace& Namespaces::GetDefaultNamespace() const {
 }
 
 Namespace& Namespaces::GetOrInsert(std::string_view ns) {
-  std::lock_guard guard(mu_);
-  return namespaces_[ns];
+  {
+    // Try to look up under a shared lock
+    std::shared_lock guard(mu_);
+    auto it = namespaces_.find(ns);
+    if (it != namespaces_.end()) {
+      return it->second;
+    }
+  }
+
+  {
+    // Key was not found, so we create create it under unique lock
+    std::unique_lock guard(mu_);
+    return namespaces_[ns];
+  }
 }
 
 }  // namespace dfly

@@ -60,7 +60,7 @@ class Namespaces {
   Namespace& GetOrInsert(std::string_view ns);
 
  private:
-  util::fb2::Mutex mu_{};
+  util::fb2::SharedMutex mu_{};
   absl::node_hash_map<std::string, Namespace> namespaces_ ABSL_GUARDED_BY(mu_);
   Namespace* default_namespace_ = nullptr;
 };

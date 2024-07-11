@@ -213,7 +213,7 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZParams& zparams, const OpArgs&
       return OpStatus::WRONG_TYPE;
   }
 
-  auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+  auto* blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.is_new && blocking_controller) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);

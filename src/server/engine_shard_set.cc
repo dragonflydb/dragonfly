@@ -453,7 +453,7 @@ void EngineShard::DestroyThreadLocal() {
   if (!shard_)
     return;
 
-  uint32_t index = shard_->shard_id();
+  uint32_t shard_id = shard_->shard_id();
   mi_heap_t* tlh = shard_->mi_resource_.heap();
 
   shard_->Shutdown();
@@ -464,7 +464,7 @@ void EngineShard::DestroyThreadLocal() {
   CompactObj::InitThreadLocal(nullptr);
   mi_heap_delete(tlh);
   RoundRobinSharder::Destroy();
-  VLOG(1) << "Shard reset " << index;
+  VLOG(1) << "Shard reset " << shard_id;
 }
 
 // Is called by Transaction::ExecuteAsync in order to run transaction tasks.

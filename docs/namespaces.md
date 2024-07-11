@@ -4,8 +4,10 @@ Dragonfly added an _experimental_ feature, allowing complete separation of data 
 We call this feature _namespaces_, and it allows using a single Dragonfly server with multiple
 tenants, each using their own data, without being able to mix them together.
 
-This feature can also be achieved by having each user `SELECT` a different (numeric) database, or by
-asking that each user uses a unique prefix for their keys.
+Note that this feature can alternatively be achieved by having each user `SELECT` a different
+(numeric) database, or by asking that each user uses a unique prefix for their keys. This approach
+has several disadvantages, like users forgetting to `SELECT` / use their prefix, accessing data
+logically belonging to other users.
 
 The advantage of using Namespaces is that data is completely isolated, and users cannot accidentally
 use data they do not own. A user must authenticate in order to access the namespace it was assigned.
