@@ -57,15 +57,15 @@ class OpManager {
   // Delete offloaded entry located at the segment.
   void DeleteOffloaded(DiskSegment segment);
 
-  // Stash value to be offloaded
-  std::error_code Stash(EntryId id, std::string_view value);
+  // Stash (value, footer) to be offloaded. Both arguments are opaque to OpManager.
+  std::error_code Stash(EntryId id, std::string_view value, io::Bytes footer);
 
   Stats GetStats() const;
 
  protected:
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error
-  virtual void NotifyStashed(EntryId id, DiskSegment segment, std::error_code ec) = 0;
+  virtual void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) = 0;
 
   // Notify that an entry was successfully fetched. Includes whether entry was modified.
   // Returns true if value needs to be deleted.
@@ -110,7 +110,7 @@ class OpManager {
   void ProcessRead(size_t offset, std::string_view value);
 
   // Called once Stash finished
-  void ProcessStashed(EntryId id, unsigned version, DiskSegment segment, std::error_code ec);
+  void ProcessStashed(EntryId id, unsigned version, const io::Result<DiskSegment>& segment);
 
  protected:
   DiskStorage storage_;
