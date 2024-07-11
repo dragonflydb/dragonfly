@@ -42,18 +42,18 @@ struct OpManagerTest : PoolTestBase, OpManager {
     return future;
   }
 
-  void ReportStashed(EntryId id, DiskSegment segment, std::error_code ec) override {
+  void NotifyStashed(EntryId id, DiskSegment segment, std::error_code ec) override {
     EXPECT_FALSE(ec);
     stashed_[id] = segment;
   }
 
-  bool ReportFetched(EntryId id, std::string_view value, DiskSegment segment,
+  bool NotifyFetched(EntryId id, std::string_view value, DiskSegment segment,
                      bool modified) override {
     fetched_[id] = value;
     return false;
   }
 
-  bool ReportDelete(DiskSegment segment) override {
+  bool NotifyDelete(DiskSegment segment) override {
     return true;
   }
 

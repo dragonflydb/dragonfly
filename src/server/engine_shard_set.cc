@@ -598,9 +598,11 @@ void EngineShard::Heartbeat() {
     ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
   }
 
-  ssize_t eviction_redline = (max_memory_limit * kRedLimitFactor) / shard_set->size();
-  size_t tiering_redline =
-      (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
+  ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
+  size_t tiering_offload_threshold =
+      tiered_storage_
+          ? size_t(max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size()
+          : std::numeric_limits<size_t>::max();
 
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
@@ -623,7 +625,7 @@ void EngineShard::Heartbeat() {
       db_slice_.FreeMemWithEvictionStep(i, eviction_redline - db_slice_.memory_budget());
     }
 
-    if (tiered_storage_ && UsedMemory() > tiering_redline) {
+    if (UsedMemory() > tiering_offload_threshold) {
       tiered_storage_->RunOffloading(i);
     }
   }
