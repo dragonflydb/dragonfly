@@ -14,6 +14,7 @@ namespace dfly {
 
 class EngineShard;
 class Transaction;
+class DbSlice;
 
 using DbIndex = uint16_t;
 using ShardId = uint16_t;
@@ -59,19 +60,24 @@ struct KeyIndex {
 struct DbContext {
   DbIndex db_index = 0;
   uint64_t time_now_ms = 0;
+
+  // Convenience method.
+  DbSlice& GetDbSlice(ShardId shard_id) const;
 };
 
 struct OpArgs {
-  EngineShard* shard;
-  const Transaction* tx;
+  EngineShard* shard = nullptr;
+  const Transaction* tx = nullptr;
   DbContext db_cntx;
 
-  OpArgs() : shard(nullptr), tx(nullptr) {
-  }
+  OpArgs() = default;
 
   OpArgs(EngineShard* s, const Transaction* tx, const DbContext& cntx)
       : shard(s), tx(tx), db_cntx(cntx) {
   }
+
+  // Convenience method.
+  DbSlice& GetDbSlice() const;
 };
 
 // A strong type for a lock tag. Helps to disambiguate between keys and the parts of the

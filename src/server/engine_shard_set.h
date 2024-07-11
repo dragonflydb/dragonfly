@@ -50,6 +50,9 @@ class EngineShard {
   // If update_db_time is true, initializes periodic time update for its db_slice.
   static void InitThreadLocal(util::ProactorBase* pb, bool update_db_time, size_t max_file_size);
 
+  // Must be called after all InitThreadLocal() have finished
+  void InitTieredStorage(util::ProactorBase* pb, size_t max_file_size);
+
   static void DestroyThreadLocal();
 
   static EngineShard* tlocal() {

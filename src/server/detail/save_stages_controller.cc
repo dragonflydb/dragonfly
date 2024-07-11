@@ -254,10 +254,11 @@ void SaveStagesController::SaveDfs() {
 
   // Save shard files.
   auto cb = [this](Transaction* t, EngineShard* shard) {
+    auto& db_slice = shard->db_slice();
     // a hack to avoid deadlock in Transaction::RunCallback(...)
-    shard->db_slice().UnlockChangeCb();
+    db_slice.UnlockChangeCb();
     SaveDfsSingle(shard);
-    shard->db_slice().LockChangeCb();
+    db_slice.LockChangeCb();
     return OpStatus::OK;
   };
   trans_->ScheduleSingleHop(std::move(cb));
@@ -298,9 +299,10 @@ void SaveStagesController::SaveRdb() {
 
   auto cb = [snapshot = snapshot.get()](Transaction* t, EngineShard* shard) {
     // a hack to avoid deadlock in Transaction::RunCallback(...)
-    shard->db_slice().UnlockChangeCb();
+    auto& db_slice = shard->db_slice();
+    db_slice.UnlockChangeCb();
     snapshot->StartInShard(shard);
-    shard->db_slice().LockChangeCb();
+    db_slice.LockChangeCb();
     return OpStatus::OK;
   };
   trans_->ScheduleSingleHop(std::move(cb));

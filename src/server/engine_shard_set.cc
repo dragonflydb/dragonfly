@@ -286,7 +286,7 @@ void EngineShard::ForceDefrag() {
 bool EngineShard::DoDefrag() {
   // --------------------------------------------------------------------------
   // NOTE: This task is running with exclusive access to the shard.
-  // i.e. - Since we are using shared noting access here, and all access
+  // i.e. - Since we are using shared nothing access here, and all access
   // are done using fibers, This fiber is run only when no other fiber in the
   // context of the controlling thread will access this shard!
   // --------------------------------------------------------------------------
@@ -422,15 +422,6 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
 
-  if (string backing_prefix = GetFlag(FLAGS_tiered_prefix); !backing_prefix.empty()) {
-    LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
-        << "Only ioring based backing storage is supported. Exiting...";
-
-    shard_->tiered_storage_ = make_unique<TieredStorage>(&shard_->db_slice_, max_file_size);
-    error_code ec = shard_->tiered_storage_->Open(backing_prefix);
-    CHECK(!ec) << ec.message();
-  }
-
   RoundRobinSharder::Init();
 
   shard_->shard_search_indices_.reset(new ShardDocIndices());
@@ -441,11 +432,23 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t 
   }
 }
 
+void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
+  if (string backing_prefix = GetFlag(FLAGS_tiered_prefix); !backing_prefix.empty()) {
+    LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
+        << "Only ioring based backing storage is supported. Exiting...";
+
+    auto* shard = EngineShard::tlocal();
+    shard->tiered_storage_ = make_unique<TieredStorage>(&db_slice_, max_file_size);
+    error_code ec = shard->tiered_storage_->Open(backing_prefix);
+    CHECK(!ec) << ec.message();
+  }
+}
+
 void EngineShard::DestroyThreadLocal() {
   if (!shard_)
     return;
 
-  uint32_t index = shard_->db_slice_.shard_id();
+  uint32_t shard_id = shard_->shard_id();
   mi_heap_t* tlh = shard_->mi_resource_.heap();
 
   shard_->Shutdown();
@@ -456,7 +459,7 @@ void EngineShard::DestroyThreadLocal() {
   CompactObj::InitThreadLocal(nullptr);
   mi_heap_delete(tlh);
   RoundRobinSharder::Destroy();
-  VLOG(1) << "Shard reset " << index;
+  VLOG(1) << "Shard reset " << shard_id;
 }
 
 // Is called by Transaction::ExecuteAsync in order to run transaction tasks.
@@ -641,11 +644,12 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
   int64_t last_stats_time = time(nullptr);
 
   while (true) {
-    Heartbeat();
     if (fiber_periodic_done_.WaitFor(period_ms)) {
       VLOG(2) << "finished running engine shard periodic task";
       return;
     }
+
+    Heartbeat();
 
     if (runs_global_periodic) {
       ++global_count;
@@ -860,6 +864,12 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
       InitThreadLocal(pb, update_db_time, max_shard_file_size);
+    }
+  });
+
+  pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
+    if (index < shard_queue_.size()) {
+      EngineShard::tlocal()->InitTieredStorage(pb, max_shard_file_size);
     }
   });
 }
