@@ -208,6 +208,17 @@ class TestEmulated:
         assert val == [True, "bar"]
 
 
+@dfly_args({"cluster_mode": "emulated", "admin_port": 30001})
+async def test_emulated_cluster_with_dflymigrate(df_server):
+    # DFLYMIGRATE commands should be prohibited in emulated mode
+    admin_client = df_server.admin_client()
+    try:
+        res = await admin_client.execute_command("DFLYCLUSTER", "GETSLOTINFO", "SLOTS", "1")
+    except redis.exceptions.ResponseError as e:
+        assert e.args[0] == "Cluster is disabled. Enabled via passing --cluster_mode=yes"
+    await close_clients(admin_client)
+
+
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 class TestEmulatedWithAnnounceIp:
     def test_cluster_slots_command(self, df_server, cluster_client: redis.RedisCluster):
