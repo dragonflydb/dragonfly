@@ -1423,13 +1423,10 @@ void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbT
       });
     } while (cursor);
 
-    // Wait for delete operations to finish in sync.
-    // TODO: the logic inside tiered_storage that updates tiered_entries is somewhat fragile.
-    // To revisit it, otherwise we may have deadlocks around this code.
-    while (db_ptr->stats.tiered_entries > 0) {
-      LOG_EVERY_T(ERROR, 0.5) << "Long wait for tiered entry delete on flush";
-      ThisFiber::SleepFor(1ms);
-    }
+    // While tiered_storage may delete some of its entries asynchronously, it updates
+    // stats.tiered_entries immediately during the Delete call, therefore tiered_entries
+    // should be zero by this point.
+    CHECK_EQ(db_ptr->stats.tiered_entries, 0u);
   }
 }
 
