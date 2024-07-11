@@ -17,8 +17,12 @@ namespace dfly {
 using namespace std;
 using Payload = journal::Entry::Payload;
 
+DbSlice& DbContext::GetDbSlice(ShardId shard_id) const {
+  return ns->GetDbSlice(shard_id);
+}
+
 DbSlice& OpArgs::GetDbSlice() const {
-  return db_cntx.ns->GetDbSlice(shard->shard_id());
+  return db_cntx.GetDbSlice(shard->shard_id());
 }
 
 size_t ShardArgs::Size() const {

@@ -366,7 +366,11 @@ TEST_F(DflyEngineTest, MemcacheFlags) {
   ASSERT_EQ(Run("resp", {"flushdb"}), "OK");
   pp_->AwaitFiberOnAll([](auto*) {
     if (auto* shard = EngineShard::tlocal(); shard) {
-      EXPECT_EQ(shard->db_slice().GetDBTable(0)->mcflag.size(), 0u);
+      EXPECT_EQ(namespaces.GetDefaultNamespace()
+                    .GetDbSlice(shard->shard_id())
+                    .GetDBTable(0)
+                    ->mcflag.size(),
+                0u);
     }
   });
 }

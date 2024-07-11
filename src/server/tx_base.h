@@ -62,6 +62,9 @@ struct DbContext {
   Namespace* ns = nullptr;
   DbIndex db_index = 0;
   uint64_t time_now_ms = 0;
+
+  // Convenience method.
+  DbSlice& GetDbSlice(ShardId shard_id) const;
 };
 
 struct OpArgs {
