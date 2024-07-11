@@ -401,8 +401,8 @@ void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
-  if (!IsClusterEnabledOrEmulated()) {
-    return cntx->SendError(kClusterDisabled);
+  if (!IsClusterEnabled()) {
+    return cntx->SendError("Cluster is disabled. Enabled via passing --cluster_mode=yes");
   }
 
   VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
