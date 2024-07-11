@@ -739,5 +739,10 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {
   EXPECT_THAT(res, GetMyId() + " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\n");
 }
 
+TEST_F(ClusterFamilyEmulatedTest, ForbidenCommands) {
+  auto res = Run({"DFLYCLUSTER", "GETSLOTINFO", "SLOTS", "1"});
+  EXPECT_THAT(res, ErrArg("ERR Cluster is disabled. Enabled via passing --cluster_mode=yes"));
+}
+
 }  // namespace
 }  // namespace dfly::cluster
