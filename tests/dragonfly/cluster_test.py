@@ -170,7 +170,7 @@ def key_slot(key_str) -> int:
 
 
 async def get_node_id(admin_connection):
-    id = await admin_connection.execute_command("DFLYCLUSTER MYID")
+    id = await admin_connection.execute_command("CLUSTER MYID")
     assert isinstance(id, str)
     return id
 
@@ -268,11 +268,11 @@ async def test_emulated_cluster_with_replicas(df_factory):
     df_factory.start_all([master, *replicas])
 
     c_master = aioredis.Redis(port=master.port)
-    master_id = (await c_master.execute_command("dflycluster myid")).decode("utf-8")
+    master_id = (await c_master.execute_command("CLUSTER MYID")).decode("utf-8")
 
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
     replica_ids = [
-        (await c_replica.execute_command("dflycluster myid")).decode("utf-8")
+        (await c_replica.execute_command("CLUSTER MYID")).decode("utf-8")
         for c_replica in c_replicas
     ]
 

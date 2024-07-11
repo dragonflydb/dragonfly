@@ -371,6 +371,8 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
 
   if (sub_cmd == "HELP") {
     return ClusterHelp(cntx);
+  } else if (sub_cmd == "MYID") {
+    return ClusterMyId(cntx);
   } else if (sub_cmd == "SHARDS") {
     return ClusterShards(cntx);
   } else if (sub_cmd == "SLOTS") {
@@ -414,8 +416,6 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterGetSlotInfo(args, cntx);
   } else if (sub_cmd == "CONFIG") {
     return DflyClusterConfig(args, cntx);
-  } else if (sub_cmd == "MYID") {
-    return DflyClusterMyId(args, cntx);
   } else if (sub_cmd == "FLUSHSLOTS") {
     return DflyClusterFlushSlots(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
@@ -425,10 +425,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
 }
 
-void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
-  if (!args.empty()) {
-    return cntx->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
-  }
+void ClusterFamily::ClusterMyId(ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->SendBulkString(id_);
 }
