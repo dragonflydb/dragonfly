@@ -19,7 +19,7 @@ import time
 from copy import deepcopy
 
 from pathlib import Path
-from tempfile import TemporaryDirectory, gettempdir
+from tempfile import gettempdir, mkdtemp
 
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from . import PortPicker, dfly_args
@@ -28,6 +28,37 @@ from .utility import DflySeederFactory, gen_ca_cert, gen_certificate
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 DATABASE_INDEX = 0
+BASE_LOG_DIR = "/tmp/dragonfly_logs/"
+FAILED_PATH = "/tmp/failed/"
+
+
+# runs on pytest start
+def pytest_configure(config):
+    # clean everything
+    if os.path.exists(FAILED_PATH):
+        shutil.rmtree(FAILED_PATH)
+    if os.path.exists(BASE_LOG_DIR):
+        shutil.rmtree(BASE_LOG_DIR)
+
+
+# runs per test case
+def pytest_runtest_setup(item):
+    # Generate a unique directory name for each test based on its nodeid
+    translator = str.maketrans(":[]{}/ ", "_______", "\"*'")
+    unique_dir = item.name.translate(translator)
+
+    test_dir = os.path.join(BASE_LOG_DIR, unique_dir)
+    if os.path.exists(test_dir):
+        shutil.rmtree(test_dir)
+    os.makedirs(test_dir)
+
+    # Attach the directory path to the item for later access
+    item.log_dir = test_dir
+
+    # needs for action.yml to get logs if timedout is happen for test
+    last_logs = open("/tmp/last_test_log_dir.txt", "w")
+    last_logs.write(test_dir)
+    last_logs.close()
 
 
 @pytest.fixture(scope="session")
@@ -37,9 +68,12 @@ def tmp_dir():
     where the Dragonfly executable will be run and where all test data
     should be stored. The directory will be cleaned up at the end of a session
     """
-    tmp = TemporaryDirectory()
-    yield Path(tmp.name)
-    tmp.cleanup()
+    tmp_name = mkdtemp()
+    yield Path(tmp_name)
+    if os.environ.get("DRAGONFLY_KEEP_TMP"):
+        logging.info(f"Keeping tmp dir {tmp_name}")
+        return
+    shutil.rmtree(tmp_name, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
@@ -86,6 +120,8 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     path = os.environ.get("DRAGONFLY_PATH", os.path.join(scripts_dir, "../../build-dbg/dragonfly"))
 
+    log_directory = getattr(request.node, "log_dir")
+
     args = request.param if request.param else {}
     existing = request.config.getoption("--existing-port")
     existing_admin = request.config.getoption("--existing-admin-port")
@@ -100,6 +136,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         existing_admin_port=int(existing_admin) if existing_admin else None,
         existing_mc_port=int(existing_mc) if existing_mc else None,
         env=test_env,
+        log_dir=log_directory,
     )
 
     factory = DflyInstanceFactory(params, args)
@@ -327,39 +364,38 @@ def with_ca_tls_client_args(with_tls_client_args, with_tls_ca_cert_args):
     return args
 
 
-def copy_failed_logs_and_clean_tmp_folder(report):
-    return  # TODO: to fix it first and then enable it.
-    failed_path = "/tmp/failed"
-    path_exists = os.path.exists(failed_path)
-    if not path_exists:
-        os.makedirs(failed_path)
+def copy_failed_logs(log_dir, report):
+    test_failed_path = os.path.join(FAILED_PATH, os.path.basename(log_dir))
+    if not os.path.exists(test_failed_path):
+        os.makedirs(test_failed_path)
 
-    if os.path.isfile("/tmp/last_test_log_files.txt"):
-        last_log_file = open("/tmp/last_test_log_files.txt", "r")
-        files = last_log_file.readlines()
-        logging.error(f"Test failed {report.nodeid} with logs: ")
-        for file in files:
-            # copy to failed folder
+    logging.error(f"Test failed {report.nodeid} with logs: ")
+
+    for f in os.listdir(log_dir):
+        file = os.path.join(log_dir, f)
+        if os.path.isfile(file):
             file = file.rstrip("\n")
             logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
-            shutil.copy(file, failed_path)
+            shutil.copy(file, test_failed_path)
 
 
-def pytest_exception_interact(node, call, report):
-    if report.failed:
-        copy_failed_logs_and_clean_tmp_folder(report)
+# tests results we get on the "call" state
+# but we can not copy logs until "teardown" state because the server isn't stoped
+# so we save result of the "call" state and process it on the "teardown" when the server is stoped
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
 
+    if report.when == "call":
+        # Store the result of the call phase in the item
+        item.call_outcome = report
 
-@pytest.fixture(autouse=True)
-def run_before_and_after_test():
-    # Setup: logic before any of the test starts
-    # Empty the log on each run
-    last_log_file = open("/tmp/last_test_log_files.txt", "w")
-    last_log_file.close()
-
-    yield  # this is where the testing happens
-
-    # Teardown
+    if report.when == "teardown":
+        log_dir = getattr(item, "log_dir", None)
+        call_outcome = getattr(item, "call_outcome", None)
+        if call_outcome and call_outcome.failed:
+            copy_failed_logs(log_dir, call_outcome)
 
 
 @pytest.fixture(scope="function")

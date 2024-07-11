@@ -30,10 +30,9 @@ class MultiCommandSquasher {
  private:
   // Per-shard execution info.
   struct ShardExecInfo {
-    ShardExecInfo() : had_writes{false}, cmds{}, replies{}, local_tx{nullptr} {
+    ShardExecInfo() : cmds{}, replies{}, local_tx{nullptr} {
     }
 
-    bool had_writes;
     std::vector<StoredCmd*> cmds;  // accumulated commands
     std::vector<facade::CapturingReplyBuilder::Payload> replies;
     boost::intrusive_ptr<Transaction> local_tx;  // stub-mode tx for use inside shard

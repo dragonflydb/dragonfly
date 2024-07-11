@@ -37,6 +37,7 @@ class User final {
     bool unset{false};
     bool nopass{false};
     bool reset_password{false};
+    bool is_hashed{false};
   };
 
   struct UpdateRequest {

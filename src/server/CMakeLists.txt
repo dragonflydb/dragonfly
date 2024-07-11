@@ -78,6 +78,7 @@ find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRE
 
 if (WITH_AWS)
   SET(AWS_LIB awsv2_lib)
+  add_definitions(-DWITH_AWS)
 endif()
 
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)

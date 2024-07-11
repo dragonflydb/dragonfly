@@ -2005,7 +2005,6 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       cntx->transaction = stub_tx.get();
 
       result = interpreter->RunFunction(eval_args.sha, &error);
-      cntx->transaction->FIX_ConcludeJournalExec();  // flush journal
 
       cntx->transaction = tx;
       return OpStatus::OK;

@@ -156,6 +156,7 @@ jobs:
           ./dragonfly_test
           ./multi_test --multi_exec_mode=1
           ./multi_test --multi_exec_mode=3
+          ./json_family_test --jsonpathv2=false
 
       - name: Upload unit logs on failure
         if: failure()
@@ -178,9 +179,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: regression_logs
-          path: |
-            /tmp/**/*
-            /tmp/*
+          path: /tmp/failed/*
 
   lint-test-chart:
     runs-on: ubuntu-latest

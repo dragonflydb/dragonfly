@@ -362,6 +362,13 @@ TEST_F(DflyEngineTest, MemcacheFlags) {
   ASSERT_EQ(resp, "OK");
   MCResponse resp2 = RunMC(MP::GET, "key");
   EXPECT_THAT(resp2, ElementsAre("VALUE key 42 3", "bar", "END"));
+
+  ASSERT_EQ(Run("resp", {"flushdb"}), "OK");
+  pp_->AwaitFiberOnAll([](auto*) {
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      EXPECT_EQ(shard->db_slice().GetDBTable(0)->mcflag.size(), 0u);
+    }
+  });
 }
 
 TEST_F(DflyEngineTest, LimitMemory) {

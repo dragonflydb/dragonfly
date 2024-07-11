@@ -1151,10 +1151,7 @@ take_over_cases = [
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
 @pytest.mark.asyncio
 async def test_take_over_counters(df_factory, master_threads, replica_threads):
-    master = df_factory.create(
-        proactor_threads=master_threads,
-        logtostderr=True,
-    )
+    master = df_factory.create(proactor_threads=master_threads)
     replica1 = df_factory.create(proactor_threads=replica_threads)
     replica2 = df_factory.create(proactor_threads=replica_threads)
     replica3 = df_factory.create(proactor_threads=replica_threads)
@@ -1214,11 +1211,7 @@ async def test_take_over_seeder(
     request, df_factory, df_seeder_factory, master_threads, replica_threads
 ):
     tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
-    master = df_factory.create(
-        proactor_threads=master_threads,
-        dbfilename=f"dump_{tmp_file_name}",
-        logtostderr=True,
-    )
+    master = df_factory.create(proactor_threads=master_threads, dbfilename=f"dump_{tmp_file_name}")
     replica = df_factory.create(proactor_threads=replica_threads)
     df_factory.start_all([master, replica])
 
@@ -1229,17 +1222,27 @@ async def test_take_over_seeder(
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
-    async def seed():
-        await seeder.run(target_ops=3000)
+    fill_task = asyncio.create_task(seeder.run())
 
-    fill_task = asyncio.create_task(seed())
+    stop_info = False
+
+    async def info_task():
+        my_client = replica.client()
+        while not stop_info:
+            info = await my_client.info("replication")
+            asyncio.sleep(0.5)
+
+    info_task = asyncio.create_task(info_task())
 
     # Give the seeder a bit of time.
-    await asyncio.sleep(1)
+    await asyncio.sleep(3)
+    logging.debug("running repltakover")
     await c_replica.execute_command(f"REPLTAKEOVER 5 SAVE")
+    logging.debug("after running repltakover")
     seeder.stop()
 
     assert await c_replica.execute_command("role") == ["master", []]
+    stop_info = True
 
     # Need to wait a bit to give time to write the shutdown snapshot
     await asyncio.sleep(1)
@@ -1258,10 +1261,7 @@ async def test_take_over_seeder(
 @pytest.mark.parametrize("master_threads, replica_threads", [[4, 4]])
 @pytest.mark.asyncio
 async def test_take_over_read_commands(df_factory, master_threads, replica_threads):
-    master = df_factory.create(
-        proactor_threads=master_threads,
-        logtostderr=True,
-    )
+    master = df_factory.create(proactor_threads=master_threads)
     replica = df_factory.create(proactor_threads=replica_threads)
     df_factory.start_all([master, replica])
 
@@ -2061,7 +2061,7 @@ async def test_saving_replica(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
+    await c_master.execute_command("DEBUG POPULATE 100000 key 4048 RAND")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
 
@@ -2070,7 +2070,10 @@ async def test_saving_replica(df_factory):
 
     save_task = asyncio.create_task(save_replica())
     while not await is_saving(c_replica):  # wait for replica start saving
-        asyncio.sleep(0.1)
+        assert "rdb_changes_since_last_success_save:0" not in await c_replica.execute_command(
+            "info persistence"
+        ), "Weak test case, finished saving too quickly"
+        await asyncio.sleep(0.1)
     await c_replica.execute_command("replicaof no one")
     assert await is_saving(c_replica)
     await save_task
@@ -2090,14 +2093,17 @@ async def test_start_replicating_while_save(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_replica.execute_command("DEBUG POPULATE 1000 key 4096 RAND")
+    await c_replica.execute_command("DEBUG POPULATE 100000 key 4096 RAND")
 
     async def save_replica():
         await c_replica.execute_command("save")
 
     save_task = asyncio.create_task(save_replica())
     while not await is_saving(c_replica):  # wait for server start saving
-        asyncio.sleep(0.1)
+        assert "rdb_changes_since_last_success_save:0" not in await c_replica.execute_command(
+            "info persistence"
+        ), "Weak test case, finished saving too quickly"
+        await asyncio.sleep(0.1)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     assert await is_saving(c_replica)
     await save_task

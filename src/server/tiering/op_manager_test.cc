@@ -100,7 +100,7 @@ TEST_F(OpManagerTest, DeleteAfterReads) {
     std::vector<util::fb2::Future<std::string>> reads;
     for (unsigned i = 0; i < 100; i++)
       reads.emplace_back(Read(0u, stashed_[0u]));
-    Delete(stashed_[0u]);
+    DeleteOffloaded(stashed_[0u]);
 
     for (auto& fut : reads)
       EXPECT_EQ(fut.Get(), "DATA");

@@ -101,9 +101,12 @@ void MemoryCmd::Run(CmdArgList args) {
         "    Shows breakdown of memory.",
         "MALLOC-STATS",
         "    Show global malloc stats as provided by allocator libraries",
-        "ARENA [BACKING] [thread-id]",
+        "ARENA BACKING] [thread-id]",
         "    Show mimalloc arena stats for a heap residing in specified thread-id. 0 by default.",
         "    If BACKING is specified, show stats for the backing heap.",
+        "ARENA SHOW",
+        "    Prints the arena summary report for the entire process.",
+        "    Requires MIMALLOC_VERBOSE=1 environment to be set. The output goes to stdout",
         "USAGE <key>",
         "    Show memory usage of a key.",
         "DECOMMIT",
@@ -322,18 +325,30 @@ void MemoryCmd::MallocStats() {
 void MemoryCmd::ArenaStats(CmdArgList args) {
   uint32_t tid = 0;
   bool backing = false;
+  bool show_arenas = false;
   if (args.size() >= 2) {
     ToUpper(&args[1]);
 
-    unsigned tid_indx = 1;
-    if (ArgS(args, tid_indx) == "BACKING") {
-      ++tid_indx;
-      backing = true;
-    }
+    if (ArgS(args, 1) == "SHOW") {
+      if (args.size() != 2)
+        return cntx_->SendError(kSyntaxErr, kSyntaxErrType);
+      show_arenas = true;
+    } else {
+      unsigned tid_indx = 1;
 
-    if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
-      return cntx_->SendError(kInvalidIntErr);
+      if (ArgS(args, tid_indx) == "BACKING") {
+        ++tid_indx;
+        backing = true;
+      }
+      if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
+        return cntx_->SendError(kInvalidIntErr);
+      }
     }
+  }
+
+  if (show_arenas) {
+    mi_debug_show_arenas(true, true, true);
+    return cntx_->reply_builder()->SendOk();
   }
 
   if (backing && tid >= shard_set->pool()->size()) {

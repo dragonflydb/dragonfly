@@ -29,6 +29,7 @@ class DflyParams:
     existing_admin_port: int
     existing_mc_port: int
     env: any
+    log_dir: str
 
 
 class Colors:
@@ -143,13 +144,6 @@ class DflyInstance:
 
         self.log_files = self.get_logs_from_psutil()
 
-        last_log_file = open("/tmp/last_test_log_files.txt", "a")
-
-        for log in self.log_files:
-            last_log_file.write(log + "\n")
-
-        last_log_file.close()
-
         # Remove first 6 lines - our default header with log locations (as it carries no useful information)
         # Next, replace log-level + date with port and colored arrow
         sed_format = f"1,6d;s/[^ ]*/{self.port}{Colors.next()}➜{Colors.CLEAR}/"
@@ -215,6 +209,8 @@ class DflyInstance:
         if not self.params.existing_port:
             return_code = self.proc.poll()
             if return_code is not None:
+                # log stdout of the failed process
+                logging.error("Dragonfly process error:\n%s", self.proc.stdout.read().decode())
                 self.proc = None
                 raise DflyStartException(f"Failed to start instance, return code {return_code}")
 
@@ -334,9 +330,10 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1"
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,dflycmd=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
+        args.setdefault("log_dir", self.params.log_dir)
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v

@@ -59,15 +59,16 @@ void OpManager::Delete(EntryId id) {
   pending_stash_ver_.erase(ToOwned(id));
 }
 
-void OpManager::Delete(DiskSegment segment) {
-  EntryOps* pending_op = nullptr;
+void OpManager::DeleteOffloaded(DiskSegment segment) {
+  EntryOps* pending_read = nullptr;
 
   auto base_it = pending_reads_.find(segment.ContainingPages().offset);
   if (base_it != pending_reads_.end())
-    pending_op = base_it->second.Find(segment);
+    pending_read = base_it->second.Find(segment);
 
-  if (pending_op) {
-    pending_op->deleting = true;
+  if (pending_read) {
+    // Mark that the read operation must finilize with deletion.
+    pending_read->deleting = true;
   } else if (ReportDelete(segment) && base_it == pending_reads_.end()) {
     storage_.MarkAsFree(segment.ContainingPages());
   }

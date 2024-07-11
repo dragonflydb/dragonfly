@@ -12,6 +12,7 @@
 #include "base/pmr/memory_resource.h"
 #include "core/json/json_object.h"
 #include "core/small_string.h"
+#include "core/string_or_view.h"
 
 namespace dfly {
 
@@ -325,6 +326,9 @@ class CompactObj {
   void SetExternal(size_t offset, size_t sz);
   std::pair<size_t, size_t> GetExternalSlice() const;
 
+  // The opposite of SetExternal, changes the external entry to be an in-memory string.
+  void Materialize(std::string_view str);
+
   // In case this object a single blob, returns number of bytes allocated on heap
   // for that blob. Otherwise returns 0.
   size_t MallocUsed() const;
@@ -373,7 +377,18 @@ class CompactObj {
     memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
+  // returns raw (non-decoded) string together with the encoding mask.
+  // Used to bypass decoding layer.
+  // Precondition: the object is a non-inline string.
+  std::pair<StringOrView, uint8_t> GetRawString() const;
+
+  // (blob, enc_mask) must be the same as returned by GetRawString
+  // NOTE: current implementation assumes that the object is of external type
+  // though the functionality may be extended to other states if needed.
+  void SetRawString(std::string_view blob, uint8_t enc_mask);
+
  private:
+  void EncodeString(std::string_view str);
   size_t DecodedLen(size_t sz) const;
 
   bool EqualNonInline(std::string_view sv) const;

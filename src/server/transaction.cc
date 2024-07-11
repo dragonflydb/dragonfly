@@ -132,8 +132,6 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   string_view cmd_name(cid_->name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
-    multi_->shard_journal_write.resize(shard_set->size(), false);
-
     multi_->mode = NOT_DETERMINED;
     multi_->role = DEFAULT;
   }
@@ -153,7 +151,6 @@ Transaction::Transaction(const Transaction* parent, ShardId shard_id,
   }
 
   multi_->role = SQUASHED_STUB;
-  multi_->shard_journal_write.resize(1);
 
   MultiUpdateWithParent(parent);
   if (slot_id.has_value()) {
@@ -185,7 +182,7 @@ void Transaction::InitGlobal() {
 void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShardCache>* out) {
   auto& shard_index = *out;
 
-  auto add = [this, &shard_index](uint32_t sid, uint32_t b, uint32_t e) {
+  auto add = [&shard_index](uint32_t sid, uint32_t b, uint32_t e) {
     auto& slices = shard_index[sid].slices;
     if (!slices.empty() && slices.back().second == b) {
       slices.back().second = e;
@@ -601,11 +598,6 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     // This is the last hop, so clear cont_trans if its held by the current tx
     shard->RemoveContTx(this);
 
-    if (IsAtomicMulti()) {  // Can only be true if run through ScheduleSingleHop
-      DCHECK(cid_->IsMultiTransactional());
-      MultiReportJournalOnShard(shard);
-    }
-
     // It has 2 responsibilities.
     // 1: to go over potential wakened keys, verify them and activate watch queues.
     // 2: if this transaction was notified and finished running - to remove it from the head
@@ -764,15 +756,6 @@ void Transaction::ScheduleInternal() {
   }
 }
 
-void Transaction::ReportWritesSquashedMulti(absl::FunctionRef<bool(ShardId)> had_write) {
-  DCHECK(multi_);
-  for (unsigned i = 0; i < multi_->shard_journal_write.size(); i++)
-    multi_->shard_journal_write[i] |= had_write(i);
-
-  // Update imemdiately if we decide to conclude after one hop without UnlockMulti
-  multi_->shard_journal_cnt = CalcMultiNumOfShardJournals();
-}
-
 // Runs in the coordinator fiber.
 void Transaction::UnlockMulti() {
   VLOG(1) << "UnlockMulti " << DebugId();
@@ -788,8 +771,6 @@ void Transaction::UnlockMulti() {
     sharded_keys[sid].emplace_back(fp);
   }
 
-  multi_->shard_journal_cnt = ServerState::tlocal()->journal() ? CalcMultiNumOfShardJournals() : 0;
-
   use_count_.fetch_add(shard_data_.size(), std::memory_order_relaxed);
 
   DCHECK_EQ(shard_data_.size(), shard_set->size());
@@ -802,16 +783,6 @@ void Transaction::UnlockMulti() {
   }
 
   VLOG(1) << "UnlockMultiEnd " << DebugId();
-}
-
-uint32_t Transaction::CalcMultiNumOfShardJournals() const {
-  uint32_t shard_journals_cnt = 0;
-  for (bool was_shard_write : multi_->shard_journal_write) {
-    if (was_shard_write) {
-      ++shard_journals_cnt;
-    }
-  }
-  return shard_journals_cnt;
 }
 
 OpStatus Transaction::ScheduleSingleHop(RunnableType cb) {
@@ -924,14 +895,6 @@ void Transaction::Refurbish() {
 const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps() const {
   DCHECK(multi_);
   return multi_->tag_fps;
-}
-
-void Transaction::FIX_ConcludeJournalExec() {
-  if (!multi_->shard_journal_write.front())
-    return;
-
-  multi_->shard_journal_cnt = 1;
-  MultiReportJournalOnShard(EngineShard::tlocal());
 }
 
 string Transaction::DEBUG_PrintFailState(ShardId sid) const {
@@ -1277,20 +1240,8 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   return result;
 }
 
-void Transaction::MultiReportJournalOnShard(EngineShard* shard) const {
-  DCHECK_EQ(EngineShard::tlocal(), shard);
-  auto* journal = shard->journal();
-  size_t write_idx = multi_->role == SQUASHED_STUB ? 0 : shard->shard_id();
-  if (journal != nullptr && multi_->shard_journal_write[write_idx]) {
-    journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, multi_->shard_journal_cnt,
-                         unique_slot_checker_.GetUniqueSlotId(), {}, true);
-  }
-}
-
 void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* shard) {
   DCHECK(multi_ && multi_->lock_mode);
-
-  MultiReportJournalOnShard(shard);
 
   if (multi_->mode == GLOBAL) {
     shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
@@ -1418,37 +1369,15 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   }
   // Record to journal autojournal commands, here we allow await which anables writing to sync
   // the journal change.
-  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, false, true);
+  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, true);
 }
 
 void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                                    uint32_t shard_cnt, bool multi_commands,
-                                    bool allow_await) const {
+                                    uint32_t shard_cnt, bool allow_await) const {
   auto journal = shard->journal();
   CHECK(journal);
-
-  if (multi_) {
-    if (multi_->role != SQUASHED_STUB)
-      multi_->shard_journal_write[shard->shard_id()] = true;
-    else
-      multi_->shard_journal_write[0] = true;
-  }
-
-  bool is_multi = multi_commands || IsAtomicMulti();
-
-  auto opcode = is_multi ? journal::Op::MULTI_COMMAND : journal::Op::COMMAND;
-  journal->RecordEntry(txid_, opcode, db_index_, shard_cnt, unique_slot_checker_.GetUniqueSlotId(),
-                       std::move(payload), allow_await);
-}
-
-void Transaction::FinishLogJournalOnShard(EngineShard* shard, uint32_t shard_cnt) const {
-  if (multi_) {
-    return;
-  }
-  auto journal = shard->journal();
-  CHECK(journal);
-  journal->RecordEntry(txid_, journal::Op::EXEC, db_index_, shard_cnt,
-                       unique_slot_checker_.GetUniqueSlotId(), {}, false);
+  journal->RecordEntry(txid_, journal::Op::COMMAND, db_index_, shard_cnt,
+                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload), allow_await);
 }
 
 void Transaction::ReviveAutoJournal() {

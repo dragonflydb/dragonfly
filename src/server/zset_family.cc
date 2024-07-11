@@ -488,11 +488,13 @@ void IntervalVisitor::ActionRem(const zlexrangespec& range) {
 }
 
 void IntervalVisitor::ActionPop(ZSetFamily::TopNScored sc) {
-  if (robj_wrapper_->encoding() == OBJ_ENCODING_LISTPACK) {
-    PopListPack(sc);
-  } else {
-    CHECK_EQ(robj_wrapper_->encoding(), OBJ_ENCODING_SKIPLIST);
-    PopSkipList(sc);
+  if (sc > 0) {
+    if (robj_wrapper_->encoding() == OBJ_ENCODING_LISTPACK) {
+      PopListPack(sc);
+    } else {
+      CHECK_EQ(robj_wrapper_->encoding(), OBJ_ENCODING_SKIPLIST);
+      PopSkipList(sc);
+    }
   }
 }
 
