@@ -198,8 +198,8 @@ TEST_F(AclFamilyTest, AclWhoAmI) {
 }
 
 TEST_F(AclFamilyTest, TestAllCategories) {
-  TestInitAclFam();
-  for (auto& cat : acl::REVERSE_CATEGORY_INDEX_TABLE) {
+  const auto* fam = TestInitAclFam();
+  for (auto& cat : fam->GetRevTable()) {
     if (cat != "_RESERVED") {
       auto resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("+@", cat)});
       EXPECT_THAT(resp, "OK");
@@ -222,7 +222,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
     }
   }
 
-  for (auto& cat : acl::REVERSE_CATEGORY_INDEX_TABLE) {
+  for (auto& cat : fam->GetRevTable()) {
     if (cat != "_RESERVED") {
       auto resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("+@", cat)});
       EXPECT_THAT(resp, "OK");
@@ -245,8 +245,8 @@ TEST_F(AclFamilyTest, TestAllCategories) {
 }
 
 TEST_F(AclFamilyTest, TestAllCommands) {
-  TestInitAclFam();
-  const auto& rev_indexer = acl::CommandsRevIndexer();
+  const auto* fam = TestInitAclFam();
+  const auto& rev_indexer = fam->GetCommandsRevIndexer();
   for (const auto& family : rev_indexer) {
     for (const auto& command_name : family) {
       auto resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("+", command_name)});

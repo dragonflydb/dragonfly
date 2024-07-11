@@ -5,6 +5,7 @@
 #include "server/test_utils.h"
 
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/acl_family.h"
 #include "util/fibers/fibers.h"
 
 extern "C" {
@@ -702,9 +703,9 @@ void BaseFamilyTest::SetTestFlag(string_view flag_name, string_view new_value) {
   CHECK(flag->ParseFrom(new_value, &error)) << "Error: " << error;
 }
 
-void BaseFamilyTest::TestInitAclFam() {
+const acl::AclFamily* BaseFamilyTest::TestInitAclFam() {
   absl::SetFlag(&FLAGS_acllog_max_len, 0);
-  service_->TestInit();
+  return service_->TestInit();
 }
 
 }  // namespace dfly

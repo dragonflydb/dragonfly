@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "server/acl/acl_commands_def.h"
 #include "server/acl/user.h"
 #include "util/fibers/synchronization.h"
 
@@ -27,7 +28,9 @@ class UserRegistry {
   UserRegistry(const UserRegistry&) = delete;
   UserRegistry(UserRegistry&&) = delete;
 
-  void Init();
+  void Init(const CategoryToIdxStore* cat_to_id_table,
+            const ReverseCategoryIndexTable* reverse_cat_table,
+            const CategoryToCommandsIndexStore* cat_to_commands_table);
 
   using RegistryType = absl::flat_hash_map<std::string, User>;
 
@@ -88,6 +91,10 @@ class UserRegistry {
    private:
     LockT<util::fb2::SharedMutex> registry_lk_;
   };
+
+  const CategoryToIdxStore* cat_to_id_table_;
+  const ReverseCategoryIndexTable* reverse_cat_table_;
+  const CategoryToCommandsIndexStore* cat_to_commands_table_;
 };
 
 }  // namespace dfly::acl
