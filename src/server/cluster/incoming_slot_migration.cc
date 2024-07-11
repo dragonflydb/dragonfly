@@ -53,14 +53,16 @@ class ClusterShardMigration {
         break;
       }
 
-      while (tx_data->opcode == journal::Op::FIN) {
-        VLOG(2) << "Attempt to finalize flow " << source_shard_id_;
+      while (tx_data->opcode == journal::Op::LSN) {
+        VLOG(2) << "Attempt to finalize flow " << source_shard_id_ << " attempt " << tx_data->lsn;
+        last_attempt_.store(tx_data->lsn);
         bc->Dec();  // we can Join the flow now
         // if we get new data, attempt is failed
         if (tx_data = tx_reader.NextTxData(&reader, cntx); !tx_data) {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }
+        VLOG(2) << "Attempt failed to finalize flow " << source_shard_id_;
         bc->Add();  // the flow isn't finished so we lock it again
       }
       if (tx_data->opcode == journal::Op::PING) {
@@ -70,6 +72,7 @@ class ClusterShardMigration {
       }
     }
 
+    VLOG(2) << "Flow " << source_shard_id_ << " canceled";
     bc->Dec();  // we should provide ability to join the flow
   }
 
@@ -86,6 +89,10 @@ class ClusterShardMigration {
     return {};
   }
 
+  long GetLastAttempt() const {
+    return last_attempt_.load();
+  }
+
  private:
   void ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
     if (cntx->IsCancelled()) {
@@ -93,7 +100,8 @@ class ClusterShardMigration {
     }
     CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
     if (!tx_data.IsGlobalCmd()) {
-      VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+      VLOG(3) << "Execute cmd without sync between shards. cmd: "
+              << CmdArgList(tx_data.command.cmd_args);
       executor_.Execute(tx_data.dbid, tx_data.command);
     } else {
       // TODO check which global commands should be supported
@@ -112,6 +120,7 @@ class ClusterShardMigration {
   util::FiberSocketBase* socket_ ABSL_GUARDED_BY(mu_);
   JournalExecutor executor_;
   IncomingSlotMigration* in_migration_;
+  atomic_long last_attempt_{-1};
 };
 
 IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
@@ -130,16 +139,29 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 IncomingSlotMigration::~IncomingSlotMigration() {
 }
 
-bool IncomingSlotMigration::Join() {
-  auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
-  if (bc_->WaitFor(timeout)) {
-    state_.store(MigrationState::C_FINISHED);
-    keys_number_ = cluster::GetKeyCount(slots_);
-    return true;
+bool IncomingSlotMigration::Join(long attempt) {
+  const absl::Time start = absl::Now();
+  const absl::Duration timeout =
+      absl::Milliseconds(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+
+  while (true) {
+    const absl::Time now = absl::Now();
+    const absl::Duration passed = now - start;
+    VLOG(1) << "Checking whether to continue with join " << passed << " vs " << timeout;
+    if (passed >= timeout) {
+      LOG(WARNING) << "Can't join migration in time";
+      ReportError(GenericError("Can't join migration in time"));
+      return false;
+    }
+
+    if ((bc_->WaitFor(absl::ToInt64Milliseconds(timeout - passed) * 1ms)) &&
+        (std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                     [&](const auto& flow) { return flow->GetLastAttempt() == attempt; }))) {
+      state_.store(MigrationState::C_FINISHED);
+      keys_number_ = cluster::GetKeyCount(slots_);
+      return true;
+    }
   }
-  LOG(WARNING) << "Can't join migration in time";
-  ReportError(GenericError("Can't join migration in time"));
-  return false;
 }
 
 void IncomingSlotMigration::Stop() {
@@ -159,7 +181,7 @@ void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* sou
   state_.store(MigrationState::C_SYNC);
 
   shard_flows_[shard]->Start(&cntx_, source, bc_);
-  VLOG(1) << "Incoming flow: " << shard << " finished for " << source_id_;
+  VLOG(1) << "Incoming flow " << shard << " finished for " << source_id_;
 }
 
 size_t IncomingSlotMigration::GetKeyCount() const {

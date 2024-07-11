@@ -938,7 +938,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
   if (!migration)
     return cntx->SendError(kIdNotFound);
 
-  if (!migration->Join()) {
+  if (!migration->Join(attempt)) {
     return cntx->SendError("Join timeout happened");
   }
 

@@ -30,7 +30,7 @@ class IncomingSlotMigration {
   // Waits until all flows got FIN opcode.
   // returns true if we joined false if timeout is readed
   // After Join we still can get data due to error situation
-  [[nodiscard]] bool Join();
+  [[nodiscard]] bool Join(long attempt);
 
   // Stop migrations, can be called even after migration is finished
   void Stop();
