@@ -277,7 +277,6 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   while (!it.is_done()) {
     ++result;
     // might yield
-    ThisFiber::Yield();
     SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
     ++it;
   }
