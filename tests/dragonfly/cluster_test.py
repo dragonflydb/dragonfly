@@ -98,14 +98,15 @@ class NodeInfo:
 
 
 async def create_node_info(instance):
-    admin_client = instance.admin_client()
+    client = instance.client()
+    node_id = await get_node_id(client)
     ninfo = NodeInfo(
         instance=instance,
-        client=instance.client(),
-        admin_client=admin_client,
+        client=client,
+        admin_client=instance.admin_client(),
         slots=[],
         migrations=[],
-        id=await get_node_id(admin_client),
+        id=node_id,
     )
     return ninfo
 
