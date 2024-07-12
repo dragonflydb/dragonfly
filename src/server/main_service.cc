@@ -139,7 +139,7 @@ constexpr size_t kMaxThreadSize = 1024;
 void UnwatchAllKeys(Namespace* ns, ConnectionState::ExecInfo* exec_info) {
   if (!exec_info->watched_keys.empty()) {
     auto cb = [&](EngineShard* shard) {
-      ns->GetCurrentDbSlice().UnregisterConnectionWatches(exec_info);
+      ns->GetDbSlice(shard->shard_id()).UnregisterConnectionWatches(exec_info);
     };
     shard_set->RunBriefInParallel(std::move(cb));
   }
@@ -516,7 +516,8 @@ void Topkeys(const http::QueryArgs& args, HttpContext* send) {
     vector<string> rows(shard_set->size());
 
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
-      for (const auto& db : namespaces.GetDefaultNamespace().GetCurrentDbSlice().databases()) {
+      for (const auto& db :
+           namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).databases()) {
         if (db->top_keys.IsEnabled()) {
           is_enabled = true;
           for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
@@ -1618,8 +1619,8 @@ const CommandId* Service::FindCmd(std::string_view cmd) const {
 
 bool Service::IsLocked(Namespace* ns, DbIndex db_index, std::string_view key) const {
   ShardId sid = Shard(key, shard_count());
-  bool is_open = pp_.at(sid)->AwaitBrief([db_index, key, ns] {
-    return ns->GetCurrentDbSlice().CheckLock(IntentLock::EXCLUSIVE, db_index, key);
+  bool is_open = pp_.at(sid)->AwaitBrief([db_index, key, ns, sid] {
+    return ns->GetDbSlice(sid).CheckLock(IntentLock::EXCLUSIVE, db_index, key);
   });
   return !is_open;
 }

@@ -11,7 +11,6 @@
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "server/engine_shard_set.h"
-#include "server/namespaces.h"
 #include "server/search/doc_accessors.h"
 #include "server/server_state.h"
 

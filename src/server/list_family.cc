@@ -878,7 +878,7 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
 
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice(&pop_key_, 1); };
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction* t,
+  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {
     return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };
@@ -909,7 +909,7 @@ OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
   // This allows us to run Transaction::Execute on watched transactions in both shards.
   auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice(&this->pop_key_, 1); };
 
-  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction* t,
+  const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {
     return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };

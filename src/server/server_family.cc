@@ -703,7 +703,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
 
   // We should not expire/evict keys while clients are puased.
   shard_set->RunBriefInParallel(
-      [ns](EngineShard*) { ns->GetCurrentDbSlice().SetExpireAllowed(false); });
+      [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
 
   return fb2::Fiber("client_pause", [is_pause_in_progress, pause_state, ns]() mutable {
     // On server shutdown we sleep 10ms to make sure all running task finish, therefore 10ms steps
@@ -719,7 +719,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
         ServerState::tlocal()->SetPauseState(pause_state, false);
       });
       shard_set->RunBriefInParallel(
-          [ns](EngineShard*) { ns->GetCurrentDbSlice().SetExpireAllowed(true); });
+          [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true); });
     }
   });
 }
@@ -1943,7 +1943,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
     if (shard) {
       result.heap_used_bytes += shard->UsedMemory();
-      MergeDbSliceStats(ns->GetCurrentDbSlice().GetStats(), &result);
+      MergeDbSliceStats(ns->GetDbSlice(shard->shard_id()).GetStats(), &result);
       result.shard_stats += shard->stats();
 
       if (shard->tiered_storage()) {

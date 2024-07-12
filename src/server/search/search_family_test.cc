@@ -8,7 +8,6 @@
 #include "base/logging.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
-#include "server/namespaces.h"
 #include "server/test_utils.h"
 
 using namespace testing;

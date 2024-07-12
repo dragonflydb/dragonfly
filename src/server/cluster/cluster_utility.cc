@@ -50,8 +50,10 @@ uint64_t GetKeyCount(const SlotRanges& slots) {
     uint64_t shard_keys = 0;
     for (const SlotRange& range : slots) {
       for (SlotId slot = range.start; slot <= range.end; slot++) {
-        shard_keys +=
-            namespaces.GetDefaultNamespace().GetCurrentDbSlice().GetSlotStats(slot).key_count;
+        shard_keys += namespaces.GetDefaultNamespace()
+                          .GetDbSlice(shard->shard_id())
+                          .GetSlotStats(slot)
+                          .key_count;
       }
     }
     keys.fetch_add(shard_keys);

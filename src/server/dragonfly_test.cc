@@ -588,7 +588,7 @@ TEST_F(DflyEngineTest, Bug496) {
     if (shard == nullptr)
       return;
 
-    auto& db = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+    auto& db = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
     int cb_hits = 0;
     uint32_t cb_id =

@@ -28,7 +28,7 @@ endif()
 
 add_library(dfly_transaction db_slice.cc malloc_stats.cc blocking_controller.cc
             command_registry.cc  cluster/cluster_utility.cc
-            journal/tx_executor.cc
+            journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -47,7 +47,7 @@ add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
-            protocol_client.cc namespaces.cc
+            protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc malloc_stats.cc
             detail/save_stages_controller.cc
             detail/snapshot_storage.cc

@@ -752,7 +752,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     // after running the callback
     // Note that running debug populate while running flushall/db can cause dcheck fail because the
     // finish cb is executed just when we finish populating the database.
-    cntx_->ns->GetCurrentDbSlice().OnCbFinish();
+    cntx_->ns->GetDbSlice(shard->shard_id()).OnCbFinish();
   });
 }
 

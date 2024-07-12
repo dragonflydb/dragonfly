@@ -1252,7 +1252,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
                                        EngineShard* shard) {
   auto& s = GetSnapshot(shard);
-  auto& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+  auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
   s = std::make_unique<SliceSnapshot>(&db_slice, &channel_, compression_mode_);
 
   s->Start(stream_journal, cll);
@@ -1260,7 +1260,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* 
 
 void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* shard,
                                                   LSN start_lsn) {
-  auto& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+  auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
   s = std::make_unique<SliceSnapshot>(&db_slice, &channel_, compression_mode_);
 

@@ -197,7 +197,7 @@ void OutgoingMigration::SyncFb() {
 
     shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
       if (auto* shard = EngineShard::tlocal(); shard) {
-        DbSlice& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+        DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
         server_family_->journal()->StartInThread();
         slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
             &db_slice, server(), migration_info_.slot_ranges, server_family_->journal());

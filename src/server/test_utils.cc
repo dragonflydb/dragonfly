@@ -213,7 +213,7 @@ void BaseFamilyTest::ResetService() {
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
   auto default_ns = &namespaces.GetDefaultNamespace();
   auto cb = [&](EngineShard* s) {
-    default_ns->GetCurrentDbSlice().UpdateExpireBase(TEST_current_time_ms - 1000, 0);
+    default_ns->GetDbSlice(s->shard_id()).UpdateExpireBase(TEST_current_time_ms - 1000, 0);
   };
   shard_set->RunBriefInParallel(cb);
 
@@ -248,8 +248,10 @@ void BaseFamilyTest::ResetService() {
           }
 
           LOG(ERROR) << "TxLocks for shard " << es->shard_id();
-          for (const auto& k_v :
-               namespaces.GetDefaultNamespace().GetCurrentDbSlice().GetDBTable(0)->trans_locks) {
+          for (const auto& k_v : namespaces.GetDefaultNamespace()
+                                     .GetDbSlice(es->shard_id())
+                                     .GetDBTable(0)
+                                     ->trans_locks) {
             LOG(ERROR) << "Key " << k_v.first << " " << k_v.second;
           }
         }
@@ -303,7 +305,7 @@ unsigned BaseFamilyTest::NumLocked() {
   atomic_uint count = 0;
   auto default_ns = &namespaces.GetDefaultNamespace();
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    for (const auto& db : default_ns->GetCurrentDbSlice().databases()) {
+    for (const auto& db : default_ns->GetDbSlice(shard->shard_id()).databases()) {
       if (db == nullptr) {
         continue;
       }
@@ -646,7 +648,8 @@ vector<LockFp> BaseFamilyTest::GetLastFps() {
     }
 
     lock_guard lk(mu);
-    for (auto fp : namespaces.GetDefaultNamespace().GetCurrentDbSlice().TEST_GetLastLockedFps()) {
+    for (auto fp :
+         namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).TEST_GetLastLockedFps()) {
       result.push_back(fp);
     }
   };
