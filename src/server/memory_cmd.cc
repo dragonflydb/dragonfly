@@ -24,6 +24,7 @@
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
+#include "server/transaction.h"
 
 using namespace std;
 using namespace facade;

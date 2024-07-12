@@ -618,18 +618,18 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-bool DbSlice::Del(DbIndex db_ind, Iterator it) {
+bool DbSlice::Del(Context cntx, Iterator it) {
   if (!IsValid(it)) {
     return false;
   }
 
-  auto& db = db_arr_[db_ind];
+  auto& db = db_arr_[cntx.db_index];
   auto obj_type = it->second.ObjType();
 
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
-    doc_del_cb_(key, DbContext{db_ind, GetCurrentTimeMs()}, it->second);
+    doc_del_cb_(key, cntx, it->second);
   }
   fetched_items_.erase(it->first.AsRef());
   PerformDeletion(it, db.get());
@@ -842,7 +842,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   if (rel_msec <= 0) {  // implicit - don't persist
-    CHECK(Del(cntx.db_index, prime_it));
+    CHECK(Del(cntx, prime_it));
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
     auto current = ExpireTime(expire_it);

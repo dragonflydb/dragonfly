@@ -813,6 +813,7 @@ Service::Service(ProactorPool* pp)
   });
 #endif
 
+  CHECK(shard_set == nullptr);
   shard_set = new EngineShardSet(pp);
 
   // We support less than 1024 threads and we support less than 1024 shards.
@@ -1284,7 +1285,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   DVLOG(2) << "Start tracking keys for client ID: " << conn_ref.GetClientId()
            << " with thread ID: " << conn_ref.Thread();
 
-  auto& db_slice = slice_args.shard->db_slice();
+  auto& db_slice = slice_args.GetDbSlice();
   // TODO: There is a bug here that we track all arguments instead of tracking only keys.
   for (auto key : args) {
     DVLOG(2) << "Inserting client ID " << conn_ref.GetClientId()
@@ -1659,9 +1660,10 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_uint32_t keys_existed = 0;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ShardArgs largs = t->GetShardArgs(shard->shard_id());
+    ShardId shard_id = shard->shard_id();
+    ShardArgs largs = t->GetShardArgs(shard_id);
     for (auto k : largs) {
-      shard->db_slice().RegisterWatchedKey(cntx->db_index(), k, &exec_info);
+      t->GetDbSlice(shard_id).RegisterWatchedKey(cntx->db_index(), k, &exec_info);
     }
 
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), largs);
@@ -2131,8 +2133,10 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
 }
 
 // Return true if transaction was scheduled, false if scheduling was not required.
-void StartMultiExec(DbIndex dbid, Transaction* trans, ConnectionState::ExecInfo* exec_info,
+void StartMultiExec(ConnectionContext* cntx, ConnectionState::ExecInfo* exec_info,
                     Transaction::MultiMode multi_mode) {
+  auto trans = cntx->transaction;
+  auto dbid = cntx->db_index();
   switch (multi_mode) {
     case Transaction::GLOBAL:
       trans->StartMultiGlobal(dbid);
@@ -2189,7 +2193,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   bool scheduled = false;
   if (multi_mode != Transaction::NOT_DETERMINED) {
-    StartMultiExec(cntx->db_index(), cntx->transaction, &exec_info, multi_mode);
+    StartMultiExec(cntx, &exec_info, multi_mode);
     scheduled = true;
   }
 

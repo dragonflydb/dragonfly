@@ -16,6 +16,17 @@ namespace dfly {
 using namespace std;
 using Payload = journal::Entry::Payload;
 
+DbSlice& DbContext::GetDbSlice(ShardId shard_id) const {
+  // TODO: Update this when adding namespaces
+  DCHECK_EQ(shard_id, EngineShard::tlocal()->shard_id());
+  return EngineShard::tlocal()->db_slice();
+}
+
+DbSlice& OpArgs::GetDbSlice() const {
+  // TODO: Update this when adding namespaces
+  return shard->db_slice();
+}
+
 size_t ShardArgs::Size() const {
   size_t sz = 0;
   for (const auto& s : slice_.second)

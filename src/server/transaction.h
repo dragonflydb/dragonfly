@@ -29,6 +29,7 @@ namespace dfly {
 
 class EngineShard;
 class BlockingController;
+class DbSlice;
 
 using facade::OpResult;
 using facade::OpStatus;
@@ -304,6 +305,8 @@ class Transaction {
   DbContext GetDbContext() const {
     return DbContext{db_index_, time_now_ms_};
   }
+
+  DbSlice& GetDbSlice(ShardId sid) const;
 
   DbIndex GetDbIndex() const {
     return db_index_;
