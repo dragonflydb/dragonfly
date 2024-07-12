@@ -74,17 +74,17 @@ void OpManager::DeleteOffloaded(DiskSegment segment) {
   }
 }
 
-std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
+std::error_code OpManager::Stash(EntryId id_ref, std::string_view value, io::Bytes footer) {
   auto id = ToOwned(id_ref);
   unsigned version = pending_stash_ver_[id] = ++pending_stash_counter_;
 
-  io::Bytes buf_view{reinterpret_cast<const uint8_t*>(value.data()), value.length()};
-  auto io_cb = [this, version, id = std::move(id)](DiskSegment segment, std::error_code ec) {
-    ProcessStashed(Borrowed(id), version, segment, ec);
+  io::Bytes buf_view = io::Buffer(value);
+  auto io_cb = [this, version, id = std::move(id)](io::Result<DiskSegment> segment) {
+    ProcessStashed(Borrowed(id), version, segment);
   };
 
   // May block due to blocking call to Grow.
-  auto ec = storage_.Stash(buf_view, std::move(io_cb));
+  auto ec = storage_.Stash(buf_view, footer, std::move(io_cb));
   if (ec)
     pending_stash_ver_.erase(ToOwned(id_ref));
   return ec;
@@ -96,23 +96,24 @@ OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
 
   auto [it, inserted] = pending_reads_.try_emplace(aligned_segment.offset, aligned_segment);
   if (inserted) {
-    auto io_cb = [this, aligned_segment](std::string_view value, std::error_code ec) {
-      ProcessRead(aligned_segment.offset, value);
+    auto io_cb = [this, aligned_segment](io::Result<std::string_view> result) {
+      CHECK(result) << result.error();  // TODO: to handle this gracefully.
+      ProcessRead(aligned_segment.offset, *result);
     };
     storage_.Read(aligned_segment, io_cb);
   }
   return it->second;
 }
 
-void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment,
-                               std::error_code ec) {
+void OpManager::ProcessStashed(EntryId id, unsigned version,
+                               const io::Result<DiskSegment>& segment) {
   if (auto it = pending_stash_ver_.find(ToOwned(id));
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
-    NotifyStashed(id, segment, ec);
-  } else if (!ec) {
+    NotifyStashed(id, segment);
+  } else if (segment) {
     // Throw away the value because it's no longer up-to-date even if no error occured
-    storage_.MarkAsFree(segment);
+    storage_.MarkAsFree(*segment);
   }
 }
 

@@ -103,12 +103,12 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Load all values from bin by their hashes
   void Defragment(tiering::DiskSegment segment, string_view value);
 
-  void NotifyStashed(EntryId id, tiering::DiskSegment segment, error_code ec) override {
-    if (ec) {
-      VLOG(1) << "Stash failed " << ec.message();
+  void NotifyStashed(EntryId id, const io::Result<tiering::DiskSegment>& segment) override {
+    if (!segment) {
+      VLOG(1) << "Stash failed " << segment.error().message();
       visit([this](auto id) { ClearIoPending(id); }, id);
     } else {
-      visit([this, segment](auto id) { SetExternal(id, segment); }, id);
+      visit([this, segment](auto id) { SetExternal(id, *segment); }, id);
     }
   }
 
@@ -299,10 +299,10 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   error_code ec;
   if (OccupiesWholePages(value->Size())) {  // large enough for own page
     id = KeyRef(dbid, key);
-    ec = op_manager_->Stash(id, value_sv);
-  } else if (auto bin = bins_->Stash(dbid, key, value_sv); bin) {
+    ec = op_manager_->Stash(id, value_sv, {});
+  } else if (auto bin = bins_->Stash(dbid, key, value_sv, {}); bin) {
     id = bin->first;
-    ec = op_manager_->Stash(id, bin->second);
+    ec = op_manager_->Stash(id, bin->second, {});
   }
 
   if (ec) {

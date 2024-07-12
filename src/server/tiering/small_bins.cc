@@ -28,10 +28,10 @@ size_t StashedValueSize(string_view value) {
 }  // namespace
 
 std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
-                                                     std::string_view value) {
+                                                     std::string_view value, io::Bytes footer) {
   DCHECK_LT(value.size(), 2_KB);
 
-  size_t value_bytes = StashedValueSize(value);
+  size_t value_bytes = StashedValueSize(value) + footer.size();
 
   std::optional<FilledBin> filled_bin;
   if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
@@ -39,17 +39,13 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   }
 
   current_bin_bytes_ += value_bytes;
+  string blob;
+  blob.reserve(value.size() + footer.size());
+  blob.append(value);
+  blob.append(io::View(footer));
+  auto [it, inserted] = current_bin_.emplace(std::make_pair(dbid, key), std::move(blob));
+  CHECK(inserted);
 
-  auto [it, inserted] = current_bin_.emplace(std::make_pair(dbid, key), value);
-  if (!inserted) {
-    LOG(ERROR) << "Duplicate key " << key << " dbid " << dbid;
-    LOG(ERROR) << "Values are same: " << int(it->second == value);
-    for (const auto& [key, _] : current_bin_) {
-      LOG(ERROR) << "Existing ones: " << key.first << " " << key.second;
-    }
-
-    LOG(FATAL) << "Crashing!";
-  }
   DVLOG(2) << "current_bin_bytes: " << current_bin_bytes_
            << ", current_bin_size:" << current_bin_.size();
   return filled_bin;
