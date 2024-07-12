@@ -1534,7 +1534,7 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
 
   transaction->Execute(
       [db_ind](Transaction* t, EngineShard* shard) {
-        t->GetCurrentDbSlice().FlushDb(db_ind);
+        t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
         return OpStatus::OK;
       },
       true);

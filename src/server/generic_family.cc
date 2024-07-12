@@ -191,8 +191,7 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
     return std::nullopt;
   }
 
-  auto res = db_slice.AddNew(DbContext{cntx.ns, cntx.db_index, GetCurrentTimeMs()}, key,
-                             std::move(pv), args.ExpirationTime());
+  auto res = db_slice.AddNew(cntx, key, std::move(pv), args.ExpirationTime());
   res->it->first.SetSticky(args.Sticky());
   if (res) {
     return std::move(res.value());
@@ -375,13 +374,13 @@ void Renamer::FinalizeRename() {
 }
 
 bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const {
-  auto& db_slice = t->GetCurrentDbSlice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
   return IsValid(it);
 }
 
 void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
-  auto& db_slice = t->GetCurrentDbSlice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto [it, exp_it] = db_slice.FindReadOnly(t->GetDbContext(), src_key_);
 
   src_found_ = IsValid(it);
@@ -400,7 +399,7 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
 }
 
 OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
-  auto& db_slice = t->GetCurrentDbSlice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto res = db_slice.FindMutable(t->GetDbContext(), src_key_);
   auto& it = res.it;
 
@@ -425,7 +424,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     return OpStatus::OUT_OF_RANGE;
   }
 
-  auto& db_slice = t->GetCurrentDbSlice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto dest_res = db_slice.FindMutable(op_args.db_cntx, dest_key_);
 
   if (dest_found_) {
@@ -672,7 +671,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
 // returns -2 if the key was not found, -3 if the field was not found,
 // -1 if ttl on the field was not found.
 OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
-  auto& db_slice = t->GetCurrentDbSlice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();
   auto [it, expire_it] = db_slice.FindReadOnly(db_cntx, key);
   if (!IsValid(it))
@@ -1474,7 +1473,7 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
-  auto& db_slice = t->GetCurrentDbSlice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto [it, expire_it] = db_slice.FindReadOnly(t->GetDbContext(), key);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;

@@ -73,7 +73,7 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
 
 struct TransactionGuard {
   static OpStatus ExitGuardCb(Transaction* t, EngineShard* shard) {
-    t->GetCurrentDbSlice().SetExpireAllowed(true);
+    t->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
     return OpStatus::OK;
   };
 
@@ -81,7 +81,7 @@ struct TransactionGuard {
     t->Execute(
         [disable_expirations](Transaction* t, EngineShard* shard) {
           if (disable_expirations) {
-            t->GetCurrentDbSlice().SetExpireAllowed(!disable_expirations);
+            t->GetDbSlice(shard->shard_id()).SetExpireAllowed(!disable_expirations);
           }
           return OpStatus::OK;
         },
@@ -456,7 +456,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   cntx->transaction->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
-    t->GetCurrentDbSlice().ExpireAllIfNeeded();
+    t->GetDbSlice(shard->shard_id()).ExpireAllIfNeeded();
     return OpStatus::OK;
   });
 

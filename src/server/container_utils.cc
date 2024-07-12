@@ -60,8 +60,9 @@ OpResult<string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_ty
   DCHECK_EQ(trans->GetUniqueShardCnt(), 1u);
   string key;
   auto cb = [&](Transaction* t, EngineShard* shard) -> Transaction::RunnableResult {
-    auto args = t->GetShardArgs(shard->shard_id());
-    auto ff_res = FindFirstReadOnly(t->GetCurrentDbSlice(), t->GetDbContext(), args, req_obj_type);
+    ShardId sid = shard->shard_id();
+    auto args = t->GetShardArgs(sid);
+    auto ff_res = FindFirstReadOnly(t->GetDbSlice(sid), t->GetDbContext(), args, req_obj_type);
 
     if (ff_res == OpStatus::WRONG_TYPE)
       return OpStatus::WRONG_TYPE;
@@ -96,8 +97,9 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
   std::fill(find_res.begin(), find_res.end(), OpStatus::KEY_NOTFOUND);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto args = t->GetShardArgs(shard->shard_id());
-    auto ff_res = FindFirstReadOnly(t->GetCurrentDbSlice(), t->GetDbContext(), args, req_obj_type);
+    ShardId sid = shard->shard_id();
+    auto args = t->GetShardArgs(sid);
+    auto ff_res = FindFirstReadOnly(t->GetDbSlice(sid), t->GetDbContext(), args, req_obj_type);
     if (ff_res) {
       find_res[shard->shard_id()] =
           FFResult{ff_res->first->first.AsRef(), ff_res->second, shard->shard_id()};

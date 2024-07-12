@@ -312,7 +312,7 @@ class Transaction {
     return *namespace_;
   }
 
-  DbSlice& GetCurrentDbSlice() const;
+  DbSlice& GetDbSlice(ShardId sid) const;
 
   DbIndex GetDbIndex() const {
     return db_index_;

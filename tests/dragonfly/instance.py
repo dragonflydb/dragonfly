@@ -168,7 +168,7 @@ class DflyInstance:
                 # if the return code is negative it means termination by signal
                 # if the return code is positive it means abnormal exit
                 if proc.returncode != 0:
-                    raise Exception("Dragfonfly did not terminate gracefully")
+                    raise Exception("Dragonfly did not terminate gracefully")
 
         except subprocess.TimeoutExpired:
             # We need to send SIGUSR1 to DF such that it prints the stacktrace
@@ -330,7 +330,7 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,dflycmd=1"
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
         args.setdefault("log_dir", self.params.log_dir)

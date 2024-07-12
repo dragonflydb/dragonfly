@@ -413,7 +413,7 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, bool f
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
-  auto& db_slice = t->GetCurrentDbSlice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
 
   SinkReplyBuilder::MGetResponse response(keys.Size());
   absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
@@ -857,7 +857,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
-    auto it_res = tx->GetCurrentDbSlice().FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+    auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -869,7 +869,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
-    auto& db_slice = tx->GetCurrentDbSlice();
+    auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
@@ -1262,7 +1262,7 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    auto it_res = t->GetCurrentDbSlice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    auto it_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 

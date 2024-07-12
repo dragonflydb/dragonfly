@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -9,6 +9,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
+#include "util/fibers/synchronization.h"
 
 using namespace facade;
 
@@ -211,6 +212,8 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
 
     bool written = false;
     cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+      ConditionGuard guard(&bucket_ser_);
+
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
       if (WriteBucket(it)) {
@@ -280,10 +283,6 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
 }
 
 bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
-  // Can't switch fibers because that could invalidate iterator or cause bucket splits which may
-  // move keys between buckets.
-  FiberAtomicGuard fg;
-
   bool written = false;
 
   if (it.GetVersion() < snapshot_version_) {
@@ -312,7 +311,8 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
-  FiberAtomicGuard fg;
+  ConditionGuard guard(&bucket_ser_);
+
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {

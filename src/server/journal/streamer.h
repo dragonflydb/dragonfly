@@ -1,9 +1,10 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
 
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
@@ -102,6 +103,8 @@ class RestoreStreamer : public JournalStreamer {
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
+
+  ConditionFlag bucket_ser_;
 };
 
 }  // namespace dfly

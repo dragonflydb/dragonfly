@@ -1670,9 +1670,10 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_uint32_t keys_existed = 0;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    ShardArgs largs = t->GetShardArgs(shard->shard_id());
+    ShardId shard_id = shard->shard_id();
+    ShardArgs largs = t->GetShardArgs(shard_id);
     for (auto k : largs) {
-      t->GetCurrentDbSlice().RegisterWatchedKey(cntx->db_index(), k, &exec_info);
+      t->GetDbSlice(shard_id).RegisterWatchedKey(cntx->db_index(), k, &exec_info);
     }
 
     auto res = GenericFamily::OpExists(t->GetOpArgs(shard), largs);

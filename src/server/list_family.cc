@@ -178,7 +178,7 @@ class BPopPusher {
 std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, ListDir dir) {
   DVLOG(2) << "popping from " << key << " " << t->DebugId();
 
-  auto& db_slice = t->GetCurrentDbSlice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto it_res = db_slice.FindMutable(t->GetDbContext(), key, OBJ_LIST);
 
   if (!it_res) {
@@ -211,7 +211,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
     absl::StrAppend(debugMessages.Next(), "OpBPop Del: ", key, " by ", t->DebugId());
 
-    CHECK(t->GetCurrentDbSlice().Del(op_args.db_cntx, it));
+    CHECK(op_args.GetDbSlice().Del(op_args.db_cntx, it));
   }
 
   if (op_args.shard->journal()) {
@@ -880,7 +880,7 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction* t,
                               std::string_view key) -> bool {
-    return t->GetCurrentDbSlice().FindReadOnly(context, key, OBJ_LIST).ok();
+    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };
   // Block
   auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &(cntx->blocked), &(cntx->paused));
@@ -911,7 +911,7 @@ OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
 
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction* t,
                               std::string_view key) -> bool {
-    return t->GetCurrentDbSlice().FindReadOnly(context, key, OBJ_LIST).ok();
+    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };
 
   if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked, &cntx->paused);

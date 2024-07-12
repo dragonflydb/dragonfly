@@ -359,4 +359,27 @@ class UniquePicksGenerator : public PicksGenerator {
   absl::BitGen bitgen_{};
 };
 
+struct ConditionFlag {
+  util::fb2::CondVarAny cond_var;
+  bool flag = false;
+};
+
+// Helper class used to guarantee atomicity between serialization of buckets
+class ConditionGuard {
+ public:
+  explicit ConditionGuard(ConditionFlag* enclosing) : enclosing_(enclosing) {
+    util::fb2::NoOpLock noop_lk_;
+    enclosing_->cond_var.wait(noop_lk_, [this]() { return !enclosing_->flag; });
+    enclosing_->flag = true;
+  }
+
+  ~ConditionGuard() {
+    enclosing_->flag = false;
+    enclosing_->cond_var.notify_one();
+  }
+
+ private:
+  ConditionFlag* enclosing_;
+};
+
 }  // namespace dfly
