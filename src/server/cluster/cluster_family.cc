@@ -426,8 +426,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::ClusterMyId(ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendBulkString(id_);
+  cntx->SendSimpleString(id_);
 }
 
 namespace {
