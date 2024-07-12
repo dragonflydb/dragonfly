@@ -806,7 +806,7 @@ async def test_cluster_native_client(
     df_factory.start_all(masters)
     c_masters = [aioredis.Redis(port=master.port) for master in masters]
     c_masters_admin = [master.admin_client() for master in masters]
-    master_ids = await asyncio.gather(*(get_node_id(c) for c in c_masters))
+    master_ids = await asyncio.gather(*(get_node_id(c) for c in c_masters_admin))
 
     replicas = [
         df_factory.create(
@@ -1617,7 +1617,6 @@ async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
     raise RuntimeError("Failed to reach stable sync")
 
 
-@pytest.mark.skip(reason="temporary disabled due to failed for unknown reason")
 @dfly_args({"proactor_threads": 4})
 async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_seeder_factory):
     """
