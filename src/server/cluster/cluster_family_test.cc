@@ -34,7 +34,7 @@ class ClusterFamilyTest : public BaseFamilyTest {
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
   string GetMyId() {
-    return RunPrivileged({"cluster", "myid"}).GetString();
+    return Run({"cluster", "myid"}).GetString();
   }
 
   void ConfigSingleNodeCluster(string id) {
