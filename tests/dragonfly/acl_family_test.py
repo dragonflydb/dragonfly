@@ -458,6 +458,23 @@ async def test_require_pass(df_factory):
 
 
 @pytest.mark.asyncio
+@dfly_args({"port": 1111, "requirepass": "temp"})
+async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
+    acl = create_temp_file(
+        "USER default ON >jordan ~* +@all",
+        tmp_dir,
+    )
+
+    df = df_factory.create(aclfile=acl)
+    df.start()
+
+    client = aioredis.Redis(username="default", password="jordan", port=df.port)
+
+    b"OK" == await client.execute_command("SET foo bar")
+    client.close()
+
+
+@pytest.mark.asyncio
 async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
     acl_file_content = "USER roy ON #ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@string +@fast +hset\nUSER john on nopass +@string"
 
