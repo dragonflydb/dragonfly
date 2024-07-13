@@ -470,8 +470,8 @@ async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
 
     client = aioredis.Redis(username="default", password="jordan", port=df.port)
 
-    b"OK" == await client.execute_command("SET foo bar")
-    client.close()
+    assert await client.set("foo", "bar")
+    await client.close()
 
 
 @pytest.mark.asyncio
