@@ -741,7 +741,7 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {
 
 TEST_F(ClusterFamilyEmulatedTest, ForbidenCommands) {
   auto res = Run({"DFLYCLUSTER", "GETSLOTINFO", "SLOTS", "1"});
-  EXPECT_THAT(res, ErrArg("ERR Cluster is disabled. Enabled via passing --cluster_mode=yes"));
+  EXPECT_THAT(res, ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
 }
 
 }  // namespace

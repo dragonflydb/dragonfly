@@ -369,6 +369,14 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kClusterDisabled);
   }
 
+  if (sub_cmd == "KEYSLOT") {
+    return KeySlot(args, cntx);
+  }
+
+  if (args.size() > 1) {
+    return cntx->SendError(WrongNumArgsError(absl::StrCat("CLUSTER ", sub_cmd)));
+  }
+
   if (sub_cmd == "HELP") {
     return ClusterHelp(cntx);
   } else if (sub_cmd == "MYID") {
@@ -381,8 +389,6 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
     return ClusterNodes(cntx);
   } else if (sub_cmd == "INFO") {
     return ClusterInfo(cntx);
-  } else if (sub_cmd == "KEYSLOT") {
-    return KeySlot(args, cntx);
   } else {
     return cntx->SendError(facade::UnknownSubCmd(sub_cmd, "CLUSTER"), facade::kSyntaxErrType);
   }
@@ -404,7 +410,7 @@ void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   if (!IsClusterEnabled()) {
-    return cntx->SendError("Cluster is disabled. Enabled via passing --cluster_mode=yes");
+    return cntx->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
 
   VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
