@@ -65,8 +65,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     streamer_.Cancel();
   }
 
-  void Finalize() {
-    streamer_.SendFinalize();
+  void Finalize(long attempt) {
+    streamer_.SendFinalize(attempt);
   }
 
   const dfly::GenericError GetError() const {
@@ -270,9 +270,9 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     pause_fb_opt->JoinIfNeeded();
   });
 
-  auto cb = [this](util::ProactorBase* pb) {
+  auto cb = [this, attempt](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
-      slot_migrations_[shard->shard_id()]->Finalize();
+      slot_migrations_[shard->shard_id()]->Finalize(attempt);
     }
   };
 
@@ -302,7 +302,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   const auto attempt_res = get<int64_t>(LastResponseArgs().front().u);
-  if (attempt_res == kInvalidAttempt) {
+  if (attempt_res != attempt) {
+    LOG(WARNING) << "Incorrect attempt payload, sent " << attempt << " received " << attempt_res;
     return false;
   }
 
