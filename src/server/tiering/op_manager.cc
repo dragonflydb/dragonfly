@@ -142,7 +142,7 @@ void OpManager::ProcessRead(size_t offset, std::string_view page) {
 
     bool modified = false;
     for (auto& cb : ko.callbacks)
-      modified |= cb(&key_value);
+      modified |= cb(!modified, &key_value);
 
     bool delete_from_storage = ko.deleting;
 
