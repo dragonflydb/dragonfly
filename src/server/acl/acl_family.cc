@@ -45,6 +45,18 @@ ABSL_FLAG(std::string, aclfile, "", "Path and name to aclfile");
 
 namespace dfly::acl {
 
+namespace {
+
+std::string PasswordsToString(const absl::flat_hash_set<std::string>& passwords, bool nopass,
+                              bool full_sha);
+using MaterializedContents = std::optional<std::vector<std::vector<std::string_view>>>;
+
+MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames,
+                                             std::string_view file_contents);
+
+std::string AclKeysToString(const AclKeys& keys);
+}  // namespace
+
 AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
     : registry_(registry), pool_(pool) {
 }
@@ -104,7 +116,7 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   const bool exists = reg.registry.contains(username);
   const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
 
-  auto req = ParseAclSetUser(args.subspan(1), *cmd_registry_, false, has_all_keys);
+  auto req = ParseAclSetUser(args.subspan(1), false, has_all_keys);
 
   auto error_case = [cntx](ErrorReply&& error) { cntx->SendError(error); };
 
@@ -276,7 +288,7 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
   std::vector<User::UpdateRequest> requests;
 
   for (auto& cmds : *materialized) {
-    auto req = ParseAclSetUser(cmds, *cmd_registry_, true);
+    auto req = ParseAclSetUser(cmds, true);
     if (std::holds_alternative<ErrorReply>(req)) {
       auto error = std::move(std::get<ErrorReply>(req));
       LOG(WARNING) << "Error while parsing aclfile: " << error.ToSv();
@@ -707,8 +719,21 @@ std::string AclFamily::AclCommandToString(size_t family, uint64_t mask, User::Si
   return res;
 }
 
-AclFamily::MergeResult AclFamily::MergeTables(const User::CategoryChanges& categories,
-                                              const User::CommandChanges& commands) const {
+namespace {
+struct CategoryAndMetadata {
+  User::CategoryChange change;
+  User::ChangeMetadata metadata;
+};
+
+struct CommandAndMetadata {
+  User::CommandChange change;
+  User::ChangeMetadata metadata;
+};
+
+using MergeResult = std::vector<std::variant<CategoryAndMetadata, CommandAndMetadata>>;
+
+MergeResult MergeTables(const User::CategoryChanges& categories,
+                        const User::CommandChanges& commands) {
   MergeResult result;
   for (auto [cat, meta] : categories) {
     result.push_back(CategoryAndMetadata{cat, meta});
@@ -726,45 +751,39 @@ AclFamily::MergeResult AclFamily::MergeTables(const User::CategoryChanges& categ
   return result;
 }
 
-std::string AclFamily::AclCatAndCommandToString(const User::CategoryChanges& cat,
-                                                const User::CommandChanges& cmds) const {
-  std::string result;
+using MaterializedContents = std::optional<std::vector<std::vector<std::string_view>>>;
 
-  auto tables = MergeTables(cat, cmds);
+MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames,
+                                             std::string_view file_contents) {
+  // This is fine, a very large file will top at 1-2 mb. And that's for 5000+ users with 400
+  // characters per line
+  std::vector<std::string_view> commands = absl::StrSplit(file_contents, "\n");
+  std::vector<std::vector<std::string_view>> materialized;
+  materialized.reserve(commands.size());
+  usernames->reserve(commands.size());
+  for (auto& command : commands) {
+    if (command.empty())
+      continue;
+    std::vector<std::string_view> cmds = absl::StrSplit(command, ' ');
+    if (!absl::EqualsIgnoreCase(cmds[0], "USER") || cmds.size() < 4) {
+      return {};
+    }
 
-  auto cat_visitor = [&result, this](const CategoryAndMetadata& val) {
-    const auto& [change, meta] = val;
-    absl::StrAppend(&result, AclCatToString(change, meta.sign), " ");
-  };
-
-  auto cmd_visitor = [&result, this](const CommandAndMetadata& val) {
-    const auto& [change, meta] = val;
-    const auto [family, bit_index] = change;
-    absl::StrAppend(&result, AclCommandToString(family, bit_index, meta.sign), " ");
-  };
-
-  Overloaded visitor{cat_visitor, cmd_visitor};
-
-  for (auto change : tables) {
-    std::visit(visitor, change);
+    usernames->push_back(std::string(cmds[1]));
+    cmds.erase(cmds.begin(), cmds.begin() + 2);
+    materialized.push_back(cmds);
   }
-
-  if (!result.empty()) {
-    result.pop_back();
-  }
-
-  return result;
+  return materialized;
 }
 
-std::string AclFamily::PrettyPrintSha(std::string_view pass, bool all) const {
-  if (all) {
-    return absl::BytesToHexString(pass);
-  }
-  return absl::BytesToHexString(pass.substr(0, 15)).substr(0, 15);
+struct ParseKeyResult {
+  std::string glob;
+  KeyOp op;
+  bool all_keys{false};
+  bool reset_keys{false};
 };
 
-std::optional<AclFamily::ParseKeyResult> AclFamily::MaybeParseAclKey(
-    std::string_view command) const {
+std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command) {
   if (absl::EqualsIgnoreCase(command, "ALLKEYS") || command == "~*") {
     return ParseKeyResult{"", {}, true};
   }
@@ -796,8 +815,14 @@ std::optional<AclFamily::ParseKeyResult> AclFamily::MaybeParseAclKey(
   return ParseKeyResult{std::string(key), op};
 }
 
-std::optional<User::UpdatePass> AclFamily::MaybeParsePassword(std::string_view command,
-                                                              bool hashed) const {
+std::string PrettyPrintSha(std::string_view pass, bool all) {
+  if (all) {
+    return absl::BytesToHexString(pass);
+  }
+  return absl::BytesToHexString(pass.substr(0, 15)).substr(0, 15);
+};
+
+std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, bool hashed) {
   using UpPass = User::UpdatePass;
   if (command == "nopass") {
     return UpPass{"", false, true};
@@ -818,7 +843,7 @@ std::optional<User::UpdatePass> AclFamily::MaybeParsePassword(std::string_view c
   return {};
 }
 
-std::optional<bool> AclFamily::MaybeParseStatus(std::string_view command) const {
+std::optional<bool> MaybeParseStatus(std::string_view command) {
   if (command == "ON") {
     return true;
   }
@@ -826,6 +851,71 @@ std::optional<bool> AclFamily::MaybeParseStatus(std::string_view command) const 
     return false;
   }
   return {};
+}
+
+std::string PasswordsToString(const absl::flat_hash_set<std::string>& passwords, bool nopass,
+                              bool full_sha) {
+  if (nopass) {
+    return "nopass ";
+  }
+  std::string result;
+  for (const auto& pass : passwords) {
+    absl::StrAppend(&result, "#", PrettyPrintSha(pass, full_sha), " ");
+  }
+
+  return result;
+}
+
+std::string AclKeysToString(const AclKeys& keys) {
+  if (keys.all_keys) {
+    return "~*";
+  }
+  std::string result;
+  for (auto& [pattern, op] : keys.key_globs) {
+    if (op == KeyOp::READ_WRITE) {
+      absl::StrAppend(&result, "~", pattern, " ");
+      continue;
+    }
+    std::string op_str = (op == KeyOp::READ) ? "R" : "W";
+    absl::StrAppend(&result, "%", op_str, "~", pattern, " ");
+  }
+
+  if (!result.empty()) {
+    result.pop_back();
+  }
+  return result;
+}
+
+}  // namespace
+
+std::string AclFamily::AclCatAndCommandToString(const User::CategoryChanges& cat,
+                                                const User::CommandChanges& cmds) const {
+  std::string result;
+
+  auto tables = MergeTables(cat, cmds);
+
+  auto cat_visitor = [&result, this](const CategoryAndMetadata& val) {
+    const auto& [change, meta] = val;
+    absl::StrAppend(&result, AclCatToString(change, meta.sign), " ");
+  };
+
+  auto cmd_visitor = [&result, this](const CommandAndMetadata& val) {
+    const auto& [change, meta] = val;
+    const auto [family, bit_index] = change;
+    absl::StrAppend(&result, AclCommandToString(family, bit_index, meta.sign), " ");
+  };
+
+  Overloaded visitor{cat_visitor, cmd_visitor};
+
+  for (auto change : tables) {
+    std::visit(visitor, change);
+  }
+
+  if (!result.empty()) {
+    result.pop_back();
+  }
+
+  return result;
 }
 
 using OptCat = std::optional<uint32_t>;
@@ -853,9 +943,9 @@ std::pair<OptCat, bool> AclFamily::MaybeParseAclCategory(std::string_view comman
 }
 
 std::pair<AclFamily::OptCommand, bool> AclFamily::MaybeParseAclCommand(
-    std::string_view command, const CommandRegistry& registry) const {
+    std::string_view command) const {
   if (absl::StartsWith(command, "+")) {
-    auto res = registry.Find(command.substr(1));
+    auto res = cmd_registry_->Find(command.substr(1));
     if (!res) {
       return {};
     }
@@ -864,7 +954,7 @@ std::pair<AclFamily::OptCommand, bool> AclFamily::MaybeParseAclCommand(
   }
 
   if (absl::StartsWith(command, "-")) {
-    auto res = registry.Find(command.substr(1));
+    auto res = cmd_registry_->Find(command.substr(1));
     if (!res) {
       return {};
     }
@@ -875,33 +965,10 @@ std::pair<AclFamily::OptCommand, bool> AclFamily::MaybeParseAclCommand(
   return {};
 }
 
-AclFamily::MaterializedContents AclFamily::MaterializeFileContents(
-    std::vector<std::string>* usernames, std::string_view file_contents) const {
-  // This is fine, a very large file will top at 1-2 mb. And that's for 5000+ users with 400
-  // characters per line
-  std::vector<std::string_view> commands = absl::StrSplit(file_contents, "\n");
-  std::vector<std::vector<std::string_view>> materialized;
-  materialized.reserve(commands.size());
-  usernames->reserve(commands.size());
-  for (auto& command : commands) {
-    if (command.empty())
-      continue;
-    std::vector<std::string_view> cmds = absl::StrSplit(command, ' ');
-    if (!absl::EqualsIgnoreCase(cmds[0], "USER") || cmds.size() < 4) {
-      return {};
-    }
-
-    usernames->push_back(std::string(cmds[1]));
-    cmds.erase(cmds.begin(), cmds.begin() + 2);
-    materialized.push_back(cmds);
-  }
-  return materialized;
-}
-
 using facade::ErrorReply;
 
 std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
-    facade::ArgRange args, const CommandRegistry& registry, bool hashed, bool has_all_keys) const {
+    const facade::ArgRange& args, bool hashed, bool has_all_keys) const {
   User::UpdateRequest req;
 
   for (std::string_view arg : args) {
@@ -952,7 +1019,7 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
       continue;
     }
 
-    auto [cmd, sign] = MaybeParseAclCommand(command, registry);
+    auto [cmd, sign] = MaybeParseAclCommand(command);
     if (!cmd) {
       return ErrorReply(absl::StrCat("Unrecognized parameter ", command));
     }
@@ -965,41 +1032,6 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
   }
 
   return req;
-}
-
-using facade::CmdArgList;
-
-std::string AclFamily::AclKeysToString(const AclKeys& keys) const {
-  if (keys.all_keys) {
-    return "~*";
-  }
-  std::string result;
-  for (auto& [pattern, op] : keys.key_globs) {
-    if (op == KeyOp::READ_WRITE) {
-      absl::StrAppend(&result, "~", pattern, " ");
-      continue;
-    }
-    std::string op_str = (op == KeyOp::READ) ? "R" : "W";
-    absl::StrAppend(&result, "%", op_str, "~", pattern, " ");
-  }
-
-  if (!result.empty()) {
-    result.pop_back();
-  }
-  return result;
-}
-
-std::string AclFamily::PasswordsToString(const absl::flat_hash_set<std::string>& passwords,
-                                         bool nopass, bool full_sha) const {
-  if (nopass) {
-    return "nopass ";
-  }
-  std::string result;
-  for (const auto& pass : passwords) {
-    absl::StrAppend(&result, "#", PrettyPrintSha(pass, full_sha), " ");
-  }
-
-  return result;
 }
 
 void AclFamily::BuildIndexers(RevCommandsIndexStore families) {

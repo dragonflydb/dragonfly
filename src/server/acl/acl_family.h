@@ -74,61 +74,14 @@ class AclFamily final {
   std::string AclCatAndCommandToString(const User::CategoryChanges& cat,
                                        const User::CommandChanges& cmds) const;
 
-  std::string PrettyPrintSha(std::string_view pass, bool all = false) const;
-
-  // When hashed is true, we allow passwords that start with both # and >
-  std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command,
-                                                     bool hashed = false) const;
-
-  std::optional<bool> MaybeParseStatus(std::string_view command) const;
-
   using OptCat = std::optional<uint32_t>;
   std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) const;
 
   using OptCommand = std::optional<std::pair<size_t, uint64_t>>;
-  std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command,
-                                                   const CommandRegistry& registry) const;
+  std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command) const;
 
   std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
-      facade::ArgRange args, const CommandRegistry& registry, bool hashed = false,
-      bool has_all_keys = false) const;
-
-  using MaterializedContents = std::optional<std::vector<std::vector<std::string_view>>>;
-
-  // Helper function that transforms a serialized acl file into a data structure we can
-  // iterate and push to the registry
-  MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames,
-                                               std::string_view file_contents) const;
-
-  struct ParseKeyResult {
-    std::string glob;
-    KeyOp op;
-    bool all_keys{false};
-    bool reset_keys{false};
-  };
-
-  std::optional<ParseKeyResult> MaybeParseAclKey(std::string_view command) const;
-
-  std::string AclKeysToString(const AclKeys& keys) const;
-
-  std::string PasswordsToString(const absl::flat_hash_set<std::string>& passwords, bool nopass,
-                                bool full_sha) const;
-
-  struct CategoryAndMetadata {
-    User::CategoryChange change;
-    User::ChangeMetadata metadata;
-  };
-
-  struct CommandAndMetadata {
-    User::CommandChange change;
-    User::ChangeMetadata metadata;
-  };
-
-  using MergeResult = std::vector<std::variant<CategoryAndMetadata, CommandAndMetadata>>;
-
-  // Merge Category and Command changes and sort them by global order seq_no
-  MergeResult MergeTables(const User::CategoryChanges& categories,
-                          const User::CommandChanges& commands) const;
+      const facade::ArgRange& args, bool hashed = false, bool has_all_keys = false) const;
 
   void BuildIndexers(RevCommandsIndexStore families);
 
