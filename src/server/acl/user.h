@@ -37,6 +37,7 @@ class User final {
     bool unset{false};
     bool nopass{false};
     bool reset_password{false};
+    bool is_hashed{false};
   };
 
   struct UpdateRequest {
@@ -80,7 +81,9 @@ class User final {
   User(User&&) = default;
 
   // For single step updates
-  void Update(UpdateRequest&& req);
+  void Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
+              const ReverseCategoryIndexTable& reverse_cat,
+              const CategoryToCommandsIndexStore& cat_to_commands);
 
   bool HasPassword(std::string_view password) const;
 
@@ -109,8 +112,12 @@ class User final {
   const CommandChanges& CmdChanges() const;
 
  private:
-  void SetAclCategoriesAndIncrSeq(uint32_t cat);
-  void UnsetAclCategoriesAndIncrSeq(uint32_t cat);
+  void SetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
+                                  const ReverseCategoryIndexTable& reverse_cat,
+                                  const CategoryToCommandsIndexStore& cat_to_commands);
+  void UnsetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
+                                    const ReverseCategoryIndexTable& reverse_cat,
+                                    const CategoryToCommandsIndexStore& cat_to_commands);
 
   // For ACL commands
   void SetAclCommands(size_t index, uint64_t bit_index);

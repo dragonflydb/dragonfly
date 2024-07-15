@@ -7,11 +7,13 @@ import redis.asyncio as aioredis
 
 from . import dfly_args
 from .seeder import StaticSeeder
+from .utility import info_tick_timer
 
 
-BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiering_test_backing"}
+BASIC_ARGS = {"port": 6379, "proactor_threads": 4, "tiered_prefix": "/tmp/tiered/backing"}
 
 
+@pytest.mark.skip("Requires evaluating runner performance first")
 @pytest.mark.opt_only
 @dfly_args(BASIC_ARGS)
 async def test_basic_memory_usage(async_client: aioredis.Redis):
@@ -25,12 +27,9 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     await seeder.run(async_client)
 
     # Wait for tiering stashes
-    with async_timeout.timeout(5):
-        while True:
-            info = await async_client.info("ALL")
-            if info["tiered_entries"] > 195_000:
-                break
-            await asyncio.sleep(0.2)
+    async for info, breaker in info_tick_timer(async_client, section="TIERED"):
+        with breaker:
+            assert info["tiered_entries"] > 195_000
 
     info = await async_client.info("ALL")
     assert info["num_entries"] == 200_000
@@ -76,8 +75,9 @@ async def test_mixed_append(async_client: aioredis.Redis):
     n = 20
     await asyncio.gather(*(run(ops[i::n]) for i in range(n)))
 
-    info = await async_client.info("tiered")
-    assert info["tiered_entries"] > len(key_range) / 5
+    async for info, breaker in info_tick_timer(async_client, section="TIERED"):
+        with breaker:
+            assert info["tiered_entries"] > len(key_range) / 5
 
     # Verify lengths
     p = async_client.pipeline(transaction=False)

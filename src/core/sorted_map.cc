@@ -573,34 +573,50 @@ size_t SortedMap::DeleteRangeByLex(const zlexrangespec& range) {
 }
 
 SortedMap::ScoredArray SortedMap::PopTopScores(unsigned count, bool reverse) {
+  DCHECK_GT(count, 0u);
   DCHECK_EQ(score_map->UpperBoundSize(), score_tree->Size());
   size_t sz = score_map->UpperBoundSize();
 
   ScoredArray res;
 
-  if (sz == 0)
+  DCHECK_GT(sz, 0u);  // Empty sets are not allowed.
+
+  if (sz == 0 || count == 0)
     return res;
 
-  if (count >= sz)
-    count = score_map->UpperBoundSize();
+  if (count > sz)
+    count = sz;
 
   res.reserve(count);
-  unsigned rank = 0;
-  unsigned step = 0;
 
-  if (reverse) {
-    rank = sz - 1;
-    step = 1;
-  }
-
-  for (unsigned i = 0; i < count; ++i) {
-    auto path = score_tree->FromRank(rank);
-    ScoreSds obj = path.Terminal();
+  auto cb = [&](ScoreSds obj) {
     res.emplace_back(string{(sds)obj, sdslen((sds)obj)}, GetObjScore(obj));
 
-    score_tree->Delete(path);
-    score_map->Erase((sds)obj);
-    rank -= step;
+    // We can not delete from score_tree because we are in the middle of the iteration.
+    CHECK(score_map->Erase((sds)obj));
+    return true;  // continue with the iteration.
+  };
+
+  unsigned rank = 0;
+  unsigned step = 0;
+  if (reverse) {
+    score_tree->IterateReverse(0, count - 1, std::move(cb));
+    rank = score_tree->Size() - 1;
+    step = 1;
+  } else {
+    score_tree->Iterate(0, count - 1, std::move(cb));
+  }
+
+  // We already deleted elements from score_map, so what's left is to delete from the tree.
+  if (score_map->Empty()) {
+    // Corner case optimization.
+    score_tree->Clear();
+  } else {
+    for (unsigned i = 0; i < res.size(); ++i) {
+      auto path = score_tree->FromRank(rank);
+      score_tree->Delete(path);
+      rank -= step;
+    }
   }
 
   return res;

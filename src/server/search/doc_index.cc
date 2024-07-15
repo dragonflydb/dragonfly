@@ -22,7 +22,7 @@ namespace {
 
 template <typename F>
 void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
   auto [prime_table, _] = db_slice.GetTables(op_args.db_cntx.db_index);
 
@@ -202,7 +202,7 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto search_results = search_algo->Search(&indices_, params.limit_offset + params.limit_total);
 
   if (!search_results.error.empty())
@@ -235,7 +235,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
 vector<absl::flat_hash_map<string, search::SortableValue>> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, ArgSlice load_fields, search::SearchAlgorithm* search_algo) const {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto search_results = search_algo->Search(&indices_);
 
   if (!search_results.error.empty())
@@ -287,7 +287,7 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
   if (ServerState::tlocal()->gstate() == GlobalState::ACTIVE)
     it->second->Rebuild(op_args, &local_mr_);
 
-  op_args.shard->db_slice().SetDocDeletionCallback(
+  op_args.GetDbSlice().SetDocDeletionCallback(
       [this](string_view key, const DbContext& cntx, const PrimeValue& pv) {
         RemoveDoc(key, cntx, pv);
       });

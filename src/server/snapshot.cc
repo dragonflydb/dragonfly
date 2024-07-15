@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -250,37 +250,35 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
-  // We need to block if serialization is in progress
-  {
-    std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
-    ++stats_.savecb_calls;
+  ConditionGuard guard(&bucket_ser_);
 
-    auto check = [&](auto v) {
-      if (v >= snapshot_version_) {
-        // either has been already serialized or added after snapshotting started.
-        DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
-                 << " at " << v;
-        ++stats_.skipped;
-        return false;
-      }
-      return true;
-    };
+  ++stats_.savecb_calls;
 
-    uint64_t v = it.GetVersion();
-    if (!check(v))
+  auto check = [&](auto v) {
+    if (v >= snapshot_version_) {
+      // either has been already serialized or added after snapshotting started.
+      DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
+               << " at " << v;
+      ++stats_.skipped;
       return false;
+    }
+    return true;
+  };
+
+  uint64_t v = it.GetVersion();
+  if (!check(v)) {
+    return false;
   }
 
   db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
   stats_.loop_serialized += SerializeBucket(current_db_, it);
+
   return false;
 }
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
-  std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_);
-
   DCHECK_LT(it.GetVersion(), snapshot_version_);
 
   // traverse physical bucket and write it into string file.
@@ -360,7 +358,8 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  { std::unique_lock<util::fb2::Mutex> lk(bucket_ser_mu_); }
+  ConditionGuard guard(&bucket_ser_);
+
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 
@@ -382,11 +381,6 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
 void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
-  // We ignore EXEC entries because we they have no meaning during
-  // the LOAD phase on replica.
-  if (item.opcode == journal::Op::EXEC)
-    return;
-
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerializedToChannel.

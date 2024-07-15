@@ -617,18 +617,18 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-bool DbSlice::Del(DbIndex db_ind, Iterator it) {
+bool DbSlice::Del(Context cntx, Iterator it) {
   if (!IsValid(it)) {
     return false;
   }
 
-  auto& db = db_arr_[db_ind];
+  auto& db = db_arr_[cntx.db_index];
   auto obj_type = it->second.ObjType();
 
   if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
     string tmp;
     string_view key = it->first.GetSlice(&tmp);
-    doc_del_cb_(key, DbContext{db_ind, GetCurrentTimeMs()}, it->second);
+    doc_del_cb_(key, cntx, it->second);
   }
   fetched_items_.erase(it->first.AsRef());
   PerformDeletion(it, db.get());
@@ -707,14 +707,10 @@ void DbSlice::FlushSlots(cluster::SlotRanges slot_ranges) {
 }
 
 void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
-  // Async cleanup can only be performed if no tiered entries exist
-  bool async_cleanup = true;
-  for (DbIndex index : indexes) {
-    async_cleanup &= db_arr_[index]->stats.tiered_entries == 0;
-  }
+  bool clear_tiered = owner_->tiered_storage() != nullptr;
 
-  if (!async_cleanup)
-    ClearEntriesOnFlush(indexes, db_arr_, false);
+  if (clear_tiered)
+    ClearOffloadedEntries(indexes, db_arr_);
 
   DbTableArray flush_db_arr(db_arr_.size());
   for (DbIndex index : indexes) {
@@ -728,9 +724,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   }
 
   CHECK(fetched_items_.empty());
-  auto cb = [this, async_cleanup, indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
-    if (async_cleanup)
-      ClearEntriesOnFlush(indexes, flush_db_arr, true);
+  auto cb = [this, indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
@@ -847,7 +841,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   if (rel_msec <= 0) {  // implicit - don't persist
-    CHECK(Del(cntx.db_index, prime_it));
+    CHECK(Del(cntx, prime_it));
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
     auto current = ExpireTime(expire_it);
@@ -1092,15 +1086,18 @@ void DbSlice::ExpireAllIfNeeded() {
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
-  uint64_t ver = NextVersion();
-
   // TODO rewrite this logic to be more clear
   // this mutex lock is needed to check that this method is not called simultaneously with
   // change_cb_ calls and journal_slice::change_cb_arr_ calls.
   // It can be unlocked anytime because DbSlice::RegisterOnChange
   // and journal_slice::RegisterOnChange calls without preemption
   std::lock_guard lk(cb_mu_);
+
+  uint64_t ver = NextVersion();
   change_cb_.emplace_back(ver, std::move(cb));
+  DCHECK(std::is_sorted(change_cb_.begin(), change_cb_.end(),
+                        [](auto& a, auto& b) { return a.first < b.first; }));
+
   return ver;
 }
 
@@ -1401,27 +1398,31 @@ void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
   }
 }
 
-void DbSlice::ClearEntriesOnFlush(absl::Span<const DbIndex> indices, const DbTableArray& db_arr,
-                                  bool async) {
-  for (auto index : indices) {
+void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr) {
+  // Currently being used only for tiered storage.
+  TieredStorage* tiered_storage = shard_owner()->tiered_storage();
+  string scratch;
+  for (DbIndex index : indices) {
     const auto& db_ptr = db_arr[index];
-    if (!db_ptr || db_ptr->stats.tiered_entries == 0)
+    if (!db_ptr)
       continue;
 
     // Delete all tiered entries
     PrimeTable::Cursor cursor;
     do {
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
-        if (it->second.IsExternal())
-          PerformDeletion(it, db_ptr.get());
+        if (it->second.IsExternal()) {
+          tiered_storage->Delete(index, &it->second);
+        } else if (it->second.HasIoPending()) {
+          tiered_storage->CancelStash(index, it->first.GetSlice(&scratch), &it->second);
+        }
       });
-    } while (cursor && db_ptr->stats.tiered_entries > 0);
+    } while (cursor);
 
-    // Wait for delete operations to finish in sync
-    while (!async && db_ptr->stats.tiered_entries > 0) {
-      LOG_EVERY_T(ERROR, 0.5) << "Long wait for tiered entry delete on flush";
-      ThisFiber::SleepFor(1ms);
-    }
+    // While tiered_storage may delete some of its entries asynchronously, it updates
+    // stats.tiered_entries immediately during the Delete call, therefore tiered_entries
+    // should be zero by this point.
+    CHECK_EQ(db_ptr->stats.tiered_entries, 0u);
   }
 }
 

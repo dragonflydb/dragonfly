@@ -76,8 +76,6 @@ void JournalWriter::Write(const journal::Entry& entry) {
       return;
     case journal::Op::COMMAND:
     case journal::Op::EXPIRED:
-    case journal::Op::MULTI_COMMAND:
-    case journal::Op::EXEC:
       Write(entry.txid);
       Write(entry.shard_cnt);
       Write(entry.payload);

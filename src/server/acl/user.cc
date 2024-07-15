@@ -11,7 +11,6 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/escaping.h"
 #include "core/overloaded.h"
-#include "server/acl/helpers.h"
 
 namespace dfly::acl {
 
@@ -30,7 +29,9 @@ User::User() {
   commands_ = std::vector<uint64_t>(NumberOfFamilies(), 0);
 }
 
-void User::Update(UpdateRequest&& req) {
+void User::Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
+                  const ReverseCategoryIndexTable& reverse_cat,
+                  const CategoryToCommandsIndexStore& cat_to_commands) {
   for (auto& pass : req.passwords) {
     if (pass.nopass) {
       SetNopass();
@@ -44,16 +45,16 @@ void User::Update(UpdateRequest&& req) {
       password_hashes_.clear();
       continue;
     }
-    SetPasswordHash(pass.password, req.is_hashed);
+    SetPasswordHash(pass.password, pass.is_hashed);
   }
 
-  auto cat_visitor = [this](UpdateRequest::CategoryValueType cat) {
+  auto cat_visitor = [&, this](UpdateRequest::CategoryValueType cat) {
     auto [sign, category] = cat;
     if (sign == Sign::PLUS) {
-      SetAclCategoriesAndIncrSeq(category);
+      SetAclCategoriesAndIncrSeq(category, cat_to_id, reverse_cat, cat_to_commands);
       return;
     }
-    UnsetAclCategoriesAndIncrSeq(category);
+    UnsetAclCategoriesAndIncrSeq(category, cat_to_id, reverse_cat, cat_to_commands);
   };
 
   auto cmd_visitor = [this](UpdateRequest::CommandsValueType cmd) {
@@ -100,14 +101,16 @@ bool User::HasPassword(std::string_view password) const {
   return password_hashes_.contains(StringSHA256(password));
 }
 
-void User::SetAclCategoriesAndIncrSeq(uint32_t cat) {
+void User::SetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
+                                      const ReverseCategoryIndexTable& reverse_cat,
+                                      const CategoryToCommandsIndexStore& cat_to_commands) {
   acl_categories_ |= cat;
   if (cat == acl::ALL) {
     SetAclCommands(std::numeric_limits<size_t>::max(), 0);
   } else {
-    auto id = CategoryToIdx().at(cat);
-    std::string_view name = REVERSE_CATEGORY_INDEX_TABLE[id];
-    const auto& commands_group = CategoryToCommandsIndex().at(name);
+    auto id = cat_to_id.at(cat);
+    std::string_view name = reverse_cat[id];
+    const auto& commands_group = cat_to_commands.at(name);
     for (size_t fam_id = 0; fam_id < commands_group.size(); ++fam_id) {
       SetAclCommands(fam_id, commands_group[fam_id]);
     }
@@ -117,14 +120,16 @@ void User::SetAclCategoriesAndIncrSeq(uint32_t cat) {
   cat_changes_[change] = ChangeMetadata{Sign::PLUS, seq_++};
 }
 
-void User::UnsetAclCategoriesAndIncrSeq(uint32_t cat) {
+void User::UnsetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
+                                        const ReverseCategoryIndexTable& reverse_cat,
+                                        const CategoryToCommandsIndexStore& cat_to_commands) {
   acl_categories_ ^= cat;
   if (cat == acl::ALL) {
     UnsetAclCommands(std::numeric_limits<size_t>::max(), 0);
   } else {
-    auto id = CategoryToIdx().at(cat);
-    std::string_view name = REVERSE_CATEGORY_INDEX_TABLE[id];
-    const auto& commands_group = CategoryToCommandsIndex().at(name);
+    auto id = cat_to_id.at(cat);
+    std::string_view name = reverse_cat[id];
+    const auto& commands_group = cat_to_commands.at(name);
     for (size_t fam_id = 0; fam_id < commands_group.size(); ++fam_id) {
       UnsetAclCommands(fam_id, commands_group[fam_id]);
     }

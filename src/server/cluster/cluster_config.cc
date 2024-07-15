@@ -90,6 +90,7 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
 
   shared_ptr<ClusterConfig> result(new ClusterConfig());
 
+  result->my_id_ = my_id;
   result->config_ = config;
 
   for (const auto& shard : result->config_) {
@@ -101,10 +102,10 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
       result->my_outgoing_migrations_ = shard.migrations;
     } else {
       for (const auto& m : shard.migrations) {
-        if (my_id == m.node_id) {
+        if (my_id == m.node_info.id) {
           auto incoming_migration = m;
           // for incoming migration we need the source node
-          incoming_migration.node_id = shard.master.id;
+          incoming_migration.node_info.id = shard.master.id;
           result->my_incoming_migrations_.push_back(std::move(incoming_migration));
         }
       }
@@ -132,7 +133,7 @@ optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
     return nullopt;
   }
 
-  SlotRanges ranges;
+  std::vector<SlotRange> ranges;
 
   for (const auto& range : slots.array_range()) {
     if (!range.is_object()) {
@@ -149,7 +150,7 @@ optional<SlotRanges> GetClusterSlotRanges(const JsonType& slots) {
     ranges.push_back({.start = start.value(), .end = end.value()});
   }
 
-  return ranges;
+  return SlotRanges(ranges);
 }
 
 optional<ClusterNodeInfo> ParseClusterNode(const JsonType& json) {
@@ -211,10 +212,10 @@ optional<std::vector<MigrationInfo>> ParseMigrations(const JsonType& json) {
       return nullopt;
     }
 
-    res.emplace_back(MigrationInfo{.slot_ranges = std::move(*slots),
-                                   .node_id = node_id.as_string(),
-                                   .ip = ip.as_string(),
-                                   .port = *port});
+    res.emplace_back(MigrationInfo{
+        .slot_ranges = std::move(*slots),
+        .node_info =
+            ClusterNodeInfo{.id = node_id.as_string(), .ip = ip.as_string(), .port = *port}});
   }
   return res;
 }
@@ -316,10 +317,17 @@ ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
   CHECK_LE(id, cluster::kMaxSlotNum) << "Requesting a non-existing slot id " << id;
 
   for (const auto& shard : config_) {
-    for (const auto& range : shard.slot_ranges) {
-      if (id >= range.start && id <= range.end) {
-        return shard.master;
+    if (shard.slot_ranges.Contains(id)) {
+      if (shard.master.id == my_id_) {
+        // The only reason why this function call and shard.master == my_id_ is the slot was
+        // migrated
+        for (const auto& m : shard.migrations) {
+          if (m.slot_ranges.Contains(id)) {
+            return m.node_info;
+          }
+        }
       }
+      return shard.master;
     }
   }
 

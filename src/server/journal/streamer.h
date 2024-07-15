@@ -1,9 +1,10 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
 
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
@@ -79,7 +80,7 @@ class RestoreStreamer : public JournalStreamer {
   // Cancel() must be called if Start() is called
   void Cancel() override;
 
-  void SendFinalize();
+  void SendFinalize(long attempt);
 
   bool IsSnapshotFinished() const {
     return snapshot_finished_;
@@ -103,7 +104,7 @@ class RestoreStreamer : public JournalStreamer {
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
 
-  util::fb2::Mutex bucket_ser_mu_;
+  ConditionFlag bucket_ser_;
 };
 
 }  // namespace dfly

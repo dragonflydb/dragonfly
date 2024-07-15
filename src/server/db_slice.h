@@ -329,7 +329,7 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  bool Del(DbIndex db_ind, Iterator it);
+  bool Del(Context cntx, Iterator it);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
@@ -494,10 +494,8 @@ class DbSlice {
   // Invalidate all watched keys for given slots. Used on FlushSlots.
   void InvalidateSlotWatches(const cluster::SlotSet& slot_ids);
 
-  // Properly clear db_arr before deleting it. If async is set, it's called from a detached fiber
-  // after swapping the db.
-  void ClearEntriesOnFlush(absl::Span<const DbIndex> indices, const DbTableArray& db_arr,
-                           bool async);
+  // Clear tiered storage entries for the specified indices.
+  void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
   void PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table);
 

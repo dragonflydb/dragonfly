@@ -94,8 +94,8 @@ class ExternalAllocator {
 
   static SegmentDescr* ToSegDescr(Page*);
 
-  SegmentDescr* sq_[2];  // map: PageClass -> free Segment.
-  Page* free_pages_[detail::kNumFreePages];
+  SegmentDescr* sq_[2];                      // map: PageClass -> free Segment.
+  Page* free_pages_[detail::kNumFreePages];  // intrusive linked lists of pages with free blocks
 
   // A segment for each 256MB range. To get a segment id from the offset, shift right by 28.
   std::vector<SegmentDescr*> segments_;

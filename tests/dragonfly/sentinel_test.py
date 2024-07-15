@@ -140,9 +140,9 @@ def sentinel(tmp_dir, port_picker) -> Sentinel:
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_failover(df_local_factory, sentinel, port_picker):
-    master = df_local_factory.create(port=sentinel.initial_master_port)
-    replica = df_local_factory.create(port=port_picker.get_available_port())
+async def test_failover(df_factory, sentinel, port_picker):
+    master = df_factory.create(port=sentinel.initial_master_port)
+    replica = df_factory.create(port=port_picker.get_available_port())
 
     master.start()
     replica.start()
@@ -206,9 +206,9 @@ async def test_failover(df_local_factory, sentinel, port_picker):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_master_failure(df_local_factory, sentinel, port_picker):
-    master = df_local_factory.create(port=sentinel.initial_master_port)
-    replica = df_local_factory.create(port=port_picker.get_available_port())
+async def test_master_failure(df_factory, sentinel, port_picker):
+    master = df_factory.create(port=sentinel.initial_master_port)
+    replica = df_factory.create(port=port_picker.get_available_port())
 
     master.start()
     replica.start()
@@ -245,16 +245,16 @@ async def test_master_failure(df_local_factory, sentinel, port_picker):
 
 @dfly_args({"info_replication_valkey_compatible": True})
 @pytest.mark.asyncio
-async def test_priority_on_failover(df_local_factory, sentinel, port_picker):
-    master = df_local_factory.create(port=sentinel.initial_master_port)
+async def test_priority_on_failover(df_factory, sentinel, port_picker):
+    master = df_factory.create(port=sentinel.initial_master_port)
     # lower priority is the best candidate for sentinel
-    low_priority_repl = df_local_factory.create(
+    low_priority_repl = df_factory.create(
         port=port_picker.get_available_port(), replica_priority=20
     )
-    mid_priority_repl = df_local_factory.create(
+    mid_priority_repl = df_factory.create(
         port=port_picker.get_available_port(), replica_priority=60
     )
-    high_priority_repl = df_local_factory.create(
+    high_priority_repl = df_factory.create(
         port=port_picker.get_available_port(), replica_priority=80
     )
 

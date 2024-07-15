@@ -362,6 +362,13 @@ TEST_F(DflyEngineTest, MemcacheFlags) {
   ASSERT_EQ(resp, "OK");
   MCResponse resp2 = RunMC(MP::GET, "key");
   EXPECT_THAT(resp2, ElementsAre("VALUE key 42 3", "bar", "END"));
+
+  ASSERT_EQ(Run("resp", {"flushdb"}), "OK");
+  pp_->AwaitFiberOnAll([](auto*) {
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      EXPECT_EQ(shard->db_slice().GetDBTable(0)->mcflag.size(), 0u);
+    }
+  });
 }
 
 TEST_F(DflyEngineTest, LimitMemory) {
@@ -563,12 +570,12 @@ TEST_F(DflyEngineTest, Bug468) {
   resp = Run({"exec"});
   ASSERT_THAT(resp, ErrArg("not an integer"));
 
-  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+  ASSERT_FALSE(IsLocked(0, "foo"));
 
   resp = Run({"eval", "return redis.call('set', 'foo', 'bar', 'EX', 'moo')", "1", "foo"});
   ASSERT_THAT(resp, ErrArg("not an integer"));
 
-  ASSERT_FALSE(service_->IsLocked(0, "foo"));
+  ASSERT_FALSE(IsLocked(0, "foo"));
 }
 
 TEST_F(DflyEngineTest, Bug496) {

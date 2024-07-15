@@ -9,9 +9,10 @@ from redis import asyncio as aioredis
 from pathlib import Path
 import boto3
 from .instance import RedisServer
+from random import randint as rand
 
 from . import dfly_args
-from .utility import wait_available_async, chunked, is_saving
+from .utility import wait_available_async, is_saving, tmp_file_name
 
 from .seeder import StaticSeeder
 
@@ -37,11 +38,15 @@ def find_main_file(path: Path, pattern):
         dict(key_target=1000, data_size=5_000, variance=10, samples=10),
     ],
 )
-@dfly_args({**BASIC_ARGS, "proactor_threads": 4, "dbfilename": "test-consistency"})
-async def test_consistency(async_client: aioredis.Redis, format: str, seeder_opts: dict):
+@dfly_args({**BASIC_ARGS, "proactor_threads": 4})
+async def test_consistency(df_factory, format: str, seeder_opts: dict):
     """
     Test consistency over a large variety of data with different sizes
     """
+    dbfilename = f"dump_{tmp_file_name()}"
+    instance = df_factory.create(dbfilename=dbfilename)
+    instance.start()
+    async_client = instance.client()
     await StaticSeeder(**seeder_opts).run(async_client)
 
     start_capture = await StaticSeeder.capture(async_client)
@@ -52,21 +57,25 @@ async def test_consistency(async_client: aioredis.Redis, format: str, seeder_opt
     await async_client.execute_command(
         "DEBUG",
         "LOAD",
-        "test-consistency.rdb" if format == "RDB" else "test-consistency-summary.dfs",
+        f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
 
     assert (await StaticSeeder.capture(async_client)) == start_capture
 
 
 @pytest.mark.parametrize("format", FILE_FORMATS)
-@dfly_args({**BASIC_ARGS, "proactor_threads": 4, "dbfilename": "test-multidb"})
-async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
+@dfly_args({**BASIC_ARGS, "proactor_threads": 4})
+async def test_multidb(df_factory, format: str):
     """
     Test serialization of multiple logical databases
     """
+    dbfilename = f"test-multidb{rand(0, 5000)}"
+    instance = df_factory.create(dbfilename=dbfilename)
+    instance.start()
+    async_client = instance.client()
     start_captures = []
     for dbid in range(10):
-        db_client = df_server.client(db=dbid)
+        db_client = instance.client(db=dbid)
         await StaticSeeder(key_target=1000).run(db_client)
         start_captures.append(await StaticSeeder.capture(db_client))
 
@@ -76,11 +85,11 @@ async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
     await async_client.execute_command(
         "DEBUG",
         "LOAD",
-        "test-multidb.rdb" if format == "RDB" else "test-multidb-summary.dfs",
+        f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
 
     for dbid in range(10):
-        db_client = df_server.client(db=dbid)
+        db_client = instance.client(db=dbid)
         assert (await StaticSeeder.capture(db_client)) == start_captures[dbid]
 
 
@@ -97,7 +106,7 @@ async def test_multidb(async_client: aioredis.Redis, df_server, format: str):
     ],
 )
 async def test_dbfilenames(
-    df_local_factory, tmp_dir: Path, save_type: str, dbfilename: str, pattern: str
+    df_factory, tmp_dir: Path, save_type: str, dbfilename: str, pattern: str
 ):
     df_args = {**BASIC_ARGS, "dbfilename": dbfilename, "port": 1111}
 
@@ -106,7 +115,7 @@ async def test_dbfilenames(
 
     start_capture = None
 
-    with df_local_factory.create(**df_args) as df_server:
+    with df_factory.create(**df_args) as df_server:
         async with df_server.client() as client:
             await wait_available_async(client)
 
@@ -120,7 +129,7 @@ async def test_dbfilenames(
     assert file is not None
     assert os.path.basename(file).startswith(dbfilename.split("{{")[0])
 
-    with df_local_factory.create(**df_args) as df_server:
+    with df_factory.create(**df_args) as df_server:
         async with df_server.client() as client:
             await wait_available_async(client)
             assert await StaticSeeder.capture(client) == start_capture
@@ -220,11 +229,11 @@ async def test_parallel_snapshot(async_client):
     assert save_successes == 1, "Only one SAVE must be successful"
 
 
-async def test_path_escapes(df_local_factory):
+async def test_path_escapes(df_factory):
     """Test that we don't allow path escapes. We just check that df_server.start()
     fails because we don't have a much better way to test that."""
 
-    df_server = df_local_factory.create(dbfilename="../../../../etc/passwd")
+    df_server = df_factory.create(dbfilename="../../../../etc/passwd")
     try:
         df_server.start()
         assert False, "Server should not start correctly"
@@ -366,7 +375,10 @@ class TestDflySnapshotOnShutdown:
 
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @dfly_args({**BASIC_ARGS, "dbfilename": "info-while-snapshot"})
-async def test_infomemory_while_snapshoting(async_client: aioredis.Redis, format: str):
+async def test_infomemory_while_snapshoting(df_factory, format: str):
+    instance = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
+    instance.start()
+    async_client = instance.client()
     await async_client.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
 
     async def save():
@@ -411,7 +423,7 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
         **BASIC_ARGS,
         "proactor_threads": 4,
         "dbfilename": "tiered-entries",
-        "tiered_prefix": "/tmp/tiering_test_backing",
+        "tiered_prefix": "tiering-test-backing",
         "tiered_offload_threshold": "0.0",  # ask offloading loop to offload as much as possible
     }
 )
@@ -443,4 +455,48 @@ async def test_tiered_entries(async_client: aioredis.Redis):
     )
 
     # Compare captures
+    assert await StaticSeeder.capture(async_client) == start_capture
+
+
+@pytest.mark.skip("Too heavy")
+@pytest.mark.opt_only
+@dfly_args(
+    {
+        **BASIC_ARGS,
+        "proactor_threads": 4,
+        "maxmemory": "1G",
+        "dbfilename": "tiered-entries",
+        "tiered_prefix": "tiering-test-backing",
+        "tiered_offload_threshold": "0.5",  # ask to keep below 0.5 * 1G
+        "tiered_storage_write_depth": 50,
+    }
+)
+async def test_tiered_entries_throttle(async_client: aioredis.Redis):
+    """This test makes sure tieried entries are correctly persisted"""
+    await StaticSeeder(key_target=600_000, data_size=4096, variance=1, types=["STRING"]).run(
+        async_client
+    )
+
+    # Compute the capture, this brings all items back to memory... so we'll wait for offloading
+    start_capture = await StaticSeeder.capture(async_client)
+
+    # Save + flush + load
+    await async_client.execute_command("SAVE", "DF")
+    assert await async_client.flushall()
+
+    load_task = asyncio.create_task(
+        async_client.execute_command(
+            "DEBUG",
+            "LOAD",
+            "tiered-entries-summary.dfs",
+        )
+    )
+
+    while not load_task.done():
+        info = await async_client.info("ALL")
+        # print(info["used_memory_human"], info["used_memory_rss_human"])
+        assert info["used_memory"] < 600e6  # less than 600mb,
+        await asyncio.sleep(0.05)
+
+    await load_task
     assert await StaticSeeder.capture(async_client) == start_capture

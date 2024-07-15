@@ -72,7 +72,7 @@ template <typename T> T GetResult(std::variant<T, util::fb2::Future<T>> v) {
 OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t start,
                               string_view value) {
   VLOG(2) << "SetRange(" << key << ", " << start << ", " << value << ")";
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   size_t range_len = start + value.size();
 
   if (range_len == 0) {
@@ -107,7 +107,7 @@ OpResult<uint32_t> OpSetRange(const OpArgs& op_args, string_view key, size_t sta
 }
 
 OpResult<string> OpGetRange(const OpArgs& op_args, string_view key, int32_t start, int32_t end) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res.ok())
     return it_res.status();
@@ -153,7 +153,7 @@ size_t ExtendExisting(DbSlice::Iterator it, string_view key, string_view val, bo
 }
 
 OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view val, bool prepend) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
   if (!it_res) {
     return false;
@@ -163,7 +163,7 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
 }
 
 OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(op_res);
@@ -208,7 +208,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 // if skip_on_missing - returns KEY_NOTFOUND.
 OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
                            bool skip_on_missing) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
   auto res = db_slice.FindMutable(op_args.db_cntx, key);
@@ -307,7 +307,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view key,
                                        const int64_t limit, const int64_t emission_interval_ms,
                                        const uint64_t quantity) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   if (emission_interval_ms > INT64_MAX / limit) {
     return OpStatus::INVALID_INT;
@@ -413,7 +413,7 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, bool f
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
 
   SinkReplyBuilder::MGetResponse response(keys.Size());
   absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
@@ -478,7 +478,7 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
                                                               std::string_view value,
                                                               bool prepend) {
   auto* shard = op_args.shard;
-  auto it_res = shard->db_slice().AddOrFind(op_args.db_cntx, key);
+  auto it_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(it_res);
 
   if (it_res->is_new) {
@@ -489,7 +489,7 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
   if (it_res->it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  if (PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
+  if (const PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
     auto modf = [value = string{value}, prepend](std::string* v) {
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();
@@ -551,7 +551,7 @@ bool StringValue::IsEmpty() const {
 }
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
-  auto& db_slice = op_args_.shard->db_slice();
+  auto& db_slice = op_args_.GetDbSlice();
 
   DCHECK(db_slice.IsDbValid(op_args_.db_cntx.db_index));
   VLOG(2) << "Set " << key << "(" << db_slice.shard_id() << ") ";
@@ -596,7 +596,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   PrimeValue& prime_value = it->second;
   EngineShard* shard = op_args_.shard;
 
-  DbSlice& db_slice = shard->db_slice();
+  auto& db_slice = op_args_.GetDbSlice();
   uint64_t at_ms =
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
 
@@ -636,8 +636,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
 
 void SetCmd::AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
                     std::string_view key, std::string_view value) {
-  EngineShard* shard = op_args_.shard;
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = op_args_.GetDbSlice();
 
   // Adding new value.
   PrimeValue tvalue{value};
@@ -663,10 +662,9 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
                       PrimeValue* pv) {
   EngineShard* shard = op_args_.shard;
 
-  // Currently we always offload
-  if (auto* ts = shard->tiered_storage(); ts && ts->ShouldStash(*pv)) {
-    ts->Stash(op_args_.db_cntx.db_index, key, pv);
-  }
+  // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
+  if (auto* ts = shard->tiered_storage(); ts)
+    ts->TryStash(op_args_.db_cntx.db_index, key, pv);
 
   if (manual_journal_ && op_args_.shard->journal()) {
     RecordJournal(params, key, value);
@@ -736,18 +734,18 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       auto [opt, int_arg] = parser.Next<string_view, int64_t>();
 
       if (auto err = parser.Error(); err) {
-        return builder->SendError(err->MakeReply());
+        return cntx->SendError(err->MakeReply());
       }
 
       // We can set expiry only once.
       if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
-        return builder->SendError(kSyntaxErr);
+        return cntx->SendError(kSyntaxErr);
 
       sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
 
       // Since PXAT/EXAT can change this, we need to check this ahead
       if (int_arg <= 0) {
-        return builder->SendError(InvalidExpireTime("set"));
+        return cntx->SendError(InvalidExpireTime("set"));
       }
 
       bool is_ms = (opt[0] == 'P');
@@ -787,14 +785,14 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+    return cntx->SendError(err->MakeReply());
   }
 
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
 
   if (has_mask(SetCmd::SET_IF_EXISTS | SetCmd::SET_IF_NOTEXIST) ||
       has_mask(SetCmd::SET_KEEP_EXPIRE | SetCmd::SET_EXPIRE_AFTER_MS)) {
-    return builder->SendError(kSyntaxErr);
+    return cntx->SendError(kSyntaxErr);
   }
 
   StringValue prev;
@@ -816,7 +814,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (result == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
+    return cntx->SendError(kOutOfMemory);
   }
 
   DCHECK_EQ(result, OpStatus::SKIPPED);  // in case of NX option
@@ -851,7 +849,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
     return builder->SendLong(1);  // this means that we successfully set the value
   }
   if (results == OpStatus::OUT_OF_MEMORY) {
-    return builder->SendError(kOutOfMemory);
+    return cntx->SendError(kOutOfMemory);
   }
   CHECK_EQ(results, OpStatus::SKIPPED);  // in this case it must be skipped!
   return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
@@ -859,7 +857,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
-    auto it_res = es->db_slice().FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
+    auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
@@ -871,13 +869,14 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
 void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
-    auto it_res = es->db_slice().FindMutable(tx->GetDbContext(), key, OBJ_STRING);
+    auto& db_slice = tx->GetDbSlice(es->shard_id());
+    auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
     auto value = StringValue::Read(tx->GetDbIndex(), key, it_res->it->second, es);
     it_res->post_updater.Run();  // Run manually before delete
-    es->db_slice().Del(tx->GetDbIndex(), it_res->it);
+    db_slice.Del(tx->GetDbContext(), it_res->it);
     return value;
   };
 
@@ -986,7 +985,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringValue> {
     auto op_args = t->GetOpArgs(shard);
 
-    auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
+    auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
     if (!it_res)
       return it_res.status();
 
@@ -994,8 +993,8 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
 
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
-      RETURN_ON_BAD_STATUS(op_args.shard->db_slice().UpdateExpire(op_args.db_cntx, it_res->it,
-                                                                  it_res->exp_it, exp_params));
+      RETURN_ON_BAD_STATUS(op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it,
+                                                             it_res->exp_it, exp_params));
     }
 
     // Replicate GETEX as PEXPIREAT or PERSIST
@@ -1093,10 +1092,10 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
       builder->SendLong(result.value());
       break;
     case OpStatus::INVALID_VALUE:
-      builder->SendError(kInvalidIntErr);
+      cntx->SendError(kInvalidIntErr);
       break;
     case OpStatus::OUT_OF_RANGE:
-      builder->SendError(kIncrOverflow);
+      cntx->SendError(kIncrOverflow);
       break;
     case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
       reinterpret_cast<MCReplyBuilder*>(builder)->SendNotFound();
@@ -1262,7 +1261,7 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<size_t> {
-    auto it_res = shard->db_slice().FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+    auto it_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 

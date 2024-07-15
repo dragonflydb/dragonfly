@@ -14,6 +14,7 @@ namespace dfly {
 
 class EngineShard;
 class Transaction;
+class DbSlice;
 
 using DbIndex = uint16_t;
 using ShardId = uint16_t;
@@ -59,19 +60,24 @@ struct KeyIndex {
 struct DbContext {
   DbIndex db_index = 0;
   uint64_t time_now_ms = 0;
+
+  // Convenience method.
+  DbSlice& GetDbSlice(ShardId shard_id) const;
 };
 
 struct OpArgs {
-  EngineShard* shard;
-  const Transaction* tx;
+  EngineShard* shard = nullptr;
+  const Transaction* tx = nullptr;
   DbContext db_cntx;
 
-  OpArgs() : shard(nullptr), tx(nullptr) {
-  }
+  OpArgs() = default;
 
   OpArgs(EngineShard* s, const Transaction* tx, const DbContext& cntx)
       : shard(s), tx(tx), db_cntx(cntx) {
   }
+
+  // Convenience method.
+  DbSlice& GetDbSlice() const;
 };
 
 // A strong type for a lock tag. Helps to disambiguate between keys and the parts of the
@@ -201,12 +207,9 @@ class ShardArgs {
 
 // Record non auto journal command with own txid and dbid.
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, const ShardArgs& args,
-                   uint32_t shard_cnt = 1, bool multi_commands = false);
+                   uint32_t shard_cnt = 1);
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
-                   uint32_t shard_cnt = 1, bool multi_commands = false);
-
-// Record non auto journal command finish. Call only when command translates to multi commands.
-void RecordJournalFinish(const OpArgs& op_args, uint32_t shard_cnt);
+                   uint32_t shard_cnt = 1);
 
 // Record expiry in journal with independent transaction. Must be called from shard thread holding
 // key.

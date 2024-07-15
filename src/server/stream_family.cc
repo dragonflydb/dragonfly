@@ -605,7 +605,7 @@ int StreamTrim(const AddTrimOpts& opts, stream* s) {
 
 OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   DbSlice::AddOrFindResult add_res;
 
   if (opts.no_mkstream) {
@@ -657,7 +657,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
 }
 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -801,7 +801,7 @@ stream* GetReadOnlyStream(const CompactObj& cobj) {
 OpResult<vector<pair<string, streamID>>> OpLastIDs(const OpArgs& op_args, const ShardArgs& args) {
   DCHECK(!args.Empty());
 
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   vector<pair<string, streamID>> last_ids;
   for (string_view key : args) {
@@ -866,7 +866,7 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
 }
 
 OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -877,7 +877,7 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, string_view key) {
 
 OpResult<vector<GroupInfo>> OpListGroups(const DbContext& db_cntx, string_view key,
                                          EngineShard* shard) {
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1009,7 +1009,7 @@ void GetConsumers(stream* s, streamCG* cg, long long count, GroupInfo* ginfo) {
 
 OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, EngineShard* shard,
                                int full, size_t count) {
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1072,7 +1072,7 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
 
 OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard* shard,
                                            string_view stream_name, string_view group_name) {
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
   auto res_it = db_slice.FindReadOnly(db_cntx, stream_name, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1116,8 +1116,7 @@ struct CreateOpts {
 };
 
 OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts) {
-  auto* shard = op_args.shard;
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
   if (!res_it) {
@@ -1164,7 +1163,7 @@ struct FindGroupResult {
 
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto* shard = op_args.shard;
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1453,8 +1452,7 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
 }
 
 OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
-  auto* shard = op_args.shard;
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1492,8 +1490,7 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
 }
 
 OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<streamID> ids) {
-  auto* shard = op_args.shard;
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
@@ -1922,8 +1919,7 @@ void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
-  auto* shard = op_args.shard;
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_STREAM);
   if (!res_it) {
     if (res_it.status() == OpStatus::KEY_NOTFOUND) {
@@ -2402,7 +2398,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         }
         return;
       }
-      return rb->SendError(result.status());
+      return cntx->SendError(result.status());
     } else if (sub_cmd == "STREAM") {
       int full = 0;
       size_t count = 10;  // default count for xinfo streams
@@ -2560,7 +2556,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         }
         return;
       }
-      return rb->SendError(sinfo.status());
+      return cntx->SendError(sinfo.status());
     } else if (sub_cmd == "CONSUMERS") {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
@@ -2584,12 +2580,12 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
         return;
       }
       if (result.status() == OpStatus::INVALID_VALUE) {
-        return rb->SendError(NoGroupError(stream_name, group_name));
+        return cntx->SendError(NoGroupError(stream_name, group_name));
       }
-      return rb->SendError(result.status());
+      return cntx->SendError(result.status());
     }
   }
-  return rb->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
+  return cntx->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
 }
 
 void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
@@ -2900,7 +2896,8 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
 
   const auto key_checker = [&opts](EngineShard* owner, const DbContext& context, Transaction* tx,
                                    std::string_view key) -> bool {
-    auto res_it = owner->db_slice().FindReadOnly(context, key, OBJ_STREAM);
+    auto& db_slice = context.GetDbSlice(owner->shard_id());
+    auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
     if (!res_it.ok())
       return false;
 
@@ -2996,7 +2993,7 @@ std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, R
   });
 
   if (detailed_err.has_value()) {
-    rb->SendError(*detailed_err);
+    cntx->SendError(*detailed_err);
     return std::nullopt;
   }
 
@@ -3043,7 +3040,7 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
     auto has_entries = HasEntries(opts, *last_ids);
     if (!has_entries.has_value()) {
       cntx->transaction->Conclude();
-      rb->SendError(has_entries.error());
+      cntx->SendError(has_entries.error());
       return;
     }
 
@@ -3221,7 +3218,7 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   if (result.status() == OpStatus::KEY_NOTFOUND) {
     return rb->SendEmptyArray();
   }
-  return rb->SendError(result.status());
+  return cntx->SendError(result.status());
 }
 
 void StreamFamily::XAck(CmdArgList args, ConnectionContext* cntx) {

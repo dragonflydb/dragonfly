@@ -12,6 +12,7 @@ import async_timeout
 from dataclasses import dataclass
 from aiohttp import ClientSession
 
+from .utility import tick_timer
 from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
@@ -309,9 +310,9 @@ async def test_pubsub_subcommand_for_numsub(async_client: aioredis.Redis):
     await asyncio.gather(*(resub(s, False, "chan1") for s in subs1))
 
     # Make sure numsub drops to 0
-    with async_timeout.timeout(1):
-        while (await async_client.pubsub_numsub("chan1"))[0][1] > 0:
-            await asyncio.sleep(0.05)
+    async for numsub, breaker in tick_timer(lambda: async_client.pubsub_numsub("chan1")):
+        with breaker:
+            assert numsub[0][1] == 0
 
     # Check empty numsub
     assert await async_client.pubsub_numsub() == []
@@ -576,8 +577,8 @@ async def test_large_cmd(async_client: aioredis.Redis):
     assert len(res) == MAX_ARR_SIZE
 
 
-async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_factory):
-    server: DflyInstance = df_local_factory.create(
+async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factory):
+    server: DflyInstance = df_factory.create(
         no_tls_on_admin_port="true",
         admin_port=1111,
         port=1211,
@@ -596,8 +597,8 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_local_
     await client.close()
 
 
-async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_local_factory):
-    server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_factory):
+    server = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
 
     client = aioredis.Redis(port=server.port, **with_tls_client_args, ssl_cert_reqs=None)
@@ -605,8 +606,8 @@ async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_lo
     await client.close()
 
 
-async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, df_local_factory):
-    server = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, df_factory):
+    server = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
 
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
@@ -615,9 +616,9 @@ async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, d
 
 
 async def test_tls_reject(
-    with_ca_tls_server_args, with_tls_client_args, df_local_factory: DflyInstanceFactory
+    with_ca_tls_server_args, with_tls_client_args, df_factory: DflyInstanceFactory
 ):
-    server: DflyInstance = df_local_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
+    server: DflyInstance = df_factory.create(port=BASE_PORT, **with_ca_tls_server_args)
     server.start()
 
     client = server.client(**with_tls_client_args, ssl_cert_reqs=None)
@@ -677,8 +678,8 @@ async def test_squashed_pipeline_multi(async_client: aioredis.Redis):
     await p.execute()
 
 
-async def test_unix_domain_socket(df_local_factory, tmp_dir):
-    server = df_local_factory.create(proactor_threads=1, port=BASE_PORT, unixsocket="./df.sock")
+async def test_unix_domain_socket(df_factory, tmp_dir):
+    server = df_factory.create(proactor_threads=1, port=BASE_PORT, unixsocket="./df.sock")
     server.start()
 
     await asyncio.sleep(0.5)
@@ -687,8 +688,8 @@ async def test_unix_domain_socket(df_local_factory, tmp_dir):
     assert await r.ping()
 
 
-async def test_unix_socket_only(df_local_factory, tmp_dir):
-    server = df_local_factory.create(proactor_threads=1, port=0, unixsocket="./df.sock")
+async def test_unix_socket_only(df_factory, tmp_dir):
+    server = df_factory.create(proactor_threads=1, port=0, unixsocket="./df.sock")
     server._start()
 
     await asyncio.sleep(1)
@@ -788,14 +789,14 @@ async def test_multiple_blocking_commands_client_pause(async_client: aioredis.Re
 
 
 async def test_tls_when_read_write_is_interleaved(
-    with_ca_tls_server_args, with_ca_tls_client_args, df_local_factory
+    with_ca_tls_server_args, with_ca_tls_client_args, df_factory
 ):
     """
     This test covers a deadlock bug in helio and TlsSocket when a client connection renegotiated a
     handshake without reading its pending data from the socket.
     This is a weak test case and from our local experiments it deadlocked 30% of the test runs
     """
-    server: DflyInstance = df_local_factory.create(
+    server: DflyInstance = df_factory.create(
         port=1211, **with_ca_tls_server_args, proactor_threads=1
     )
     # TODO(kostas): to fix the deadlock in the test

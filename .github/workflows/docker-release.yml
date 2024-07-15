@@ -71,7 +71,7 @@ jobs:
       uses: azure/setup-helm@v4
 
     - name: Setup Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
 
     - name: Configure Git
       if: env.IS_PRERELEASE != 'true'

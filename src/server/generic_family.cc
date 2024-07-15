@@ -150,7 +150,7 @@ class RdbRestoreValue : protected RdbLoaderBase {
   }
 
   std::optional<DbSlice::ItAndUpdater> Add(std::string_view payload, std::string_view key,
-                                           DbSlice& db_slice, DbIndex index,
+                                           DbSlice& db_slice, const DbContext& cntx,
                                            const RestoreArgs& args);
 
  private:
@@ -177,7 +177,8 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view 
 
 std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
                                                           std::string_view key, DbSlice& db_slice,
-                                                          DbIndex index, const RestoreArgs& args) {
+                                                          const DbContext& cntx,
+                                                          const RestoreArgs& args) {
   auto opaque_res = Parse(data);
   if (!opaque_res) {
     return std::nullopt;
@@ -190,8 +191,7 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
     return std::nullopt;
   }
 
-  auto res = db_slice.AddNew(DbContext{index, GetCurrentTimeMs()}, key, std::move(pv),
-                             args.ExpirationTime());
+  auto res = db_slice.AddNew(cntx, key, std::move(pv), args.ExpirationTime());
   res->it->first.SetSticky(args.Sticky());
   if (res) {
     return std::move(res.value());
@@ -374,13 +374,13 @@ void Renamer::FinalizeRename() {
 }
 
 bool Renamer::KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const {
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
   return IsValid(it);
 }
 
 void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto [it, exp_it] = db_slice.FindReadOnly(t->GetDbContext(), src_key_);
 
   src_found_ = IsValid(it);
@@ -399,7 +399,8 @@ void Renamer::SerializeSrc(Transaction* t, EngineShard* shard) {
 }
 
 OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
-  auto res = shard->db_slice().FindMutable(t->GetDbContext(), src_key_);
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  auto res = db_slice.FindMutable(t->GetDbContext(), src_key_);
   auto& it = res.it;
 
   CHECK(IsValid(it));
@@ -407,7 +408,7 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
   DVLOG(1) << "Rename: removing the key '" << src_key_;
 
   res.post_updater.Run();
-  CHECK(shard->db_slice().Del(t->GetDbIndex(), it));
+  CHECK(db_slice.Del(t->GetDbContext(), it));
   if (shard->journal()) {
     RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_}, 2);
   }
@@ -423,13 +424,13 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     return OpStatus::OUT_OF_RANGE;
   }
 
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto dest_res = db_slice.FindMutable(op_args.db_cntx, dest_key_);
 
   if (dest_found_) {
     DVLOG(1) << "Rename: deleting the destiny key '" << dest_key_;
     dest_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, dest_res.it));
+    CHECK(db_slice.Del(op_args.db_cntx, dest_res.it));
   }
 
   if (restore_args.Expired()) {
@@ -443,8 +444,8 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   }
 
   RdbRestoreValue loader(serialized_value_.version.value());
-  auto restored_dest_it = loader.Add(serialized_value_.value, dest_key_, db_slice,
-                                     op_args.db_cntx.db_index, restore_args);
+  auto restored_dest_it =
+      loader.Add(serialized_value_.value, dest_key_, db_slice, op_args.db_cntx, restore_args);
 
   if (restored_dest_it) {
     auto& dest_it = restored_dest_it->it;
@@ -472,7 +473,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
 }
 
 OpStatus OpPersist(const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto res = db_slice.FindMutable(op_args.db_cntx, key);
 
   if (!IsValid(res.it)) {
@@ -488,7 +489,7 @@ OpStatus OpPersist(const OpArgs& op_args, string_view key) {
 }
 
 OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto [it, expire_it] = db_slice.FindReadOnly(op_args.db_cntx, key);
 
   if (IsValid(it)) {
@@ -508,7 +509,7 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
     return OpStatus::OUT_OF_RANGE;
   }
 
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   // The redis impl (see cluster.c function restoreCommand), remove the old key if
   // the replace option is set, so lets do the same here
   {
@@ -518,7 +519,7 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
         VLOG(1) << "restore command is running with replace, found old key '" << key
                 << "' and removing it";
         res.post_updater.Run();
-        CHECK(db_slice.Del(op_args.db_cntx.db_index, res.it));
+        CHECK(db_slice.Del(op_args.db_cntx, res.it));
       }
     } else {
       // we are not allowed to replace it, so make sure it doesn't exist
@@ -534,13 +535,13 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
   }
 
   RdbRestoreValue loader(rdb_version);
-  auto res = loader.Add(payload, key, db_slice, op_args.db_cntx.db_index, restore_args);
+  auto res = loader.Add(payload, key, db_slice, op_args.db_cntx, restore_args);
   return res.has_value();
 }
 
 bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, string* scratch,
             StringVec* res) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
   if (prime_it->second.HasExpire()) {
@@ -569,7 +570,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
 }
 
 void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, StringVec* vec) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
   unsigned cnt = 0;
@@ -609,10 +610,16 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   DbContext db_cntx{cntx->conn_state.db_index, GetCurrentTimeMs()};
 
   do {
-    ess->Await(sid, [&] {
+    auto cb = [&] {
       OpArgs op_args{EngineShard::tlocal(), 0, db_cntx};
       OpScan(op_args, scan_opts, &cursor, keys);
-    });
+    };
+
+    // Avoid deadlocking, if called from shard queue script
+    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid)
+      cb();
+    else
+      ess->Await(sid, cb);
 
     if (cursor == 0) {
       ++sid;
@@ -637,7 +644,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 }
 
 OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireParams& params) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindMutable(op_args.db_cntx, key);
   if (!IsValid(find_res.it)) {
     return OpStatus::KEY_NOTFOUND;
@@ -664,7 +671,7 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
 // returns -2 if the key was not found, -3 if the field was not found,
 // -1 if ttl on the field was not found.
 OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();
   auto [it, expire_it] = db_slice.FindReadOnly(db_cntx, key);
   if (!IsValid(it))
@@ -685,7 +692,7 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
 
 OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Del: " << keys.Front();
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   uint32_t res = 0;
 
@@ -694,7 +701,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys) {
     if (!IsValid(fres.it))
       continue;
     fres.post_updater.Run();
-    res += int(db_slice.Del(op_args.db_cntx.db_index, fres.it));
+    res += int(db_slice.Del(op_args.db_cntx, fres.it));
   }
 
   return res;
@@ -703,7 +710,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys) {
 OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Stick: " << keys.Front();
 
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   uint32_t res = 0;
   for (string_view key : keys) {
@@ -1088,7 +1095,7 @@ OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::stri
                                                 bool alpha) {
   using namespace container_utils;
 
-  auto it = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key).it;
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
   if (!IsValid(it) || !IsContainer(it->second)) {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -1463,7 +1470,7 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
 }
 
 OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto [it, expire_it] = db_slice.FindReadOnly(t->GetDbContext(), key);
   if (!IsValid(it))
     return OpStatus::KEY_NOTFOUND;
@@ -1478,7 +1485,7 @@ OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, stri
 
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Exists: " << keys.Front();
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   uint32_t res = 0;
 
   for (string_view key : keys) {
@@ -1491,7 +1498,7 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArg
 OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key, string_view to_key,
                                     bool destination_should_not_exist) {
   auto* es = op_args.shard;
-  auto& db_slice = es->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto from_res = db_slice.FindMutable(op_args.db_cntx, from_key);
   if (!IsValid(from_res.it))
     return OpStatus::KEY_NOTFOUND;
@@ -1529,13 +1536,13 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     to_res.post_updater.Run();
 
     from_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, from_res.it));
+    CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
   } else {
     // Here we first delete from_it because AddNew below could invalidate from_it.
     // On the other hand, AddNew does not rely on the iterators - this is why we keep
     // the value in `from_obj`.
     from_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx.db_index, from_res.it));
+    CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
     auto op_result = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);
@@ -1552,7 +1559,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
 // as a global transaction.
 // TODO: Allow running OpMove without a global transaction.
 OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   // Fetch value at key in current db.
   auto from_res = db_slice.FindMutable(op_args.db_cntx, key);
@@ -1577,7 +1584,7 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   // Restore expire flag after std::move.
   from_res.it->second.SetExpire(IsValid(from_res.exp_it));
 
-  CHECK(db_slice.Del(op_args.db_cntx.db_index, from_res.it));
+  CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
   auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
   RETURN_ON_BAD_STATUS(op_result);
   auto& add_res = *op_result;

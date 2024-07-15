@@ -37,19 +37,19 @@ struct DiskStorageTest : public PoolTestBase {
   void Stash(size_t index, string value) {
     pending_ops_++;
     auto buf = make_shared<string>(value);
-    storage_->Stash(io::Buffer(*buf), [this, index, buf](DiskSegment segment, std::error_code ec) {
-      EXPECT_FALSE(ec);
-      EXPECT_GT(segment.length, 0u);
-      segments_[index] = segment;
+    storage_->Stash(io::Buffer(*buf), {}, [this, index, buf](io::Result<DiskSegment> segment) {
+      EXPECT_TRUE(segment);
+      EXPECT_GT(segment->length, 0u);
+      segments_[index] = *segment;
       pending_ops_--;
     });
   }
 
   void Read(size_t index) {
     pending_ops_++;
-    storage_->Read(segments_[index], [this, index](string_view value, std::error_code ec) {
-      EXPECT_FALSE(ec);
-      last_reads_[index] = value;
+    storage_->Read(segments_[index], [this, index](io::Result<string_view> value) {
+      EXPECT_TRUE(value);
+      last_reads_[index] = *value;
       pending_ops_--;
     });
   }
