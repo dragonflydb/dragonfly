@@ -68,7 +68,7 @@ class SliceSnapshot {
 
   // Initialize snapshot, start bucket iteration fiber, register listeners.
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
-  void Start(bool stream_journal, const Cancellation* cll);
+  void Start(bool stream_journal, const Cancellation* cll, bool allow_flush_fun = false);
 
   // Initialize a snapshot that sends only the missing journal updates
   // since start_lsn and then registers a callback switches into the
@@ -178,7 +178,6 @@ class SliceSnapshot {
   } stats_;
 
   ConditionFlag bucket_ser_;
-  std::function<void(size_t)> flush_fun_;
 };
 
 }  // namespace dfly

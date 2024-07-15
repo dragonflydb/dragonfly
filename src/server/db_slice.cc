@@ -220,6 +220,24 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   return 1;
 }
 
+// Helper class to cache and restore fetched_items_ of DbSlice for flows that preempt
+// because some other transaction might conclude and clear the fetched_items_ with OnCbFinish()
+class FetchedItemsRestorer {
+ public:
+  using RestoreType = absl::flat_hash_set<CompactObjectView>;
+  explicit FetchedItemsRestorer(RestoreType* dst) : dst_to_restore_(dst) {
+    cached_ = std::move(*dst_to_restore_);
+  }
+
+  ~FetchedItemsRestorer() {
+    *dst_to_restore_ = std::move(cached_);
+  }
+
+ private:
+  absl::flat_hash_set<CompactObjectView> cached_;
+  absl::flat_hash_set<CompactObjectView>* dst_to_restore_;
+};
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -1102,6 +1120,8 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 }
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
+  FetchedItemsRestorer fetched_restorer(&fetched_items_);
+
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
@@ -1528,6 +1548,7 @@ void DbSlice::OnCbFinish() {
 }
 
 void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
+  FetchedItemsRestorer fetched_restorer(&fetched_items_);
   for (const auto& ccb : change_cb_) {
     ccb.second(id, cr);
   }

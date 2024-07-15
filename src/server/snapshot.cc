@@ -21,7 +21,7 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(size_t, flush_limit_save_entries, 0, "Byte limit to flush while serializing entries");
+ABSL_FLAG(size_t, flush_big_entries_threshold, 0, "Total bytes before flushing big entries");
 
 namespace dfly {
 
@@ -41,15 +41,6 @@ SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMod
     : db_slice_(slice), dest_(dest), compression_mode_(compression_mode) {
   db_array_ = slice->databases();
   tl_slice_snapshots.insert(this);
-  const auto flush_limit = absl::GetFlag(FLAGS_flush_limit_save_entries);
-  if (flush_limit != 0) {
-    flush_fun_ = [this, flush_limit](size_t bytes_serialized) {
-      if (bytes_serialized > flush_limit) {
-        auto serialized = Serialize();
-        VLOG(2) << "FlushedToChannel " << serialized << " bytes";
-      }
-    };
-  }
 }
 
 SliceSnapshot::~SliceSnapshot() {
@@ -68,7 +59,7 @@ bool SliceSnapshot::IsSnaphotInProgress() {
   return tl_slice_snapshots.size() > 0;
 }
 
-void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
+void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, bool allow_flush_fun) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
@@ -81,7 +72,19 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
+  const auto flush_threshold = absl::GetFlag(FLAGS_flush_big_entries_threshold);
+  std::function<bool(size_t)> flush_fun;
+  if (flush_threshold != 0 && allow_flush_fun) {
+    flush_fun = [this, flush_threshold](size_t bytes_serialized) {
+      if (bytes_serialized > flush_threshold) {
+        auto serialized = Serialize();
+        VLOG(2) << "FlushedToChannel " << serialized << " bytes";
+        return true;
+      }
+      return false;
+    };
+  }
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -288,7 +291,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   while (!it.is_done()) {
     ++result;
-    // might yield
+    // might preempt
     SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
     ++it;
   }
@@ -296,8 +299,6 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   return result;
 }
 
-// This function should not block and should not preempt because it's called
-// from SerializeBucket which should execute atomically.
 void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
                                    optional<uint64_t> expire, RdbSerializer* serializer) {
   time_t expire_time = expire.value_or(0);
@@ -315,7 +316,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     delayed_entries_.push_back({db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time});
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
-    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx, flush_fun_);
+    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
   }
@@ -342,7 +343,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
   // Because we can finally block in this function, we'll await and serialize them
   while (!delayed_entries_.empty()) {
     auto& entry = delayed_entries_.back();
-    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid, {});
+    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid);
     delayed_entries_.pop_back();
   }
 
@@ -396,6 +397,8 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
 }
 
 void SliceSnapshot::CloseRecordChannel() {
+  ConditionGuard guard(&bucket_ser_);
+
   CHECK(!serialize_bucket_running_);
   // Make sure we close the channel only once with a CAS check.
   bool expected = false;

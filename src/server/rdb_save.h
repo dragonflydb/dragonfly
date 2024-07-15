@@ -199,7 +199,8 @@ class SerializerBase {
 
 class RdbSerializer : public SerializerBase {
  public:
-  explicit RdbSerializer(CompressionMode compression_mode);
+  explicit RdbSerializer(CompressionMode compression_mode,
+                         std::function<bool(size_t)> flush_fun = {});
 
   ~RdbSerializer();
 
@@ -210,12 +211,13 @@ class RdbSerializer : public SerializerBase {
   // Returns the serialized rdb_type or the error.
   // expire_ms = 0 means no expiry.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
-                                DbIndex dbid, std::function<void(size_t)> flush_fun);
+                                DbIndex dbid);
 
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
   // this by finding the key. This function is used
   // for the dump command - thus it is public function
+  // Also this function might preempt if flush_fun_ is used
   std::error_code SaveValue(const PrimeValue& pv);
 
   std::error_code SendJournalOffset(uint64_t journal_offset);
@@ -223,6 +225,7 @@ class RdbSerializer : public SerializerBase {
   size_t GetTempBufferSize() const override;
 
  private:
+  // Might preempt if flush_fun_ is used
   std::error_code SaveObject(const PrimeValue& pv);
   std::error_code SaveListObject(const PrimeValue& pv);
   std::error_code SaveSetObject(const PrimeValue& pv);
@@ -238,8 +241,12 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
 
+  // Might preempt
+  bool MaybeApplyFlushFunc();
+
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
+  std::function<bool(size_t)> flush_fun_;
 };
 
 }  // namespace dfly
