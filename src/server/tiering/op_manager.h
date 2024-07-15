@@ -35,8 +35,16 @@ class OpManager {
   using EntryId = std::variant<unsigned, KeyRef>;
   using OwnedEntryId = std::variant<unsigned, std::pair<DbIndex, std::string>>;
 
-  // Callback for post-read completion. Returns whether the value was modified
-  using ReadCallback = std::function<bool(std::string*)>;
+  // Callback for post-read completion. Returns whether the value was modified.
+  // We use fu2 function to allow moveable semantics. The arguments are:
+  // bool - true if the string is raw as it was extracted from the prime value.
+  // string* - the string that may potentially be modified by the callbacks that subsribed to this
+  //           read. The callback run in the same order as the order of invocation, guaranteeing
+  //           consistent read after modifications.
+  using ReadCallback =
+      fu2::function_base<true /*owns*/, false /*moveable*/, fu2::capacity_fixed<40, 8>,
+                         false /* non-throwing*/, false /* strong exceptions guarantees*/,
+                         bool(bool, std::string*)>;
 
   explicit OpManager(size_t max_size);
   virtual ~OpManager();

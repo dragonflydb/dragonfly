@@ -942,11 +942,17 @@ void CompactObj::GetString(char* dest) const {
 }
 
 void CompactObj::SetExternal(size_t offset, size_t sz) {
-  SetMeta(EXTERNAL_TAG, mask_ & ~kEncMask);
+  SetMeta(EXTERNAL_TAG, mask_);
 
   u_.ext_ptr.page_index = offset / 4096;
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.size = sz;
+}
+
+void CompactObj::ImportExternal(const CompactObj& src) {
+  DCHECK(src.IsExternal());
+  SetMeta(EXTERNAL_TAG, src.mask_ & kEncMask);
+  u_.ext_ptr = src.u_.ext_ptr;
 }
 
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
@@ -955,11 +961,24 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   return pair<size_t, size_t>(offset, size_t(u_.ext_ptr.size));
 }
 
-void CompactObj::Materialize(std::string_view str) {
-  CHECK(IsExternal());
-  CHECK_GT(str.size(), 20u);
+void CompactObj::Materialize(std::string_view blob, bool is_raw) {
+  CHECK(IsExternal()) << int(taglen_);
 
-  EncodeString(str);
+  DCHECK_GT(blob.size(), kInlineLen);
+
+  if (is_raw) {
+    uint8_t mask = mask_;
+
+    if (kUseSmallStrings && SmallString::CanAllocate(blob.size())) {
+      SetMeta(SMALL_TAG, mask);
+      tl.small_str_bytes += u_.small_str.Assign(blob);
+    } else {
+      SetMeta(ROBJ_TAG, mask);
+      u_.r_obj.SetString(blob, tl.local_mr);
+    }
+  } else {
+    EncodeString(blob);
+  }
 }
 
 void CompactObj::Reset() {
@@ -1186,38 +1205,23 @@ void CompactObj::EncodeString(string_view str) {
   u_.r_obj.SetString(encoded, tl.local_mr);
 }
 
-pair<StringOrView, uint8_t> CompactObj::GetRawString() const {
+StringOrView CompactObj::GetRawString() const {
   DCHECK(!IsExternal());
 
   if (taglen_ == ROBJ_TAG) {
     CHECK_EQ(OBJ_STRING, u_.r_obj.type());
     DCHECK_EQ(OBJ_ENCODING_RAW, u_.r_obj.encoding());
-    return {StringOrView::FromView(u_.r_obj.AsView()), mask_ & kEncMask};
+    return StringOrView::FromView(u_.r_obj.AsView());
   }
 
   if (taglen_ == SMALL_TAG) {
     string tmp;
     u_.small_str.Get(&tmp);
-    return {StringOrView::FromString(std::move(tmp)), mask_ & kEncMask};
+    return StringOrView::FromString(std::move(tmp));
   }
+
   LOG(FATAL) << "Unsupported tag for GetRawString(): " << taglen_;
   return {};
-}
-
-void CompactObj::SetRawString(std::string_view blob, uint8_t enc_mask) {
-  DCHECK_GT(blob.size(), kInlineLen);
-  // Current implementation assumes that the object is External, and switches to string.
-  CHECK_EQ(taglen_, EXTERNAL_TAG);
-
-  uint8_t mask = (mask_ & ~kEncMask) | enc_mask;
-
-  if (kUseSmallStrings && SmallString::CanAllocate(blob.size())) {
-    SetMeta(SMALL_TAG, mask);
-    tl.small_str_bytes += u_.small_str.Assign(blob);
-  } else {
-    SetMeta(ROBJ_TAG, mask);
-    u_.r_obj.SetString(blob, tl.local_mr);
-  }
 }
 
 size_t CompactObj::DecodedLen(size_t sz) const {

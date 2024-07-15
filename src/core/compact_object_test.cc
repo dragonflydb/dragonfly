@@ -578,26 +578,27 @@ TEST_F(CompactObjectTest, RawInterface) {
   string str(50, 'a'), tmp, owned;
   cobj_.SetString(str);
   {
-    auto [raw_blob, mask] = cobj_.GetRawString();
+    auto raw_blob = cobj_.GetRawString();
     EXPECT_LT(raw_blob.view().size(), str.size());
-    EXPECT_TRUE(mask != 0);
+
     raw_blob.MakeOwned();
     cobj_.SetExternal(0, 10);  // dummy external pointer
-    cobj_.SetRawString(raw_blob.view(), mask);
+    cobj_.Materialize(raw_blob.view(), true);
 
     EXPECT_EQ(str, cobj_.GetSlice(&tmp));
   }
+
   str.assign(50, char(200));  // non ascii
   cobj_.SetString(str);
+
   {
-    auto [raw_blob, mask] = cobj_.GetRawString();
+    auto raw_blob = cobj_.GetRawString();
 
     EXPECT_EQ(raw_blob.view(), str);
-    EXPECT_EQ(mask, 0);
 
     raw_blob.MakeOwned();
     cobj_.SetExternal(0, 10);  // dummy external pointer
-    cobj_.SetRawString(raw_blob.view(), mask);
+    cobj_.Materialize(raw_blob.view(), true);
 
     EXPECT_EQ(str, cobj_.GetSlice(&tmp));
   }
