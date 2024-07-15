@@ -125,7 +125,7 @@ class Service : public facade::ServiceInterface {
 
   // Utility function used in unit tests
   // Do not use in production, only meant to be used by unit tests
-  void TestInit();
+  const acl::AclFamily* TestInit();
 
  private:
   static void Quit(CmdArgList args, ConnectionContext* cntx);
