@@ -1210,8 +1210,9 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
 async def test_take_over_seeder(
     request, df_factory, df_seeder_factory, master_threads, replica_threads
 ):
-    tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
-    master = df_factory.create(proactor_threads=master_threads, dbfilename=f"dump_{tmp_file_name}")
+    master = df_factory.create(
+        proactor_threads=master_threads, dbfilename=f"dump_{tmp_file_name()}"
+    )
     replica = df_factory.create(proactor_threads=replica_threads)
     df_factory.start_all([master, replica])
 
@@ -1884,9 +1885,8 @@ async def test_client_pause_with_replica(df_factory, df_seeder_factory):
 
 
 async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
-    tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
     master = df_factory.create()
-    replica = df_factory.create(dbfilename=f"dump_{tmp_file_name}")
+    replica = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
     df_factory.start_all([master, replica])
 
     seeder = SeederV2(key_target=40000)
@@ -2052,10 +2052,8 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
 
 @pytest.mark.asyncio
 async def test_saving_replica(df_factory):
-    tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
-
     master = df_factory.create(proactor_threads=1)
-    replica = df_factory.create(proactor_threads=1, dbfilename=f"dump_{tmp_file_name}")
+    replica = df_factory.create(proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}")
     df_factory.start_all([master, replica])
 
     c_master = master.client()
@@ -2084,10 +2082,8 @@ async def test_saving_replica(df_factory):
 
 @pytest.mark.asyncio
 async def test_start_replicating_while_save(df_factory):
-    tmp_file_name = "".join(random.choices(string.ascii_letters, k=10))
-
     master = df_factory.create(proactor_threads=4)
-    replica = df_factory.create(proactor_threads=4, dbfilename=f"dump_{tmp_file_name}")
+    replica = df_factory.create(proactor_threads=4, dbfilename=f"dump_{tmp_file_name()}")
     df_factory.start_all([master, replica])
 
     c_master = master.client()
