@@ -15,6 +15,10 @@ import os
 from enum import Enum
 
 
+def tmp_file_name():
+    return "".join(random.choices(string.ascii_letters, k=10))
+
+
 def chunked(n, iterable):
     """Transform iterable into iterator of chunks of size n"""
     it = iter(iterable)
