@@ -71,32 +71,6 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
   return "unsupported";
 }
 
-struct TransactionGuard {
-  static OpStatus ExitGuardCb(Transaction* t, EngineShard* shard) {
-    t->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
-    return OpStatus::OK;
-  };
-
-  explicit TransactionGuard(Transaction* t, bool disable_expirations = false) : t(t) {
-    t->Execute(
-        [disable_expirations](Transaction* t, EngineShard* shard) {
-          if (disable_expirations) {
-            t->GetDbSlice(shard->shard_id()).SetExpireAllowed(!disable_expirations);
-          }
-          return OpStatus::OK;
-        },
-        false);
-    VLOG(2) << "Transaction guard engaged";
-  }
-
-  ~TransactionGuard() {
-    VLOG(2) << "Releasing transaction guard";
-    t->Execute(ExitGuardCb, true);
-  }
-
-  Transaction* t;
-};
-
 OpStatus WaitReplicaFlowToCatchup(absl::Time end_time, shared_ptr<DflyCmd::ReplicaInfo> replica,
                                   EngineShard* shard) {
   // We don't want any writes to the journal after we send the `PING`,
@@ -299,7 +273,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
 
   // Start full sync.
   {
-    TransactionGuard tg{cntx->transaction};
+    Transaction::Guard tg{cntx->transaction};
     AggregateStatus status;
 
     // Use explicit assignment for replica_ptr, because capturing structured bindings is C++20.
@@ -337,7 +311,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   {
-    TransactionGuard tg{cntx->transaction};
+    Transaction::Guard tg{cntx->transaction};
     AggregateStatus status;
 
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {

@@ -201,6 +201,10 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   JournalStreamer::Start(dest, send_lsn);
+}
+
+void RestoreStreamer::Run() {
+  VLOG(1) << "RestoreStreamer run";
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;
