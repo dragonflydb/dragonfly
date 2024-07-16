@@ -38,27 +38,42 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 
 
 @pytest.mark.parametrize(
-    "t_master, t_replicas, seeder_config, stream_target",
+    "t_master, t_replicas, seeder_config, stream_target, big_value",
     [
         # Quick general test that replication is working
         (1, 3 * [1], dict(key_target=1_000), 500),
         (4, [4, 4], dict(key_target=10_000), 1_000),
-        pytest.param(6, [6, 6, 6], dict(key_target=100_000), 20_000, marks=M_OPT),
+        pytest.param(6, [6, 6, 6], dict(key_target=100_000), 20_000, False, marks=M_OPT),
         # Skewed tests with different thread ratio
-        pytest.param(8, 6 * [1], dict(key_target=5_000), 2_000, marks=M_SLOW),
-        pytest.param(2, [8, 8], dict(key_target=10_000), 2_000, marks=M_SLOW),
+        pytest.param(8, 6 * [1], dict(key_target=5_000), 2_000, False, marks=M_SLOW),
+        pytest.param(2, [8, 8], dict(key_target=10_000), 2_000, False, marks=M_SLOW),
         # Test with big value size
-        pytest.param(2, [2], dict(key_target=1_000, data_size=10_000), 100, marks=M_SLOW),
+        pytest.param(2, [2], dict(key_target=1_000, data_size=10_000), 100, False, marks=M_SLOW),
+        # Test with big value and big value serialization
+        pytest.param(2, [2], dict(key_target=1_000, data_size=10_000), 100, True, marks=M_SLOW),
         # Stress test
-        pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
+        pytest.param(
+            8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, False, marks=M_STRESS
+        ),
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
 async def test_replication_all(
-    df_factory: DflyInstanceFactory, t_master, t_replicas, seeder_config, stream_target, mode
+    df_factory: DflyInstanceFactory,
+    t_master,
+    t_replicas,
+    seeder_config,
+    stream_target,
+    big_value,
+    mode,
 ):
     if mode:
         mode["maxmemory"] = str(t_master * 256) + "mb"
+
+    if big_value:
+        mode["compression_mode"] = 0
+        mode["flush_big_entries_threshold"] = 4096
+        logging.debug(f"FLUSHING")
 
     master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **mode)
     replicas = [

@@ -432,7 +432,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
         RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
       } else {
         RETURN_ON_ERR(SaveString(node->entry, node->sz));
-        // MaybeApplyFlushFunc();
+        MaybeApplyFlushFunc();
       }
     } else {
       // listpack
@@ -508,7 +508,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
           expiry = it.ExpiryTime();
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
       }
-      // MaybeApplyFlushFunc();
+      MaybeApplyFlushFunc();
     }
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
@@ -542,7 +542,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
       ec = SaveBinaryDouble(score);
       if (ec)
         return false;
-      // MaybeApplyFlushFunc();
+      MaybeApplyFlushFunc();
       return true;
     });
   } else {
@@ -653,7 +653,7 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
 
     string_view blob = sbf->data(i);
     RETURN_ON_ERR(SaveString(blob));
-    // MaybeApplyFlushFunc();
+    MaybeApplyFlushFunc();
   }
 
   return {};
