@@ -34,6 +34,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &cntx_) {
   }
 
+  // Send DFLYMIGRATE FLOW
   void PrepareFlow(const std::string& node_id) {
     uint32_t shard_id = EngineShard::tlocal()->shard_id();
 
@@ -62,10 +63,12 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     }
   }
 
+  // Register db_slice and journal change listeners
   void PrepareSync() {
     streamer_.Start(Sock());
   }
 
+  // Run restore streamer
   void RunSync() {
     streamer_.Run();
   }
@@ -210,6 +213,7 @@ void OutgoingMigration::SyncFb() {
 
     OnAllShards([this](auto& migration) {
       auto* shard = EngineShard::tlocal();
+      server_family_->journal()->StartInThread();
       migration = std::make_unique<SliceSlotMigration>(
           &shard->db_slice(), server(), migration_info_.slot_ranges, server_family_->journal());
     });

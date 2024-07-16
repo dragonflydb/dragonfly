@@ -6,8 +6,6 @@
 
 #include <absl/cleanup/cleanup.h>
 
-#include <iterator>
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "generic_family.h"
