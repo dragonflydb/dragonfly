@@ -201,6 +201,10 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   JournalStreamer::Start(dest, send_lsn);
+}
+
+void RestoreStreamer::Run() {
+  VLOG(1) << "RestoreStreamer run";
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;
@@ -231,9 +235,9 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   } while (cursor);
 }
 
-void RestoreStreamer::SendFinalize() {
-  VLOG(1) << "RestoreStreamer FIN opcode for : " << db_slice_->shard_id();
-  journal::Entry entry(journal::Op::FIN, 0 /*db_id*/, 0 /*slot_id*/);
+void RestoreStreamer::SendFinalize(long attempt) {
+  VLOG(1) << "RestoreStreamer LSN opcode for : " << db_slice_->shard_id() << " attempt " << attempt;
+  journal::Entry entry(journal::Op::LSN, attempt);
 
   io::StringSink sink;
   JournalWriter writer{&sink};

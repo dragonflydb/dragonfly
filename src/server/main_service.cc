@@ -2645,8 +2645,9 @@ void Service::RegisterCommands() {
   server_family_.Register(&registry_);
   cluster_family_.Register(&registry_);
 
+  // AclFamily should always be registered last
+  // If we add a new familly, register that first above and *not* below
   acl_family_.Register(&registry_);
-  acl::BuildIndexers(registry_.GetFamilies(), &registry_);
 
   // Only after all the commands are registered
   registry_.Init(pp_.size());
@@ -2674,8 +2675,9 @@ void Service::RegisterCommands() {
   }
 }
 
-void Service::TestInit() {
+const acl::AclFamily* Service::TestInit() {
   acl_family_.Init(nullptr, &user_registry_);
+  return &acl_family_;
 }
 
 void SetMaxMemoryFlag(uint64_t value) {

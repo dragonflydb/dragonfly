@@ -12,7 +12,7 @@ from .instance import RedisServer
 from random import randint as rand
 
 from . import dfly_args
-from .utility import wait_available_async, chunked, is_saving
+from .utility import wait_available_async, is_saving, tmp_file_name
 
 from .seeder import StaticSeeder
 
@@ -43,7 +43,7 @@ async def test_consistency(df_factory, format: str, seeder_opts: dict):
     """
     Test consistency over a large variety of data with different sizes
     """
-    dbfilename = f"test-consistency{rand(0, 5000)}"
+    dbfilename = f"dump_{tmp_file_name()}"
     instance = df_factory.create(dbfilename=dbfilename)
     instance.start()
     async_client = instance.client()
@@ -376,8 +376,7 @@ class TestDflySnapshotOnShutdown:
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @dfly_args({**BASIC_ARGS, "dbfilename": "info-while-snapshot"})
 async def test_infomemory_while_snapshoting(df_factory, format: str):
-    dbfilename = f"test-consistency{rand(0, 5000)}"
-    instance = df_factory.create(dbfilename=dbfilename)
+    instance = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
     instance.start()
     async_client = instance.client()
     await async_client.execute_command("DEBUG POPULATE 10000 key 4048 RAND")

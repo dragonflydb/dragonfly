@@ -76,18 +76,18 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
   size_t stashes = 0;
   ExpectConditionWithinTimeout([this, &stashes] {
     stashes = GetMetrics().tiered_stats.total_stashes;
-    return stashes >= kMax - 256 - 1;
+    return stashes >= kMax - kMin - 1;
   });
 
   // All entries were accounted for except that one (see comment above)
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, kMax - kMin - 1);
-  EXPECT_EQ(metrics.db_stats[0].tiered_used_bytes, (kMax - 1 + kMin) * (kMax - kMin) / 2 - 2047);
+  EXPECT_LE(metrics.db_stats[0].tiered_used_bytes, (kMax - 1 + kMin) * (kMax - kMin) / 2 - 2047);
 
   // Perform GETSETs
   for (size_t i = kMin; i < kMax; i++) {
     auto resp = Run({"GETSET", absl::StrCat("k", i), string(i, 'B')});
-    ASSERT_EQ(resp, string(i, 'A')) << i;
+    ASSERT_EQ(resp, BuildString(i)) << i;
   }
 
   // Perform GETs
@@ -126,7 +126,7 @@ TEST_F(TieredStorageTest, SimpleAppend) {
     if (sleep)
       util::ThisFiber::SleepFor(sleep * 1us);
     EXPECT_THAT(Run({"APPEND", "k0", "B"}), IntArg(3001));
-    EXPECT_EQ(Run({"GET", "k0"}), BuildString(3000) + 'B');
+    ASSERT_EQ(Run({"GET", "k0"}), BuildString(3000) + 'B') << sleep;
   }
 }
 
@@ -148,16 +148,18 @@ TEST_F(TieredStorageTest, MultiDb) {
 
 TEST_F(TieredStorageTest, Defrag) {
   for (char k = 'a'; k < 'a' + 8; k++) {
-    Run({"SET", string(1, k), string(512, k)});
+    Run({"SET", string(1, k), string(600, k)});
   }
 
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
 
   // 7 out 8 are in one bin, the last one made if flush and is now filling
   auto metrics = GetMetrics();
-  EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
-  EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 7u);
-  EXPECT_EQ(metrics.tiered_stats.small_bins_filling_bytes, 512 + 12);
+  ASSERT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
+  ASSERT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 7u);
+
+  // Distorted due to encoded values.
+  ASSERT_EQ(metrics.tiered_stats.small_bins_filling_bytes, 537);
 
   // Reading 3 values still leaves the bin more than half occupied
   Run({"GET", string(1, 'a')});

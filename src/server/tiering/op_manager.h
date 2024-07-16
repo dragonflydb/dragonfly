@@ -35,8 +35,16 @@ class OpManager {
   using EntryId = std::variant<unsigned, KeyRef>;
   using OwnedEntryId = std::variant<unsigned, std::pair<DbIndex, std::string>>;
 
-  // Callback for post-read completion. Returns whether the value was modified
-  using ReadCallback = std::function<bool(std::string*)>;
+  // Callback for post-read completion. Returns whether the value was modified.
+  // We use fu2 function to allow moveable semantics. The arguments are:
+  // bool - true if the string is raw as it was extracted from the prime value.
+  // string* - the string that may potentially be modified by the callbacks that subsribed to this
+  //           read. The callback run in the same order as the order of invocation, guaranteeing
+  //           consistent read after modifications.
+  using ReadCallback =
+      fu2::function_base<true /*owns*/, false /*moveable*/, fu2::capacity_fixed<40, 8>,
+                         false /* non-throwing*/, false /* strong exceptions guarantees*/,
+                         bool(bool, std::string*)>;
 
   explicit OpManager(size_t max_size);
   virtual ~OpManager();
@@ -57,15 +65,15 @@ class OpManager {
   // Delete offloaded entry located at the segment.
   void DeleteOffloaded(DiskSegment segment);
 
-  // Stash value to be offloaded
-  std::error_code Stash(EntryId id, std::string_view value);
+  // Stash (value, footer) to be offloaded. Both arguments are opaque to OpManager.
+  std::error_code Stash(EntryId id, std::string_view value, io::Bytes footer);
 
   Stats GetStats() const;
 
  protected:
   // Notify that a stash succeeded and the entry was stored at the provided segment or failed with
   // given error
-  virtual void NotifyStashed(EntryId id, DiskSegment segment, std::error_code ec) = 0;
+  virtual void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) = 0;
 
   // Notify that an entry was successfully fetched. Includes whether entry was modified.
   // Returns true if value needs to be deleted.
@@ -110,7 +118,7 @@ class OpManager {
   void ProcessRead(size_t offset, std::string_view value);
 
   // Called once Stash finished
-  void ProcessStashed(EntryId id, unsigned version, DiskSegment segment, std::error_code ec);
+  void ProcessStashed(EntryId id, unsigned version, const io::Result<DiskSegment>& segment);
 
  protected:
   DiskStorage storage_;

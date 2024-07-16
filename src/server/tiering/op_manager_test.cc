@@ -35,16 +35,16 @@ struct OpManagerTest : PoolTestBase, OpManager {
 
   util::fb2::Future<std::string> Read(EntryId id, DiskSegment segment) {
     util::fb2::Future<std::string> future;
-    Enqueue(id, segment, [future](std::string* value) mutable {
+    Enqueue(id, segment, [future](bool, std::string* value) mutable {
       future.Resolve(*value);
       return false;
     });
     return future;
   }
 
-  void NotifyStashed(EntryId id, DiskSegment segment, std::error_code ec) override {
-    EXPECT_FALSE(ec);
-    stashed_[id] = segment;
+  void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) override {
+    ASSERT_TRUE(segment);
+    stashed_[id] = *segment;
   }
 
   bool NotifyFetched(EntryId id, std::string_view value, DiskSegment segment,
@@ -66,9 +66,9 @@ TEST_F(OpManagerTest, SimpleStashesWithReads) {
     Open();
 
     for (unsigned i = 0; i < 100; i++) {
-      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "cancelled")));
-      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "cancelled")));
-      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "real")));
+      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "cancelled"), {}));
+      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "cancelled"), {}));
+      EXPECT_FALSE(Stash(i, absl::StrCat("VALUE", i, "real"), {}));
     }
 
     EXPECT_EQ(GetStats().pending_stash_cnt, 100);
@@ -93,7 +93,7 @@ TEST_F(OpManagerTest, DeleteAfterReads) {
   pp_->at(0)->Await([this] {
     Open();
 
-    EXPECT_FALSE(Stash(0u, absl::StrCat("DATA")));
+    EXPECT_FALSE(Stash(0u, absl::StrCat("DATA"), {}));
     while (stashed_.empty())
       util::ThisFiber::SleepFor(1ms);
 
@@ -122,7 +122,7 @@ TEST_F(OpManagerTest, ReadSamePageDifferentOffsets) {
       numbers += number;
     }
 
-    EXPECT_FALSE(Stash(0u, numbers));
+    EXPECT_FALSE(Stash(0u, numbers, {}));
     while (stashed_.empty())
       util::ThisFiber::SleepFor(1ms);
 
@@ -144,14 +144,14 @@ TEST_F(OpManagerTest, Modify) {
   pp_->at(0)->Await([this] {
     Open();
 
-    Stash(0u, "D");
+    Stash(0u, "D", {});
     while (stashed_.empty())
       util::ThisFiber::SleepFor(1ms);
 
     // Atomically issue sequence of modify-read operations
     std::vector<util::fb2::Future<std::string>> futures;
     for (size_t i = 0; i < 10; i++) {
-      Enqueue(0u, stashed_[0u], [i](std::string* v) {
+      Enqueue(0u, stashed_[0u], [i](bool, std::string* v) {
         absl::StrAppend(v, i);
         return true;
       });

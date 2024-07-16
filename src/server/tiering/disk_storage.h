@@ -22,10 +22,11 @@ class DiskStorage {
     size_t capacity_bytes = 0;
     uint64_t heap_buf_alloc_count = 0;
     uint64_t registered_buf_alloc_count = 0;
+    size_t max_file_size = 0;
   };
 
-  using ReadCb = std::function<void(std::string_view, std::error_code)>;
-  using StashCb = std::function<void(DiskSegment, std::error_code)>;
+  using ReadCb = std::function<void(io::Result<std::string_view>)>;
+  using StashCb = std::function<void(io::Result<DiskSegment>)>;
 
   explicit DiskStorage(size_t max_size);
 
@@ -42,12 +43,14 @@ class DiskStorage {
   // grow backing file. Returns error code if operation failed  immediately (most likely it failed
   // to grow the backing file) or passes an empty segment if the final write operation failed.
   // Bytes are copied and can be dropped before cb is resolved
-  std::error_code Stash(io::Bytes bytes, StashCb cb);
+  std::error_code Stash(io::Bytes bytes, io::Bytes footer, StashCb cb);
 
   Stats GetStats() const;
 
  private:
   std::error_code Grow(off_t grow_size);
+
+  // Returns a buffer with size greater or equal to len.
   util::fb2::UringBuf PrepareBuf(size_t len);
 
   off_t size_, max_size_;

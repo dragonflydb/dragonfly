@@ -11,6 +11,7 @@
 #include "io/io_buf.h"
 #include "server/error.h"
 #include "server/tiering/common.h"
+#include "server/tiering/external_alloc.h"
 #include "util/fibers/uring_proactor.h"
 
 using namespace ::dfly::tiering::literals;
@@ -22,6 +23,7 @@ ABSL_FLAG(uint64_t, registered_buffer_size, 512_KB,
 
 namespace dfly::tiering {
 
+using namespace std;
 using namespace ::util::fb2;
 
 namespace {
@@ -30,13 +32,13 @@ UringBuf AllocateTmpBuf(size_t size) {
   size = (size + kPageSize - 1) / kPageSize * kPageSize;
   VLOG(1) << "Fallback to temporary allocation: " << size;
 
-  uint8_t* buf = new (std::align_val_t(kPageSize)) uint8_t[size];
-  return UringBuf{{buf, size}, std::nullopt};
+  uint8_t* buf = new (align_val_t(kPageSize)) uint8_t[size];
+  return UringBuf{{buf, size}, nullopt};
 }
 
 void DestroyTmpBuf(UringBuf buf) {
   DCHECK(!buf.buf_idx);
-  ::operator delete[](buf.bytes.data(), std::align_val_t(kPageSize));
+  ::operator delete[](buf.bytes.data(), align_val_t(kPageSize));
 }
 
 void ReturnBuf(UringBuf buf) {
@@ -51,12 +53,12 @@ void ReturnBuf(UringBuf buf) {
 
 constexpr off_t kInitialSize = 1UL << 28;  // 256MB
 
-template <typename... Ts> std::error_code DoFiberCall(void (SubmitEntry::*c)(Ts...), Ts... args) {
+template <typename... Ts> error_code DoFiberCall(void (SubmitEntry::*c)(Ts...), Ts... args) {
   auto* proactor = static_cast<UringProactor*>(ProactorBase::me());
   FiberCall fc(proactor);
   (fc.operator->()->*c)(std::forward<Ts>(args)...);
   FiberCall::IoResult io_res = fc.Get();
-  return io_res < 0 ? std::error_code{-io_res, std::system_category()} : std::error_code{};
+  return io_res < 0 ? error_code{-io_res, system_category()} : error_code{};
 }
 
 }  // anonymous namespace
@@ -64,7 +66,7 @@ template <typename... Ts> std::error_code DoFiberCall(void (SubmitEntry::*c)(Ts.
 DiskStorage::DiskStorage(size_t max_size) : max_size_(max_size) {
 }
 
-std::error_code DiskStorage::Open(std::string_view path) {
+error_code DiskStorage::Open(string_view path) {
   DCHECK_EQ(ProactorBase::me()->GetKind(), ProactorBase::IOURING);
   CHECK(!backing_file_);
 
@@ -86,13 +88,13 @@ std::error_code DiskStorage::Open(std::string_view path) {
 
   auto* up = static_cast<UringProactor*>(ProactorBase::me());
   if (int io_res = up->RegisterBuffers(absl::GetFlag(FLAGS_registered_buffer_size)); io_res < 0)
-    return std::error_code{-io_res, std::system_category()};
+    return error_code{-io_res, system_category()};
 
   return {};
 }
 
 void DiskStorage::Close() {
-  using namespace std::chrono_literals;
+  using namespace chrono_literals;
 
   // TODO: to fix this polling.
   while (pending_ops_ > 0 || grow_pending_)
@@ -106,12 +108,15 @@ void DiskStorage::Read(DiskSegment segment, ReadCb cb) {
   DCHECK_GT(segment.length, 0u);
   DCHECK_EQ(segment.offset % kPageSize, 0u);
 
-  UringBuf buf = PrepareBuf(segment.length);
-  auto io_cb = [this, cb = std::move(cb), buf, segment](int io_res) {
-    if (io_res < 0)
-      cb("", std::error_code{-io_res, std::system_category()});
-    else
-      cb(std::string_view{reinterpret_cast<char*>(buf.bytes.data()), segment.length}, {});
+  size_t len = segment.length;
+  UringBuf buf = PrepareBuf(len);
+  auto io_cb = [this, cb = std::move(cb), buf, len](int io_res) {
+    if (io_res < 0) {
+      cb(nonstd::make_unexpected(error_code{-io_res, system_category()}));
+      return;
+    }
+
+    cb(string_view{reinterpret_cast<char*>(buf.bytes.data()), len});
     ReturnBuf(buf);
     pending_ops_--;
   };
@@ -130,10 +135,11 @@ void DiskStorage::MarkAsFree(DiskSegment segment) {
   alloc_.Free(segment.offset, segment.length);
 }
 
-std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
+std::error_code DiskStorage::Stash(io::Bytes bytes, io::Bytes footer, StashCb cb) {
   DCHECK_GT(bytes.length(), 0u);
 
-  int64_t offset = alloc_.Malloc(bytes.size());
+  size_t len = bytes.size() + footer.size();
+  int64_t offset = alloc_.Malloc(len);
 
   // If we've run out of space, block and grow as much as needed
   if (offset < 0) {
@@ -141,20 +147,22 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
     // Right now we do it synchronously as well (see Grow(256MB) call.)
     RETURN_ON_ERR(Grow(-offset));
 
-    offset = alloc_.Malloc(bytes.size());
+    offset = alloc_.Malloc(len);
     if (offset < 0)  // we can't fit it even after resizing
       return std::make_error_code(std::errc::file_too_large);
   }
 
-  UringBuf buf = PrepareBuf(bytes.size());
+  UringBuf buf = PrepareBuf(len);
   memcpy(buf.bytes.data(), bytes.data(), bytes.length());
+  if (!footer.empty())
+    memcpy(buf.bytes.data() + bytes.length(), footer.data(), footer.length());
 
-  auto io_cb = [this, cb, offset, buf, len = bytes.size()](int io_res) {
+  auto io_cb = [this, cb, offset, buf, len](int io_res) {
     if (io_res < 0) {
       MarkAsFree({size_t(offset), len});
-      cb({}, std::error_code{-io_res, std::system_category()});
+      cb(nonstd::make_unexpected(error_code{-io_res, std::system_category()}));
     } else {
-      cb({size_t(offset), len}, {});
+      cb(DiskSegment{size_t(offset), len});
     }
     ReturnBuf(buf);
     pending_ops_--;
@@ -165,7 +173,10 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
     backing_file_->WriteFixedAsync(buf.bytes, offset, *buf.buf_idx, std::move(io_cb));
   else
     backing_file_->WriteAsync(buf.bytes, offset, std::move(io_cb));
-  if (alloc_.allocated_bytes() > (size_ * 0.85) && !grow_pending_) {
+
+  // Grow in advance if needed and possible
+  if (alloc_.allocated_bytes() > (size_ * 0.85) &&
+      size_ + ExternalAllocator::kExtAlignment < static_cast<size_t>(max_size_) && !grow_pending_) {
     auto ec = Grow(265_MB);
     LOG_IF(ERROR, ec) << "Could not call grow :" << ec.message();
     return ec;
@@ -174,7 +185,8 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, StashCb cb) {
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
-  return {alloc_.allocated_bytes(), alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_};
+  return {alloc_.allocated_bytes(), alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_,
+          static_cast<size_t>(max_size_)};
 }
 
 std::error_code DiskStorage::Grow(off_t grow_size) {

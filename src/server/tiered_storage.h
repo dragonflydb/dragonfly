@@ -50,7 +50,9 @@ class TieredStorage {
   void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
             std::function<void(const std::string&)> readf);
 
-  // Apply modification to offloaded value, return generic result from callback
+  // Apply modification to offloaded value, return generic result from callback.
+  // Unlike immutable Reads - the modified value must be uploaded back to memory.
+  // This is handled by OpManager when modf completes.
   template <typename T>
   util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
                               std::function<T(std::string*)> modf);

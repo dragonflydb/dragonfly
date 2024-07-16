@@ -59,7 +59,7 @@ add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc
             cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
             cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
-            acl/validator.cc acl/helpers.cc)
+            acl/validator.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_ENABLE_MEMORY_TRACKING)

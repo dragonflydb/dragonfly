@@ -154,7 +154,7 @@ class BaseFamilyTest : public ::testing::Test {
 
   static void SetTestFlag(std::string_view flag_name, std::string_view new_value);
 
-  void TestInitAclFam();
+  const acl::AclFamily* TestInitAclFam();
 
   std::unique_ptr<util::ProactorPool> pp_;
   std::unique_ptr<Service> service_;

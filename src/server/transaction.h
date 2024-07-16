@@ -171,6 +171,14 @@ class Transaction {
     RAN_IMMEDIATELY = 1 << 7,  // Whether the shard executed immediately (during schedule)
   };
 
+  struct Guard {
+    explicit Guard(Transaction* tx);
+    ~Guard();
+
+   private:
+    Transaction* tx;
+  };
+
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx

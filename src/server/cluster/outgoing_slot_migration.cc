@@ -16,6 +16,7 @@
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/streamer.h"
+#include "server/main_service.h"
 #include "server/server_family.h"
 
 ABSL_FLAG(int, slot_migration_connection_timeout_ms, 2000, "Timeout for network operations");
@@ -33,7 +34,10 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &cntx_) {
   }
 
-  void Sync(const std::string& node_id, uint32_t shard_id) {
+  // Send DFLYMIGRATE FLOW
+  void PrepareFlow(const std::string& node_id) {
+    uint32_t shard_id = EngineShard::tlocal()->shard_id();
+
     VLOG(1) << "Connecting to source node_id " << node_id << " shard_id " << shard_id;
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
@@ -57,16 +61,24 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       cntx_.ReportError("Incorrect response for FLOW cmd");
       return;
     }
+  }
 
+  // Register db_slice and journal change listeners
+  void PrepareSync() {
     streamer_.Start(Sock());
+  }
+
+  // Run restore streamer
+  void RunSync() {
+    streamer_.Run();
   }
 
   void Cancel() {
     streamer_.Cancel();
   }
 
-  void Finalize() {
-    streamer_.SendFinalize();
+  void Finalize(long attempt) {
+    streamer_.SendFinalize(attempt);
   }
 
   const dfly::GenericError GetError() const {
@@ -82,18 +94,17 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
       migration_info_(std::move(info)),
       slot_migrations_(shard_set->size()),
       server_family_(sf),
-      cf_(cf) {
+      cf_(cf),
+      tx_(new Transaction{sf->service().FindCmd("DFLYCLUSTER")}) {
+  tx_->InitByArgs(&namespaces.GetDefaultNamespace(), 0, {});
 }
 
 OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
 
-  // Destroy each flow in its dedicated thread, because we could be the last owner of the db tables
-  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      slot_migrations_[shard->shard_id()].reset();
-    }
-  });
+  // Destroy each flow in its dedicated thread, because we could be the last
+  // owner of the db tables
+  OnAllShards([](auto& migration) { migration.reset(); });
 }
 
 bool OutgoingMigration::ChangeState(MigrationState new_state) {
@@ -104,6 +115,15 @@ bool OutgoingMigration::ChangeState(MigrationState new_state) {
 
   state_ = new_state;
   return true;
+}
+
+void OutgoingMigration::OnAllShards(
+    std::function<void(std::unique_ptr<SliceSlotMigration>&)> func) {
+  shard_set->pool()->AwaitFiberOnAll([this, &func](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      func(slot_migrations_[shard->shard_id()]);
+    }
+  });
 }
 
 void OutgoingMigration::Finish(bool is_error) {
@@ -132,12 +152,9 @@ void OutgoingMigration::Finish(bool is_error) {
   }
 
   if (should_cancel_flows) {
-    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-      if (const auto* shard = EngineShard::tlocal(); shard) {
-        auto& flow = slot_migrations_[shard->shard_id()];
-        CHECK(flow != nullptr);
-        flow->Cancel();
-      }
+    OnAllShards([](auto& migration) {
+      CHECK(migration != nullptr);
+      migration->Cancel();
     });
   }
 }
@@ -161,8 +178,7 @@ void OutgoingMigration::SyncFb() {
 
     if (last_error_) {
       LOG(ERROR) << last_error_.Format();
-      // if error is happened on the previous attempt we wait for some time and try again
-      ThisFiber::SleepFor(1000ms);
+      ThisFiber::SleepFor(1000ms);  // wait some time before next retry
     }
 
     VLOG(2) << "Connecting to source";
@@ -195,28 +211,34 @@ void OutgoingMigration::SyncFb() {
       continue;
     }
 
-    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-      if (auto* shard = EngineShard::tlocal(); shard) {
-        DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
-        server_family_->journal()->StartInThread();
-        slot_migrations_[shard->shard_id()] = std::make_unique<SliceSlotMigration>(
-            &db_slice, server(), migration_info_.slot_ranges, server_family_->journal());
-      }
+    OnAllShards([this](auto& migration) {
+      DbSlice& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+      server_family_->journal()->StartInThread();
+      migration = std::make_unique<SliceSlotMigration>(
+          &db_slice, server(), migration_info_.slot_ranges, server_family_->journal());
     });
 
     if (!ChangeState(MigrationState::C_SYNC)) {
       break;
     }
 
-    shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
-      if (auto* shard = EngineShard::tlocal(); shard) {
-        auto& migration = slot_migrations_[shard->shard_id()];
-        CHECK(migration != nullptr);
-        migration->Sync(cf_->MyID(), shard->shard_id());
-        if (migration->GetError()) {
-          Finish(true);
-        }
-      }
+    OnAllShards([this](auto& migration) { migration->PrepareFlow(cf_->MyID()); });
+    if (CheckFlowsForErrors()) {
+      LOG(WARNING) << "Preparation error detected, retrying outgoing migration";
+      continue;
+    }
+
+    // Global transactional cut for migration to register db_slice and journal
+    // listeners
+    {
+      Transaction::Guard tg{tx_.get()};
+      OnAllShards([](auto& migration) { migration->PrepareSync(); });
+    }
+
+    OnAllShards([this](auto& migration) {
+      migration->RunSync();
+      if (migration->GetError())
+        Finish(true);
     });
 
     if (CheckFlowsForErrors()) {
@@ -241,8 +263,8 @@ void OutgoingMigration::SyncFb() {
 }
 
 bool OutgoingMigration::FinalizeMigration(long attempt) {
-  // if it's not the 1st attempt and flows are work correctly we try to reconnect and ACK one more
-  // time
+  // if it's not the 1st attempt and flows are work correctly we try to
+  // reconnect and ACK one more time
   VLOG(1) << "FinalizeMigration for " << cf_->MyID() << " : " << migration_info_.node_info.id;
   if (attempt > 1) {
     if (CheckFlowsForErrors()) {
@@ -256,6 +278,9 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       return false;
     }
   }
+
+  // Migration finalization has to be done via client pause because commands need to
+  // be blocked on coordinator level to avoid intializing transactions with stale cluster slot info
   // TODO implement blocking on migrated slots only
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
@@ -272,14 +297,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     pause_fb_opt->JoinIfNeeded();
   });
 
-  auto cb = [this](util::ProactorBase* pb) {
-    if (const auto* shard = EngineShard::tlocal(); shard) {
-      slot_migrations_[shard->shard_id()]->Finalize();
-    }
-  };
-
   VLOG(1) << "FINALIZE flows for " << cf_->MyID() << " : " << migration_info_.node_info.id;
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+  OnAllShards([attempt](auto& migration) { migration->Finalize(attempt); });
 
   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID(), " ", attempt);
   VLOG(1) << "send " << cmd;
@@ -304,7 +323,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   const auto attempt_res = get<int64_t>(LastResponseArgs().front().u);
-  if (attempt_res == kInvalidAttempt) {
+  if (attempt_res != attempt) {
+    LOG(WARNING) << "Incorrect attempt payload, sent " << attempt << " received " << attempt_res;
     return false;
   }
 

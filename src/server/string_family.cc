@@ -489,7 +489,7 @@ OpResult<variant<size_t, util::fb2::Future<size_t>>> OpExtend(const OpArgs& op_a
   if (it_res->it->second.ObjType() != OBJ_STRING)
     return OpStatus::WRONG_TYPE;
 
-  if (PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
+  if (const PrimeValue& pv = it_res->it->second; pv.IsExternal()) {
     auto modf = [value = string{value}, prepend](std::string* v) {
       *v = prepend ? absl::StrCat(value, *v) : absl::StrCat(*v, value);
       return v->size();

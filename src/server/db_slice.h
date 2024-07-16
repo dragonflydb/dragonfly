@@ -469,14 +469,6 @@ class DbSlice {
   void PerformDeletion(Iterator del_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
-  void LockChangeCb() const {
-    return cb_mu_.lock_shared();
-  }
-
-  void UnlockChangeCb() const {
-    return cb_mu_.unlock_shared();
-  }
-
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
@@ -552,12 +544,6 @@ class DbSlice {
   // Used in temporary computations in Acquire/Release.
   mutable absl::flat_hash_set<uint64_t> uniq_fps_;
 
-  // To ensure correct data replication, we must serialize the buckets that each running command
-  // will modify, followed by serializing the command to the journal. We use a mutex to prevent
-  // interleaving between bucket and journal registrations, and the command execution with its
-  // journaling. LockChangeCb is called before the callback, and UnlockChangeCb is called after
-  // journaling is completed. Register to bucket and journal changes is also does without preemption
-  mutable util::fb2::SharedMutex cb_mu_;
   // ordered from the smallest to largest version.
   std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
 

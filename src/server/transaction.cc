@@ -127,6 +127,16 @@ cv_status Transaction::BatonBarrier::Wait(time_point tp) {
   return cv_status::no_timeout;
 }
 
+Transaction::Guard::Guard(Transaction* tx) : tx(tx) {
+  DCHECK(tx->cid_->opt_mask() & CO::GLOBAL_TRANS);
+  tx->Execute([](auto*, auto*) { return OpStatus::OK; }, false);
+}
+
+Transaction::Guard::~Guard() {
+  tx->Conclude();
+  tx->Refurbish();
+}
+
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   InitTxTime();
   string_view cmd_name(cid_->name());
@@ -625,7 +635,6 @@ void Transaction::RunCallback(EngineShard* shard) {
 
   RunnableResult result;
   auto& db_slice = GetDbSlice(shard->shard_id());
-  db_slice.LockChangeCb();
   try {
     result = (*cb_ptr_)(this, shard);
 
@@ -663,10 +672,7 @@ void Transaction::RunCallback(EngineShard* shard) {
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
     LogAutoJournalOnShard(shard, result);
-    db_slice.UnlockChangeCb();
     MaybeInvokeTrackingCb();
-  } else {
-    db_slice.UnlockChangeCb();
   }
 }
 
@@ -1230,11 +1236,11 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
 
   auto* shard = EngineShard::tlocal();
   auto& db_slice = GetDbSlice(shard->shard_id());
-  db_slice.LockChangeCb();
+
   auto result = cb(this, shard);
   db_slice.OnCbFinish();
+
   LogAutoJournalOnShard(shard, result);
-  db_slice.UnlockChangeCb();
   MaybeInvokeTrackingCb();
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it

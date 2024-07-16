@@ -3,9 +3,12 @@
 //
 #pragma once
 
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 #include "io/io.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/protocol_client.h"
+#include "server/transaction.h"
 
 namespace dfly {
 class DbSlice;
@@ -75,6 +78,8 @@ class OutgoingMigration : private ProtocolClient {
 
   bool ChangeState(MigrationState new_state) ABSL_LOCKS_EXCLUDED(state_mu_);
 
+  void OnAllShards(std::function<void(std::unique_ptr<SliceSlotMigration>&)>);
+
  private:
   MigrationInfo migration_info_;
   std::vector<std::unique_ptr<SliceSlotMigration>> slot_migrations_;
@@ -86,6 +91,8 @@ class OutgoingMigration : private ProtocolClient {
 
   mutable util::fb2::Mutex state_mu_;
   MigrationState state_ ABSL_GUARDED_BY(state_mu_) = MigrationState::C_NO_STATE;
+
+  boost::intrusive_ptr<Transaction> tx_;
 
   // when migration is finished we need to store number of migrated keys
   // because new request can add or remove keys and we get incorrect statistic

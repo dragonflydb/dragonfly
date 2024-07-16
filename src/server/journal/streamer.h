@@ -77,10 +77,13 @@ class RestoreStreamer : public JournalStreamer {
   ~RestoreStreamer() override;
 
   void Start(util::FiberSocketBase* dest, bool send_lsn = false) override;
+
+  void Run();
+
   // Cancel() must be called if Start() is called
   void Cancel() override;
 
-  void SendFinalize();
+  void SendFinalize(long attempt);
 
   bool IsSnapshotFinished() const {
     return snapshot_finished_;
