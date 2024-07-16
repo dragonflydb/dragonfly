@@ -1089,19 +1089,7 @@ void DbSlice::ExpireAllIfNeeded() {
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
-  // TODO rewrite this logic to be more clear
-  // this mutex lock is needed to check that this method is not called simultaneously with
-  // change_cb_ calls and journal_slice::change_cb_arr_ calls.
-  // It can be unlocked anytime because DbSlice::RegisterOnChange
-  // and journal_slice::RegisterOnChange calls without preemption
-  std::lock_guard lk(cb_mu_);
-
-  uint64_t ver = NextVersion();
-  change_cb_.emplace_back(ver, std::move(cb));
-  DCHECK(std::is_sorted(change_cb_.begin(), change_cb_.end(),
-                        [](auto& a, auto& b) { return a.first < b.first; }));
-
-  return ver;
+  return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
@@ -1125,14 +1113,10 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
-  lock_guard lk(cb_mu_);  // we need to wait until callback is finished before remove it
-  for (auto it = change_cb_.begin(); it != change_cb_.end(); ++it) {
-    if (it->first == id) {
-      change_cb_.erase(it);
-      return;
-    }
-  }
-  LOG(DFATAL) << "Could not find " << id << " to unregister";
+  auto it = find_if(change_cb_.begin(), change_cb_.end(),
+                    [id](const auto& cb) { return cb.first == id; });
+  CHECK(it != change_cb_.end());
+  change_cb_.erase(it);
 }
 
 auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
