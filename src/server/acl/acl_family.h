@@ -80,6 +80,8 @@ class AclFamily final {
   using OptCommand = std::optional<std::pair<size_t, uint64_t>>;
   std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command) const;
 
+  std::optional<std::string> MaybeParseNamespace(std::string_view command) const;
+
   std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
       const facade::ArgRange& args, bool hashed = false, bool has_all_keys = false) const;
 
