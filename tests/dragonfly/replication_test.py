@@ -41,8 +41,8 @@ Test full replication pipeline. Test full sync with streaming changes and stable
     "t_master, t_replicas, seeder_config, stream_target, big_value",
     [
         # Quick general test that replication is working
-        (1, 3 * [1], dict(key_target=1_000), 500),
-        (4, [4, 4], dict(key_target=10_000), 1_000),
+        (1, 3 * [1], dict(key_target=1_000), 500, False),
+        (4, [4, 4], dict(key_target=10_000), 1_000, False),
         pytest.param(6, [6, 6, 6], dict(key_target=100_000), 20_000, False, marks=M_OPT),
         # Skewed tests with different thread ratio
         pytest.param(8, 6 * [1], dict(key_target=5_000), 2_000, False, marks=M_SLOW),
