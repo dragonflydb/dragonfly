@@ -61,7 +61,7 @@ void BlockingControllerTest::SetUp() {
     arg_vec_.emplace_back(s);
   }
 
-  trans_->InitByArgs(0, {arg_vec_.data(), arg_vec_.size()});
+  trans_->InitByArgs(&namespaces.GetDefaultNamespace(), 0, {arg_vec_.data(), arg_vec_.size()});
   CHECK_EQ(0u, Shard("x", shard_set->size()));
   CHECK_EQ(2u, Shard("z", shard_set->size()));
 
@@ -70,6 +70,8 @@ void BlockingControllerTest::SetUp() {
 }
 
 void BlockingControllerTest::TearDown() {
+  namespaces.Clear();
+
   shard_set->Shutdown();
   delete shard_set;
 
@@ -79,7 +81,7 @@ void BlockingControllerTest::TearDown() {
 
 TEST_F(BlockingControllerTest, Basic) {
   trans_->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
-    BlockingController bc(shard);
+    BlockingController bc(shard, &namespaces.GetDefaultNamespace());
     auto keys = t->GetShardArgs(shard->shard_id());
     bc.AddWatched(
         keys, [](auto...) { return true; }, t);
@@ -103,7 +105,12 @@ TEST_F(BlockingControllerTest, Timeout) {
 
   EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(
-      0, [&] { return EngineShard::tlocal()->blocking_controller()->NumWatched(0); });
+
+      0, [&] {
+        return namespaces.GetDefaultNamespace()
+            .GetBlockingController(EngineShard::tlocal()->shard_id())
+            ->NumWatched(0);
+      });
 
   EXPECT_EQ(0, num_watched);
   trans_.reset();

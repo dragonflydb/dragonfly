@@ -145,7 +145,7 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   cntx_->cid = cmd->Cid();
 
   if (cmd->Cid()->IsTransactional())
-    tx->InitByArgs(cntx_->conn_state.db_index, args);
+    tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
   service_->InvokeCmd(cmd->Cid(), args, cntx_);
 
   return true;
@@ -181,7 +181,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     local_cntx.cid = cmd->Cid();
     crb.SetReplyMode(cmd->ReplyMode());
 
-    local_tx->InitByArgs(local_cntx.conn_state.db_index, args);
+    local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
     service_->InvokeCmd(cmd->Cid(), args, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());

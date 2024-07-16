@@ -13,6 +13,7 @@
 #include "base/logging.h"
 #include "server/detail/snapshot_storage.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/script_mgr.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
@@ -400,7 +401,7 @@ void SaveStagesController::CloseCb(unsigned index) {
   }
 
   if (auto* es = EngineShard::tlocal(); use_dfs_format_ && es)
-    es->db_slice().ResetUpdateEvents();
+    namespaces.GetDefaultNamespace().GetDbSlice(es->shard_id()).ResetUpdateEvents();
 }
 
 void SaveStagesController::RunStage(void (SaveStagesController::*cb)(unsigned)) {

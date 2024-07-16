@@ -9,6 +9,7 @@
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -17,14 +18,11 @@ using namespace std;
 using Payload = journal::Entry::Payload;
 
 DbSlice& DbContext::GetDbSlice(ShardId shard_id) const {
-  // TODO: Update this when adding namespaces
-  DCHECK_EQ(shard_id, EngineShard::tlocal()->shard_id());
-  return EngineShard::tlocal()->db_slice();
+  return ns->GetDbSlice(shard_id);
 }
 
 DbSlice& OpArgs::GetDbSlice() const {
-  // TODO: Update this when adding namespaces
-  return shard->db_slice();
+  return db_cntx.GetDbSlice(shard->shard_id());
 }
 
 size_t ShardArgs::Size() const {

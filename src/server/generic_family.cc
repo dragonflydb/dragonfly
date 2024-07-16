@@ -451,7 +451,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     auto& dest_it = restored_dest_it->it;
     dest_it->first.SetSticky(serialized_value_.sticky);
 
-    auto bc = shard->blocking_controller();
+    auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
     if (bc) {
       bc->AwakeWatched(t->GetDbIndex(), dest_key_);
     }
@@ -607,7 +607,7 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   }
 
   cursor >>= 10;
-  DbContext db_cntx{cntx->conn_state.db_index, GetCurrentTimeMs()};
+  DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
 
   do {
     auto cb = [&] {
@@ -1355,8 +1355,10 @@ void GenericFamily::Select(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kDbIndOutOfRangeErr);
   }
   cntx->conn_state.db_index = index;
-  auto cb = [index](EngineShard* shard) {
-    shard->db_slice().ActivateDb(index);
+  auto cb = [cntx, index](EngineShard* shard) {
+    CHECK(cntx->ns != nullptr);
+    auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+    db_slice.ActivateDb(index);
     return OpStatus::OK;
   };
   shard_set->RunBriefInParallel(std::move(cb));
@@ -1385,7 +1387,8 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
-    auto it = shard->db_slice().FindReadOnly(t->GetDbContext(), key).it;
+    auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+    auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
     if (!it.is_done()) {
       return it->second.ObjType();
     } else {
@@ -1549,8 +1552,9 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     to_res.it->first.SetSticky(sticky);
   }
 
-  if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && es->blocking_controller()) {
-    es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, to_key);
+  auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
+  if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {
+    bc->AwakeWatched(op_args.db_cntx.db_index, to_key);
   }
   return OpStatus::OK;
 }
@@ -1590,8 +1594,9 @@ OpStatus GenericFamily::OpMove(const OpArgs& op_args, string_view key, DbIndex t
   auto& add_res = *op_result;
   add_res.it->first.SetSticky(sticky);
 
-  if (add_res.it->second.ObjType() == OBJ_LIST && op_args.shard->blocking_controller()) {
-    op_args.shard->blocking_controller()->AwakeWatched(target_db, key);
+  auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+  if (add_res.it->second.ObjType() == OBJ_LIST && bc) {
+    bc->AwakeWatched(target_db, key);
   }
 
   return OpStatus::OK;
@@ -1602,14 +1607,15 @@ void GenericFamily::RandomKey(CmdArgList args, ConnectionContext* cntx) {
 
   absl::BitGen bitgen;
   atomic_size_t candidates_counter{0};
-  DbContext db_cntx{cntx->conn_state.db_index, GetCurrentTimeMs()};
+  DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
   ScanOpts scan_opts;
   scan_opts.limit = 3;  // number of entries per shard
   std::vector<StringVec> candidates_collection(shard_set->size());
 
   shard_set->RunBriefInParallel(
       [&](EngineShard* shard) {
-        auto [prime_table, expire_table] = shard->db_slice().GetTables(db_cntx.db_index);
+        auto [prime_table, expire_table] =
+            cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
         if (prime_table->size() == 0) {
           return;
         }

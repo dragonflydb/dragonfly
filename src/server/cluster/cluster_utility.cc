@@ -2,6 +2,7 @@
 
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 
 using namespace std;
 
@@ -49,7 +50,10 @@ uint64_t GetKeyCount(const SlotRanges& slots) {
     uint64_t shard_keys = 0;
     for (const SlotRange& range : slots) {
       for (SlotId slot = range.start; slot <= range.end; slot++) {
-        shard_keys += shard->db_slice().GetSlotStats(slot).key_count;
+        shard_keys += namespaces.GetDefaultNamespace()
+                          .GetDbSlice(shard->shard_id())
+                          .GetSlotStats(slot)
+                          .key_count;
       }
     }
     keys.fetch_add(shard_keys);

@@ -648,9 +648,9 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
 
   StreamTrim(opts, stream_inst);
 
-  EngineShard* es = op_args.shard;
-  if (es->blocking_controller()) {
-    es->blocking_controller()->AwakeWatched(op_args.db_cntx.db_index, opts.key);
+  auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+  if (blocking_controller) {
+    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, opts.key);
   }
 
   return result_id;
@@ -2364,7 +2364,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       // We do not use transactional xemantics for xinfo since it's informational command.
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{cntx->db_index(), GetCurrentTimeMs()};
+        DbContext db_context{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
         return OpListGroups(db_context, key, shard);
       };
 
@@ -2433,7 +2433,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        return OpStreams(DbContext{cntx->db_index(), GetCurrentTimeMs()}, key, shard, full, count);
+        return OpStreams(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()}, key, shard,
+                         full, count);
       };
 
       auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -2561,8 +2562,8 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
       auto cb = [&]() {
-        return OpConsumers(DbContext{cntx->db_index(), GetCurrentTimeMs()}, EngineShard::tlocal(),
-                           stream_name, group_name);
+        return OpConsumers(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()},
+                           EngineShard::tlocal(), stream_name, group_name);
       };
 
       OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));

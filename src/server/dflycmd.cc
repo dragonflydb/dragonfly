@@ -75,7 +75,7 @@ OpStatus WaitReplicaFlowToCatchup(absl::Time end_time, shared_ptr<DflyCmd::Repli
                                   EngineShard* shard) {
   // We don't want any writes to the journal after we send the `PING`,
   // and expirations could ruin that.
-  shard->db_slice().SetExpireAllowed(false);
+  namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
   shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {}, true);
 
   FlowInfo* flow = &replica->flows[shard->shard_id()];
@@ -396,8 +396,9 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "AwaitCurrentDispatches done";
 
   absl::Cleanup([] {
-    shard_set->RunBriefInParallel(
-        [](EngineShard* shard) { shard->db_slice().SetExpireAllowed(true); });
+    shard_set->RunBriefInParallel([](EngineShard* shard) {
+      namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+    });
     VLOG(2) << "Enable expiration";
   });
 

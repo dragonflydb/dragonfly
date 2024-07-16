@@ -366,7 +366,11 @@ TEST_F(DflyEngineTest, MemcacheFlags) {
   ASSERT_EQ(Run("resp", {"flushdb"}), "OK");
   pp_->AwaitFiberOnAll([](auto*) {
     if (auto* shard = EngineShard::tlocal(); shard) {
-      EXPECT_EQ(shard->db_slice().GetDBTable(0)->mcflag.size(), 0u);
+      EXPECT_EQ(namespaces.GetDefaultNamespace()
+                    .GetDbSlice(shard->shard_id())
+                    .GetDBTable(0)
+                    ->mcflag.size(),
+                0u);
     }
   });
 }
@@ -584,7 +588,7 @@ TEST_F(DflyEngineTest, Bug496) {
     if (shard == nullptr)
       return;
 
-    auto& db = shard->db_slice();
+    auto& db = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
     int cb_hits = 0;
     uint32_t cb_id =

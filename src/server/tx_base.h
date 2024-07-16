@@ -14,6 +14,7 @@ namespace dfly {
 
 class EngineShard;
 class Transaction;
+class Namespace;
 class DbSlice;
 
 using DbIndex = uint16_t;
@@ -58,6 +59,7 @@ struct KeyIndex {
 };
 
 struct DbContext {
+  Namespace* ns = nullptr;
   DbIndex db_index = 0;
   uint64_t time_now_ms = 0;
 

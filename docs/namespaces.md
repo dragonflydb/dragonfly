@@ -1,6 +1,6 @@
 # Namespaces in Dragonfly
 
-Dragonfly will soon add an _experimental_ feature, allowing complete separation of data by different users.
+Dragonfly added an _experimental_ feature, allowing complete separation of data by different users.
 We call this feature _namespaces_, and it allows using a single Dragonfly server with multiple
 tenants, each using their own data, without being able to mix them together.
 

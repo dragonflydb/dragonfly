@@ -1078,7 +1078,7 @@ void DbSlice::ExpireAllIfNeeded() {
         LOG(ERROR) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
         return;
       }
-      ExpireIfNeeded(Context{db_index, GetCurrentTimeMs()}, prime_it);
+      ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
     };
 
     ExpireTable::Cursor cursor;

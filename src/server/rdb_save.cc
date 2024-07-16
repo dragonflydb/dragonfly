@@ -35,6 +35,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/search/doc_index.h"
 #include "server/serializer_commons.h"
@@ -1251,15 +1252,17 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
                                        EngineShard* shard) {
   auto& s = GetSnapshot(shard);
-  s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_);
+  auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
+  s = std::make_unique<SliceSnapshot>(&db_slice, &channel_, compression_mode_);
 
   s->Start(stream_journal, cll);
 }
 
 void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* shard,
                                                   LSN start_lsn) {
+  auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
-  s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_);
+  s = std::make_unique<SliceSnapshot>(&db_slice, &channel_, compression_mode_);
 
   s->StartIncremental(cntx, start_lsn);
 }
