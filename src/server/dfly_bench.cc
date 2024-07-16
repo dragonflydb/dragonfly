@@ -150,6 +150,15 @@ void CommandGenerator::FillGet(string_view key) {
   absl::StrAppend(&cmd_, "get ", key, "\r\n");
 }
 
+struct ClientStats {
+  base::Histogram hist;
+
+  uint64_t num_responses = 0;
+  uint64_t hit_count = 0;
+  uint64_t hit_opportunities = 0;
+  uint64_t num_errors = 0;
+};
+
 // Per connection driver.
 class Driver {
  public:
@@ -163,20 +172,12 @@ class Driver {
   Driver& operator=(Driver&&) = default;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
-  void Run(uint32_t num_reqs, uint64_t cycle_ns, base::Histogram* dest);
-
-  uint64_t hit_count() const {
-    return hit_count_;
-  }
-
-  uint64_t hit_opportunities() const {
-    return hit_opportunities_;
-  }
+  void Run(uint32_t num_reqs, uint64_t cycle_ns, ClientStats* stats);
 
  private:
-  void PopRequest(base::Histogram* dest);
-  void ReceiveFb(base::Histogram* dest);
-  void ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf, base::Histogram* dest);
+  void PopRequest(ClientStats* dest);
+  void ReceiveFb(ClientStats* dest);
+  void ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf, ClientStats* dest);
 
   struct Req {
     uint64_t start;
@@ -185,7 +186,6 @@ class Driver {
 
   unique_ptr<FiberSocketBase> socket_;
   queue<Req> reqs_;
-  uint64_t hit_count_ = 0, hit_opportunities_ = 0, num_resp_ = 0;
 };
 
 // Per thread client.
@@ -203,9 +203,7 @@ class TLocalClient {
   void Connect(tcp::endpoint ep);
   void Run(uint64_t cycle_ns);
 
-  base::Histogram hist;
-  uint64_t hit_count = 0;
-  uint64_t hit_opportunities = 0;
+  ClientStats stats;
 
  private:
   ProactorBase* p_;
@@ -259,7 +257,7 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
 }
 
-void Driver::Run(uint32_t num_reqs, uint64_t cycle_ns, base::Histogram* dest) {
+void Driver::Run(uint32_t num_reqs, uint64_t cycle_ns, ClientStats* dest) {
   auto receive_fb = MakeFiber([this, dest] { ReceiveFb(dest); });
 
   int64_t next_invocation = absl::GetCurrentTimeNanos();
@@ -325,17 +323,17 @@ static string_view FindLine(io::Bytes buf) {
   return {};
 };
 
-void Driver::PopRequest(base::Histogram* dest) {
+void Driver::PopRequest(ClientStats* stats) {
   uint64_t now = absl::GetCurrentTimeNanos();
   uint64_t usec = (now - reqs_.front().start) / 1000;
-  dest->Add(usec);
-  hit_opportunities_ += reqs_.front().might_hit;
+  stats->hist.Add(usec);
+  stats->hit_opportunities += reqs_.front().might_hit;
 
   reqs_.pop();
-  ++num_resp_;
+  ++stats->num_responses;
 }
 
-void Driver::ReceiveFb(base::Histogram* dest) {
+void Driver::ReceiveFb(ClientStats* stats) {
   facade::RedisParser parser{1 << 16, false};
   io::IoBuf io_buf{512};
 
@@ -344,7 +342,7 @@ void Driver::ReceiveFb(base::Histogram* dest) {
   while (true) {
     io_buf.EnsureCapacity(256);
     auto buf = io_buf.AppendBuffer();
-    VLOG(2) << "Socket read: " << reqs_.size() << " " << num_resp_;
+    VLOG(2) << "Socket read: " << reqs_.size();
 
     ::io::Result<size_t> recv_sz = socket_->Recv(buf);
     if (!recv_sz && FiberSocketBase::IsConnClosed(recv_sz.error())) {
@@ -354,7 +352,7 @@ void Driver::ReceiveFb(base::Histogram* dest) {
     io_buf.CommitWrite(*recv_sz);
 
     if (protocol == RESP) {
-      ParseRESP(&parser, &io_buf, dest);
+      ParseRESP(&parser, &io_buf, stats);
     } else {
       // MC_TEXT
       while (true) {
@@ -363,7 +361,7 @@ void Driver::ReceiveFb(base::Histogram* dest) {
           break;
         CHECK_EQ(line.back(), '\n');
         if (line == "STORED\r\n" || line == "END\r\n") {
-          PopRequest(dest);
+          PopRequest(stats);
           blob_len = 0;
         } else if (absl::StartsWith(line, "VALUE")) {
           // last token is a blob length.
@@ -376,10 +374,14 @@ void Driver::ReceiveFb(base::Histogram* dest) {
             LOG(ERROR) << "Invalid blob len " << line;
             return;
           }
-          ++hit_count_;
+          ++stats->hit_count;
+        } else if (absl::StartsWith(line, "SERVER_ERROR")) {
+          ++stats->num_errors;
+          PopRequest(stats);
+          blob_len = 0;
         } else {
           auto handle = socket_->native_handle();
-          CHECK_EQ(blob_len + 2, line.size());
+          CHECK_EQ(blob_len + 2, line.size()) << line;
           blob_len = 0;
           VLOG(2) << "Got line " << handle << ": " << line;
         }
@@ -390,7 +392,7 @@ void Driver::ReceiveFb(base::Histogram* dest) {
   VLOG(1) << "ReceiveFb done";
 }
 
-void Driver::ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf, base::Histogram* dest) {
+void Driver::ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf, ClientStats* stats) {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
   RespVec parse_args;
@@ -399,10 +401,10 @@ void Driver::ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf, base::His
     result = parser->Parse(io_buf->InputBuffer(), &consumed, &parse_args);
     if (result == RedisParser::OK && !parse_args.empty()) {
       if (reqs_.front().might_hit && parse_args[0].type != facade::RespExpr::NIL) {
-        ++hit_count_;
+        ++stats->hit_count;
       }
       parse_args.clear();
-      PopRequest(dest);
+      PopRequest(stats);
     }
     io_buf->ConsumeInput(consumed);
   } while (result == RedisParser::OK);
@@ -428,18 +430,50 @@ void TLocalClient::Run(uint64_t cycle_ns) {
   uint32_t num_reqs = GetFlag(FLAGS_n);
 
   for (size_t i = 0; i < fbs.size(); ++i) {
-    fbs[i] =
-        fb2::Fiber(absl::StrCat("run/", i), [&, i] { drivers_[i].Run(num_reqs, cycle_ns, &hist); });
+    fbs[i] = fb2::Fiber(absl::StrCat("run/", i),
+                        [&, i] { drivers_[i].Run(num_reqs, cycle_ns, &stats); });
   }
 
   for (auto& fb : fbs)
     fb.Join();
 
-  for (size_t i = 0; i < drivers_.size(); ++i) {
-    hit_count += drivers_[i].hit_count();
-    hit_opportunities += drivers_[i].hit_opportunities();
+  VLOG(1) << "Total hits: " << stats.hit_count;
+}
+
+thread_local unique_ptr<TLocalClient> client;
+
+void WatchFiber(absl::Time start_time, atomic_bool* finish_signal, ProactorPool* pp) {
+  fb2::Mutex mutex;
+
+  absl::Time last_print;  // initialized to epoch time.
+  uint64_t num_last_resp_cnt = 0;
+
+  while (*finish_signal == false) {
+    // we sleep with resolution of 1s but print with lower frequency to be more responsive
+    // when benchmark finishes.
+    ThisFiber::SleepFor(1s);
+    absl::Time now = absl::Now();
+    if (now - last_print > absl::Seconds(5)) {
+      uint64_t num_resp = 0;
+
+      pp->AwaitFiberOnAll([&](auto* p) {
+        unique_lock lk(mutex);
+
+        num_resp += client->stats.num_responses;
+        lk.unlock();
+      });
+
+      uint64_t total_ms = (now - start_time) / absl::Milliseconds(1);
+      uint64_t period_ms = (now - last_print) / absl::Milliseconds(1);
+      uint64_t period_resp_cnt = num_resp - num_last_resp_cnt;
+      CONSOLE_INFO << total_ms / 1000
+                   << "s: effective RPS(now/accumulated): " << period_resp_cnt * 1000 / period_ms
+                   << "/" << num_resp * 1000 / total_ms;
+
+      last_print = now;
+      num_last_resp_cnt = num_resp;
+    }
   }
-  VLOG(1) << "Total hits: " << hit_count;
 }
 
 int main(int argc, char* argv[]) {
@@ -467,8 +501,6 @@ int main(int argc, char* argv[]) {
   auto address = ::boost::asio::ip::make_address(ip_addr);
   tcp::endpoint ep{address, GetFlag(FLAGS_p)};
 
-  thread_local unique_ptr<TLocalClient> client;
-
   LOG(INFO) << "Connecting threads";
   pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
     base::SplitMix64 seed_mix(GetFlag(FLAGS_seed) + index * 0x6a45554a264d72bULL);
@@ -484,32 +516,43 @@ int main(int argc, char* argv[]) {
   uint64_t num_reqs = GetFlag(FLAGS_n);
 
   CONSOLE_INFO << "Running all threads, sending " << num_reqs << " requests at a rate of "
-               << GetFlag(FLAGS_qps) << " qps per connection, i.e. request every "
+               << GetFlag(FLAGS_qps) << " rps per connection, i.e. request every "
                << interval / 1000 << "us";
-  CONSOLE_INFO << "Overall scheduled QPS: " << qps * pp->size() * GetFlag(FLAGS_c);
+  CONSOLE_INFO << "Overall scheduled RPS: " << qps * pp->size() * GetFlag(FLAGS_c);
 
   const absl::Time start_time = absl::Now();
+  atomic_bool finish{false};
+  auto watch_fb =
+      pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(start_time, &finish, pp.get()); });
+
   pp->AwaitFiberOnAll([&](auto* p) { client->Run(interval); });
   absl::Duration duration = absl::Now() - start_time;
-  LOG(INFO) << "Finished. Total time: " << duration;
+  finish.store(true);
+  watch_fb.Join();
+
+  CONSOLE_INFO << "\nFinished. Total time: " << duration;
 
   fb2::Mutex mutex;
   base::Histogram hist;
 
   LOG(INFO) << "Resetting all threads";
-  uint64_t hit_opportunities = 0, hit_count = 0;
+  uint64_t hit_opportunities = 0, hit_count = 0, num_errors = 0;
 
   pp->AwaitFiberOnAll([&](auto* p) {
     unique_lock lk(mutex);
-    hist.Merge(client->hist);
+    hist.Merge(client->stats.hist);
 
-    hit_opportunities += client->hit_opportunities;
-    hit_count += client->hit_count;
+    hit_opportunities += client->stats.hit_opportunities;
+    hit_count += client->stats.hit_count;
+    num_errors += client->stats.num_errors;
     lk.unlock();
     client.reset();
   });
 
-  CONSOLE_INFO << "Effective QPS: " << num_reqs * 1000 / (duration / absl::Milliseconds(1));
+  if (num_errors) {
+    CONSOLE_INFO << "Got " << num_errors << " error responses!";
+  }
+
   CONSOLE_INFO << "Latency summary, all times are in usec:\n" << hist.ToString();
   if (hit_opportunities) {
     CONSOLE_INFO << "----------------------------------\nHit rate: "
