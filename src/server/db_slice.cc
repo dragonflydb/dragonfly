@@ -234,8 +234,8 @@ class FetchedItemsRestorer {
   }
 
  private:
-  absl::flat_hash_set<CompactObjectView> cached_;
-  absl::flat_hash_set<CompactObjectView>* dst_to_restore_;
+  RestoreType cached_;
+  RestoreType* dst_to_restore_;
 };
 
 }  // namespace

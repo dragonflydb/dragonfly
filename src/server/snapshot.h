@@ -15,7 +15,6 @@
 #include "server/rdb_save.h"
 #include "server/table.h"
 #include "util/fibers/future.h"
-#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -118,7 +117,7 @@ class SliceSnapshot {
   // Return if pushed.
   bool PushSerializedToChannel(bool force);
 
-  // Helper function that flushes the serilized items into the RecordStream
+  // Helper function that flushes the serialized items into the RecordStream
   size_t Serialize();
 
  public:
