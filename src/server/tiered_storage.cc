@@ -412,7 +412,15 @@ TieredStats TieredStorage::GetStats() const {
 }
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
+  const size_t kMaxIterations = 500;
+
   if (SliceSnapshot::IsSnaphotInProgress())
+    return;
+
+  // Don't run offloading if there's only very little space left
+  auto disk_stats = op_manager_->GetStats().disk_stats;
+  if (disk_stats.allocated_bytes + kMaxIterations / 2 * tiering::kPageSize >
+      disk_stats.max_file_size)
     return;
 
   auto cb = [this, dbid, tmp = std::string{}](PrimeIterator it) mutable {
@@ -429,12 +437,14 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
     if (op_manager_->GetStats().pending_stash_cnt >= write_depth_limit_)
       break;
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
-  } while (offloading_cursor_ != start_cursor && iterations++ < 500);
+  } while (offloading_cursor_ != start_cursor && iterations++ < kMaxIterations);
 }
 
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
+  auto disk_stats = op_manager_->GetStats().disk_stats;
   return !pv.IsExternal() && !pv.HasIoPending() && pv.ObjType() == OBJ_STRING &&
-         pv.Size() >= kMinValueSize;
+         pv.Size() >= kMinValueSize &&
+         disk_stats.allocated_bytes + tiering::kPageSize + pv.Size() < disk_stats.max_file_size;
 }
 
 }  // namespace dfly
