@@ -282,7 +282,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
                                               BlockingResultCb func, unsigned limit_ms,
                                               bool* block_flag, bool* pause_flag,
                                               std::string* info) {
-  string result_key;
+  OpResult<string> result_key = OpStatus::KEY_NOTFOUND;
 
   // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
   // If we don't find anything, we abort concluding and keep scheduled.
@@ -305,8 +305,9 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   if (result.ok()) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       if (shard->shard_id() == result->sid) {
-        result->key.GetString(&result_key);
-        func(t, shard, result_key);
+        result_key.set_status(OpStatus::OK);
+        result->key.GetString(&result_key.value());
+        func(t, shard, result_key.value());
       }
       return OpStatus::OK;
     };
@@ -327,6 +328,8 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     trans->Conclude();
     return OpStatus::TIMED_OUT;
   }
+
+  result_key = OpStatus::CANCELLED;
 
   DCHECK(trans->IsScheduled());  // single shard optimization didn't forget to schedule
   VLOG(1) << "Blocking " << trans->DebugId();
@@ -351,8 +354,9 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (auto wake_key = t->GetWakeKey(shard->shard_id()); wake_key) {
-      result_key = *wake_key;
-      func(t, shard, result_key);
+      result_key.set_status(OpStatus::OK);
+      *result_key = *wake_key;
+      func(t, shard, result_key.value());
     }
     return OpStatus::OK;
   };

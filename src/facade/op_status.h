@@ -45,6 +45,10 @@ class OpResultBase {
     return st_;
   }
 
+  void set_status(OpStatus st) {
+    st_ = st;
+  }
+
   bool operator==(OpStatus st) const {
     return st_ == st;
   }
