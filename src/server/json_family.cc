@@ -24,6 +24,7 @@
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/common.h"
+#include "server/detail/wrapped_json_path.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/search/doc_index.h"
@@ -55,6 +56,56 @@ static const char DefaultJsonPath[] = "$";
 
 namespace {
 
+namespace json_parser {
+
+template <typename T> using ParseResult = io::Result<T, std::string>;
+
+ParseResult<JsonExpression> ParseJsonPathAsExpression(std::string_view path) {
+  std::error_code ec;
+  JsonExpression res = MakeJsonPathExpr(path, ec);
+  if (ec)
+    return nonstd::make_unexpected(kSyntaxErr);
+  return res;
+}
+
+ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, bool is_legacy_mode_path) {
+  if (absl::GetFlag(FLAGS_jsonpathv2)) {
+    auto path_result = json::ParsePath(path.view());
+    RETURN_UNEXPECTED(path_result);
+    return WrappedJsonPath{std::move(path_result).value(), std::move(path), is_legacy_mode_path};
+  }
+
+  auto expr_result = ParseJsonPathAsExpression(path.view());
+  RETURN_UNEXPECTED(expr_result);
+  return WrappedJsonPath{std::move(expr_result).value(), std::move(path), is_legacy_mode_path};
+}
+
+ParseResult<WrappedJsonPath> ParseJsonPathV1(std::string_view path) {
+  if (path == WrappedJsonPath::kV1PathRootElement) {
+    return ParseJsonPath(StringOrView::FromView(WrappedJsonPath::kV2PathRootElement), true);
+  }
+
+  std::string v2_path = absl::StrCat(
+      WrappedJsonPath::kV2PathRootElement, path.front() != '.' && path.front() != '[' ? "." : "",
+      path);  // Convert to V2 path; TODO(path.front() != all kinds of symbols)
+  return ParseJsonPath(StringOrView::FromString(std::move(v2_path)), true);
+}
+
+ParseResult<WrappedJsonPath> ParseJsonPathV2(std::string_view path) {
+  return ParseJsonPath(StringOrView::FromView(path), false);
+}
+
+bool IsJsonPathV2(std::string_view path) {
+  return path.front() == '$';
+}
+
+ParseResult<WrappedJsonPath> ParseJsonPath(std::string_view path) {
+  DCHECK(!path.empty());
+  return IsJsonPathV2(path) ? ParseJsonPathV2(path) : ParseJsonPathV1(path);
+}
+
+}  // namespace json_parser
+
 using JsonPathV2 = variant<json::Path, JsonExpression>;
 using ExprCallback = absl::FunctionRef<void(string_view, const JsonType&)>;
 
@@ -80,7 +131,7 @@ inline JsonType Evaluate(const json::Path& expr, const JsonType& obj) {
 }
 
 facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
   RETURN_ON_BAD_STATUS(op_res);
@@ -193,7 +244,7 @@ error_code JsonReplace(JsonType& instance, string_view path, json::MutateCallbac
 // jsoncons version
 OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_view path,
                      json::MutateCallback callback, JsonReplaceVerify verify_op = {}) {
-  auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok()) {
     return it_res.status();
   }
@@ -227,7 +278,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, std::string_view key, std::string_vi
 // json::Path version.
 OpStatus UpdateEntry(const OpArgs& op_args, string_view key, const json::Path& path,
                      json::MutateCallback cb) {
-  auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok()) {
     return it_res.status();
   }
@@ -243,7 +294,7 @@ OpStatus UpdateEntry(const OpArgs& op_args, string_view key, const json::Path& p
 }
 
 OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
-  auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok())
     return it_res.status();
 
@@ -454,66 +505,79 @@ void SendJsonValue(RedisReplyBuilder* rb, const JsonType& j) {
   }
 }
 
-OpResult<string> OpJsonGet(const OpArgs& op_args, string_view key,
-                           const vector<pair<string_view, optional<JsonPathV2>>>& expressions,
-                           bool should_format, const OptString& indent, const OptString& new_line,
-                           const OptString& space) {
+bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJsonPath>>& paths) {
+  return std::all_of(paths.begin(), paths.end(),
+                     [](auto& parsed_path) { return parsed_path.second.IsLegacyModePath(); });
+}
+
+OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
+                                const vector<pair<string_view, WrappedJsonPath>>& paths,
+                                const std::optional<std::string>& indent,
+                                const std::optional<std::string>& new_line,
+                                const std::optional<std::string>& space) {
   OpResult<JsonType*> result = GetJson(op_args, key);
-  if (!result) {
-    return result.status();
-  }
+  RETURN_ON_BAD_STATUS(result);
 
   const JsonType& json_entry = *(result.value());
-  if (expressions.empty()) {
+  if (paths.empty()) {
     // this implicitly means that we're using $ which
     // means we just brings all values
     return json_entry.to_string();
   }
 
   json_options options;
-  if (should_format) {
-    options.spaces_around_comma(spaces_option::no_spaces)
-        .spaces_around_colon(spaces_option::no_spaces)
-        .object_array_line_splits(line_split_kind::multi_line)
-        .indent_size(1)
-        .new_line_chars("");
+  options.spaces_around_comma(spaces_option::no_spaces)
+      .spaces_around_colon(spaces_option::no_spaces)
+      .object_array_line_splits(line_split_kind::multi_line)
+      .indent_size(0)
+      .new_line_chars("");
 
-    if (indent) {
-      options.indent_chars(*indent);
-    } else {
-      options.indent_size(0);
-    }
-
-    if (new_line) {
-      options.new_line_chars(*new_line);
-    }
-
-    if (space) {
-      options.after_key_chars(*space);
-    }
+  if (indent) {
+    options.indent_size(1);
+    options.indent_chars(*indent);
   }
 
-  auto eval_wrapped = [&json_entry](const optional<JsonPathV2>& expr) -> JsonType {
-    return expr ? visit([&](auto& arg) { return Evaluate(arg, json_entry); }, *expr) : json_entry;
+  if (new_line) {
+    options.new_line_chars(*new_line);
+  }
+
+  if (space) {
+    options.after_key_chars(*space);
+  }
+
+  const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
+
+  auto cb = [](std::string_view, const JsonType& val) { return val; };
+
+  auto eval_wrapped = [&json_entry, &cb, legacy_mode_is_enabled](
+                          const WrappedJsonPath& json_path) -> std::optional<JsonType> {
+    auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, legacy_mode_is_enabled);
+
+    DCHECK(legacy_mode_is_enabled == eval_result.IsV1());
+
+    if (eval_result.IsV1()) {
+      return eval_result.AsV1();
+    }
+
+    return JsonType{eval_result.AsV2()};
   };
 
-  JsonType out{json_object_arg};  // see https://github.com/danielaparker/jsoncons/issues/482
-  if (expressions.size() == 1) {
-    out = eval_wrapped(expressions[0].second);
+  JsonType out{
+      jsoncons::json_object_arg};  // see https://github.com/danielaparker/jsoncons/issues/482
+  if (paths.size() == 1) {
+    auto eval_result = eval_wrapped(paths[0].second);
+    out = std::move(eval_result).value();  // TODO(Print not existing path to the user)
   } else {
-    for (const auto& [expr_str, expr] : expressions) {
-      out[expr_str] = eval_wrapped(expr);
+    for (const auto& [path_str, path] : paths) {
+      auto eval_result = eval_wrapped(path);
+      out[path_str] = std::move(eval_result).value();  // TODO(Print not existing path to the user)
     }
   }
 
-  if (should_format) {
-    json_printable jp(out, options, indenting::indent);
-    std::stringstream ss;
-    jp.dump(ss);
-    return ss.str();
-  }
-
-  return out.as<string>();
+  jsoncons::json_printable jp(out, options, jsoncons::indenting::indent);
+  std::stringstream ss;
+  jp.dump(ss);
+  return ss.str();
 }
 
 OpResult<vector<string>> OpType(const OpArgs& op_args, string_view key, JsonPathV2 expression) {
@@ -689,9 +753,9 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key, stri
 OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
                      optional<JsonPathV2> expression) {
   if (!expression || path.empty()) {
-    auto& db_slice = op_args.shard->db_slice();
+    auto& db_slice = op_args.GetDbSlice();
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    return long(db_slice.Del(op_args.db_cntx.db_index, it));
+    return long(db_slice.Del(op_args.db_cntx, it));
   }
 
   OpResult<JsonType*> result = GetJson(op_args, key);
@@ -1136,7 +1200,7 @@ vector<OptString> OpJsonMGet(const JsonPathV2& expression, const Transaction* t,
   DCHECK(!args.Empty());
   vector<OptString> response(args.Size());
 
-  auto& db_slice = shard->db_slice();
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
   unsigned index = 0;
   for (string_view key : args) {
     auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_JSON);
@@ -1224,7 +1288,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // and its not JSON, it would return an error.
   if (path == "." || path == "$") {
     if (is_nx_condition || is_xx_condition) {
-      auto it_res = op_args.shard->db_slice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
+      auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
       bool key_exists = (it_res.status() != OpStatus::KEY_NOTFOUND);
       if (is_nx_condition && key_exists) {
         return false;
@@ -1353,7 +1417,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, std::string_view json_s
     return OpStatus::SYNTAX_ERR;
   }
 
-  auto& db_slice = op_args.shard->db_slice();
+  auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_JSON);
   if (it_res.ok()) {
     op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_res->it->second);
@@ -1383,10 +1447,16 @@ io::Result<JsonPathV2, string> ParsePathV2(string_view path) {
   }
 
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
-    return json::ParsePath(path);
+    auto path_result = json::ParsePath(path);
+    if (!path_result) {
+      VLOG(1) << "Invalid Json path: " << path << ' ' << path_result.error() << std::endl;
+      return nonstd::make_unexpected(kSyntaxErr);
+    }
+    return path_result;
   }
   io::Result<JsonExpression> expr_result = ParseJsonPath(path);
   if (!expr_result) {
+    VLOG(1) << "Invalid Json path: " << path << ' ' << expr_result.error() << std::endl;
     return nonstd::make_unexpected(kSyntaxErr);
   }
   return JsonPathV2(std::move(expr_result.value()));
@@ -1439,7 +1509,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       rb->SendNull();
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1510,7 +1580,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
       SendJsonValue(rb, it);
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1793,7 +1863,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1865,7 +1935,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1916,7 +1986,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(*result);
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1944,7 +2014,7 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     rb->SendBulkString(*result);
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 
@@ -1992,7 +2062,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
       rb->SendNullArray();
     } else {
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
     }
   }
 }
@@ -2067,8 +2137,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   OptString new_line;
   OptString space;
 
-  // '.' corresponds to the legacy, non-array format and is passed as nullopt.
-  vector<pair<string_view, optional<JsonPathV2>>> expressions;
+  vector<pair<string_view, WrappedJsonPath>> paths;
 
   while (parser.HasNext()) {
     if (parser.Check("SPACE").IgnoreCase().ExpectTail(1)) {
@@ -2084,23 +2153,17 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
       continue;
     }
 
-    optional<JsonPathV2> expr;
-    string_view expr_str = parser.Next();
+    string_view path_str = parser.Next();
+    WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(json_parser::ParseJsonPath(path_str));
 
-    if (expr_str != ".") {
-      JsonPathV2 expression = PARSE_PATHV2(expr_str);
-      expr.emplace(std::move(expression));
-    }
-
-    expressions.emplace_back(expr_str, std::move(expr));
+    paths.emplace_back(path_str, std::move(json_path));
   }
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
-  bool should_format = (indent || new_line || space);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpJsonGet(t->GetOpArgs(shard), key, expressions, should_format, indent, new_line, space);
+    return OpJsonGet(t->GetOpArgs(shard), key, paths, indent, new_line, space);
   };
 
   Transaction* trans = cntx->transaction;
@@ -2112,7 +2175,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     if (result == facade::OpStatus::KEY_NOTFOUND) {
       rb->SendNull();  // Match Redis
     } else {
-      rb->SendError(result.status());
+      cntx->SendError(result.status());
     }
   }
 }

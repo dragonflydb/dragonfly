@@ -61,20 +61,25 @@ struct LockTagOptions {
 };
 
 struct TieredStats {
-  size_t total_stashes = 0;
-  size_t total_fetches = 0;
-  size_t total_cancels = 0;
-  size_t total_deletes = 0;
-  size_t total_defrags = 0;
+  uint64_t total_stashes = 0;
+  uint64_t total_fetches = 0;
+  uint64_t total_cancels = 0;
+  uint64_t total_deletes = 0;
+  uint64_t total_defrags = 0;
+  uint64_t total_registered_buf_allocs = 0;
+  uint64_t total_heap_buf_allocs = 0;
+
+  // How many times the system did not perform Stash call (disjoint with total_stashes).
+  uint64_t total_stash_overflows = 0;
 
   size_t allocated_bytes = 0;
   size_t capacity_bytes = 0;
 
-  size_t pending_read_cnt = 0;
-  size_t pending_stash_cnt = 0;
+  uint32_t pending_read_cnt = 0;
+  uint32_t pending_stash_cnt = 0;
 
-  size_t small_bins_cnt = 0;
-  size_t small_bins_entries_cnt = 0;
+  uint64_t small_bins_cnt = 0;
+  uint64_t small_bins_entries_cnt = 0;
   size_t small_bins_filling_bytes = 0;
 
   TieredStats& operator+=(const TieredStats&);
@@ -352,6 +357,29 @@ class UniquePicksGenerator : public PicksGenerator {
   std::uint32_t remaining_picks_count_;
   std::unordered_set<RandomPick> picked_indexes_;
   absl::BitGen bitgen_{};
+};
+
+struct ConditionFlag {
+  util::fb2::CondVarAny cond_var;
+  bool flag = false;
+};
+
+// Helper class used to guarantee atomicity between serialization of buckets
+class ConditionGuard {
+ public:
+  explicit ConditionGuard(ConditionFlag* enclosing) : enclosing_(enclosing) {
+    util::fb2::NoOpLock noop_lk_;
+    enclosing_->cond_var.wait(noop_lk_, [this]() { return !enclosing_->flag; });
+    enclosing_->flag = true;
+  }
+
+  ~ConditionGuard() {
+    enclosing_->flag = false;
+    enclosing_->cond_var.notify_one();
+  }
+
+ private:
+  ConditionFlag* enclosing_;
 };
 
 }  // namespace dfly

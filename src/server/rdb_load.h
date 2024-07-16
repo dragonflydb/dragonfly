@@ -25,6 +25,8 @@ class Service;
 
 class DecompressImpl;
 
+using RdbVersion = std::uint16_t;
+
 class RdbLoaderBase {
  protected:
   RdbLoaderBase();
@@ -170,7 +172,7 @@ class RdbLoaderBase {
   std::unique_ptr<DecompressImpl> decompress_impl_;
   JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
-  int rdb_version_ = RDB_VERSION;
+  RdbVersion rdb_version_ = RDB_VERSION;
 };
 
 class RdbLoader : protected RdbLoaderBase {
@@ -268,7 +270,7 @@ class RdbLoader : protected RdbLoaderBase {
  private:
   Service* service_;
   ScriptMgr* script_mgr_;
-  std::unique_ptr<ItemsBuf[]> shard_buf_;
+  std::vector<ItemsBuf> shard_buf_;
 
   size_t keys_loaded_ = 0;
   double load_time_ = 0;
@@ -277,6 +279,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   AggregateError ec_;
   std::atomic_bool stop_early_{false};
+  std::atomic_uint blocked_shards_{0};
 
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;

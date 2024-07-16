@@ -20,10 +20,10 @@ class TestDflyAutoLoadSnapshot:
     """
 
     @pytest.mark.asyncio
-    async def test_gracefull_shutdown(self, df_local_factory):
+    async def test_gracefull_shutdown(self, df_factory):
         df_args = {"dbfilename": "dump", **BASIC_ARGS, "port": 1111}
 
-        df_server = df_local_factory.create(**df_args)
+        df_server = df_factory.create(**df_args)
         df_server.start()
         client = aioredis.Redis(port=df_server.port)
 

@@ -198,7 +198,16 @@ unsigned char* ZzlInsert(unsigned char* zl, sds ele, double score) {
   return zzlInsertAt(zl, NULL, ele, score);
 }
 
-int SortedMap::DfImpl::ScoreSdsPolicy::KeyCompareTo::operator()(ScoreSds a, ScoreSds b) const {
+SortedMap::SortedMap(PMR_NS::memory_resource* mr)
+    : score_map(new ScoreMap(mr)), score_tree(new ScoreTree(mr)) {
+}
+
+SortedMap::~SortedMap() {
+  delete score_tree;
+  delete score_map;
+}
+
+int SortedMap::ScoreSdsPolicy::KeyCompareTo::operator()(ScoreSds a, ScoreSds b) const {
   sds sdsa = (sds)(uint64_t(a) & kSdsMask);
   sds sdsb = (sds)(uint64_t(b) & kSdsMask);
 
@@ -224,7 +233,7 @@ int SortedMap::DfImpl::ScoreSdsPolicy::KeyCompareTo::operator()(ScoreSds a, Scor
   return sdscmp(sdsa, sdsb);
 }
 
-int SortedMap::DfImpl::Add(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
+int SortedMap::Add(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
   // does not take ownership over ele.
   DCHECK(!isnan(score));
 
@@ -272,7 +281,7 @@ int SortedMap::DfImpl::Add(double score, sds ele, int in_flags, int* out_flags, 
   return 1;
 }
 
-optional<double> SortedMap::DfImpl::GetScore(sds ele) const {
+optional<double> SortedMap::GetScore(sds ele) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj != nullptr) {
     return GetObjScore(obj);
@@ -281,19 +290,8 @@ optional<double> SortedMap::DfImpl::GetScore(sds ele) const {
   return std::nullopt;
 }
 
-void SortedMap::DfImpl::Init(PMR_NS::memory_resource* mr) {
-  score_map = new ScoreMap(mr);
-  score_tree = new ScoreTree(mr);
-}
-
-void SortedMap::DfImpl::Free() {
-  DVLOG(1) << "Freeing SortedMap";
-  delete score_tree;
-  delete score_map;
-}
-
 // Takes ownership over ele.
-bool SortedMap::DfImpl::Insert(double score, sds ele) {
+bool SortedMap::Insert(double score, sds ele) {
   DVLOG(1) << "Inserting " << ele << " with score " << score;
 
   auto [newk, added] = score_map->AddOrUpdate(string_view{ele, sdslen(ele)}, score);
@@ -306,7 +304,7 @@ bool SortedMap::DfImpl::Insert(double score, sds ele) {
   return true;
 }
 
-optional<unsigned> SortedMap::DfImpl::GetRank(sds ele, bool reverse) const {
+optional<unsigned> SortedMap::GetRank(sds ele, bool reverse) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj == nullptr)
     return std::nullopt;
@@ -316,8 +314,8 @@ optional<unsigned> SortedMap::DfImpl::GetRank(sds ele, bool reverse) const {
   return reverse ? score_map->UpperBoundSize() - *rank - 1 : *rank;
 }
 
-SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsigned offset,
-                                                   unsigned limit, bool reverse) const {
+SortedMap::ScoredArray SortedMap::GetRange(const zrangespec& range, unsigned offset, unsigned limit,
+                                           bool reverse) const {
   ScoredArray arr;
   if (score_tree->Size() <= offset || limit == 0)
     return arr;
@@ -387,8 +385,8 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetRange(const zrangespec& range, unsi
   return arr;
 }
 
-SortedMap::ScoredArray SortedMap::DfImpl::GetLexRange(const zlexrangespec& range, unsigned offset,
-                                                      unsigned limit, bool reverse) const {
+SortedMap::ScoredArray SortedMap::GetLexRange(const zlexrangespec& range, unsigned offset,
+                                              unsigned limit, bool reverse) const {
   if (score_tree->Size() <= offset || limit == 0)
     return {};
 
@@ -459,7 +457,7 @@ SortedMap::ScoredArray SortedMap::DfImpl::GetLexRange(const zlexrangespec& range
   return arr;
 }
 
-uint8_t* SortedMap::DfImpl::ToListPack() const {
+uint8_t* SortedMap::ToListPack() const {
   uint8_t* lp = lpNew(0);
 
   score_tree->Iterate(0, UINT32_MAX, [&](ScoreSds ele) {
@@ -470,7 +468,7 @@ uint8_t* SortedMap::DfImpl::ToListPack() const {
   return lp;
 }
 
-bool SortedMap::DfImpl::Delete(sds ele) {
+bool SortedMap::Delete(sds ele) {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj == nullptr)
     return false;
@@ -480,17 +478,17 @@ bool SortedMap::DfImpl::Delete(sds ele) {
   return true;
 }
 
-size_t SortedMap::DfImpl::MallocSize() const {
+size_t SortedMap::MallocSize() const {
   // TODO: add malloc used to BPTree.
   return score_map->SetMallocUsed() + score_map->ObjMallocUsed() + score_tree->NodeCount() * 256;
 }
 
-bool SortedMap::DfImpl::Reserve(size_t sz) {
+bool SortedMap::Reserve(size_t sz) {
   score_map->Reserve(sz);
   return true;
 }
 
-size_t SortedMap::DfImpl::DeleteRangeByRank(unsigned start, unsigned end) {
+size_t SortedMap::DeleteRangeByRank(unsigned start, unsigned end) {
   DCHECK_LE(start, end);
   DCHECK_LT(end, score_tree->Size());
 
@@ -510,7 +508,7 @@ size_t SortedMap::DfImpl::DeleteRangeByRank(unsigned start, unsigned end) {
   return end - start + 1;
 }
 
-size_t SortedMap::DfImpl::DeleteRangeByScore(const zrangespec& range) {
+size_t SortedMap::DeleteRangeByScore(const zrangespec& range) {
   char buf[16] = {0};
   size_t deleted = 0;
 
@@ -539,7 +537,7 @@ size_t SortedMap::DfImpl::DeleteRangeByScore(const zrangespec& range) {
   return deleted;
 }
 
-size_t SortedMap::DfImpl::DeleteRangeByLex(const zlexrangespec& range) {
+size_t SortedMap::DeleteRangeByLex(const zlexrangespec& range) {
   if (score_tree->Size() == 0)
     return 0;
 
@@ -574,41 +572,57 @@ size_t SortedMap::DfImpl::DeleteRangeByLex(const zlexrangespec& range) {
   return deleted;
 }
 
-SortedMap::ScoredArray SortedMap::DfImpl::PopTopScores(unsigned count, bool reverse) {
+SortedMap::ScoredArray SortedMap::PopTopScores(unsigned count, bool reverse) {
+  DCHECK_GT(count, 0u);
   DCHECK_EQ(score_map->UpperBoundSize(), score_tree->Size());
   size_t sz = score_map->UpperBoundSize();
 
   ScoredArray res;
 
-  if (sz == 0)
+  DCHECK_GT(sz, 0u);  // Empty sets are not allowed.
+
+  if (sz == 0 || count == 0)
     return res;
 
-  if (count >= sz)
-    count = score_map->UpperBoundSize();
+  if (count > sz)
+    count = sz;
 
   res.reserve(count);
-  unsigned rank = 0;
-  unsigned step = 0;
 
-  if (reverse) {
-    rank = sz - 1;
-    step = 1;
-  }
-
-  for (unsigned i = 0; i < count; ++i) {
-    auto path = score_tree->FromRank(rank);
-    ScoreSds obj = path.Terminal();
+  auto cb = [&](ScoreSds obj) {
     res.emplace_back(string{(sds)obj, sdslen((sds)obj)}, GetObjScore(obj));
 
-    score_tree->Delete(path);
-    score_map->Erase((sds)obj);
-    rank -= step;
+    // We can not delete from score_tree because we are in the middle of the iteration.
+    CHECK(score_map->Erase((sds)obj));
+    return true;  // continue with the iteration.
+  };
+
+  unsigned rank = 0;
+  unsigned step = 0;
+  if (reverse) {
+    score_tree->IterateReverse(0, count - 1, std::move(cb));
+    rank = score_tree->Size() - 1;
+    step = 1;
+  } else {
+    score_tree->Iterate(0, count - 1, std::move(cb));
+  }
+
+  // We already deleted elements from score_map, so what's left is to delete from the tree.
+  if (score_map->Empty()) {
+    // Corner case optimization.
+    score_tree->Clear();
+  } else {
+    for (unsigned i = 0; i < res.size(); ++i) {
+      auto path = score_tree->FromRank(rank);
+      score_tree->Delete(path);
+      rank -= step;
+    }
   }
 
   return res;
 }
 
-size_t SortedMap::DfImpl::Count(const zrangespec& range) const {
+size_t SortedMap::Count(const zrangespec& range) const {
   DCHECK_LE(range.min, range.max);
 
   if (score_tree->Size() == 0)
@@ -654,7 +668,7 @@ size_t SortedMap::DfImpl::Count(const zrangespec& range) const {
   return max_rank < min_rank ? 0 : max_rank - min_rank + 1;
 }
 
-size_t SortedMap::DfImpl::LexCount(const zlexrangespec& range) const {
+size_t SortedMap::LexCount(const zlexrangespec& range) const {
   if (score_tree->Size() == 0)
     return 0;
 
@@ -696,8 +710,8 @@ size_t SortedMap::DfImpl::LexCount(const zlexrangespec& range) const {
   return max_rank < min_rank ? 0 : max_rank - min_rank + 1;
 }
 
-bool SortedMap::DfImpl::Iterate(unsigned start_rank, unsigned len, bool reverse,
-                                absl::FunctionRef<bool(sds, double)> cb) const {
+bool SortedMap::Iterate(unsigned start_rank, unsigned len, bool reverse,
+                        absl::FunctionRef<bool(sds, double)> cb) const {
   DCHECK_GT(len, 0u);
   unsigned end_rank = start_rank + len - 1;
   bool success;
@@ -712,25 +726,14 @@ bool SortedMap::DfImpl::Iterate(unsigned start_rank, unsigned len, bool reverse,
   return success;
 }
 
-uint64_t SortedMap::DfImpl::Scan(uint64_t cursor,
-                                 absl::FunctionRef<void(std::string_view, double)> cb) const {
+uint64_t SortedMap::Scan(uint64_t cursor,
+                         absl::FunctionRef<void(std::string_view, double)> cb) const {
   auto scan_cb = [&cb](const void* obj) {
     sds ele = (sds)obj;
     cb(string_view{ele, sdslen(ele)}, GetObjScore(obj));
   };
 
   return this->score_map->Scan(cursor, std::move(scan_cb));
-}
-
-/***************************************************************************/
-/* SortedMap */
-/***************************************************************************/
-SortedMap::SortedMap(PMR_NS::memory_resource* mr) : impl_(DfImpl()) {
-  std::visit(Overload{[mr](auto& impl) { impl.Init(mr); }}, impl_);
-}
-
-SortedMap::~SortedMap() {
-  std::visit([](auto& impl) { impl.Free(); }, impl_);
 }
 
 // taken from zsetConvert

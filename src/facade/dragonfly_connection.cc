@@ -275,22 +275,6 @@ struct Connection::Shutdown {
   }
 };
 
-Connection::PubMessage::PubMessage(string pattern, shared_ptr<char[]> buf, size_t channel_len,
-                                   size_t message_len)
-    : pattern{std::move(pattern)},
-      buf{std::move(buf)},
-      channel_len{channel_len},
-      message_len{message_len} {
-}
-
-string_view Connection::PubMessage::Channel() const {
-  return {buf.get(), channel_len};
-}
-
-string_view Connection::PubMessage::Message() const {
-  return {buf.get() + channel_len, message_len};
-}
-
 void Connection::PipelineMessage::SetArgs(const RespVec& args) {
   auto* next = storage.data();
   for (size_t i = 0; i < args.size(); ++i) {
@@ -361,7 +345,7 @@ size_t Connection::PipelineMessage::StorageCapacity() const {
 size_t Connection::MessageHandle::UsedMemory() const {
   struct MessageSize {
     size_t operator()(const PubMessagePtr& msg) {
-      return sizeof(PubMessage) + (msg->channel_len + msg->message_len);
+      return sizeof(PubMessage) + (msg->channel.size() + msg->message.size());
     }
     size_t operator()(const PipelineMessagePtr& msg) {
       return sizeof(PipelineMessage) + msg->args.capacity() * sizeof(MutableSlice) +
@@ -449,8 +433,8 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
     arr[i++] = "pmessage";
     arr[i++] = pub_msg.pattern;
   }
-  arr[i++] = pub_msg.Channel();
-  arr[i++] = pub_msg.Message();
+  arr[i++] = pub_msg.channel;
+  arr[i++] = pub_msg.message;
   rbuilder->SendStringArr(absl::Span<string_view>{arr.data(), i},
                           RedisReplyBuilder::CollectionType::PUSH);
 }
@@ -764,6 +748,7 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
+    DCHECK(cc_->reply_builder());
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
     if (cc_->reply_builder()->IsSendActive())
       phase_name = "send";
@@ -1119,6 +1104,8 @@ void Connection::OnBreakCb(int32_t mask) {
     LOG(ERROR) << "Unexpected event " << mask;
     return;
   }
+
+  DCHECK(cc_->reply_builder());
 
   VLOG(1) << "[" << id_ << "] Got event " << mask << " " << phase_ << " "
           << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();

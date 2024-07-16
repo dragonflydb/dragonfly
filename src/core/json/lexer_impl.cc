@@ -6,8 +6,6 @@
 
 #include <absl/strings/str_cat.h>
 
-using namespace std;
-
 namespace dfly::json {
 
 Lexer::Lexer() {
@@ -16,8 +14,9 @@ Lexer::Lexer() {
 Lexer::~Lexer() {
 }
 
-string Lexer::UnknownTokenMsg() const {
-  return absl::StrCat("Unknown token '", text(), "'");
+std::string Lexer::UnknownTokenMsg() const {
+  std::string res = absl::StrCat("Unknown token '", text(), "'");
+  return res;
 }
 
 }  // namespace dfly::json

@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime
 from sys import stderr
 import logging
+from . import dfly_args
 
 
 # Helper function to parse some sentinel cli commands output as key value dictionaries.
@@ -63,6 +64,7 @@ class Sentinel:
             f"port {self.port}",
             f"sentinel monitor {self.default_deployment} 127.0.0.1 {self.initial_master_port} 1",
             f"sentinel down-after-milliseconds {self.default_deployment} 3000",
+            f"slave-priority 100",
         ]
         self.config_file.write_text("\n".join(config))
 
@@ -138,9 +140,9 @@ def sentinel(tmp_dir, port_picker) -> Sentinel:
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_failover(df_local_factory, sentinel, port_picker):
-    master = df_local_factory.create(port=sentinel.initial_master_port)
-    replica = df_local_factory.create(port=port_picker.get_available_port())
+async def test_failover(df_factory, sentinel, port_picker):
+    master = df_factory.create(port=sentinel.initial_master_port)
+    replica = df_factory.create(port=port_picker.get_available_port())
 
     master.start()
     replica.start()
@@ -204,9 +206,9 @@ async def test_failover(df_local_factory, sentinel, port_picker):
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_master_failure(df_local_factory, sentinel, port_picker):
-    master = df_local_factory.create(port=sentinel.initial_master_port)
-    replica = df_local_factory.create(port=port_picker.get_available_port())
+async def test_master_failure(df_factory, sentinel, port_picker):
+    master = df_factory.create(port=sentinel.initial_master_port)
+    replica = df_factory.create(port=port_picker.get_available_port())
 
     master.start()
     replica.start()
@@ -228,7 +230,7 @@ async def test_master_failure(df_local_factory, sentinel, port_picker):
     # Simulate master failure.
     master.stop()
 
-    # Verify replica pormoted.
+    # Verify replica promoted.
     await await_for(
         lambda: sentinel.live_master_port(),
         lambda p: p == replica.port,
@@ -239,3 +241,54 @@ async def test_master_failure(df_local_factory, sentinel, port_picker):
     # Verify we can now write to replica.
     await replica_client.set("key", "value")
     assert await replica_client.get("key") == b"value"
+
+
+@dfly_args({"info_replication_valkey_compatible": True})
+@pytest.mark.asyncio
+async def test_priority_on_failover(df_factory, sentinel, port_picker):
+    master = df_factory.create(port=sentinel.initial_master_port)
+    # lower priority is the best candidate for sentinel
+    low_priority_repl = df_factory.create(
+        port=port_picker.get_available_port(), replica_priority=20
+    )
+    mid_priority_repl = df_factory.create(
+        port=port_picker.get_available_port(), replica_priority=60
+    )
+    high_priority_repl = df_factory.create(
+        port=port_picker.get_available_port(), replica_priority=80
+    )
+
+    master.start()
+    low_priority_repl.start()
+    mid_priority_repl.start()
+    high_priority_repl.start()
+
+    high_client = aioredis.Redis(port=high_priority_repl.port)
+    await high_client.execute_command("REPLICAOF localhost " + str(master.port))
+
+    mid_client = aioredis.Redis(port=mid_priority_repl.port)
+    await mid_client.execute_command("REPLICAOF localhost " + str(master.port))
+
+    low_client = aioredis.Redis(port=low_priority_repl.port)
+    await low_client.execute_command("REPLICAOF localhost " + str(master.port))
+
+    assert sentinel.live_master_port() == master.port
+
+    # Verify sentinel picked up replica.
+    await await_for(
+        lambda: sentinel.master(),
+        lambda m: m["num-slaves"] == "3",
+        timeout_sec=15,
+        timeout_msg="Timeout waiting for sentinel to pick up replica.",
+    )
+
+    # Simulate master failure.
+    master.stop()
+
+    # Verify replica promoted.
+    await await_for(
+        lambda: sentinel.live_master_port(),
+        lambda p: p == low_priority_repl.port,
+        timeout_sec=30,
+        timeout_msg="Timeout waiting for sentinel to report replica as master.",
+    )

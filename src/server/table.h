@@ -123,6 +123,9 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   // Stores a list of dependant connections for each watched key.
   absl::flat_hash_map<std::string, std::vector<ConnectionState::ExecInfo*>> watched_keys;
 
+  // Keyspace notifications: list of expired keys since last batch of messages was published.
+  mutable std::vector<std::string> expired_keys_events_;
+
   mutable DbTableStats stats;
   std::vector<SlotStats> slots_stats;
   ExpireTable::Cursor expire_cursor;

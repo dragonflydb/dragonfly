@@ -195,6 +195,9 @@ const float* FlatVectorIndex::Get(DocId doc) const {
 }
 
 struct HnswlibAdapter {
+  // Default setting of hnswlib/hnswalg
+  constexpr static size_t kDefaultEfRuntime = 10;
+
   HnswlibAdapter(const SchemaField::VectorParams& params)
       : space_{MakeSpace(params.dim, params.sim)}, world_{GetSpacePtr(),
                                                           params.capacity,
@@ -214,11 +217,13 @@ struct HnswlibAdapter {
     world_.markDelete(id);
   }
 
-  vector<pair<float, DocId>> Knn(float* target, size_t k) {
+  vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) {
+    world_.setEf(ef.value_or(kDefaultEfRuntime));
     return QueueToVec(world_.searchKnn(target, k));
   }
 
-  vector<pair<float, DocId>> Knn(float* target, size_t k, const vector<DocId>& allowed) {
+  vector<pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
+                                 const vector<DocId>& allowed) {
     struct BinsearchFilter : hnswlib::BaseFilterFunctor {
       virtual bool operator()(hnswlib::labeltype id) {
         return binary_search(allowed->begin(), allowed->end(), id);
@@ -229,6 +234,7 @@ struct HnswlibAdapter {
       const vector<DocId>* allowed;
     };
 
+    world_.setEf(ef.value_or(kDefaultEfRuntime));
     BinsearchFilter filter{&allowed};
     return QueueToVec(world_.searchKnn(target, k, &filter));
   }
@@ -276,12 +282,14 @@ void HnswVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
     adapter_->Add(ptr.get(), id);
 }
 
-std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k) const {
-  return adapter_->Knn(target, k);
+std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
+                                                          std::optional<size_t> ef) const {
+  return adapter_->Knn(target, k, ef);
 }
 std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
+                                                          std::optional<size_t> ef,
                                                           const std::vector<DocId>& allowed) const {
-  return adapter_->Knn(target, k, allowed);
+  return adapter_->Knn(target, k, ef, allowed);
 }
 
 void HnswVectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {

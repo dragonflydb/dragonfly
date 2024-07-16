@@ -71,15 +71,9 @@ class Connection : public util::Connection {
 
   // PubSub message, either incoming message for active subscription or reply for new subscription.
   struct PubMessage {
-    std::string pattern{};            // non-empty for pattern subscriber
-    std::shared_ptr<char[]> buf;      // stores channel name and message
-    size_t channel_len, message_len;  // lengths in buf
-
-    std::string_view Channel() const;
-    std::string_view Message() const;
-
-    PubMessage(std::string pattern, std::shared_ptr<char[]> buf, size_t channel_len,
-               size_t message_len);
+    std::string pattern{};              // non-empty for pattern subscriber
+    std::shared_ptr<char[]> buf;        // stores channel name and message
+    std::string_view channel, message;  // channel and message parts from buf
   };
 
   // Pipeline message, accumulated Redis command to be executed.

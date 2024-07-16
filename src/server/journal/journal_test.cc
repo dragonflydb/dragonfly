@@ -97,9 +97,7 @@ TEST(Journal, WriteRead) {
       {2, Op::COMMAND, 1, 1, nullopt, Payload("LPUSH", list("l", "v1", "v2"))},
       {3, Op::COMMAND, 0, 1, nullopt, Payload("MSET", slice("D", "4"))},
       {4, Op::COMMAND, 1, 1, nullopt, Payload("DEL", list("l1"))},
-      {5, Op::COMMAND, 2, 1, nullopt, Payload("DEL", list("E", "2"))},
-      {6, Op::MULTI_COMMAND, 2, 1, nullopt, Payload("SET", list("E", "2"))},
-      {6, Op::EXEC, 2, 1, nullopt}};
+      {5, Op::COMMAND, 2, 1, nullopt, Payload("DEL", list("E", "2"))}};
 
   // Write all entries to a buffer.
   base::IoBuf buf;

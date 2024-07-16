@@ -58,21 +58,15 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
-    // Check if migration was cancelled while we yielded so far.
-    if (cancelled_) {
-      return;
-    }
-
     streamer_.Start(Sock());
   }
 
   void Cancel() {
     streamer_.Cancel();
-    cancelled_ = true;
   }
 
-  void Finalize() {
-    streamer_.SendFinalize();
+  void Finalize(long attempt) {
+    streamer_.SendFinalize(attempt);
   }
 
   const dfly::GenericError GetError() const {
@@ -81,11 +75,10 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
  private:
   RestoreStreamer streamer_;
-  bool cancelled_ = false;
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
-    : ProtocolClient(info.ip, info.port),
+    : ProtocolClient(info.node_info.ip, info.node_info.port),
       migration_info_(std::move(info)),
       slot_migrations_(shard_set->size()),
       server_family_(sf),
@@ -94,6 +87,13 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
 
 OutgoingMigration::~OutgoingMigration() {
   main_sync_fb_.JoinIfNeeded();
+
+  // Destroy each flow in its dedicated thread, because we could be the last owner of the db tables
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase* pb) {
+    if (const auto* shard = EngineShard::tlocal(); shard) {
+      slot_migrations_[shard->shard_id()].reset();
+    }
+  });
 }
 
 bool OutgoingMigration::ChangeState(MigrationState new_state) {
@@ -107,6 +107,8 @@ bool OutgoingMigration::ChangeState(MigrationState new_state) {
 }
 
 void OutgoingMigration::Finish(bool is_error) {
+  VLOG(1) << "Finish outgoing migration for " << cf_->MyID() << " : "
+          << migration_info_.node_info.id;
   bool should_cancel_flows = false;
 
   {
@@ -217,20 +219,18 @@ void OutgoingMigration::SyncFb() {
     });
 
     if (CheckFlowsForErrors()) {
-      VLOG(1) << "Errors detected, retrying outgoing migration";
+      LOG(WARNING) << "Errors detected, retrying outgoing migration";
       continue;
     }
-
-    VLOG(2) << "Migrations snapshot is finished";
 
     long attempt = 0;
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
       // process commands that were on pause and try again
-      VLOG(2) << "Waiting for migration to finalize...";
+      VLOG(1) << "Waiting for migration to finalize...";
       ThisFiber::SleepFor(500ms);
     }
     if (CheckFlowsForErrors()) {
-      VLOG(1) << "Errors detected, retrying outgoing migration";
+      LOG(WARNING) << "Errors detected, retrying outgoing migration";
       continue;
     }
     break;
@@ -242,6 +242,7 @@ void OutgoingMigration::SyncFb() {
 bool OutgoingMigration::FinalizeMigration(long attempt) {
   // if it's not the 1st attempt and flows are work correctly we try to reconnect and ACK one more
   // time
+  VLOG(1) << "FinalizeMigration for " << cf_->MyID() << " : " << migration_info_.node_info.id;
   if (attempt > 1) {
     if (CheckFlowsForErrors()) {
       Finish(true);
@@ -269,13 +270,13 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     pause_fb_opt->JoinIfNeeded();
   });
 
-  auto cb = [this](util::ProactorBase* pb) {
+  auto cb = [this, attempt](util::ProactorBase* pb) {
     if (const auto* shard = EngineShard::tlocal(); shard) {
-      VLOG(1) << "FINALIZE outgoing migration" << shard->shard_id();
-      slot_migrations_[shard->shard_id()]->Finalize();
+      slot_migrations_[shard->shard_id()]->Finalize(attempt);
     }
   };
 
+  VLOG(1) << "FINALIZE flows for " << cf_->MyID() << " : " << migration_info_.node_info.id;
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 
   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID(), " ", attempt);
@@ -301,7 +302,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   const auto attempt_res = get<int64_t>(LastResponseArgs().front().u);
-  if (attempt_res == kInvalidAttempt) {
+  if (attempt_res != attempt) {
+    LOG(WARNING) << "Incorrect attempt payload, sent " << attempt << " received " << attempt_res;
     return false;
   }
 
@@ -309,8 +311,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   Finish(is_error);
   if (!is_error) {
     keys_number_ = cluster::GetKeyCount(migration_info_.slot_ranges);
-    cf_->UpdateConfig(migration_info_.slot_ranges, false);
-    VLOG(1) << "Config is updated for " << cf_->MyID();
+    cf_->ApplyMigrationSlotRangeToConfig(migration_info_.node_info.id, migration_info_.slot_ranges,
+                                         false);
   }
   return true;
 }

@@ -695,10 +695,13 @@ TEST_F(GenericFamilyTest, Info) {
   EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
 
   EXPECT_EQ(Run({"bgsave"}), "OK");
-  WaitUntilCondition([&]() {
-    resp = Run({"info", "persistence"});
-    return get_rdb_changes_since_last_save(resp.GetString()) == 0;
-  });
+  bool cond = WaitUntilCondition(
+      [&]() {
+        resp = Run({"info", "persistence"});
+        return get_rdb_changes_since_last_save(resp.GetString()) == 0;
+      },
+      500ms);
+  EXPECT_TRUE(cond);
 
   EXPECT_EQ(Run({"set", "k3", "3"}), "OK");
   resp = Run({"info", "persistence"});

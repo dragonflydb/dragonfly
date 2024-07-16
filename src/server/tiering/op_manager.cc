@@ -11,6 +11,7 @@
 #include "io/io.h"
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
+#include "util/fibers/fibers.h"
 namespace dfly::tiering {
 
 namespace {
@@ -41,6 +42,8 @@ std::error_code OpManager::Open(std::string_view file) {
 
 void OpManager::Close() {
   storage_.Close();
+  DCHECK(pending_stash_ver_.empty());
+  DCHECK(pending_reads_.empty());
 }
 
 void OpManager::Enqueue(EntryId id, DiskSegment segment, ReadCallback cb) {
@@ -56,29 +59,35 @@ void OpManager::Delete(EntryId id) {
   pending_stash_ver_.erase(ToOwned(id));
 }
 
-void OpManager::Delete(DiskSegment segment) {
-  EntryOps* pending_op = nullptr;
+void OpManager::DeleteOffloaded(DiskSegment segment) {
+  EntryOps* pending_read = nullptr;
 
   auto base_it = pending_reads_.find(segment.ContainingPages().offset);
   if (base_it != pending_reads_.end())
-    pending_op = base_it->second.Find(segment);
+    pending_read = base_it->second.Find(segment);
 
-  if (pending_op) {
-    pending_op->deleting = true;
-  } else if (ReportDelete(segment) && base_it == pending_reads_.end()) {
+  if (pending_read) {
+    // Mark that the read operation must finilize with deletion.
+    pending_read->deleting = true;
+  } else if (NotifyDelete(segment) && base_it == pending_reads_.end()) {
     storage_.MarkAsFree(segment.ContainingPages());
   }
 }
 
-std::error_code OpManager::Stash(EntryId id_ref, std::string_view value) {
+std::error_code OpManager::Stash(EntryId id_ref, std::string_view value, io::Bytes footer) {
   auto id = ToOwned(id_ref);
   unsigned version = pending_stash_ver_[id] = ++pending_stash_counter_;
 
-  io::Bytes buf_view{reinterpret_cast<const uint8_t*>(value.data()), value.length()};
-  auto io_cb = [this, version, id = std::move(id)](DiskSegment segment, std::error_code ec) {
-    ProcessStashed(Borrowed(id), version, segment, ec);
+  io::Bytes buf_view = io::Buffer(value);
+  auto io_cb = [this, version, id = std::move(id)](io::Result<DiskSegment> segment) {
+    ProcessStashed(Borrowed(id), version, segment);
   };
-  return storage_.Stash(buf_view, std::move(io_cb));
+
+  // May block due to blocking call to Grow.
+  auto ec = storage_.Stash(buf_view, footer, std::move(io_cb));
+  if (ec)
+    pending_stash_ver_.erase(ToOwned(id_ref));
+  return ec;
 }
 
 OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
@@ -87,27 +96,28 @@ OpManager::ReadOp& OpManager::PrepareRead(DiskSegment aligned_segment) {
 
   auto [it, inserted] = pending_reads_.try_emplace(aligned_segment.offset, aligned_segment);
   if (inserted) {
-    auto io_cb = [this, aligned_segment](std::string_view value, std::error_code ec) {
-      ProcessRead(aligned_segment.offset, value);
+    auto io_cb = [this, aligned_segment](io::Result<std::string_view> result) {
+      CHECK(result) << result.error();  // TODO: to handle this gracefully.
+      ProcessRead(aligned_segment.offset, *result);
     };
     storage_.Read(aligned_segment, io_cb);
   }
   return it->second;
 }
 
-void OpManager::ProcessStashed(EntryId id, unsigned version, DiskSegment segment,
-                               std::error_code ec) {
+void OpManager::ProcessStashed(EntryId id, unsigned version,
+                               const io::Result<DiskSegment>& segment) {
   if (auto it = pending_stash_ver_.find(ToOwned(id));
       it != pending_stash_ver_.end() && it->second == version) {
     pending_stash_ver_.erase(it);
-    ReportStashed(id, segment, ec);
-  } else if (!ec) {
+    NotifyStashed(id, segment);
+  } else if (segment) {
     // Throw away the value because it's no longer up-to-date even if no error occured
-    storage_.MarkAsFree(segment);
+    storage_.MarkAsFree(*segment);
   }
 }
 
-void OpManager::ProcessRead(size_t offset, std::string_view value) {
+void OpManager::ProcessRead(size_t offset, std::string_view page) {
   util::FiberAtomicGuard guard;  // atomically update items, no in-between states should be possible
   ReadOp* info = &pending_reads_.at(offset);
 
@@ -128,20 +138,22 @@ void OpManager::ProcessRead(size_t offset, std::string_view value) {
   // Report functions in the loop may append items to info->key_ops during the traversal
   for (size_t i = 0; i < info->key_ops.size(); i++) {
     auto& ko = info->key_ops[i];
-    key_value = value.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
+    key_value = page.substr(ko.segment.offset - info->segment.offset, ko.segment.length);
 
     bool modified = false;
     for (auto& cb : ko.callbacks)
-      modified |= cb(&key_value);
+      modified |= cb(!modified, &key_value);
+
+    bool delete_from_storage = ko.deleting;
 
     // If the item is not being deleted, report is as fetched to be cached potentially.
     // In case it's cached, we might need to delete it.
-    if (!ko.deleting)
-      ko.deleting |= ReportFetched(Borrowed(ko.id), key_value, ko.segment, modified);
+    if (!delete_from_storage)
+      delete_from_storage |= NotifyFetched(Borrowed(ko.id), key_value, ko.segment, modified);
 
     // If the item is being deleted, check if the full page needs to be deleted.
-    if (ko.deleting)
-      deleting_full |= ReportDelete(ko.segment);
+    if (delete_from_storage)
+      deleting_full |= NotifyDelete(ko.segment);
   }
 
   if (deleting_full) {

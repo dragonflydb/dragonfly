@@ -50,6 +50,9 @@ class EngineShard {
   // If update_db_time is true, initializes periodic time update for its db_slice.
   static void InitThreadLocal(util::ProactorBase* pb, bool update_db_time, size_t max_file_size);
 
+  // Must be called after all InitThreadLocal() have finished
+  void InitTieredStorage(util::ProactorBase* pb, size_t max_file_size);
+
   static void DestroyThreadLocal();
 
   static EngineShard* tlocal() {
@@ -184,6 +187,11 @@ class EngineShard {
   TxQueueInfo AnalyzeTxQueue() const;
 
   void ForceDefrag();
+
+  // Returns true if revelant write operations should throttle to wait for tiering to catch up.
+  // The estimate is based on memory usage crossing tiering redline and the write depth being at
+  // least 50% of allowed max, providing at least some guarantee of progress.
+  bool ShouldThrottleForTiering() const;
 
  private:
   struct DefragTaskState {

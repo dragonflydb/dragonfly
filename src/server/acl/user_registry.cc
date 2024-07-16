@@ -21,7 +21,7 @@ namespace dfly::acl {
 void UserRegistry::MaybeAddAndUpdate(std::string_view username, User::UpdateRequest req) {
   std::unique_lock<fb2::SharedMutex> lock(mu_);
   auto& user = registry_[username];
-  user.Update(std::move(req));
+  user.Update(std::move(req), *cat_to_id_table_, *reverse_cat_table_, *cat_to_commands_table_);
 }
 
 bool UserRegistry::RemoveUser(std::string_view username) {
@@ -75,22 +75,31 @@ UserRegistry::UserWithWriteLock::UserWithWriteLock(std::unique_lock<fb2::SharedM
 User::UpdateRequest UserRegistry::DefaultUserUpdateRequest() const {
   std::pair<User::Sign, uint32_t> acl{User::Sign::PLUS, acl::ALL};
   auto key = User::UpdateKey{"~*", KeyOp::READ_WRITE, true, false};
-  return {{}, true, false, {std::move(acl)}, {std::move(key)}};
+  auto pass = std::vector<User::UpdatePass>{{"", false, true}};
+  return {std::move(pass), true, false, {std::move(acl)}, {std::move(key)}};
 }
 
-void UserRegistry::Init() {
+void UserRegistry::Init(const CategoryToIdxStore* cat_to_id_table,
+                        const ReverseCategoryIndexTable* reverse_cat_table,
+                        const CategoryToCommandsIndexStore* cat_to_commands_table) {
   // if there exists an acl file to load from, requirepass
   // will not overwrite the default's user password loaded from
   // that file. Loading the default's user password from a file
   // has higher priority than the deprecated flag
+  cat_to_id_table_ = cat_to_id_table;
+  reverse_cat_table_ = reverse_cat_table;
+  cat_to_commands_table_ = cat_to_commands_table;
   auto default_user = DefaultUserUpdateRequest();
   auto maybe_password = absl::GetFlag(FLAGS_requirepass);
   if (!maybe_password.empty()) {
-    default_user.password = std::move(maybe_password);
+    default_user.passwords.front().password = std::move(maybe_password);
+    default_user.passwords.front().nopass = false;
   } else if (const char* env_var = getenv("DFLY_PASSWORD"); env_var) {
-    default_user.password = env_var;
+    default_user.passwords.front().password = env_var;
+    default_user.passwords.front().nopass = false;
   } else if (const char* env_var = getenv("DFLY_requirepass"); env_var) {
-    default_user.password = env_var;
+    default_user.passwords.front().password = env_var;
+    default_user.passwords.front().nopass = false;
   }
   MaybeAddAndUpdate("default", std::move(default_user));
 }

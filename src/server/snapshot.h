@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -10,6 +10,7 @@
 #include "base/pod_array.h"
 #include "core/size_tracking_channel.h"
 #include "io/file.h"
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/rdb_save.h"
 #include "server/table.h"
@@ -171,6 +172,8 @@ class SliceSnapshot {
     size_t savecb_calls = 0;
     size_t keys_total = 0;
   } stats_;
+
+  ConditionFlag bucket_ser_;
 };
 
 }  // namespace dfly

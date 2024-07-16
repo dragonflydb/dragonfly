@@ -43,8 +43,14 @@ class SmallBins {
   // List of item key db indices and hashes
   using KeyHashDbList = std::vector<std::tuple<DbIndex, uint64_t /* hash */, DiskSegment>>;
 
+  // Returns true if the entry is pending inside SmallBins.
+  bool IsPending(DbIndex dbid, std::string_view key) const {
+    return current_bin_.count({dbid, std::string(key)}) > 0;
+  }
+
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
-  std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value);
+  std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value,
+                                 io::Bytes footer);
 
   // Report that a stash succeeeded. Returns list of stored keys with calculated value locations.
   KeySegmentList ReportStashed(BinId id, DiskSegment segment);

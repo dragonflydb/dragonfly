@@ -17,36 +17,43 @@ namespace dfly::tiering {
 using namespace std;
 using namespace std::string_literals;
 
-TEST(SmallBins, SimpleStashRead) {
-  SmallBins bins;
+string SmallString(size_t len) {
+  return string(len, 'a');
+}
 
+class SmallBinsTest : public ::testing::Test {
+ protected:
+  SmallBins bins_;
+};
+
+TEST_F(SmallBinsTest, SimpleStashRead) {
   // Fill single bin
   std::optional<SmallBins::FilledBin> bin;
   for (unsigned i = 0; !bin; i++)
-    bin = bins.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), {});
 
   // Verify cut locations point to correct values
-  auto segments = bins.ReportStashed(bin->first, DiskSegment{0, 4_KB});
+  auto segments = bins_.ReportStashed(bin->first, DiskSegment{0, 4_KB});
   for (auto [dbid, key, location] : segments) {
     auto value = "v"s + key.substr(1);
     EXPECT_EQ(value, bin->second.substr(location.offset, location.length));
   }
 }
 
-TEST(SmallBins, SimpleDeleteAbort) {
+TEST_F(SmallBinsTest, SimpleDeleteAbort) {
   SmallBins bins;
 
   // Fill single bin
   std::optional<SmallBins::FilledBin> bin;
   unsigned i = 0;
   for (; !bin; i++)
-    bin = bins.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), {});
 
   // Delete all even values
   for (unsigned j = 0; j <= i; j += 2)
-    bins.Delete(0, absl::StrCat("k", j));
+    bins_.Delete(0, absl::StrCat("k", j));
 
-  auto remaining = bins.ReportStashAborted(bin->first);
+  auto remaining = bins_.ReportStashAborted(bin->first);
   sort(remaining.begin(), remaining.end());
 
   // Expect all odd keys still to exist
@@ -57,20 +64,18 @@ TEST(SmallBins, SimpleDeleteAbort) {
   }
 }
 
-TEST(SmallBins, PartialStashDelete) {
-  SmallBins bins;
-
+TEST_F(SmallBinsTest, PartialStashDelete) {
   // Fill single bin
   std::optional<SmallBins::FilledBin> bin;
   unsigned i = 0;
   for (; !bin; i++)
-    bin = bins.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), {});
 
   // Delete all even values
   for (unsigned j = 0; j <= i; j += 2)
-    bins.Delete(0, absl::StrCat("k", j));
+    bins_.Delete(0, absl::StrCat("k", j));
 
-  auto segments = bins.ReportStashed(bin->first, DiskSegment{0, 4_KB});
+  auto segments = bins_.ReportStashed(bin->first, DiskSegment{0, 4_KB});
 
   // Expect all odd keys still to exist
   EXPECT_EQ(segments.size(), i / 2);
@@ -82,7 +87,7 @@ TEST(SmallBins, PartialStashDelete) {
   while (!segments.empty()) {
     auto segment = std::get<2>(segments.back());
     segments.pop_back();
-    auto bin = bins.Delete(segment);
+    auto bin = bins_.Delete(segment);
 
     EXPECT_EQ(bin.segment.offset, 0u);
     EXPECT_EQ(bin.segment.length, 4_KB);
@@ -93,6 +98,21 @@ TEST(SmallBins, PartialStashDelete) {
       EXPECT_TRUE(bin.fragmented);  // half of the values were deleted
     }
   }
+}
+
+TEST_F(SmallBinsTest, UpdateStatsAfterDelete) {
+  // caused https://github.com/dragonflydb/dragonfly/issues/3240
+  for (unsigned i = 0; i < 10; i++) {
+    auto spilled_bin = bins_.Stash(0, absl::StrCat("k", i), SmallString(128), {});
+    ASSERT_FALSE(spilled_bin);
+  }
+
+  EXPECT_GT(bins_.GetStats().current_bin_bytes, 128 * 10);
+  for (unsigned i = 0; i < 10; i++) {
+    auto res = bins_.Delete(0, absl::StrCat("k", i));
+    ASSERT_FALSE(res);
+  }
+  EXPECT_EQ(0u, bins_.GetStats().current_bin_bytes);
 }
 
 }  // namespace dfly::tiering

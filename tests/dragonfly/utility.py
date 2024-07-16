@@ -15,6 +15,10 @@ import os
 from enum import Enum
 
 
+def tmp_file_name():
+    return "".join(random.choices(string.ascii_letters, k=10))
+
+
 def chunked(n, iterable):
     """Transform iterable into iterator of chunks of size n"""
     it = iter(iterable)
@@ -38,6 +42,51 @@ def gen_test_data(n, start=0, seed=None):
 def batch_fill_data(client, gen, batch_size=100):
     for group in chunked(batch_size, gen):
         client.mset({k: v for k, v, in group})
+
+
+async def tick_timer(func, timeout=5, step=0.1):
+    """
+    Async generator with automatic break when all asserts pass
+
+    for object, breaker in tick_timer():
+        with breaker:
+            assert conditions on object
+
+    If the generator times out, the last failed assert is raised
+    """
+
+    class ticker_breaker:
+        def __init__(self):
+            self.exc = None
+            self.entered = False
+
+        def __enter__(self):
+            self.entered = True
+
+        def __exit__(self, exc_type, exc_value, trace):
+            if exc_value:
+                self.exc = exc_value
+                return True
+
+    last_error = None
+    start = time.time()
+    while time.time() - start < timeout:
+        breaker = ticker_breaker()
+        yield (await func(), breaker)
+        if breaker.entered and not breaker.exc:
+            return
+
+        last_error = breaker.exc
+        await asyncio.sleep(step)
+
+    if last_error:
+        raise RuntimeError("Timed out!") from last_error
+    raise RuntimeError("Timed out!")
+
+
+async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
+    async for x in tick_timer(lambda: client.info(section), **kwargs):
+        yield x
 
 
 async def wait_available_async(client: aioredis.Redis, timeout=10):

@@ -149,4 +149,24 @@ TEST_F(SearchParserTest, KNN) {
   NEXT_TOK(TOK_LBRACKET);
 }
 
+TEST_F(SearchParserTest, KNNfull) {
+  SetInput("*=>[KNN 1 @vector field_vec AS vec_sort EF_RUNTIME 15]");
+  NEXT_TOK(TOK_STAR);
+  NEXT_TOK(TOK_ARROW);
+  NEXT_TOK(TOK_LBRACKET);
+
+  NEXT_TOK(TOK_KNN);
+  NEXT_EQ(TOK_UINT32, uint32_t, 1);
+  NEXT_TOK(TOK_FIELD);
+  NEXT_TOK(TOK_TERM);
+
+  NEXT_TOK(TOK_AS);
+  NEXT_EQ(TOK_TERM, string, "vec_sort");
+
+  NEXT_TOK(TOK_EF_RUNTIME);
+  NEXT_EQ(TOK_UINT32, uint32_t, 15);
+
+  NEXT_TOK(TOK_RBRACKET);
+}
+
 }  // namespace dfly::search

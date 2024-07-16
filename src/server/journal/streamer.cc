@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -9,6 +9,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
+#include "util/fibers/synchronization.h"
 
 using namespace facade;
 
@@ -34,7 +35,7 @@ uint32_t replication_stream_output_limit_cached = 64_KB;
 }  // namespace
 
 JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
-    : journal_(journal), cntx_(cntx) {
+    : cntx_(cntx), journal_(journal) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
 }
@@ -44,7 +45,7 @@ JournalStreamer::~JournalStreamer() {
   VLOG(1) << "~JournalStreamer";
 }
 
-void JournalStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
+void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
   journal_cb_id_ =
@@ -188,9 +189,13 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
                                  Context* cntx)
     : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
+  db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it
 }
 
-void RestoreStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
+void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
+  if (fiber_cancelled_)
+    return;
+
   VLOG(1) << "RestoreStreamer start";
   auto db_cb = absl::bind_front(&RestoreStreamer::OnDbChange, this);
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
@@ -199,7 +204,7 @@ void RestoreStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;
-  PrimeTable* pt = &db_slice_->databases()[0]->prime;
+  PrimeTable* pt = &db_array_[0]->prime;
 
   do {
     if (fiber_cancelled_)
@@ -207,6 +212,8 @@ void RestoreStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
 
     bool written = false;
     cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+      ConditionGuard guard(&bucket_ser_);
+
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
       if (WriteBucket(it)) {
@@ -224,9 +231,9 @@ void RestoreStreamer::Start(io::AsyncSink* dest, bool send_lsn) {
   } while (cursor);
 }
 
-void RestoreStreamer::SendFinalize() {
-  VLOG(1) << "RestoreStreamer FIN opcode for : " << db_slice_->shard_id();
-  journal::Entry entry(journal::Op::FIN, 0 /*db_id*/, 0 /*slot_id*/);
+void RestoreStreamer::SendFinalize(long attempt) {
+  VLOG(1) << "RestoreStreamer LSN opcode for : " << db_slice_->shard_id() << " attempt " << attempt;
+  journal::Entry entry(journal::Op::LSN, attempt);
 
   io::StringSink sink;
   JournalWriter writer{&sink};
@@ -244,14 +251,22 @@ RestoreStreamer::~RestoreStreamer() {
 void RestoreStreamer::Cancel() {
   auto sver = snapshot_version_;
   snapshot_version_ = 0;  // to prevent double cancel in another fiber
+  fiber_cancelled_ = true;
   if (sver != 0) {
-    fiber_cancelled_ = true;
     db_slice_->UnregisterOnChange(sver);
     JournalStreamer::Cancel();
   }
 }
 
 bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
+  if (item.cmd == "FLUSHALL" || item.cmd == "FLUSHDB") {
+    // On FLUSH* we restart the migration
+    CHECK(dest_ != nullptr);
+    cntx_->ReportError("FLUSH command during migration");
+    dest_->Shutdown(SHUT_RDWR);
+    return false;
+  }
+
   if (!item.slot.has_value()) {
     return false;
   }
@@ -268,10 +283,6 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
 }
 
 bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
-  // Can't switch fibers because that could invalidate iterator or cause bucket splits which may
-  // move keys between buckets.
-  FiberAtomicGuard fg;
-
   bool written = false;
 
   if (it.GetVersion() < snapshot_version_) {
@@ -289,7 +300,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
           expire = db_slice_->ExpireTime(eit);
         }
 
-        WriteEntry(key, pv, expire);
+        WriteEntry(key, it->first, pv, expire);
       }
     }
   }
@@ -300,7 +311,8 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
-  FiberAtomicGuard fg;
+  ConditionGuard guard(&bucket_ser_);
+
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
@@ -314,8 +326,9 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
   }
 }
 
-void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pv, uint64_t expire_ms) {
-  absl::InlinedVector<string_view, 4> args;
+void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+                                 uint64_t expire_ms) {
+  absl::InlinedVector<string_view, 5> args;
   args.push_back(key);
 
   string expire_str = absl::StrCat(expire_ms);
@@ -326,6 +339,10 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pv, uint64_t
   args.push_back(value_dump_sink.str());
 
   args.push_back("ABSTTL");  // Means expire string is since epoch
+
+  if (pk.IsSticky()) {
+    args.push_back("STICK");
+  }
 
   WriteCommand(journal::Entry::Payload("RESTORE", ArgSlice(args)));
 }

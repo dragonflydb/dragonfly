@@ -1,9 +1,10 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
 
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
@@ -23,7 +24,7 @@ class JournalStreamer {
   JournalStreamer(JournalStreamer&& other) = delete;
 
   // Register journal listener and start writer in fiber.
-  virtual void Start(io::AsyncSink* dest, bool send_lsn);
+  virtual void Start(util::FiberSocketBase* dest, bool send_lsn);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup.
@@ -48,6 +49,9 @@ class JournalStreamer {
 
   void WaitForInflightToComplete();
 
+  util::FiberSocketBase* dest_ = nullptr;
+  Context* cntx_;
+
  private:
   void OnCompletion(std::error_code ec, size_t len);
 
@@ -58,8 +62,6 @@ class JournalStreamer {
   bool IsStalled() const;
 
   journal::Journal* journal_;
-  Context* cntx_;
-  io::AsyncSink* dest_ = nullptr;
   std::vector<uint8_t> pending_buf_;
   size_t in_flight_bytes_ = 0;
   time_t last_lsn_time_ = 0;
@@ -74,11 +76,11 @@ class RestoreStreamer : public JournalStreamer {
   RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal, Context* cntx);
   ~RestoreStreamer() override;
 
-  void Start(io::AsyncSink* dest, bool send_lsn = false) override;
+  void Start(util::FiberSocketBase* dest, bool send_lsn = false) override;
   // Cancel() must be called if Start() is called
   void Cancel() override;
 
-  void SendFinalize();
+  void SendFinalize(long attempt);
 
   bool IsSnapshotFinished() const {
     return snapshot_finished_;
@@ -92,14 +94,17 @@ class RestoreStreamer : public JournalStreamer {
 
   // Returns whether anything was written
   bool WriteBucket(PrimeTable::bucket_iterator it);
-  void WriteEntry(string_view key, const PrimeValue& pv, uint64_t expire_ms);
+  void WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv, uint64_t expire_ms);
   void WriteCommand(journal::Entry::Payload cmd_payload);
 
   DbSlice* db_slice_;
+  DbTableArray db_array_;
   uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
+
+  ConditionFlag bucket_ser_;
 };
 
 }  // namespace dfly

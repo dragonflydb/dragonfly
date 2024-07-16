@@ -64,6 +64,7 @@ term_char [_]|\w
 "|"            return Parser::make_OR_OP (loc());
 "KNN"          return Parser::make_KNN (loc());
 "AS"           return Parser::make_AS (loc());
+"EF_RUNTIME"   return Parser::make_EF_RUNTIME (loc());
 
 [0-9]{1,9}                     return make_UINT32(matched_view(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)  return make_DOUBLE(matched_view(), loc());
