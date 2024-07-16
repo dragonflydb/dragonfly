@@ -107,10 +107,6 @@ jobs:
           # Memtier benchmark run will fail at some point because old master shutdown on version upgrade
           kubectl wait --for=condition=failed --timeout=120s -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null
           kubectl logs -n ${{ steps.setup.outputs.namespace }} -f jobs/memtier-benchmark
-
-      - name: Delete Memtier Benchmark jon
-        shell: bash
-        run: |
           kubectl delete -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark
 
       - name: Run Memtier Benchmark again
