@@ -942,6 +942,14 @@ std::pair<OptCat, bool> AclFamily::MaybeParseAclCategory(std::string_view comman
   return {};
 }
 
+std::optional<std::string> AclFamily::MaybeParseNamespace(std::string_view command) const {
+  constexpr std::string_view kPrefix = "NAMESPACE:";
+  if (absl::StartsWith(command, kPrefix)) {
+    return std::string(command.substr(kPrefix.size()));
+  }
+  return std::nullopt;
+}
+
 std::pair<AclFamily::OptCommand, bool> AclFamily::MaybeParseAclCommand(
     std::string_view command) const {
   if (absl::StartsWith(command, "+")) {
@@ -1016,6 +1024,12 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
       using Val = std::pair<Sign, uint32_t>;
       auto val = add ? Val{Sign::PLUS, *cat} : Val{Sign::MINUS, *cat};
       req.updates.push_back(val);
+      continue;
+    }
+
+    auto ns = MaybeParseNamespace(command);
+    if (ns.has_value()) {
+      req.ns = *ns;
       continue;
     }
 

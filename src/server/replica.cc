@@ -570,6 +570,7 @@ error_code Replica::ConsumeRedisStream() {
   conn_context.is_replicating = true;
   conn_context.journal_emulated = true;
   conn_context.skip_acl_validation = true;
+  conn_context.ns = &namespaces.GetDefaultNamespace();
   ResetParser(true);
 
   // Master waits for this command in order to start sending replication stream.

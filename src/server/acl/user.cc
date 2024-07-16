@@ -79,6 +79,8 @@ void User::Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
   if (req.is_active) {
     SetIsActive(*req.is_active);
   }
+
+  SetNamespace(req.ns);
 }
 
 void User::SetPasswordHash(std::string_view password, bool is_hashed) {
@@ -92,6 +94,14 @@ void User::SetPasswordHash(std::string_view password, bool is_hashed) {
 
 void User::UnsetPassword(std::string_view password) {
   password_hashes_.erase(StringSHA256(password));
+}
+
+void User::SetNamespace(const std::string& ns) {
+  namespace_ = ns;
+}
+
+const std::string& User::Namespace() const {
+  return namespace_;
 }
 
 bool User::HasPassword(std::string_view password) const {

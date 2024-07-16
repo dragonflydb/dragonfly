@@ -21,6 +21,7 @@
 #include "server/error.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 
@@ -369,8 +370,18 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kClusterDisabled);
   }
 
+  if (sub_cmd == "KEYSLOT") {
+    return KeySlot(args, cntx);
+  }
+
+  if (args.size() > 1) {
+    return cntx->SendError(WrongNumArgsError(absl::StrCat("CLUSTER ", sub_cmd)));
+  }
+
   if (sub_cmd == "HELP") {
     return ClusterHelp(cntx);
+  } else if (sub_cmd == "MYID") {
+    return ClusterMyId(cntx);
   } else if (sub_cmd == "SHARDS") {
     return ClusterShards(cntx);
   } else if (sub_cmd == "SLOTS") {
@@ -379,8 +390,6 @@ void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
     return ClusterNodes(cntx);
   } else if (sub_cmd == "INFO") {
     return ClusterInfo(cntx);
-  } else if (sub_cmd == "KEYSLOT") {
-    return KeySlot(args, cntx);
   } else {
     return cntx->SendError(facade::UnknownSubCmd(sub_cmd, "CLUSTER"), facade::kSyntaxErrType);
   }
@@ -401,11 +410,15 @@ void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
-  if (!IsClusterEnabledOrEmulated()) {
-    return cntx->SendError(kClusterDisabled);
+  if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
+    return cntx->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
 
-  VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
+  if (cntx->conn()) {
+    VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
+  } else {
+    VLOG(2) << "Got DFLYCLUSTER command (NO_CLIENT_ID): " << args;
+  }
 
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
@@ -414,8 +427,6 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return DflyClusterGetSlotInfo(args, cntx);
   } else if (sub_cmd == "CONFIG") {
     return DflyClusterConfig(args, cntx);
-  } else if (sub_cmd == "MYID") {
-    return DflyClusterMyId(args, cntx);
   } else if (sub_cmd == "FLUSHSLOTS") {
     return DflyClusterFlushSlots(args, cntx);
   } else if (sub_cmd == "SLOT-MIGRATION-STATUS") {
@@ -425,12 +436,8 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendError(UnknownSubCmd(sub_cmd, "DFLYCLUSTER"), kSyntaxErrType);
 }
 
-void ClusterFamily::DflyClusterMyId(CmdArgList args, ConnectionContext* cntx) {
-  if (!args.empty()) {
-    return cntx->SendError(WrongNumArgsError("DFLYCLUSTER MYID"));
-  }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendBulkString(id_);
+void ClusterFamily::ClusterMyId(ConnectionContext* cntx) {
+  cntx->SendSimpleString(id_);
 }
 
 namespace {
@@ -445,7 +452,7 @@ void DeleteSlots(const SlotRanges& slots_ranges) {
     if (shard == nullptr)
       return;
 
-    shard->db_slice().FlushSlots(slots_ranges);
+    namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
@@ -593,7 +600,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 
     lock_guard lk(mu);
     for (auto& [slot, data] : slots_stats) {
-      data += shard->db_slice().GetSlotStats(slot);
+      data += namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
     }
   };
 

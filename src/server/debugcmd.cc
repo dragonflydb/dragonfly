@@ -159,7 +159,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
     stub_tx->MultiSwitchCmd(cid);
     local_cntx.cid = cid;
     crb.SetReplyMode(ReplyMode::NONE);
-    stub_tx->InitByArgs(local_cntx.conn_state.db_index, args_span);
+    stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
 
     sf->service().InvokeCmd(cid, args_span, &local_cntx);
   }
@@ -261,8 +261,8 @@ void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
   }
 }
 
-void DoBuildObjHist(EngineShard* shard, ObjHistMap* obj_hist_map) {
-  auto& db_slice = shard->db_slice();
+void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj_hist_map) {
+  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
   unsigned steps = 0;
 
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
@@ -288,8 +288,9 @@ void DoBuildObjHist(EngineShard* shard, ObjHistMap* obj_hist_map) {
   }
 }
 
-ObjInfo InspectOp(string_view key, DbIndex db_index) {
-  auto& db_slice = EngineShard::tlocal()->db_slice();
+ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
+  auto& db_slice = cntx->ns->GetCurrentDbSlice();
+  auto db_index = cntx->db_index();
   auto [pt, exp_t] = db_slice.GetTables(db_index);
 
   PrimeIterator it = pt->Find(key);
@@ -323,8 +324,9 @@ ObjInfo InspectOp(string_view key, DbIndex db_index) {
   return oinfo;
 }
 
-OpResult<ValueCompressInfo> EstimateCompression(string_view key, DbIndex db_index) {
-  auto& db_slice = EngineShard::tlocal()->db_slice();
+OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_view key) {
+  auto& db_slice = cntx->ns->GetCurrentDbSlice();
+  auto db_index = cntx->db_index();
   auto [pt, exp_t] = db_slice.GetTables(db_index);
 
   PrimeIterator it = pt->Find(key);
@@ -544,7 +546,7 @@ void DebugCmd::Load(string_view filename) {
 
   const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
   intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
-  flush_trans->InitByArgs(0, {});
+  flush_trans->InitByArgs(cntx_->ns, 0, {});
   VLOG(1) << "Performing flush";
   error_code ec = sf_.Drakarys(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
@@ -750,7 +752,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
     // after running the callback
     // Note that running debug populate while running flushall/db can cause dcheck fail because the
     // finish cb is executed just when we finish populating the database.
-    shard->db_slice().OnCbFinish();
+    cntx_->ns->GetDbSlice(shard->shard_id()).OnCbFinish();
   });
 }
 
@@ -801,7 +803,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
   string resp;
 
   if (check_compression) {
-    auto cb = [&] { return EstimateCompression(key, cntx_->db_index()); };
+    auto cb = [&] { return EstimateCompression(cntx_, key); };
     auto res = ess.Await(sid, std::move(cb));
     if (!res) {
       cntx_->SendError(res.status());
@@ -812,7 +814,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
       StrAppend(&resp, " ratio: ", static_cast<double>(res->compressed_size) / (res->raw_size));
     }
   } else {
-    auto cb = [&] { return InspectOp(key, cntx_->db_index()); };
+    auto cb = [&] { return InspectOp(cntx_, key); };
 
     ObjInfo res = ess.Await(sid, std::move(cb));
 
@@ -846,7 +848,7 @@ void DebugCmd::Watched() {
   vector<string> awaked_trans;
 
   auto cb = [&](EngineShard* shard) {
-    auto* bc = shard->blocking_controller();
+    auto* bc = cntx_->ns->GetBlockingController(shard->shard_id());
     if (bc) {
       auto keys = bc->GetWatchedKeys(cntx_->db_index());
 
@@ -894,8 +896,9 @@ void DebugCmd::TxAnalysis() {
 void DebugCmd::ObjHist() {
   vector<ObjHistMap> obj_hist_map_arr(shard_set->size());
 
-  shard_set->RunBlockingInParallel(
-      [&](EngineShard* shard) { DoBuildObjHist(shard, &obj_hist_map_arr[shard->shard_id()]); });
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    DoBuildObjHist(shard, cntx_, &obj_hist_map_arr[shard->shard_id()]);
+  });
 
   for (size_t i = shard_set->size() - 1; i > 0; --i) {
     MergeObjHistMap(std::move(obj_hist_map_arr[i]), &obj_hist_map_arr[0]);
@@ -937,8 +940,9 @@ void DebugCmd::Shards() {
 
   vector<ShardInfo> infos(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    auto slice_stats = shard->db_slice().GetStats();
-    auto& stats = infos[shard->shard_id()];
+    auto sid = shard->shard_id();
+    auto slice_stats = cntx_->ns->GetDbSlice(sid).GetStats();
+    auto& stats = infos[sid];
 
     stats.used_memory = shard->UsedMemory();
     for (const auto& db_stats : slice_stats.db_stats) {

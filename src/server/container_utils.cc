@@ -339,9 +339,10 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   }
 
   auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
-  const auto key_checker = [req_obj_type](EngineShard* owner, const DbContext& context,
-                                          Transaction*, std::string_view key) -> bool {
-    return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, req_obj_type).ok();
+  auto* ns = &trans->GetNamespace();
+  const auto key_checker = [req_obj_type, ns](EngineShard* owner, const DbContext& context,
+                                              Transaction*, std::string_view key) -> bool {
+    return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, req_obj_type).ok();
   };
 
   auto status = trans->WaitOnWatch(limit_tp, std::move(wcb), key_checker, block_flag, pause_flag);

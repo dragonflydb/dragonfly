@@ -13,6 +13,7 @@
 #include "base/logging.h"
 #include "server/detail/snapshot_storage.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/script_mgr.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
@@ -254,11 +255,7 @@ void SaveStagesController::SaveDfs() {
 
   // Save shard files.
   auto cb = [this](Transaction* t, EngineShard* shard) {
-    auto& db_slice = shard->db_slice();
-    // a hack to avoid deadlock in Transaction::RunCallback(...)
-    db_slice.UnlockChangeCb();
     SaveDfsSingle(shard);
-    db_slice.LockChangeCb();
     return OpStatus::OK;
   };
   trans_->ScheduleSingleHop(std::move(cb));
@@ -298,11 +295,7 @@ void SaveStagesController::SaveRdb() {
   }
 
   auto cb = [snapshot = snapshot.get()](Transaction* t, EngineShard* shard) {
-    // a hack to avoid deadlock in Transaction::RunCallback(...)
-    auto& db_slice = shard->db_slice();
-    db_slice.UnlockChangeCb();
     snapshot->StartInShard(shard);
-    db_slice.LockChangeCb();
     return OpStatus::OK;
   };
   trans_->ScheduleSingleHop(std::move(cb));
@@ -408,7 +401,7 @@ void SaveStagesController::CloseCb(unsigned index) {
   }
 
   if (auto* es = EngineShard::tlocal(); use_dfs_format_ && es)
-    es->db_slice().ResetUpdateEvents();
+    namespaces.GetDefaultNamespace().GetDbSlice(es->shard_id()).ResetUpdateEvents();
 }
 
 void SaveStagesController::RunStage(void (SaveStagesController::*cb)(unsigned)) {

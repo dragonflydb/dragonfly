@@ -15,6 +15,7 @@
 #include "server/detail/save_stages_controller.h"
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 #include "server/replica.h"
 #include "server/server_state.h"
 #include "util/fibers/fiberqueue_threadpool.h"
@@ -158,9 +159,9 @@ class ServerFamily {
     return service_;
   }
 
-  void ResetStat();
+  void ResetStat(Namespace* ns);
 
-  Metrics GetMetrics() const;
+  Metrics GetMetrics(Namespace* ns) const;
 
   ScriptMgr* script_mgr() {
     return script_mgr_.get();
@@ -337,7 +338,7 @@ class ServerFamily {
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
-std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners,
+std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                       facade::Connection* conn, ClientPause pause_state,
                                       std::function<bool()> is_pause_in_progress);
 

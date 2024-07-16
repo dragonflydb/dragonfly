@@ -2066,7 +2066,8 @@ error_code RdbLoader::Load(io::Source* src) {
         FlushShardAsync(i);
 
         // Active database if not existed before.
-        shard_set->Add(i, [dbid] { EngineShard::tlocal()->db_slice().ActivateDb(dbid); });
+        shard_set->Add(
+            i, [dbid] { namespaces.GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
@@ -2451,8 +2452,8 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* p
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   EngineShard* es = EngineShard::tlocal();
-  DbSlice& db_slice = es->db_slice();
-  DbContext db_cntx{db_ind, GetCurrentTimeMs()};
+  DbContext db_cntx{&namespaces.GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
+  DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
 
   for (const auto* item : ib) {
     PrimeValue pv;
@@ -2564,6 +2565,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
+  cntx.ns = &namespaces.GetDefaultNamespace();
 
   // Avoid deleting local crb
   absl::Cleanup cntx_clean = [&cntx] { cntx.Inject(nullptr); };
@@ -2613,7 +2615,8 @@ void RdbLoader::PerformPostLoad(Service* service) {
 
   // Rebuild all search indices as only their definitions are extracted from the snapshot
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-    es->search_indices()->RebuildAllIndices(OpArgs{es, nullptr, DbContext{0, GetCurrentTimeMs()}});
+    es->search_indices()->RebuildAllIndices(
+        OpArgs{es, nullptr, DbContext{&namespaces.GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
   });
 }
 
