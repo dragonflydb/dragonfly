@@ -34,7 +34,7 @@ class ClusterFamilyTest : public BaseFamilyTest {
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
   string GetMyId() {
-    return RunPrivileged({"dflycluster", "myid"}).GetString();
+    return Run({"cluster", "myid"}).GetString();
   }
 
   void ConfigSingleNodeCluster(string id) {
@@ -735,8 +735,13 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterSlots) {
 }
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {
-  EXPECT_THAT(Run({"cluster", "nodes"}),
-              GetMyId() + " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\n");
+  auto res = Run({"cluster", "nodes"});
+  EXPECT_THAT(res, GetMyId() + " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\n");
+}
+
+TEST_F(ClusterFamilyEmulatedTest, ForbidenCommands) {
+  auto res = Run({"DFLYCLUSTER", "GETSLOTINFO", "SLOTS", "1"});
+  EXPECT_THAT(res, ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
 }
 
 }  // namespace
