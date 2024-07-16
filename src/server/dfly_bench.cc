@@ -527,7 +527,7 @@ int main(int argc, char* argv[]) {
 
   pp->AwaitFiberOnAll([&](auto* p) { client->Run(interval); });
   absl::Duration duration = absl::Now() - start_time;
-  finish = true;
+  finish.store(true);
   watch_fb.Join();
 
   CONSOLE_INFO << "\nFinished. Total time: " << duration;
