@@ -46,26 +46,12 @@ struct KeyIndex {
   using pointer = value_type;
   using reference = value_type;
 
-  unsigned operator*() {
-    if (bonus)
-      return *bonus;
-    return start;
-  }
+  unsigned operator*() const;
+  KeyIndex& operator++();
+  bool operator!=(const KeyIndex& ki) const;
 
-  KeyIndex& operator++() {
-    if (bonus)
-      bonus.reset();
-    else
-      start = std::max(end, start + step);
-    return *this;
-  }
-
-  bool operator!=(const KeyIndex& ki) const {
-    return std::tie(start, end, step, bonus) != std::tie(ki.start, ki.end, ki.step, ki.bonus);
-  }
-
-  unsigned Size() const {
-    return (end - start) / step + unsigned(bonus.has_value());
+  unsigned NumArgs() const {
+    return (end - start) + unsigned(bonus.has_value());
   }
 
   auto Range() const {

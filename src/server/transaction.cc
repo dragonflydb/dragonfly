@@ -190,28 +190,26 @@ void Transaction::InitGlobal() {
 }
 
 void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShardCache>* out) {
-  auto& shard_index = *out;
-
-  auto add = [&shard_index](uint32_t sid, uint32_t b, uint32_t e) {
-    auto& slices = shard_index[sid].slices;
-    if (!slices.empty() && slices.back().second == b) {
-      slices.back().second = e;
-    } else {
-      slices.emplace_back(b, e);
-    }
-  };
-
   // Because of the way we iterate in InitShardData
   DCHECK(!key_index.bonus || key_index.step == 1);
 
+  auto& shard_index = *out;
   for (unsigned i : key_index.Range()) {
     string_view key = ArgS(full_args_, i);
     unique_slot_checker_.Add(key);
     ShardId sid = Shard(key, shard_data_.size());
 
+    VLOG(0) << i << " " << key;
+
     unsigned step = i == key_index.bonus ? 1 : key_index.step;
+
     shard_index[sid].key_step = step;
-    add(sid, i, step);
+    auto& slices = shard_index[sid].slices;
+    if (!slices.empty() && slices.back().second == i) {
+      slices.back().second = i + step;
+    } else {
+      slices.emplace_back(i, i + step);
+    }
   }
 }
 
@@ -242,7 +240,7 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
     unique_shard_cnt_++;
     unique_shard_id_ = i;
 
-    for (const auto [start, end] : src.slices) {
+    for (const auto& [start, end] : src.slices) {
       args_slices_.emplace_back(start, end);
       for (string_view key : KeyIndex(start, end, src.key_step).Range(full_args_)) {
         kv_fp_.push_back(LockTag(key).Fingerprint());
@@ -282,12 +280,15 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     return;
   }
 
+  VLOG(0) << "InitByKeys " << key_index.start << " " << key_index.end << " " << key_index.step
+          << " -> " << key_index.NumArgs();
+
   DCHECK_LT(key_index.start, full_args_.size());
 
   // Stub transactions always operate only on single shard.
   bool is_stub = multi_ && multi_->role == SQUASHED_STUB;
 
-  if ((key_index.Size() == 1 && !IsAtomicMulti()) || is_stub) {
+  if ((key_index.NumArgs() == 1 && !IsAtomicMulti()) || is_stub) {
     DCHECK(!IsActiveMulti() || multi_->mode == NON_ATOMIC);
 
     // We don't have to split the arguments by shards, so we can copy them directly.
@@ -320,7 +321,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   BuildShardIndex(key_index, &shard_index);
 
   // Initialize shard data based on distributed arguments.
-  InitShardData(shard_index, key_index.Size());
+  InitShardData(shard_index, key_index.NumArgs());
 
   DCHECK(!multi_ || multi_->mode != LOCK_AHEAD || !multi_->tag_fps.empty());
 

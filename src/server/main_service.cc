@@ -714,7 +714,7 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
         StoredCmd cmd = scmd;
         cmd.Fill(&arg_vec);
         auto keys = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
-        transactional |= (keys && keys.value().Size() > 0);
+        transactional |= (keys && keys.value().NumArgs() > 0);
       } else {
         transactional |= scmd.Cid()->IsTransactional();
       }

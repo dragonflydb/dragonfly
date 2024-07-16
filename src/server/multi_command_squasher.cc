@@ -83,7 +83,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   auto keys = DetermineKeys(cmd->Cid(), args);
   if (!keys.ok())
     return SquashResult::ERROR;
-  if (keys->Size() == 0)
+  if (keys->NumArgs() == 0)
     return SquashResult::NOT_SQUASHED;
 
   // Check if all commands belong to one shard
