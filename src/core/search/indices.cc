@@ -199,12 +199,9 @@ struct HnswlibAdapter {
   constexpr static size_t kDefaultEfRuntime = 10;
 
   HnswlibAdapter(const SchemaField::VectorParams& params)
-      : space_{MakeSpace(params.dim, params.sim)}, world_{GetSpacePtr(),
-                                                          params.capacity,
-                                                          params.hnsw_m,
-                                                          params.hnsw_ef_construction,
-                                                          100 /* seed*/,
-                                                          true} {
+      : space_{MakeSpace(params.dim, params.sim)},
+        world_{GetSpacePtr(), params.capacity, params.hnsw_m, params.hnsw_ef_construction,
+               100 /* seed*/} {
   }
 
   void Add(float* data, DocId id) {
