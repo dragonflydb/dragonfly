@@ -76,23 +76,11 @@ namespace dfly::acl {
 
   bool keys_allowed = true;
   if (!keys.all_keys && id.first_key_pos() != 0 && (is_read_command || is_write_command)) {
-    const auto keys_index = DetermineKeys(&id, tail_args).value();
-    const size_t end = keys_index.end;
-    if (keys_index.bonus) {
-      auto target = facade::ToSV(tail_args[*keys_index.bonus]);
-      if (!iterate_globs(target)) {
-        keys_allowed = false;
-      }
-    }
-    if (keys_allowed) {
-      for (size_t i = keys_index.start; i < end; i += keys_index.step) {
-        auto target = facade::ToSV(tail_args[i]);
-        if (!iterate_globs(target)) {
-          keys_allowed = false;
-          break;
-        }
-      }
-    }
+    auto keys_index = DetermineKeys(&id, tail_args);
+    DCHECK(keys_index);
+
+    for (std::string_view key : keys_index->Range(tail_args))
+      keys_allowed &= iterate_globs(key);
   }
 
   return {keys_allowed, AclLog::Reason::KEY};

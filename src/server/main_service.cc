@@ -710,7 +710,7 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
         StoredCmd cmd = scmd;
         cmd.Fill(&arg_vec);
         auto keys = DetermineKeys(scmd.Cid(), absl::MakeSpan(arg_vec));
-        transactional |= (keys && keys.value().num_args() > 0);
+        transactional |= (keys && keys.value().Size() > 0);
       } else {
         transactional |= scmd.Cid()->IsTransactional();
       }
@@ -935,10 +935,8 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   optional<cluster::SlotId> keys_slot;
   bool cross_slot = false;
   // Iterate keys and check to which slot they belong.
-  for (unsigned i = key_index.start; i < key_index.end; i += key_index.step) {
-    string_view key = ArgS(args, i);
-    cluster::SlotId slot = cluster::KeySlot(key);
-    if (keys_slot && slot != *keys_slot) {
+  for (string_view key : key_index.Range(args)) {
+    if (cluster::SlotId slot = cluster::KeySlot(key); keys_slot && slot != *keys_slot) {
       cross_slot = true;  // keys belong to different slots
       break;
     } else {
@@ -983,18 +981,7 @@ optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_i
   // TODO: Switch to transaction internal locked keys once single hop multi transactions are merged
   // const auto& locked_keys = trans->GetMultiKeys();
   const auto& locked_tags = eval_info.lock_tags;
-
-  const auto& key_index = *key_index_res;
-  for (unsigned i = key_index.start; i < key_index.end; ++i) {
-    string_view key = ArgS(args, i);
-    LockTag tag{key};
-    if (!locked_tags.contains(tag)) {
-      return ErrorReply(absl::StrCat(kUndeclaredKeyErr, ", key: ", key));
-    }
-  }
-
-  if (key_index.bonus) {
-    string_view key = ArgS(args, *key_index.bonus);
+  for (string_view key : key_index_res->Range(args)) {
     if (!locked_tags.contains(LockTag{key})) {
       return ErrorReply(absl::StrCat(kUndeclaredKeyErr, ", key: ", key));
     }
@@ -2113,13 +2100,8 @@ template <typename F> void IterateAllKeys(ConnectionState::ExecInfo* exec_info, 
     if (!key_res.ok())
       continue;
 
-    auto key_index = key_res.value();
-
-    for (unsigned i = key_index.start; i < key_index.end; i += key_index.step)
+    for (unsigned i : key_res->Range())
       f(arg_vec[i]);
-
-    if (key_index.bonus)
-      f(arg_vec[*key_index.bonus]);
   }
 }
 
