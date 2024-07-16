@@ -409,11 +409,15 @@ void ClusterFamily::ReadWrite(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
-  if (!IsClusterEnabled()) {
+  if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
     return cntx->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
 
-  VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
+  if (cntx->conn()) {
+    VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
+  } else {
+    VLOG(2) << "Got DFLYCLUSTER command (NO_CLIENT_ID): " << args;
+  }
 
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
