@@ -6,6 +6,7 @@
 
 #include <absl/strings/match.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/op_status.h"
 #include "redis/redis_aux.h"
