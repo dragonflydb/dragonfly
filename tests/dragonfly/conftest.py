@@ -394,6 +394,8 @@ def pytest_runtest_makereport(item, call):
     if report.when == "teardown":
         log_dir = getattr(item, "log_dir", None)
         call_outcome = getattr(item, "call_outcome", None)
+        if report.failed:
+            copy_failed_logs(log_dir, report)
         if call_outcome and call_outcome.failed:
             copy_failed_logs(log_dir, call_outcome)
 
