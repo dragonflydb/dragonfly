@@ -396,12 +396,16 @@ void EngineShard::Shutdown() {
     tiered_storage_.reset();
   }
 
+  DCHECK(!fiber_periodic_.IsJoinable());
+
+  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
+}
+
+void EngineShard::StopPeriodicFiber() {
   fiber_periodic_done_.Notify();
   if (fiber_periodic_.IsJoinable()) {
     fiber_periodic_.Join();
   }
-
-  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
 }
 
 void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
@@ -893,6 +897,10 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
       EngineShard::tlocal()->InitTieredStorage(pb, max_shard_file_size);
     }
   });
+}
+
+void EngineShardSet::PreShutdown() {
+  RunBlockingInParallel([](EngineShard* shard) { shard->StopPeriodicFiber(); });
 }
 
 void EngineShardSet::Shutdown() {

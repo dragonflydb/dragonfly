@@ -149,6 +149,8 @@ class EngineShard {
 
   void TEST_EnableHeartbeat();
 
+  void StopPeriodicFiber();
+
   struct TxQueueInfo {
     // Armed - those that the coordinator has armed with callbacks and wants them to run.
     // Runnable - those that could run (they own the locks) but probably can not run due
@@ -281,6 +283,12 @@ class EngineShardSet {
   }
 
   void Init(uint32_t size, bool update_db_time);
+
+  // Shutdown sequence:
+  // - EngineShardSet.PreShutDown()
+  // - Namespaces.Clear()
+  // - EngineShardSet.Shutdown()
+  void PreShutdown();
   void Shutdown();
 
   static const std::vector<CachedStats>& GetCachedStats();
