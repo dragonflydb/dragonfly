@@ -175,7 +175,6 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
     # else:
     #    print("Cluster clients left: ", len(clients_left))
 
-    raise Exception("Dragonfly did not terminate gracefully")
     if instance["cluster_mode"]:
         print("Cluster clients left: ", len(clients_left))
 
