@@ -11,9 +11,13 @@
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "core/string_or_view.h"
+#include "facade/op_status.h"
+#include "glog/logging.h"
 
 namespace dfly {
 
+using facade::OpResult;
+using facade::OpStatus;
 using Nothing = std::monostate;
 using JsonExpression = jsoncons::jsonpath::jsonpath_expression<JsonType>;
 
@@ -77,14 +81,10 @@ template <typename T> class JsonCallbackResult {
 
   JsonCallbackResult() = default;
 
-  explicit JsonCallbackResult(bool legacy_mode_is_enabled)
-      : legacy_mode_is_enabled_(legacy_mode_is_enabled) {
-    if (!legacy_mode_is_enabled_) {
+  explicit JsonCallbackResult(bool legacy_mode_is_enabled) {
+    if (!legacy_mode_is_enabled) {
       result_ = JsonV2Result{};
     }
-  }
-
-  explicit JsonCallbackResult(std::error_code error_code) : error_code_(error_code) {
   }
 
   void AddValue(T value) {
@@ -96,41 +96,27 @@ template <typename T> class JsonCallbackResult {
   }
 
   bool IsV1() const {
-    return legacy_mode_is_enabled_;
+    return std::holds_alternative<JsonV1Result>(result_);
   }
 
   JsonV1Result& AsV1() {
-    DCHECK(!ErrorOccured());
     return std::get<JsonV1Result>(result_);
   }
 
   JsonV2Result& AsV2() {
-    DCHECK(!ErrorOccured());
     return std::get<JsonV2Result>(result_);
   }
 
   const JsonV1Result& AsV1() const {
-    DCHECK(!ErrorOccured());
     return std::get<JsonV1Result>(result_);
   }
 
   const JsonV2Result& AsV2() const {
-    DCHECK(!ErrorOccured());
     return std::get<JsonV2Result>(result_);
-  }
-
-  bool ErrorOccured() const {
-    return static_cast<bool>(error_code_);
-  }
-
-  const std::error_code& GetError() const {
-    return error_code_;
   }
 
  private:
   std::variant<JsonV1Result, JsonV2Result> result_;
-  bool legacy_mode_is_enabled_;
-  std::error_code error_code_;
 };
 
 class WrappedJsonPath {
@@ -180,7 +166,7 @@ class WrappedJsonPath {
   }
 
   template <typename T>
-  JsonCallbackResult<T> Mutate(JsonType* json_entry, JsonPathMutateCallback<T> cb) const {
+  OpResult<JsonCallbackResult<T>> Mutate(JsonType* json_entry, JsonPathMutateCallback<T> cb) const {
     JsonCallbackResult<T> mutate_result{IsLegacyModePath()};
 
     auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
@@ -211,7 +197,8 @@ class WrappedJsonPath {
 
       JsonSelector expr = e.compile(static_resources, path_.view(), ec);
       if (ec) {
-        return JsonCallbackResult<T>{ec};
+        VLOG(1) << "Failed to mutate json with error: " << ec.message();
+        return OpStatus::SYNTAX_ERR;
       }
 
       dynamic_resources<ValueType, Reference> resources;

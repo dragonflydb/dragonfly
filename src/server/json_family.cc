@@ -132,11 +132,6 @@ template <typename T> void Send(const std::vector<T>& vec, RedisReplyBuilder* rb
 }
 
 template <typename T> void Send(const JsonCallbackResult<T>& result, RedisReplyBuilder* rb) {
-  if (result.ErrorOccured()) {
-    rb->SendError(result.GetError().message());
-    return;
-  }
-
   if (result.IsV1()) {
     /* The specified path was restricted (JSON legacy mode), then the result consists only of a
      * single value */
@@ -293,12 +288,12 @@ error_code JsonReplace(JsonType& instance, string_view path, json::MutateCallbac
   return ec;
 }
 
-template <typename T = Nothing>
+template <typename T>
 OpResult<JsonCallbackResult<T>> UpdateEntry(const OpArgs& op_args, std::string_view key,
                                             const WrappedJsonPath& json_path,
                                             JsonPathMutateCallback<T> cb,
                                             JsonReplaceVerify verify_op = {}) {
-  auto it_res = op_args.shard->db_slice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
 
   PrimeValue& pv = it_res->it->second;
@@ -310,12 +305,9 @@ OpResult<JsonCallbackResult<T>> UpdateEntry(const OpArgs& op_args, std::string_v
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
   auto mutate_res = json_path.Mutate(json_val, cb);
-  if (mutate_res.ErrorOccured()) {
-    return mutate_res;  // TODO(If error occured return or continue)
-  }
 
   // Make sure that we don't have other internal issue with the operation
-  if (verify_op) {
+  if (mutate_res && verify_op) {
     verify_op(*json_val);
   }
 
