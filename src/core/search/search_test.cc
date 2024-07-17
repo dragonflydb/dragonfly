@@ -563,6 +563,51 @@ TEST_P(KnnTest, Cosine) {
   }
 }
 
+TEST_P(KnnTest, AddRemove) {
+  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
+  schema.fields["pos"].special_params =
+      SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2};
+  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+
+  vector<MockedDocument> documents(10);
+  for (size_t i = 0; i < 10; i++) {
+    documents[i] = Map{{"pos", ToBytes({float(i)})}};
+    indices.Add(i, &documents[i]);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // search leftmost 5
+  {
+    params["vec"] = ToBytes({-1.0});
+    algo.Init("* =>[KNN 5 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(0, 1, 2, 3, 4));
+  }
+
+  // delete leftmost 5
+  for (size_t i = 0; i < 5; i++)
+    indices.Remove(i, &documents[i]);
+
+  // search leftmost 5 again
+  {
+    params["vec"] = ToBytes({-1.0});
+    algo.Init("* =>[KNN 5 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(5, 6, 7, 8, 9));
+  }
+
+  // add removed elements
+  for (size_t i = 0; i < 5; i++)
+    indices.Add(i, &documents[i]);
+
+  // repeat first search
+  {
+    params["vec"] = ToBytes({-1.0});
+    algo.Init("* =>[KNN 5 @pos $vec]", &params);
+    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(0, 1, 2, 3, 4));
+  }
+}
+
 TEST_P(KnnTest, AutoResize) {
   // Make sure index resizes automatically even with a small initial capacity
   const size_t kInitialCapacity = 5;
