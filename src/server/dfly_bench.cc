@@ -186,6 +186,7 @@ class Driver {
 
   unique_ptr<FiberSocketBase> socket_;
   queue<Req> reqs_;
+  fb2::CondVarAny cnd_;
 };
 
 // Per thread client.
@@ -194,7 +195,7 @@ class TLocalClient {
   explicit TLocalClient(ProactorBase* p) : p_(p) {
     drivers_.resize(GetFlag(FLAGS_c));
     for (auto& driver : drivers_) {
-      driver = Driver{p_};
+      driver.reset(new Driver{p_});
     }
   }
 
@@ -207,7 +208,7 @@ class TLocalClient {
 
  private:
   ProactorBase* p_;
-  vector<Driver> drivers_;
+  vector<unique_ptr<Driver>> drivers_;
 };
 
 KeyGenerator::KeyGenerator(uint32_t min, uint32_t max)
@@ -272,15 +273,21 @@ void Driver::Run(uint32_t num_reqs, uint64_t cycle_ns, ClientStats* dest) {
   for (unsigned i = 0; i < num_reqs; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
-    int64_t sleep_ns = next_invocation - now;
-    if (sleep_ns > 0) {
-      VLOG(5) << "Sleeping for " << sleep_ns << "ns";
-      ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
+    if (cycle_ns) {
+      int64_t sleep_ns = next_invocation - now;
+      if (sleep_ns > 0) {
+        VLOG(5) << "Sleeping for " << sleep_ns << "ns";
+        ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
+      } else {
+        VLOG(5) << "Behind QPS schedule";
+      }
+      next_invocation += cycle_ns;
     } else {
-      VLOG(5) << "Behind QPS schedule";
-    }
-    next_invocation += cycle_ns;
+      // Coordinated omission.
 
+      fb2::NoOpLock lk;
+      cnd_.wait(lk, [this] { return reqs_.empty(); });
+    }
     string cmd = cmd_gen();
 
     Req req;
@@ -330,6 +337,9 @@ void Driver::PopRequest(ClientStats* stats) {
   stats->hit_opportunities += reqs_.front().might_hit;
 
   reqs_.pop();
+  if (reqs_.empty()) {
+    cnd_.notify_one();
+  }
   ++stats->num_responses;
 }
 
@@ -417,7 +427,7 @@ void TLocalClient::Connect(tcp::endpoint ep) {
   for (size_t i = 0; i < fbs.size(); ++i) {
     fbs[i] = MakeFiber([&, i] {
       ThisFiber::SetName(absl::StrCat("connect/", i));
-      drivers_[i].Connect(i, ep);
+      drivers_[i]->Connect(i, ep);
     });
   }
 
@@ -431,7 +441,7 @@ void TLocalClient::Run(uint64_t cycle_ns) {
 
   for (size_t i = 0; i < fbs.size(); ++i) {
     fbs[i] = fb2::Fiber(absl::StrCat("run/", i),
-                        [&, i] { drivers_[i].Run(num_reqs, cycle_ns, &stats); });
+                        [&, i] { drivers_[i]->Run(num_reqs, cycle_ns, &stats); });
   }
 
   for (auto& fb : fbs)
@@ -512,14 +522,18 @@ int main(int argc, char* argv[]) {
   });
 
   const uint32_t qps = GetFlag(FLAGS_qps);
-  const int64_t interval = 1000000000LL / qps;
+  const int64_t interval = qps ? 1000000000LL / qps : 0;
   uint64_t num_reqs = GetFlag(FLAGS_n);
 
-  CONSOLE_INFO << "Running all threads, sending " << num_reqs << " requests at a rate of "
-               << GetFlag(FLAGS_qps) << " rps per connection, i.e. request every "
-               << interval / 1000 << "us";
-  CONSOLE_INFO << "Overall scheduled RPS: " << qps * pp->size() * GetFlag(FLAGS_c);
-
+  CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
+               << " requests per each connection";
+  if (interval) {
+    CONSOLE_INFO << "At a rate of " << GetFlag(FLAGS_qps)
+                 << " rps per connection, i.e. request every " << interval / 1000 << "us";
+    CONSOLE_INFO << "Overall scheduled RPS: " << qps * pp->size() * GetFlag(FLAGS_c);
+  } else {
+    CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
+  }
   const absl::Time start_time = absl::Now();
   atomic_bool finish{false};
   auto watch_fb =
@@ -530,13 +544,11 @@ int main(int argc, char* argv[]) {
   finish.store(true);
   watch_fb.Join();
 
-  CONSOLE_INFO << "\nFinished. Total time: " << duration;
-
   fb2::Mutex mutex;
   base::Histogram hist;
 
   LOG(INFO) << "Resetting all threads";
-  uint64_t hit_opportunities = 0, hit_count = 0, num_errors = 0;
+  uint64_t hit_opportunities = 0, hit_count = 0, num_errors = 0, num_responses = 0;
 
   pp->AwaitFiberOnAll([&](auto* p) {
     unique_lock lk(mutex);
@@ -545,9 +557,12 @@ int main(int argc, char* argv[]) {
     hit_opportunities += client->stats.hit_opportunities;
     hit_count += client->stats.hit_count;
     num_errors += client->stats.num_errors;
+    num_responses += client->stats.num_responses;
     lk.unlock();
     client.reset();
   });
+
+  CONSOLE_INFO << "\nTotal time: " << duration << ". Overall number of requests: " << num_responses;
 
   if (num_errors) {
     CONSOLE_INFO << "Got " << num_errors << " error responses!";
