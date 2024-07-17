@@ -136,7 +136,6 @@ jobs:
       - name: Server checks
         run: |
           nohup kubectl port-forward -n ${{ steps.setup.outputs.namespace }} service/dragonfly-sample 6379:6379 &
-          #TODO how can we check version upgrade finished
           pip install -r tools/requirements.txt
           python3 tools/benchmark/post_run_checks.py
 
