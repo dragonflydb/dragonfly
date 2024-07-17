@@ -22,7 +22,7 @@ jobs:
                   app.kubernetes.io/created-by: "dragonfly-operator"
                 name: "dragonfly-sample"
               spec:
-                image: "docker.dragonflydb.io/dragonflydb/dragonfly"
+                image: "ghcr.io/dragonflydb/dragonfly:latest"
                 args: ["--cache_mode"]
                 replicas: 2
                 resources:
