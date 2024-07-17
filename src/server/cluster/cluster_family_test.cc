@@ -686,6 +686,7 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
 
   EXPECT_THAT(Run({"MSET", "key", "value", "key2", "value2"}), ErrArg("CROSSSLOT"));
   EXPECT_THAT(Run({"MGET", "key", "key2"}), ErrArg("CROSSSLOT"));
+  EXPECT_THAT(Run({"ZINTERSTORE", "key", "2", "key1", "key2"}), ErrArg("CROSSSLOT"));
 
   EXPECT_EQ(Run({"MSET", "key{tag}", "value", "key2{tag}", "value2"}), "OK");
   EXPECT_THAT(Run({"MGET", "key{tag}", "key2{tag}"}), RespArray(ElementsAre("value", "value2")));

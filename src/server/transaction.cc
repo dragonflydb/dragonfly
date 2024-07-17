@@ -199,11 +199,7 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShar
     unique_slot_checker_.Add(key);
     ShardId sid = Shard(key, shard_data_.size());
 
-    VLOG(0) << i << " " << key;
-
-    unsigned step = i == key_index.bonus ? 1 : key_index.step;
-
-    shard_index[sid].key_step = step;
+    unsigned step = shard_index[sid].key_step = key_index.bonus ? 1 : key_index.step;
     auto& slices = shard_index[sid].slices;
     if (!slices.empty() && slices.back().second == i) {
       slices.back().second = i + step;
@@ -279,9 +275,6 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     CHECK(absl::StartsWith(cid_->name(), "EVAL")) << cid_->name();
     return;
   }
-
-  VLOG(0) << "InitByKeys " << key_index.start << " " << key_index.end << " " << key_index.step
-          << " -> " << key_index.NumArgs();
 
   DCHECK_LT(key_index.start, full_args_.size());
 
