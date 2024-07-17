@@ -22,7 +22,7 @@ jobs:
                   app.kubernetes.io/created-by: "dragonfly-operator"
                 name: "dragonfly-sample"
               spec:
-                image: "ghcr.io/dragonflydb/dragonfly-weekly:latest"
+                image: "ghcr.io/dragonflydb/dragonfly:latest"
                 args: ["--cache_mode"]
                 replicas: 2
                 resources:
@@ -89,7 +89,27 @@ jobs:
           kubectl wait -n ${{ steps.setup.outputs.namespace }} pods --selector app=dragonfly-sample --for condition=Ready --timeout=120s
           kubectl describe -n ${{ steps.setup.outputs.namespace }} pod dragonfly-sample-0
 
-      - name: Run Benchmark
+      - name: Run Memtier Benchmark
+        shell: bash
+        run: |
+          kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
+
+      - name: Version upgrade
+        shell: bash
+        run: |
+          # benchmark is running, wait for 30 seconds before version upgrade
+          sleep 30
+          kubectl patch dragonfly dragonfly-sample -n ${{ steps.setup.outputs.namespace }}  --type merge -p '{"spec":{"image":"ghcr.io/dragonflydb/dragonfly-weekly:latest"}}'
+
+      - name: Wait for Memtier Benchmark fail
+        shell: bash
+        run: |
+          # Memtier benchmark run will fail at some point because old master shutdown on version upgrade
+          kubectl wait --for=condition=failed --timeout=120s -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark 2>/dev/null
+          kubectl logs -n ${{ steps.setup.outputs.namespace }} -f jobs/memtier-benchmark
+          kubectl delete -n ${{ steps.setup.outputs.namespace }} jobs/memtier-benchmark
+
+      - name: Run Memtier Benchmark again
         shell: bash
         run: |
           kubectl apply -n ${{ steps.setup.outputs.namespace }} -f tools/benchmark/k8s-benchmark-job.yaml
@@ -116,7 +136,6 @@ jobs:
       - name: Server checks
         run: |
           nohup kubectl port-forward -n ${{ steps.setup.outputs.namespace }} service/dragonfly-sample 6379:6379 &
-
           pip install -r tools/requirements.txt
           python3 tools/benchmark/post_run_checks.py
 
@@ -138,6 +157,15 @@ jobs:
           command: |
             kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-1
 
+      - name: Describe dragonflydb object
+        uses: nick-fields/retry@v3
+        if: always()
+        with:
+          timeout_minutes: 1
+          max_attempts: 3
+          command: |
+            kubectl describe dragonflies.dragonflydb.io -n ${{ steps.setup.outputs.namespace }} dragonfly-sample
+
       - name: Scale down to zero
         if: always()
         run: |
@@ -152,3 +180,16 @@ jobs:
           set -x
           kubectl delete namespace ${{ steps.setup.outputs.namespace }}
           kubectl delete namespace dragonfly-operator-system
+
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Benchmark tests failed.\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'

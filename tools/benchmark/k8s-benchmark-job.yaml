@@ -11,7 +11,7 @@ spec:
         - name: memtier
           image: redislabs/memtier_benchmark:latest
           args:
-            - memtier_benchmark --pipeline=30 --key-maximum=10000 -c 10 -t 2 --requests=500000 --expiry-range=10-100 --reconnect-interval=10000 --distinct-client-seed --hide-histogram -s dragonfly-sample
+            - memtier_benchmark --pipeline=30 --key-maximum=100000 -c 10 -t 2 --test-time=600 --reconnect-interval=10000 --distinct-client-seed --hide-histogram -s dragonfly-sample
           command:
             - sh # This is important! without it memtier cannot DIG the dragonfly SVC domain
             - -c
