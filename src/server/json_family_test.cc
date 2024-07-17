@@ -675,6 +675,8 @@ TEST_F(JsonFamilyTest, StrAppend) {
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
+  /* Test simple response from only one value */
+
   resp = Run({"JSON.STRAPPEND", "json", "$.a.a", "a", "b"});
   EXPECT_THAT(resp, IntArg(3));
 
@@ -691,6 +693,19 @@ TEST_F(JsonFamilyTest, StrAppend) {
       resp,
       R"({"a":{"a":"aaba"},"b":{"a":"a","b":1},"c":{"a":"a","b":"bb"},"d":{"a":1,"b":"b","c":3}})");
 
+  resp = Run({"JSON.STRAPPEND", "json", "$.c.b", "a"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aaba"},"b":{"a":"a","b":1},"c":{"a":"a","b":"bba"},"d":{"a":1,"b":"b","c":3}})");
+
+  /*
+  Test response from several possible values
+  In JSON V2, the response is an array of all possible values
+  */
+
   resp = Run({"JSON.STRAPPEND", "json", "$.b.*", "a"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), ArgType(RespExpr::NIL)));
@@ -698,19 +713,11 @@ TEST_F(JsonFamilyTest, StrAppend) {
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(
       resp,
-      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"a","b":"bb"},"d":{"a":1,"b":"b","c":3}})");
+      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"a","b":"bba"},"d":{"a":1,"b":"b","c":3}})");
 
   resp = Run({"JSON.STRAPPEND", "json", "$.c.*", "a"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3)));
-
-  resp = Run({"JSON.GET", "json"});
-  EXPECT_EQ(
-      resp,
-      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"aa","b":"bba"},"d":{"a":1,"b":"b","c":3}})");
-
-  resp = Run({"JSON.STRAPPEND", "json", "$.c.b", "a"});
-  EXPECT_THAT(resp, IntArg(4));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(4)));
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(
@@ -726,6 +733,77 @@ TEST_F(JsonFamilyTest, StrAppend) {
   EXPECT_EQ(
       resp,
       R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"aa","b":"bbaa"},"d":{"a":1,"b":"ba","c":3}})");
+
+  json = R"(
+    {"a":{"a":"a", "b":"aa", "c":"aaa"}, "b":{"a":"aaa", "b":"aa", "c":"a"}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.a.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), IntArg(4)));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{"a":"aa","b":"aaa","c":"aaaa"},"b":{"a":"aaa","b":"aa","c":"a"}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.b.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(4), IntArg(3), IntArg(2)));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{"a":"aa","b":"aaa","c":"aaaa"},"b":{"a":"aaaa","b":"aaa","c":"aa"}})");
+
+  json = R"(
+    {"a":{"a":"a", "b":"aa", "c":["aaaaa", "aaaaa"]}, "b":{"a":"aaa", "b":["aaaaa", "aaaaa"], "c":"a"}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.a.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aa","b":"aaa","c":["aaaaa","aaaaa"]},"b":{"a":"aaa","b":["aaaaa","aaaaa"],"c":"a"}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.b.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(4), ArgType(RespExpr::NIL), IntArg(2)));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aa","b":"aaa","c":["aaaaa","aaaaa"]},"b":{"a":"aaaa","b":["aaaaa","aaaaa"],"c":"aa"}})");
+
+  json = R"(
+    {"a":{"a":"a", "b":"aa", "c":{"c": "aaaaa"}}, "b":{"a":"aaa", "b":{"b": "aaaaa"}, "c":"a"}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.a.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(2), IntArg(3), ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aa","b":"aaa","c":{"c":"aaaaa"}},"b":{"a":"aaa","b":{"b":"aaaaa"},"c":"a"}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", "$.b.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(4), ArgType(RespExpr::NIL), IntArg(2)));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aa","b":"aaa","c":{"c":"aaaaa"}},"b":{"a":"aaaa","b":{"b":"aaaaa"},"c":"aa"}})");
 
   json = R"(
     {"a":"foo", "inner": {"a": "bye"}, "inner1": {"a": 7}}
@@ -750,6 +828,8 @@ TEST_F(JsonFamilyTest, StrAppendLegacyMode) {
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
+  /* Test simple response from only one value */
+
   resp = Run({"JSON.STRAPPEND", "json", ".a.a", "a", "b"});
   ASSERT_THAT(resp, ArgType(RespExpr::INT64));
   EXPECT_THAT(resp, IntArg(3));
@@ -768,6 +848,21 @@ TEST_F(JsonFamilyTest, StrAppendLegacyMode) {
       resp,
       R"({"a":{"a":"aaba"},"b":{"a":"a","b":1},"c":{"a":"a","b":"bb"},"d":{"a":1,"b":"b","c":3}})");
 
+  resp = Run({"JSON.STRAPPEND", "json", ".c.b", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_THAT(
+      resp,
+      R"({"a":{"a":"aaba"},"b":{"a":"a","b":1},"c":{"a":"a","b":"bba"},"d":{"a":1,"b":"b","c":3}})");
+
+  /*
+  Test response from several possible values
+  In JSON legacy mode, the response contains only one value - the new length of the last updated
+  string.
+  */
+
   resp = Run({"JSON.STRAPPEND", "json", ".b.*", "a"});
   ASSERT_THAT(resp, ArgType(RespExpr::INT64));
   EXPECT_THAT(resp, IntArg(2));
@@ -775,18 +870,9 @@ TEST_F(JsonFamilyTest, StrAppendLegacyMode) {
   resp = Run({"JSON.GET", "json"});
   EXPECT_THAT(
       resp,
-      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"a","b":"bb"},"d":{"a":1,"b":"b","c":3}})");
+      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"a","b":"bba"},"d":{"a":1,"b":"b","c":3}})");
 
   resp = Run({"JSON.STRAPPEND", "json", ".c.*", "a"});
-  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
-  EXPECT_THAT(resp, IntArg(3));
-
-  resp = Run({"JSON.GET", "json"});
-  EXPECT_THAT(
-      resp,
-      R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"aa","b":"bba"},"d":{"a":1,"b":"b","c":3}})");
-
-  resp = Run({"JSON.STRAPPEND", "json", ".c.b", "a"});
   ASSERT_THAT(resp, ArgType(RespExpr::INT64));
   EXPECT_THAT(resp, IntArg(4));
 
@@ -803,6 +889,91 @@ TEST_F(JsonFamilyTest, StrAppendLegacyMode) {
   EXPECT_THAT(
       resp,
       R"({"a":{"a":"aaba"},"b":{"a":"aa","b":1},"c":{"a":"aa","b":"bbaa"},"d":{"a":1,"b":"ba","c":3}})");
+
+  json = R"(
+    {"a":{"a":"a", "b":"aa", "c":"aaa"}, "b":{"a":"aaa", "b":"aa", "c":"a"}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", ".a.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp, IntArg(4));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{"a":"aa","b":"aaa","c":"aaaa"},"b":{"a":"aaa","b":"aa","c":"a"}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", ".b.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{"a":"aa","b":"aaa","c":"aaaa"},"b":{"a":"aaaa","b":"aaa","c":"aa"}})");
+
+  json = R"(
+    {"a":{"a":"a", "b":"aa", "c":["aaaaa", "aaaaa"]}, "b":{"a":"aaa", "b":["aaaaa", "aaaaa"], "c":"a"}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", ".a.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aa","b":"aaa","c":["aaaaa","aaaaa"]},"b":{"a":"aaa","b":["aaaaa","aaaaa"],"c":"a"}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", ".b.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aa","b":"aaa","c":["aaaaa","aaaaa"]},"b":{"a":"aaaa","b":["aaaaa","aaaaa"],"c":"aa"}})");
+
+  json = R"(
+    {"a":{"a":"a", "b":"aa", "c":{"c": "aaaaa"}}, "b":{"a":"aaa", "b":{"b": "aaaaa"}, "c":"a"}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", ".a.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aa","b":"aaa","c":{"c":"aaaaa"}},"b":{"a":"aaa","b":{"b":"aaaaa"},"c":"a"}})");
+
+  resp = Run({"JSON.STRAPPEND", "json", ".b.*", "a"});
+  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"aa","b":"aaa","c":{"c":"aaaaa"}},"b":{"a":"aaaa","b":{"b":"aaaaa"},"c":"aa"}})");
+
+  json = R"(
+    {"a":"foo", "inner": {"a": "bye"}, "inner1": {"a": 7}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.STRAPPEND", "json", "..a", "bar"});
+  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
+  EXPECT_THAT(resp, IntArg(6));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":"foobar","inner":{"a":"byebar"},"inner1":{"a":7}})");
 }
 
 TEST_F(JsonFamilyTest, Clear) {
