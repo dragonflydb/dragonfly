@@ -216,8 +216,8 @@ class RdbSerializer : public SerializerBase {
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing
   // this by finding the key. This function is used
-  // for the dump command - thus it is public function
-  // Also this function might preempt if flush_fun_ is used
+  // for the dump command - thus it is public function.
+  // This function might preempt if flush_fun_ is used.
   std::error_code SaveValue(const PrimeValue& pv);
 
   std::error_code SendJournalOffset(uint64_t journal_offset);
@@ -242,7 +242,7 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamConsumers(streamCG* cg);
 
   // Might preempt
-  bool MaybeApplyFlushFunc();
+  bool FlushIfNeeded();
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;

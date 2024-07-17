@@ -21,7 +21,7 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(size_t, flush_big_entries_threshold, 0, "Total bytes before flushing big entries");
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0, "Total bytes before flushing big entries");
 
 namespace dfly {
 
@@ -59,7 +59,7 @@ bool SliceSnapshot::IsSnaphotInProgress() {
   return tl_slice_snapshots.size() > 0;
 }
 
-void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, bool allow_flush_fun) {
+void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
@@ -72,9 +72,9 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, bool all
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  const auto flush_threshold = absl::GetFlag(FLAGS_flush_big_entries_threshold);
+  const auto flush_threshold = absl::GetFlag(FLAGS_serialization_max_chunk_size);
   std::function<bool(size_t)> flush_fun;
-  if (flush_threshold != 0 && allow_flush_fun) {
+  if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
     flush_fun = [this, flush_threshold](size_t bytes_serialized) {
       if (bytes_serialized > flush_threshold) {
         auto serialized = Serialize();
@@ -335,10 +335,19 @@ size_t SliceSnapshot::Serialize() {
   DbRecord db_rec{.id = id, .value = std::move(sfile.val)};
 
   dest_->Push(std::move(db_rec));
+  if (serialized != 0) {
+    VLOG(2) << "Pushed with Serialize() " << serialized << " bytes";
+  }
   return serialized;
 }
 
 bool SliceSnapshot::PushSerializedToChannel(bool force) {
+  if (!force && serializer_->SerializedLen() < 4096)
+    return false;
+
+  // Flush any of the leftovers to avoid interleavings
+  const auto serialized = Serialize();
+
   // Bucket serialization might have accumulated some delayed values.
   // Because we can finally block in this function, we'll await and serialize them
   while (!delayed_entries_.empty()) {
@@ -347,15 +356,8 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
     delayed_entries_.pop_back();
   }
 
-  if (!force && serializer_->SerializedLen() < 4096)
-    return false;
-
-  auto serialized = Serialize();
-  if (serialized == 0)
-    return false;
-
-  VLOG(2) << "PushSerializedToChannel " << serialized << " bytes";
-  return true;
+  const auto total_serialized = Serialize() + serialized;
+  return total_serialized > 0;
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {

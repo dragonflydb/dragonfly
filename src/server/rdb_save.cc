@@ -432,7 +432,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
         RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
       } else {
         RETURN_ON_ERR(SaveString(node->entry, node->sz));
-        MaybeApplyFlushFunc();
+        FlushIfNeeded();
       }
     } else {
       // listpack
@@ -477,7 +477,7 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
           expiry = it.ExpiryTime();
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
       }
-      MaybeApplyFlushFunc();
+      FlushIfNeeded();
     }
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
@@ -508,7 +508,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
           expiry = it.ExpiryTime();
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
       }
-      MaybeApplyFlushFunc();
+      FlushIfNeeded();
     }
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
@@ -542,7 +542,7 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
       ec = SaveBinaryDouble(score);
       if (ec)
         return false;
-      MaybeApplyFlushFunc();
+      FlushIfNeeded();
       return true;
     });
   } else {
@@ -653,7 +653,7 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
 
     string_view blob = sbf->data(i);
     RETURN_ON_ERR(SaveString(blob));
-    MaybeApplyFlushFunc();
+    FlushIfNeeded();
   }
 
   return {};
@@ -1262,7 +1262,9 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* 
   auto& s = GetSnapshot(shard);
   s = std::make_unique<SliceSnapshot>(&shard->db_slice(), &channel_, compression_mode_);
 
-  s->Start(stream_journal, cll, save_mode_ != SaveMode::RDB);
+  const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
+                                                         : SliceSnapshot::SnapshotFlush::kDisallow;
+  s->Start(stream_journal, cll, allow_flush);
 }
 
 void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* shard,
@@ -1603,7 +1605,7 @@ size_t RdbSerializer::GetTempBufferSize() const {
   return SerializerBase::GetTempBufferSize() + tmp_str_.size();
 }
 
-bool RdbSerializer::MaybeApplyFlushFunc() {
+bool RdbSerializer::FlushIfNeeded() {
   if (flush_fun_) {
     return flush_fun_(SerializedLen());
   }
