@@ -833,7 +833,6 @@ Service::Service(ProactorPool* pp)
 Service::~Service() {
   delete shard_set;
   shard_set = nullptr;
-  namespaces.Clear();
 }
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
@@ -913,8 +912,8 @@ void Service::Shutdown() {
 
   ChannelStore::Destroy();
 
+  shard_set->PreShutdown();
   namespaces.Clear();
-
   shard_set->Shutdown();
 
   pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });

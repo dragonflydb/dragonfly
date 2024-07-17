@@ -70,8 +70,8 @@ void BlockingControllerTest::SetUp() {
 }
 
 void BlockingControllerTest::TearDown() {
+  shard_set->PreShutdown();
   namespaces.Clear();
-
   shard_set->Shutdown();
   delete shard_set;
 
