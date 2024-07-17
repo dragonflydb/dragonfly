@@ -168,7 +168,6 @@ class BaseFamilyTest : public ::testing::Test {
   bool single_response_ = true;
   util::fb2::Fiber watchdog_fiber_;
   util::fb2::Done watchdog_done_;
-  bool map_single_element_vector_ = true;
 };
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats);
