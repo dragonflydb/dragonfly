@@ -696,75 +696,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   return created;
 }
 
-struct OpSetExResult {
-  std::uint32_t created;
-  std::uint32_t updated;
-};
-
-OpResult<OpSetExResult> OpSetEx(const OpArgs& op_args, string_view key, CmdArgList values,
-                                const OpSetParams& op_sp = OpSetParams{}) {
-  DCHECK(!values.empty() && 0 == values.size() % 2);
-  VLOG(2) << "OpSetEx(" << key << ")";
-
-  auto& db_slice = op_args.GetDbSlice();
-
-  auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
-  RETURN_ON_BAD_STATUS(op_res);
-
-  auto& add_res = *op_res;
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-
-  PrimeValue& pv = add_res.it->second;
-
-  if (add_res.is_new) {
-    pv.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
-  } else {
-    if (pv.ObjType() != OBJ_HASH)
-      return OpStatus::WRONG_TYPE;
-
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
-  }
-
-  StringMap* sm;
-  if (pv.Encoding() == kEncodingListPack) {
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
-
-    stats->listpack_bytes -= lpBytes(lp);
-    stats->listpack_blob_cnt--;
-
-    sm = HSetFamily::ConvertToStrMap(lp);
-    pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
-  } else {
-    sm = GetStringMap(pv, op_args.db_cntx);
-  }
-
-  DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
-
-  sm->Reserve(values.size() / 2);
-
-  std::uint32_t created = 0;
-  std::uint32_t updated = 0;
-
-  for (size_t i = 0; i < values.size(); i += 2) {
-    string_view field = ToSV(values[i]);
-    string_view value = ToSV(values[i + 1]);
-
-    bool added;
-    if (op_sp.skip_if_exists) {
-      added = sm->AddOrSkip(field, value, op_sp.ttl);
-    } else {
-      added = sm->AddOrUpdate(field, value, op_sp.ttl);
-      updated += static_cast<std::uint32_t>(!added);
-    }
-
-    created += static_cast<std::uint32_t>(added);
-  }
-
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
-
-  return OpSetExResult{created, updated};
-}
-
 void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) {
   string_view key = ArgS(args, 0);
 
@@ -809,17 +740,14 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
   OpSetParams op_sp{skip_if_exists, ttl_sec};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSetEx(t->GetOpArgs(shard), key, fields, op_sp);
+    return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
   };
 
-  OpResult<OpSetExResult> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    rb->StartArray(2);
-    rb->SendLong(result->created);
-    rb->SendLong(result->updated);
+    cntx->SendLong(*result);
   } else {
-    rb->SendError(result.status());
+    cntx->SendError(result.status());
   }
 }
 

@@ -34,15 +34,6 @@ class HestFamilyTestProtocolVersioned : public HSetFamilyTest,
 INSTANTIATE_TEST_SUITE_P(HestFamilyTestProtocolVersioned, HestFamilyTestProtocolVersioned,
                          ::testing::Values("2", "3"));
 
-MATCHER_P(IsCreatedAndUpdatedMatcher, p, "") {
-  auto& vec = arg.GetVec();
-  return vec.size() == 2 && vec[0].GetInt() == p.first && vec[1].GetInt() == p.second;
-}
-
-auto IsCreatedAndUpdated(std::uint32_t created, std::uint32_t updated) {
-  return IsCreatedAndUpdatedMatcher(std::make_pair(created, updated));
-}
-
 TEST_F(HSetFamilyTest, Basic) {
   auto resp = Run({"hset", "x", "a"});
   EXPECT_THAT(resp, ErrArg("wrong number"));
@@ -316,7 +307,7 @@ TEST_F(HSetFamilyTest, HSetEx) {
   TEST_current_time_ms = kMemberExpiryBase * 1000;  // to reset to test time.
 
   auto resp = Run({"HSETEX", "k", "1", "f", "v"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(1, 0));
+  EXPECT_THAT(resp, IntArg(1));
 
   AdvanceTime(500);
   EXPECT_THAT(Run({"HGET", "k", "f"}), "v");
@@ -327,19 +318,19 @@ TEST_F(HSetFamilyTest, HSetEx) {
   const std::string_view long_time = "100"sv;
 
   resp = Run({"HSETEX", "k", long_time, "field1", "value"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(1, 0));
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"HSETEX", "k", long_time, "field1", "new_value"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(0, 1));
+  EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"HGET", "k", "field1"});
   EXPECT_THAT(resp, "new_value");  // HSETEX without NX option; value was replaced by new_value
 
   resp = Run({"HSETEX", "k", long_time, "field2", "value"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(1, 0));
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"HSETEX", "k", "NX", long_time, "field2", "new_value"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(0, 0));
+  EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"HGET", "k", "field2"});
   EXPECT_THAT(resp, "value");  // HSETEX with NX option; value was NOT replaced by new_value
@@ -347,10 +338,10 @@ TEST_F(HSetFamilyTest, HSetEx) {
   const std::string_view short_time = "1"sv;
 
   resp = Run({"HSETEX", "k", long_time, "field3", "value"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(1, 0));
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"HSETEX", "k", short_time, "field3", "value"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(0, 1));
+  EXPECT_THAT(resp, IntArg(0));
 
   AdvanceTime(1000);
   resp = Run({"HGET", "k", "field3"});
@@ -358,10 +349,10 @@ TEST_F(HSetFamilyTest, HSetEx) {
   // HSETEX without NX option; old expiration time was replaced by a new one
 
   resp = Run({"HSETEX", "k", long_time, "field4", "value"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(1, 0));
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"HSETEX", "k", "NX", short_time, "field4", "value"});
-  EXPECT_THAT(resp, IsCreatedAndUpdated(0, 0));
+  EXPECT_THAT(resp, IntArg(0));
 
   AdvanceTime(1100);
   resp = Run({"HGET", "k", "field4"});
@@ -387,14 +378,14 @@ TEST_F(HSetFamilyTest, Issue1140) {
 
 TEST_F(HSetFamilyTest, Issue2102) {
   // Set key with element that will expire after 1s
-  EXPECT_THAT(Run({"HSETEX", "key", "10", "k1", "v1"}), IsCreatedAndUpdated(1, 0));
+  EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", "k1", "v1"}), 1);
   AdvanceTime(10'000);
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
 }
 
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
   for (int i = 0; i < 10; ++i) {
-    EXPECT_THAT(Run({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), IsCreatedAndUpdated(1, 0));
+    EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), 1);
   }
   AdvanceTime(10'000);
   EXPECT_THAT(Run({"HRANDFIELD", "key"}), ArgType(RespExpr::NIL));
@@ -402,7 +393,7 @@ TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
 
 TEST_F(HSetFamilyTest, RandomField1NotExpired) {
   for (int i = 0; i < 10; ++i) {
-    EXPECT_THAT(Run({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), IsCreatedAndUpdated(1, 0));
+    EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), 1);
   }
   EXPECT_EQ(CheckedInt({"HSET", "key", "keep", "v"}), 1);
 
