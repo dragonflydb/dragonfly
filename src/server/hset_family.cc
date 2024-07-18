@@ -13,6 +13,7 @@ extern "C" {
 
 #include "base/logging.h"
 #include "core/string_map.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -714,14 +715,15 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
   }
 }
 
-// HSETEX key tll_sec field value field value ...
+// HSETEX key [NX] tll_sec field value field value ...
 void HSetEx(CmdArgList args, ConnectionContext* cntx) {
-  if (args.size() % 2 != 0) {
-    return cntx->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
-  }
+  CmdArgParser parser{args};
 
-  string_view key = ArgS(args, 0);
-  string_view ttl_str = ArgS(args, 1);
+  string_view key = parser.Next();
+
+  bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv).IgnoreCase());
+  string_view ttl_str = parser.Next();
+
   uint32_t ttl_sec;
   constexpr uint32_t kMaxTtl = (1UL << 26);
 
@@ -729,12 +731,16 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kInvalidIntErr);
   }
 
-  args.remove_prefix(2);
-  OpSetParams op_sp;
-  op_sp.ttl = ttl_sec;
+  CmdArgList fields = parser.Tail();
+
+  if (fields.size() % 2 != 0) {
+    return cntx->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
+  }
+
+  OpSetParams op_sp{skip_if_exists, ttl_sec};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, args, op_sp);
+    return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
