@@ -72,7 +72,7 @@ async def test_replication_all(
 
     if big_value:
         mode["compression_mode"] = 0
-        mode["flush_big_entries_threshold"] = 4096
+        mode["serialization_max_chunk_size"] = 4096
 
     master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **mode)
     replicas = [
