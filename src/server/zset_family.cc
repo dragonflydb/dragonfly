@@ -1364,9 +1364,11 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
-    case OpStatus::KEY_MOVED:
-      // if key is moved the cluster is definitely exist and we must get an error
-      return cntx->SendError(*cluster::SlotOwnershipErrorStr(*transaction->GetUniqueSlotId()));
+    case OpStatus::KEY_MOVED: {
+      auto error = cluster::SlotOwnershipErrorStr(*transaction->GetUniqueSlotId());
+      CHECK(error.has_value());
+      return cntx->SendError(std::move(*error));
+    }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
   }

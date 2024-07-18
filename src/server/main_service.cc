@@ -960,7 +960,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 
   if (keys_slot.has_value()) {
     if (auto error_str = cluster::SlotOwnershipErrorStr(*keys_slot); error_str) {
-      return ErrorReply{*error_str};
+      return ErrorReply{std::move(*error_str)};
     }
   }
 

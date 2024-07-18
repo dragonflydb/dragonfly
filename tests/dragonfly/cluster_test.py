@@ -788,7 +788,7 @@ async def test_cluster_blocking_command(df_server):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_blocking_comands_cancel(df_factory, df_seeder_factory):
+async def test_blocking_commands_cancel(df_factory, df_seeder_factory):
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
