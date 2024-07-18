@@ -29,7 +29,7 @@ class ClusterFamily {
   void Register(CommandRegistry* registry);
 
   // Returns a thread-local pointer.
-  ClusterConfig* cluster_config();
+  static ClusterConfig* cluster_config();
 
   void ApplyMigrationSlotRangeToConfig(std::string_view node_id, const SlotRanges& slots,
                                        bool is_outgoing);

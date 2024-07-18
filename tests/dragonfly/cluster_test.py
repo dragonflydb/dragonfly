@@ -787,6 +787,47 @@ async def test_cluster_blocking_command(df_server):
     await close_clients(c_master, c_master_admin)
 
 
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_blocking_commands_cancel(df_factory, df_seeder_factory):
+    instances = [
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    set_task = asyncio.create_task(nodes[0].client.execute_command("BZPOPMIN set1 0"))
+    list_task = asyncio.create_task(nodes[0].client.execute_command("BLPOP list1 0"))
+
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    with pytest.raises(aioredis.ResponseError) as set_e_info:
+        await set_task
+    assert "MOVED 3037 127.0.0.1:30002" == str(set_e_info.value)
+
+    with pytest.raises(aioredis.ResponseError) as list_e_info:
+        await list_task
+    assert "MOVED 7141 127.0.0.1:30002" == str(list_e_info.value)
+
+    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
+
+
 @pytest.mark.parametrize("set_cluster_node_id", [True, False])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_native_client(

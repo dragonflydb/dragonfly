@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -121,6 +122,9 @@ enum class MigrationState : uint8_t {
 };
 
 SlotId KeySlot(std::string_view key);
+
+// return error message if slot doesn't belong to this node
+std::optional<std::string> SlotOwnershipErrorStr(SlotId slot_id);
 
 void InitializeCluster();
 bool IsClusterEnabled();
