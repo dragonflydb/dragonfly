@@ -10,6 +10,7 @@
 
 #include <mutex>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "server/db_slice.h"
@@ -19,6 +20,8 @@
 #include "server/rdb_save.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
+
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0, "Total bytes before flushing big entries");
 
 namespace dfly {
 
@@ -56,7 +59,7 @@ bool SliceSnapshot::IsSnaphotInProgress() {
   return tl_slice_snapshots.size() > 0;
 }
 
-void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
+void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
@@ -69,7 +72,19 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll) {
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
+  const auto flush_threshold = absl::GetFlag(FLAGS_serialization_max_chunk_size);
+  std::function<bool(size_t)> flush_fun;
+  if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
+    flush_fun = [this, flush_threshold](size_t bytes_serialized) {
+      if (bytes_serialized > flush_threshold) {
+        auto serialized = Serialize();
+        VLOG(2) << "FlushedToChannel " << serialized << " bytes";
+        return true;
+      }
+      return false;
+    };
+  }
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun);
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
@@ -276,7 +291,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   while (!it.is_done()) {
     ++result;
-    // might yield
+    // might preempt
     SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
     ++it;
   }
@@ -284,8 +299,6 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   return result;
 }
 
-// This function should not block and should not preempt because it's called
-// from SerializeBucket which should execute atomically.
 void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
                                    optional<uint64_t> expire, RdbSerializer* serializer) {
   time_t expire_time = expire.value_or(0);
@@ -309,18 +322,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   }
 }
 
-bool SliceSnapshot::PushSerializedToChannel(bool force) {
-  // Bucket serialization might have accumulated some delayed values.
-  // Because we can finally block in this function, we'll await and serialize them
-  while (!delayed_entries_.empty()) {
-    auto& entry = delayed_entries_.back();
-    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid);
-    delayed_entries_.pop_back();
-  }
-
-  if (!force && serializer_->SerializedLen() < 4096)
-    return false;
-
+size_t SliceSnapshot::Serialize() {
   io::StringFile sfile;
   serializer_->FlushToSink(&sfile);
 
@@ -333,9 +335,29 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
   DbRecord db_rec{.id = id, .value = std::move(sfile.val)};
 
   dest_->Push(std::move(db_rec));
+  if (serialized != 0) {
+    VLOG(2) << "Pushed with Serialize() " << serialized << " bytes";
+  }
+  return serialized;
+}
 
-  VLOG(2) << "PushSerializedToChannel " << serialized << " bytes";
-  return true;
+bool SliceSnapshot::PushSerializedToChannel(bool force) {
+  if (!force && serializer_->SerializedLen() < 4096)
+    return false;
+
+  // Flush any of the leftovers to avoid interleavings
+  const auto serialized = Serialize();
+
+  // Bucket serialization might have accumulated some delayed values.
+  // Because we can finally block in this function, we'll await and serialize them
+  while (!delayed_entries_.empty()) {
+    auto& entry = delayed_entries_.back();
+    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid);
+    delayed_entries_.pop_back();
+  }
+
+  const auto total_serialized = Serialize() + serialized;
+  return total_serialized > 0;
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -377,6 +399,8 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
 }
 
 void SliceSnapshot::CloseRecordChannel() {
+  ConditionGuard guard(&bucket_ser_);
+
   CHECK(!serialize_bucket_running_);
   // Make sure we close the channel only once with a CAS check.
   bool expected = false;

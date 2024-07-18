@@ -67,7 +67,10 @@ class SliceSnapshot {
 
   // Initialize snapshot, start bucket iteration fiber, register listeners.
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
-  void Start(bool stream_journal, const Cancellation* cll);
+  enum class SnapshotFlush { kAllow, kDisallow };
+
+  void Start(bool stream_journal, const Cancellation* cll,
+             SnapshotFlush allow_flush = SnapshotFlush::kDisallow);
 
   // Initialize a snapshot that sends only the missing journal updates
   // since start_lsn and then registers a callback switches into the
@@ -116,6 +119,9 @@ class SliceSnapshot {
   // Push regardless of buffer size if force is true.
   // Return if pushed.
   bool PushSerializedToChannel(bool force);
+
+  // Helper function that flushes the serialized items into the RecordStream
+  size_t Serialize();
 
  public:
   uint64_t snapshot_version() const {
