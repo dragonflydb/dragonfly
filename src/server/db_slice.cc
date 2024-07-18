@@ -1115,13 +1115,13 @@ void DbSlice::ExpireAllIfNeeded() {
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
-  counter_flag_.WaitUntilCounterIsZero();
+  block_counter_.Wait();
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  CounterConditionGuard counter(&counter_flag_);
+  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
 
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
@@ -1142,7 +1142,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
-  counter_flag_.WaitUntilCounterIsZero();
+  block_counter_.Wait();
   auto it = find_if(change_cb_.begin(), change_cb_.end(),
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
@@ -1547,7 +1547,8 @@ void DbSlice::OnCbFinish() {
 
 void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  CounterConditionGuard counter(&counter_flag_);
+  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
+
   for (const auto& ccb : change_cb_) {
     CHECK(ccb.second);
     ccb.second(id, cr);
