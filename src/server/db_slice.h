@@ -13,6 +13,7 @@
 #include "server/conn_context.h"
 #include "server/table.h"
 #include "util/fibers/fibers.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly {
 
@@ -524,6 +525,39 @@ class DbSlice {
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
 
  private:
+  struct CounterCondFlag {
+    void WaitUntilCounterIsZero() {
+      util::fb2::NoOpLock noop_lk_;
+      cond_var.wait(noop_lk_, [this]() { return mutating == 0; });
+    }
+
+    util::fb2::CondVarAny cond_var;
+    size_t mutating = 0;
+  };
+
+  class CounterConditionGuard {
+   public:
+    explicit CounterConditionGuard(CounterCondFlag* enclosing) : enclosing_(enclosing) {
+      ++enclosing_->mutating;
+    }
+    ~CounterConditionGuard() {
+      --enclosing_->mutating;
+      if (enclosing_->mutating == 0) {
+        enclosing_->cond_var.notify_one();
+      }
+    }
+
+   private:
+    CounterCondFlag* enclosing_;
+  };
+
+  // We need this because registered callbacks might yield. If RegisterOnChange
+  // gets called after we preempt while iterating over the registered callbacks
+  // (let's say in FlushChangeToEarlierCallbacks) we will get UB, because we pushed
+  // into a vector which might get resized, invalidating the iterators that are being
+  // used by the preempted FlushChangeToEarlierCallbacks. CounterConditionguard and
+  // and counter_flag_ protects us against this case.
+  mutable CounterCondFlag counter_flag_;
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
 
