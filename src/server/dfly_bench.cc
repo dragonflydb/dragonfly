@@ -56,7 +56,12 @@ constexpr string_view kKeyPlaceholder = "__key__"sv;
 
 thread_local base::Xoroshiro128p bit_gen;
 
+#if __INTELLISENSE__
+#pragma diag_suppress 144
+#endif
+
 enum Protocol { RESP, MC_TEXT } protocol;
+enum DistType { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
 
 class KeyGenerator {
  public:
@@ -69,7 +74,6 @@ class KeyGenerator {
   uint64_t min_, max_, range_;
   double stddev_ = 1.0 / 6;
   optional<base::ZipfianGenerator> zipf_;
-  enum DistType { UNIFORM, NORMAL, ZIPFIAN } dist_type_;
 };
 
 class CommandGenerator {
@@ -162,9 +166,9 @@ struct ClientStats {
 // Per connection driver.
 class Driver {
  public:
-  explicit Driver(ProactorBase* p = nullptr) {
-    if (p)
-      socket_.reset(p->CreateSocket());
+  explicit Driver(uint32_t num_reqs, ClientStats* stats, ProactorBase* p)
+      : num_reqs_(num_reqs), stats_(*stats) {
+    socket_.reset(p->CreateSocket());
   }
 
   Driver(const Driver&) = delete;
@@ -172,18 +176,20 @@ class Driver {
   Driver& operator=(Driver&&) = default;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
-  void Run(uint32_t num_reqs, uint64_t cycle_ns, ClientStats* stats);
+  void Run(uint64_t cycle_ns);
 
  private:
-  void PopRequest(ClientStats* dest);
-  void ReceiveFb(ClientStats* dest);
-  void ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf, ClientStats* dest);
+  void PopRequest();
+  void ReceiveFb();
+  void ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf);
 
   struct Req {
     uint64_t start;
     bool might_hit;
   };
 
+  uint32_t num_reqs_;
+  ClientStats& stats_;
   unique_ptr<FiberSocketBase> socket_;
   queue<Req> reqs_;
   fb2::CondVarAny cnd_;
@@ -195,7 +201,7 @@ class TLocalClient {
   explicit TLocalClient(ProactorBase* p) : p_(p) {
     drivers_.resize(GetFlag(FLAGS_c));
     for (auto& driver : drivers_) {
-      driver.reset(new Driver{p_});
+      driver.reset(new Driver{GetFlag(FLAGS_n), &stats, p_});
     }
   }
 
@@ -214,28 +220,26 @@ class TLocalClient {
 KeyGenerator::KeyGenerator(uint32_t min, uint32_t max)
     : min_(min), max_(max), range_(max - min + 1) {
   prefix_ = GetFlag(FLAGS_key_prefix);
-  string dist = GetFlag(FLAGS_key_dist);
   CHECK_GT(range_, 0u);
 
-  if (dist == "U") {
-    dist_type_ = UNIFORM;
-  } else if (dist == "N") {
-    dist_type_ = NORMAL;
-    uint64_t stddev = GetFlag(FLAGS_key_stddev);
-    if (stddev != 0) {
-      stddev_ = double(stddev) / double(range_);
+  switch (dist_type) {
+    case NORMAL: {
+      uint64_t stddev = GetFlag(FLAGS_key_stddev);
+      if (stddev != 0) {
+        stddev_ = double(stddev) / double(range_);
+      }
+      break;
     }
-  } else if (dist == "Z") {
-    dist_type_ = ZIPFIAN;
-    zipf_.emplace(min, max, GetFlag(FLAGS_zipf_alpha));
-  } else {
-    LOG(FATAL) << "Unknown distribution type: " << dist;
+    case ZIPFIAN:
+      zipf_.emplace(min, max, GetFlag(FLAGS_zipf_alpha));
+      break;
+    default:;
   }
 }
 
 string KeyGenerator::operator()() {
   uint64_t key_suffix{0};
-  switch (dist_type_) {
+  switch (dist_type) {
     case UNIFORM:
       key_suffix = absl::Uniform(bit_gen, min_, max_);
       break;
@@ -246,6 +250,9 @@ string KeyGenerator::operator()() {
     }
     case ZIPFIAN:
       key_suffix = zipf_->Next(bit_gen);
+      break;
+    case SEQUENTIAL:
+      key_suffix = min_++;
       break;
   }
 
@@ -258,8 +265,8 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
 }
 
-void Driver::Run(uint32_t num_reqs, uint64_t cycle_ns, ClientStats* dest) {
-  auto receive_fb = MakeFiber([this, dest] { ReceiveFb(dest); });
+void Driver::Run(uint64_t cycle_ns) {
+  auto receive_fb = MakeFiber([this] { ReceiveFb(); });
 
   int64_t next_invocation = absl::GetCurrentTimeNanos();
 
@@ -270,7 +277,7 @@ void Driver::Run(uint32_t num_reqs, uint64_t cycle_ns, ClientStats* dest) {
 
   KeyGenerator key_gen(key_minimum, key_maximum);
   CommandGenerator cmd_gen(&key_gen);
-  for (unsigned i = 0; i < num_reqs; ++i) {
+  for (unsigned i = 0; i < num_reqs_; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
     if (cycle_ns) {
@@ -306,7 +313,7 @@ void Driver::Run(uint32_t num_reqs, uint64_t cycle_ns, ClientStats* dest) {
   }
 
   const absl::Time finish = absl::Now();
-  VLOG(1) << "Done queuing " << num_reqs << " requests, which took " << finish - start
+  VLOG(1) << "Done queuing " << num_reqs_ << " requests, which took " << finish - start
           << ". Waiting for server processing";
 
   // TODO: to change to a condvar or something.
@@ -330,20 +337,20 @@ static string_view FindLine(io::Bytes buf) {
   return {};
 };
 
-void Driver::PopRequest(ClientStats* stats) {
+void Driver::PopRequest() {
   uint64_t now = absl::GetCurrentTimeNanos();
   uint64_t usec = (now - reqs_.front().start) / 1000;
-  stats->hist.Add(usec);
-  stats->hit_opportunities += reqs_.front().might_hit;
+  stats_.hist.Add(usec);
+  stats_.hit_opportunities += reqs_.front().might_hit;
 
   reqs_.pop();
   if (reqs_.empty()) {
     cnd_.notify_one();
   }
-  ++stats->num_responses;
+  ++stats_.num_responses;
 }
 
-void Driver::ReceiveFb(ClientStats* stats) {
+void Driver::ReceiveFb() {
   facade::RedisParser parser{1 << 16, false};
   io::IoBuf io_buf{512};
 
@@ -362,7 +369,7 @@ void Driver::ReceiveFb(ClientStats* stats) {
     io_buf.CommitWrite(*recv_sz);
 
     if (protocol == RESP) {
-      ParseRESP(&parser, &io_buf, stats);
+      ParseRESP(&parser, &io_buf);
     } else {
       // MC_TEXT
       while (true) {
@@ -371,7 +378,7 @@ void Driver::ReceiveFb(ClientStats* stats) {
           break;
         CHECK_EQ(line.back(), '\n');
         if (line == "STORED\r\n" || line == "END\r\n") {
-          PopRequest(stats);
+          PopRequest();
           blob_len = 0;
         } else if (absl::StartsWith(line, "VALUE")) {
           // last token is a blob length.
@@ -384,10 +391,10 @@ void Driver::ReceiveFb(ClientStats* stats) {
             LOG(ERROR) << "Invalid blob len " << line;
             return;
           }
-          ++stats->hit_count;
+          ++stats_.hit_count;
         } else if (absl::StartsWith(line, "SERVER_ERROR")) {
-          ++stats->num_errors;
-          PopRequest(stats);
+          ++stats_.num_errors;
+          PopRequest();
           blob_len = 0;
         } else {
           auto handle = socket_->native_handle();
@@ -402,7 +409,7 @@ void Driver::ReceiveFb(ClientStats* stats) {
   VLOG(1) << "ReceiveFb done";
 }
 
-void Driver::ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf, ClientStats* stats) {
+void Driver::ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf) {
   uint32_t consumed = 0;
   RedisParser::Result result = RedisParser::OK;
   RespVec parse_args;
@@ -411,10 +418,10 @@ void Driver::ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf, ClientSta
     result = parser->Parse(io_buf->InputBuffer(), &consumed, &parse_args);
     if (result == RedisParser::OK && !parse_args.empty()) {
       if (reqs_.front().might_hit && parse_args[0].type != facade::RespExpr::NIL) {
-        ++stats->hit_count;
+        ++stats_.hit_count;
       }
       parse_args.clear();
-      PopRequest(stats);
+      PopRequest();
     }
     io_buf->ConsumeInput(consumed);
   } while (result == RedisParser::OK);
@@ -437,11 +444,8 @@ void TLocalClient::Connect(tcp::endpoint ep) {
 
 void TLocalClient::Run(uint64_t cycle_ns) {
   vector<fb2::Fiber> fbs(drivers_.size());
-  uint32_t num_reqs = GetFlag(FLAGS_n);
-
   for (size_t i = 0; i < fbs.size(); ++i) {
-    fbs[i] = fb2::Fiber(absl::StrCat("run/", i),
-                        [&, i] { drivers_[i]->Run(num_reqs, cycle_ns, &stats); });
+    fbs[i] = fb2::Fiber(absl::StrCat("run/", i), [&, i] { drivers_[i]->Run(cycle_ns); });
   }
 
   for (auto& fb : fbs)
@@ -499,6 +503,20 @@ int main(int argc, char* argv[]) {
   } else {
     CHECK(proto_str.empty());
     protocol = RESP;
+  }
+
+  string dist = GetFlag(FLAGS_key_dist);
+
+  if (dist == "U") {
+    dist_type = UNIFORM;
+  } else if (dist == "N") {
+    dist_type = NORMAL;
+  } else if (dist == "Z") {
+    dist_type = ZIPFIAN;
+  } else if (dist == "S") {
+    dist_type = SEQUENTIAL;
+  } else {
+    LOG(FATAL) << "Unknown distribution type: " << dist;
   }
 
   auto* proactor = pp->GetNextProactor();
