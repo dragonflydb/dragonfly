@@ -10,6 +10,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
+#include "server/conn_context.h"
 
 ABSL_FLAG(size_t, acllog_max_len, 32,
           "Specify the number of log entries. Logs are kept locally for each thread "

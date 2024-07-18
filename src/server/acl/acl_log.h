@@ -8,12 +8,11 @@
 #include <deque>
 #include <string>
 
-#include "base/flags.h"
-#include "server/conn_context.h"
+namespace dfly {
 
-ABSL_DECLARE_FLAG(size_t, acllog_max_len);
+class ConnectionContext;
 
-namespace dfly::acl {
+namespace acl {
 
 class AclLog {
  public:
@@ -49,4 +48,5 @@ class AclLog {
   size_t total_entries_allowed_;
 };
 
-}  // namespace dfly::acl
+}  // namespace acl
+}  // namespace dfly

@@ -23,8 +23,6 @@ using namespace testing;
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
-ABSL_DECLARE_FLAG(bool, tiered_storage_cache_fetched);
-ABSL_DECLARE_FLAG(bool, backing_file_direct);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 
@@ -53,8 +51,6 @@ class TieredStorageTest : public BaseFamilyTest {
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
       SetFlag(&FLAGS_tiered_prefix, "/tmp/tiered_storage_test");
     }
-    SetFlag(&FLAGS_tiered_storage_cache_fetched, true);
-    SetFlag(&FLAGS_backing_file_direct, true);
 
     BaseFamilyTest::SetUp();
   }

@@ -479,6 +479,18 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     fetched_items_.insert(res.it->first.AsRef());
   }
 
+  // If the value has a pending stash, cancel it before any modification are applied.
+  // Rationale: we either look it up for reads - and then it's hot, or alternatively,
+  // we follow up with modifications during mutation operations, and in that case storing on disk
+  // does not make much sense.
+  if (res.it->second.HasStashPending()) {
+    owner_->tiered_storage()->CancelStash(cntx.db_index, key, &res.it->second);
+  }
+
+  // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
+  // attribute of the entry in case of value overtides.
+  res.it->first.SetTouched(true);
+
   db.top_keys.Touch(key);
 
   std::move(update_stats_on_miss).Cancel();
@@ -490,6 +502,11 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       events_.hits++;
       if (cluster::IsClusterEnabled()) {
         db.slots_stats[cluster::KeySlot(key)].total_reads++;
+      }
+      if (res.it->second.IsExternal()) {
+        events_.ram_misses++;
+      } else {
+        events_.ram_hits++;
       }
       break;
   }
@@ -976,13 +993,6 @@ void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   DVLOG(2) << "Running callbacks in dbid " << db_ind;
   CallChangeCallbacks(db_ind, ChangeReq{it.GetInnerIt()});
 
-  // If the value has a pending stash, cancel it before any modification are applied.
-  // Note: we don't delete offloaded values before updates, because a read-modify operation (like
-  // append) can be applied instead of a full overwrite. Deleting is reponsibility of the commands
-  if (it.IsOccupied() && it->second.HasIoPending()) {
-    owner_->tiered_storage()->CancelStash(db_ind, key, &it->second);
-  }
-
   it.GetInnerIt().SetVersion(NextVersion());
 }
 
@@ -1401,7 +1411,7 @@ void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbT
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, &it->second);
-        } else if (it->second.HasIoPending()) {
+        } else if (it->second.HasStashPending()) {
           tiered_storage->CancelStash(index, it->first.GetSlice(&scratch), &it->second);
         }
       });

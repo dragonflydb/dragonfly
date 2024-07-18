@@ -53,6 +53,8 @@ void CopyValueToBuffer(const PrimeValue& pv, char* dest) {
 
 string GetString(const PrimeValue& pv) {
   string res;
+  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
+
   if (pv.ObjType() != OBJ_STRING)
     return res;
   res.resize(pv.Size());

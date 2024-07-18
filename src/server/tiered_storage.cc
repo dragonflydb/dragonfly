@@ -17,7 +17,6 @@
 #include "base/logging.h"
 #include "server/common.h"
 #include "server/db_slice.h"
-#include "server/engine_shard_set.h"
 #include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
@@ -25,8 +24,11 @@
 #include "server/tiering/small_bins.h"
 #include "server/tx_base.h"
 
-ABSL_FLAG(bool, tiered_storage_cache_fetched, true,
-          "WIP: Load results of offloaded reads to memory");
+using namespace facade;
+
+ABSL_FLAG(uint32_t, tiered_storage_memory_margin, 1_MB,
+          "In bytes. If memory budget on a shard goes blow this limit, tiering stops "
+          "hot-loading values into ram.");
 
 ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
           "Maximum number of concurrent stash requests issued by background offload");
@@ -35,8 +37,6 @@ namespace dfly {
 
 using namespace std;
 using namespace util;
-
-using namespace tiering::literals;
 
 using KeyRef = tiering::OpManager::KeyRef;
 
@@ -80,14 +80,14 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
  public:
   ShardOpManager(TieredStorage* ts, DbSlice* db_slice, size_t max_size)
-      : tiering::OpManager{max_size}, ts_{ts}, db_slice_{db_slice} {
-    cache_fetched_ = absl::GetFlag(FLAGS_tiered_storage_cache_fetched);
+      : tiering::OpManager{max_size}, ts_{ts}, db_slice_{*db_slice} {
+    memory_margin_ = absl::GetFlag(FLAGS_tiered_storage_memory_margin);
   }
 
   // Clear IO pending flag for entry
   void ClearIoPending(OpManager::KeyRef key) {
     if (auto pv = Find(key); pv) {
-      pv->SetIoPending(false);
+      pv->SetStashPending(false);
       stats_.total_cancels++;
     }
   }
@@ -99,14 +99,14 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   DbTableStats* GetDbTableStats(DbIndex dbid) {
-    return db_slice_->MutableStats(dbid);
+    return db_slice_.MutableStats(dbid);
   }
 
  private:
   PrimeValue* Find(OpManager::KeyRef key) {
     // TODO: Get DbContext for transaction for correct dbid and time
     // Bypass all update and stat mechanisms
-    auto it = db_slice_->GetDBTable(key.first)->prime.Find(key.second);
+    auto it = db_slice_.GetDBTable(key.first)->prime.Find(key.second);
     return IsValid(it) ? &it->second : nullptr;
   }
 
@@ -141,7 +141,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     if (auto pv = Find(key); pv) {
       RecordAdded(*pv, segment.length, GetDbTableStats(key.first));
 
-      pv->SetIoPending(false);
+      pv->SetStashPending(false);
       pv->SetExternal(segment.offset, segment.length);
 
       stats_.total_stashes++;
@@ -154,7 +154,11 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       SetExternal({sub_dbid, sub_key}, sub_segment);
   }
 
-  bool cache_fetched_ = false;
+  bool HasEnoughMemoryMargin(int64_t value_len) {
+    return db_slice_.memory_budget() - memory_margin_ - value_len > 0;
+  }
+
+  int64_t memory_margin_ = 0;
 
   struct {
     size_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
@@ -162,7 +166,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   } stats_;
 
   TieredStorage* ts_;
-  DbSlice* db_slice_;
+  DbSlice& db_slice_;
 };
 
 void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, string_view page) {
@@ -173,7 +177,7 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
     auto predicate = [item_segment](const PrimeKey& key, const PrimeValue& probe) {
       return probe.IsExternal() && tiering::DiskSegment{probe.GetExternalSlice()} == item_segment;
     };
-    auto it = db_slice_->GetDBTable(dbid)->prime.FindFirst(hash, predicate);
+    auto it = db_slice_.GetDBTable(dbid)->prime.FindFirst(hash, predicate);
     if (!IsValid(it))
       continue;
 
@@ -200,7 +204,8 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   //    the snapshotting.
   // TODO: to revisit this when we rewrite it with more efficient snapshotting algorithm.
 
-  bool should_upload = modified || (cache_fetched_ && !SliceSnapshot::IsSnaphotInProgress());
+  bool should_upload =
+      modified || (HasEnoughMemoryMargin(value.size()) && !SliceSnapshot::IsSnaphotInProgress());
 
   if (!should_upload)
     return false;
@@ -332,7 +337,7 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   }
 
   StringOrView raw_string = value->GetRawString();
-  value->SetIoPending(true);
+  value->SetStashPending(true);
 
   tiering::OpManager::EntryId id;
   error_code ec;
@@ -364,13 +369,13 @@ void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
 }
 
 void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
-  DCHECK(value->HasIoPending());
+  DCHECK(value->HasStashPending());
   if (OccupiesWholePages(value->Size())) {
     op_manager_->Delete(KeyRef(dbid, key));
   } else if (auto bin = bins_->Delete(dbid, key); bin) {
     op_manager_->Delete(*bin);
   }
-  value->SetIoPending(false);
+  value->SetStashPending(false);
 }
 
 float TieredStorage::WriteDepthUsage() const {
@@ -423,11 +428,18 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
       disk_stats.max_file_size)
     return;
 
-  auto cb = [this, dbid, tmp = std::string{}](PrimeIterator it) mutable {
-    TryStash(dbid, it->first.GetSlice(&tmp), &it->second);
+  string tmp;
+  auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
+    if (ShouldStash(it->second)) {
+      if (it->first.WasTouched()) {
+        it->first.SetTouched(false);
+      } else {
+        TryStash(dbid, it->first.GetSlice(&tmp), &it->second);
+      }
+    }
   };
 
-  PrimeTable& table = op_manager_->db_slice_->GetDBTable(dbid)->prime;
+  PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
   PrimeTable::Cursor start_cursor{};
 
   // Loop while we haven't traversed all entries or reached our stash io device limit.
@@ -442,7 +454,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
   auto disk_stats = op_manager_->GetStats().disk_stats;
-  return !pv.IsExternal() && !pv.HasIoPending() && pv.ObjType() == OBJ_STRING &&
+  return !pv.IsExternal() && !pv.HasStashPending() && pv.ObjType() == OBJ_STRING &&
          pv.Size() >= kMinValueSize &&
          disk_stats.allocated_bytes + tiering::kPageSize + pv.Size() < disk_stats.max_file_size;
 }

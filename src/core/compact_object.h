@@ -238,13 +238,13 @@ class CompactObj {
     }
   }
 
-  bool HasIoPending() const {
+  bool DefragIfNeeded(float ratio);
+
+  bool HasStashPending() const {
     return mask_ & IO_PENDING;
   }
 
-  bool DefragIfNeeded(float ratio);
-
-  void SetIoPending(bool b) {
+  void SetStashPending(bool b) {
     if (b) {
       mask_ |= IO_PENDING;
     } else {
@@ -451,7 +451,7 @@ class CompactObj {
   //
   static_assert(sizeof(u_) == 16, "");
 
-  mutable uint8_t mask_ = 0;
+  uint8_t mask_ = 0;
 
   // We currently reserve 5 bits for tags and 3 bits for extending the mask. currently reserved.
   uint8_t taglen_ = 0;
