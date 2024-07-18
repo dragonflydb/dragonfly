@@ -1226,8 +1226,8 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED:
-      // TODO: proper error for moved
-      return cntx->SendError("-MOVED");
+      // if key is moved the cluster is definitely exist and we must get an error
+      return cntx->SendError(*cluster::SlotOwnershipErrorStr(*transaction->GetUniqueSlotId()));
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
   }

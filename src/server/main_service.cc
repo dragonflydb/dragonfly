@@ -629,10 +629,10 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
   }
 
   if (cluster::IsClusterEnabled()) {
-    if (cluster_family->cluster_config() == nullptr) {
+    if (cluster::ClusterFamily::cluster_config() == nullptr) {
       resp.body() += "<h2>Not yet configured.</h2>\n";
     } else {
-      auto config = cluster_family->cluster_config()->GetConfig();
+      auto config = cluster::ClusterFamily::cluster_config()->GetConfig();
       for (const auto& shard : config) {
         resp.body() += "<div class='master'>\n";
         resp.body() += "<h3>Master</h3>\n";
@@ -958,16 +958,10 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
     return ErrorReply{"-CROSSSLOT Keys in request don't hash to the same slot"};
   }
 
-  // Check keys slot is in my ownership
-  const cluster::ClusterConfig* cluster_config = cluster_family_.cluster_config();
-  if (cluster_config == nullptr) {
-    return ErrorReply{kClusterNotConfigured};
-  }
-
-  if (keys_slot.has_value() && !cluster_config->IsMySlot(*keys_slot)) {
-    // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
-    cluster::ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(*keys_slot);
-    return ErrorReply{absl::StrCat("-MOVED ", *keys_slot, " ", master.ip, ":", master.port)};
+  if (keys_slot.has_value()) {
+    if (auto error_str = cluster::SlotOwnershipErrorStr(*keys_slot); error_str) {
+      return ErrorReply{*error_str};
+    }
   }
 
   return nullopt;

@@ -9,8 +9,12 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "cluster_defs.h"
+#include "facade/error.h"
 #include "slot_set.h"
 #include "src/server/common.h"
+
+// TODO remove when tl_cluster_config will be moved out from it
+#include "server/cluster/cluster_family.h"
 
 using namespace std;
 
@@ -92,4 +96,16 @@ bool IsClusterShardedByTag() {
   return IsClusterEnabledOrEmulated() || LockTagOptions::instance().enabled;
 }
 
+std::optional<std::string> SlotOwnershipErrorStr(SlotId slot_id) {
+  const cluster::ClusterConfig* cluster_config = ClusterFamily::cluster_config();
+  if (!cluster_config)
+    return facade::kClusterNotConfigured;
+
+  if (!cluster_config->IsMySlot(slot_id)) {
+    // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
+    cluster::ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(slot_id);
+    return absl::StrCat("-MOVED ", slot_id, " ", master.ip, ":", master.port);
+  }
+  return std::nullopt;
+}
 }  // namespace dfly::cluster
