@@ -199,7 +199,8 @@ void Transaction::BuildShardIndex(const KeyIndex& key_index, std::vector<PerShar
     unique_slot_checker_.Add(key);
     ShardId sid = Shard(key, shard_data_.size());
 
-    unsigned step = shard_index[sid].key_step = key_index.bonus ? 1 : key_index.step;
+    unsigned step = key_index.bonus ? 1 : key_index.step;
+    shard_index[sid].key_step = step;
     auto& slices = shard_index[sid].slices;
     if (!slices.empty() && slices.back().second == i) {
       slices.back().second = i + step;
