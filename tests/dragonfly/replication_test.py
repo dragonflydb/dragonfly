@@ -55,6 +55,7 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(
             8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, False, marks=M_STRESS
         ),
+        pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, True, marks=M_STRESS),
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
@@ -67,14 +68,16 @@ async def test_replication_all(
     big_value,
     mode,
 ):
+    args = {}
     if mode:
-        mode["maxmemory"] = str(t_master * 256) + "mb"
+        args["cache_mode"] = "true"
+        args["maxmemory"] = str(t_master * 256) + "mb"
 
     if big_value:
-        mode["compression_mode"] = 0
-        mode["flush_big_entries_threshold"] = 4096
+        args["compression_mode"] = 0
+        args["serialization_max_chunk_size"] = 4096
 
-    master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **mode)
+    master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **args)
     replicas = [
         df_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
         for i, t in enumerate(t_replicas)
