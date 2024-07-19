@@ -33,6 +33,8 @@ class AllocationTracker {
   bool Add(const TrackingInfo& info);
 
   // Removes all tracking exactly matching lower_bound and upper_bound.
+  // Returns true if the tracking range [lower_bound, upper_bound] was removed
+  // and false, otherwise.
   bool Remove(size_t lower_bound, size_t upper_bound);
 
   // Clears *all* tracking.

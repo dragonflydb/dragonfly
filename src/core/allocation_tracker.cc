@@ -37,7 +37,7 @@ bool AllocationTracker::Remove(size_t lower_bound, size_t upper_bound) {
                                  }),
                   tracking_.end());
 
-  return before_size == tracking_.size();
+  return before_size != tracking_.size();
 }
 
 void AllocationTracker::Clear() {
