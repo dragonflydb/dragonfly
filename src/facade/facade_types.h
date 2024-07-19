@@ -91,6 +91,10 @@ struct ArgRange {
     return Range().second;
   }
 
+  std::string_view operator[](size_t idx) const {
+    return std::visit([idx](const auto& span) { return facade::ToSV(span[idx]); }, span);
+  }
+
   std::variant<CmdArgList, ArgSlice, OwnedArgSlice> span;
 };
 struct ConnectionStats {

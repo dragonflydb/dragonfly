@@ -17,6 +17,24 @@ namespace dfly {
 using namespace std;
 using Payload = journal::Entry::Payload;
 
+unsigned KeyIndex::operator*() const {
+  if (bonus)
+    return *bonus;
+  return start;
+}
+
+KeyIndex& KeyIndex::operator++() {
+  if (bonus)
+    bonus.reset();
+  else
+    start = std::min(end, start + step);
+  return *this;
+}
+
+bool KeyIndex::operator!=(const KeyIndex& ki) const {
+  return std::tie(start, end, step, bonus) != std::tie(ki.start, ki.end, ki.step, ki.bonus);
+}
+
 DbSlice& DbContext::GetDbSlice(ShardId shard_id) const {
   return ns->GetDbSlice(shard_id);
 }

@@ -13,6 +13,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/transaction.h"
+#include "server/tx_base.h"
 
 namespace dfly {
 
@@ -21,14 +22,6 @@ using namespace facade;
 using namespace util;
 
 namespace {
-
-template <typename F> void IterateKeys(CmdArgList args, KeyIndex keys, F&& f) {
-  for (unsigned i = keys.start; i < keys.end; i += keys.step)
-    f(args[i]);
-
-  if (keys.bonus)
-    f(args[*keys.bonus]);
-}
 
 void CheckConnStateClean(const ConnectionState& state) {
   DCHECK_EQ(state.exec_info.state, ConnectionState::ExecInfo::EXEC_INACTIVE);
@@ -90,29 +83,21 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   auto keys = DetermineKeys(cmd->Cid(), args);
   if (!keys.ok())
     return SquashResult::ERROR;
+  if (keys->NumArgs() == 0)
+    return SquashResult::NOT_SQUASHED;
 
   // Check if all commands belong to one shard
-  bool found_more = false;
   cluster::UniqueSlotChecker slot_checker;
   ShardId last_sid = kInvalidSid;
-  IterateKeys(args, *keys, [&last_sid, &found_more, &slot_checker](MutableSlice key) {
-    if (found_more)
-      return;
 
-    string_view key_sv = facade::ToSV(key);
-
-    slot_checker.Add(key_sv);
-
-    ShardId sid = Shard(key_sv, shard_set->size());
-    if (last_sid == kInvalidSid || last_sid == sid) {
+  for (string_view key : keys->Range(args)) {
+    slot_checker.Add(key);
+    ShardId sid = Shard(key, shard_set->size());
+    if (last_sid == kInvalidSid || last_sid == sid)
       last_sid = sid;
-      return;
-    }
-    found_more = true;
-  });
-
-  if (found_more || last_sid == kInvalidSid)
-    return SquashResult::NOT_SQUASHED;
+    else
+      return SquashResult::NOT_SQUASHED;  // at least two shards
+  }
 
   auto& sinfo = PrepareShardInfo(last_sid, slot_checker.GetUniqueSlotId());
 
