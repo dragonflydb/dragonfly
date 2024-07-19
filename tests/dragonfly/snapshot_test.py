@@ -430,10 +430,10 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
 async def test_tiered_entries(async_client: aioredis.Redis):
     """This test makes sure tieried entries are correctly persisted"""
 
-    # With variance 4: 512 - 8192 we include small and large values
-    await StaticSeeder(key_target=5000, data_size=1024, variance=4, types=["STRING"]).run(
-        async_client
-    )
+    # With variance 8: 128 - 8192 we include small and large values
+    await StaticSeeder(
+        key_target=6000, data_size=1024, variance=8, types=["STRING"], samples=30
+    ).run(async_client)
 
     # Compute the capture, this brings all items back to memory... so we'll wait for offloading
     start_capture = await StaticSeeder.capture(async_client)

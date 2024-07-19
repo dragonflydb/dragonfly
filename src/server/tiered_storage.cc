@@ -158,7 +158,14 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     return db_slice_.memory_budget() - memory_margin_ - value_len > 0;
   }
 
+  void ClearDelayed() {
+    for (auto segment : delayed_deletes_)
+      OpManager::DeleteOffloaded(segment);
+    delayed_deletes_.clear();
+  }
+
   int64_t memory_margin_ = 0;
+  std::vector<tiering::DiskSegment> delayed_deletes_;
 
   struct {
     size_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
@@ -228,6 +235,11 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
 
   auto bin = ts_->bins_->Delete(segment);
   if (bin.empty) {
+    if (SliceSnapshot::IsSnaphotInProgress()) {
+      delayed_deletes_.push_back(segment);
+      return false;
+    }
+
     return true;
   }
 
@@ -421,6 +433,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   if (SliceSnapshot::IsSnaphotInProgress())
     return;
+
+  op_manager_->ClearDelayed();
 
   // Don't run offloading if there's only very little space left
   auto disk_stats = op_manager_->GetStats().disk_stats;

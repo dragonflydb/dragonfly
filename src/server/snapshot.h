@@ -91,6 +91,8 @@ class SliceSnapshot {
   void Cancel();
 
  private:
+  struct TieredSerializer;
+
   // Main fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
   void IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut);
@@ -140,14 +142,6 @@ class SliceSnapshot {
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
  private:
-  // An entry whose value must be awaited
-  struct DelayedEntry {
-    DbIndex dbid;
-    CompactObj key;
-    util::fb2::Future<PrimeValue> value;
-    time_t expire;
-  };
-
   DbSlice* db_slice_;
   DbTableArray db_array_;
 
@@ -157,7 +151,7 @@ class SliceSnapshot {
   DbIndex current_db_;
 
   std::unique_ptr<RdbSerializer> serializer_;
-  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  std::unique_ptr<TieredSerializer> tiered_serializer_;
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
