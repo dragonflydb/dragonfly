@@ -34,6 +34,10 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), journal, &cntx_) {
   }
 
+  ~SliceSlotMigration() {
+    streamer_.Cancel();
+  }
+
   // Send DFLYMIGRATE FLOW
   void PrepareFlow(const std::string& node_id) {
     uint32_t shard_id = EngineShard::tlocal()->shard_id();

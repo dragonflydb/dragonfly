@@ -1033,7 +1033,6 @@ async def test_config_consistency(df_factory: DflyInstanceFactory):
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
-@pytest.mark.skip("Deadlocks on CI, see #3302")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_flushall_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory
