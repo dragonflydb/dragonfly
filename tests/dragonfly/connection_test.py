@@ -544,7 +544,6 @@ async def test_pipeline_batching_while_migrating(
     incrs = "".join("INCR a\r\n" for _ in range(50))
     writer.write((f"EVALSHA {sha} 1 a\r\n" + incrs).encode())
     await writer.drain()
-
     # We migrate only when the socket wakes up, so send another batch to trigger migration
     writer.write("INCR a\r\n".encode())
     await writer.drain()
@@ -575,6 +574,20 @@ async def test_large_cmd(async_client: aioredis.Redis):
 
     res = await async_client.mget([f"key{i}" for i in range(MAX_ARR_SIZE)])
     assert len(res) == MAX_ARR_SIZE
+
+
+@dfly_args({"proactor_threads": 1})
+async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port, limit=10)
+    writer.write(b"*1000\r\n")
+    writer.write(b"$4\r\nmget\r\n")
+    val = (b"a" * 100) + b"\r\n"
+    for i in range(0, 900):
+        writer.write(b"$100\r\n" + val)
+    await writer.drain()
+    # writer is pending because the request is not finished.
+    stats = await async_client.execute_command("memory stats")
+    assert stats["connections.direct_bytes"] > 150000
 
 
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factory):
