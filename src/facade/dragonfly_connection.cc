@@ -917,6 +917,9 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
     //
     // Otherwise the clients write could fail (or block), so they would never
     // read the above protocol error (see issue #1327).
+    // TODO: we have a bug that can potentially deadlock the code below.
+    // If a peer does not close the socket on the other side, the while loop will never finish.
+    // to reproduce: nc localhost 6379  and then run invalid sequence: *1 <enter> *1 <enter>
     error_code ec2 = peer->Shutdown(SHUT_WR);
     LOG_IF(WARNING, ec2) << "Could not shutdown socket " << ec2;
     if (!ec2) {
