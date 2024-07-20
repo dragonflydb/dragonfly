@@ -83,11 +83,13 @@ OpResult<TResult<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   RETURN_ON_BAD_STATUS(it_res);
 
   // For external entries we have to enqueue reads because modify operations like append could be
-  // already pending. TODO: Optimize to return co.Size() if no modify operations are present
+  // already pending.
+  // TODO: Optimize to return co.Size() if no modify operations are present
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
     util::fb2::Future<size_t> fut;
-    op_args.shard->tiered_storage()->Read(op_args.db_cntx.db_index, key, co,
-                                          [fut](const std::string& s) { return s.size(); });
+    op_args.shard->tiered_storage()->Read(
+        op_args.db_cntx.db_index, key, co,
+        [fut](const std::string& s) mutable { fut.Resolve(s.size()); });
     return {std::move(fut)};
   } else {
     return {co.Size()};
@@ -156,7 +158,7 @@ OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t
     op_args.shard->tiered_storage()->Read(
         op_args.db_cntx.db_index, key, co,
         [read, fut](const std::string& s) mutable { fut.Resolve(string{read(s)}); });
-    return {fut};
+    return {std::move(fut)};
   } else {
     string tmp;
     string_view slice = co.GetSlice(&tmp);
