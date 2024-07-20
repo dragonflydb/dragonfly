@@ -63,7 +63,8 @@ class JournalStreamer {
 
   journal::Journal* journal_;
   std::vector<uint8_t> pending_buf_;
-  size_t in_flight_bytes_ = 0;
+  size_t in_flight_bytes_ = 0, total_sent_ = 0;
+
   time_t last_lsn_time_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
