@@ -39,11 +39,12 @@ class TaskQueue {
   }
 
   /**
-   * @brief Notifies Run() function to empty the queue and to exit.
-   *        Does not block.
+   * @brief Notifies Run() function to empty the queue and to exit and waits for the consumer
+   *        fiber to finish.
    */
   void Shutdown() {
     queue_.Shutdown();
+    consumer_fiber_.JoinIfNeeded();
   }
 
  private:
