@@ -27,7 +27,7 @@ enum CommandOpt : uint32_t {
   LOADING = 1U << 3,  // Command allowed during LOADING state.
   DENYOOM = 1U << 4,  // use-memory in redis.
 
-  // UNUSED = 1U << 5,
+  DANGEROUS = 1U << 5,  // Dangerous commands are logged when used
 
   VARIADIC_KEYS = 1U << 6,  // arg 2 determines number of keys. Relevant for ZUNIONSTORE, EVAL etc.
 

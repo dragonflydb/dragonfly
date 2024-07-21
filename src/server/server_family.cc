@@ -2942,11 +2942,13 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
       << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kBGSave}.HFUNC(BgSave)
       << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kClient}.HFUNC(Client)
-      << CI{"CONFIG", CO::ADMIN, -2, 0, 0, acl::kConfig}.HFUNC(Config)
+      << CI{"CONFIG", CO::ADMIN | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
       << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
-      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS, 1, 0, 0, acl::kFlushDB}.HFUNC(FlushDb)
-      << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS, -1, 0, 0, acl::kFlushAll}.HFUNC(FlushAll)
+      << CI{"FLUSHDB", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, 1, 0, 0, acl::kFlushDB}.HFUNC(
+             FlushDb)
+      << CI{"FLUSHALL", CO::WRITE | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
+             .HFUNC(FlushAll)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
       << CI{"HELLO", CO::LOADING, -1, 0, 0, acl::kHello}.HFUNC(Hello)
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
@@ -2954,8 +2956,9 @@ void ServerFamily::Register(CommandRegistry* registry) {
              Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
       << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
-      << CI{"SHUTDOWN", CO::ADMIN | CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kShutDown}.HFUNC(
-             ShutdownCmd)
+      << CI{"SHUTDOWN",    CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::DANGEROUS, -1, 0, 0,
+            acl::kShutDown}
+             .HFUNC(ShutdownCmd)
       << CI{"SLAVEOF", kReplicaOpts, 3, 0, 0, acl::kSlaveOf}.HFUNC(ReplicaOf)
       << CI{"REPLICAOF", kReplicaOpts, -3, 0, 0, acl::kReplicaOf}.HFUNC(ReplicaOf)
       << CI{"ADDREPLICAOF", kReplicaOpts, 5, 0, 0, acl::kReplicaOf}.HFUNC(AddReplicaOf)

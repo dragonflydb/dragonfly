@@ -795,6 +795,13 @@ struct BorrowedInterpreter {
   bool owned_ = false;
 };
 
+string ConnectionLogContext(const facade::Connection* conn) {
+  if (conn == nullptr) {
+    return "(null-conn)";
+  }
+  return absl::StrCat("(", conn->RemoteEndpointStr(), ")");
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1035,6 +1042,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
   if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid->IsRestricted()) {
+    VLOG(1) << "Non-admin attempt to execute " << cid->name() << " "
+            << ConnectionLogContext(dfly_cntx.conn());
     return ErrorReply{"Cannot execute restricted command (admin only)"};
   }
 
@@ -1181,6 +1190,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->SendError(std::move(*err));
     return;
   }
+
+  VLOG_IF(1, cid->opt_mask() & CO::CommandOpt::DANGEROUS)
+      << "Executing dangerous command " << cid->name() << " "
+      << ConnectionLogContext(dfly_cntx->conn());
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
