@@ -374,7 +374,7 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(1, kQueueLen),
+    : queue_(kQueueLen),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
       shard_id_(pb->GetPoolIndex()) {
