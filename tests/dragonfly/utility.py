@@ -1,12 +1,13 @@
+import asyncio
+import functools
 import itertools
 import logging
 import sys
-import asyncio
+import wrapt
 from redis import asyncio as aioredis
 import redis
 import random
 import string
-import itertools
 import time
 import difflib
 import json
@@ -696,3 +697,21 @@ class EnvironCntx:
 
 async def is_saving(c_client: aioredis.Redis):
     return "saving:1" in (await c_client.execute_command("INFO PERSISTENCE"))
+
+
+def assert_eventually(wrapped=None, *, times=100):
+    if wrapped is None:
+        return functools.partial(assert_eventually, times=100)
+
+    @wrapt.decorator
+    async def wrapper(wrapped, instance, args, kwargs):
+        for attempt in range(times):
+            try:
+                result = await wrapped(*args, **kwargs)
+                return result
+            except AssertionError as e:
+                if attempt == times - 1:
+                    raise
+                await asyncio.sleep(0.1)
+
+    return wrapper(wrapped)

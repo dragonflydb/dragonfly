@@ -66,6 +66,7 @@ struct TieredStats {
   uint64_t total_cancels = 0;
   uint64_t total_deletes = 0;
   uint64_t total_defrags = 0;
+  uint64_t total_uploads = 0;
   uint64_t total_registered_buf_allocs = 0;
   uint64_t total_heap_buf_allocs = 0;
 
