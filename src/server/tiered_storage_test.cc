@@ -206,9 +206,10 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
 
   // Wait for offload to do it all again
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
-
+  auto resp = Run({"INFO", "ALL"});
+  LOG(INFO) << "INFO " << resp.GetString();
   auto metrics = GetMetrics();
-  EXPECT_EQ(metrics.tiered_stats.total_stashes, 2 * kNum);
+  EXPECT_EQ(metrics.tiered_stats.total_stashes, 2 * kNum) << resp.GetString();
   EXPECT_EQ(metrics.tiered_stats.total_fetches, kNum);
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }

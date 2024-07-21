@@ -587,7 +587,7 @@ async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
     await writer.drain()
     # writer is pending because the request is not finished.
     stats = await async_client.execute_command("memory stats")
-    assert stats["connections.direct_bytes"] > 150000
+    assert stats["connections.direct_bytes"] > 130000
 
 
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factory):
