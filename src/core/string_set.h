@@ -48,6 +48,7 @@ class StringSet : public DenseSet {
   class iterator : private IteratorBase {
    public:
     using iterator_category = std::forward_iterator_tag;
+    using difference_type = std::ptrdiff_t;
     using value_type = sds;
     using pointer = sds*;
     using reference = sds&;
