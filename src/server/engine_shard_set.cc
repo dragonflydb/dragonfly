@@ -680,6 +680,8 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
 
       // Every 8 runs, update the global stats.
       if (global_count % 8 == 0) {
+        DVLOG(2) << "Global periodic";
+
         uint64_t sum = 0;
         const auto& stats = EngineShardSet::GetCachedStats();
         for (const auto& s : stats)
