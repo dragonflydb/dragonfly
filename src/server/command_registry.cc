@@ -176,6 +176,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "fast";
     case LOADING:
       return "loading";
+    case DANGEROUS:
+      return "dangerous";
     case ADMIN:
       return "admin";
     case NOSCRIPT:

@@ -244,7 +244,7 @@ void SendMonitor(const std::string& msg) {
   const auto& monitor_repo = ServerState::tlocal()->Monitors();
   const auto& monitors = monitor_repo.monitors();
   if (!monitors.empty()) {
-    VLOG(1) << "thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '"
+    VLOG(2) << "Thread " << ProactorBase::me()->GetPoolIndex() << " sending monitor message '"
             << msg << "' for " << monitors.size();
 
     for (auto monitor_conn : monitors) {
@@ -258,7 +258,7 @@ void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid, CmdArgList t
   //  We have connections waiting to get the info on the last command, send it to them
   string monitor_msg = MakeMonitorMessage(cntx, cid, tail_args);
 
-  VLOG(1) << "sending command '" << monitor_msg << "' to the clients that registered on it";
+  VLOG(2) << "Sending command '" << monitor_msg << "' to the clients that registered on it";
 
   shard_set->pool()->DispatchBrief(
       [msg = std::move(monitor_msg)](unsigned idx, util::ProactorBase*) { SendMonitor(msg); });
@@ -795,6 +795,13 @@ struct BorrowedInterpreter {
   bool owned_ = false;
 };
 
+string ConnectionLogContext(const facade::Connection* conn) {
+  if (conn == nullptr) {
+    return "(null-conn)";
+  }
+  return absl::StrCat("(", conn->RemoteEndpointStr(), ")");
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1035,6 +1042,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
   if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid->IsRestricted()) {
+    VLOG(1) << "Non-admin attempt to execute " << cid->name() << " "
+            << ConnectionLogContext(dfly_cntx.conn());
     return ErrorReply{"Cannot execute restricted command (admin only)"};
   }
 
@@ -1181,6 +1190,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->SendError(std::move(*err));
     return;
   }
+
+  VLOG_IF(1, cid->opt_mask() & CO::CommandOpt::DANGEROUS)
+      << "Executing dangerous command " << cid->name() << " "
+      << ConnectionLogContext(dfly_cntx->conn());
 
   bool is_trans_cmd = CO::IsTransKind(cid->name());
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
@@ -1993,7 +2006,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     if (*sid != ServerState::tlocal()->thread_index()) {
-      VLOG(1) << "Migrating connection " << cntx->conn() << " from "
+      VLOG(2) << "Migrating connection " << cntx->conn() << " from "
               << ProactorBase::me()->GetPoolIndex() << " to " << *sid;
       cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
     }
@@ -2192,7 +2205,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   exec_info.state = ConnectionState::ExecInfo::EXEC_RUNNING;
 
-  VLOG(1) << "StartExec " << exec_info.body.size();
+  VLOG(2) << "StartExec " << exec_info.body.size();
 
   // Make sure we flush whatever responses we aggregated in the reply builder.
   SinkReplyBuilder::ReplyAggregator agg(rb);
