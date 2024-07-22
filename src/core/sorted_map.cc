@@ -711,7 +711,7 @@ size_t SortedMap::LexCount(const zlexrangespec& range) const {
 }
 
 bool SortedMap::Iterate(unsigned start_rank, unsigned len, bool reverse,
-                        absl::FunctionRef<bool(sds, double)> cb) const {
+                        std::function<bool(sds, double)> cb) const {
   DCHECK_GT(len, 0u);
   unsigned end_rank = start_rank + len - 1;
   bool success;

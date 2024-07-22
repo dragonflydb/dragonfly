@@ -73,15 +73,13 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
   }
 
   const auto flush_threshold = absl::GetFlag(FLAGS_serialization_max_chunk_size);
-  std::function<bool(size_t)> flush_fun;
+  std::function<void(size_t, bool)> flush_fun;
   if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
-    flush_fun = [this, flush_threshold](size_t bytes_serialized) {
+    flush_fun = [this, flush_threshold](size_t bytes_serialized, bool is_last_chunk) {
       if (bytes_serialized > flush_threshold) {
-        auto serialized = Serialize();
+        auto serialized = Serialize(is_last_chunk);
         VLOG(2) << "FlushedToChannel " << serialized << " bytes";
-        return true;
       }
-      return false;
     };
   }
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_, flush_fun);
@@ -322,9 +320,9 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   }
 }
 
-size_t SliceSnapshot::Serialize() {
+size_t SliceSnapshot::Serialize(bool is_last_chunk) {
   io::StringFile sfile;
-  serializer_->FlushToSink(&sfile);
+  serializer_->FlushToSink(&sfile, is_last_chunk);
 
   size_t serialized = sfile.val.size();
   if (serialized == 0)

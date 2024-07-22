@@ -294,7 +294,7 @@ SerializerBase::SerializerBase(CompressionMode compression_mode)
 }
 
 RdbSerializer::RdbSerializer(CompressionMode compression_mode,
-                             std::function<bool(size_t)> flush_fun)
+                             std::function<void(size_t, bool)> flush_fun)
     : SerializerBase(compression_mode), flush_fun_(std::move(flush_fun)) {
 }
 
@@ -433,10 +433,8 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
         RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
       } else {
         RETURN_ON_ERR(SaveString(node->entry, node->sz));
-        if (!node->next) {
-          is_last_entry_ = true;
-        }
-        FlushIfNeeded();
+        const bool is_last_chunk = (node->next == nullptr);
+        FlushIfNeeded(is_last_chunk);
       }
     } else {
       // listpack
@@ -472,7 +470,6 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
     StringSet* set = (StringSet*)obj.RObjPtr();
 
     RETURN_ON_ERR(SaveLen(set->SizeSlow()));
-
     for (auto it = set->begin(); it != set->end();) {
       RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
       if (set->ExpirationUsed()) {
@@ -482,10 +479,8 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
       }
       ++it;
-      if (it == set->end()) {
-        is_last_entry_ = true;
-      }
-      FlushIfNeeded();
+      const bool is_last_chunk = (it == set->end());
+      FlushIfNeeded(is_last_chunk);
     }
   } else {
     CHECK_EQ(obj.Encoding(), kEncodingIntSet);
@@ -517,10 +512,8 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
       }
       ++it;
-      if (it == string_map->end()) {
-        is_last_entry_ = true;
-      }
-      FlushIfNeeded();
+      const bool is_last_chunk = (it == string_map->end());
+      FlushIfNeeded(is_last_chunk);
     }
   } else {
     CHECK_EQ(kEncodingListPack, pv.Encoding());
@@ -547,14 +540,18 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
      * element will always be the smaller, so adding to the skiplist
      * will always immediately stop at the head, making the insertion
      * O(1) instead of O(log(N)). */
-    zs->Iterate(0, zs->Size(), true, [&](sds ele, double score) {
+    const size_t total = zs->Size();
+    size_t count = 0;
+    zs->Iterate(0, total, true, [&](sds ele, double score) mutable {
       ec = SaveString(string_view{ele, sdslen(ele)});
       if (ec)
         return false;
       ec = SaveBinaryDouble(score);
       if (ec)
         return false;
-      FlushIfNeeded();
+      ++count;
+      const bool is_last_chunk = (count == total);
+      FlushIfNeeded(is_last_chunk);
       return true;
     });
   } else {
@@ -665,10 +662,8 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
 
     string_view blob = sbf->data(i);
     RETURN_ON_ERR(SaveString(blob));
-    if (i + 1 == sbf->num_filters()) {
-      is_last_entry_ = true;
-    }
-    FlushIfNeeded();
+    const bool is_last_chunk = (i + 1) == sbf->num_filters();
+    FlushIfNeeded(is_last_chunk);
   }
 
   return {};
@@ -828,8 +823,8 @@ error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-error_code SerializerBase::FlushToSink(io::Sink* s) {
-  auto bytes = PrepareFlush();
+error_code SerializerBase::FlushToSink(io::Sink* s, bool is_last_chunk) {
+  auto bytes = PrepareFlush(is_last_chunk);
   if (bytes.empty())
     return error_code{};
 
@@ -842,8 +837,8 @@ error_code SerializerBase::FlushToSink(io::Sink* s) {
   return error_code{};
 }
 
-error_code RdbSerializer::FlushToSink(io::Sink* s) {
-  RETURN_ON_ERR(SerializerBase::FlushToSink(s));
+error_code RdbSerializer::FlushToSink(io::Sink* s, bool is_last_chunk) {
+  RETURN_ON_ERR(SerializerBase::FlushToSink(s, is_last_chunk));
 
   // After every flush we should write the DB index again because the blobs in the channel are
   // interleaved and multiple savers can correspond to a single writer (in case of single file rdb
@@ -905,7 +900,7 @@ void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
   CHECK(!ec);
   ec = serializer.SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  ec = serializer.FlushToSink(out);
+  ec = serializer.FlushToSink(out, false);
   CHECK(!ec);         // make sure that fully was successful
   AppendFooter(out);  // version and crc
   CHECK_GT(out->str().size(), 10u);
@@ -915,20 +910,19 @@ size_t SerializerBase::SerializedLen() const {
   return mem_buf_.InputLen();
 }
 
-io::Bytes SerializerBase::PrepareFlush() {
+io::Bytes SerializerBase::PrepareFlush(bool is_last_chunk) {
   size_t sz = mem_buf_.InputLen();
   if (sz == 0)
     return mem_buf_.InputBuffer();
 
-  if (is_last_entry_ && number_of_chunks_ == 0) {
+  if (is_last_chunk && number_of_chunks_ == 0) {
     if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD ||
         compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
       CompressBlob();
     }
   }
 
-  number_of_chunks_ = is_last_entry_ ? 0 : (number_of_chunks_ + 1);
-  is_last_entry_ = false;
+  number_of_chunks_ = is_last_chunk ? 0 : (number_of_chunks_ + 1);
 
   return mem_buf_.InputBuffer();
 }
@@ -1464,7 +1458,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
 }
 
 error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
-  RETURN_ON_ERR(impl_->serializer()->FlushToSink(impl_->sink()));
+  RETURN_ON_ERR(impl_->serializer()->FlushToSink(impl_->sink(), false));
 
   if (save_mode_ == SaveMode::SUMMARY) {
     impl_->serializer()->SendFullSyncCut();
@@ -1539,7 +1533,7 @@ error_code RdbSaver::SaveEpilog() {
   absl::little_endian::Store64(buf, chksum);
   RETURN_ON_ERR(ser.WriteRaw(buf));
 
-  RETURN_ON_ERR(ser.FlushToSink(impl_->sink()));
+  RETURN_ON_ERR(ser.FlushToSink(impl_->sink(), false));
 
   return impl_->Flush();
 }
@@ -1627,11 +1621,10 @@ size_t RdbSerializer::GetTempBufferSize() const {
   return SerializerBase::GetTempBufferSize() + tmp_str_.size();
 }
 
-bool RdbSerializer::FlushIfNeeded() {
+void RdbSerializer::FlushIfNeeded(bool is_last_chunk) {
   if (flush_fun_) {
-    return flush_fun_(SerializedLen());
+    flush_fun_(SerializedLen(), is_last_chunk);
   }
-  return false;
 }
 
 }  // namespace dfly

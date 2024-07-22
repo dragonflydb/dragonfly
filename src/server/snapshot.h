@@ -121,7 +121,7 @@ class SliceSnapshot {
   bool PushSerializedToChannel(bool force);
 
   // Helper function that flushes the serialized items into the RecordStream
-  size_t Serialize();
+  size_t Serialize(bool is_last_chunk = false);
 
  public:
   uint64_t snapshot_version() const {

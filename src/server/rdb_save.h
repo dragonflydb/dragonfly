@@ -149,7 +149,7 @@ class SerializerBase {
   size_t SerializedLen() const;
 
   // Flush internal buffer to sink.
-  virtual std::error_code FlushToSink(io::Sink* s);
+  virtual std::error_code FlushToSink(io::Sink* s, bool is_last_chunk);
 
   size_t GetBufferCapacity() const;
   virtual size_t GetTempBufferSize() const;
@@ -172,7 +172,7 @@ class SerializerBase {
 
  protected:
   // Prepare internal buffer for flush. Compress it.
-  io::Bytes PrepareFlush();
+  io::Bytes PrepareFlush(bool is_last_chunk);
 
   // If membuf data is compressable use compression impl to compress the data and write it to membuf
   void CompressBlob();
@@ -196,17 +196,16 @@ class SerializerBase {
   base::PODArray<uint8_t> tmp_buf_;
   std::unique_ptr<LZF_HSLOT[]> lzf_;
   size_t number_of_chunks_ = 0;
-  bool is_last_entry_ = false;
 };
 
 class RdbSerializer : public SerializerBase {
  public:
   explicit RdbSerializer(CompressionMode compression_mode,
-                         std::function<bool(size_t)> flush_fun = {});
+                         std::function<void(size_t, bool)> flush_fun = {});
 
   ~RdbSerializer();
 
-  std::error_code FlushToSink(io::Sink* s) override;
+  std::error_code FlushToSink(io::Sink* s, bool is_last_chunk) override;
   std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
@@ -244,11 +243,11 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamConsumers(streamCG* cg);
 
   // Might preempt
-  bool FlushIfNeeded();
+  void FlushIfNeeded(bool is_last_chunk);
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
-  std::function<bool(size_t)> flush_fun_;
+  std::function<void(size_t, bool)> flush_fun_;
 };
 
 }  // namespace dfly
