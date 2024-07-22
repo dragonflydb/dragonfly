@@ -1278,7 +1278,6 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
-@pytest.mark.skip("Fails in CI, TODO: to reenable it")
 @pytest.mark.parametrize(
     "node_count, segments, keys",
     [
@@ -1373,7 +1372,6 @@ async def test_cluster_fuzzymigration(
 
     logging.debug("finish migrations")
 
-    @assert_eventually(times=500)
     async def all_finished():
         res = True
         for node in nodes:
@@ -1410,7 +1408,11 @@ async def test_cluster_fuzzymigration(
                         res = False
         return res
 
-    await all_finished
+    @assert_eventually(times=500)
+    async def test_all_finished():
+        assert await all_finished()
+
+    await test_all_finished()
 
     for counter in counters:
         counter.cancel()
