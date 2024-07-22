@@ -433,6 +433,9 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
         RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
       } else {
         RETURN_ON_ERR(SaveString(node->entry, node->sz));
+        if (!node->next) {
+          is_last_entry_ = true;
+        }
         FlushIfNeeded();
       }
     } else {
@@ -470,13 +473,17 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
 
     RETURN_ON_ERR(SaveLen(set->SizeSlow()));
 
-    for (auto it = set->begin(); it != set->end(); ++it) {
+    for (auto it = set->begin(); it != set->end();) {
       RETURN_ON_ERR(SaveString(string_view{*it, sdslen(*it)}));
       if (set->ExpirationUsed()) {
         int64_t expiry = -1;
         if (it.HasExpiry())
           expiry = it.ExpiryTime();
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
+      }
+      ++it;
+      if (it == set->end()) {
+        is_last_entry_ = true;
       }
       FlushIfNeeded();
     }
@@ -499,7 +506,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
 
     RETURN_ON_ERR(SaveLen(string_map->SizeSlow()));
 
-    for (auto it = string_map->begin(); it != string_map->end(); ++it) {
+    for (auto it = string_map->begin(); it != string_map->end();) {
       const auto& [k, v] = *it;
       RETURN_ON_ERR(SaveString(string_view{k, sdslen(k)}));
       RETURN_ON_ERR(SaveString(string_view{v, sdslen(v)}));
@@ -508,6 +515,10 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
         if (it.HasExpiry())
           expiry = it.ExpiryTime();
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
+      }
+      ++it;
+      if (it == string_map->end()) {
+        is_last_entry_ = true;
       }
       FlushIfNeeded();
     }
@@ -654,6 +665,9 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
 
     string_view blob = sbf->data(i);
     RETURN_ON_ERR(SaveString(blob));
+    if (i + 1 == sbf->num_filters()) {
+      is_last_entry_ = true;
+    }
     FlushIfNeeded();
   }
 
@@ -906,10 +920,15 @@ io::Bytes SerializerBase::PrepareFlush() {
   if (sz == 0)
     return mem_buf_.InputBuffer();
 
-  if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD ||
-      compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
-    CompressBlob();
+  if (is_last_entry_ && number_of_chunks_ == 0) {
+    if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD ||
+        compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
+      CompressBlob();
+    }
   }
+
+  number_of_chunks_ = is_last_entry_ ? 0 : (number_of_chunks_ + 1);
+  is_last_entry_ = false;
 
   return mem_buf_.InputBuffer();
 }

@@ -195,6 +195,8 @@ class SerializerBase {
   std::optional<CompressionStats> compression_stats_;
   base::PODArray<uint8_t> tmp_buf_;
   std::unique_ptr<LZF_HSLOT[]> lzf_;
+  size_t number_of_chunks_ = 0;
+  bool is_last_entry_ = false;
 };
 
 class RdbSerializer : public SerializerBase {
