@@ -100,7 +100,7 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
 
 TEST_F(TieredStorageTest, MGET) {
   vector<string> command = {"MGET"}, values = {};
-  for (char key = 'A'; key <= 'B'; key++) {
+  for (char key = 'A'; key <= 'Z'; key++) {
     command.emplace_back(1, key);
     values.emplace_back(3000, key);
     Run({"SET", command.back(), values.back()});
@@ -125,6 +125,22 @@ TEST_F(TieredStorageTest, SimpleAppend) {
     EXPECT_THAT(Run({"APPEND", "k0", "B"}), IntArg(3001));
     ASSERT_EQ(Run({"GET", "k0"}), BuildString(3000) + 'B') << sleep;
   }
+}
+
+TEST_F(TieredStorageTest, Ranges) {
+  Run({"SET", "key", string(3000, 'a')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 1; });
+
+  Run({"SETRANGE", "key", "1000", string(1000, 'b')});
+  auto resp = Run({"GET", "key"});
+  EXPECT_EQ(resp, string(1000, 'a') + string(1000, 'b') + string(1000, 'a'));
+
+  Run({"DEL", "key"});
+  Run({"SET", "key", string(1500, 'c') + string(1500, 'd')});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 2; });
+
+  resp = Run({"GETRANGE", "key", "1000", "1999"});
+  EXPECT_EQ(resp, string(500, 'c') + string(500, 'd'));
 }
 
 TEST_F(TieredStorageTest, MultiDb) {
