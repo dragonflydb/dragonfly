@@ -524,28 +524,28 @@ class DbSlice {
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
 
- private:
   class LocalBlockingCounter {
    public:
     void lock() {
-      ++mutating;
+      ++mutating_;
     }
 
     void unlock() {
-      --mutating;
-      if (mutating == 0) {
-        cond_var.notify_one();
+      DCHECK(mutating_ > 0);
+      --mutating_;
+      if (mutating_ == 0) {
+        cond_var_.notify_one();
       }
     }
 
     void Wait() {
       util::fb2::NoOpLock noop_lk_;
-      cond_var.wait(noop_lk_, [this]() { return mutating == 0; });
+      cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
     }
 
    private:
-    util::fb2::CondVarAny cond_var;
-    size_t mutating = 0;
+    util::fb2::CondVarAny cond_var_;
+    size_t mutating_ = 0;
   };
 
   // We need this because registered callbacks might yield. If RegisterOnChange
