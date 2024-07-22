@@ -161,8 +161,9 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   int64_t memory_margin_ = 0;
 
   struct {
-    size_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
-    size_t total_defrags = 0;
+    uint64_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
+    uint64_t total_defrags = 0;
+    uint64_t total_uploads = 0;
   } stats_;
 
   TieredStorage* ts_;
@@ -214,6 +215,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   auto* pv = Find(key);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
     bool is_raw = !modified;
+    ++stats_.total_uploads;
     Upload(key.first, value, is_raw, segment.length, pv);
     return true;
   }
@@ -391,6 +393,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.total_stashes = shard_stats.total_stashes;
     stats.total_cancels = shard_stats.total_cancels;
     stats.total_defrags = shard_stats.total_defrags;
+    stats.total_uploads = shard_stats.total_uploads;
   }
 
   {  // OpManager stats

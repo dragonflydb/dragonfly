@@ -12,7 +12,7 @@ import async_timeout
 from dataclasses import dataclass
 from aiohttp import ClientSession
 
-from .utility import tick_timer
+from .utility import tick_timer, assert_eventually
 from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
@@ -584,10 +584,14 @@ async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
     val = (b"a" * 100) + b"\r\n"
     for i in range(0, 900):
         writer.write(b"$100\r\n" + val)
-    await writer.drain()
-    # writer is pending because the request is not finished.
-    stats = await async_client.execute_command("memory stats")
-    assert stats["connections.direct_bytes"] > 130000
+    await writer.drain()  # writer is pending because the request is not finished.
+
+    @assert_eventually
+    async def check_stats():
+        stats = await async_client.execute_command("memory stats")
+        assert stats["connections.direct_bytes"] > 130000
+
+    await check_stats()
 
 
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factory):

@@ -207,9 +207,13 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   // Wait for offload to do it all again
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
   auto resp = Run({"INFO", "ALL"});
-  LOG(INFO) << "INFO " << resp.GetString();
+  VLOG(1) << "INFO " << resp.GetString();
   auto metrics = GetMetrics();
-  EXPECT_EQ(metrics.tiered_stats.total_stashes, 2 * kNum) << resp.GetString();
+
+  // Not all values were necessary uploaded during GET calls, but all that were uploaded
+  // should be re-stashed again.
+  EXPECT_EQ(metrics.tiered_stats.total_stashes, kNum + metrics.tiered_stats.total_uploads)
+      << resp.GetString();
   EXPECT_EQ(metrics.tiered_stats.total_fetches, kNum);
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }
