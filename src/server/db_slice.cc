@@ -506,7 +506,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   }
 
   // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
-  // attribute of the entry in case of value overtides.
+  // attribute of the entry in case of value overrides.
   res.it->first.SetTouched(true);
 
   db.top_keys.Touch(key);

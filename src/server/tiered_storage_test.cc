@@ -90,6 +90,7 @@ TEST_F(TieredStorageTest, SimpleGetSet) {
   for (size_t i = kMin; i < kMax; i++) {
     auto resp = Run({"GET", absl::StrCat("k", i)});
     ASSERT_EQ(resp, string(i, 'B')) << i;
+    Run({"GET", absl::StrCat("k", i)});  // To enforce uploads.
   }
 
   metrics = GetMetrics();
@@ -137,7 +138,9 @@ TEST_F(TieredStorageTest, MultiDb) {
   for (size_t i = 0; i < 10; i++) {
     Run({"SELECT", absl::StrCat(i)});
     EXPECT_EQ(GetMetrics().db_stats[i].tiered_entries, 1);
-    EXPECT_EQ(Run({"GET", absl::StrCat("k", i)}), BuildString(3000, char('A' + i)));
+    string key = absl::StrCat("k", i);
+    EXPECT_EQ(Run({"GET", key}), BuildString(3000, char('A' + i)));
+    Run({"GET", key});
     EXPECT_EQ(GetMetrics().db_stats[i].tiered_entries, 0);
   }
 }
@@ -158,14 +161,17 @@ TEST_F(TieredStorageTest, Defrag) {
   ASSERT_EQ(metrics.tiered_stats.small_bins_filling_bytes, 537);
 
   // Reading 3 values still leaves the bin more than half occupied
-  Run({"GET", string(1, 'a')});
-  Run({"GET", string(1, 'b')});
-  Run({"GET", string(1, 'c')});
+  for (unsigned j = 0; j < 2; ++j) {
+    Run({"GET", string(1, 'a')});
+    Run({"GET", string(1, 'b')});
+    Run({"GET", string(1, 'c')});
+  }
   metrics = GetMetrics();
   EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 1u);
   EXPECT_EQ(metrics.tiered_stats.small_bins_entries_cnt, 4u);
 
   // This tirggers defragmentation, as only 3 < 7/2 remain left
+  Run({"GET", string(1, 'd')});
   Run({"GET", string(1, 'd')});
   metrics = GetMetrics();
   EXPECT_EQ(metrics.tiered_stats.total_defrags, 3u);
@@ -202,6 +208,7 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
     EXPECT_EQ(resp, value);
     resp = Run({"TTL", key});
     EXPECT_THAT(resp, IntArg(100));
+    Run({"GET", key});  // enforce uploads
   }
 
   // Wait for offload to do it all again
@@ -214,7 +221,7 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   // should be re-stashed again.
   EXPECT_EQ(metrics.tiered_stats.total_stashes, kNum + metrics.tiered_stats.total_uploads)
       << resp.GetString();
-  EXPECT_EQ(metrics.tiered_stats.total_fetches, kNum);
+  EXPECT_EQ(metrics.tiered_stats.total_fetches, kNum * 2);
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }
 
