@@ -102,8 +102,6 @@ class ClusterShardMigration {
     }
     CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
     if (!tx_data.IsGlobalCmd()) {
-      VLOG(3) << "Execute cmd without sync between shards. cmd: "
-              << CmdArgList(tx_data.command.cmd_args);
       executor_.Execute(tx_data.dbid, tx_data.command);
     } else {
       // TODO check which global commands should be supported
@@ -149,7 +147,8 @@ bool IncomingSlotMigration::Join(long attempt) {
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG(1) << "Checking whether to continue with join " << passed << " vs " << timeout;
+    VLOG_EVERY_N(1, 1000) << "Checking whether to continue with join " << passed << " vs "
+                          << timeout;
     if (passed >= timeout) {
       LOG(WARNING) << "Can't join migration in time";
       ReportError(GenericError("Can't join migration in time"));
