@@ -176,11 +176,17 @@ Transaction::~Transaction() {
 
 void Transaction::InitBase(Namespace* ns, DbIndex dbid, CmdArgList args) {
   global_ = false;
-  namespace_ = ns;
   db_index_ = dbid;
   full_args_ = args;
   local_result_ = OpStatus::OK;
   stats_.coordinator_index = ProactorBase::me() ? ProactorBase::me()->GetPoolIndex() : kInvalidSid;
+
+  // Namespace is read by poll execution, so it can't be changed on the fly
+  if (IsScheduled()) {
+    DCHECK_EQ(namespace_, ns);
+  } else {
+    namespace_ = ns;
+  }
 }
 
 void Transaction::InitGlobal() {
