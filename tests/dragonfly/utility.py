@@ -715,3 +715,16 @@ def assert_eventually(wrapped=None, *, times=100):
                 await asyncio.sleep(0.1)
 
     return wrapper(wrapped)
+
+
+def wait_for_or_assert(*, result=True, times=500):
+    @wrapt.decorator
+    async def wrapper(wrapped, instance, args, kwargs):
+        for _ in range(times):
+            if await wrapped(*args, **kwargs) == result:
+                return
+            await asyncio.sleep(0.1)
+
+        assert False
+
+    return wrapper
