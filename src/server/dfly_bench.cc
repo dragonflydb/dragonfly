@@ -35,7 +35,7 @@ ABSL_FLAG(string, h, "localhost", "server hostname/ip");
 ABSL_FLAG(uint64_t, key_minimum, 0, "Min value for keys used");
 ABSL_FLAG(uint64_t, key_maximum, 50'000'000, "Max value for keys used");
 ABSL_FLAG(string, key_prefix, "key:", "keys prefix");
-ABSL_FLAG(string, key_dist, "U", "U for uniform, N for normal, Z for zipfian");
+ABSL_FLAG(string, key_dist, "U", "U for uniform, N for normal, Z for zipfian, S for sequential");
 ABSL_FLAG(double, zipf_alpha, 0.99, "zipfian alpha parameter");
 ABSL_FLAG(uint64_t, seed, 42, "A seed for random data generation");
 ABSL_FLAG(uint64_t, key_stddev, 0,
@@ -81,7 +81,7 @@ class CommandGenerator {
  public:
   CommandGenerator(KeyGenerator* keygen);
 
-  string operator()();
+  string Next();
 
   bool might_hit() const {
     return might_hit_;
@@ -116,7 +116,7 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
   }
 }
 
-string CommandGenerator::operator()() {
+string CommandGenerator::Next() {
   cmd_.clear();
   string key;
   if (command_.empty()) {
@@ -177,7 +177,7 @@ class Driver {
   Driver& operator=(Driver&&) = default;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
-  void Run(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns);
+  void Run(uint64_t cycle_ns, CommandGenerator* cmd_gen);
 
  private:
   void PopRequest();
@@ -269,15 +269,13 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
 }
 
-void Driver::Run(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) {
+void Driver::Run(uint64_t cycle_ns, CommandGenerator* cmd_gen) {
   auto receive_fb = MakeFiber([this] { ReceiveFb(); });
 
   int64_t next_invocation = absl::GetCurrentTimeNanos();
 
   const absl::Time start = absl::Now();
 
-  KeyGenerator key_gen(key_min, key_max);
-  CommandGenerator cmd_gen(&key_gen);
   for (unsigned i = 0; i < num_reqs_; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
@@ -296,11 +294,11 @@ void Driver::Run(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) {
       fb2::NoOpLock lk;
       cnd_.wait(lk, [this] { return reqs_.empty(); });
     }
-    string cmd = cmd_gen();
+    string cmd = cmd_gen->Next();
 
     Req req;
     req.start = absl::GetCurrentTimeNanos();
-    req.might_hit = cmd_gen.might_hit();
+    req.might_hit = cmd_gen->might_hit();
 
     reqs_.push(req);
 
@@ -444,15 +442,12 @@ void TLocalClient::Connect(tcp::endpoint ep) {
 }
 
 void TLocalClient::Run(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) {
-  uint32_t quanta =
-      dist_type == SEQUENTIAL ? std::max(1UL, (key_max - key_min + 1) / drivers_.size()) : 0;
+  KeyGenerator key_gen(key_min, key_max);
+  CommandGenerator cmd_gen(&key_gen);
+
   vector<fb2::Fiber> fbs(drivers_.size());
   for (size_t i = 0; i < fbs.size(); ++i) {
-    uint32 from = key_min + quanta * i;
-    uint32 to = quanta > 0 && i + 1 < fbs.size() ? key_min + quanta * (i + 1) - 1 : key_max;
-
-    fbs[i] = fb2::Fiber(absl::StrCat("run/", i),
-                        [&, i, from, to] { drivers_[i]->Run(from, to, cycle_ns); });
+    fbs[i] = fb2::Fiber(absl::StrCat("run/", i), [&, i] { drivers_[i]->Run(cycle_ns, &cmd_gen); });
   }
 
   for (auto& fb : fbs)
@@ -468,6 +463,8 @@ void WatchFiber(absl::Time start_time, atomic_bool* finish_signal, ProactorPool*
 
   absl::Time last_print;  // initialized to epoch time.
   uint64_t num_last_resp_cnt = 0;
+
+  uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n);
 
   while (*finish_signal == false) {
     // we sleep with resolution of 1s but print with lower frequency to be more responsive
@@ -487,9 +484,11 @@ void WatchFiber(absl::Time start_time, atomic_bool* finish_signal, ProactorPool*
       uint64_t total_ms = (now - start_time) / absl::Milliseconds(1);
       uint64_t period_ms = (now - last_print) / absl::Milliseconds(1);
       uint64_t period_resp_cnt = num_resp - num_last_resp_cnt;
-      CONSOLE_INFO << total_ms / 1000
-                   << "s: effective RPS(now/accumulated): " << period_resp_cnt * 1000 / period_ms
-                   << "/" << num_resp * 1000 / total_ms;
+      double done_perc = double(num_resp) * 100 / resp_goal;
+
+      CONSOLE_INFO << total_ms / 1000 << "s: " << absl::StrFormat("%.1f", done_perc)
+                   << "% done, effective RPS(now/accumulated): "
+                   << period_resp_cnt * 1000 / period_ms << "/" << num_resp * 1000 / total_ms;
 
       last_print = now;
       num_last_resp_cnt = num_resp;
@@ -609,7 +608,8 @@ int main(int argc, char* argv[]) {
     client.reset();
   });
 
-  CONSOLE_INFO << "\nTotal time: " << duration << ". Overall number of requests: " << num_responses;
+  CONSOLE_INFO << "\nTotal time: " << duration << ". Overall number of requests: " << num_responses
+               << ", QPS: " << num_responses / (duration / absl::Seconds(1));
 
   if (num_errors) {
     CONSOLE_INFO << "Got " << num_errors << " error responses!";
