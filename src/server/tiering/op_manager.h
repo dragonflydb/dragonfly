@@ -76,7 +76,7 @@ class OpManager {
   virtual void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) = 0;
 
   // Notify that an entry was successfully fetched. Includes whether entry was modified.
-  // Returns true if value needs to be deleted.
+  // Returns true if value needs to be deleted from the storage.
   virtual bool NotifyFetched(EntryId id, std::string_view value, DiskSegment segment,
                              bool modified) = 0;
 

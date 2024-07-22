@@ -214,10 +214,14 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
   auto key = get<OpManager::KeyRef>(id);
   auto* pv = Find(key);
   if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
-    bool is_raw = !modified;
-    ++stats_.total_uploads;
-    Upload(key.first, value, is_raw, segment.length, pv);
-    return true;
+    if (modified || pv->WasTouched()) {
+      bool is_raw = !modified;
+      ++stats_.total_uploads;
+      Upload(key.first, value, is_raw, segment.length, pv);
+      return true;
+    }
+    pv->SetTouched(true);
+    return false;
   }
 
   LOG(DFATAL) << "Internal error, should not reach this";
