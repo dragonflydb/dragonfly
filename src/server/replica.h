@@ -119,6 +119,7 @@ class Replica : ProtocolClient {
     bool full_sync_done;
     time_t master_last_io_sec;  // monotonic clock.
     std::string master_id;
+    uint32_t reconnect_count;
   };
 
   Summary GetSummary() const;  // thread-safe, blocks fiber
@@ -159,6 +160,8 @@ class Replica : ProtocolClient {
   std::string id_;
 
   std::optional<cluster::SlotRange> slot_range_;
+
+  uint32_t reconnect_count_ = 0;
 };
 
 class RdbLoader;
