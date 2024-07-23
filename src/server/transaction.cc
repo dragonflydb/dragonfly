@@ -185,6 +185,7 @@ void Transaction::InitBase(Namespace* ns, DbIndex dbid, CmdArgList args) {
   if (IsScheduled()) {
     DCHECK_EQ(namespace_, ns);
   } else {
+    DCHECK(namespace_ == nullptr || namespace_ == ns);
     namespace_ = ns;
   }
 }
