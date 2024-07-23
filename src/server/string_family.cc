@@ -1503,7 +1503,7 @@ void StringFamily::Register(CommandRegistry* registry) {
       << CI{"DECRBY", CO::WRITE | CO::FAST, 3, 1, 1, acl::kDecrBy}.HFUNC(DecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1, acl::kGet}.HFUNC(Get)
       << CI{"GETDEL", CO::WRITE | CO::FAST, 2, 1, 1, acl::kGetDel}.HFUNC(GetDel)
-      << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -1, 1, 1, acl::kGetEx}
+      << CI{"GETEX", CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1, acl::kGetEx}
              .HFUNC(GetEx)
       << CI{"GETSET", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::kGetSet}.HFUNC(GetSet)
       << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1, acl::kMGet}.HFUNC(MGet)
