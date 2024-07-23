@@ -139,6 +139,11 @@ class CompressorImpl;
 
 class SerializerBase {
  public:
+  enum class ChunkState {
+    SIMPLE_CHUNK,  // Just a chunk, we got multiple for a single value
+    FINAL_CHUNK,   // Last chunk of a given value
+  };
+
   explicit SerializerBase(CompressionMode compression_mode);
   virtual ~SerializerBase() = default;
 
@@ -149,7 +154,7 @@ class SerializerBase {
   size_t SerializedLen() const;
 
   // Flush internal buffer to sink.
-  virtual std::error_code FlushToSink(io::Sink* s, bool is_last_chunk);
+  virtual std::error_code FlushToSink(io::Sink* s, ChunkState chunk_state);
 
   size_t GetBufferCapacity() const;
   virtual size_t GetTempBufferSize() const;
@@ -172,7 +177,7 @@ class SerializerBase {
 
  protected:
   // Prepare internal buffer for flush. Compress it.
-  io::Bytes PrepareFlush(bool is_last_chunk);
+  io::Bytes PrepareFlush(ChunkState chunk_state);
 
   // If membuf data is compressable use compression impl to compress the data and write it to membuf
   void CompressBlob();
@@ -201,11 +206,11 @@ class SerializerBase {
 class RdbSerializer : public SerializerBase {
  public:
   explicit RdbSerializer(CompressionMode compression_mode,
-                         std::function<void(size_t, bool)> flush_fun = {});
+                         std::function<void(size_t, ChunkState)> flush_fun = {});
 
   ~RdbSerializer();
 
-  std::error_code FlushToSink(io::Sink* s, bool is_last_chunk) override;
+  std::error_code FlushToSink(io::Sink* s, ChunkState chunk_state) override;
   std::error_code SelectDb(uint32_t dbid);
 
   // Must be called in the thread to which `it` belongs.
@@ -243,11 +248,11 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamConsumers(streamCG* cg);
 
   // Might preempt
-  void FlushIfNeeded(bool is_last_chunk);
+  void FlushIfNeeded(ChunkState chunk_state);
 
   std::string tmp_str_;
   DbIndex last_entry_db_index_ = kInvalidDbId;
-  std::function<void(size_t, bool)> flush_fun_;
+  std::function<void(size_t, ChunkState)> flush_fun_;
 };
 
 }  // namespace dfly
