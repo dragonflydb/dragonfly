@@ -74,7 +74,6 @@ async def test_replication_all(
         args["maxmemory"] = str(t_master * 256) + "mb"
 
     if big_value:
-        args["compression_mode"] = 0
         args["serialization_max_chunk_size"] = 4096
 
     master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **args)

@@ -6,6 +6,7 @@
 
 #include <absl/functional/function_ref.h>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -80,7 +81,7 @@ class SortedMap {
   // Runs cb for each element in the range [start_rank, start_rank + len).
   // Stops iteration if cb returns false. Returns false in this case.
   bool Iterate(unsigned start_rank, unsigned len, bool reverse,
-               absl::FunctionRef<bool(sds, double)> cb) const;
+               std::function<bool(sds, double)> cb) const;
 
   uint64_t Scan(uint64_t cursor, absl::FunctionRef<void(std::string_view, double)> cb) const;
 
