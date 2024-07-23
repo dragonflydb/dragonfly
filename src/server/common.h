@@ -82,6 +82,7 @@ struct TieredStats {
   uint64_t small_bins_cnt = 0;
   uint64_t small_bins_entries_cnt = 0;
   size_t small_bins_filling_bytes = 0;
+  size_t cold_storage_bytes = 0;
 
   TieredStats& operator+=(const TieredStats&);
 };

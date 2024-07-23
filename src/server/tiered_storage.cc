@@ -17,6 +17,7 @@
 #include "base/logging.h"
 #include "server/common.h"
 #include "server/db_slice.h"
+#include "server/engine_shard_set.h"
 #include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
@@ -26,8 +27,8 @@
 
 using namespace facade;
 
-ABSL_FLAG(uint32_t, tiered_storage_memory_margin, 1_MB,
-          "In bytes. If memory budget on a shard goes blow this limit, tiering stops "
+ABSL_FLAG(uint32_t, tiered_storage_memory_margin, 10_MB,
+          "In bytes. If memory budget on a shard goes below this limit, tiering stops "
           "hot-loading values into ram.");
 
 ABSL_FLAG(unsigned, tiered_storage_write_depth, 50,
@@ -250,7 +251,7 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
   return false;
 }
 
-TieredStorage::TieredStorage(DbSlice* db_slice, size_t max_size)
+TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
     : op_manager_{make_unique<ShardOpManager>(this, db_slice, max_size)},
       bins_{make_unique<tiering::SmallBins>()} {
   write_depth_limit_ = absl::GetFlag(FLAGS_tiered_storage_write_depth);
@@ -306,6 +307,8 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
                                            const PrimeValue& value,
                                            std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
+  DCHECK(!value.IsCool());  // TBD
+
   util::fb2::Future<T> future;
   PrimeValue decoder;
   decoder.ImportExternal(value);
@@ -419,6 +422,7 @@ TieredStats TieredStorage::GetStats() const {
 
   {  // Own stats
     stats.total_stash_overflows = stats_.stash_overflow_cnt;
+    stats.cold_storage_bytes = cool_queue_.UsedMemory();
   }
   return stats;
 }

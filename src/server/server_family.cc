@@ -2190,6 +2190,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
     append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
+    append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
   }
 
   if (should_enter("PERSISTENCE", true)) {

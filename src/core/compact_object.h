@@ -331,14 +331,14 @@ class CompactObj {
   }
 
   void SetExternal(size_t offset, uint32_t sz);
-  void SetCold(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
+  void SetCool(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
 
-  struct ColdItem {
+  struct CoolItem {
     uint16_t page_offset;
     size_t serialized_size;
     detail::TieredColdRecord* record;
   };
-  ColdItem GetCold() const;
+  CoolItem GetCool() const;
 
   void ImportExternal(const CompactObj& src);
 
@@ -433,6 +433,8 @@ class CompactObj {
     uint16_t is_cool : 1;
     uint16_t is_reserved : 15;
 
+    // We do not have enough space in the common area to store page_index together with
+    // cool_record pointer. Therefore, we moved this field into TieredColdRecord itself.
     struct Offload {
       uint32_t page_index;
       uint32_t reserved;
@@ -440,7 +442,7 @@ class CompactObj {
 
     union {
       Offload offload;
-      detail::TieredColdRecord* cold_record;
+      detail::TieredColdRecord* cool_record;
     };
   } __attribute__((packed));
 

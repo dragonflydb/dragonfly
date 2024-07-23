@@ -950,21 +950,23 @@ void CompactObj::SetExternal(size_t offset, uint32_t sz) {
   u_.ext_ptr.offload.page_index = offset / 4096;
 }
 
-void CompactObj::SetCold(size_t offset, uint32_t sz, detail::TieredColdRecord* record) {
-  SetMeta(EXTERNAL_TAG, mask_);
+void CompactObj::SetCool(size_t offset, uint32_t sz, detail::TieredColdRecord* record) {
+  // We copy the mask of the "cooled" referenced object because it contains the encoding info.
+  SetMeta(EXTERNAL_TAG, record->value.mask_);
+
   u_.ext_ptr.is_cool = 1;
   u_.ext_ptr.page_offset = offset % 4096;
   u_.ext_ptr.serialized_size = sz;
-  u_.ext_ptr.cold_record = record;
+  u_.ext_ptr.cool_record = record;
 }
 
-auto CompactObj::GetCold() const -> ColdItem {
+auto CompactObj::GetCool() const -> CoolItem {
   DCHECK(IsExternal() && u_.ext_ptr.is_cool);
 
-  ColdItem res;
+  CoolItem res;
   res.page_offset = u_.ext_ptr.page_offset;
   res.serialized_size = u_.ext_ptr.serialized_size;
-  res.record = u_.ext_ptr.cold_record;
+  res.record = u_.ext_ptr.cool_record;
   return res;
 }
 
@@ -976,9 +978,9 @@ void CompactObj::ImportExternal(const CompactObj& src) {
 
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   DCHECK_EQ(EXTERNAL_TAG, taglen_);
-  DCHECK_EQ(u_.ext_ptr.is_cool, 0);
-
-  size_t offset = size_t(u_.ext_ptr.offload.page_index) * 4096 + u_.ext_ptr.page_offset;
+  auto& ext = u_.ext_ptr;
+  size_t offset = ext.page_offset;
+  offset += size_t(ext.is_cool ? ext.cool_record->page_index : ext.offload.page_index) * 4096;
   return pair<size_t, size_t>(offset, size_t(u_.ext_ptr.serialized_size));
 }
 
