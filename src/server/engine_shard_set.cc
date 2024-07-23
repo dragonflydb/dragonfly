@@ -419,7 +419,7 @@ void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
   });
 }
 
-void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t max_file_size) {
+void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   CHECK(shard_ == nullptr) << pb->GetPoolIndex();
 
   mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
@@ -447,7 +447,7 @@ void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
     // TODO: enable tiered storage on non-default namespace
     DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
     auto* shard = EngineShard::tlocal();
-    shard->tiered_storage_ = make_unique<TieredStorage>(&db_slice, max_file_size);
+    shard->tiered_storage_ = make_unique<TieredStorage>(max_file_size, &db_slice);
     error_code ec = shard->tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();
   }
@@ -888,7 +888,7 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   size_t max_shard_file_size = GetTieredFileLimit(sz);
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
-      InitThreadLocal(pb, update_db_time, max_shard_file_size);
+      InitThreadLocal(pb, update_db_time);
     }
   });
 
@@ -909,8 +909,8 @@ void EngineShardSet::Shutdown() {
   RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
-void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time, size_t max_file_size) {
-  EngineShard::InitThreadLocal(pb, update_db_time, max_file_size);
+void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
+  EngineShard::InitThreadLocal(pb, update_db_time);
   EngineShard* es = EngineShard::tlocal();
   shard_queue_[es->shard_id()] = es->GetFiberQueue();
 }

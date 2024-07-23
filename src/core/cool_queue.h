@@ -27,7 +27,9 @@ class CoolQueue {
 
   CompactObj Erase(detail::TieredColdRecord* record);
 
-  size_t UsedMemory() const;
+  size_t UsedMemory() const {
+    return used_memory_;
+  }
 
  private:
   detail::TieredColdRecord* head_ = nullptr;

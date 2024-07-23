@@ -48,7 +48,7 @@ class EngineShard {
 
   // Sets up a new EngineShard in the thread.
   // If update_db_time is true, initializes periodic time update for its db_slice.
-  static void InitThreadLocal(util::ProactorBase* pb, bool update_db_time, size_t max_file_size);
+  static void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
 
   // Must be called after all InitThreadLocal() have finished
   void InitTieredStorage(util::ProactorBase* pb, size_t max_file_size);
@@ -342,7 +342,7 @@ class EngineShardSet {
   void TEST_EnableCacheMode();
 
  private:
-  void InitThreadLocal(util::ProactorBase* pb, bool update_db_time, size_t max_file_size);
+  void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
 
   util::ProactorPool* pp_;
   std::vector<TaskQueue*> shard_queue_;

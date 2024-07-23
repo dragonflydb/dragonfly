@@ -13,6 +13,7 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include "core/cool_queue.h"
 #include "server/common.h"
 #include "server/table.h"
 
@@ -34,7 +35,7 @@ class TieredStorage {
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
-  explicit TieredStorage(DbSlice* db_slice, size_t max_size);
+  explicit TieredStorage(size_t max_file_size, DbSlice* db_slice);
   ~TieredStorage();  // drop forward declared unique_ptrs
 
   TieredStorage(TieredStorage&& other) = delete;
@@ -79,11 +80,12 @@ class TieredStorage {
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv) const;
 
- private:
   PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
+  CoolQueue cool_queue_;
+
   unsigned write_depth_limit_ = 10;
   struct {
     uint64_t stash_overflow_cnt = 0;

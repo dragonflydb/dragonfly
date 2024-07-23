@@ -31,7 +31,8 @@ class OpManager {
   using KeyRef = std::pair<DbIndex, std::string_view>;
 
   // Two separate keyspaces are provided - one for strings, one for numeric identifiers.
-  // Ids can be used to track auxiliary values that don't map to real keys (like packed pages).
+  // Ids can be used to track auxiliary values that don't map to real keys (like a page index).
+  // Specifically, we track page indexes when serializing small-bin pages with multiple items.
   using EntryId = std::variant<unsigned, KeyRef>;
   using OwnedEntryId = std::variant<unsigned, std::pair<DbIndex, std::string>>;
 
