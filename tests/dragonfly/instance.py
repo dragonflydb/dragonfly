@@ -312,6 +312,14 @@ class DflyInstance:
                     return True
         return False
 
+    @property
+    def rss(self):
+        if self.proc is None:
+            return 0
+        process = psutil.Process(self.proc.pid)
+        mem_info = process.memory_info()
+        return mem_info.rss
+
 
 class DflyInstanceFactory:
     """

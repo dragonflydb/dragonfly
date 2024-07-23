@@ -122,7 +122,7 @@ class SliceSnapshot {
 
   // Helper function that flushes the serialized items into the RecordStream
   using ChunkState = SerializerBase::ChunkState;
-  size_t Serialize(ChunkState chunk_state = ChunkState::SIMPLE_CHUNK);
+  size_t Serialize(ChunkState chunk_state = ChunkState::kFlushMidEntry);
 
  public:
   uint64_t snapshot_version() const {

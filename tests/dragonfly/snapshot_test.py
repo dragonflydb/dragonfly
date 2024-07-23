@@ -10,6 +10,8 @@ from pathlib import Path
 import boto3
 from .instance import RedisServer
 from random import randint as rand
+import string
+import random
 
 from . import dfly_args
 from .utility import wait_available_async, is_saving, tmp_file_name
@@ -500,3 +502,33 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
     await load_task
     assert await StaticSeeder.capture(async_client) == start_capture
+
+
+@dfly_args({"proactor_threads": 1, "dbfilename": "big_snapshot"})
+async def test_big_value_serialization_memory_limit(df_factory):
+    instance = df_factory.create()
+    instance.start()
+    client = instance.client()
+
+    ten_mb = 125000
+
+    def ten_mb_random_string():
+        return "".join(random.choices(string.ascii_letters, k=ten_mb))
+
+    one_gb = 125000000
+    upper_limit = one_gb * 1.25
+
+    while instance.rss < one_gb:
+        await client.execute_command(f"SADD foo {ten_mb_random_string()}")
+
+    async def check_memory_usage(instance):
+        while True:
+            assert instance.rss < upper_limit
+            await asyncio.sleep(0.01)
+
+    checker = asyncio.create_task(check_memory_usage(instance))
+
+    await client.execute_command("SAVE")
+
+    checker.cancel()
+    await client.close()

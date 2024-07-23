@@ -139,10 +139,7 @@ class CompressorImpl;
 
 class SerializerBase {
  public:
-  enum class ChunkState {
-    SIMPLE_CHUNK,  // Just a chunk, we got multiple for a single value
-    FINAL_CHUNK,   // Last chunk of a given value
-  };
+  enum class ChunkState { kFlushMidEntry, kFlushEndEntry };
 
   explicit SerializerBase(CompressionMode compression_mode);
   virtual ~SerializerBase() = default;

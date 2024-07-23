@@ -21,7 +21,8 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(size_t, serialization_max_chunk_size, 0, "Total bytes before flushing big entries");
+using facade::operator""_MB;
+ABSL_FLAG(size_t, serialization_max_chunk_size, 10_MB, "Total bytes before flushing big entries");
 
 namespace dfly {
 

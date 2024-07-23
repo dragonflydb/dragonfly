@@ -433,9 +433,9 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
         RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
       } else {
         RETURN_ON_ERR(SaveString(node->entry, node->sz));
-        ChunkState chunk_state = ChunkState::SIMPLE_CHUNK;
+        ChunkState chunk_state = ChunkState::kFlushMidEntry;
         if (node->next == nullptr)
-          chunk_state = ChunkState::FINAL_CHUNK;
+          chunk_state = ChunkState::kFlushEndEntry;
         FlushIfNeeded(chunk_state);
       }
     } else {
@@ -481,9 +481,9 @@ error_code RdbSerializer::SaveSetObject(const PrimeValue& obj) {
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
       }
       ++it;
-      ChunkState chunk_state = ChunkState::SIMPLE_CHUNK;
+      ChunkState chunk_state = ChunkState::kFlushMidEntry;
       if (it == set->end())
-        chunk_state = ChunkState::FINAL_CHUNK;
+        chunk_state = ChunkState::kFlushEndEntry;
       FlushIfNeeded(chunk_state);
     }
   } else {
@@ -516,9 +516,9 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
         RETURN_ON_ERR(SaveLongLongAsString(expiry));
       }
       ++it;
-      ChunkState chunk_state = ChunkState::SIMPLE_CHUNK;
+      ChunkState chunk_state = ChunkState::kFlushMidEntry;
       if (it == string_map->end())
-        chunk_state = ChunkState::FINAL_CHUNK;
+        chunk_state = ChunkState::kFlushEndEntry;
       FlushIfNeeded(chunk_state);
     }
   } else {
@@ -556,9 +556,9 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
       if (ec)
         return false;
       ++count;
-      ChunkState chunk_state = ChunkState::SIMPLE_CHUNK;
+      ChunkState chunk_state = ChunkState::kFlushMidEntry;
       if (count == total)
-        chunk_state = ChunkState::FINAL_CHUNK;
+        chunk_state = ChunkState::kFlushEndEntry;
 
       FlushIfNeeded(chunk_state);
       return true;
@@ -671,9 +671,9 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
 
     string_view blob = sbf->data(i);
     RETURN_ON_ERR(SaveString(blob));
-    ChunkState chunk_state = ChunkState::SIMPLE_CHUNK;
+    ChunkState chunk_state = ChunkState::kFlushMidEntry;
     if ((i + 1) == sbf->num_filters())
-      chunk_state = ChunkState::FINAL_CHUNK;
+      chunk_state = ChunkState::kFlushEndEntry;
 
     FlushIfNeeded(chunk_state);
   }
@@ -912,7 +912,7 @@ void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
   CHECK(!ec);
   ec = serializer.SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  ec = serializer.FlushToSink(out, SerializerBase::ChunkState::SIMPLE_CHUNK);
+  ec = serializer.FlushToSink(out, SerializerBase::ChunkState::kFlushMidEntry);
   CHECK(!ec);         // make sure that fully was successful
   AppendFooter(out);  // version and crc
   CHECK_GT(out->str().size(), 10u);
@@ -927,7 +927,7 @@ io::Bytes SerializerBase::PrepareFlush(SerializerBase::ChunkState chunk_state) {
   if (sz == 0)
     return mem_buf_.InputBuffer();
 
-  bool is_last_chunk = chunk_state == ChunkState::FINAL_CHUNK;
+  bool is_last_chunk = chunk_state == ChunkState::kFlushEndEntry;
   if (is_last_chunk && number_of_chunks_ == 0) {
     if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD ||
         compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
@@ -1472,7 +1472,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
 
 error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
   RETURN_ON_ERR(
-      impl_->serializer()->FlushToSink(impl_->sink(), SerializerBase::ChunkState::SIMPLE_CHUNK));
+      impl_->serializer()->FlushToSink(impl_->sink(), SerializerBase::ChunkState::kFlushMidEntry));
 
   if (save_mode_ == SaveMode::SUMMARY) {
     impl_->serializer()->SendFullSyncCut();
@@ -1547,7 +1547,7 @@ error_code RdbSaver::SaveEpilog() {
   absl::little_endian::Store64(buf, chksum);
   RETURN_ON_ERR(ser.WriteRaw(buf));
 
-  RETURN_ON_ERR(ser.FlushToSink(impl_->sink(), SerializerBase::ChunkState::SIMPLE_CHUNK));
+  RETURN_ON_ERR(ser.FlushToSink(impl_->sink(), SerializerBase::ChunkState::kFlushMidEntry));
 
   return impl_->Flush();
 }
