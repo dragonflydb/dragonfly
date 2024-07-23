@@ -89,7 +89,6 @@ class TieredStorage {
   std::unique_ptr<tiering::SmallBins> bins_;
   CoolQueue cool_queue_;
 
-  size_t memory_low_limit_;
   unsigned write_depth_limit_ = 10;
   struct {
     uint64_t stash_overflow_cnt = 0;

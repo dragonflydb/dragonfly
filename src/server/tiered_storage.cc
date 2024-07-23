@@ -116,7 +116,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   PrimeValue* Find(OpManager::KeyRef key) {
     // TODO: Get DbContext for transaction for correct dbid and time
     // Bypass all update and stat mechanisms
-    auto it = db_slice_.GetDBTable(key.first)->prime.Find(key.second);
+    auto* table = db_slice_.GetDBTable(key.first);
+    auto it = table->prime.Find(key.second);
     return IsValid(it) ? &it->second : nullptr;
   }
 
@@ -128,7 +129,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       VLOG(1) << "Stash failed " << segment.error().message();
       visit([this](auto id) { ClearIoPending(id); }, id);
     } else {
-      ExternalizeColdEntries(segment->length);
       visit([this, segment](auto id) { SetExternal(id, *segment); }, id);
     }
   }
@@ -140,7 +140,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
   // If memory is pressurred, then remove entries from the ColdQueue,
   // and promote their PrimeValues to be fully external.
-  void ExternalizeColdEntries(size_t additional_memory);
+  void RetireColdEntries(size_t additional_memory);
 
   // Set value to be an in-memory type again. Update memory stats.
   void Upload(DbIndex dbid, string_view value, bool is_raw, size_t serialized_len, PrimeValue* pv) {
@@ -164,6 +164,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       stats_.total_stashes++;
 
       if (absl::GetFlag(FLAGS_tiered_experimental_cooling)) {
+        RetireColdEntries(pv->MallocUsed());
         detail::TieredColdRecord* record = ts_->cool_queue_.PushFront(
             key.first, CompactObj::HashCode(key.second), segment.offset / 4096, std::move(*pv));
         DCHECK(record);
@@ -189,7 +190,8 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     return db_slice_.memory_budget() - memory_margin_ - value_len > 0;
   }
 
-  int64_t memory_margin_ = 0;
+  int64_t memory_margin_ = 0;  // TODO: get rid of memory_margin_
+  size_t memory_low_limit_;
 
   struct {
     uint64_t total_stashes = 0, total_cancels = 0, total_fetches = 0;
@@ -293,7 +295,36 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
   return false;
 }
 
-void TieredStorage::ShardOpManager::ExternalizeColdEntries(size_t len) {
+void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) {
+  ssize_t threshold = memory_low_limit_ + additional_memory;
+  // we trigger if we below the low point
+  if (db_slice_.memory_budget() < threshold) {
+    // But once we below we try to raise above high watermark.
+    const double kHighFactor = 1.0;
+    size_t needed_to_free =
+        (threshold - db_slice_.memory_budget()) + memory_low_limit_ * kHighFactor;
+    size_t gained = 0;
+    do {
+      size_t memory_before = ts_->cool_queue_.UsedMemory();
+      detail::TieredColdRecord* record = ts_->cool_queue_.PopBack();
+      if (record == nullptr)
+        break;
+
+      auto predicate = [record](const PrimeKey& key, const PrimeValue& probe) {
+        return probe.IsExternal() && probe.IsCool() && probe.GetCool().record == record;
+      };
+
+      PrimeIterator it =
+          db_slice_.GetDBTable(record->db_index)->prime.FindFirst(record->key_hash, predicate);
+      CHECK(IsValid(it));
+      CompactObj::DeleteMR<detail::TieredColdRecord>(record);
+      gained += memory_before - ts_->cool_queue_.UsedMemory();
+    } while (gained < needed_to_free);
+
+    VLOG(1) << "Memory budget: " << db_slice_.memory_budget() << ", gained " << gained;
+    // Update memory_budget
+    db_slice_.SetCachedParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
+  }
 }
 
 void TieredStorage::ShardOpManager::DeleteOffloaded(DbIndex dbid,
@@ -324,8 +355,8 @@ void TieredStorage::Close() {
 }
 
 void TieredStorage::SetMemoryLowLimit(size_t mem_limit) {
-  memory_low_limit_ = mem_limit;
-  VLOG(1) << "Memory low limit is " << memory_low_limit_;
+  op_manager_->memory_low_limit_ = mem_limit;
+  VLOG(1) << "Memory low limit is " << mem_limit;
 }
 
 util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,

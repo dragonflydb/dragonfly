@@ -376,6 +376,7 @@ class DbSlice {
   }
 
   DbTable* GetDBTable(DbIndex id) {
+    assert(id < db_arr_.size());
     return db_arr_[id].get();
   }
 

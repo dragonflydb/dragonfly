@@ -299,6 +299,8 @@ DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
 }
 
 DbSlice::~DbSlice() {
+  DVLOG(1) << "~DbSlice";
+
   // we do not need this code but it's easier to debug in case we encounter
   // memory allocation bugs during delete operations.
 

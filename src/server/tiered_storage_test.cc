@@ -20,6 +20,7 @@
 
 using namespace std;
 using namespace testing;
+using namespace util;
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
@@ -287,11 +288,21 @@ TEST_F(TieredStorageTest, FlushPending) {
 }
 
 TEST_F(TieredStorageTest, MemoryPressure) {
-  max_memory_limit = 100_MB;
+  max_memory_limit = 20_MB;
   pp_->at(0)->AwaitBrief([] {
     EngineShard::tlocal()->TEST_EnableHeartbeat();
-    EngineShard::tlocal()->tiered_storage()->SetMemoryLowLimit(10_MB);
+    EngineShard::tlocal()->tiered_storage()->SetMemoryLowLimit(2_MB);
   });
+
+  constexpr size_t kNum = 10000;
+  for (size_t i = 0; i < kNum; i++) {
+    auto resp = Run({"SET", absl::StrCat("k", i), BuildString(10000)});
+    ASSERT_EQ(resp, "OK") << i;
+    // TODO: to remove it once used_mem_current is updated frequently.
+    ThisFiber::SleepFor(10us);
+  }
+
+  EXPECT_LT(used_mem_peak.load(), 20_MB);
 }
 
 }  // namespace dfly

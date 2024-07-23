@@ -60,6 +60,8 @@ bool Namespaces::IsInitialized() const {
 }
 
 void Namespaces::Clear() {
+  VLOG(1) << "Namespaces::Clear";
+
   std::unique_lock guard(mu_);
 
   namespaces.default_namespace_ = nullptr;
