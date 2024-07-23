@@ -44,6 +44,8 @@ class TieredStorage {
   std::error_code Open(std::string_view path);
   void Close();
 
+  void SetMemoryLowLimit(size_t mem_limit);
+
   // Read offloaded value. It must be of external type
   util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);
 
@@ -79,6 +81,7 @@ class TieredStorage {
  private:
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv) const;
+  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem);
 
   PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
 
@@ -86,6 +89,7 @@ class TieredStorage {
   std::unique_ptr<tiering::SmallBins> bins_;
   CoolQueue cool_queue_;
 
+  size_t memory_low_limit_;
   unsigned write_depth_limit_ = 10;
   struct {
     uint64_t stash_overflow_cnt = 0;

@@ -286,4 +286,12 @@ TEST_F(TieredStorageTest, FlushPending) {
   EXPECT_EQ(GetMetrics().tiered_stats.small_bins_filling_bytes, 0u);
 }
 
+TEST_F(TieredStorageTest, MemoryPressure) {
+  max_memory_limit = 100_MB;
+  pp_->at(0)->AwaitBrief([] {
+    EngineShard::tlocal()->TEST_EnableHeartbeat();
+    EngineShard::tlocal()->tiered_storage()->SetMemoryLowLimit(10_MB);
+  });
+}
+
 }  // namespace dfly
