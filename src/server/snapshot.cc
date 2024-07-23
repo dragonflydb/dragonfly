@@ -387,6 +387,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerializedToChannel.
+  ConditionGuard guard(&bucket_ser_);
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }
