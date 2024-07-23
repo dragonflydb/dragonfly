@@ -28,8 +28,11 @@ class Journal;
 class TieredStorage;
 class ShardDocIndices;
 class BlockingController;
+class EngineShardSet;
 
 class EngineShard {
+  friend class EngineShardSet;
+
  public:
   struct Stats {
     uint64_t defrag_attempt_total = 0;
@@ -48,7 +51,7 @@ class EngineShard {
 
   // Sets up a new EngineShard in the thread.
   // If update_db_time is true, initializes periodic time update for its db_slice.
-  static void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
+  static void InitThreadLocal(util::ProactorBase* pb);
 
   // Must be called after all InitThreadLocal() have finished
   void InitTieredStorage(util::ProactorBase* pb, size_t max_file_size);
@@ -237,6 +240,8 @@ class EngineShard {
   // Become passive if replica: don't automatially evict expired items.
   bool is_replica_ = false;
 
+  size_t last_cached_used_memory_ = 0;
+
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;
   Transaction* continuation_trans_ = nullptr;
@@ -291,8 +296,6 @@ class EngineShardSet {
   void PreShutdown();
   void Shutdown();
 
-  static const std::vector<CachedStats>& GetCachedStats();
-
   // Uses a shard queue to dispatch. Callback runs in a dedicated fiber.
   template <typename F> auto Await(ShardId sid, F&& f) {
     return shard_queue_[sid]->Await(std::forward<F>(f));
@@ -342,7 +345,7 @@ class EngineShardSet {
   void TEST_EnableCacheMode();
 
  private:
-  void InitThreadLocal(util::ProactorBase* pb, bool update_db_time);
+  void InitThreadLocal(util::ProactorBase* pb);
 
   util::ProactorPool* pp_;
   std::vector<TaskQueue*> shard_queue_;
