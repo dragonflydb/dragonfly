@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -91,6 +91,8 @@ class RobjWrapper {
   uint32_t : 24;
 
 } __attribute__((packed));
+
+struct TieredColdRecord;
 
 }  // namespace detail
 
@@ -323,7 +325,21 @@ class CompactObj {
     return taglen_ == EXTERNAL_TAG;
   }
 
-  void SetExternal(size_t offset, size_t sz);
+  bool IsCool() const {
+    assert(IsExternal());
+    return u_.ext_ptr.is_cool;
+  }
+
+  void SetExternal(size_t offset, uint32_t sz);
+  void SetCold(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
+
+  struct ColdItem {
+    uint16_t page_offset;
+    size_t serialized_size;
+    detail::TieredColdRecord* record;
+  };
+  ColdItem GetCold() const;
+
   void ImportExternal(const CompactObj& src);
 
   std::pair<size_t, size_t> GetExternalSlice() const;
@@ -410,13 +426,22 @@ class CompactObj {
     mask_ = mask;
   }
 
+  // Must be 16 bytes.
   struct ExternalPtr {
-    uint32_t type : 8;
-    uint32_t reserved : 24;
-    uint32_t page_index;
+    uint32_t serialized_size;
     uint16_t page_offset;  // 0 for multi-page blobs. != 0 for small blobs.
-    uint16_t reserved2;
-    uint32_t size;
+    uint16_t is_cool : 1;
+    uint16_t is_reserved : 15;
+
+    struct Offload {
+      uint32_t page_index;
+      uint32_t reserved;
+    };
+
+    union {
+      Offload offload;
+      detail::TieredColdRecord* cold_record;
+    };
   } __attribute__((packed));
 
   struct JsonWrapper {
@@ -507,6 +532,20 @@ class CompactObjectView {
  private:
   CompactObj obj_;
 };
+
+namespace detail {
+
+struct TieredColdRecord {
+  TieredColdRecord* next = nullptr;
+  TieredColdRecord* prev = nullptr;
+  uint64_t key_hash;  // Allows searching the entry in the dbslice.
+  CompactObj value;
+  uint16_t db_index;
+  uint32_t page_index;
+};
+static_assert(sizeof(TieredColdRecord) == 48);
+
+};  // namespace detail
 
 }  // namespace dfly
 

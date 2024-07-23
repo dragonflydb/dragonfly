@@ -569,7 +569,7 @@ size_t CompactObj::Size() const {
         break;
       }
       case EXTERNAL_TAG:
-        raw_size = u_.ext_ptr.size;
+        raw_size = u_.ext_ptr.serialized_size;
         break;
       case ROBJ_TAG:
         raw_size = u_.r_obj.Size();
@@ -941,12 +941,31 @@ void CompactObj::GetString(char* dest) const {
   LOG(FATAL) << "Bad tag " << int(taglen_);
 }
 
-void CompactObj::SetExternal(size_t offset, size_t sz) {
+void CompactObj::SetExternal(size_t offset, uint32_t sz) {
   SetMeta(EXTERNAL_TAG, mask_);
 
-  u_.ext_ptr.page_index = offset / 4096;
+  u_.ext_ptr.is_cool = 0;
   u_.ext_ptr.page_offset = offset % 4096;
-  u_.ext_ptr.size = sz;
+  u_.ext_ptr.serialized_size = sz;
+  u_.ext_ptr.offload.page_index = offset / 4096;
+}
+
+void CompactObj::SetCold(size_t offset, uint32_t sz, detail::TieredColdRecord* record) {
+  SetMeta(EXTERNAL_TAG, mask_);
+  u_.ext_ptr.is_cool = 1;
+  u_.ext_ptr.page_offset = offset % 4096;
+  u_.ext_ptr.serialized_size = sz;
+  u_.ext_ptr.cold_record = record;
+}
+
+auto CompactObj::GetCold() const -> ColdItem {
+  DCHECK(IsExternal() && u_.ext_ptr.is_cool);
+
+  ColdItem res;
+  res.page_offset = u_.ext_ptr.page_offset;
+  res.serialized_size = u_.ext_ptr.serialized_size;
+  res.record = u_.ext_ptr.cold_record;
+  return res;
 }
 
 void CompactObj::ImportExternal(const CompactObj& src) {
@@ -957,8 +976,10 @@ void CompactObj::ImportExternal(const CompactObj& src) {
 
 std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
   DCHECK_EQ(EXTERNAL_TAG, taglen_);
-  size_t offset = size_t(u_.ext_ptr.page_index) * 4096 + u_.ext_ptr.page_offset;
-  return pair<size_t, size_t>(offset, size_t(u_.ext_ptr.size));
+  DCHECK_EQ(u_.ext_ptr.is_cool, 0);
+
+  size_t offset = size_t(u_.ext_ptr.offload.page_index) * 4096 + u_.ext_ptr.page_offset;
+  return pair<size_t, size_t>(offset, size_t(u_.ext_ptr.serialized_size));
 }
 
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {
