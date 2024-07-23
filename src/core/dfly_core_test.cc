@@ -3,6 +3,7 @@
 //
 
 #include "base/gtest.h"
+#include "core/cool_queue.h"
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 
@@ -63,6 +64,17 @@ TEST_F(IntentLockTest, Basic) {
   ASSERT_FALSE(lk_.Check(IntentLock::EXCLUSIVE));
   lk_.Release(IntentLock::SHARED);
   ASSERT_TRUE(lk_.Check(IntentLock::EXCLUSIVE));
+}
+
+TEST_F(TxQueueTest, CoolQueue) {
+  CoolQueue queue;
+
+  ASSERT_TRUE(queue.Empty());
+  auto* record = queue.PushFront(0, 1, 2, CompactObj{});
+  EXPECT_EQ(record->key_hash, 1);
+  ASSERT_FALSE(queue.Empty());
+  queue.PopBack();
+  ASSERT_TRUE(queue.Empty());
 }
 
 }  // namespace dfly
