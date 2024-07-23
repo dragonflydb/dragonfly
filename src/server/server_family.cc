@@ -1296,7 +1296,7 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
 
   if (m.replica_reconnections) {
     auto& replica_reconnections = m.replica_reconnections.value();
-    AppendMetricHeader("replica_reconnect_count", "The number of replica reconnections",
+    AppendMetricHeader("replica_reconnect_count", "Number of replica reconnects",
                        MetricType::COUNTER, &resp->body());
     AppendMetricValue("replica_reconnect_count", replica_reconnections.reconnect_count,
                       {"replica_host", "replica_port"},
