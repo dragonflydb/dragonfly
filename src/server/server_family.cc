@@ -1568,7 +1568,7 @@ void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> stat
   auto cb = [status_cb](unsigned thread_index, util::Connection* conn) {
     if (auto fcntx = static_cast<facade::Connection*>(conn)->cntx(); fcntx) {
       auto* cntx = static_cast<ConnectionContext*>(fcntx);
-      if (cntx->transaction && cntx->blocked) {
+      if (cntx->transaction) {
         cntx->transaction->CancelBlocking(status_cb);
       }
     }

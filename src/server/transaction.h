@@ -630,6 +630,9 @@ class Transaction {
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
+  // Stores status if COORD_CANCELLED was set. Apart from cancelled, it can be moved for cluster
+  // changes
+  OpStatus block_cancel_result_ = OpStatus::OK;
 
   // Transaction coordinator state, written and read by coordinator thread.
   uint8_t coordinator_state_ = 0;

@@ -1178,7 +1178,8 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
   if (status == cv_status::timeout) {
     result = OpStatus::TIMED_OUT;
   } else if (coordinator_state_ & COORD_CANCELLED) {
-    result = local_result_;
+    DCHECK_GT(block_cancel_result_, OpStatus::OK);
+    result = block_cancel_result_;
   }
 
   // If we don't follow up with an "action" hop, we must clean up manually on all shards.
@@ -1412,7 +1413,8 @@ void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
     return;
 
   coordinator_state_ |= COORD_CANCELLED;
-  local_result_ = status;
+  // don't use local_result_ because it can be overwirtten if we cancel ahead
+  block_cancel_result_ = status;
   blocking_barrier_.Close();
 }
 
