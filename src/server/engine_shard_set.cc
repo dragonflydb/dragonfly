@@ -503,10 +503,13 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   }
 
   string dbg_id;
-  auto run = [this, &dbg_id](Transaction* tx, bool is_ooo) -> bool /* keep */ {
+  bool update_stats = false;
+
+  auto run = [this, &dbg_id, &update_stats](Transaction* tx, bool is_ooo) -> bool /* keep */ {
     dbg_id = VLOG_IS_ON(1) ? tx->DebugId() : "";
     bool keep = tx->RunInShard(this, is_ooo);
     DLOG_IF(INFO, !dbg_id.empty()) << dbg_id << ", keep " << keep << ", ooo " << is_ooo;
+    update_stats = true;
     return keep;
   };
 
@@ -533,7 +536,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // Progress on the transaction queue if no transaction is running currently.
   Transaction* head = nullptr;
-  bool update_stats = false;
 
   while (continuation_trans_ == nullptr && !txq_.Empty()) {
     head = get<Transaction*>(txq_.Front());
@@ -563,7 +565,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     // This way scheduling transactions won't see an understated value.
     DCHECK_LT(committed_txid_, txid);  //  strictly increasing when processed via txq
     committed_txid_ = txid;
-    update_stats = true;
+
     if (bool keep = run(head, false); keep)
       continuation_trans_ = head;
   }

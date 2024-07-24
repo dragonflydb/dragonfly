@@ -100,7 +100,8 @@ TEST_F(ListFamilyTest, BLPopUnblocking) {
   ASSERT_THAT(resp, ArrLen(2));
   EXPECT_THAT(resp.GetVec(), ElementsAre(kKey2, "2"));
 
-  Run({"set", "z", "1"});
+  resp = Run({"set", "z", "1"});
+  ASSERT_EQ(resp, "OK");
 
   resp = Run({"blpop", "z", "0"});
   ASSERT_THAT(resp, ErrArg("WRONGTYPE "));
