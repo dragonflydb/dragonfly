@@ -139,6 +139,10 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
 
   void Clear();
   PrimeIterator Launder(PrimeIterator it, std::string_view key);
+
+  size_t table_memory() const {
+    return expire.mem_usage() + prime.mem_usage();
+  }
 };
 
 // We use reference counting semantics of DbTable when doing snapshotting.

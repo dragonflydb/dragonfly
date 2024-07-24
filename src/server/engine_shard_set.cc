@@ -715,9 +715,10 @@ void EngineShard::CacheStats() {
     DbTable* table = db_slice.GetDBTable(i);
     if (table) {
       entries += table->prime.size();
-      table_memory += (table->prime.mem_usage() + table->expire.mem_usage());
+      table_memory += table->table_memory();
     }
   }
+  DCHECK_EQ(table_memory, db_slice.table_memory());
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
 
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
