@@ -512,7 +512,6 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
         ("SADD"),
         ("ZSET"),
         ("LIST"),
-        # ("BLOOM"),
     ],
 )
 async def test_big_value_serialization_memory_limit(df_factory, query):
@@ -531,12 +530,6 @@ async def test_big_value_serialization_memory_limit(df_factory, query):
     upper_limit = one_gb * 1.1  # 1GB + 100MB
 
     i = 0
-    # comment this out when we support EXPANSION
-    # because otherwise BLOOM filter will stay of constant size and just increase the error
-    # rate which will make the code below deadlock. Even if we reserve 1GiB, the test won't work
-    # cause RSS will be 1GiB and the bloom filter will actually be empty...
-    #   if query == "BLOOM":
-    #       await client.execute_command(f"BF.RESERVE foo_key 0.001 {one_gb / 4} EXPANSION 2")
 
     while instance.rss < one_gb:
         if query == "HSET":
@@ -548,8 +541,6 @@ async def test_big_value_serialization_memory_limit(df_factory, query):
             await client.execute_command(f"ZADD foo_key {i} {ten_mb_random_string()}")
         elif query == "LIST":
             await client.execute_command(f"LPUSH foo_key {ten_mb_random_string()}")
-        # elif query == "BLOOM":
-        #    await client.execute_command(f"BF.ADD foo_key {ten_mb_random_string()}")
 
     async def check_memory_usage(instance):
         while True:
