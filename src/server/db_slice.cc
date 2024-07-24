@@ -323,7 +323,7 @@ auto DbSlice::GetStats() const -> Stats {
     stats.key_count = db_wrap.prime.size();
     stats.bucket_count = db_wrap.prime.bucket_count();
     stats.expire_count = db_wrap.expire.size();
-    stats.table_mem_usage = (db_wrap.prime.mem_usage() + db_wrap.expire.mem_usage());
+    stats.table_mem_usage = db_wrap.table_memory();
   }
   s.small_string_bytes = CompactObj::GetStats().small_string_bytes;
 
@@ -599,6 +599,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   PrimeIterator it;
 
   // I try/catch just for sake of having a convenient place to set a breakpoint.
+  size_t table_before = db.prime.mem_usage();
   try {
     it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
@@ -607,6 +608,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
     return OpStatus::OUT_OF_MEMORY;
   }
 
+  table_memory_ += (db.prime.mem_usage() - table_before);
   size_t evicted_obj_bytes = 0;
 
   // We may still reach the state when our memory usage is above the limit even if we
@@ -749,11 +751,11 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     ClearOffloadedEntries(indexes, db_arr_);
 
   DbTableArray flush_db_arr(db_arr_.size());
+
   for (DbIndex index : indexes) {
-    auto& db = db_arr_[index];
-    CHECK(db);
+    table_memory_ -= db_arr_[index]->table_memory();
     InvalidateDbWatches(index);
-    flush_db_arr[index] = std::move(db);
+    flush_db_arr[index] = std::move(db_arr_[index]);
 
     CreateDb(index);
     std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
@@ -792,14 +794,20 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 
 void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
   uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
-  CHECK(db_arr_[db_ind]->expire.Insert(main_it->first.AsRef(), ExpirePeriod(delta)).second);
+  auto& db = *db_arr_[db_ind];
+  size_t table_before = db.expire.mem_usage();
+  CHECK(db.expire.Insert(main_it->first.AsRef(), ExpirePeriod(delta)).second);
+  table_memory_ += (db.expire.mem_usage() - table_before);
   main_it->second.SetExpire(true);
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
   if (main_it->second.HasExpire()) {
-    CHECK_EQ(1u, db_arr_[db_ind]->expire.Erase(main_it->first));
+    auto& db = *db_arr_[db_ind];
+    size_t table_before = db.expire.mem_usage();
+    CHECK_EQ(1u, db.expire.Erase(main_it->first));
     main_it->second.SetExpire(false);
+    table_memory_ += (db.expire.mem_usage() - table_before);
     return true;
   }
   return false;
@@ -933,8 +941,10 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrUpdateInternal(const Context& c
     if (IsValid(res.exp_it) && force_update) {
       res.exp_it->second = ExpirePeriod(delta);
     } else {
+      size_t table_before = db.expire.mem_usage();
       auto exp_it = db.expire.InsertNew(it->first.AsRef(), ExpirePeriod(delta));
       res.exp_it = ExpIterator(exp_it, StringOrView::FromView(key));
+      table_memory_ += (db.expire.mem_usage() - table_before);
     }
   }
 
@@ -1296,6 +1306,7 @@ void DbSlice::CreateDb(DbIndex db_ind) {
   auto& db = db_arr_[db_ind];
   if (!db) {
     db.reset(new DbTable{owner_->memory_resource(), db_ind});
+    table_memory_ += db->table_memory();
   }
 }
 
@@ -1498,6 +1509,7 @@ void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
 }
 
 void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table) {
+  size_t table_before = table->table_memory();
   if (!exp_it.is_done()) {
     table->expire.Erase(exp_it.GetInnerIt());
   }
@@ -1533,6 +1545,8 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   }
 
   table->prime.Erase(del_it.GetInnerIt());
+  table_memory_ += (table->table_memory() - table_before);
+
   SendInvalidationTrackingMessage(del_it.key());
 }
 

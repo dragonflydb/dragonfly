@@ -412,6 +412,10 @@ class DbSlice {
     return version_;
   }
 
+  size_t table_memory() const {
+    return table_memory_;
+  }
+
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
 
   //! Registers the callback to be called for each change.
@@ -575,6 +579,7 @@ class DbSlice {
   ssize_t memory_budget_ = SSIZE_MAX;
   size_t bytes_per_object_ = 0;
   size_t soft_budget_limit_ = 0;
+  size_t table_memory_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 
