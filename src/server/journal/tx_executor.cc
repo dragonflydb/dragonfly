@@ -96,29 +96,25 @@ TransactionData TransactionData::FromEntry(journal::ParsedEntry&& entry) {
 
 std::optional<TransactionData> TransactionReader::NextTxData(JournalReader* reader, Context* cntx) {
   io::Result<journal::ParsedEntry> res;
-  while (true) {
-    if (res = reader->ReadEntry(); !res) {
-      cntx->ReportError(res.error());
-      return std::nullopt;
-    }
-
-    // When LSN opcode is sent master does not increase journal lsn.
-    if (lsn_.has_value() && res->opcode != journal::Op::LSN) {
-      ++*lsn_;
-      VLOG(2) << "read lsn: " << *lsn_;
-    }
-
-    TransactionData tx_data = TransactionData::FromEntry(std::move(res.value()));
-    if (lsn_.has_value() && tx_data.opcode == journal::Op::LSN) {
-      DCHECK_NE(tx_data.lsn, 0u);
-      LOG_IF_EVERY_N(WARNING, tx_data.lsn != *lsn_, 10000)
-          << "master lsn:" << tx_data.lsn << " replica lsn" << *lsn_;
-      DCHECK_EQ(tx_data.lsn, *lsn_);
-    }
-    return tx_data;
+  if (res = reader->ReadEntry(); !res) {
+    cntx->ReportError(res.error());
+    return std::nullopt;
   }
 
-  return std::nullopt;
+  // When LSN opcode is sent master does not increase journal lsn.
+  if (lsn_.has_value() && res->opcode != journal::Op::LSN) {
+    ++*lsn_;
+    VLOG(2) << "read lsn: " << *lsn_;
+  }
+
+  TransactionData tx_data = TransactionData::FromEntry(std::move(res.value()));
+  if (lsn_.has_value() && tx_data.opcode == journal::Op::LSN) {
+    DCHECK_NE(tx_data.lsn, 0u);
+    LOG_IF_EVERY_N(WARNING, tx_data.lsn != *lsn_, 10000)
+        << "master lsn:" << tx_data.lsn << " replica lsn" << *lsn_;
+    DCHECK_EQ(tx_data.lsn, *lsn_);
+  }
+  return tx_data;
 }
 
 }  // namespace dfly
