@@ -504,22 +504,51 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
     assert await StaticSeeder.capture(async_client) == start_capture
 
 
-@dfly_args({"proactor_threads": 1, "dbfilename": "big_snapshot"})
-async def test_big_value_serialization_memory_limit(df_factory):
-    instance = df_factory.create()
+@dfly_args({"proactor_threads": 1})
+@pytest.mark.parametrize(
+    "query",
+    [
+        ("HSET"),
+        ("SADD"),
+        ("ZSET"),
+        ("LIST"),
+        # ("BLOOM"),
+    ],
+)
+async def test_big_value_serialization_memory_limit(df_factory, query):
+    dbfilename = f"dump_{tmp_file_name()}"
+    instance = df_factory.create(dbfilename=dbfilename)
     instance.start()
     client = instance.client()
 
-    ten_mb = 125000
+    ten_mb = 100000
 
     def ten_mb_random_string():
         return "".join(random.choices(string.ascii_letters, k=ten_mb))
 
-    one_gb = 125000000
-    upper_limit = one_gb * 1.25
+    one_gb = 100000000  # 1GB
+    upper_limit = one_gb * 1.1  # 1GB + 100MB
+
+    i = 0
+    # comment this out when we support EXPANSION
+    # because otherwise BLOOM filter will stay of constant size and just increase the error
+    # rate which will make the code below deadlock. Even if we reserve 1GiB, the test won't work
+    # cause RSS will be 1GiB and the bloom filter will actually be empty...
+    #   if query == "BLOOM":
+    #       await client.execute_command(f"BF.RESERVE foo_key 0.001 {one_gb / 4} EXPANSION 2")
 
     while instance.rss < one_gb:
-        await client.execute_command(f"SADD foo {ten_mb_random_string()}")
+        if query == "HSET":
+            i = i + 1
+            await client.execute_command(f"HSET foo_key foo_{i} {ten_mb_random_string()}")
+        elif query == "SADD":
+            await client.execute_command(f"SADD foo_key {ten_mb_random_string()}")
+        elif query == "ZSET":
+            await client.execute_command(f"ZADD foo_key {i} {ten_mb_random_string()}")
+        elif query == "LIST":
+            await client.execute_command(f"LPUSH foo_key {ten_mb_random_string()}")
+        # elif query == "BLOOM":
+        #    await client.execute_command(f"BF.ADD foo_key {ten_mb_random_string()}")
 
     async def check_memory_usage(instance):
         while True:
