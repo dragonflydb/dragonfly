@@ -60,12 +60,10 @@ error_code Journal::Close() {
 }
 
 uint32_t Journal::RegisterOnChange(ChangeCallback cb) {
-  lock_guard lk(state_mu_);
   return journal_slice.RegisterOnChange(cb);
 }
 
 void Journal::UnregisterOnChange(uint32_t id) {
-  lock_guard lk(state_mu_);
   journal_slice.UnregisterOnChange(id);
 }
 
