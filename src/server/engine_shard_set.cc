@@ -591,6 +591,8 @@ void EngineShard::RemoveContTx(Transaction* tx) {
 }
 
 void EngineShard::Heartbeat() {
+  DCHECK(namespaces.IsInitialized());
+
   CacheStats();
 
   if (IsReplica())  // Never run expiration on replica.
@@ -620,10 +622,6 @@ void EngineShard::Heartbeat() {
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
   // TODO: iterate over all namespaces
-  if (!namespaces.IsInitialized()) {
-    return;
-  }
-
   DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))
