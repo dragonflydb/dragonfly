@@ -15,6 +15,7 @@
 #include <string_view>
 #include <vector>
 
+#include "base/logging.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "util/fibers/fibers.h"
