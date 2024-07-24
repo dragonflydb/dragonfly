@@ -60,10 +60,12 @@ error_code Journal::Close() {
 }
 
 uint32_t Journal::RegisterOnChange(ChangeCallback cb) {
+  lock_guard lk(state_mu_);
   return journal_slice.RegisterOnChange(cb);
 }
 
 void Journal::UnregisterOnChange(uint32_t id) {
+  lock_guard lk(state_mu_);
   journal_slice.UnregisterOnChange(id);
 }
 
@@ -85,6 +87,7 @@ LSN Journal::GetLsn() const {
 
 void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
                           std::optional<cluster::SlotId> slot, Entry::Payload payload, bool await) {
+  lock_guard lk(state_mu_);
   journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)}, await);
 }
 

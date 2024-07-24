@@ -536,30 +536,6 @@ class DbSlice {
 
   void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
 
-  class LocalBlockingCounter {
-   public:
-    void lock() {
-      ++mutating_;
-    }
-
-    void unlock() {
-      DCHECK(mutating_ > 0);
-      --mutating_;
-      if (mutating_ == 0) {
-        cond_var_.notify_one();
-      }
-    }
-
-    void Wait() {
-      util::fb2::NoOpLock noop_lk_;
-      cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
-    }
-
-   private:
-    util::fb2::CondVarAny cond_var_;
-    size_t mutating_ = 0;
-  };
-
   // We need this because registered callbacks might yield. If RegisterOnChange
   // gets called after we preempt while iterating over the registered callbacks
   // (let's say in FlushChangeToEarlierCallbacks) we will get UB, because we pushed
