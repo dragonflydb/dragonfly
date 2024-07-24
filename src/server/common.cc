@@ -147,7 +147,7 @@ const char* ObjTypeName(int type) {
     case OBJ_STREAM:
       return "stream";
     case OBJ_JSON:
-      return "rejson-rl";
+      return "ReJSON-RL";
     case OBJ_SBF:
       return "MBbloom--";
 
