@@ -416,7 +416,9 @@ void Driver::ParseRESP(facade::RedisParser* parser, io::IoBuf* io_buf) {
   do {
     result = parser->Parse(io_buf->InputBuffer(), &consumed, &parse_args);
     if (result == RedisParser::OK && !parse_args.empty()) {
-      if (reqs_.front().might_hit && parse_args[0].type != facade::RespExpr::NIL) {
+      if (parse_args[0].type == facade::RespExpr::ERROR) {
+        ++stats_.num_errors;
+      } else if (reqs_.front().might_hit && parse_args[0].type != facade::RespExpr::NIL) {
         ++stats_.hit_count;
       }
       parse_args.clear();
@@ -473,11 +475,13 @@ void WatchFiber(absl::Time start_time, atomic_bool* finish_signal, ProactorPool*
     absl::Time now = absl::Now();
     if (now - last_print > absl::Seconds(5)) {
       uint64_t num_resp = 0;
+      uint64_t num_errors = 0;
 
       pp->AwaitFiberOnAll([&](auto* p) {
         unique_lock lk(mutex);
 
         num_resp += client->stats.num_responses;
+        num_errors += client->stats.num_errors;
         lk.unlock();
       });
 
@@ -488,7 +492,8 @@ void WatchFiber(absl::Time start_time, atomic_bool* finish_signal, ProactorPool*
 
       CONSOLE_INFO << total_ms / 1000 << "s: " << absl::StrFormat("%.1f", done_perc)
                    << "% done, effective RPS(now/accumulated): "
-                   << period_resp_cnt * 1000 / period_ms << "/" << num_resp * 1000 / total_ms;
+                   << period_resp_cnt * 1000 / period_ms << "/" << num_resp * 1000 / total_ms
+                   << ", errors: " << num_errors;
 
       last_print = now;
       num_last_resp_cnt = num_resp;
