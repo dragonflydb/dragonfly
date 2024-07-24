@@ -304,12 +304,16 @@ void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) 
     size_t needed_to_free =
         (threshold - db_slice_.memory_budget()) + memory_low_limit_ * kHighFactor;
     size_t gained = 0;
+
     do {
       size_t memory_before = ts_->cool_queue_.UsedMemory();
       detail::TieredColdRecord* record = ts_->cool_queue_.PopBack();
       if (record == nullptr)  // nothing to pull anymore
         break;
 
+      gained += memory_before - ts_->cool_queue_.UsedMemory();
+
+      // Find the entry that points to the cool item and externalize it.
       auto predicate = [record](const PrimeKey& key, const PrimeValue& probe) {
         return probe.IsExternal() && probe.IsCool() && probe.GetCool().record == record;
       };
@@ -322,8 +326,10 @@ void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) 
 
       // Now the item is only in storage.
       pv.SetExternal(segment.offset, segment.length);
+
+      auto* stats = GetDbTableStats(record->db_index);
+      stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
       CompactObj::DeleteMR<detail::TieredColdRecord>(record);
-      gained += memory_before - ts_->cool_queue_.UsedMemory();
     } while (gained < needed_to_free);
 
     VLOG(1) << "Memory budget: " << db_slice_.memory_budget() << ", gained " << gained;
@@ -402,13 +408,8 @@ void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& v
                          std::function<void(const std::string&)> readf) {
   DCHECK(value.IsExternal());
   if (value.IsCool()) {
-    PrimeValue hot = Warmup(dbid, value.GetCool());
-    DCHECK_EQ(value.Size(), hot.Size());
-    string tmp;
-    hot.GetString(&tmp);
-    // TODO: An awful hack - to fix later.
-    const_cast<PrimeValue&>(value) = std::move(hot);
-    readf(tmp);
+    util::fb2::Future<string> res = Read(dbid, key, value);
+    readf(res.Get());
   } else {
     PrimeValue decoder;
     decoder.ImportExternal(value);
