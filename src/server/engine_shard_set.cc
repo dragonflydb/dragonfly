@@ -387,12 +387,9 @@ EngineShard::~EngineShard() {
 }
 
 void EngineShard::Shutdown() {
-  queue_.Shutdown();
+  DVLOG(1) << "EngineShard::Shutdown";
 
-  if (tiered_storage_) {
-    tiered_storage_->Close();
-    tiered_storage_.reset();
-  }
+  queue_.Shutdown();
 
   DCHECK(!fiber_periodic_.IsJoinable());
 
@@ -894,7 +891,14 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
 }
 
 void EngineShardSet::PreShutdown() {
-  RunBlockingInParallel([](EngineShard* shard) { shard->StopPeriodicFiber(); });
+  RunBlockingInParallel([](EngineShard* shard) {
+    shard->StopPeriodicFiber();
+
+    // We must close tiered_storage before we destroy namespaces that own db slices.
+    if (shard->tiered_storage()) {
+      shard->tiered_storage()->Close();
+    }
+  });
 }
 
 void EngineShardSet::Shutdown() {
