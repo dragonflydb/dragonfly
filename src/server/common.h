@@ -132,9 +132,6 @@ extern std::atomic_uint64_t rss_mem_peak;
 
 extern size_t max_memory_limit;
 
-// malloc memory stats.
-int64_t GetMallocCurrentCommitted();
-
 // version 5.11 maps to 511 etc.
 // set upon server start.
 extern unsigned kernel_version;

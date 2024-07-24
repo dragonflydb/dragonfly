@@ -533,6 +533,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // Progress on the transaction queue if no transaction is running currently.
   Transaction* head = nullptr;
+  bool update_stats = false;
+
   while (continuation_trans_ == nullptr && !txq_.Empty()) {
     head = get<Transaction*>(txq_.Front());
 
@@ -561,7 +563,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     // This way scheduling transactions won't see an understated value.
     DCHECK_LT(committed_txid_, txid);  //  strictly increasing when processed via txq
     committed_txid_ = txid;
-
+    update_stats = true;
     if (bool keep = run(head, false); keep)
       continuation_trans_ = head;
   }
@@ -581,6 +583,9 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     // Otherwise it is required to stay there to keep the relative order.
     if (is_ooo && !trans->IsMulti())
       DCHECK_EQ(keep, trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd);
+  }
+  if (update_stats) {
+    CacheStats();
   }
 }
 
@@ -696,9 +701,11 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
 }
 
 void EngineShard::CacheStats() {
-  // mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
-  mi_stats_merge();
+  uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
+  if (cache_stats_time_ + 1000000 > now)  // 1ms
+    return;
 
+  cache_stats_time_ = now;
   // Used memory for this shard.
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
