@@ -86,8 +86,6 @@ namespace {
 
 constexpr uint64_t kCursorDoneState = 0u;
 
-vector<EngineShardSet::CachedStats> cached_stats;  // initialized in EngineShardSet::Init
-
 struct ShardMemUsage {
   std::size_t commited = 0;
   std::size_t used = 0;
@@ -419,7 +417,7 @@ void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
   });
 }
 
-void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
+void EngineShard::InitThreadLocal(ProactorBase* pb) {
   CHECK(shard_ == nullptr) << pb->GetPoolIndex();
 
   mi_heap_t* data_heap = ServerState::tlocal()->data_heap();
@@ -432,11 +430,6 @@ void EngineShard::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
   RoundRobinSharder::Init();
 
   shard_->shard_search_indices_.reset(new ShardDocIndices());
-
-  if (update_db_time) {
-    // Must be last, as it accesses objects initialized above.
-    shard_->StartPeriodicFiber(pb);
-  }
 }
 
 void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
@@ -598,6 +591,8 @@ void EngineShard::RemoveContTx(Transaction* tx) {
 }
 
 void EngineShard::Heartbeat() {
+  DCHECK(namespaces.IsInitialized());
+
   CacheStats();
 
   if (IsReplica())  // Never run expiration on replica.
@@ -627,10 +622,6 @@ void EngineShard::Heartbeat() {
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
   // TODO: iterate over all namespaces
-  if (!namespaces.IsInitialized()) {
-    return;
-  }
-
   DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))
@@ -682,16 +673,11 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
       if (global_count % 8 == 0) {
         DVLOG(2) << "Global periodic";
 
-        uint64_t sum = 0;
-        const auto& stats = EngineShardSet::GetCachedStats();
-        for (const auto& s : stats)
-          sum += s.used_memory.load(memory_order_relaxed);
-
-        used_mem_current.store(sum, memory_order_relaxed);
+        uint64_t mem_current = used_mem_current.load(std::memory_order_relaxed);
 
         // Single writer, so no races.
-        if (sum > used_mem_peak.load(memory_order_relaxed))
-          used_mem_peak.store(sum, memory_order_relaxed);
+        if (mem_current > used_mem_peak.load(memory_order_relaxed))
+          used_mem_peak.store(mem_current, memory_order_relaxed);
 
         int64_t cur_time = time(nullptr);
         if (cur_time != last_stats_time) {
@@ -710,18 +696,18 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
 }
 
 void EngineShard::CacheStats() {
-  if (!namespaces.IsInitialized()) {
-    return;
-  }
-
   // mi_heap_visit_blocks(tlh, false /* visit all blocks*/, visit_cb, &sum);
   mi_stats_merge();
 
   // Used memory for this shard.
   size_t used_mem = UsedMemory();
   DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
-  cached_stats[db_slice.shard_id()].used_memory.store(used_mem, memory_order_relaxed);
-  ssize_t free_mem = max_memory_limit - used_mem_current.load(memory_order_relaxed);
+
+  // delta can wrap if used_memory is smaller than last_cached_used_memory_ and it's fine.
+  size_t delta = used_mem - last_cached_used_memory_;
+  last_cached_used_memory_ = used_mem;
+  size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
+  ssize_t free_mem = max_memory_limit - current;
 
   size_t entries = 0;
   size_t table_memory = 0;
@@ -882,13 +868,12 @@ size_t GetTieredFileLimit(size_t threads) {
 
 void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
   CHECK_EQ(0u, size());
-  cached_stats.resize(sz);
   shard_queue_.resize(sz);
 
   size_t max_shard_file_size = GetTieredFileLimit(sz);
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
-      InitThreadLocal(pb, update_db_time);
+      InitThreadLocal(pb);
     }
   });
 
@@ -896,7 +881,13 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < shard_queue_.size()) {
-      EngineShard::tlocal()->InitTieredStorage(pb, max_shard_file_size);
+      auto* shard = EngineShard::tlocal();
+      shard->InitTieredStorage(pb, max_shard_file_size);
+
+      if (update_db_time) {
+        // Must be last, as it accesses objects initialized above.
+        shard->StartPeriodicFiber(pb);
+      }
     }
   });
 }
@@ -909,14 +900,10 @@ void EngineShardSet::Shutdown() {
   RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 }
 
-void EngineShardSet::InitThreadLocal(ProactorBase* pb, bool update_db_time) {
-  EngineShard::InitThreadLocal(pb, update_db_time);
+void EngineShardSet::InitThreadLocal(ProactorBase* pb) {
+  EngineShard::InitThreadLocal(pb);
   EngineShard* es = EngineShard::tlocal();
   shard_queue_[es->shard_id()] = es->GetFiberQueue();
-}
-
-const vector<EngineShardSet::CachedStats>& EngineShardSet::GetCachedStats() {
-  return cached_stats;
 }
 
 void EngineShardSet::TEST_EnableHeartBeat() {
