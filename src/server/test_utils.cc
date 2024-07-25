@@ -167,6 +167,7 @@ void BaseFamilyTest::SetUpTestSuite() {
       SetTestFlag(flag, value);
     }
   }
+  max_memory_limit = INT_MAX;
 }
 
 void BaseFamilyTest::SetUp() {

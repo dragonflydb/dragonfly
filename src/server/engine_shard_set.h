@@ -241,6 +241,7 @@ class EngineShard {
   bool is_replica_ = false;
 
   size_t last_cached_used_memory_ = 0;
+  uint64_t cache_stats_time_ = 0;  // monotonic, set by ProactorBase::GetMonotonicTimeNs.
 
   // Logical ts used to order distributed transactions.
   TxId committed_txid_ = 0;

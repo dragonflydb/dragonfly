@@ -1024,6 +1024,7 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
     uint64_t used_memory = etl.GetUsedMemory(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
     if (used_memory > (max_memory_limit * oom_deny_ratio)) {
+      DLOG(WARNING) << "Out of memory, used " << used_memory << " vs limit " << max_memory_limit;
       etl.stats.oom_error_cmd_cnt++;
       return facade::ErrorReply{kOutOfMemory};
     }
