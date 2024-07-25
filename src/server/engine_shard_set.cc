@@ -74,6 +74,9 @@ ABSL_FLAG(string, shard_round_robin_prefix, "",
 ABSL_FLAG(uint32_t, mem_defrag_check_sec_interval, 10,
           "Number of seconds between every defragmentation necessity check");
 
+ABSL_FLAG(bool, enable_heartbeat_eviction, true,
+          "Enable eviction during heartbeat when memory is under pressure.");
+
 namespace dfly {
 
 using namespace tiering::literals;
@@ -641,8 +644,10 @@ void EngineShard::Heartbeat() {
     }
 
     // if our budget is below the limit
-    if (db_slice.memory_budget() < eviction_redline) {
-      db_slice.FreeMemWithEvictionStep(i, eviction_redline - db_slice.memory_budget());
+    if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
+      uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
+      db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
+                                       eviction_redline - db_slice.memory_budget());
     }
 
     if (UsedMemory() > tiering_offload_threshold) {
@@ -658,9 +663,12 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
+  VLOG(1) << "RunPeriodic with period " << period_ms.count() << "ms";
+
   bool runs_global_periodic = (shard_id() == 0);  // Only shard 0 runs global periodic.
   unsigned global_count = 0;
   int64_t last_stats_time = time(nullptr);
+  int64_t last_heartbeat_ms = INT64_MAX;
 
   while (true) {
     if (fiber_periodic_done_.WaitFor(period_ms)) {
@@ -668,7 +676,12 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
       return;
     }
 
+    int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+    if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
+      VLOG(1) << "This heartbeat took " << now_ms - last_heartbeat_ms << "ms";
+    }
     Heartbeat();
+    last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
 
     if (runs_global_periodic) {
       ++global_count;

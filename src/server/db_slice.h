@@ -437,7 +437,12 @@ class DbSlice {
 
   // Deletes some amount of possible expired items.
   DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
-  void FreeMemWithEvictionStep(DbIndex db_indx, size_t increase_goal_bytes);
+
+  // Evicts items with dynamically allocated data from the primary table.
+  // Does not shrink tables.
+  // Returnes number of bytes freed due to evictions.
+  size_t FreeMemWithEvictionStep(DbIndex db_indx, size_t starting_segment_id,
+                                 size_t increase_goal_bytes);
   void ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
@@ -469,6 +474,8 @@ class DbSlice {
   // Resets events_ member. Used by CONFIG RESETSTAT
   void ResetEvents();
 
+  // Controls the expiry/eviction state. The server may enter states where
+  // Both evictions and expiries will be stopped for a short period of time.
   void SetExpireAllowed(bool is_allowed) {
     expire_allowed_ = is_allowed;
   }
@@ -508,7 +515,6 @@ class DbSlice {
   void SendInvalidationTrackingMessage(std::string_view key);
 
   void CreateDb(DbIndex index);
-  size_t EvictObjects(size_t memory_to_free, Iterator it, DbTable* table);
 
   enum class UpdateStatsMode {
     kReadStats,
@@ -534,7 +540,7 @@ class DbSlice {
     return version_++;
   }
 
-  void CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const;
+  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
 
   class LocalBlockingCounter {
    public:

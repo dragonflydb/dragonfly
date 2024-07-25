@@ -12,7 +12,7 @@
 
 namespace dfly::acl {
 
-class AclKeys;
+struct AclKeys;
 
 std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
     const std::vector<uint64_t>& acl_commands, const AclKeys& keys, facade::CmdArgList tail_args,

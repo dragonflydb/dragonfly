@@ -701,7 +701,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
     return std::nullopt;
   }
 
-  // We should not expire/evict keys while clients are puased.
+  // We should not expire/evict keys while clients are paused.
   shard_set->RunBriefInParallel(
       [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
 

@@ -403,6 +403,8 @@ class CompactObj {
   // Precondition: the object is a non-inline string.
   StringOrView GetRawString() const;
 
+  bool HasAllocated() const;
+
  private:
   void EncodeString(std::string_view str);
   size_t DecodedLen(size_t sz) const;
@@ -411,8 +413,6 @@ class CompactObj {
 
   // Requires: HasAllocated() - true.
   void Free();
-
-  bool HasAllocated() const;
 
   bool CmpEncoded(std::string_view sv) const;
 
