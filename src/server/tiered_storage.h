@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <boost/intrusive/list.hpp>
 #include <memory>
 #include <utility>
 
@@ -13,7 +14,6 @@
 
 #include <absl/container/flat_hash_map.h>
 
-#include "core/cool_queue.h"
 #include "server/common.h"
 #include "server/table.h"
 
@@ -78,19 +78,34 @@ class TieredStorage {
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
 
+  size_t ReclaimMemory(size_t goal);
+
+  size_t CoolMemoryUsage() const {
+    return cool_memory_used_;
+  }
+
  private:
   // Returns if a value should be stashed
   bool ShouldStash(const PrimeValue& pv) const;
 
+  // Moves pv contents to the cool storage and updates pv to point to it.
+  void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
+                PrimeValue* pv);
+
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
+
+  PrimeValue DeleteCool(detail::TieredColdRecord* record);
+  detail::TieredColdRecord* PopCool();
 
   PrimeTable::Cursor offloading_cursor_{};  // where RunOffloading left off
 
   std::unique_ptr<ShardOpManager> op_manager_;
   std::unique_ptr<tiering::SmallBins> bins_;
-  CoolQueue cool_queue_;
+  typedef ::boost::intrusive::list<detail::TieredColdRecord> CoolQueue;
 
+  CoolQueue cool_queue_;
+  size_t cool_memory_used_ = 0;
   unsigned write_depth_limit_ = 10;
   struct {
     uint64_t stash_overflow_cnt = 0;

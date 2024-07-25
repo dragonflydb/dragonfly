@@ -255,7 +255,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 112, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 120, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -270,6 +270,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(insertion_rejections);
   ADD(update);
   ADD(ram_hits);
+  ADD(ram_cool_hits);
   ADD(ram_misses);
 
   return *this;
@@ -518,7 +519,10 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
         db.slots_stats[cluster::KeySlot(key)].total_reads++;
       }
       if (res.it->second.IsExternal()) {
-        events_.ram_misses++;
+        if (res.it->second.IsCool())
+          events_.ram_cool_hits++;
+        else
+          events_.ram_misses++;
       } else {
         events_.ram_hits++;
       }
@@ -612,7 +616,9 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
     // Instead, we create a positive, converging force that should help with freeing enough memory.
     // Free at least 256 bytes or 3% of the total debt.
     size_t evict_goal = std::max<size_t>(256, (-evp.mem_budget()) / 32);
-    evicted_obj_bytes = FreeMemWithEvictionStep(cntx.db_index, it.segment_id(), evict_goal);
+    auto [items, bytes] = FreeMemWithEvictionStep(cntx.db_index, it.segment_id(), evict_goal);
+    evicted_obj_bytes = bytes;
+    events_.hard_evictions += items;
   }
 
   table_memory_ += (db.table_memory() - table_before);
@@ -1213,11 +1219,19 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
          db_arr_[db_ind]->prime.GetSegmentCount();
 }
 
-size_t DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t starting_segment_id,
-                                        size_t increase_goal_bytes) {
+pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t starting_segment_id,
+                                                        size_t increase_goal_bytes) {
   DCHECK(!owner_->IsReplica());
   if ((!caching_mode_) || !expire_allowed_)
-    return 0;
+    return {0, 0};
+
+  size_t evicted_items = 0, evicted_bytes = 0;
+
+  if (owner_->tiered_storage()) {
+    evicted_bytes = owner_->tiered_storage()->ReclaimMemory(increase_goal_bytes);
+    if (evicted_bytes >= increase_goal_bytes)
+      return {0, evicted_bytes};
+  }
 
   auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);
   auto max_segment_to_consider = GetFlag(FLAGS_max_segment_to_consider);
@@ -1227,7 +1241,6 @@ size_t DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t starting_segment_
   constexpr int32_t num_buckets = PrimeTable::Segment_t::kTotalBuckets;
   constexpr int32_t num_slots = PrimeTable::Segment_t::kSlotNum;
 
-  size_t evicted_items = 0, evicted_bytes = 0;
   string tmp;
 
   bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
@@ -1291,7 +1304,7 @@ finish:
   DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted_items << "/"
            << max_eviction_per_hb;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
-  return evicted_bytes;
+  return {evicted_items, evicted_bytes};
 }
 
 void DbSlice::CreateDb(DbIndex db_ind) {

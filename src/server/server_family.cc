@@ -2161,9 +2161,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("reply_count", reply_stats.send_stats.count);
     append("reply_latency_usec", reply_stats.send_stats.total_duration);
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
-    append("ram_hits", m.events.ram_hits);
-    append("ram_misses", m.events.ram_misses);
-
     append("lua_interpreter_cnt", m.lua_stats.interpreter_cnt);
     append("lua_blocked", m.lua_stats.blocked_cnt);
   }
@@ -2191,6 +2188,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
     append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
     append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
+    append("tiered_ram_hits", m.events.ram_hits);
+    append("tiered_ram_cool_hits", m.events.ram_cool_hits);
+    append("tiered_ram_misses", m.events.ram_misses);
   }
 
   if (should_enter("PERSISTENCE", true)) {
