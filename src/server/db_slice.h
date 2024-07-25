@@ -589,7 +589,7 @@ class DbSlice {
   mutable absl::flat_hash_set<uint64_t> uniq_fps_;
 
   // ordered from the smallest to largest version.
-  std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
+  std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   mutable absl::flat_hash_set<CompactObjectView> fetched_items_;
