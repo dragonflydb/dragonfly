@@ -57,6 +57,7 @@ struct SliceEvents {
 
   // ram hit/miss when tiering is enabled
   size_t ram_hits = 0;
+  size_t ram_cool_hits = 0;
   size_t ram_misses = 0;
 
   // how many insertions were rejected due to OOM.
@@ -444,9 +445,9 @@ class DbSlice {
 
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
-  // Returnes number of bytes freed due to evictions.
-  size_t FreeMemWithEvictionStep(DbIndex db_indx, size_t starting_segment_id,
-                                 size_t increase_goal_bytes);
+  // Returnes number of (elements,bytes) freed due to evictions.
+  std::pair<uint64_t, size_t> FreeMemWithEvictionStep(DbIndex db_indx, size_t starting_segment_id,
+                                                      size_t increase_goal_bytes);
   void ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;

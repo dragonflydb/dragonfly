@@ -6,6 +6,7 @@
 
 #include <absl/base/internal/endian.h>
 
+#include <boost/intrusive/list_hook.hpp>
 #include <optional>
 #include <type_traits>
 
@@ -537,9 +538,8 @@ class CompactObjectView {
 
 namespace detail {
 
-struct TieredColdRecord {
-  TieredColdRecord* next = nullptr;
-  TieredColdRecord* prev = nullptr;
+struct TieredColdRecord : public ::boost::intrusive::list_base_hook<
+                              boost::intrusive::link_mode<boost::intrusive::normal_link>> {
   uint64_t key_hash;  // Allows searching the entry in the dbslice.
   CompactObj value;
   uint16_t db_index;

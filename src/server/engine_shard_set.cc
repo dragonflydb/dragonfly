@@ -738,6 +738,9 @@ void EngineShard::CacheStats() {
     }
   }
   DCHECK_EQ(table_memory, db_slice.table_memory());
+  if (tiered_storage_) {
+    table_memory += tiered_storage_->CoolMemoryUsage();
+  }
   size_t obj_memory = table_memory <= used_mem ? used_mem - table_memory : 0;
 
   size_t bytes_per_obj = entries > 0 ? obj_memory / entries : 0;
