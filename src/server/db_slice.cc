@@ -1126,7 +1126,6 @@ void DbSlice::ExpireAllIfNeeded() {
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
-  block_counter_.Wait();
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
@@ -1139,15 +1138,18 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
 
-  for (const auto& ccb : change_cb_) {
-    uint64_t cb_version = ccb.first;
+  const size_t limit = change_cb_.size();
+  auto ccb = change_cb_.begin();
+  for (size_t i = 0; i < limit; ++i) {
+    uint64_t cb_version = ccb->first;
     DCHECK_LE(cb_version, upper_bound);
     if (cb_version == upper_bound) {
       return;
     }
     if (bucket_version < cb_version) {
-      ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
+      ccb->second(db_ind, ChangeReq{it.GetInnerIt()});
     }
+    ++ccb;
   }
 }
 
@@ -1477,9 +1479,12 @@ void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const Change
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
   std::unique_lock<LocalBlockingCounter> lk(block_counter_);
 
-  for (const auto& ccb : change_cb_) {
-    CHECK(ccb.second);
-    ccb.second(id, cr);
+  const size_t limit = change_cb_.size();
+  auto ccb = change_cb_.begin();
+  for (size_t i = 0; i < limit; ++i) {
+    CHECK(ccb->second);
+    ccb->second(id, cr);
+    ++ccb;
   }
 }
 
