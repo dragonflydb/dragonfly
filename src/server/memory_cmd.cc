@@ -165,7 +165,7 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (sub_cmd == "DEFRAGMENT") {
-    shard_set->pool()->DispatchOnAll([this](util::ProactorBase*) {
+    shard_set->pool()->DispatchOnAll([](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard)
         shard->ForceDefrag();
     });

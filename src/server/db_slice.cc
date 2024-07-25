@@ -705,7 +705,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
       string_view key = get<string_view>(req.change);
       table->CVCUponInsert(
           next_version, key,
-          [this, db_index, next_version, iterate_bucket](PrimeTable::bucket_iterator it) {
+          [db_index, next_version, iterate_bucket](PrimeTable::bucket_iterator it) {
             DCHECK_LT(it.GetVersion(), next_version);
             iterate_bucket(db_index, it);
           });
@@ -758,7 +758,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   }
 
   CHECK(fetched_items_.empty());
-  auto cb = [this, indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
+  auto cb = [indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
                                           ServerState::kGlibcmalloc);
