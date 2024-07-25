@@ -85,7 +85,6 @@ LSN Journal::GetLsn() const {
 
 void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
                           std::optional<cluster::SlotId> slot, Entry::Payload payload, bool await) {
-  lock_guard lk(state_mu_);
   journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)}, await);
 }
 
