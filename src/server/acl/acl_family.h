@@ -122,8 +122,7 @@ class AclFamily final {
                                       {"FT_SEARCH", FT_SEARCH},
                                       {"THROTTLE", THROTTLE},
                                       {"JSON", JSON},
-                                      {"ALL", ALL},
-                                      {"NONE", NONE}};
+                                      {"ALL", ALL}};
 
   // bit 0 at index 0
   // bit 1 at index 1
