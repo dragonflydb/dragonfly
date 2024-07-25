@@ -552,4 +552,5 @@ async def test_big_value_serialization_memory_limit(df_factory, query):
     await client.execute_command("SAVE")
 
     checker.cancel()
+    await client.execute_command("FLUSHALL")
     await client.close()

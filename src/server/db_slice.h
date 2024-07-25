@@ -423,6 +423,10 @@ class DbSlice {
   //! at a time of the call.
   uint64_t RegisterOnChange(ChangeCallback cb);
 
+  bool HasRegisteredCallbacks() const {
+    return !change_cb_.empty();
+  }
+
   // Call registered callbacks with version less than upper_bound.
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
 
