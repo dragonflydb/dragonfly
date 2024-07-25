@@ -406,6 +406,8 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (*status == OpStatus::OK) {
     auto cb = [replica_ptr = std::move(replica_ptr), end_time,
                &catchup_success](EngineShard* shard) {
+      // We can't std::move(replica_ptr) into WaitReplicaFlowToCatchup() because `cb` runs on
+      // multiple threads, meaning it will be moved()d multiple times
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr, shard)) {
         catchup_success.store(false);
       }
