@@ -1420,8 +1420,9 @@ void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
 
 bool Transaction::CanRunInlined() const {
   auto* ss = ServerState::tlocal();
+  auto* es = EngineShard::tlocal();
   if (unique_shard_cnt_ == 1 && unique_shard_id_ == ss->thread_index() &&
-      ss->AllowInlineScheduling()) {
+      ss->AllowInlineScheduling() && !GetDbSlice(es->shard_id()).HasRegisteredCallbacks()) {
     ss->stats.tx_inline_runs++;
     return true;
   }
