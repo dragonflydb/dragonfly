@@ -34,6 +34,8 @@ OpManager::OpManager(size_t max_size) : storage_{max_size} {
 }
 
 OpManager::~OpManager() {
+  DCHECK(pending_stash_ver_.empty());
+  DCHECK(pending_reads_.empty());
 }
 
 std::error_code OpManager::Open(std::string_view file) {
