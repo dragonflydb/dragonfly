@@ -1227,7 +1227,7 @@ async def test_take_over_seeder(
     request, df_factory, df_seeder_factory, master_threads, replica_threads
 ):
     master = df_factory.create(
-        proactor_threads=master_threads, dbfilename=f"dump_{tmp_file_name()}"
+        proactor_threads=master_threads, dbfilename=f"dump_{tmp_file_name()}", admin_port=ADMIN_PORT
     )
     replica = df_factory.create(proactor_threads=replica_threads)
     df_factory.start_all([master, replica])
@@ -1236,30 +1236,32 @@ async def test_take_over_seeder(
 
     c_replica = replica.client()
 
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}")
     await wait_available_async(c_replica)
 
     fill_task = asyncio.create_task(seeder.run())
 
     stop_info = False
 
-    async def info_task():
+    async def info_replication():
         my_client = replica.client()
         while not stop_info:
-            info = await my_client.info("replication")
-            asyncio.sleep(0.5)
+            await my_client.info("replication")
+            await asyncio.sleep(0.5)
 
-    info_task = asyncio.create_task(info_task())
+    info_task = asyncio.create_task(info_replication())
 
     # Give the seeder a bit of time.
     await asyncio.sleep(3)
     logging.debug("running repltakover")
-    await c_replica.execute_command(f"REPLTAKEOVER 5 SAVE")
+    await c_replica.execute_command(f"REPLTAKEOVER 10 SAVE")
     logging.debug("after running repltakover")
     seeder.stop()
+    await fill_task
 
     assert await c_replica.execute_command("role") == ["master", []]
     stop_info = True
+    await info_task
 
     # Need to wait a bit to give time to write the shutdown snapshot
     await asyncio.sleep(1)

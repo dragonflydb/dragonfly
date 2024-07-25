@@ -71,8 +71,8 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
   return "unsupported";
 }
 
-OpStatus WaitReplicaFlowToCatchup(absl::Time end_time, shared_ptr<DflyCmd::ReplicaInfo> replica,
-                                  EngineShard* shard) {
+bool WaitReplicaFlowToCatchup(absl::Time end_time, DflyCmd::ReplicaInfo* replica,
+                              EngineShard* shard) {
   // We don't want any writes to the journal after we send the `PING`,
   // and expirations could ruin that.
   namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
@@ -84,17 +84,17 @@ OpStatus WaitReplicaFlowToCatchup(absl::Time end_time, shared_ptr<DflyCmd::Repli
       LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: " << replica->address
                    << ":" << replica->listening_port << ", last acked: " << flow->last_acked_lsn
                    << ", expecting " << shard->journal()->GetLsn();
-      return OpStatus::TIMED_OUT;
+      return false;
     }
     if (replica->cntx.IsCancelled()) {
-      return OpStatus::CANCELLED;
+      return false;
     }
     VLOG(1) << "Replica lsn:" << flow->last_acked_lsn
             << " master lsn:" << shard->journal()->GetLsn();
     ThisFiber::SleepFor(1ms);
   }
 
-  return OpStatus::OK;
+  return true;
 }
 
 }  // namespace
@@ -395,24 +395,31 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   VLOG(1) << "AwaitCurrentDispatches done";
 
-  absl::Cleanup([] {
+  absl::Cleanup cleanup([] {
+    VLOG(2) << "Enabling expiration";
     shard_set->RunBriefInParallel([](EngineShard* shard) {
       namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
     });
-    VLOG(2) << "Enable expiration";
   });
 
+  atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
-    auto cb = [replica_ptr = std::move(replica_ptr), end_time, &status](EngineShard* shard) {
-      status = WaitReplicaFlowToCatchup(end_time, std::move(replica_ptr), shard);
+    auto cb = [replica_ptr = std::move(replica_ptr), end_time,
+               &catchup_success](EngineShard* shard) {
+      if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
+        catchup_success.store(false);
+      }
     };
     shard_set->RunBlockingInParallel(std::move(cb));
   }
 
-  if (*status != OpStatus::OK) {
+  VLOG(1) << "WaitReplicaFlowToCatchup done";
+
+  if (*status != OpStatus::OK || !catchup_success.load()) {
     sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
     return cntx->SendError("Takeover failed!");
   }
+
   cntx->SendOk();
 
   if (save_flag) {
