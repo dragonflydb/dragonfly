@@ -40,6 +40,11 @@ imagePullSecrets:
 securityContext:
   {{- toYaml . | trim | nindent 2 }}
 {{- end }}
+hostNetwork: {{ .Values.hostNetwork }}
+{{- with .Values.topologySpreadConstraints }}
+topologySpreadConstraints:
+  {{- toYaml . | trim | nindent 2 }}
+{{- end }}
 {{- with .Values.initContainers }}
 initContainers:
   {{- if eq (typeOf .) "string" }}
