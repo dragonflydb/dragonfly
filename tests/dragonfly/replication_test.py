@@ -130,7 +130,7 @@ async def test_replication_all(
     # speed up shutdown
     for c in c_replicas:
         await c.execute_command("REPLICAOF NO ONE")
-    await c_mater.execute_command("FLUSHALL")
+    await c_master.execute_command("FLUSHALL")
 
     await disconnect_clients(c_master, *c_replicas)
 
