@@ -159,6 +159,7 @@ class SliceSnapshot {
 
   std::unique_ptr<RdbSerializer> serializer_;
   std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  absl::flat_hash_set<size_t> serialized_pages_;
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;

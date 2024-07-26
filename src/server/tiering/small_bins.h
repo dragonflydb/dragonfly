@@ -8,10 +8,11 @@
 
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
-#include "server/tiering/disk_storage.h"
+#include "base/iterator.h"
+#include "io/io.h"
+#include "server/tiering/common.h"
 #include "server/tx_base.h"
 
 namespace dfly::tiering {
@@ -70,6 +71,8 @@ class SmallBins {
   KeyHashDbList DeleteBin(DiskSegment segment, std::string_view value);
 
   Stats GetStats() const;
+
+  std::vector<size_t> GetStashedOffsets() const;
 
  private:
   // Flush current bin

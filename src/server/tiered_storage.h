@@ -23,7 +23,8 @@ class DbSlice;
 
 namespace tiering {
 class SmallBins;
-};
+class DiskStorage;
+};  // namespace tiering
 
 // Manages offloaded values
 class TieredStorage {
@@ -77,6 +78,10 @@ class TieredStorage {
 
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
+
+  tiering::DiskStorage& BorrowStorage();
+
+  util::fb2::Future<std::string> ReadPage(size_t offset);
 
  private:
   // Returns if a value should be stashed

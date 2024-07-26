@@ -32,6 +32,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/json/json_object.h"
+#include "core/overloaded.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -48,6 +49,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/tiering/common.h"  // for _KB literal
+#include "server/tiering/disk_storage.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
@@ -387,6 +389,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   void operator()(const LzfString& lzfstr);
   void operator()(const unique_ptr<LoadTrace>& ptr);
   void operator()(const RdbSBF& src);
+  void operator()(const RdbTieredSegment& segmnet);
 
   std::error_code ec() const {
     return ec_;
@@ -479,6 +482,10 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
     sbf->AddFilter(src.filters[i].blob, src.filters[i].hash_cnt);
   }
   pv_->SetSBF(sbf);
+}
+
+void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTieredSegment& src) {
+  CHECK(false) << "unreachable";
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -1385,6 +1392,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_SBF:
       iores = ReadSBF();
       break;
+    case RDB_TYPE_TIERED_SEGMENT:
+      iores = ReadTieredSegment();
+      break;
     default:
       LOG(ERROR) << "Unsupported rdb type " << rdbtype;
 
@@ -1878,6 +1888,14 @@ auto RdbLoaderBase::ReadSBF() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(res), RDB_TYPE_SBF};
 }
 
+auto RdbLoaderBase::ReadTieredSegment() -> io::Result<OpaqueObj> {
+  RdbTieredSegment segment;
+  SET_OR_UNEXPECT(LoadLen(nullptr), segment.offset);
+  SET_OR_UNEXPECT(LoadLen(nullptr), segment.length);
+  SET_OR_UNEXPECT(LoadLen(nullptr), segment.enc_mask);
+  return OpaqueObj{segment, RDB_TYPE_TIERED_SEGMENT};
+};
+
 template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
   auto ec = EnsureRead(sizeof(T));
   if (ec)
@@ -1924,6 +1942,18 @@ RdbLoader::RdbLoader(Service* service)
 }
 
 RdbLoader::~RdbLoader() {
+  for (auto& [_, page] : small_items_pages_) {
+    if (!holds_alternative<tiering::DiskSegment>(page))
+      continue;
+    auto segment = get<tiering::DiskSegment>(page);
+    EngineShard::tlocal()->tiered_storage()->BorrowStorage().MarkAsFree(segment);
+  }
+
+  for (auto& [_, items] : small_items_) {
+    for (Item* item : items)
+      delete item;
+  }
+
   while (true) {
     Item* item = item_queue_.Pop();
     if (item == nullptr)
@@ -2117,6 +2147,11 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_TIERED_PAGE) {
+      RETURN_ON_ERR(LoadTieredPage());
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
@@ -2125,6 +2160,11 @@ error_code RdbLoader::Load(io::Source* src) {
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
     settings.Reset();
   }  // main load loop
+
+  // Flush all small items
+  HandleSmallItems(true);
+
+  FlushAllShards();
 
   DVLOG(1) << "RdbLoad loop finished";
 
@@ -2348,6 +2388,38 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   return std::error_code{};
 }
 
+error_code RdbLoader::LoadTieredPage() {
+  size_t offset;
+  SET_OR_RETURN(LoadLen(nullptr), offset);
+
+  std::string page;
+  SET_OR_RETURN(FetchGenericString(), page);
+
+  // If tiering is enabled, try saving the received page on disk
+  // Fall back to memory in case of errors
+  if (EngineShard::tlocal() && EngineShard::tlocal()->tiered_storage()) {
+    auto& storage = EngineShard::tlocal()->tiered_storage()->BorrowStorage();
+
+    util::fb2::Done done;
+    std::error_code ec;
+    auto cb = [this, offset, &ec, &done](io::Result<tiering::DiskSegment> res) {
+      if (res.has_value())
+        small_items_pages_[offset] = res.value();
+      else
+        ec = res.error();
+      done.Notify();
+    };
+    ec = storage.Stash(io::Buffer(page), {}, cb);
+
+    done.Wait();
+    if (!ec)
+      return {};
+  }
+
+  small_items_pages_[offset] = page;
+  return {};
+}
+
 error_code RdbLoader::HandleAux() {
   /* AUX: generic string-string fields. Use to add state to RDB
    * which is backward compatible. Implementations of RDB loading
@@ -2531,20 +2603,37 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
   item->is_sticky = settings->is_sticky;
 
-  ShardId sid = Shard(item->key, shard_set->size());
   item->expire_ms = settings->expiretime;
 
-  auto& out_buf = shard_buf_[sid];
-
-  out_buf.emplace_back(item);
   std::move(cleanup).Cancel();
+
+  if (item->val.rdb_type == RDB_TYPE_TIERED_SEGMENT) {
+    auto segment = get<RdbTieredSegment>(item->val.obj);
+    {
+      size_t offset = segment.offset / tiering::kPageSize * tiering::kPageSize;
+      auto& items = small_items_[offset];
+      small_items_sizes_.erase({items.size(), offset});
+      items.push_back(item);
+      small_items_sizes_.insert({items.size(), offset});
+    }
+    HandleSmallItems(false);  // don't force flush
+    return kOk;
+  }
+
+  Add(item);
+  return kOk;
+}
+
+void RdbLoader::Add(Item* item) {
+  ShardId sid = Shard(item->key, shard_set->size());
+
+  auto& out_buf = shard_buf_[sid];
+  out_buf.emplace_back(item);
 
   constexpr size_t kBufSize = 128;
   if (out_buf.size() >= kBufSize) {
     FlushShardAsync(sid);
   }
-
-  return kOk;
 }
 
 void RdbLoader::LoadScriptFromAux(string&& body) {
@@ -2556,6 +2645,42 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
     auto res = script_mgr_->Insert(body, interpreter);
     if (!res)
       LOG(ERROR) << "Error compiling script";
+  }
+}
+
+void RdbLoader::HandleSmallItems(bool flush) {
+  while (!small_items_.empty() && (flush || small_items_.size() > 1000)) {
+    auto [_, offset] = small_items_sizes_.extract(small_items_sizes_.begin()).value();
+    auto node = small_items_.extract(offset);
+
+    auto page_reader = [](tiering::DiskSegment segment) {
+      auto& store = EngineShard::tlocal()->tiered_storage()->BorrowStorage();
+      util::fb2::Future<std::string> f;
+      store.Read(segment, [f](io::Result<std::string_view> result) mutable {
+        CHECK(result.has_value());  // TODO
+        f.Resolve(string{result.value()});
+      });
+      return f.Get();
+    };
+    string page = visit(Overloaded{[](const string& s) { return s; }, page_reader},
+                        small_items_pages_[offset]);
+
+    for (Item* item : node.mapped()) {
+      RdbTieredSegment segment = get<RdbTieredSegment>(item->val.obj);
+
+      CompactObj co;
+      co.SetEncodingMask(segment.enc_mask);
+      co.Materialize({page.data() + (segment.offset - offset), segment.length}, true);
+
+      VLOG(0) << "Loaded " << co.ToString();
+
+      base::PODArray<char> arr(co.Size(), nullptr);
+      co.GetString(arr.data());
+
+      item->val.rdb_type = RDB_TYPE_STRING;
+      item->val.obj = std::move(arr);
+      Add(item);
+    }
   }
 }
 

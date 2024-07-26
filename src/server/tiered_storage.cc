@@ -56,6 +56,7 @@ bool OccupiesWholePages(size_t size) {
 
 // Stashed bins no longer have bin ids, so this sentinel is used to differentiate from regular reads
 constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
+constexpr auto kRandomBin = tiering::SmallBins::kInvalidBin - 2;
 
 // Called after setting new value in place of previous segment
 void RecordDeleted(const PrimeValue& pv, size_t tiered_len, DbTableStats* stats) {
@@ -243,6 +244,9 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
     return true;  // delete
   }
 
+  if (holds_alternative<tiering::SmallBins::BinId>(id))
+    return false;  // god knows why we read
+
   // 1. When modified is true we MUST upload the value back to memory.
   // 2. On the other hand, if read is caused by snapshotting we do not want to fetch it.
   //    Currently, our heuristic is not very smart, because we stop uploading any reads during
@@ -278,6 +282,7 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
 
   auto bin = ts_->bins_->Delete(segment);
   if (bin.empty) {
+    //    CHECK(false) << "Not supported";
     return true;
   }
 
@@ -594,6 +599,20 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
       break;
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
   } while (offloading_cursor_ != start_cursor && iterations++ < kMaxIterations);
+}
+
+tiering::DiskStorage& TieredStorage::BorrowStorage() {
+  return op_manager_->storage_;
+}
+
+util::fb2::Future<string> TieredStorage::ReadPage(size_t offset) {
+  util::fb2::Future<string> fut;
+  op_manager_->Enqueue(kRandomBin, {offset, tiering::kPageSize},
+                       [fut](bool is_raw, const string* raw_val) mutable {
+                         fut.Resolve(*raw_val);
+                         return false;
+                       });
+  return fut;
 }
 
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {

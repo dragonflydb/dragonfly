@@ -161,6 +161,8 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
   unsigned compact_enc = pv.Encoding();
   switch (type) {
     case OBJ_STRING:
+      if (pv.IsExternal())
+        return RDB_TYPE_TIERED_SEGMENT;
       return RDB_TYPE_STRING;
     case OBJ_LIST:
       if (compact_enc == OBJ_ENCODING_QUICKLIST)
@@ -311,8 +313,9 @@ RdbSerializer::~RdbSerializer() {
 std::error_code RdbSerializer::SaveValue(const PrimeValue& pv) {
   std::error_code ec;
   if (pv.ObjType() == OBJ_STRING) {
-    auto opt_int = pv.TryGetInt();
-    if (opt_int) {
+    if (pv.IsExternal()) {
+      ec = SaveExternalSegment(pv);
+    } else if (auto opt_int = pv.TryGetInt(); opt_int) {
       ec = SaveLongLongAsString(*opt_int);
     } else {
       ec = SaveString(pv.GetSlice(&tmp_str_));
@@ -679,6 +682,13 @@ std::error_code RdbSerializer::SaveSBFObject(const PrimeValue& pv) {
   }
 
   return {};
+}
+
+std::error_code RdbSerializer::SaveExternalSegment(const PrimeValue& pv) {
+  auto [offset, length] = pv.GetExternalSlice();
+  RETURN_ON_ERR(SaveLen(offset));
+  RETURN_ON_ERR(SaveLen(length));
+  return SaveLen(pv.GetEncodingMask());
 }
 
 /* Save a long long value as either an encoded string or a string. */
@@ -1633,6 +1643,12 @@ void SerializerBase::CompressBlob() {
 
 size_t RdbSerializer::GetTempBufferSize() const {
   return SerializerBase::GetTempBufferSize() + tmp_str_.size();
+}
+
+error_code RdbSerializer::SaveTieringPage(size_t offset, std::string_view page) {
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_TIERED_PAGE));
+  RETURN_ON_ERR(SaveLen(offset));
+  return SaveString(page);
 }
 
 void RdbSerializer::FlushIfNeeded(SerializerBase::FlushState flush_state) {

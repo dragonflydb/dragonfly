@@ -3,6 +3,9 @@
 //
 #pragma once
 
+#include <absl/container/btree_set.h>
+#include <absl/container/flat_hash_map.h>
+
 #include <system_error>
 
 extern "C" {
@@ -15,6 +18,7 @@ extern "C" {
 #include "io/io_buf.h"
 #include "server/common.h"
 #include "server/journal/serializer.h"
+#include "server/tiering/common.h"
 
 namespace dfly {
 
@@ -54,8 +58,18 @@ class RdbLoaderBase {
     std::vector<Filter> filters;
   };
 
-  using RdbVariant =
-      std::variant<long long, base::PODArray<char>, LzfString, std::unique_ptr<LoadTrace>, RdbSBF>;
+  struct RdbTieredSegment {
+    size_t offset, length;
+    uint8_t enc_mask;
+  };
+
+  struct RdbTieredPage {
+    size_t offset;
+    std::string blob;
+  };
+
+  using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
+                                  std::unique_ptr<LoadTrace>, RdbSBF, RdbTieredSegment>;
 
   struct OpaqueObj {
     RdbVariant obj;
@@ -148,6 +162,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadRedisJson();
   ::io::Result<OpaqueObj> ReadJson();
   ::io::Result<OpaqueObj> ReadSBF();
+  ::io::Result<OpaqueObj> ReadTieredSegment();
 
   std::error_code SkipModuleData();
   std::error_code HandleCompressedBlob(int op_type);
@@ -168,10 +183,13 @@ class RdbLoaderBase {
 
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
+
   base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<DecompressImpl> decompress_impl_;
+
   JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
+
   RdbVersion rdb_version_ = RDB_VERSION;
 };
 
@@ -259,9 +277,13 @@ class RdbLoader : protected RdbLoaderBase {
   void FlushShardAsync(ShardId sid);
   void FlushAllShards();
 
+  void Add(Item* item);
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
   void LoadScriptFromAux(std::string&& value);
+
+  void HandleSmallItems(bool flush);
+  std::error_code LoadTieredPage();
 
   // Load index definition from RESP string describing it in FT.CREATE format,
   // issues an FT.CREATE call, but does not start indexing
@@ -285,6 +307,12 @@ class RdbLoader : protected RdbLoaderBase {
   std::function<void()> full_sync_cut_cb;
 
   base::MPSCIntrusiveQueue<Item> item_queue_;
+
+  absl::flat_hash_map<size_t /* offset */, std::vector<Item*>> small_items_;
+  absl::btree_set<std::pair<size_t /* num entries*/, size_t /* offset */>, std::greater<>>
+      small_items_sizes_;
+  absl::flat_hash_map<size_t /* offset  */, std::variant<std::string, tiering::DiskSegment>>
+      small_items_pages_;
 };
 
 }  // namespace dfly

@@ -175,6 +175,14 @@ SmallBins::Stats SmallBins::GetStats() const {
                .current_bin_bytes = current_bin_bytes_};
 }
 
+vector<size_t> SmallBins::GetStashedOffsets() const {
+  vector<size_t> out;
+  out.reserve(stashed_bins_.size());
+  for (const auto& [offset, _] : stashed_bins_)
+    out.push_back(offset);
+  return out;
+}
+
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
   DCHECK_EQ(value.size(), kPageSize);
 

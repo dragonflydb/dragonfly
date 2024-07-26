@@ -405,6 +405,15 @@ class CompactObj {
 
   bool HasAllocated() const;
 
+  uint8_t GetEncodingMask() const {
+    return mask_ & kEncMask;
+  }
+
+  void SetEncodingMask(uint8_t mask) {
+    mask_ &= ~kEncMask;
+    mask_ |= (mask & kEncMask);
+  }
+
  private:
   void EncodeString(std::string_view str);
   size_t DecodedLen(size_t sz) const;

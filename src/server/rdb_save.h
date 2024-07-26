@@ -227,6 +227,8 @@ class RdbSerializer : public SerializerBase {
 
   size_t GetTempBufferSize() const override;
 
+  std::error_code SaveTieringPage(size_t offset, std::string_view page);
+
  private:
   // Might preempt if flush_fun_ is used
   std::error_code SaveObject(const PrimeValue& pv);
@@ -237,6 +239,7 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveStreamObject(const PrimeValue& obj);
   std::error_code SaveJsonObject(const PrimeValue& pv);
   std::error_code SaveSBFObject(const PrimeValue& pv);
+  std::error_code SaveExternalSegment(const PrimeValue& pv);
 
   std::error_code SaveLongLongAsString(int64_t value);
   std::error_code SaveBinaryDouble(double val);

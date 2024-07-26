@@ -985,7 +985,7 @@ std::pair<size_t, size_t> CompactObj::GetExternalSlice() const {
 }
 
 void CompactObj::Materialize(std::string_view blob, bool is_raw) {
-  CHECK(IsExternal()) << int(taglen_);
+  // CHECK(IsExternal()) << int(taglen_);
 
   DCHECK_GT(blob.size(), kInlineLen);
 

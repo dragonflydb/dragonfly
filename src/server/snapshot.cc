@@ -307,19 +307,28 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     expire_time = db_slice_->ExpireTime(eit);
   }
 
-  if (pv.IsExternal()) {
+  auto* ts = EngineShard::tlocal()->tiered_storage();
+  if (pv.IsExternal() && pv.Size() > 2048) {
     // We can't block, so we just schedule a tiered read and append it to the delayed entries
     util::fb2::Future<PrimeValue> future;
-    EngineShard::tlocal()->tiered_storage()->Read(
-        db_indx, pk.ToString(), pv,
-        [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
+    ts->Read(db_indx, pk.ToString(), pv,
+             [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
     delayed_entries_.push_back({db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time});
     ++type_freq_map_[RDB_TYPE_STRING];
-  } else {
-    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
-    CHECK(res);
-    ++type_freq_map_[*res];
+    return;
   }
+
+  // Serialize page if needed
+  if (pv.IsExternal()) {
+    tiering::DiskSegment segment{pv.GetExternalSlice()};
+    segment = segment.ContainingPages();
+    if (serialized_pages_.emplace(segment.offset).second)
+      serializer_->SaveTieringPage(segment.offset, ts->ReadPage(segment.offset).Get());
+  }
+
+  io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
+  CHECK(res);
+  ++type_freq_map_[*res];
 }
 
 size_t SliceSnapshot::Serialize(SerializerBase::FlushState flush_state) {
@@ -345,9 +354,6 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
   if (!force && serializer_->SerializedLen() < 4096)
     return false;
 
-  // Flush any of the leftovers to avoid interleavings
-  const auto serialized = Serialize();
-
   // Bucket serialization might have accumulated some delayed values.
   // Because we can finally block in this function, we'll await and serialize them
   while (!delayed_entries_.empty()) {
@@ -356,8 +362,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
     delayed_entries_.pop_back();
   }
 
-  const auto total_serialized = Serialize() + serialized;
-  return total_serialized > 0;
+  return Serialize() > 0;
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -384,6 +389,8 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
 void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
+  CHECK(false) << "Not supported";
+
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerializedToChannel.
