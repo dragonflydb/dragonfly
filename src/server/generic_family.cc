@@ -551,7 +551,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   if (!IsValid(it))
     return false;
 
-  bool matches = opts.type_filter.empty() || ObjTypeName(it->second.ObjType()) == opts.type_filter;
+  bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
 
   if (!matches)
     return false;
@@ -1399,7 +1399,7 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   if (!result) {
     cntx->SendSimpleString("none");
   } else {
-    cntx->SendSimpleString(ObjTypeName(result.value()));
+    cntx->SendSimpleString(CompactObjTypeConverter::ObjTypeToString(result.value()));
   }
 }
 

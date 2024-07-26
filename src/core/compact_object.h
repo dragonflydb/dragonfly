@@ -9,6 +9,7 @@
 #include <boost/intrusive/list_hook.hpp>
 #include <optional>
 #include <type_traits>
+#include <unordered_map>
 
 #include "base/pmr/memory_resource.h"
 #include "core/json/json_object.h"
@@ -96,6 +97,10 @@ class RobjWrapper {
 struct TieredColdRecord;
 
 }  // namespace detail
+
+using CompactObjType = unsigned;
+
+constexpr CompactObjType kInvalidCompactObjType = std::numeric_limits<CompactObjType>::max();
 
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
@@ -268,9 +273,7 @@ class CompactObj {
   }
 
   unsigned Encoding() const;
-  unsigned ObjType() const;
-
-  static std::string_view ObjTypeToString(unsigned type);
+  CompactObjType ObjType() const;
 
   void* RObjPtr() const {
     return u_.r_obj.inner_obj();
@@ -282,7 +285,7 @@ class CompactObj {
 
   // takes ownership over obj_inner.
   // type should not be OBJ_STRING.
-  void InitRobj(unsigned type, unsigned encoding, void* obj_inner);
+  void InitRobj(CompactObjType type, unsigned encoding, void* obj_inner);
 
   // For STR object.
   void SetInt(int64_t val);
@@ -534,6 +537,15 @@ class CompactObjectView {
 
  private:
   CompactObj obj_;
+};
+
+class CompactObjTypeConverter {
+ public:
+  static std::string_view ObjTypeToString(CompactObjType type);
+  static CompactObjType ObjTypeFromString(std::string_view sv);
+
+ private:
+  static const std::unordered_map<CompactObjType, std::string_view> kObjTypeToString;
 };
 
 namespace detail {

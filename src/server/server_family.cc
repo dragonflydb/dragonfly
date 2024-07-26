@@ -1196,7 +1196,8 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
       size_t mem = total.memory_usage_by_type[type];
       if (mem > 0) {
-        AppendMetricValue("type_used_memory", mem, {"type"}, {CompactObj::ObjTypeToString(type)},
+        AppendMetricValue("type_used_memory", mem, {"type"},
+                          {CompactObjTypeConverter::ObjTypeToString(type)},
                           &type_used_memory_metric);
         added = true;
       }
@@ -2078,7 +2079,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
       size_t mem = total.memory_usage_by_type[type];
       if (mem > 0) {
-        append(absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), mem);
+        append(absl::StrCat("type_used_memory_", CompactObjTypeConverter::ObjTypeToString(type)),
+               mem);
       }
     }
     append("table_used_memory", total.table_mem_usage);

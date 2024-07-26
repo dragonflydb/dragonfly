@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "util/fibers/fibers.h"
@@ -121,7 +122,6 @@ inline void ToLower(const MutableSlice* val) {
 
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
 bool ParseDouble(std::string_view src, double* value);
-const char* ObjTypeName(int type);
 
 const char* RdbTypeName(unsigned type);
 
@@ -295,7 +295,7 @@ class Context : protected Cancellation {
 struct ScanOpts {
   std::string_view pattern;
   size_t limit = 10;
-  std::string_view type_filter;
+  std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;
 
   bool Matches(std::string_view val_name) const;
