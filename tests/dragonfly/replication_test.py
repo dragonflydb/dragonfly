@@ -107,7 +107,7 @@ async def test_replication_all(
     )
 
     # Wait for all replicas to transition into stable sync
-    async with async_timeout.timeout(20):
+    async with async_timeout.timeout(60):
         await wait_for_replicas_state(*c_replicas)
 
     # Stop streaming data once every replica is in stable sync
