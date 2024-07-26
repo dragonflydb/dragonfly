@@ -539,14 +539,9 @@ class CompactObjectView {
   CompactObj obj_;
 };
 
-class CompactObjTypeConverter {
- public:
-  static std::string_view ObjTypeToString(CompactObjType type);
-  static CompactObjType ObjTypeFromString(std::string_view sv);
+std::optional<std::string_view> ObjTypeToString(CompactObjType type);
 
- private:
-  static const std::unordered_map<CompactObjType, std::string_view> kObjTypeToString;
-};
+std::optional<CompactObjType> ObjTypeFromString(std::string_view sv);
 
 namespace detail {
 

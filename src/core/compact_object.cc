@@ -1232,28 +1232,31 @@ MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
 }
 
-std::string_view CompactObjTypeConverter::ObjTypeToString(CompactObjType type) {
-  auto it = kObjTypeToString.find(type);
-  if (it != kObjTypeToString.end()) {
-    return it->second;
+constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[8] = {
+    {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},    {OBJ_SET, "set"sv},
+    {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
+    {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
+
+std::optional<std::string_view> ObjTypeToString(CompactObjType type) {
+  for (auto& p : kObjTypeToString) {
+    if (type == p.first) {
+      return p.second;
+    }
   }
+
   LOG(ERROR) << "Unsupported type " << type;
-  return "invalid";
+  return std::nullopt;
 }
 
-CompactObjType CompactObjTypeConverter::ObjTypeFromString(std::string_view sv) {
+std::optional<CompactObjType> ObjTypeFromString(std::string_view sv) {
   for (auto& p : kObjTypeToString) {
     if (absl::EqualsIgnoreCase(sv, p.second)) {
       return p.first;
     }
   }
-  return kInvalidCompactObjType;
-}
 
-const std::unordered_map<CompactObjType, std::string_view>
-    CompactObjTypeConverter::kObjTypeToString{{OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},
-                                              {OBJ_SET, "set"sv},        {OBJ_ZSET, "zset"sv},
-                                              {OBJ_HASH, "hash"sv},      {OBJ_STREAM, "stream"sv},
-                                              {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
+  LOG(ERROR) << "Unsupported type " << sv;
+  return std::nullopt;
+}
 
 }  // namespace dfly

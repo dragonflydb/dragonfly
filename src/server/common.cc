@@ -293,7 +293,7 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       if (scan_opts.pattern == "*")
         scan_opts.pattern = string_view{};
     } else if (opt == "TYPE") {
-      scan_opts.type_filter = CompactObjTypeConverter::ObjTypeFromString(ArgS(args, i + 1));
+      scan_opts.type_filter = ObjTypeFromString(ArgS(args, i + 1));
     } else if (opt == "BUCKET") {
       if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.bucket_id)) {
         return facade::OpStatus::INVALID_INT;
