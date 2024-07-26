@@ -162,6 +162,15 @@ struct ClientStats {
   uint64_t hit_count = 0;
   uint64_t hit_opportunities = 0;
   uint64_t num_errors = 0;
+
+  ClientStats& operator+=(const ClientStats& o) {
+    hist.Merge(o.hist);
+    num_responses += o.num_responses;
+    hit_count += o.hit_count;
+    hit_opportunities += o.hit_opportunities;
+    num_errors += o.num_errors;
+    return *this;
+  }
 };
 
 // Per connection driver.
@@ -474,29 +483,30 @@ void WatchFiber(absl::Time start_time, atomic_bool* finish_signal, ProactorPool*
     ThisFiber::SleepFor(1s);
     absl::Time now = absl::Now();
     if (now - last_print > absl::Seconds(5)) {
-      uint64_t num_resp = 0;
-      uint64_t num_errors = 0;
-
+      ClientStats client_stats;
       pp->AwaitFiberOnAll([&](auto* p) {
         unique_lock lk(mutex);
-
-        num_resp += client->stats.num_responses;
-        num_errors += client->stats.num_errors;
+        client_stats += client->stats;
         lk.unlock();
       });
 
       uint64_t total_ms = (now - start_time) / absl::Milliseconds(1);
       uint64_t period_ms = (now - last_print) / absl::Milliseconds(1);
-      uint64_t period_resp_cnt = num_resp - num_last_resp_cnt;
-      double done_perc = double(num_resp) * 100 / resp_goal;
-
+      uint64_t period_resp_cnt = client_stats.num_responses - num_last_resp_cnt;
+      double done_perc = double(client_stats.num_responses) * 100 / resp_goal;
+      double hitrate =
+          client_stats.hit_opportunities > 0
+              ? 100 * double(client_stats.hit_count) / double(client_stats.hit_opportunities)
+              : 0;
       CONSOLE_INFO << total_ms / 1000 << "s: " << absl::StrFormat("%.1f", done_perc)
                    << "% done, effective RPS(now/accumulated): "
-                   << period_resp_cnt * 1000 / period_ms << "/" << num_resp * 1000 / total_ms
-                   << ", errors: " << num_errors;
+                   << period_resp_cnt * 1000 / period_ms << "/"
+                   << client_stats.num_responses * 1000 / total_ms
+                   << ", errors: " << client_stats.num_errors
+                   << ", hitrate: " << absl::StrFormat("%.1f", hitrate) << "%";
 
       last_print = now;
-      num_last_resp_cnt = num_resp;
+      num_last_resp_cnt = client_stats.num_responses;
     }
   }
 }
@@ -599,31 +609,27 @@ int main(int argc, char* argv[]) {
   base::Histogram hist;
 
   LOG(INFO) << "Resetting all threads";
-  uint64_t hit_opportunities = 0, hit_count = 0, num_errors = 0, num_responses = 0;
 
+  ClientStats summary;
   pp->AwaitFiberOnAll([&](auto* p) {
     unique_lock lk(mutex);
-    hist.Merge(client->stats.hist);
-
-    hit_opportunities += client->stats.hit_opportunities;
-    hit_count += client->stats.hit_count;
-    num_errors += client->stats.num_errors;
-    num_responses += client->stats.num_responses;
+    summary += client->stats;
     lk.unlock();
     client.reset();
   });
 
-  CONSOLE_INFO << "\nTotal time: " << duration << ". Overall number of requests: " << num_responses
-               << ", QPS: " << num_responses / (duration / absl::Seconds(1));
+  CONSOLE_INFO << "\nTotal time: " << duration
+               << ". Overall number of requests: " << summary.num_responses
+               << ", QPS: " << summary.num_responses / (duration / absl::Seconds(1));
 
-  if (num_errors) {
-    CONSOLE_INFO << "Got " << num_errors << " error responses!";
+  if (summary.num_errors) {
+    CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";
   }
 
   CONSOLE_INFO << "Latency summary, all times are in usec:\n" << hist.ToString();
-  if (hit_opportunities) {
+  if (summary.hit_opportunities) {
     CONSOLE_INFO << "----------------------------------\nHit rate: "
-                 << 100 * double(hit_count) / double(hit_opportunities) << "%\n";
+                 << 100 * double(summary.hit_count) / double(summary.hit_opportunities) << "%\n";
   }
   pp->Stop();
 

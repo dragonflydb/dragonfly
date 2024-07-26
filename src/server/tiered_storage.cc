@@ -31,7 +31,7 @@ ABSL_FLAG(uint32_t, tiered_storage_memory_margin, 10_MB,
           "In bytes. If memory budget on a shard goes below this limit, tiering stops "
           "hot-loading values into ram.");
 
-ABSL_FLAG(bool, tiered_experimental_cooling, false,
+ABSL_FLAG(bool, tiered_experimental_cooling, true,
           "If true, uses intermidate cooling layer "
           "when offloading values to storage");
 
@@ -267,6 +267,8 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
 }
 
 bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
+  DVLOG(2) << "NotifyDelete [" << segment.offset << "," << segment.length << "]";
+
   if (OccupiesWholePages(segment.length))
     return true;
 
@@ -398,22 +400,33 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
                                            const PrimeValue& value,
                                            std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
-  DCHECK(!value.IsCool());  // TBD
 
   util::fb2::Future<T> future;
-  PrimeValue decoder;
-  decoder.ImportExternal(value);
+  if (value.IsCool()) {
+    PrimeValue hot = Warmup(dbid, value.GetCool());
+    string tmp;
 
-  auto cb = [future, modf = std::move(modf), decoder = std::move(decoder)](
-                bool is_raw, std::string* raw_val) mutable {
-    if (is_raw) {
-      decoder.Materialize(*raw_val, true);
-      decoder.GetString(raw_val);
-    }
-    future.Resolve(modf(raw_val));
-    return true;
-  };
-  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
+    DCHECK_EQ(value.Size(), hot.Size());
+    hot.GetString(&tmp);
+    future.Resolve(modf(&tmp));
+
+    // TODO: An awful hack - to fix later.
+    const_cast<PrimeValue&>(value).Materialize(tmp, false);
+  } else {
+    PrimeValue decoder;
+    decoder.ImportExternal(value);
+
+    auto cb = [future, modf = std::move(modf), decoder = std::move(decoder)](
+                  bool is_raw, std::string* raw_val) mutable {
+      if (is_raw) {
+        decoder.Materialize(*raw_val, true);
+        decoder.GetString(raw_val);
+      }
+      future.Resolve(modf(raw_val));
+      return true;
+    };
+    op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
+  }
   return future;
 }
 
