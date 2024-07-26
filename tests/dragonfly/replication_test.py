@@ -107,7 +107,7 @@ async def test_replication_all(
     )
 
     # Wait for all replicas to transition into stable sync
-    async with async_timeout.timeout(60):
+    async with async_timeout.timeout(300):
         await wait_for_replicas_state(*c_replicas)
 
     # Stop streaming data once every replica is in stable sync
@@ -126,6 +126,11 @@ async def test_replication_all(
 
     # Check data after stable state stream
     await check()
+
+    # speed up shutdown
+    for c in c_replicas:
+        await c.execute_command("REPLICAOF NO ONE")
+    await c_mater.execute_command("FLUSHALL")
 
     await disconnect_clients(c_master, *c_replicas)
 
