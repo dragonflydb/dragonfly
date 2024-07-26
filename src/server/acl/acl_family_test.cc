@@ -109,6 +109,10 @@ TEST_F(AclFamilyTest, AclSetUser) {
   vec = resp.GetVec();
   EXPECT_THAT(vec,
               UnorderedElementsAre("user default on nopass ~* +@all", "user vlad on -@all +acl"));
+
+  // +@NONE should not exist anymore. It's not in the spec.
+  resp = Run({"ACL", "SETUSER", "rand", "+@NONE"});
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter +@NONE"));
 }
 
 TEST_F(AclFamilyTest, AclDelUser) {
