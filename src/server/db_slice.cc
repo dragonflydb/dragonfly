@@ -622,6 +622,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   }
 
   table_memory_ += (db.table_memory() - table_before);
+  entries_count_++;
 
   db.stats.inline_keys += it->first.IsInline();
   AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
@@ -756,6 +757,8 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 
   for (DbIndex index : indexes) {
     table_memory_ -= db_arr_[index]->table_memory();
+    entries_count_ -= db_arr_[index]->prime.size();
+
     InvalidateDbWatches(index);
     flush_db_arr[index] = std::move(db_arr_[index]);
 
@@ -764,6 +767,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   }
 
   CHECK(fetched_items_.empty());
+
   auto cb = [indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
@@ -1464,6 +1468,7 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
 
   table->prime.Erase(del_it.GetInnerIt());
   table_memory_ += (table->table_memory() - table_before);
+  --entries_count_;
 
   SendInvalidationTrackingMessage(del_it.key());
 }

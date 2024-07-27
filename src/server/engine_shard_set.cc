@@ -620,10 +620,15 @@ void EngineShard::Heartbeat() {
   }
 
   ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
+
+  // Offset CoolMemoryUsage when consider background offloading.
+  // TODO: Another approach could be is to align the approach  similarly to how we do with
+  // FreeMemWithEvictionStep, i.e. if memory_budget is below the limit.
   size_t tiering_offload_threshold =
-      tiered_storage_
-          ? size_t(max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size()
-          : std::numeric_limits<size_t>::max();
+      tiered_storage_ ? tiered_storage_->CoolMemoryUsage() +
+                            size_t(max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) /
+                                shard_set->size()
+                      : std::numeric_limits<size_t>::max();
 
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
@@ -738,6 +743,7 @@ void EngineShard::CacheStats() {
     }
   }
   DCHECK_EQ(table_memory, db_slice.table_memory());
+  DCHECK_EQ(entries, db_slice.entries_count());
   if (tiered_storage_) {
     table_memory += tiered_storage_->CoolMemoryUsage();
   }
@@ -764,7 +770,10 @@ bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula 
 
   size_t tiering_redline =
       (max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) / shard_set->size();
-  return UsedMemory() > tiering_redline && tiered_storage_->WriteDepthUsage() > 0.3;
+
+  // UsedMemory includes CoolMemoryUsage, so we are offsetting it to remove the cool cache impact.
+  return tiered_storage_->WriteDepthUsage() > 0.3 &&
+         (UsedMemory() > tiering_redline + tiered_storage_->CoolMemoryUsage());
 }
 
 auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {

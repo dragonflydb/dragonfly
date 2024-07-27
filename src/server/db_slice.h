@@ -391,7 +391,6 @@ class DbSlice {
   // Returns existing keys count in the db.
   size_t DbSize(DbIndex db_ind) const;
 
-  // Callback functions called upon writing to the existing key.
   DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
   }
@@ -415,6 +414,10 @@ class DbSlice {
 
   size_t table_memory() const {
     return table_memory_;
+  }
+
+  size_t entries_count() const {
+    return entries_count_;
   }
 
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
@@ -567,6 +570,7 @@ class DbSlice {
   size_t bytes_per_object_ = 0;
   size_t soft_budget_limit_ = 0;
   size_t table_memory_ = 0;
+  uint64_t entries_count_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 
