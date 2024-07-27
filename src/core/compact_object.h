@@ -375,22 +375,12 @@ class CompactObj {
   static void InitThreadLocal(MemoryResource* mr);
   static MemoryResource* memory_resource();  // thread-local.
 
-  template <typename T>
-  inline static constexpr bool IsConstructibleFromMR =
-      std::is_constructible_v<T, decltype(memory_resource())>;
-
-  template <typename T> static std::enable_if_t<IsConstructibleFromMR<T>, T*> AllocateMR() {
+  template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
     void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
-    return new (ptr) T{memory_resource()};
-  }
-
-  template <typename T, typename... Args>
-  inline static constexpr bool IsConstructibleFromArgs = std::is_constructible_v<T, Args...>;
-
-  template <typename T, typename... Args>
-  static std::enable_if_t<IsConstructibleFromArgs<T, Args...>, T*> AllocateMR(Args&&... args) {
-    void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
-    return new (ptr) T{std::forward<Args&&>(args)...};
+    if constexpr (std::is_constructible_v<T, decltype(memory_resource())> && sizeof...(args) == 0)
+      return new (ptr) T{memory_resource()};
+    else
+      return new (ptr) T{std::forward<Args>(args)...};
   }
 
   template <typename T> static void DeleteMR(void* ptr) {

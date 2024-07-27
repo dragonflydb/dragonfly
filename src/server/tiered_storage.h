@@ -78,7 +78,11 @@ class TieredStorage {
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
 
+  // Prune cool entries to reach the set memory goal with freed memory
   size_t ReclaimMemory(size_t goal);
+
+  // Returns the primary value, and deletes the cool item as well as its offloaded storage.
+  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
 
   size_t CoolMemoryUsage() const {
     return cool_memory_used_;
@@ -91,9 +95,6 @@ class TieredStorage {
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 PrimeValue* pv);
-
-  // Returns the primary value, and deletes the cool item as well as its offloaded storage.
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
 
   PrimeValue DeleteCool(detail::TieredColdRecord* record);
   detail::TieredColdRecord* PopCool();
