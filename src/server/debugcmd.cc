@@ -909,7 +909,7 @@ void DebugCmd::ObjHist() {
   absl::StrAppend(&result, "___begin object histogram___\n\n");
 
   for (auto& [obj_type, hist_ptr] : obj_hist_map_arr[0]) {
-    StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type).value_or("Invalid type"), "\n");
+    StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
     StrAppend(&result, "Key length histogram:\n", hist_ptr->key_len.ToString(), "\n");
     StrAppend(&result, "Value length histogram:\n", hist_ptr->val_len.ToString(), "\n");

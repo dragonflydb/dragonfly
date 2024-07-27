@@ -1399,7 +1399,7 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   if (!result) {
     cntx->SendSimpleString("none");
   } else {
-    cntx->SendSimpleString(ObjTypeToString(result.value()).value_or("none"));
+    cntx->SendSimpleString(ObjTypeToString(result.value()));
   }
 }
 

@@ -1237,15 +1237,15 @@ constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[8] = {
     {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
     {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
 
-std::optional<std::string_view> ObjTypeToString(CompactObjType type) {
+std::string_view ObjTypeToString(CompactObjType type) {
   for (auto& p : kObjTypeToString) {
     if (type == p.first) {
       return p.second;
     }
   }
 
-  LOG(ERROR) << "Unsupported type " << type;
-  return std::nullopt;
+  LOG(DFATAL) << "Unsupported type " << type;
+  return "Invalid type"sv;
 }
 
 std::optional<CompactObjType> ObjTypeFromString(std::string_view sv) {
@@ -1254,8 +1254,6 @@ std::optional<CompactObjType> ObjTypeFromString(std::string_view sv) {
       return p.first;
     }
   }
-
-  LOG(ERROR) << "Unsupported type " << sv;
   return std::nullopt;
 }
 

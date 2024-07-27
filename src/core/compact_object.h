@@ -9,7 +9,6 @@
 #include <boost/intrusive/list_hook.hpp>
 #include <optional>
 #include <type_traits>
-#include <unordered_map>
 
 #include "base/pmr/memory_resource.h"
 #include "core/json/json_object.h"
@@ -539,7 +538,7 @@ class CompactObjectView {
   CompactObj obj_;
 };
 
-std::optional<std::string_view> ObjTypeToString(CompactObjType type);
+std::string_view ObjTypeToString(CompactObjType type);
 
 std::optional<CompactObjType> ObjTypeFromString(std::string_view sv);
 
