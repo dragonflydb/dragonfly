@@ -293,11 +293,11 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       if (scan_opts.pattern == "*")
         scan_opts.pattern = string_view{};
     } else if (opt == "TYPE") {
-      auto obj_type_as_string = ObjTypeFromString(ArgS(args, i + 1));
-      if (!obj_type_as_string) {
+      auto obj_type = ObjTypeFromString(ArgS(args, i + 1));
+      if (!obj_type) {
         return facade::OpStatus::SYNTAX_ERR;
       }
-      scan_opts.type_filter = obj_type_as_string;
+      scan_opts.type_filter = obj_type;
     } else if (opt == "BUCKET") {
       if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.bucket_id)) {
         return facade::OpStatus::INVALID_INT;
