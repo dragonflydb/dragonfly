@@ -551,7 +551,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   if (!IsValid(it))
     return false;
 
-  bool matches = opts.type_filter.empty() || ObjTypeName(it->second.ObjType()) == opts.type_filter;
+  bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
 
   if (!matches)
     return false;
@@ -1386,7 +1386,7 @@ void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
 void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CompactObjType> {
     auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
     auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
     if (!it.is_done()) {
@@ -1395,11 +1395,11 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
       return OpStatus::KEY_NOTFOUND;
     }
   };
-  OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<CompactObjType> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (!result) {
     cntx->SendSimpleString("none");
   } else {
-    cntx->SendSimpleString(ObjTypeName(result.value()));
+    cntx->SendSimpleString(ObjTypeToString(result.value()));
   }
 }
 

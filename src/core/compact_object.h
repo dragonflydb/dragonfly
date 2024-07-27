@@ -97,6 +97,10 @@ struct TieredColdRecord;
 
 }  // namespace detail
 
+using CompactObjType = unsigned;
+
+constexpr CompactObjType kInvalidCompactObjType = std::numeric_limits<CompactObjType>::max();
+
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
 
@@ -268,9 +272,7 @@ class CompactObj {
   }
 
   unsigned Encoding() const;
-  unsigned ObjType() const;
-
-  static std::string_view ObjTypeToString(unsigned type);
+  CompactObjType ObjType() const;
 
   void* RObjPtr() const {
     return u_.r_obj.inner_obj();
@@ -282,7 +284,7 @@ class CompactObj {
 
   // takes ownership over obj_inner.
   // type should not be OBJ_STRING.
-  void InitRobj(unsigned type, unsigned encoding, void* obj_inner);
+  void InitRobj(CompactObjType type, unsigned encoding, void* obj_inner);
 
   // For STR object.
   void SetInt(int64_t val);
@@ -535,6 +537,10 @@ class CompactObjectView {
  private:
   CompactObj obj_;
 };
+
+std::string_view ObjTypeToString(CompactObjType type);
+
+std::optional<CompactObjType> ObjTypeFromString(std::string_view sv);
 
 namespace detail {
 

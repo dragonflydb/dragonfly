@@ -621,7 +621,7 @@ uint64_t CompactObj::HashCode(string_view str) {
   return XXH3_64bits_withSeed(str.data(), str.size(), kHashSeed);
 }
 
-unsigned CompactObj::ObjType() const {
+CompactObjType CompactObj::ObjType() const {
   if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG || taglen_ == EXTERNAL_TAG)
     return OBJ_STRING;
 
@@ -637,30 +637,7 @@ unsigned CompactObj::ObjType() const {
   }
 
   LOG(FATAL) << "TBD " << int(taglen_);
-  return 0;
-}
-
-string_view CompactObj::ObjTypeToString(unsigned type) {
-#define OBJECT_TYPE_CASE(type) \
-  case type:                   \
-    return absl::StripPrefix(#type, "OBJ_")
-
-  switch (type) {
-    OBJECT_TYPE_CASE(OBJ_STRING);
-    OBJECT_TYPE_CASE(OBJ_LIST);
-    OBJECT_TYPE_CASE(OBJ_SET);
-    OBJECT_TYPE_CASE(OBJ_ZSET);
-    OBJECT_TYPE_CASE(OBJ_HASH);
-    OBJECT_TYPE_CASE(OBJ_MODULE);
-    OBJECT_TYPE_CASE(OBJ_STREAM);
-    OBJECT_TYPE_CASE(OBJ_JSON);
-    OBJECT_TYPE_CASE(OBJ_SBF);
-    default:
-      DCHECK(false) << "Unknown object type " << type;
-      return "OTHER";
-  }
-
-#undef OBJECT_TYPE_CASE
+  return kInvalidCompactObjType;
 }
 
 unsigned CompactObj::Encoding() const {
@@ -674,7 +651,7 @@ unsigned CompactObj::Encoding() const {
   }
 }
 
-void CompactObj::InitRobj(unsigned type, unsigned encoding, void* obj) {
+void CompactObj::InitRobj(CompactObjType type, unsigned encoding, void* obj) {
   DCHECK_NE(type, OBJ_STRING);
   SetMeta(ROBJ_TAG, mask_);
   u_.r_obj.Init(type, encoding, obj);
@@ -1253,6 +1230,31 @@ size_t CompactObj::DecodedLen(size_t sz) const {
 
 MemoryResource* CompactObj::memory_resource() {
   return tl.local_mr;
+}
+
+constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[8] = {
+    {OBJ_STRING, "string"sv},  {OBJ_LIST, "list"sv},    {OBJ_SET, "set"sv},
+    {OBJ_ZSET, "zset"sv},      {OBJ_HASH, "hash"sv},    {OBJ_STREAM, "stream"sv},
+    {OBJ_JSON, "ReJSON-RL"sv}, {OBJ_SBF, "MBbloom--"sv}};
+
+std::string_view ObjTypeToString(CompactObjType type) {
+  for (auto& p : kObjTypeToString) {
+    if (type == p.first) {
+      return p.second;
+    }
+  }
+
+  LOG(DFATAL) << "Unsupported type " << type;
+  return "Invalid type"sv;
+}
+
+std::optional<CompactObjType> ObjTypeFromString(std::string_view sv) {
+  for (auto& p : kObjTypeToString) {
+    if (absl::EqualsIgnoreCase(sv, p.second)) {
+      return p.first;
+    }
+  }
+  return std::nullopt;
 }
 
 }  // namespace dfly

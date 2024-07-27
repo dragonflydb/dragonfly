@@ -747,4 +747,19 @@ TEST_F(GenericFamilyTest, RandomKey) {
   EXPECT_EQ(Run({"randomkey"}), "k1");
 }
 
+TEST_F(GenericFamilyTest, JsonType) {
+  auto resp = Run({"json.set", "json", "$", R"({"example":"value"})"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"type", "json"});
+  EXPECT_EQ(resp, "ReJSON-RL") << "For the Redis GUI the register of the JSON type is important. "
+                                  "See https://github.com/dragonflydb/dragonfly/issues/3386";
+
+  // Test json type lowercase works for the SCAN commmand
+  resp = Run({"scan", "0", "type", "rejson-rl"});
+  EXPECT_THAT(resp, ArrLen(2));
+  auto vec = StrArray(resp.GetVec()[1]);
+  ASSERT_THAT(vec, ElementsAre("json"));
+}
+
 }  // namespace dfly

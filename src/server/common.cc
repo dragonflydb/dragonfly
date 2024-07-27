@@ -132,31 +132,6 @@ const char* GlobalStateName(GlobalState s) {
   ABSL_UNREACHABLE();
 }
 
-const char* ObjTypeName(int type) {
-  switch (type) {
-    case OBJ_STRING:
-      return "string";
-    case OBJ_LIST:
-      return "list";
-    case OBJ_SET:
-      return "set";
-    case OBJ_ZSET:
-      return "zset";
-    case OBJ_HASH:
-      return "hash";
-    case OBJ_STREAM:
-      return "stream";
-    case OBJ_JSON:
-      return "rejson-rl";
-    case OBJ_SBF:
-      return "MBbloom--";
-
-    default:
-      LOG(ERROR) << "Unsupported type " << type;
-  }
-  return "invalid";
-};
-
 const char* RdbTypeName(unsigned type) {
   switch (type) {
     case RDB_TYPE_STRING:
@@ -318,8 +293,11 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       if (scan_opts.pattern == "*")
         scan_opts.pattern = string_view{};
     } else if (opt == "TYPE") {
-      ToLower(&args[i + 1]);
-      scan_opts.type_filter = ArgS(args, i + 1);
+      auto obj_type = ObjTypeFromString(ArgS(args, i + 1));
+      if (!obj_type) {
+        return facade::OpStatus::SYNTAX_ERR;
+      }
+      scan_opts.type_filter = obj_type;
     } else if (opt == "BUCKET") {
       if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.bucket_id)) {
         return facade::OpStatus::INVALID_INT;
