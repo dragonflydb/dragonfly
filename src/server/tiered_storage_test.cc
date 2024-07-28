@@ -310,7 +310,10 @@ TEST_F(TieredStorageTest, MemoryPressure) {
   constexpr size_t kNum = 10000;
   for (size_t i = 0; i < kNum; i++) {
     auto resp = Run({"SET", absl::StrCat("k", i), BuildString(10000)});
-    ASSERT_EQ(resp, "OK") << i;
+    if (resp != "OK"sv) {
+      resp = Run({"INFO", "ALL"});
+      ASSERT_FALSE(true) << i << "\nInfo ALL:\n" << resp.GetString();
+    }
     // TODO: to remove it once used_mem_current is updated frequently.
     ThisFiber::SleepFor(10us);
   }

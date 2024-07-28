@@ -704,7 +704,9 @@ void Transaction::ScheduleInternal() {
     InitTxTime();
 
     atomic_uint32_t schedule_fails = 0;
-    auto cb = [this, &schedule_fails, can_run_immediately]() {
+    unsigned started = 0;
+    auto cb = [this, &schedule_fails, can_run_immediately, &started]() {
+      ++started;
       if (!ScheduleInShard(EngineShard::tlocal(), can_run_immediately)) {
         schedule_fails.fetch_add(1, memory_order_relaxed);
       }
@@ -723,7 +725,8 @@ void Transaction::ScheduleInternal() {
       // during tests.
       ThisFiber::PrintLocalsCallback locals([&] {
         return absl::StrCat("unique_shard_cnt_: ", unique_shard_cnt_,
-                            " run_barrier_cnt: ", run_barrier_.DEBUG_Count(), "\n");
+                            " run_barrier_cnt: ", run_barrier_.DEBUG_Count(),
+                            ", started: ", started, "\n");
       });
       run_barrier_.Wait();
     }
