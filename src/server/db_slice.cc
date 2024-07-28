@@ -623,10 +623,14 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
     // We do not require for a single operation to unload the whole negative debt.
     // Instead, we create a positive, converging force that should help with freeing enough memory.
     // Free at least K bytes or 3% of the total debt.
+    // TODO: to reenable and optimize this - this call significantly slows down server
+    // when evictions are running.
+#if 0
     size_t evict_goal = std::max<size_t>(512, (-evp.mem_budget()) / 32);
     auto [items, bytes] = FreeMemWithEvictionStep(cntx.db_index, it.segment_id(), evict_goal);
     evicted_obj_bytes = bytes;
     events_.hard_evictions += items;
+#endif
   }
 
   table_memory_ += (db.table_memory() - table_before);
