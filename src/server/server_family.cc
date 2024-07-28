@@ -823,6 +823,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_key_file");
   config_registry.RegisterMutable("tls_ca_cert_file");
   config_registry.RegisterMutable("tls_ca_cert_dir");
+  config_registry.RegisterMutable("replica_priority");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1765,9 +1766,11 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       vector<string> names = config_registry.List(param);
 
       for (const auto& name : names) {
-        absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
-        res.push_back(name);
-        res.push_back(flag->CurrentValue());
+        auto value = config_registry.Get(name);
+        if (value.has_value()) {
+          res.push_back(name);
+          res.push_back(*value);
+        }
       }
     }
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());

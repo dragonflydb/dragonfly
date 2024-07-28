@@ -4,6 +4,7 @@
 #include "src/server/config_registry.h"
 
 #include <absl/flags/reflection.h>
+#include <absl/strings/str_replace.h>
 
 #include "base/logging.h"
 
@@ -12,13 +13,24 @@ extern "C" {
 }
 
 namespace dfly {
-
+namespace {
 using namespace std;
 
+string NormalizeConfigName(string_view name) {
+  return absl::StrReplaceAll(name, {{"_", "-"}});
+}
+
+absl::CommandLineFlag* GetFlag(string_view name) {
+  return absl::FindCommandLineFlag(absl::StrReplaceAll(name, {{"-", "_"}}));
+}
+}  // namespace
+
 // Returns true if the value was updated.
-auto ConfigRegistry::Set(std::string_view config_name, std::string_view value) -> SetResult {
+auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResult {
+  string name = NormalizeConfigName(config_name);
+
   unique_lock lk(mu_);
-  auto it = registry_.find(config_name);
+  auto it = registry_.find(name);
   if (it == registry_.end())
     return SetResult::UNKNOWN;
   if (!it->second.is_mutable)
@@ -26,7 +38,7 @@ auto ConfigRegistry::Set(std::string_view config_name, std::string_view value) -
 
   auto cb = it->second.cb;
 
-  absl::CommandLineFlag* flag = absl::FindCommandLineFlag(config_name);
+  absl::CommandLineFlag* flag = GetFlag(name);
   CHECK(flag);
   if (string error; !flag->ParseFrom(value, &error)) {
     LOG(WARNING) << error;
@@ -37,13 +49,15 @@ auto ConfigRegistry::Set(std::string_view config_name, std::string_view value) -
   return success ? SetResult::OK : SetResult::INVALID;
 }
 
-std::optional<std::string> ConfigRegistry::Get(std::string_view config_name) {
+optional<string> ConfigRegistry::Get(string_view config_name) {
+  string name = NormalizeConfigName(config_name);
+
   unique_lock lk(mu_);
-  if (!registry_.contains(config_name))
-    return std::nullopt;
+  if (!registry_.contains(name))
+    return nullopt;
   lk.unlock();
 
-  absl::CommandLineFlag* flag = absl::FindCommandLineFlag(config_name);
+  absl::CommandLineFlag* flag = GetFlag(name);
   CHECK(flag);
   return flag->CurrentValue();
 }
@@ -54,17 +68,21 @@ void ConfigRegistry::Reset() {
 }
 
 vector<string> ConfigRegistry::List(string_view glob) const {
+  string normalized_glob = NormalizeConfigName(glob);
+
   vector<string> res;
   unique_lock lk(mu_);
   for (const auto& [name, _] : registry_) {
-    if (stringmatchlen(glob.data(), glob.size(), name.data(), name.size(), 1))
+    if (stringmatchlen(normalized_glob.data(), normalized_glob.size(), name.data(), name.size(), 1))
       res.push_back(name);
   }
   return res;
 }
 
-void ConfigRegistry::RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb) {
-  absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
+void ConfigRegistry::RegisterInternal(string_view config_name, bool is_mutable, WriteCb cb) {
+  string name = NormalizeConfigName(config_name);
+
+  absl::CommandLineFlag* flag = GetFlag(name);
   CHECK(flag) << "Unknown config name: " << name;
 
   unique_lock lk(mu_);

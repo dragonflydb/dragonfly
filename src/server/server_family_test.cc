@@ -516,4 +516,28 @@ TEST_F(ServerFamilyTest, ClientTrackingLuaBug) {
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 3);
 }
 
+TEST_F(ServerFamilyTest, ConfigNormalization) {
+  // Default value
+  EXPECT_THAT(Run({"config", "get", "replica-priority"}),
+              RespArray(ElementsAre("replica-priority", "100")));
+  EXPECT_THAT(Run({"config", "get", "replica_priority"}),
+              RespArray(ElementsAre("replica-priority", "100")));
+
+  // Set with dash
+  EXPECT_THAT(Run({"config", "set", "replica-priority", "7"}), "OK");
+
+  EXPECT_THAT(Run({"config", "get", "replica-priority"}),
+              RespArray(ElementsAre("replica-priority", "7")));
+  EXPECT_THAT(Run({"config", "get", "replica_priority"}),
+              RespArray(ElementsAre("replica-priority", "7")));
+
+  // Set with underscore
+  EXPECT_THAT(Run({"config", "set", "replica_priority", "13"}), "OK");
+
+  EXPECT_THAT(Run({"config", "get", "replica-priority"}),
+              RespArray(ElementsAre("replica-priority", "13")));
+  EXPECT_THAT(Run({"config", "get", "replica_priority"}),
+              RespArray(ElementsAre("replica-priority", "13")));
+}
+
 }  // namespace dfly

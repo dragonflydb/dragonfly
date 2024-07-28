@@ -9,6 +9,9 @@
 
 namespace dfly {
 
+// Allows reading and modifying pre-registered configuration values by string names.
+// All names are normalized to have underscores (_) replaced with dashes (-) for Valkey
+// compatibility.
 class ConfigRegistry {
  public:
   // Accepts the new value as argument. Return true if config was successfully updated.
