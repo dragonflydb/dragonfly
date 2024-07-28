@@ -494,20 +494,6 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     fetched_items_.insert(res.it->first.AsRef());
   }
 
-  // If the value has a pending stash, cancel it before any modification are applied.
-  // Rationale: we either look it up for reads - and then it's hot, or alternatively,
-  // we follow up with modifications during mutation operations, and in that case storing on disk
-  // does not make much sense.
-  if (res.it->second.HasStashPending()) {
-    owner_->tiered_storage()->CancelStash(cntx.db_index, key, &res.it->second);
-  }
-
-  // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
-  // attribute of the entry in case of value overrides.
-  res.it->first.SetTouched(true);
-
-  db.top_keys.Touch(key);
-
   std::move(update_stats_on_miss).Cancel();
   switch (stats_mode) {
     case UpdateStatsMode::kMutableStats:
@@ -528,6 +514,27 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       }
       break;
   }
+
+  auto& pv = res.it->second;
+
+  // Cancel any pending stashes of looked up values
+  // Rationale: we either look it up for reads - and then it's hot, or alternatively,
+  // we follow up with modifications, so the pending stash becomes outdated.
+  if (pv.HasStashPending()) {
+    owner_->tiered_storage()->CancelStash(cntx.db_index, key, &pv);
+  }
+
+  // Fetch back cool items
+  if (pv.IsExternal() && pv.IsCool()) {
+    pv = owner_->tiered_storage()->Warmup(cntx.db_index, pv.GetCool());
+  }
+
+  // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
+  // attribute of the entry in case of value overrides.
+  res.it->first.SetTouched(true);
+
+  db.top_keys.Touch(key);
+
   return res;
 }
 

@@ -75,10 +75,7 @@ string DecodeString(bool is_raw, string_view str, PrimeValue decoder) {
 }
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
-  tiering::DiskSegment res;
-  res.length = item.serialized_size;
-  res.offset = size_t(item.record->page_index) * 4096 + item.page_offset;
-  return res;
+  return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
 }
 
 }  // anonymous namespace
@@ -152,8 +149,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Find entry by key in db_slice and store external segment in place of original value.
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
-    // TODO: to rename it to CoolEntry or something.
-
     if (auto* pv = Find(key); pv) {
       auto* stats = GetDbTableStats(key.first);
 
@@ -346,53 +341,25 @@ void TieredStorage::SetMemoryLowLimit(size_t mem_limit) {
 
 util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                               const PrimeValue& value) {
-  DCHECK(value.IsExternal());
-  util::fb2::Future<string> future;
-  if (value.IsCool()) {
-    // If we read a cool record - bring it back to primary table.
-    PrimeValue hot = Warmup(dbid, value.GetCool());
-    string tmp;
-
-    DCHECK_EQ(value.Size(), hot.Size());
-    hot.GetString(&tmp);
-    future.Resolve(tmp);
-
-    // TODO: An awful hack - to fix later.
-    const_cast<PrimeValue&>(value) = std::move(hot);
-  } else {
-    // The raw_val passed to cb might need decoding based on the encoding mask of the "value"
-    // object. We save the mask in decoder and use it to decode the final string that Read should
-    // resolve.
-    PrimeValue decoder;
-    decoder.ImportExternal(value);
-
-    auto cb = [future, decoder = std::move(decoder)](bool is_raw, const string* raw_val) mutable {
-      future.Resolve(DecodeString(is_raw, *raw_val, std::move(decoder)));
-      return false;  // was not modified
-    };
-
-    op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
-  }
-  return future;
+  util::fb2::Future<std::string> fut;
+  Read(dbid, key, value, [fut](const std::string& value) mutable { fut.Resolve(value); });
+  return fut;
 }
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
                          std::function<void(const std::string&)> readf) {
   DCHECK(value.IsExternal());
-  if (value.IsCool()) {
-    util::fb2::Future<string> res = Read(dbid, key, value);
-    readf(res.Get());
-  } else {
-    PrimeValue decoder;
-    decoder.ImportExternal(value);
+  DCHECK(!value.IsCool());
 
-    auto cb = [readf = std::move(readf), decoder = std::move(decoder)](
-                  bool is_raw, const string* raw_val) mutable {
-      readf(DecodeString(is_raw, *raw_val, std::move(decoder)));
-      return false;
-    };
-    op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
-  }
+  PrimeValue decoder;
+  decoder.ImportExternal(value);
+
+  auto cb = [readf = std::move(readf), decoder = std::move(decoder)](
+                bool is_raw, const string* raw_val) mutable {
+    readf(DecodeString(is_raw, *raw_val, std::move(decoder)));
+    return false;
+  };
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
 }
 
 template <typename T>
@@ -402,31 +369,19 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
   DCHECK(value.IsExternal());
 
   util::fb2::Future<T> future;
-  if (value.IsCool()) {
-    PrimeValue hot = Warmup(dbid, value.GetCool());
-    string tmp;
+  PrimeValue decoder;
+  decoder.ImportExternal(value);
 
-    DCHECK_EQ(value.Size(), hot.Size());
-    hot.GetString(&tmp);
-    future.Resolve(modf(&tmp));
-
-    // TODO: An awful hack - to fix later.
-    const_cast<PrimeValue&>(value).Materialize(tmp, false);
-  } else {
-    PrimeValue decoder;
-    decoder.ImportExternal(value);
-
-    auto cb = [future, modf = std::move(modf), decoder = std::move(decoder)](
-                  bool is_raw, std::string* raw_val) mutable {
-      if (is_raw) {
-        decoder.Materialize(*raw_val, true);
-        decoder.GetString(raw_val);
-      }
-      future.Resolve(modf(raw_val));
-      return true;
-    };
-    op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
-  }
+  auto cb = [future, modf = std::move(modf), decoder = std::move(decoder)](
+                bool is_raw, std::string* raw_val) mutable {
+    if (is_raw) {
+      decoder.Materialize(*raw_val, true);
+      decoder.GetString(raw_val);
+    }
+    future.Resolve(modf(raw_val));
+    return true;
+  };
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
   return future;
 }
 
@@ -477,15 +432,12 @@ void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
 
   tiering::DiskSegment segment = value->GetExternalSlice();
   if (value->IsCool()) {
-    // Delete the cool item.
-    PrimeValue::CoolItem item = value->GetCool();
-    PrimeValue hot = DeleteCool(item.record);
-    DCHECK_EQ(OBJ_STRING, hot.ObjType());
+    auto hot = DeleteCool(value->GetCool().record);
+    DCHECK_EQ(hot.ObjType(), OBJ_STRING);
   }
 
   // In any case we delete the offloaded segment and reset the value.
   value->Reset();
-  stats_.total_deletes++;
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 
@@ -616,14 +568,15 @@ bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
                              const tiering::DiskSegment& segment, PrimeValue* pv) {
-  cool_memory_used_ += (sizeof(detail::TieredColdRecord) + pv->MallocUsed());
   detail::TieredColdRecord* record = CompactObj::AllocateMR<detail::TieredColdRecord>();
+  cool_queue_.push_front(*record);
+  cool_memory_used_ += (sizeof(detail::TieredColdRecord) + pv->MallocUsed());
+
   record->key_hash = CompactObj::HashCode(str);
   record->db_index = db_ind;
-  record->page_index = segment.offset / 4096;
+  record->page_index = segment.offset / tiering::kPageSize;
   record->value = std::move(*pv);
-  DCHECK(record);
-  cool_queue_.push_front(*record);
+
   pv->SetCool(segment.offset, segment.length, record);
   DCHECK_EQ(pv->Size(), record->value.Size());
 }
