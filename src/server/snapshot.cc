@@ -301,6 +301,9 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
 void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
                                    optional<uint64_t> expire, RdbSerializer* serializer) {
+  if (pv.IsExternal() && pv.IsCool())
+    return SerializeEntry(db_indx, pk, pv.GetCool().record->value, expire, serializer);
+
   time_t expire_time = expire.value_or(0);
   if (!expire && pv.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);

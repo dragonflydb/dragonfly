@@ -348,6 +348,9 @@ util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
                          std::function<void(const std::string&)> readf) {
+  DCHECK(value.IsExternal());
+  DCHECK(!value.IsCool());
+
   PrimeValue decoder;
   decoder.ImportExternal(value);
 
@@ -427,10 +430,15 @@ void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   DCHECK(value->IsExternal());
   ++stats_.total_deletes;
 
+  tiering::DiskSegment segment = value->GetExternalSlice();
+  if (value->IsCool()) {
+    auto hot = DeleteCool(value->GetCool().record);
+    DCHECK_EQ(hot.ObjType(), OBJ_STRING);
+  }
+
   // In any case we delete the offloaded segment and reset the value.
-  stats_.total_deletes++;
-  op_manager_->DeleteOffloaded(dbid, value->GetExternalSlice());
   value->Reset();
+  op_manager_->DeleteOffloaded(dbid, segment);
 }
 
 void TieredStorage::CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {

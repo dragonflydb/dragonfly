@@ -175,6 +175,10 @@ class TieredStorage {
 
   void RunOffloading(DbIndex dbid) {
   }
+
+  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+    return PrimeValue{};
+  }
 };
 
 }  // namespace dfly
