@@ -132,7 +132,7 @@ class TieredStorage {
   // Min sizes of values taking up full page on their own
   const static size_t kMinOccupancySize = tiering::kPageSize / 2;
 
-  explicit TieredStorage(DbSlice* db_slice, size_t max_size) {
+  explicit TieredStorage(size_t max_size, DbSlice* db_slice) {
   }
 
   TieredStorage(TieredStorage&& other) = delete;
@@ -149,6 +149,10 @@ class TieredStorage {
     return {};
   }
 
+  void Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
+            std::function<void(const std::string&)> readf) {
+  }
+
   template <typename T>
   util::fb2::Future<T> Modify(DbIndex dbid, std::string_view key, const PrimeValue& value,
                               std::function<T(std::string*)> modf) {
@@ -158,7 +162,19 @@ class TieredStorage {
   void TryStash(DbIndex dbid, std::string_view key, PrimeValue* value) {
   }
 
-  void Delete(PrimeValue* value) {
+  void Delete(DbIndex dbid, PrimeValue* value) {
+  }
+
+  size_t ReclaimMemory(size_t goal) {
+    return 0;
+  }
+
+  float WriteDepthUsage() const {
+    return 0;
+  }
+
+  size_t CoolMemoryUsage() const {
+    return 0;
   }
 
   void CancelStash(DbIndex dbid, std::string_view key, PrimeValue* value) {

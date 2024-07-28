@@ -718,6 +718,13 @@ void Transaction::ScheduleInternal() {
       run_barrier_.Dec();
     } else {
       IterateActiveShards([cb](const auto& sd, ShardId i) { shard_set->Add(i, cb); });
+
+      // Add this debugging function to print more information when we experience deadlock
+      // during tests.
+      ThisFiber::PrintLocalsCallback locals([&] {
+        return absl::StrCat("unique_shard_cnt_: ", unique_shard_cnt_,
+                            " run_barrier_cnt: ", run_barrier_.DEBUG_Count(), "\n");
+      });
       run_barrier_.Wait();
     }
 
