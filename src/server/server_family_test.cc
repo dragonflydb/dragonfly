@@ -517,6 +517,8 @@ TEST_F(ServerFamilyTest, ClientTrackingLuaBug) {
 }
 
 TEST_F(ServerFamilyTest, ConfigNormalization) {
+  absl::FlagSaver fs;  // Restores the flag to default value after test finishes
+
   // Default value
   EXPECT_THAT(Run({"config", "get", "replica-priority"}),
               RespArray(ElementsAre("replica-priority", "100")));
