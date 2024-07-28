@@ -8,11 +8,11 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "generic_family.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/generic_family.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -40,7 +40,7 @@ namespace dfly {
 using namespace std;
 using namespace util;
 using absl::GetFlag;
-using facade::OpStatus;
+using namespace facade;
 using Payload = journal::Entry::Payload;
 
 namespace {
@@ -574,6 +574,14 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
 
+  // If we are low on memory due to cold storage, free some memory.
+  if (memory_budget_ < ssize_t(key.size()) && owner_->tiered_storage()) {
+    // At least 40KB bytes to cover potential segment split.
+    size_t goal = std::max<size_t>(key.size() * 2 - memory_budget_, 40_KB);
+    size_t reclaimed = owner_->tiered_storage()->ReclaimMemory(goal);
+    memory_budget_ += reclaimed;
+  }
+
   // In case we are loading from rdb file or replicating we want to disable conservative memory
   // checks (inside PrimeEvictionPolicy::CanGrow) and reject insertions only after we pass max
   // memory limit. When loading a snapshot created by the same server configuration (memory and
@@ -621,11 +629,15 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
     // and we add new objects or update the existing ones and our memory usage grows.
     // We do not require for a single operation to unload the whole negative debt.
     // Instead, we create a positive, converging force that should help with freeing enough memory.
-    // Free at least 256 bytes or 3% of the total debt.
-    size_t evict_goal = std::max<size_t>(256, (-evp.mem_budget()) / 32);
+    // Free at least K bytes or 3% of the total debt.
+    // TODO: to reenable and optimize this - this call significantly slows down server
+    // when evictions are running.
+#if 0
+    size_t evict_goal = std::max<size_t>(512, (-evp.mem_budget()) / 32);
     auto [items, bytes] = FreeMemWithEvictionStep(cntx.db_index, it.segment_id(), evict_goal);
     evicted_obj_bytes = bytes;
     events_.hard_evictions += items;
+#endif
   }
 
   table_memory_ += (db.table_memory() - table_before);
@@ -1233,8 +1245,6 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t starting_segment_id,
                                                         size_t increase_goal_bytes) {
   DCHECK(!owner_->IsReplica());
-  if ((!caching_mode_) || !expire_allowed_)
-    return {0, 0};
 
   size_t evicted_items = 0, evicted_bytes = 0;
 
@@ -1243,6 +1253,9 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
     if (evicted_bytes >= increase_goal_bytes)
       return {0, evicted_bytes};
   }
+
+  if ((!caching_mode_) || !expire_allowed_)
+    return {0, 0};
 
   auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);
   auto max_segment_to_consider = GetFlag(FLAGS_max_segment_to_consider);
