@@ -1767,6 +1767,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 
       for (const auto& name : names) {
         auto value = config_registry.Get(name);
+        DCHECK(value.has_value());
         if (value.has_value()) {
           res.push_back(name);
           res.push_back(*value);

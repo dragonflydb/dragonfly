@@ -17,11 +17,7 @@ namespace {
 using namespace std;
 
 string NormalizeConfigName(string_view name) {
-  return absl::StrReplaceAll(name, {{"_", "-"}});
-}
-
-absl::CommandLineFlag* GetFlag(string_view name) {
-  return absl::FindCommandLineFlag(absl::StrReplaceAll(name, {{"-", "_"}}));
+  return absl::StrReplaceAll(name, {{"-", "_"}});
 }
 }  // namespace
 
@@ -38,8 +34,8 @@ auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResul
 
   auto cb = it->second.cb;
 
-  absl::CommandLineFlag* flag = GetFlag(name);
-  CHECK(flag);
+  absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
+  CHECK(flag) << config_name;
   if (string error; !flag->ParseFrom(value, &error)) {
     LOG(WARNING) << error;
     return SetResult::INVALID;
@@ -57,7 +53,7 @@ optional<string> ConfigRegistry::Get(string_view config_name) {
     return nullopt;
   lk.unlock();
 
-  absl::CommandLineFlag* flag = GetFlag(name);
+  absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag);
   return flag->CurrentValue();
 }
@@ -82,7 +78,7 @@ vector<string> ConfigRegistry::List(string_view glob) const {
 void ConfigRegistry::RegisterInternal(string_view config_name, bool is_mutable, WriteCb cb) {
   string name = NormalizeConfigName(config_name);
 
-  absl::CommandLineFlag* flag = GetFlag(name);
+  absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag) << "Unknown config name: " << name;
 
   unique_lock lk(mu_);
