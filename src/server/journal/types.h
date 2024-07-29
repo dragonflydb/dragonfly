@@ -22,7 +22,7 @@ enum class Op : uint8_t {
   MULTI_COMMAND = 11,
   EXEC = 12,
   PING = 13,
-  FIN = 14,
+  UNUSED = 14,
   LSN = 15
 };
 

@@ -55,7 +55,6 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
       lsn = entry.lsn;
       return;
     case journal::Op::PING:
-    case journal::Op::FIN:
       return;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
