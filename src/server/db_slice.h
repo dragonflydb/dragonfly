@@ -497,6 +497,17 @@ class DbSlice {
   void PerformDeletion(Iterator del_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
+  ConditionFlag* GetCondFlag() {
+    return &cond_flag_;
+  }
+
+  // Wrapper around DashTable::Traverse that allows preemptions
+  template <typename Cb, typename DashTable>
+  PrimeTable::Cursor Traverse(PrimeTable::Cursor cursor, Cb&& cb, DashTable* pt) {
+    ConditionGuard guard(&cond_flag_);
+    return pt->Traverse(cursor, std::forward<Cb>(cb));
+  }
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
@@ -550,13 +561,16 @@ class DbSlice {
 
   void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
 
-  // We need this because registered callbacks might yield. If RegisterOnChange
+  // We need this because registered callbacks might yield. If UnegisterOnChange
   // gets called after we preempt while iterating over the registered callbacks
-  // (let's say in FlushChangeToEarlierCallbacks) we will get UB, because we pushed
-  // into a vector which might get resized, invalidating the iterators that are being
+  // (let's say in FlushChangeToEarlierCallbacks) we will get UB, because we removed
+  // an arbitrary element within the list invalidating the iterators that are being
   // used by the preempted FlushChangeToEarlierCallbacks. LocalBlockingCounter
   // protects us against this case.
   mutable LocalBlockingCounter block_counter_;
+
+  // Used to provide exlusive access while Traversing segments
+  mutable ConditionFlag cond_flag_;
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
 

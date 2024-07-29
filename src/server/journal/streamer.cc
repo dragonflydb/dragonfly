@@ -213,15 +213,19 @@ void RestoreStreamer::Run() {
       return;
 
     bool written = false;
-    cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
-      ConditionGuard guard(&bucket_ser_);
+    cursor = db_slice_->Traverse(
+        cursor,
+        [&](PrimeTable::bucket_iterator it) {
+          ConditionGuard guard(&bucket_ser_);
 
-      db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
-                                               DbSlice::Iterator::FromPrime(it), snapshot_version_);
-      if (WriteBucket(it)) {
-        written = true;
-      }
-    });
+          db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
+                                                   DbSlice::Iterator::FromPrime(it),
+                                                   snapshot_version_);
+          if (WriteBucket(it)) {
+            written = true;
+          }
+        },
+        pt);
     if (written) {
       ThrottleIfNeeded();
     }

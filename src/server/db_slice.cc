@@ -744,7 +744,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   PrimeTable::Cursor cursor;
   uint64_t i = 0;
   do {
-    PrimeTable::Cursor next = pt->Traverse(cursor, del_entry_cb);
+    PrimeTable::Cursor next = Traverse(cursor, del_entry_cb, pt);
     ++i;
     cursor = next;
     if (i % 100 == 0) {
@@ -1149,7 +1149,7 @@ void DbSlice::ExpireAllIfNeeded() {
 
     ExpireTable::Cursor cursor;
     do {
-      cursor = db.expire.Traverse(cursor, cb);
+      cursor = Traverse(cursor, cb, &db.expire);
     } while (cursor);
   }
 }
@@ -1216,13 +1216,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   unsigned i = 0;
   for (; i < count / 3; ++i) {
-    db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+    db.expire_cursor = Traverse(db.expire_cursor, cb, &db.expire);
   }
 
   // continue traversing only if we had strong deletion rate based on the first sample.
   if (result.deleted * 4 > result.traversed) {
     for (; i < count; ++i) {
-      db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+      db.expire_cursor = Traverse(db.expire_cursor, cb, &db.expire);
     }
   }
 
@@ -1388,13 +1388,16 @@ void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbT
     // Delete all tiered entries
     PrimeTable::Cursor cursor;
     do {
-      cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
-        if (it->second.IsExternal()) {
-          tiered_storage->Delete(index, &it->second);
-        } else if (it->second.HasStashPending()) {
-          tiered_storage->CancelStash(index, it->first.GetSlice(&scratch), &it->second);
-        }
-      });
+      cursor = Traverse(
+          cursor,
+          [&](PrimeIterator it) {
+            if (it->second.IsExternal()) {
+              tiered_storage->Delete(index, &it->second);
+            } else if (it->second.HasStashPending()) {
+              tiered_storage->CancelStash(index, it->first.GetSlice(&scratch), &it->second);
+            }
+          },
+          &db_ptr->prime);
     } while (cursor);
 
     // While tiered_storage may delete some of its entries asynchronously, it updates
@@ -1516,6 +1519,8 @@ void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const Change
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << id;
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
   std::unique_lock<LocalBlockingCounter> lk(block_counter_);
+
+  ConditionGuard guard_(&cond_flag_);
 
   const size_t limit = change_cb_.size();
   auto ccb = change_cb_.begin();

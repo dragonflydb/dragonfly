@@ -272,14 +272,17 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
       continue;
     PrimeTable::Cursor cursor;
     do {
-      cursor = dbt->prime.Traverse(cursor, [&](PrimeIterator it) {
-        unsigned obj_type = it->second.ObjType();
-        auto& hist_ptr = (*obj_hist_map)[obj_type];
-        if (!hist_ptr) {
-          hist_ptr.reset(new ObjHist);
-        }
-        steps += AddObjHist(it, hist_ptr.get());
-      });
+      cursor = db_slice.Traverse(
+          cursor,
+          [&](PrimeIterator it) {
+            unsigned obj_type = it->second.ObjType();
+            auto& hist_ptr = (*obj_hist_map)[obj_type];
+            if (!hist_ptr) {
+              hist_ptr.reset(new ObjHist);
+            }
+            steps += AddObjHist(it, hist_ptr.get());
+          },
+          &dbt->prime);
 
       if (steps >= 20000) {
         steps = 0;
