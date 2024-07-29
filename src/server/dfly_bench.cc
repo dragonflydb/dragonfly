@@ -243,10 +243,8 @@ class TLocalClient {
 
     for (unsigned i = 0; i < drivers_.size(); ++i) {
       float done = drivers_[i]->done();
-      if (done > max)
-        max = done;
-      if (done < min)
-        min = done;
+      max = std::max(done, max);
+      min = std::min(done, min);
     }
 
     return {min, max};
