@@ -44,10 +44,12 @@ ABSL_FLAG(uint64_t, key_stddev, 0,
 ABSL_FLAG(string, ratio, "1:10", "Set:Get ratio");
 ABSL_FLAG(string, command, "", "custom command with __key__ placeholder for keys");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
+ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
 
 using namespace std;
 using namespace util;
 using absl::GetFlag;
+using absl::StrFormat;
 using facade::RedisParser;
 using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
@@ -162,6 +164,7 @@ struct ClientStats {
   uint64_t hit_count = 0;
   uint64_t hit_opportunities = 0;
   uint64_t num_errors = 0;
+  unsigned num_clients = 0;
 
   ClientStats& operator+=(const ClientStats& o) {
     hist.Merge(o.hist);
@@ -169,6 +172,7 @@ struct ClientStats {
     hit_count += o.hit_count;
     hit_opportunities += o.hit_opportunities;
     num_errors += o.num_errors;
+    num_clients += o.num_clients;
     return *this;
   }
 };
@@ -186,7 +190,11 @@ class Driver {
   Driver& operator=(Driver&&) = default;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
-  void Run(uint64_t cycle_ns, CommandGenerator* cmd_gen);
+  void Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen);
+
+  float done() const {
+    return double(received_) / num_reqs_;
+  }
 
  private:
   void PopRequest();
@@ -198,9 +206,11 @@ class Driver {
     bool might_hit;
   };
 
-  uint32_t num_reqs_;
+  uint32_t num_reqs_, received_ = 0;
+
   ClientStats& stats_;
   unique_ptr<FiberSocketBase> socket_;
+  fb2::Fiber receive_fb_;
   queue<Req> reqs_;
   fb2::CondVarAny cnd_;
 };
@@ -218,13 +228,32 @@ class TLocalClient {
   TLocalClient(const TLocalClient&) = delete;
 
   void Connect(tcp::endpoint ep);
-  void Run(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns);
+  void Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns);
+  void Join();
 
   ClientStats stats;
+
+  float GetDone(unsigned id) const {
+    return drivers_[id]->done();
+  }
+
+  unsigned num_conns() const {
+    return drivers_.size();
+  }
+
+  void AdjustCycle();
 
  private:
   ProactorBase* p_;
   vector<unique_ptr<Driver>> drivers_;
+  optional<KeyGenerator> key_gen_;
+  optional<CommandGenerator> cmd_gen_;
+
+  vector<fb2::Fiber> driver_fbs_;
+
+  uint64_t cur_cycle_ns_;
+  uint64_t target_cycle_;
+  int64_t start_time_;
 };
 
 KeyGenerator::KeyGenerator(uint32_t min, uint32_t max)
@@ -276,27 +305,30 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
   VLOG(2) << "Connecting " << index;
   error_code ec = socket_->Connect(ep);
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
+  if (GetFlag(FLAGS_tcp_nodelay)) {
+    int yes = 1;
+    CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
+  }
+  receive_fb_ = MakeFiber(fb2::Launch::dispatch, [this] { ReceiveFb(); });
 }
 
-void Driver::Run(uint64_t cycle_ns, CommandGenerator* cmd_gen) {
-  auto receive_fb = MakeFiber([this] { ReceiveFb(); });
-
-  int64_t next_invocation = absl::GetCurrentTimeNanos();
-
-  const absl::Time start = absl::Now();
-
+void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
+  const int64_t start = absl::GetCurrentTimeNanos();
+  stats_.num_clients++;
   for (unsigned i = 0; i < num_reqs_; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
     if (cycle_ns) {
-      int64_t sleep_ns = next_invocation - now;
+      int64_t target_ts = start + i * (*cycle_ns);
+      int64_t sleep_ns = target_ts - now;
+
       if (sleep_ns > 0) {
         VLOG(5) << "Sleeping for " << sleep_ns << "ns";
         ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
-      } else {
+      } else if (i % 256 == 255) {
+        ThisFiber::Yield();
         VLOG(5) << "Behind QPS schedule";
       }
-      next_invocation += cycle_ns;
     } else {
       // Coordinated omission.
 
@@ -320,8 +352,9 @@ void Driver::Run(uint64_t cycle_ns, CommandGenerator* cmd_gen) {
     CHECK(!ec) << ec.message();
   }
 
-  const absl::Time finish = absl::Now();
-  VLOG(1) << "Done queuing " << num_reqs_ << " requests, which took " << finish - start
+  const int finish = absl::GetCurrentTimeNanos();
+  VLOG(1) << "Done queuing " << num_reqs_ << " requests, which took "
+          << StrFormat("%.1fs", double(finish - start) / 1000000000)
           << ". Waiting for server processing";
 
   // TODO: to change to a condvar or something.
@@ -330,8 +363,9 @@ void Driver::Run(uint64_t cycle_ns, CommandGenerator* cmd_gen) {
   }
 
   socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
-  receive_fb.Join();
+  receive_fb_.Join();
   std::ignore = socket_->Close();
+  stats_.num_clients--;
 }
 
 static string_view FindLine(io::Bytes buf) {
@@ -350,7 +384,7 @@ void Driver::PopRequest() {
   uint64_t usec = (now - reqs_.front().start) / 1000;
   stats_.hist.Add(usec);
   stats_.hit_opportunities += reqs_.front().might_hit;
-
+  ++received_;
   reqs_.pop();
   if (reqs_.empty()) {
     cnd_.notify_one();
@@ -452,27 +486,58 @@ void TLocalClient::Connect(tcp::endpoint ep) {
     fb.Join();
 }
 
-void TLocalClient::Run(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) {
-  KeyGenerator key_gen(key_min, key_max);
-  CommandGenerator cmd_gen(&key_gen);
+void TLocalClient::Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) {
+  key_gen_.emplace(key_min, key_max);
+  cmd_gen_.emplace(&key_gen_.value());
 
-  vector<fb2::Fiber> fbs(drivers_.size());
-  for (size_t i = 0; i < fbs.size(); ++i) {
-    fbs[i] = fb2::Fiber(absl::StrCat("run/", i), [&, i] { drivers_[i]->Run(cycle_ns, &cmd_gen); });
+  driver_fbs_.resize(drivers_.size());
+
+  cur_cycle_ns_ = cycle_ns;
+  target_cycle_ = cycle_ns;
+  start_time_ = absl::GetCurrentTimeNanos();
+
+  for (size_t i = 0; i < driver_fbs_.size(); ++i) {
+    driver_fbs_[i] = fb2::Fiber(absl::StrCat("run/", i), [&, i] {
+      drivers_[i]->Run(cur_cycle_ns_ ? &cur_cycle_ns_ : nullptr, &cmd_gen_.value());
+    });
   }
+}
 
-  for (auto& fb : fbs)
+void TLocalClient::Join() {
+  for (auto& fb : driver_fbs_)
     fb.Join();
 
   VLOG(1) << "Total hits: " << stats.hit_count;
 }
 
+void TLocalClient::AdjustCycle() {
+  if (cur_cycle_ns_ == 0 || stats.num_responses == 0)
+    return;
+
+  // We adjust sleeping cycle per thread, and it's the same for all connection in this thread.
+  // We compute the aggregated cycle so far based on responses, and if it
+  // is greater than current we increase the current cycle. Otherwise,
+  // we try slowly reducing the cycle back to the nominal one.
+
+  int64_t running_time = absl::GetCurrentTimeNanos() - start_time_;
+  int64_t real_cycle = running_time * drivers_.size() / stats.num_responses;
+  if (real_cycle > cur_cycle_ns_ * 1.05) {
+    cur_cycle_ns_ = (cur_cycle_ns_ + real_cycle) / 2;
+    VLOG(1) << "Increasing cycle to " << cur_cycle_ns_;
+  } else if (cur_cycle_ns_ > target_cycle_) {
+    cur_cycle_ns_ -= (cur_cycle_ns_ - target_cycle_) * 0.2;
+  }
+}
+
 thread_local unique_ptr<TLocalClient> client;
 
-void WatchFiber(absl::Time start_time, atomic_bool* finish_signal, ProactorPool* pp) {
+void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
   fb2::Mutex mutex;
 
-  absl::Time last_print;  // initialized to epoch time.
+  int64_t start_time = absl::GetCurrentTimeNanos();
+  LOG(INFO) << "Started watching";
+
+  int64_t last_print = start_time;
   uint64_t num_last_resp_cnt = 0;
 
   uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n);
@@ -481,33 +546,57 @@ void WatchFiber(absl::Time start_time, atomic_bool* finish_signal, ProactorPool*
     // we sleep with resolution of 1s but print with lower frequency to be more responsive
     // when benchmark finishes.
     ThisFiber::SleepFor(1s);
-    absl::Time now = absl::Now();
-    if (now - last_print > absl::Seconds(5)) {
-      ClientStats client_stats;
-      pp->AwaitFiberOnAll([&](auto* p) {
-        unique_lock lk(mutex);
-        client_stats += client->stats;
-        lk.unlock();
-      });
+    pp->AwaitBrief([](auto, auto*) { client->AdjustCycle(); });
 
-      uint64_t total_ms = (now - start_time) / absl::Milliseconds(1);
-      uint64_t period_ms = (now - last_print) / absl::Milliseconds(1);
-      uint64_t period_resp_cnt = client_stats.num_responses - num_last_resp_cnt;
-      double done_perc = double(client_stats.num_responses) * 100 / resp_goal;
-      double hitrate =
-          client_stats.hit_opportunities > 0
-              ? 100 * double(client_stats.hit_count) / double(client_stats.hit_opportunities)
-              : 0;
-      CONSOLE_INFO << total_ms / 1000 << "s: " << absl::StrFormat("%.1f", done_perc)
-                   << "% done, effective RPS(now/accumulated): "
-                   << period_resp_cnt * 1000 / period_ms << "/"
-                   << client_stats.num_responses * 1000 / total_ms
-                   << ", errors: " << client_stats.num_errors
-                   << ", hitrate: " << absl::StrFormat("%.1f", hitrate) << "%";
+    int64_t now = absl::GetCurrentTimeNanos();
+    if (now - last_print < 5000000000LL)  // 5s
+      continue;
 
-      last_print = now;
-      num_last_resp_cnt = client_stats.num_responses;
-    }
+    ClientStats client_stats;
+    float done_max = 0;
+    float done_min = 1;
+
+    pp->AwaitFiberOnAll([&](auto* p) {
+      float max = 0;
+      float min = 1;
+
+      for (unsigned i = 0; i < client->num_conns(); ++i) {
+        float done = client->GetDone(i);
+        if (done > max)
+          max = done;
+        if (done < min)
+          min = done;
+      }
+
+      unique_lock lk(mutex);
+      client_stats += client->stats;
+      if (done_max < max)
+        done_max = max;
+
+      if (done_min > min)
+        done_min = min;
+
+      lk.unlock();
+    });
+
+    uint64_t total_ms = (now - start_time) / 1000000;
+    uint64_t period_ms = (now - last_print) / 1000000;
+    uint64_t period_resp_cnt = client_stats.num_responses - num_last_resp_cnt;
+    double done_perc = double(client_stats.num_responses) * 100 / resp_goal;
+    double hitrate = client_stats.hit_opportunities > 0 ? 100 * double(client_stats.hit_count) /
+                                                              double(client_stats.hit_opportunities)
+                                                        : 0;
+    CONSOLE_INFO << total_ms / 1000 << "s: " << StrFormat("%.1f", done_perc)
+                 << "% done, RPS(now/agg): " << period_resp_cnt * 1000 / period_ms << "/"
+                 << client_stats.num_responses * 1000 / total_ms
+                 << ", errs: " << client_stats.num_errors
+                 << ", hitrate: " << StrFormat("%.1f%%", hitrate)
+                 << ", clients: " << client_stats.num_clients << "\n"
+                 << "done_min: " << StrFormat("%.2f%%", done_min * 100)
+                 << ", done_max: " << StrFormat("%.2f%%", done_max * 100);
+
+    last_print = now;
+    num_last_resp_cnt = client_stats.num_responses;
   }
 }
 
@@ -590,23 +679,26 @@ int main(int argc, char* argv[]) {
   } else {
     CONSOLE_INFO << "Coordinated omission mode - the rate is determined by the server";
   }
-  const absl::Time start_time = absl::Now();
-  atomic_bool finish{false};
-  auto watch_fb =
-      pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(start_time, &finish, pp.get()); });
 
-  pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
+  atomic_bool finish{false};
+  pp->AwaitBrief([&](unsigned index, auto* p) {
     uint32_t key_max = (thread_key_step > 0 && index + 1 < pp->size())
                            ? key_minimum + (index + 1) * thread_key_step - 1
                            : key_maximum;
-    client->Run(key_minimum + index * thread_key_step, key_max, interval);
+    client->Start(key_minimum + index * thread_key_step, key_max, interval);
   });
+
+  auto watch_fb = pp->GetNextProactor()->LaunchFiber([&] { WatchFiber(&finish, pp.get()); });
+  const absl::Time start_time = absl::Now();
+
+  // The actual run.
+  pp->AwaitFiberOnAll([&](unsigned index, auto* p) { client->Join(); });
+
   absl::Duration duration = absl::Now() - start_time;
   finish.store(true);
   watch_fb.Join();
 
   fb2::Mutex mutex;
-  base::Histogram hist;
 
   LOG(INFO) << "Resetting all threads";
 
@@ -626,7 +718,7 @@ int main(int argc, char* argv[]) {
     CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";
   }
 
-  CONSOLE_INFO << "Latency summary, all times are in usec:\n" << hist.ToString();
+  CONSOLE_INFO << "Latency summary, all times are in usec:\n" << summary.hist.ToString();
   if (summary.hit_opportunities) {
     CONSOLE_INFO << "----------------------------------\nHit rate: "
                  << 100 * double(summary.hit_count) / double(summary.hit_opportunities) << "%\n";
