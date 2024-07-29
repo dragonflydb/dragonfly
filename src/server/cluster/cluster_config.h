@@ -26,6 +26,8 @@ class ClusterConfig {
   std::shared_ptr<ClusterConfig> CloneWithChanges(const SlotRanges& enable_slots,
                                                   const SlotRanges& disable_slots) const;
 
+  std::shared_ptr<ClusterConfig> CloneWithoutMigrations() const;
+
   // If key is in my slots ownership return true
   bool IsMySlot(SlotId id) const;
   bool IsMySlot(std::string_view key) const;
