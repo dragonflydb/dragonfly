@@ -41,6 +41,7 @@ ABSL_FLAG(uint64_t, seed, 42, "A seed for random data generation");
 ABSL_FLAG(uint64_t, key_stddev, 0,
           "Standard deviation for non-uniform distribution, 0 chooses"
           " a default value of (max-min)/6");
+ABSL_FLAG(uint32_t, pipeline, 1, "maximum number of pending requests per connection");
 ABSL_FLAG(string, ratio, "1:10", "Set:Get ratio");
 ABSL_FLAG(string, command, "", "custom command with __key__ placeholder for keys");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
@@ -196,6 +197,10 @@ class Driver {
     return double(received_) / num_reqs_;
   }
 
+  unsigned pending_length() const {
+    return reqs_.size();
+  }
+
  private:
   void PopRequest();
   void ReceiveFb();
@@ -233,8 +238,28 @@ class TLocalClient {
 
   ClientStats stats;
 
-  float GetDone(unsigned id) const {
-    return drivers_[id]->done();
+  tuple<float, float> GetMinMaxDone() const {
+    float min = 1, max = 0;
+
+    for (unsigned i = 0; i < drivers_.size(); ++i) {
+      float done = drivers_[i]->done();
+      if (done > max)
+        max = done;
+      if (done < min)
+        min = done;
+    }
+
+    return {min, max};
+  }
+
+  unsigned MaxPending() const {
+    unsigned max = 0;
+    for (unsigned i = 0; i < drivers_.size(); ++i) {
+      if (drivers_[i]->pending_length() > max) {
+        max = drivers_[i]->pending_length();
+      }
+    }
+    return max;
   }
 
   unsigned num_conns() const {
@@ -314,17 +339,26 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
 
 void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
   const int64_t start = absl::GetCurrentTimeNanos();
+  unsigned pipeline = GetFlag(FLAGS_pipeline);
+
   stats_.num_clients++;
+
   for (unsigned i = 0; i < num_reqs_; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
     if (cycle_ns) {
       int64_t target_ts = start + i * (*cycle_ns);
       int64_t sleep_ns = target_ts - now;
+      if (reqs_.size() > 10 && sleep_ns <= 0) {
+        sleep_ns = 10000;
+      }
 
       if (sleep_ns > 0) {
         VLOG(5) << "Sleeping for " << sleep_ns << "ns";
-        ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
+        // There is no point in sending more requests if they are piled up in the server.
+        do {
+          ThisFiber::SleepFor(chrono::nanoseconds(sleep_ns));
+        } while (reqs_.size() > 10);
       } else if (i % 256 == 255) {
         ThisFiber::Yield();
         VLOG(5) << "Behind QPS schedule";
@@ -333,7 +367,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       // Coordinated omission.
 
       fb2::NoOpLock lk;
-      cnd_.wait(lk, [this] { return reqs_.empty(); });
+      cnd_.wait(lk, [this, pipeline] { return reqs_.size() < pipeline; });
     }
     string cmd = cmd_gen->Next();
 
@@ -549,54 +583,45 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
     pp->AwaitBrief([](auto, auto*) { client->AdjustCycle(); });
 
     int64_t now = absl::GetCurrentTimeNanos();
-    if (now - last_print < 5000000000LL)  // 5s
+    if (now - last_print < 5000'000'000LL)  // 5s
       continue;
 
-    ClientStats client_stats;
+    ClientStats stats;
     float done_max = 0;
     float done_min = 1;
+    unsigned max_pending = 0;
 
     pp->AwaitFiberOnAll([&](auto* p) {
-      float max = 0;
-      float min = 1;
-
-      for (unsigned i = 0; i < client->num_conns(); ++i) {
-        float done = client->GetDone(i);
-        if (done > max)
-          max = done;
-        if (done < min)
-          min = done;
-      }
+      auto [mind, maxd] = client->GetMinMaxDone();
+      unsigned max_pend = client->MaxPending();
 
       unique_lock lk(mutex);
-      client_stats += client->stats;
-      if (done_max < max)
-        done_max = max;
-
-      if (done_min > min)
-        done_min = min;
-
-      lk.unlock();
+      stats += client->stats;
+      done_max = max(done_max, maxd);
+      done_min = min(done_min, mind);
+      max_pending = max(max_pending, max_pend);
     });
 
     uint64_t total_ms = (now - start_time) / 1000000;
     uint64_t period_ms = (now - last_print) / 1000000;
-    uint64_t period_resp_cnt = client_stats.num_responses - num_last_resp_cnt;
-    double done_perc = double(client_stats.num_responses) * 100 / resp_goal;
-    double hitrate = client_stats.hit_opportunities > 0 ? 100 * double(client_stats.hit_count) /
-                                                              double(client_stats.hit_opportunities)
-                                                        : 0;
+    uint64_t period_resp_cnt = stats.num_responses - num_last_resp_cnt;
+    double done_perc = double(stats.num_responses) * 100 / resp_goal;
+    double hitrate = stats.hit_opportunities > 0
+                         ? 100 * double(stats.hit_count) / double(stats.hit_opportunities)
+                         : 0;
+    unsigned latency = stats.hist.Percentile(99);
+
     CONSOLE_INFO << total_ms / 1000 << "s: " << StrFormat("%.1f", done_perc)
                  << "% done, RPS(now/agg): " << period_resp_cnt * 1000 / period_ms << "/"
-                 << client_stats.num_responses * 1000 / total_ms
-                 << ", errs: " << client_stats.num_errors
+                 << stats.num_responses * 1000 / total_ms << ", errs: " << stats.num_errors
                  << ", hitrate: " << StrFormat("%.1f%%", hitrate)
-                 << ", clients: " << client_stats.num_clients << "\n"
+                 << ", clients: " << stats.num_clients << "\n"
                  << "done_min: " << StrFormat("%.2f%%", done_min * 100)
-                 << ", done_max: " << StrFormat("%.2f%%", done_max * 100);
+                 << ", done_max: " << StrFormat("%.2f%%", done_max * 100)
+                 << ", p99_lat(us): " << latency << ", max_pending: " << max_pending;
 
     last_print = now;
-    num_last_resp_cnt = client_stats.num_responses;
+    num_last_resp_cnt = stats.num_responses;
   }
 }
 
