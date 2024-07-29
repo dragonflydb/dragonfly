@@ -166,7 +166,7 @@ class DflyInstance:
                 proc.kill()
             else:
                 proc.terminate()
-                proc.communicate(timeout=15)
+                proc.communicate(timeout=120)
                 # if the return code is 0 it means normal termination
                 # if the return code is negative it means termination by signal
                 # if the return code is positive it means abnormal exit
