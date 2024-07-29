@@ -602,8 +602,8 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
       max_pending = max(max_pending, max_pend);
     });
 
-    uint64_t total_ms = (now - start_time) / 1000000;
-    uint64_t period_ms = (now - last_print) / 1000000;
+    uint64_t total_ms = (now - start_time) / 1'000'000;
+    uint64_t period_ms = (now - last_print) / 1'000'000;
     uint64_t period_resp_cnt = stats.num_responses - num_last_resp_cnt;
     double done_perc = double(stats.num_responses) * 100 / resp_goal;
     double hitrate = stats.hit_opportunities > 0
