@@ -81,6 +81,10 @@ ClusterConfig* ClusterFamily::cluster_config() {
 
 void ClusterFamily::Shutdown() {
   shard_set->pool()->at(0)->Await([this] {
+    lock_guard lk(set_config_mu);
+    if (!tl_cluster_config)
+      return;
+
     auto empty_config = tl_cluster_config->CloneWithoutMigrations();
     RemoveOutgoingMigrations(empty_config, tl_cluster_config);
     RemoveIncomingMigrations(empty_config->GetFinishedIncomingMigrations(tl_cluster_config));
