@@ -350,7 +350,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       int64_t target_ts = start + i * (*cycle_ns);
       int64_t sleep_ns = target_ts - now;
       if (reqs_.size() > 10 && sleep_ns <= 0) {
-        sleep_ns = 10000;
+        sleep_ns = 10'000;
       }
 
       if (sleep_ns > 0) {
