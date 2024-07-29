@@ -245,6 +245,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
                                   : StrCat("AUTH ", masteruser, " ", masterauth);
     RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
+    last_cmd_ = "AUTH";  // Make sure the password is not printed to logs
     PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   }
   return error_code{};
