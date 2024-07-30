@@ -28,6 +28,8 @@ class ClusterFamily {
 
   void Register(CommandRegistry* registry);
 
+  void Shutdown();
+
   // Returns a thread-local pointer.
   static ClusterConfig* cluster_config();
 

@@ -910,7 +910,9 @@ void Service::Shutdown() {
 
   config_registry.Reset();
 
-  // to shutdown all the runtime components that depend on EngineShard.
+  // to shutdown all the runtime components that depend on EngineShard
+  cluster_family_.Shutdown();
+
   server_family_.Shutdown();
   StringFamily::Shutdown();
   GenericFamily::Shutdown();

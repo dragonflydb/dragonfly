@@ -1117,8 +1117,9 @@ async def test_cluster_flushall_during_migration(
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
+@pytest.mark.parametrize("interrupt", [False, True])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_cluster_data_migration(df_factory: DflyInstanceFactory):
+async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt: bool):
     # Check data migration from one node to another
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
@@ -1144,6 +1145,23 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory):
 
     logging.debug("Start migration")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    if interrupt:  # Test nodes properly shut down with pending migration
+        await asyncio.sleep(random.random())
+
+        # random instance
+        stop = random.getrandbits(1)
+        keep = 1 - stop
+
+        nodes[stop].instance.stop()
+
+        slots = await nodes[keep].admin_client.execute_command("CLUSTER SLOTS")
+        slots.sort(key=lambda cfg: cfg[0])
+        assert 0 in slots[0] and 9000 in slots[0]
+        assert 9001 in slots[1] and 16383 in slots[1]
+
+        await close_clients(*[n.client for n in nodes], *[n.admin_client for n in nodes])
+        return
 
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
