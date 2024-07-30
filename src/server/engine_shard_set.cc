@@ -317,18 +317,15 @@ bool EngineShard::DoDefrag() {
   uint64_t attempts = 0;
 
   do {
-    cur = slice.Traverse(
-        cur,
-        [&](PrimeIterator it) {
-          // for each value check whether we should move it because it
-          // seats on underutilized page of memory, and if so, do it.
-          bool did = it->second.DefragIfNeeded(threshold);
-          attempts++;
-          if (did) {
-            reallocations++;
-          }
-        },
-        prime_table);
+    cur = slice.Traverse(prime_table, cur, [&](PrimeIterator it) {
+      // for each value check whether we should move it because it
+      // seats on underutilized page of memory, and if so, do it.
+      bool did = it->second.DefragIfNeeded(threshold);
+      attempts++;
+      if (did) {
+        reallocations++;
+      }
+    });
     traverses_count++;
   } while (traverses_count < kMaxTraverses && cur && namespaces.IsInitialized());
 

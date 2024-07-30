@@ -221,7 +221,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
         return;
 
       PrimeTable::Cursor next =
-          db_slice_->Traverse(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this), pt);
+          db_slice_->Traverse(pt, cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
       cursor = next;
       PushSerializedToChannel(false);
 
@@ -386,7 +386,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerializedToChannel.
-  ConditionGuard guard(db_slice_->GetCondFlag());
+  std::unique_lock lk(*db_slice_->GetThreadLocalMutex());
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }
@@ -399,7 +399,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
 }
 
 void SliceSnapshot::CloseRecordChannel() {
-  ConditionGuard guard(db_slice_->GetCondFlag());
+  std::unique_lock lk(*db_slice_->GetThreadLocalMutex());
 
   CHECK(!serialize_bucket_running_);
   // Make sure we close the channel only once with a CAS check.

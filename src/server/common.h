@@ -365,21 +365,22 @@ struct ConditionFlag {
 };
 
 // Helper class used to guarantee atomicity between serialization of buckets
-class ConditionGuard {
+class ThreadLocalMutex {
  public:
-  explicit ConditionGuard(ConditionFlag* enclosing) : enclosing_(enclosing) {
+  void lock() {
     util::fb2::NoOpLock noop_lk_;
-    enclosing_->cond_var.wait(noop_lk_, [this]() { return !enclosing_->flag; });
-    enclosing_->flag = true;
+    cond_var_.wait(noop_lk_, [this]() { return !flag_; });
+    flag_ = true;
   }
 
-  ~ConditionGuard() {
-    enclosing_->flag = false;
-    enclosing_->cond_var.notify_one();
+  void unlock() {
+    flag_ = false;
+    cond_var_.notify_one();
   }
 
  private:
-  ConditionFlag* enclosing_;
+  util::fb2::CondVarAny cond_var_;
+  bool flag_ = false;
 };
 
 class LocalBlockingCounter {
