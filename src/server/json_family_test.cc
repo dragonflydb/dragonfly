@@ -1393,6 +1393,11 @@ TEST_F(JsonFamilyTest, Merge) {
   EXPECT_EQ(resp, "OK");
   resp = Run({"JSON.GET", "j1", "$"});
   EXPECT_EQ(resp, R"([{"a":"z","c":{"d":"e"}}])");
+
+  resp = Run({"JSON.SET", "foo", "$", "{}"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.MERGE", "foo", "$", R"({"a":2} {"b":2})"});
+  EXPECT_EQ(resp, "OK");
 }
 
 }  // namespace dfly
