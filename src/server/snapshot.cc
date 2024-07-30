@@ -386,7 +386,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerializedToChannel.
-  std::unique_lock lk(*db_slice_->GetThreadLocalMutex());
+  std::unique_lock lk(*db_slice_->GetSerializationMutex());
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }
@@ -399,7 +399,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
 }
 
 void SliceSnapshot::CloseRecordChannel() {
-  std::unique_lock lk(*db_slice_->GetThreadLocalMutex());
+  std::unique_lock lk(*db_slice_->GetSerializationMutex());
 
   CHECK(!serialize_bucket_running_);
   // Make sure we close the channel only once with a CAS check.

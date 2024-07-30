@@ -367,44 +367,16 @@ struct ConditionFlag {
 // Helper class used to guarantee atomicity between serialization of buckets
 class ThreadLocalMutex {
  public:
-  void lock() {
-    util::fb2::NoOpLock noop_lk_;
-    cond_var_.wait(noop_lk_, [this]() { return !flag_; });
-    flag_ = true;
-  }
+  ThreadLocalMutex();
+  ~ThreadLocalMutex();
 
-  void unlock() {
-    flag_ = false;
-    cond_var_.notify_one();
-  }
+  void lock();
+  void unlock();
 
  private:
+  EngineShard* shard_;
   util::fb2::CondVarAny cond_var_;
   bool flag_ = false;
-};
-
-class LocalBlockingCounter {
- public:
-  void lock() {
-    ++mutating_;
-  }
-
-  void unlock() {
-    DCHECK(mutating_ > 0);
-    --mutating_;
-    if (mutating_ == 0) {
-      cond_var_.notify_one();
-    }
-  }
-
-  void Wait() {
-    util::fb2::NoOpLock noop_lk_;
-    cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
-  }
-
- private:
-  util::fb2::CondVarAny cond_var_;
-  size_t mutating_ = 0;
 };
 
 }  // namespace dfly
