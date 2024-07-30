@@ -37,11 +37,48 @@ using absl::StrAppend;
 using absl::StrCat;
 using absl::StrSplit;
 
-CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
-                     int8_t last_key, uint32_t acl_categories)
-    : facade::CommandId(name, mask, arity, first_key, last_key, acl_categories) {
+namespace {
+
+uint32_t ImplicitCategories(uint32_t mask) {
   if (mask & CO::ADMIN)
-    opt_mask_ |= CO::NOSCRIPT;
+    mask |= CO::NOSCRIPT;
+  return mask;
+}
+
+uint32_t ImplicitAclCategories(uint32_t mask) {
+  mask = ImplicitCategories(mask);
+  uint32_t out = 0;
+
+  if (mask & CO::WRITE)
+    out |= acl::WRITE;
+
+  if ((mask & CO::READONLY) && ((mask & CO::NOSCRIPT) == 0))
+    out |= acl::READ;
+
+  if (mask & CO::ADMIN)
+    out |= acl::ADMIN | acl::DANGEROUS;
+
+  // todo pubsub
+
+  if (mask & CO::FAST)
+    out |= acl::FAST;
+
+  if (mask & CO::BLOCKING)
+    out |= acl::BLOCKING;
+
+  if ((out & acl::FAST) == 0)
+    out |= acl::SLOW;
+
+  return out;
+}
+
+}  // namespace
+
+CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
+                     int8_t last_key, std::optional<uint32_t> acl_categories)
+    : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
+                        acl_categories.value_or(ImplicitAclCategories(mask))) {
+  implicit_acl_ = !acl_categories.has_value();
 }
 
 bool CommandId::IsTransactional() const {
@@ -152,6 +189,9 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
+  if (acl_category_)
+    cmd.SetAclCategory(*acl_category_);
+
   if (!is_sub_command || absl::StartsWith(cmd.name(), "ACL")) {
     cmd.SetBitIndex(1ULL << bit_index_);
     family_of_commands_.back().push_back(std::string(k));
@@ -165,9 +205,10 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   return *this;
 }
 
-void CommandRegistry::StartFamily() {
-  family_of_commands_.push_back({});
+void CommandRegistry::StartFamily(std::optional<uint32_t> acl_category) {
+  family_of_commands_.emplace_back();
   bit_index_ = 0;
+  acl_category_ = acl_category;
 }
 
 std::string_view CommandRegistry::RenamedOrOriginal(std::string_view orig) const {

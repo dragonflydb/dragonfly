@@ -77,7 +77,7 @@ class CommandId : public facade::CommandId {
   // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
   // server_state.h)
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
-            uint32_t acl_categories);
+            std::optional<uint32_t> acl_categories = std::nullopt);
 
   CommandId(CommandId&&) = default;
 
@@ -146,7 +146,13 @@ class CommandId : public facade::CommandId {
     return command_stats_[thread_index];
   }
 
+  void SetAclCategory(uint32_t mask) {
+    if (implicit_acl_)
+      acl_categories_ |= mask;
+  }
+
  private:
+  bool implicit_acl_;
   std::unique_ptr<CmdCallStats[]> command_stats_;
   Handler handler_;
   ArgValidator validator_;
@@ -194,7 +200,7 @@ class CommandRegistry {
     }
   }
 
-  void StartFamily();
+  void StartFamily(std::optional<uint32_t> acl_category = std::nullopt);
 
   std::string_view RenamedOrOriginal(std::string_view orig) const;
 
@@ -212,6 +218,7 @@ class CommandRegistry {
 
   FamiliesVec family_of_commands_;
   size_t bit_index_;
+  std::optional<uint32_t> acl_category_;  // category of family currently being built
 };
 
 }  // namespace dfly
