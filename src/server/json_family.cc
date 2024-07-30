@@ -13,6 +13,7 @@
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
+#include <jsoncons_ext/mergepatch/mergepatch.hpp>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -1450,28 +1451,6 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 
   return result;
 }
-
-// Implements the recursive algorithm from
-// https://datatracker.ietf.org/doc/html/rfc7386#section-2
-void RecursiveMerge(const JsonType& patch, JsonType* dest) {
-  if (!patch.is_object()) {
-    *dest = patch;
-    return;
-  }
-
-  if (!dest->is_object()) {
-    *dest = JsonType(json_object_arg, dest->get_allocator());
-  }
-
-  for (const auto& k_v : patch.object_range()) {
-    if (k_v.value().is_null()) {
-      dest->erase(k_v.key());
-    } else if (dest->find(k_v.key()) != dest->object_range().end()) {
-      RecursiveMerge(k_v.value(), &dest->at(k_v.key()));
-    }
-  }
-}
-
 OpStatus OpMerge(const OpArgs& op_args, string_view key, std::string_view json_str) {
   std::optional<JsonType> parsed_json = JsonFromString(json_str);
   if (!parsed_json) {
@@ -1486,10 +1465,12 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, std::string_view json_s
 
     JsonType* obj = it_res->it->second.GetJson();
     try {
-      RecursiveMerge(*parsed_json, obj);
+      // https://datatracker.ietf.org/doc/html/rfc7386#section-2
+      mergepatch::apply_merge_patch(*obj, *parsed_json);
     } catch (const std::exception& e) {
-      LOG(WARNING) << "Exception in OpMerge: " << e.what();
-      return OpStatus::KEY_NOTFOUND;
+      LOG_EVERY_T(ERROR, 1) << "Exception in OpMerge: " << e.what() << " with obj: " << *obj
+                            << " and patch: " << *parsed_json;
+      return OpStatus::INVALID_VALUE;
     }
     it_res->post_updater.Run();
     op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
