@@ -744,7 +744,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   PrimeTable::Cursor cursor;
   uint64_t i = 0;
   do {
-    PrimeTable::Cursor next = pt->Traverse(cursor, del_entry_cb);
+    PrimeTable::Cursor next = Traverse(pt, cursor, del_entry_cb);
     ++i;
     cursor = next;
     if (i % 100 == 0) {
@@ -1149,7 +1149,7 @@ void DbSlice::ExpireAllIfNeeded() {
 
     ExpireTable::Cursor cursor;
     do {
-      cursor = db.expire.Traverse(cursor, cb);
+      cursor = Traverse(&db.expire, cursor, cb);
     } while (cursor);
   }
 }
@@ -1160,7 +1160,6 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
 
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
@@ -1184,7 +1183,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
-  block_counter_.Wait();
+  std::unique_lock lk(local_mu_);
   auto it = find_if(change_cb_.begin(), change_cb_.end(),
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
@@ -1216,13 +1215,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   unsigned i = 0;
   for (; i < count / 3; ++i) {
-    db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+    db.expire_cursor = Traverse(&db.expire, db.expire_cursor, cb);
   }
 
   // continue traversing only if we had strong deletion rate based on the first sample.
   if (result.deleted * 4 > result.traversed) {
     for (; i < count; ++i) {
-      db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+      db.expire_cursor = Traverse(&db.expire, db.expire_cursor, cb);
     }
   }
 
@@ -1388,7 +1387,7 @@ void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbT
     // Delete all tiered entries
     PrimeTable::Cursor cursor;
     do {
-      cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
+      cursor = Traverse(&db_ptr->prime, cursor, [&](PrimeIterator it) {
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, &it->second);
         } else if (it->second.HasStashPending()) {
@@ -1515,7 +1514,7 @@ void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const Change
 
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << id;
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
+  std::unique_lock lk(local_mu_);
 
   const size_t limit = change_cb_.size();
   auto ccb = change_cb_.begin();

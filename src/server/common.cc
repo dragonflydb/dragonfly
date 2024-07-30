@@ -452,4 +452,25 @@ RandomPick UniquePicksGenerator::Generate() {
   return max_index;
 }
 
+ThreadLocalMutex::ThreadLocalMutex() {
+  shard_ = EngineShard::tlocal();
+}
+
+ThreadLocalMutex::~ThreadLocalMutex() {
+  DCHECK_EQ(EngineShard::tlocal(), shard_);
+}
+
+void ThreadLocalMutex::lock() {
+  DCHECK_EQ(EngineShard::tlocal(), shard_);
+  util::fb2::NoOpLock noop_lk_;
+  cond_var_.wait(noop_lk_, [this]() { return !flag_; });
+  flag_ = true;
+}
+
+void ThreadLocalMutex::unlock() {
+  DCHECK_EQ(EngineShard::tlocal(), shard_);
+  flag_ = false;
+  cond_var_.notify_one();
+}
+
 }  // namespace dfly

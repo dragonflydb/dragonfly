@@ -87,6 +87,9 @@ class DflyInstance:
             if threads > 1:
                 self.args["num_shards"] = threads - 1
 
+        # Add 1 byte limit for big values
+        self.args["serialization_max_chunk_size"] = 1
+
     def __del__(self):
         assert self.proc == None
 
@@ -163,7 +166,7 @@ class DflyInstance:
                 proc.kill()
             else:
                 proc.terminate()
-                proc.communicate(timeout=15)
+                proc.communicate(timeout=120)
                 # if the return code is 0 it means normal termination
                 # if the return code is negative it means termination by signal
                 # if the return code is positive it means abnormal exit

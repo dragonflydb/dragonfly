@@ -497,6 +497,20 @@ class DbSlice {
   void PerformDeletion(Iterator del_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
+  // Provides access to the internal lock of db_slice for flows that serialize
+  // entries with preemption and need to synchronize with Traverse below which
+  // acquires the same lock.
+  ThreadLocalMutex* GetSerializationMutex() {
+    return &local_mu_;
+  }
+
+  // Wrapper around DashTable::Traverse that allows preemptions
+  template <typename Cb, typename DashTable>
+  PrimeTable::Cursor Traverse(DashTable* pt, PrimeTable::Cursor cursor, Cb&& cb) {
+    std::unique_lock lk(local_mu_);
+    return pt->Traverse(cursor, std::forward<Cb>(cb));
+  }
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
@@ -550,13 +564,8 @@ class DbSlice {
 
   void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
 
-  // We need this because registered callbacks might yield. If RegisterOnChange
-  // gets called after we preempt while iterating over the registered callbacks
-  // (let's say in FlushChangeToEarlierCallbacks) we will get UB, because we pushed
-  // into a vector which might get resized, invalidating the iterators that are being
-  // used by the preempted FlushChangeToEarlierCallbacks. LocalBlockingCounter
-  // protects us against this case.
-  mutable LocalBlockingCounter block_counter_;
+  // Used to provide exclusive access while Traversing segments
+  mutable ThreadLocalMutex local_mu_;
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
 
