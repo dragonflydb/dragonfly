@@ -381,7 +381,8 @@ size_t Connection::MessageHandle::UsedMemory() const {
 }
 
 bool Connection::MessageHandle::IsReplying() const {
-  return IsPipelineMsg() || IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
+  return IsPubMsg() || holds_alternative<MonitorMessage>(handle) ||
+         holds_alternative<PipelineMessagePtr>(handle) ||
          (holds_alternative<MCPipelineMessagePtr>(handle) &&
           !get<MCPipelineMessagePtr>(handle)->cmd.no_reply);
 }
@@ -1606,7 +1607,8 @@ void Connection::SendAsync(MessageHandle msg) {
     stats_->dispatch_queue_subscriber_bytes += used_mem;
   }
 
-  if (msg.IsPipelineMsg()) {
+  // Squashing is only applied to redis commands
+  if (std::holds_alternative<PipelineMessagePtr>(msg.handle)) {
     pending_pipeline_cmd_cnt_++;
   }
 
@@ -1636,11 +1638,13 @@ void Connection::RecycleMessage(MessageHandle msg) {
     stats_->dispatch_queue_subscriber_bytes -= used_mem;
   }
 
-  // Retain pipeline message in pool.
-  if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
+  if (msg.IsPipelineMsg()) {
     ++stats_->pipelined_cmd_cnt;
     stats_->pipelined_cmd_latency += (ProactorBase::GetMonotonicTimeNs() - msg.dispatch_ts) / 1000;
+  }
 
+  // Retain pipeline message in pool.
+  if (auto* pipe = get_if<PipelineMessagePtr>(&msg.handle); pipe) {
     pending_pipeline_cmd_cnt_--;
     if (stats_->pipeline_cmd_cache_bytes < queue_backpressure_->pipeline_cache_limit) {
       stats_->pipeline_cmd_cache_bytes += (*pipe)->StorageCapacity();
