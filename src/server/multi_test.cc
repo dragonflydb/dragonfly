@@ -1106,4 +1106,17 @@ TEST_F(MultiEvalTest, MultiAndEval) {
   EXPECT_EQ(resp, "OK");
 }
 
+TEST_F(MultiTest, MultiTypes) {
+  // we had a bug with namespaces for type command in multi/exec
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"type", "sdfx3"}), "QUEUED");
+  EXPECT_THAT(Run({"type", "asdasd2"}), "QUEUED");
+  EXPECT_THAT(Run({"type", "wer124"}), "QUEUED");
+  EXPECT_THAT(Run({"type", "asafdasd"}), "QUEUED");
+  EXPECT_THAT(Run({"type", "dsfgser"}), "QUEUED");
+  EXPECT_THAT(Run({"type", "erg2"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}),
+              RespArray(ElementsAre("none", "none", "none", "none", "none", "none")));
+}
+
 }  // namespace dfly
