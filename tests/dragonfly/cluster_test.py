@@ -57,9 +57,13 @@ def redis_cluster(port_picker):
     # node3 slots 10923-16383
     ports = [port_picker.get_available_port() for i in range(3)]
     nodes = [RedisClusterNode(port) for port in ports]
-    for node in nodes:
-        node.start()
-        time.sleep(1)
+    try:
+        for node in nodes:
+            node.start()
+            time.sleep(1)
+    except FileNotFoundError as e:
+        pytest.skip("Redis server not found")
+        return None
 
     create_command = f'echo "yes" |redis-cli --cluster create {" ".join([f"127.0.0.1:{port}" for port in ports])}'
     subprocess.run(create_command, shell=True)
