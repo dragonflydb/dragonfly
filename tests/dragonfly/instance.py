@@ -337,7 +337,6 @@ class DflyInstanceFactory:
     def create(self, existing_port=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
-        args.setdefault("enable_direct_fd", None)  # Testing iouring with direct_fd enabled.
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")

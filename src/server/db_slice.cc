@@ -533,7 +533,8 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   // attribute of the entry in case of value overrides.
   res.it->first.SetTouched(true);
 
-  db.top_keys.Touch(key);
+  // We do not use TopKey feature, so disable it until we redesign it.
+  // db.top_keys.Touch(key);
 
   return res;
 }

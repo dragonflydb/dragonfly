@@ -655,7 +655,11 @@ void EngineShard::Heartbeat() {
                                        eviction_redline - db_slice.memory_budget());
     }
 
-    if (UsedMemory() > tiering_offload_threshold) {
+    size_t used_memory = UsedMemory();
+    if (used_memory > tiering_offload_threshold) {
+      VLOG(1) << "Running Offloading, memory=" << used_memory
+              << " tiering_threshold: " << tiering_offload_threshold
+              << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
       tiered_storage_->RunOffloading(i);
     }
   }
@@ -683,7 +687,7 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
 
     int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
     if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
-      VLOG(1) << "This heartbeat took " << now_ms - last_heartbeat_ms << "ms";
+      VLOG(1) << "This heartbeat-sleep took " << now_ms - last_heartbeat_ms << "ms";
     }
     Heartbeat();
     last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
