@@ -1451,39 +1451,42 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 
   return result;
 }
-OpStatus OpMerge(const OpArgs& op_args, string_view key, std::string_view json_str) {
+
+// Note that currently OpMerge works only with jsoncons and json::Path support has not been
+// implemented yet.
+OpStatus OpMerge(const OpArgs& op_args, string_view key, JsonPathV2 expression, string_view path,
+                 std::string_view json_str) {
   std::optional<JsonType> parsed_json = JsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
     return OpStatus::SYNTAX_ERR;
   }
 
-  auto& db_slice = op_args.GetDbSlice();
-  auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_JSON);
-  if (it_res.ok()) {
-    op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, it_res->it->second);
+  auto cb = [&](optional<string_view> cur_path, JsonType* val) {
+    string_view strpath = cur_path ? *cur_path : string_view{};
 
-    JsonType* obj = it_res->it->second.GetJson();
+    DVLOG(2) << "Handling " << strpath << " " << val->to_string();
+    // https://datatracker.ietf.org/doc/html/rfc7386#section-2
     try {
-      // https://datatracker.ietf.org/doc/html/rfc7386#section-2
-      mergepatch::apply_merge_patch(*obj, *parsed_json);
+      mergepatch::apply_merge_patch(*val, *parsed_json);
     } catch (const std::exception& e) {
-      LOG_EVERY_T(ERROR, 1) << "Exception in OpMerge: " << e.what() << " with obj: " << *obj
-                            << " and patch: " << *parsed_json;
-      return OpStatus::INVALID_VALUE;
+      LOG_EVERY_T(ERROR, 1) << "Exception in OpMerge: " << e.what() << " with obj: " << *val
+                            << " and patch: " << *parsed_json << ", path: " << strpath;
+      return false;
     }
-    it_res->post_updater.Run();
-    op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, it_res->it->second);
-    return OpStatus::OK;
-  }
 
-  // We add a new key only with path being root.
-  if (it_res.status() != OpStatus::KEY_NOTFOUND) {
-    return it_res.status();
-  }
+    return false;
+  };
 
-  // Add a new key.
-  return OpSet(op_args, key, "$", json_str, false, false).status();
+  OpStatus status = UpdateEntry(op_args, key, path, cb);
+  if (status != OpStatus::KEY_NOTFOUND)
+    return status;
+
+  if (path == "$") {
+    // Add a new key.
+    return OpSet(op_args, key, "$", json_str, false, false).status();
+  }
+  return OpStatus::SYNTAX_ERR;
 }
 
 io::Result<JsonPathV2, string> ParsePathV2(string_view path) {
@@ -1591,12 +1594,10 @@ void JsonFamily::Merge(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
   string_view value = ArgS(args, 2);
 
-  if (path != "." && path != "$") {
-    return cntx->SendError("Only root path is supported", kSyntaxErrType);
-  }
+  JsonPathV2 expression = PARSE_PATHV2(path);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpMerge(t->GetOpArgs(shard), key, value);
+    return OpMerge(t->GetOpArgs(shard), key, std::move(expression), path, value);
   };
 
   OpStatus status = cntx->transaction->ScheduleSingleHop(cb);

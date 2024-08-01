@@ -1400,6 +1400,43 @@ TEST_F(JsonFamilyTest, Merge) {
   EXPECT_EQ(resp, "OK");
   resp = Run({"JSON.GET", "foo", "$"});
   EXPECT_EQ(resp, R"([{"common":4,"f2":2}])");
+
+  json = R"({
+  "ans": {
+    "x": {
+      "y" : {
+        "doubled": false,
+        "answers": [
+          "foo",
+          "bar"
+        ]
+      }
+    }
+  }
+  })";
+  resp = Run({"JSON.SET", "j2", "$", json});
+  ASSERT_EQ(resp, "OK");
+
+  patch = R"(
+    {"z": {
+      "doubled": false,
+      "answers": ["xxx",  "yyy"]
+     },
+     "y": { "doubled": true}
+     })";
+
+  resp = Run({"JSON.MERGE", "j2", "$.ans.x", patch});
+
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.GET", "j2", "$"});
+  EXPECT_EQ(resp, R"([{"ans":{"x":{"y":{"answers":["foo","bar"],"doubled":true},)"
+                  R"("z":{"answers":["xxx","yyy"],"doubled":false}}}}])");
+
+  // Test not existing entry
+  resp = Run({"JSON.MERGE", "j3", "$", patch});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.GET", "j3", "$"});
+  EXPECT_EQ(resp, R"([{"y":{"doubled":true},"z":{"answers":["xxx","yyy"],"doubled":false}}])");
 }
 
 }  // namespace dfly
