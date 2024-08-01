@@ -62,8 +62,7 @@ def redis_cluster(port_picker):
             node.start()
             time.sleep(1)
     except FileNotFoundError as e:
-        if os.getenv("GITHUB_ACTIONS") == None:
-            pytest.skip("Redis server not found")
+        skip_if_not_in_github()
         raise
 
     create_command = f'echo "yes" |redis-cli --cluster create {" ".join([f"127.0.0.1:{port}" for port in ports])}'

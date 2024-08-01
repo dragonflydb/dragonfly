@@ -23,7 +23,7 @@ from tempfile import gettempdir, mkdtemp
 
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from . import PortPicker, dfly_args
-from .utility import DflySeederFactory, gen_ca_cert, gen_certificate
+from .utility import DflySeederFactory, gen_ca_cert, gen_certificate, skip_if_not_in_github
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
@@ -406,8 +406,7 @@ def redis_server(port_picker) -> RedisServer:
     try:
         s.start()
     except FileNotFoundError as e:
-        if os.getenv("GITHUB_ACTIONS") == None:
-            pytest.skip("Redis server not found")
+        skip_if_not_in_github()
         raise
     time.sleep(1)
     yield s

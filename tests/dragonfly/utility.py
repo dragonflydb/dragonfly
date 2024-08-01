@@ -12,6 +12,7 @@ import time
 import difflib
 import json
 import subprocess
+import pytest
 import os
 from enum import Enum
 
@@ -715,3 +716,8 @@ def assert_eventually(wrapped=None, *, times=100):
                 await asyncio.sleep(0.1)
 
     return wrapper(wrapped)
+
+
+def skip_if_not_in_github():
+    if os.getenv("GITHUB_ACTIONS") == None:
+        pytest.skip("Redis server not found")
