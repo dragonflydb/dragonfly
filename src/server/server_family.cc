@@ -1158,6 +1158,7 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
+  AppendMetricWithoutLabels("blocked_tasks", "", m.blocked_tasks, MetricType::GAUGE, &resp->body());
 
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
@@ -1937,6 +1938,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
     result.worker_fiber_stack_size += fb2::WorkerFibersStackSize();
     result.worker_fiber_count += fb2::WorkerFibersCount();
+    result.blocked_tasks += TaskQueue::blocked_submitters();
 
     result.coordinator_stats.Add(ss->stats);
 

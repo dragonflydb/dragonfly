@@ -107,6 +107,7 @@ struct Metrics {
   // Max length of the all the tx shard-queues.
   uint32_t tx_queue_len = 0;
   uint32_t worker_fiber_count = 0;
+  uint32_t blocked_tasks = 0;
   size_t worker_fiber_stack_size = 0;
 
   InterpreterManager::Stats lua_stats;
