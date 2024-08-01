@@ -479,7 +479,9 @@ def test_redis_om(df_server):
     try:
         import redis_om
     except ModuleNotFoundError:
-        pytest.skip("Redis-om not installed")
+        if os.getenv("GITHUB_ACTIONS") == None:
+            pytest.skip("Redis-om not installed")
+        raise
 
     client = redis.Redis(port=df_server.port)
 

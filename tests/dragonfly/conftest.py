@@ -406,8 +406,9 @@ def redis_server(port_picker) -> RedisServer:
     try:
         s.start()
     except FileNotFoundError as e:
-        pytest.skip("Redis server not found")
-        return None
+        if os.getenv("GITHUB_ACTIONS") == None:
+            pytest.skip("Redis server not found")
+        raise
     time.sleep(1)
     yield s
     s.stop()
