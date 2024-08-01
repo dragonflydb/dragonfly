@@ -1421,21 +1421,22 @@ TEST_F(JsonFamilyTest, Merge) {
     {"z": {
       "doubled": false,
       "answers": ["xxx",  "yyy"]
-     }
+     },
+     "y": { "doubled": true}
      })";
 
   resp = Run({"JSON.MERGE", "j2", "$.ans.x", patch});
 
   EXPECT_EQ(resp, "OK");
   resp = Run({"JSON.GET", "j2", "$"});
-  EXPECT_EQ(resp, R"([{"ans":{"x":{"y":{"answers":["foo","bar"],"doubled":false},)"
+  EXPECT_EQ(resp, R"([{"ans":{"x":{"y":{"answers":["foo","bar"],"doubled":true},)"
                   R"("z":{"answers":["xxx","yyy"],"doubled":false}}}}])");
 
   // Test not existing entry
   resp = Run({"JSON.MERGE", "j3", "$", patch});
   EXPECT_EQ(resp, "OK");
   resp = Run({"JSON.GET", "j3", "$"});
-  EXPECT_EQ(resp, R"([{"z":{"answers":["xxx","yyy"],"doubled":false}}])");
+  EXPECT_EQ(resp, R"([{"y":{"doubled":true},"z":{"answers":["xxx","yyy"],"doubled":false}}])");
 }
 
 }  // namespace dfly
