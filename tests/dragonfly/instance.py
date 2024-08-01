@@ -251,7 +251,6 @@ class DflyInstance:
         children = p.children()
         if len(children) == 1 and children[0].name() == "dragonfly":
             p = children[0]
-            print("selected df as a child", p)
 
         ports = set()
         try:

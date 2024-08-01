@@ -136,7 +136,7 @@ def generate_config(nodes):
 
 
 async def push_config(config, admin_connections):
-    print(json.dumps(json.loads(config), indent=2))
+    logging.debug("Pushing config %s", config)
     res = await asyncio.gather(
         *(c_admin.execute_command("DFLYCLUSTER", "CONFIG", config) for c_admin in admin_connections)
     )

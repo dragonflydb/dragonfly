@@ -718,7 +718,6 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   if (reply.empty()) {
     rb->SendSimpleString(StateToStr(MigrationState::C_NO_STATE));
   } else if (!node_id.empty()) {
-    DCHECK_EQ(reply.size(), 1UL);
     rb->SendSimpleString(reply[0]);
   } else {
     rb->SendStringArr(reply);
