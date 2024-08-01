@@ -61,6 +61,7 @@ def redis_cluster(port_picker):
         for node in nodes:
             node.start()
             time.sleep(1)
+            assert os.getenv("GITHUB_ACTIONS") == None
     except FileNotFoundError as e:
         if os.getenv("GITHUB_ACTIONS") == None:
             pytest.skip("Redis server not found")
