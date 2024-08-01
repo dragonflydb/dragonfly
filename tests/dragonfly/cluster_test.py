@@ -144,17 +144,15 @@ async def push_config(config, admin_connections):
 
 
 async def wait_for_status(admin_client, node_id, status, timeout=10):
-    start = time.time()
-    while (time.time() - start) < timeout:
-        response = await admin_client.execute_command(
-            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
-        )
-        if status in response:
-            return
-        else:
-            logging.debug(f"SLOT-MIGRATION-STATUS is {response}, not {status}")
-            await asyncio.sleep(0.1)
-    raise RuntimeError("Timeout to achieve migrations status")
+    get_status = lambda: admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
+    )
+
+    async for states, breaker in tick_timer(get_status, timeout=timeout):
+        if type(states) != list:
+            states = [states]
+        with breaker:
+            assert all(status in state for state in states), states
 
 
 async def check_for_no_state_status(admin_clients):
@@ -1109,8 +1107,13 @@ async def test_cluster_flushall_during_migration(
 
     await nodes[0].client.execute_command("flushall")
 
-    assert "FINISHED" not in await nodes[1].admin_client.execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+    assert (
+        "FINISHED"
+        not in (
+            await nodes[1].admin_client.execute_command(
+                "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+            )
+        )[0]
     ), "Weak test case - finished migration too early"
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
@@ -1183,12 +1186,12 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
         await nodes[0].admin_client.execute_command(
             "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
         )
-    ).startswith(f"out {nodes[1].id} FINISHED keys:7")
+    )[0].startswith(f"out {nodes[1].id} FINISHED keys:7")
     assert (
         await nodes[1].admin_client.execute_command(
             "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
         )
-    ).startswith(f"in {nodes[0].id} FINISHED keys:7")
+    )[0].startswith(f"in {nodes[0].id} FINISHED keys:7")
 
     nodes[0].migrations = []
     nodes[0].slots = [(0, 2999)]
@@ -1574,22 +1577,11 @@ async def test_cluster_replication_migration(
     )
 
     # wait for migration to finish
-    def get_migrations():
-        return asyncio.gather(
-            m1_node.admin_client.execute_command(
-                "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", m2_node.id
-            ),
-            m2_node.admin_client.execute_command(
-                "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", m1_node.id
-            ),
-        )
-
-    async for status, breaker in tick_timer(get_migrations):
-        with breaker:
-            assert "FINISHED" in status[0] and "FINISHED" in status[1]
+    await wait_for_status(m1_node.admin_client, m2_node.id, "FINISHED")
+    await wait_for_status(m2_node.admin_client, m1_node.id, "FINISHED")
 
     # wait for replicas to catch up
-    await asyncio.sleep(5)
+    await asyncio.sleep(2)
 
     # ensure captures got exchanged
     assert (await SeederBase.capture(r1_node.admin_client)) == r2_caputre
