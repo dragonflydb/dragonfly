@@ -1,4 +1,4 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
@@ -23,11 +23,28 @@ class TaskQueue {
   }
 
   template <typename F> bool Add(F&& f) {
-    return queue_.Add(std::forward<F>(f));
+    if (queue_.TryAdd(std::forward<F>(f)))
+      return true;
+
+    ++blocked_submitters_;
+    auto res = queue_.Add(std::forward<F>(f));
+    --blocked_submitters_;
+    return res;
   }
 
   template <typename F> auto Await(F&& f) -> decltype(f()) {
-    return queue_.Await(std::forward<F>(f));
+    util::fb2::Done done;
+    using ResultType = decltype(f());
+    util::detail::ResultMover<ResultType> mover;
+
+    ++blocked_submitters_;
+    Add([&mover, f = std::forward<F>(f), done]() mutable {
+      mover.Apply(f);
+      done.Notify();
+    });
+    --blocked_submitters_;
+    done.Wait();
+    return std::move(mover).get();
   }
 
   /**
@@ -47,9 +64,14 @@ class TaskQueue {
     consumer_fiber_.JoinIfNeeded();
   }
 
+  static unsigned blocked_submitters() {
+    return blocked_submitters_;
+  }
+
  private:
   util::fb2::FiberQueue queue_;
   util::fb2::Fiber consumer_fiber_;
+  static __thread unsigned blocked_submitters_;
 };
 
 }  // namespace dfly

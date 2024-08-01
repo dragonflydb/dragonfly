@@ -315,7 +315,7 @@ TEST_F(TieredStorageTest, MemoryPressure) {
       ASSERT_FALSE(true) << i << "\nInfo ALL:\n" << resp.GetString();
     }
     // TODO: to remove it once used_mem_current is updated frequently.
-    ThisFiber::SleepFor(10us);
+    ThisFiber::SleepFor(100us);
   }
 
   EXPECT_LT(used_mem_peak.load(), 20_MB);
