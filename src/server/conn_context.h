@@ -131,6 +131,7 @@ struct ConnectionState {
     // then it holds positive sync session id.
     uint32_t repl_session_id = 0;
     uint32_t repl_flow_id = UINT32_MAX;
+    std::string repl_ip_address;
     uint32_t repl_listening_port = 0;
     DflyVersion repl_version = DflyVersion::VER0;
   };

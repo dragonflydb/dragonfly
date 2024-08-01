@@ -563,7 +563,7 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
     fb2::Fiber("stop_replication", &DflyCmd::StopReplication, this, sync_id).Detach();
   };
 
-  string address = cntx->conn()->RemoteEndpointAddress();
+  string address = cntx->conn_state.replication_info.repl_ip_address;
   uint32_t port = cntx->conn_state.replication_info.repl_listening_port;
 
   LOG(INFO) << "Registered replica " << address << ":" << port;

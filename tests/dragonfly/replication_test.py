@@ -2213,3 +2213,23 @@ async def test_replica_reconnect(df_factory, break_conn):
     assert await c_replica.execute_command("get k") == "6789"
 
     await disconnect_clients(c_master, c_replica)
+
+
+@pytest.mark.asyncio
+async def test_announce_ip_port(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create(announce_ip="overrode-host", announce_port="1337")
+
+    master.start()
+    replica.start()
+
+    # Connect clients, connect replica to master
+    c_master = master.client()
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    role = await c_master.execute_command("role")
+    assert role[0] == "master"
+    assert role[1][0][0] == "overrode-host"
+    assert role[1][0][1] == "1337"

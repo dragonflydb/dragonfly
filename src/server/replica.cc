@@ -42,6 +42,8 @@ ABSL_FLAG(bool, break_replication_on_master_restart, false,
           "When in replica mode, and master restarts, break replication from master to avoid "
           "flushing the replica's data.");
 ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_DECLARE_FLAG(uint16_t, announce_port);
+ABSL_DECLARE_FLAG(std::string, announce_ip);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
@@ -266,9 +268,18 @@ error_code Replica::Greet() {
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
-  auto port = absl::GetFlag(FLAGS_port);
+  uint16_t port = absl::GetFlag(FLAGS_announce_port);
+  if (port == 0) {
+    port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port));
+  }
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port)));
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+
+  auto announce_ip = absl::GetFlag(FLAGS_announce_ip);
+  if (!announce_ip.empty()) {
+    RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF ip-address ", announce_ip)));
+    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  }
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa eof capa psync2"));
