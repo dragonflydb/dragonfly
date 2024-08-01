@@ -1316,7 +1316,7 @@ async def test_take_over_read_commands(df_factory, master_threads, replica_threa
 
 @pytest.mark.asyncio
 async def test_take_over_timeout(df_factory, df_seeder_factory):
-    master = df_factory.create(proactor_threads=2, logtostderr=True)
+    master = df_factory.create(proactor_threads=2)
     replica = df_factory.create(proactor_threads=2)
     df_factory.start_all([master, replica])
 
@@ -1325,7 +1325,7 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    print("PORTS ARE:  ", master.port, replica.port)
+    logging.debug(f"PORTS ARE:  {master.port} {replica.port}")
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
