@@ -74,6 +74,8 @@ struct TieredStats {
 
   // How many times the system did not perform Stash call (disjoint with total_stashes).
   uint64_t total_stash_overflows = 0;
+  uint64_t total_offloading_steps = 0;
+  uint64_t total_offloading_stashes = 0;
 
   size_t allocated_bytes = 0;
   size_t capacity_bytes = 0;

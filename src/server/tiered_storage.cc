@@ -27,10 +27,6 @@
 
 using namespace facade;
 
-ABSL_FLAG(uint32_t, tiered_storage_memory_margin, 10_MB,
-          "In bytes. If memory budget on a shard goes below this limit, tiering stops "
-          "hot-loading values into ram.");
-
 ABSL_FLAG(bool, tiered_experimental_cooling, true,
           "If true, uses intermidate cooling layer "
           "when offloading values to storage");
@@ -86,7 +82,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
  public:
   ShardOpManager(TieredStorage* ts, DbSlice* db_slice, size_t max_size)
       : tiering::OpManager{max_size}, ts_{ts}, db_slice_{*db_slice} {
-    memory_margin_ = absl::GetFlag(FLAGS_tiered_storage_memory_margin);
   }
 
   // Clear IO pending flag for entry
@@ -176,10 +171,10 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   bool HasEnoughMemoryMargin(int64_t value_len) {
-    return db_slice_.memory_budget() - memory_margin_ - value_len > 0;
+    return db_slice_.memory_budget() - value_len > ssize_t(memory_low_limit_);
   }
 
-  int64_t memory_margin_ = 0;  // TODO: get rid of memory_margin_
+  // being compared to db_slice_.memory_budget().
   size_t memory_low_limit_;
 
   struct {
@@ -486,7 +481,9 @@ TieredStats TieredStorage::GetStats() const {
 
   {  // Own stats
     stats.total_stash_overflows = stats_.stash_overflow_cnt;
-    stats.cold_storage_bytes = cool_memory_used_;
+    stats.cold_storage_bytes = stats_.cool_memory_used;
+    stats.total_offloading_steps = stats_.offloading_steps;
+    stats.total_offloading_stashes = stats_.offloading_stashes;
   }
   return stats;
 }
@@ -505,10 +502,12 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   string tmp;
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
+    stats_.offloading_steps++;
     if (ShouldStash(it->second)) {
       if (it->first.WasTouched()) {
         it->first.SetTouched(false);
       } else {
+        stats_.offloading_stashes++;
         TryStash(dbid, it->first.GetSlice(&tmp), &it->second);
       }
     }
@@ -530,12 +529,12 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 size_t TieredStorage::ReclaimMemory(size_t goal) {
   size_t gained = 0;
   do {
-    size_t memory_before = cool_memory_used_;
+    size_t memory_before = stats_.cool_memory_used;
     detail::TieredColdRecord* record = PopCool();
     if (record == nullptr)  // nothing to pull anymore
       break;
 
-    gained += memory_before - cool_memory_used_;
+    gained += memory_before - stats_.cool_memory_used;
 
     // Find the entry that points to the cool item and externalize it.
     auto predicate = [record](const PrimeKey& key, const PrimeValue& probe) {
@@ -560,7 +559,7 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
 }
 
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
-  auto disk_stats = op_manager_->GetStats().disk_stats;
+  const auto& disk_stats = op_manager_->GetStats().disk_stats;
   return !pv.IsExternal() && !pv.HasStashPending() && pv.ObjType() == OBJ_STRING &&
          pv.Size() >= kMinValueSize &&
          disk_stats.allocated_bytes + tiering::kPageSize + pv.Size() < disk_stats.max_file_size;
@@ -570,7 +569,7 @@ void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
                              const tiering::DiskSegment& segment, PrimeValue* pv) {
   detail::TieredColdRecord* record = CompactObj::AllocateMR<detail::TieredColdRecord>();
   cool_queue_.push_front(*record);
-  cool_memory_used_ += (sizeof(detail::TieredColdRecord) + pv->MallocUsed());
+  stats_.cool_memory_used += (sizeof(detail::TieredColdRecord) + pv->MallocUsed());
 
   record->key_hash = CompactObj::HashCode(str);
   record->db_index = db_ind;
@@ -590,7 +589,6 @@ PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
 
   // Bring it back to the PrimeTable.
   DCHECK(hot.ObjType() == OBJ_STRING);
-  hot.SetTouched(true);
 
   return hot;
 }
@@ -600,7 +598,7 @@ PrimeValue TieredStorage::DeleteCool(detail::TieredColdRecord* record) {
   cool_queue_.erase(it);
 
   PrimeValue hot = std::move(record->value);
-  cool_memory_used_ -= (sizeof(detail::TieredColdRecord) + hot.MallocUsed());
+  stats_.cool_memory_used -= (sizeof(detail::TieredColdRecord) + hot.MallocUsed());
   CompactObj::DeleteMR<detail::TieredColdRecord>(record);
   return hot;
 }
@@ -611,7 +609,7 @@ detail::TieredColdRecord* TieredStorage::PopCool() {
 
   detail::TieredColdRecord& res = cool_queue_.back();
   cool_queue_.pop_back();
-  cool_memory_used_ -= (sizeof(detail::TieredColdRecord) + res.value.MallocUsed());
+  stats_.cool_memory_used -= (sizeof(detail::TieredColdRecord) + res.value.MallocUsed());
   return &res;
 }
 

@@ -85,7 +85,7 @@ class TieredStorage {
   PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
 
   size_t CoolMemoryUsage() const {
-    return cool_memory_used_;
+    return stats_.cool_memory_used;
   }
 
  private:
@@ -106,11 +106,14 @@ class TieredStorage {
   typedef ::boost::intrusive::list<detail::TieredColdRecord> CoolQueue;
 
   CoolQueue cool_queue_;
-  size_t cool_memory_used_ = 0;
+
   unsigned write_depth_limit_ = 10;
   struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;
+    uint64_t offloading_steps = 0;
+    uint64_t offloading_stashes = 0;
+    size_t cool_memory_used = 0;
   } stats_;
 };
 

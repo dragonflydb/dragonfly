@@ -36,6 +36,10 @@ struct StringValue {
   static StringValue Read(DbIndex dbid, std::string_view key, const PrimeValue& pv,
                           EngineShard* es);
 
+  bool IsFuturized() const {
+    return std::holds_alternative<util::fb2::Future<std::string>>(v_);
+  }
+
  private:
   std::variant<std::monostate, std::string, util::fb2::Future<std::string>> v_;
 };

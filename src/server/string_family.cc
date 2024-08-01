@@ -424,8 +424,11 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_ms, reset_after_ms};
 }
 
-SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, bool fetch_mcflag,
-                                      bool fetch_mcver, const Transaction* t, EngineShard* shard) {
+// fetch_mask values
+constexpr uint8_t FETCH_MCFLAG = 0x1;
+constexpr uint8_t FETCH_MCVER = 0x2;
+SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask,
+                                      const Transaction* t, EngineShard* shard) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -448,7 +451,8 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, bool f
   // Allocate enough for all values
   response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
   char* next = response.storage_list->data;
-
+  bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
+  bool fetch_mcver = fetch_mask & FETCH_MCVER;
   for (size_t i = 0; i < iters.size(); ++i) {
     auto it = iters[i];
     if (it.is_done())
@@ -1122,14 +1126,17 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_set->size());
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
-  bool fetch_mcflag = cntx->protocol() == Protocol::MEMCACHE;
-  bool fetch_mcver =
-      fetch_mcflag && (dfly_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER);
+  uint8_t fetch_mask = 0;
+  if (cntx->protocol() == Protocol::MEMCACHE) {
+    fetch_mask |= FETCH_MCFLAG;
+    if (dfly_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+      fetch_mask |= FETCH_MCVER;
+  }
 
   // Count of pending tiered reads
   util::fb2::BlockingCounter tiering_bc{0};
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mcflag, fetch_mcver, t, shard);
+    mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mask, t, shard);
     return OpStatus::OK;
   };
 

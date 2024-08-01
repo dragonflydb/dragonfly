@@ -693,10 +693,10 @@ void Connection::HandleRequests() {
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
     }
+    VLOG(1) << "Closed connection for peer "
+            << GetClientInfo(fb2::ProactorBase::me()->GetPoolIndex());
     cc_.reset();
   }
-
-  VLOG(1) << "Closed connection for peer " << remote_ep;
 }
 
 void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
