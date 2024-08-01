@@ -103,6 +103,7 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
     acl_commands = owner->acl_commands;
     keys = owner->keys;
     skip_acl_validation = owner->skip_acl_validation;
+    ns = owner->ns;
   } else {
     acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);
   }
