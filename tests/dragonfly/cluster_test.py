@@ -349,7 +349,7 @@ async def test_cluster_info(async_client):
     }
 
 
-@dfly_args({"cluster_mode": "emulated"})
+@dfly_args({"cluster_mode": "emulated", "announce_ip": "127.0.0.2"})
 @pytest.mark.asyncio
 async def test_cluster_nodes(df_server, async_client):
     res = await async_client.execute_command("CLUSTER NODES")
