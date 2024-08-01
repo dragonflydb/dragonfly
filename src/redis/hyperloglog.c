@@ -685,7 +685,7 @@ int hllSparseSet(sds* hll_ptr, long index, uint8_t count, int* promoted) {
      * for future reallocates on incremental growth. But we do not allocate more than
      * 'HLL_SPARSE_MAX_BYTES' bytes for the sparse representation.
      * If the available size of hyperloglog sds string is not enough for the increment
-     * we need, we promote the hypreloglog to dense representation in 'step 3'.
+     * we need, we promote the hyperloglog to dense representation in 'step 3'.
      */
     sds hll = *hll_ptr;
     if (sdsalloc(hll) < HLL_SPARSE_MAX_BYTES && sdsavail(hll) < 3) {
