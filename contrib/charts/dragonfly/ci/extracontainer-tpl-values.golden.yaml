@@ -24,7 +24,6 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
-  clusterIP: 
   ports:
     - port: 6379
       targetPort: dragonfly
@@ -59,7 +58,6 @@ spec:
         app.kubernetes.io/instance: test
     spec:
       serviceAccountName: test-dragonfly
-      hostNetwork: false
       containers:
         - name: sidecar-tpl
           image: docker.dragonflydb.io/dragonflydb/dragonfly:latest

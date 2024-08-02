@@ -24,7 +24,6 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
-  clusterIP: 
   ports:
     - port: 6379
       targetPort: dragonfly
@@ -62,7 +61,6 @@ spec:
         - effect: NoSchedule
           operator: Exists
       serviceAccountName: test-dragonfly
-      hostNetwork: false
       containers:
         - name: dragonfly
           image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.20.1"

@@ -24,7 +24,6 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
-  clusterIP: 
   ports:
     - port: 6379
       targetPort: dragonfly
@@ -61,7 +60,6 @@ spec:
       serviceAccountName: test-dragonfly
       securityContext:
         allowPrivilegeEscalation: false
-      hostNetwork: false
       containers:
         - name: dragonfly
           securityContext:
