@@ -22,7 +22,10 @@
 #include "util/fibers/synchronization.h"
 
 using facade::operator""_MB;
-ABSL_FLAG(size_t, serialization_max_chunk_size, 0, "Total bytes before flushing big entries");
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
+          "Maximum size of a value that may be serialized at once during snapshotting or full "
+          "sync. Values bigger than this threshold will be serialized using streaming "
+          "serialization. 0 - to disable streaming mode");
 
 namespace dfly {
 
