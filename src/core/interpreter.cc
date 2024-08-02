@@ -1109,15 +1109,13 @@ void InterpreterManager::Reset() {
 }
 
 void InterpreterManager::Alter(std::function<void(Interpreter*)> modf) {
-  lock_guard guard{reset_mu_};
-
   vector<Interpreter*> taken;
   swap(taken, available_);
 
-  for (Interpreter* ir : taken)
+  for (Interpreter* ir : taken) {
     modf(ir);
-
-  available_.insert(available_.end(), taken.begin(), taken.end());
+    Return(ir);
+  }
 }
 
 }  // namespace dfly

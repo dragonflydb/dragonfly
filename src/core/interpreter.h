@@ -168,7 +168,7 @@ class InterpreterManager {
   // Clear all interpreters, keeps capacity. Waits until all are returned.
   void Reset();
 
-  // Run on all unsued interpreters. Those are marked as used at once, so the callback can block.
+  // Run on all unused interpreters. Those are marked as used at once, so the callback can block.
   void Alter(std::function<void(Interpreter*)> modf);
 
   static Stats& tl_stats();
