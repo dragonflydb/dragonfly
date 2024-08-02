@@ -884,6 +884,10 @@ void Interpreter::ResetStack() {
   lua_settop(lua_, 0);
 }
 
+void Interpreter::RunGC() {
+  lua_gc(lua_, LUA_GCCOLLECT);
+}
+
 // Returns number of results, which is always 1 in this case.
 // Please note that lua resets the stack once the function returns so no need
 // to unwind the stack manually in the function (though lua allows doing this).
@@ -1102,6 +1106,16 @@ void InterpreterManager::Reset() {
 
   reset_ec_.await([this]() { return return_untracked_ == 0; });
   VLOG(1) << "InterpreterManager::Reset ended";
+}
+
+void InterpreterManager::Alter(std::function<void(Interpreter*)> modf) {
+  vector<Interpreter*> taken;
+  swap(taken, available_);  // swap data because modf can preempt
+
+  for (Interpreter* ir : taken) {
+    modf(ir);
+    Return(ir);
+  }
 }
 
 }  // namespace dfly

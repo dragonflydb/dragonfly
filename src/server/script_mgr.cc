@@ -72,7 +72,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
         "FLAGS <sha> [flags ...]",
-        "   Set specific flags for script. Can be called before the sript is loaded."
+        "   Set specific flags for script. Can be called before the sript is loaded.",
         "   The following flags are possible: ",
         "      - Use 'allow-undeclared-keys' to allow accessing undeclared keys",
         "      - Use 'disable-atomicity' to allow running scripts non-atomically",
@@ -80,7 +80,9 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Lists loaded scripts.",
         "LATENCY",
         "   Prints latency histograms in usec for every called function.",
-        "HELP"
+        "GC",
+        "   Invokes garbage collection on all unused interpreter instances.",
+        "HELP",
         "   Prints this help."};
     auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     return rb->SendSimpleStrArr(kHelp);
@@ -104,6 +106,9 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
   if (subcmd == "FLAGS" && args.size() > 2)
     return ConfigCmd(args, cntx);
 
+  if (subcmd == "GC")
+    return GCCmd(cntx);
+
   string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                             "'. Try SCRIPT HELP.");
   cntx->SendError(err, kSyntaxErrType);
@@ -122,7 +127,6 @@ void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
   for (uint8_t v : res) {
     rb->SendLong(v);
   }
-  return;
 }
 
 void ScriptMgr::FlushCmd(CmdArgList args, ConnectionContext* cntx) {
@@ -205,6 +209,16 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
     rb->SendBulkString(k_v.first);
     rb->SendVerbatimString(k_v.second.ToString());
   }
+}
+
+void ScriptMgr::GCCmd(ConnectionContext* cntx) const {
+  auto cb = [](Interpreter* ir) {
+    ir->RunGC();
+    ThisFiber::Yield();
+  };
+  shard_set->pool()->AwaitFiberOnAll(
+      [cb](auto* pb) { ServerState::tlocal()->AlterInterpreters(cb); });
+  return cntx->SendOk();
 }
 
 // Check if script starts with shebang (#!lua). If present, look for flags parameter and truncate
