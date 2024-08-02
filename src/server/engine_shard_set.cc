@@ -605,6 +605,11 @@ void EngineShard::Heartbeat() {
   if (IsReplica())  // Never run expiration on replica.
     return;
 
+  // TODO: iterate over all namespaces
+  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
+  // Some of the functions below might acquire the lock again so we need to unlock it
+  std::unique_lock lk(db_slice.GetSerializationMutex());
+
   constexpr double kTtlDeleteLimit = 200;
   constexpr double kRedLimitFactor = 0.1;
 
@@ -633,8 +638,6 @@ void EngineShard::Heartbeat() {
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
-  // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
     if (!db_slice.IsDbValid(i))
       continue;
@@ -664,6 +667,8 @@ void EngineShard::Heartbeat() {
     }
   }
 
+  // Because TriggerOnJournalWriteToSink might lock the same lock.
+  lk.unlock();
   // Journal entries for expired entries are not writen to socket in the loop above.
   // Trigger write to socket when loop finishes.
   if (auto journal = EngineShard::tlocal()->journal(); journal) {

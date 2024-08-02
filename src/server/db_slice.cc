@@ -208,7 +208,8 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiry(cntx_.db_index, key);
     }
-
+    // Safe we already acquired std::unique_lock lk(db_slice_->GetSerializationMutex());
+    // on the flows that call this function
     db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
 
     ++evicted_;
@@ -481,6 +482,13 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
 
   if (caching_mode_ && IsValid(res.it)) {
     if (!change_cb_.empty()) {
+      {
+        // We need this because we might not be able to acquire this lock within
+        // CallChangeCallbacks and if this happens then Capture Version Change
+        // might be invalid, since the bucket might change after we block waiting
+        // for the lock to be available.
+        std::unique_lock lk(local_mu_);
+      }
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
@@ -679,6 +687,8 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 }
 
 bool DbSlice::Del(Context cntx, Iterator it) {
+  std::unique_lock lk(local_mu_);
+
   if (!IsValid(it)) {
     return false;
   }
@@ -798,6 +808,10 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
+  // We should not flush if serialization of a big value is in progress because this
+  // could lead to UB or assertion failures (while DashTable::Traverse is iterating over
+  // a logical bucket).
+  std::unique_lock lk(local_mu_);
   // clear client tracking map.
   client_tracking_map_.clear();
 
@@ -819,6 +833,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
+  std::unique_lock lk(local_mu_);
   uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
   auto& db = *db_arr_[db_ind];
   size_t table_before = db.expire.mem_usage();
@@ -828,6 +843,7 @@ void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
+  std::unique_lock lk(local_mu_);
   if (main_it->second.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
@@ -1216,13 +1232,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   unsigned i = 0;
   for (; i < count / 3; ++i) {
-    db.expire_cursor = Traverse(&db.expire, db.expire_cursor, cb);
+    db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
   }
 
   // continue traversing only if we had strong deletion rate based on the first sample.
   if (result.deleted * 4 > result.traversed) {
     for (; i < count; ++i) {
-      db.expire_cursor = Traverse(&db.expire, db.expire_cursor, cb);
+      db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
     }
   }
 
@@ -1341,10 +1357,14 @@ void DbSlice::CreateDb(DbIndex db_ind) {
 
 void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
                                  ConnectionState::ExecInfo* exec_info) {
+  // Because we might insert while another fiber is preempted
+  std::unique_lock lk(local_mu_);
   db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
 }
 
 void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
+  // Because we might remove while another fiber is preempted and miss a notification
+  std::unique_lock lk(local_mu_);
   for (const auto& [db_indx, key] : exec_info->watched_keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {
@@ -1388,7 +1408,7 @@ void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbT
     // Delete all tiered entries
     PrimeTable::Cursor cursor;
     do {
-      cursor = Traverse(&db_ptr->prime, cursor, [&](PrimeIterator it) {
+      cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, &it->second);
         } else if (it->second.HasStashPending()) {
