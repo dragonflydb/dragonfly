@@ -887,7 +887,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     ServerState::tlocal()->UpdateChannelStore(cs);
   });
 
-  shard_set->Init(shard_num, nullptr);
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
@@ -895,6 +894,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     acl_family_.Init(listeners.front(), &user_registry_);
   }
 
+  // Initialize shard_set with a global callback running once in a while in the shard threads.
+  shard_set->Init(shard_num, [this] { server_family_.GetDflyCmd()->BreakStalledFlowsInShard(); });
+
+  // Requires that shard_set will be initialized before because server_family_.Init might
+  // load the snapshot.
   server_family_.Init(acceptor, std::move(listeners));
 }
 

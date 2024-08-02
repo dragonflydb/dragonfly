@@ -33,6 +33,7 @@
 using namespace std;
 
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
+ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 
 namespace dfly {
 
@@ -119,6 +120,7 @@ void DflyCmd::ReplicaInfo::Cancel() {
     }
 
     flow->full_sync_fb.JoinIfNeeded();
+    flow->conn = nullptr;
   });
 
   // Wait for error handler to quit.
@@ -502,6 +504,9 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   DCHECK(!flow->full_sync_fb.IsJoinable());
   DCHECK(shard);
 
+  if (flow->conn == nullptr)
+    return OpStatus::CANCELLED;
+
   // The summary contains the LUA scripts, so make sure at least (and exactly one)
   // of the flows also contain them.
   SaveMode save_mode =
@@ -527,13 +532,10 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
     return OpStatus::CANCELLED;
   }
 
-  // Shard can be null for io thread.
-  if (shard != nullptr) {
-    if (flow->start_partial_sync_at.has_value())
-      saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
-    else
-      saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
-  }
+  if (flow->start_partial_sync_at.has_value())
+    saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
+  else
+    saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
 
   flow->full_sync_fb = fb2::Fiber("full_sync", &DflyCmd::FullSyncFb, this, flow, cntx);
   return OpStatus::OK;
@@ -555,6 +557,10 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   // Create streamer for shard flows.
+  DCHECK(shard);
+
+  if (flow->conn == nullptr)
+    return OpStatus::CANCELLED;
 
   if (shard != nullptr) {
     flow->streamer.reset(new JournalStreamer(sf_->journal(), cntx));
@@ -577,6 +583,8 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   error_code ec;
 
   if (ec = flow->saver->SaveBody(cntx, nullptr); ec) {
+    if (!flow->conn->socket()->IsOpen())
+      ec = make_error_code(errc::operation_canceled);  // we cancelled the operation.
     cntx->ReportError(ec);
     return;
   }
@@ -588,8 +596,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
   }
 }
 
-auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
-    -> std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> {
+auto DflyCmd::CreateSyncSession(ConnectionContext* cntx) -> std::pair<uint32_t, unsigned> {
   unique_lock lk(mu_);
   unsigned sync_id = next_sync_id_++;
 
@@ -612,7 +619,7 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 
-  return *it;
+  return {it->first, flow_count};
 }
 
 auto DflyCmd::GetReplicaInfoFromConnection(ConnectionContext* cntx)
@@ -649,6 +656,37 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
 
   lock_guard lk(mu_);
   replica_infos_.erase(sync_id);
+}
+
+void DflyCmd::BreakStalledFlowsInShard() {
+  unique_lock lk(mu_, try_to_lock);
+  if (!lk.owns_lock())
+    return;  // give up
+
+  ShardId sid = EngineShard::tlocal()->shard_id();
+  vector<uint32_t> deleted;
+
+  for (auto [sync_id, replica_ptr] : replica_infos_) {
+    shared_lock lock = replica_ptr->GetSharedLock();
+
+    if (!replica_ptr->flows[sid].saver)
+      continue;
+
+    // If saver is present - we are currently using it for full sync.
+    int64_t last_write_ns = replica_ptr->flows[sid].saver->GetLastWriteTime();
+    int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_replication_timeout)) * 1000000LL;
+    int64_t now = absl::GetCurrentTimeNanos();
+    if (last_write_ns > 0 && last_write_ns + timeout_ns < now) {
+      VLOG(1) << "Breaking full sync for sync_id " << sync_id << " last_write_ts: " << last_write_ns
+              << ", now: " << now;
+      deleted.push_back(sync_id);
+      lock.unlock();
+      replica_ptr->Cancel();
+    }
+  }
+
+  for (auto sync_id : deleted)
+    replica_infos_.erase(sync_id);
 }
 
 shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
@@ -807,7 +845,7 @@ void DflyCmd::Shutdown() {
 void FlowInfo::TryShutdownSocket() {
   // Close socket for clean disconnect.
   if (conn->socket()->IsOpen()) {
-    (void)conn->socket()->Shutdown(SHUT_RDWR);
+    std::ignore = conn->socket()->Shutdown(SHUT_RDWR);
   }
 }
 

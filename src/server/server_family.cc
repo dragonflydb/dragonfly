@@ -2665,7 +2665,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
-        auto [sid, replica_info] = dfly_cmd_->CreateSyncSession(cntx);
+        auto [sid, flow_count] = dfly_cmd_->CreateSyncSession(cntx);
         cntx->conn()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
@@ -2681,7 +2681,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         rb->StartArray(4);
         rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
-        rb->SendLong(replica_info->flows.size());
+        rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
         return;
       }
