@@ -1545,11 +1545,6 @@ async def test_cluster_replication_migration(
     m2_node.slots = [(8001, 16383)]
     m2_node.replicas = [r2_node]
 
-    # push this config
-    await push_config(
-        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
-    )
-
     # generate some data with seederv1
     seeder = df_seeder_factory.create(keys=2000, port=m1.port, cluster_mode=True)
     seeder.run(target_deviation=0.1)
@@ -1560,6 +1555,11 @@ async def test_cluster_replication_migration(
 
     await wait_available_async(r1_node.admin_client)
     await wait_available_async(r2_node.admin_client)
+
+    # push this config
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
 
     # Create caputres on the replicas with v2 seeder
     r1_caputre = await SeederBase.capture(r1_node.admin_client)
