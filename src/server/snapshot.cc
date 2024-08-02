@@ -22,7 +22,7 @@
 #include "util/fibers/synchronization.h"
 
 using facade::operator""_MB;
-ABSL_FLAG(size_t, serialization_max_chunk_size, 10_MB, "Total bytes before flushing big entries");
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0, "Total bytes before flushing big entries");
 
 namespace dfly {
 
