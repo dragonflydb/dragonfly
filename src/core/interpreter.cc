@@ -1110,7 +1110,7 @@ void InterpreterManager::Reset() {
 
 void InterpreterManager::Alter(std::function<void(Interpreter*)> modf) {
   vector<Interpreter*> taken;
-  swap(taken, available_);
+  swap(taken, available_);  // swap data because modf can preempt
 
   for (Interpreter* ir : taken) {
     modf(ir);
