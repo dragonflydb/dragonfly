@@ -68,6 +68,7 @@ class ScriptMgr {
   void ConfigCmd(CmdArgList args, ConnectionContext* cntx);
   void ListCmd(ConnectionContext* cntx) const;
   void LatencyCmd(ConnectionContext* cntx) const;
+  void GCCmd(ConnectionContext* cntx) const;
 
   void UpdateScriptCaches(ScriptKey sha, ScriptParams params) const;
 

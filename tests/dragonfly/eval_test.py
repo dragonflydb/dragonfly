@@ -339,3 +339,26 @@ async def test_migrate_close_connection(async_client: aioredis.Redis, df_server:
 
     tasks = [asyncio.create_task(run()) for _ in range(50)]
     await asyncio.gather(*tasks)
+
+
+@pytest.mark.opt_only
+@dfly_args({"proactor_threads": 4, "interpreter_per_thread": 4})
+async def test_fill_memory_gc(async_client: aioredis.Redis):
+    SCRIPT = """
+        local res = {{}}
+        for j = 1, 100 do
+          for i = 1, 10000 do
+            table.insert(res, tostring(i) .. 'data')
+          end
+        end
+    """
+
+    await asyncio.gather(*(async_client.eval(SCRIPT, 0) for _ in range(5)))
+
+    info = await async_client.info("memory")
+    # if this assert fails, we likely run gc after script invocations, remove this test
+    assert info["used_memory_lua"] > 50 * 1e6
+
+    await async_client.execute_command("SCRIPT GC")
+    info = await async_client.info("memory")
+    assert info["used_memory_lua"] < 10 * 1e6

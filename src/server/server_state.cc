@@ -189,6 +189,10 @@ void ServerState::ResetInterpreter() {
   interpreter_mgr_.Reset();
 }
 
+void ServerState::AlterInterpreters(std::function<void(Interpreter*)> modf) {
+  interpreter_mgr_.Alter(std::move(modf));
+}
+
 ServerState* ServerState::SafeTLocal() {
   // https://stackoverflow.com/a/75622732
   asm volatile("");

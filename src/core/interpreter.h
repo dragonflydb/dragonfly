@@ -110,6 +110,8 @@ class Interpreter {
 
   void ResetStack();
 
+  void RunGC();
+
   // fp must point to buffer with at least 41 chars.
   // fp[40] will be set to '\0'.
   static void FuncSha1(std::string_view body, char* fp);
@@ -165,6 +167,9 @@ class InterpreterManager {
 
   // Clear all interpreters, keeps capacity. Waits until all are returned.
   void Reset();
+
+  // Run on all unsued interpreters. Those are marked as used at once, so the callback can block.
+  void Alter(std::function<void(Interpreter*)> modf);
 
   static Stats& tl_stats();
 
