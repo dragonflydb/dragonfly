@@ -628,8 +628,6 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
 
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:2", "d:3"));
 
-  shard_set->TEST_EnableHeartBeat();
-
   AdvanceTime(60);
   ThisFiber::SleepFor(5ms);  // Give heartbeat time to delete expired doc
   EXPECT_THAT(Run({"ft.search", "i1", "*"}), AreDocIds("d:1", "d:3"));

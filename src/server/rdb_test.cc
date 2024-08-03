@@ -45,6 +45,7 @@ class RdbTest : public BaseFamilyTest {
 
 void RdbTest::SetUp() {
   InitWithDbFilename();
+  max_memory_limit = 40000000;
 }
 
 inline const uint8_t* to_byte(const void* s) {

@@ -660,7 +660,7 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   lock_guard lk(mu_);
 
   vec.reserve(replica_infos_.size());
-  auto replication_lags = ReplicationLags();
+  auto replication_lags = ReplicationLagsLocked();
 
   for (const auto& [id, info] : replica_infos_) {
     LSN lag = replication_lags[id];
@@ -712,14 +712,13 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
 
 pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
     std::string_view id_str, RedisReplyBuilder* rb) {
-  unique_lock lk(mu_);
-
   uint32_t sync_id;
   if (!ToSyncId(id_str, &sync_id)) {
     rb->SendError(kInvalidSyncId);
     return {0, nullptr};
   }
 
+  lock_guard lk(mu_);
   auto sync_it = replica_infos_.find(sync_id);
   if (sync_it == replica_infos_.end()) {
     rb->SendError(kIdNotFound);
@@ -729,7 +728,7 @@ pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
   return {sync_id, sync_it->second};
 }
 
-std::map<uint32_t, LSN> DflyCmd::ReplicationLags() const {
+std::map<uint32_t, LSN> DflyCmd::ReplicationLagsLocked() const {
   DCHECK(!mu_.try_lock());  // expects to be under global lock
   if (replica_infos_.empty())
     return {};
@@ -783,9 +782,6 @@ bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& repl_info, SyncState e
   }
 
   return true;
-}
-
-void DflyCmd::BreakOnShutdown() {
 }
 
 void DflyCmd::Shutdown() {

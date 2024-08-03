@@ -402,7 +402,6 @@ TEST_F(DflyEngineTest, FlushAll) {
 }
 
 TEST_F(DflyEngineTest, OOM) {
-  shard_set->TEST_EnableHeartBeat();
   max_memory_limit = 300000;
   size_t i = 0;
   RespExpr resp;
@@ -444,7 +443,6 @@ TEST_F(DflyEngineTest, OOM) {
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
   max_memory_limit = 300000;
-  shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
@@ -474,7 +472,6 @@ TEST_F(DflyEngineTest, Bug207) {
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {
-  shard_set->TEST_EnableHeartBeat();
   shard_set->TEST_EnableCacheMode();
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
@@ -583,11 +580,7 @@ TEST_F(DflyEngineTest, Bug468) {
 }
 
 TEST_F(DflyEngineTest, Bug496) {
-  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, ProactorBase* base) {
-    EngineShard* shard = EngineShard::tlocal();
-    if (shard == nullptr)
-      return;
-
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
     auto& db = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
     int cb_hits = 0;
