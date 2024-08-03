@@ -842,8 +842,7 @@ Service::~Service() {
   shard_set = nullptr;
 }
 
-void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
-                   const InitOpts& opts) {
+void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
 
   config_registry.RegisterMutable("maxmemory", [](const absl::CommandLineFlag& flag) {
@@ -881,7 +880,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     ServerState::Init(index, shard_num, &user_registry_);
   });
 
-  shard_set->Init(shard_num, !opts.disable_time_update);
+  shard_set->Init(shard_num, nullptr);
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
@@ -1600,10 +1599,9 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
-  owner->RegisterBreakHook([res, this](uint32_t) {
+  owner->RegisterBreakHook([res](uint32_t) {
     if (res->transaction)
       res->transaction->CancelBlocking(nullptr);
-    this->server_family().BreakOnShutdown();
   });
 
   return res;
@@ -2529,7 +2527,7 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
   }
 }
 
-void Service::OnClose(facade::ConnectionContext* cntx) {
+void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
   ConnectionState& conn_state = server_cntx->conn_state;
 

@@ -209,7 +209,6 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   const int kNum = 500;
 
   max_memory_limit = kNum * 4096;
-  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->TEST_EnableHeartbeat(); });
 
   // Stash all values
   string value = BuildString(3000);
@@ -302,10 +301,7 @@ TEST_F(TieredStorageTest, FlushPending) {
 
 TEST_F(TieredStorageTest, MemoryPressure) {
   max_memory_limit = 20_MB;
-  pp_->at(0)->AwaitBrief([] {
-    EngineShard::tlocal()->TEST_EnableHeartbeat();
-    EngineShard::tlocal()->tiered_storage()->SetMemoryLowLimit(2_MB);
-  });
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->SetMemoryLowLimit(2_MB); });
 
   constexpr size_t kNum = 10000;
   for (size_t i = 0; i < kNum; i++) {

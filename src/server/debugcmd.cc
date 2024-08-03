@@ -928,6 +928,7 @@ void DebugCmd::Stacktrace() {
     std::unique_lock lk(m);
     fb2::detail::FiberInterface::PrintAllFiberStackTraces();
   });
+  base::FlushLogs();
   cntx_->SendOk();
 }
 

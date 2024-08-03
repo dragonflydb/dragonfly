@@ -835,7 +835,7 @@ error_code SerializerBase::WriteRaw(const io::Bytes& buf) {
   return error_code{};
 }
 
-error_code SerializerBase::FlushToSink(io::Sink* s, SerializerBase::FlushState flush_state) {
+error_code SerializerBase::FlushToSink(io::Sink* sink, SerializerBase::FlushState flush_state) {
   auto bytes = PrepareFlush(flush_state);
   if (bytes.empty())
     return error_code{};
@@ -843,7 +843,7 @@ error_code SerializerBase::FlushToSink(io::Sink* s, SerializerBase::FlushState f
   DVLOG(2) << "FlushToSink " << bytes.size() << " bytes";
 
   // interrupt point.
-  RETURN_ON_ERR(s->Write(bytes));
+  RETURN_ON_ERR(sink->Write(bytes));
   mem_buf_.ConsumeInput(bytes.size());
 
   return error_code{};
@@ -1121,7 +1121,9 @@ class RdbSaver::Impl {
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
 
-  error_code Flush() {
+  error_code FlushSerializer();
+
+  error_code FlushSink() {
     return aligned_buf_ ? aligned_buf_->Flush() : error_code{};
   }
 
@@ -1131,10 +1133,6 @@ class RdbSaver::Impl {
 
   RdbSerializer* serializer() {
     return &meta_serializer_;
-  }
-
-  io::Sink* sink() {
-    return sink_;
   }
 
  private:
@@ -1252,6 +1250,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   std::optional<SliceSnapshot::DbRecord> record;
 
   RecordsPopper records_popper(push_to_sink_with_order_, &channel_);
+  auto& stats = ServerState::tlocal()->stats;
 
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
@@ -1266,10 +1265,10 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       DVLOG(2) << "Pulled " << record->id;
       auto before = absl::GetCurrentTimeNanos();
       io_error = sink_->Write(io::Buffer(record->value));
-      auto& stats = ServerState::tlocal()->stats;
       stats.rdb_save_usec += (absl::GetCurrentTimeNanos() - before) / 1'000;
       stats.rdb_save_count++;
       if (io_error) {
+        VLOG(1) << "Error writing to sink " << io_error.message();
         break;
       }
     } while ((record = records_popper.TryPop()));
@@ -1367,6 +1366,10 @@ RdbSaver::SnapshotStats RdbSaver::Impl::GetCurrentSnapshotProgress() const {
       results.begin(), results.end(), init, [](auto init, auto pr) -> RdbSaver::SnapshotStats {
         return {init.current_keys + pr.current_keys, init.total_keys + pr.total_keys};
       });
+}
+
+error_code RdbSaver::Impl::FlushSerializer() {
+  return serializer()->FlushToSink(sink_, SerializerBase::FlushState::kFlushMidEntry);
 }
 
 RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
@@ -1471,8 +1474,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
 }
 
 error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
-  RETURN_ON_ERR(
-      impl_->serializer()->FlushToSink(impl_->sink(), SerializerBase::FlushState::kFlushMidEntry));
+  RETURN_ON_ERR(impl_->FlushSerializer());
 
   if (save_mode_ == SaveMode::SUMMARY) {
     impl_->serializer()->SendFullSyncCut();
@@ -1547,9 +1549,9 @@ error_code RdbSaver::SaveEpilog() {
   absl::little_endian::Store64(buf, chksum);
   RETURN_ON_ERR(ser.WriteRaw(buf));
 
-  RETURN_ON_ERR(ser.FlushToSink(impl_->sink(), SerializerBase::FlushState::kFlushMidEntry));
+  RETURN_ON_ERR(impl_->FlushSerializer());
 
-  return impl_->Flush();
+  return impl_->FlushSink();
 }
 
 error_code RdbSaver::SaveAuxFieldStrInt(string_view key, int64_t val) {

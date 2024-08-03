@@ -86,7 +86,7 @@ class RdbSaver {
   ~RdbSaver();
 
   // Initiates the serialization in the shard's thread.
-  // TODO: to implement break functionality to allow stopping early.
+  // cll allows breaking in the middle.
   void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
   // Send only the incremental snapshot since start_lsn.

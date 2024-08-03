@@ -39,7 +39,7 @@ class ServiceInterface {
   virtual void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   }
 
-  virtual void OnClose(ConnectionContext* cntx) {
+  virtual void OnConnectionClose(ConnectionContext* cntx) {
   }
 
   struct ContextInfo {

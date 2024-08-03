@@ -227,8 +227,6 @@ class ServerFamily {
 
   void OnClose(ConnectionContext* cntx);
 
-  void BreakOnShutdown();
-
   void CancelBlockingOnThread(std::function<facade::OpStatus(ArgSlice)> = {});
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!

@@ -132,8 +132,6 @@ class DflyCmd {
 
   void OnClose(ConnectionContext* cntx);
 
-  void BreakOnShutdown();
-
   // Stop all background processes so we can exit in orderly manner.
   void Shutdown();
 
@@ -214,17 +212,17 @@ class DflyCmd {
   bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
                                 facade::RedisReplyBuilder* rb);
 
+ private:
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
-  std::map<uint32_t, LSN> ReplicationLags() const;
+  std::map<uint32_t, LSN> ReplicationLagsLocked() const;
 
- private:
   ServerFamily* sf_;  // Not owned
 
   uint32_t next_sync_id_ = 1;
 
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
-  ReplicaInfoMap replica_infos_;
+  ReplicaInfoMap replica_infos_ ABSL_GUARDED_BY(mu_);
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };

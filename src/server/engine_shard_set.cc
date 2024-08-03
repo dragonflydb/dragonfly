@@ -406,14 +406,15 @@ void EngineShard::StopPeriodicFiber() {
   }
 }
 
-void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
+void EngineShard::StartPeriodicFiber(util::ProactorBase* pb, std::function<void()> global_handler) {
   uint32_t clock_cycle_ms = 1000 / std::max<uint32_t>(1, GetFlag(FLAGS_hz));
   if (clock_cycle_ms == 0)
     clock_cycle_ms = 1;
 
-  fiber_periodic_ = MakeFiber([this, index = pb->GetPoolIndex(), period_ms = clock_cycle_ms] {
+  fiber_periodic_ = MakeFiber([this, index = pb->GetPoolIndex(), period_ms = clock_cycle_ms,
+                               handler = std::move(global_handler)] {
     ThisFiber::SetName(absl::StrCat("shard_periodic", index));
-    RunPeriodic(std::chrono::milliseconds(period_ms));
+    RunPeriodic(std::chrono::milliseconds(period_ms), std::move(handler));
   });
 }
 
@@ -671,7 +672,8 @@ void EngineShard::Heartbeat() {
   }
 }
 
-void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
+void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms,
+                              std::function<void()> global_handler) {
   VLOG(1) << "RunPeriodic with period " << period_ms.count() << "ms";
 
   bool runs_global_periodic = (shard_id() == 0);  // Only shard 0 runs global periodic.
@@ -715,6 +717,10 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
             if (rss_mem_peak.load(memory_order_relaxed) < total_rss)
               rss_mem_peak.store(total_rss, memory_order_relaxed);
           }
+        }
+
+        if (global_handler) {
+          global_handler();
         }
       }
     }
@@ -760,12 +766,6 @@ void EngineShard::CacheStats() {
 size_t EngineShard::UsedMemory() const {
   return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal() +
          search_indices()->GetUsedMemory();
-}
-
-void EngineShard::TEST_EnableHeartbeat() {
-  fiber_periodic_ = fb2::Fiber("shard_periodic_TEST", [this, period_ms = 1] {
-    RunPeriodic(std::chrono::milliseconds(period_ms));
-  });
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula justification
@@ -902,7 +902,7 @@ size_t GetTieredFileLimit(size_t threads) {
   return max_shard_file_size;
 }
 
-void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
+void EngineShardSet::Init(uint32_t sz, std::function<void()> global_handler) {
   CHECK_EQ(0u, size());
   shard_queue_.resize(sz);
 
@@ -920,10 +920,8 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
       auto* shard = EngineShard::tlocal();
       shard->InitTieredStorage(pb, max_shard_file_size);
 
-      if (update_db_time) {
-        // Must be last, as it accesses objects initialized above.
-        shard->StartPeriodicFiber(pb);
-      }
+      // Must be last, as it accesses objects initialized above.
+      shard->StartPeriodicFiber(pb, global_handler);
     }
   });
 }
@@ -947,10 +945,6 @@ void EngineShardSet::InitThreadLocal(ProactorBase* pb) {
   EngineShard::InitThreadLocal(pb);
   EngineShard* es = EngineShard::tlocal();
   shard_queue_[es->shard_id()] = es->GetFiberQueue();
-}
-
-void EngineShardSet::TEST_EnableHeartBeat() {
-  RunBriefInParallel([](EngineShard* shard) { shard->TEST_EnableHeartbeat(); });
 }
 
 void EngineShardSet::TEST_EnableCacheMode() {

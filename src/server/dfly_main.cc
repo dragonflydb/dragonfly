@@ -186,8 +186,6 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     listeners.push_back(listener.release());
   }
 
-  Service::InitOpts opts;
-  opts.disable_time_update = false;
   const auto& bind = GetFlag(FLAGS_bind);
   const char* bind_addr = bind.empty() ? nullptr : bind.c_str();
 
@@ -292,7 +290,7 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     listeners.push_back(listener.release());
   }
 
-  service.Init(acceptor, listeners, opts);
+  service.Init(acceptor, listeners);
 
   VersionMonitor version_monitor;
 
