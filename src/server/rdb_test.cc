@@ -94,7 +94,7 @@ TEST_F(RdbTest, Crc) {
 
 TEST_F(RdbTest, LoadEmpty) {
   auto ec = LoadRdb("empty.rdb");
-  CHECK(!ec);
+  ASSERT_FALSE(ec) << ec;
 }
 
 TEST_F(RdbTest, LoadSmall6) {
@@ -644,6 +644,15 @@ TEST_F(RdbTest, LoadHugeStream) {
   ASSERT_EQ(resp, "OK");
 
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
+}
+
+TEST_F(RdbTest, SnapshotTooBig) {
+  // Run({"debug", "populate", "10000", "foo", "1000"});
+  //  usleep(5000);  // let the stats to sync
+  max_memory_limit = 100000;
+  used_mem_current = 1000000;
+  auto resp = Run({"debug", "reload"});
+  ASSERT_THAT(resp, ErrArg("Out of memory"));
 }
 
 }  // namespace dfly

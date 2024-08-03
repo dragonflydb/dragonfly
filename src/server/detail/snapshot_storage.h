@@ -52,7 +52,11 @@ class SnapshotStorage {
                                                          std::string_view dbfilename) = 0;
 
   // Searches for all the relevant snapshot files given the RDB file or DFS summary file path.
-  io::Result<std::vector<std::string>, GenericError> ExpandSnapshot(const std::string& load_path);
+  struct ExpandResult {
+    std::string summary_file;
+    std::vector<std::string> snapshot_files;
+  };
+  io::Result<ExpandResult, GenericError> ExpandSnapshot(const std::string& load_path);
 
   virtual bool IsCloud() const {
     return false;
