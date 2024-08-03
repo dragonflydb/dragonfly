@@ -1390,17 +1390,12 @@ vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
   return listeners;
 }
 
-bool ServerFamily::HasReplica() const {
-  unique_lock lk(replicaof_mu_);
-  return replica_ != nullptr;
-}
-
-optional<Replica::Info> ServerFamily::GetReplicaInfo() const {
+optional<Replica::Summary> ServerFamily::GetReplicaSummary() const {
   unique_lock lk(replicaof_mu_);
   if (replica_ == nullptr) {
     return nullopt;
   } else {
-    return replica_->GetInfo();
+    return replica_->GetSummary();
   }
 }
 
@@ -2284,7 +2279,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     } else {
       append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
-      auto replication_info_cb = [&](Replica::Info rinfo) {
+      auto replication_info_cb = [&](Replica::Summary rinfo) {
         append("master_host", rinfo.host);
         append("master_port", rinfo.port);
 
@@ -2296,9 +2291,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
       };
-      replication_info_cb(replica_->GetInfo());
+      replication_info_cb(replica_->GetSummary());
       for (const auto& replica : cluster_replicas_) {
-        replication_info_cb(replica->GetInfo());
+        replication_info_cb(replica->GetSummary());
       }
     }
   }
@@ -2640,7 +2635,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
-  auto info = replica_->GetInfo();
+  auto info = replica_->GetSummary();
   if (!info.full_sync_done) {
     return cntx->SendError("Full sync not done");
   }
@@ -2696,7 +2691,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       }
       cntx->conn_state.replication_info.repl_listening_port = replica_listening_port;
     } else if (cmd == "CLIENT-ID" && args.size() == 2) {
-      auto info = dfly_cmd_->GetReplicaInfo(cntx);
+      auto info = dfly_cmd_->GetReplicaInfoFromConnection(cntx);
       DCHECK(info != nullptr);
       if (info) {
         info->id = arg;
@@ -2765,7 +2760,7 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     rb->StartArray(4 + cluster_replicas_.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
-    auto send_replica_info = [rb](Replica::Info rinfo) {
+    auto send_replica_info = [rb](Replica::Summary rinfo) {
       rb->SendBulkString(rinfo.host);
       rb->SendBulkString(absl::StrCat(rinfo.port));
       if (rinfo.full_sync_done) {
@@ -2779,9 +2774,9 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
         rb->SendBulkString("connecting");
       }
     };
-    send_replica_info(replica_->GetInfo());
+    send_replica_info(replica_->GetSummary());
     for (const auto& replica : cluster_replicas_) {
-      send_replica_info(replica->GetInfo());
+      send_replica_info(replica->GetSummary());
     }
   }
 }

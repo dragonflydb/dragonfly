@@ -111,7 +111,7 @@ class Replica : ProtocolClient {
   std::error_code ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* dest);
 
  public: /* Utility */
-  struct Info {
+  struct Summary {
     std::string host;
     uint16_t port;
     bool master_link_established;
@@ -121,7 +121,7 @@ class Replica : ProtocolClient {
     std::string master_id;
   };
 
-  Info GetInfo() const;  // thread-safe, blocks fiber
+  Summary GetSummary() const;  // thread-safe, blocks fiber
 
   bool HasDflyMaster() const {
     return !master_context_.dfly_session_id.empty();

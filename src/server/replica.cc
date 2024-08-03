@@ -1048,14 +1048,14 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
   return error_code{};
 }
 
-Replica::Info Replica::GetInfo() const {
+auto Replica::GetSummary() const -> Summary {
   auto f = [this]() {
     auto last_io_time = LastIoTime();
     for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
       last_io_time = std::max(last_io_time, flow->LastIoTime());
     }
 
-    Info res;
+    Summary res;
     res.host = server().host;
     res.port = server().port;
     res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);

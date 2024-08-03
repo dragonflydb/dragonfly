@@ -218,11 +218,14 @@ class ServerFamily {
 
   std::vector<facade::Listener*> GetNonPriviligedListeners() const;
 
-  bool HasReplica() const;
-  std::optional<Replica::Info> GetReplicaInfo() const;
+  // Replica-side method. Returns replication summary if this server is a replica,
+  // nullopt otherwise.
+  std::optional<Replica::Summary> GetReplicaSummary() const;
 
-  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfo(ConnectionContext* cntx) const {
-    return dfly_cmd_->GetReplicaInfo(cntx);
+  // Master-side acces method to replication info of that connection.
+  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfoFromConnection(
+      ConnectionContext* cntx) const {
+    return dfly_cmd_->GetReplicaInfoFromConnection(cntx);
   }
 
   void OnClose(ConnectionContext* cntx);
