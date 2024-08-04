@@ -1,9 +1,11 @@
+import pytest
 from pymemcache.client.base import Client as MCClient
-from . import dfly_args
 from redis import Redis
-from .instance import DflyInstance
 import socket
 import random
+
+from . import dfly_args
+from .instance import DflyInstance
 
 DEFAULT_ARGS = {"memcached_port": 11211, "proactor_threads": 4}
 
