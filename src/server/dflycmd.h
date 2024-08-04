@@ -111,11 +111,11 @@ class DflyCmd {
           flows{flow_count} {
     }
 
-    auto GetExclusiveLock() {
+    [[nodiscard]] auto GetExclusiveLock() {
       return std::lock_guard{shared_mu};
     }
 
-    auto GetSharedLock() {
+    [[nodiscard]] auto GetSharedLock() {
       return std::shared_lock{shared_mu};
     }
 
