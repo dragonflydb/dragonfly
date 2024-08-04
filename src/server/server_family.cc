@@ -2695,6 +2695,13 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         return;
       }
       cntx->conn_state.replication_info.repl_listening_port = replica_listening_port;
+      // We set a default value of ip_address here, because LISTENING-PORT is a mandatory field
+      // but IP-ADDRESS is optional
+      if (cntx->conn_state.replication_info.repl_ip_address.empty()) {
+        cntx->conn_state.replication_info.repl_ip_address = cntx->conn()->RemoteEndpointAddress();
+      }
+    } else if (cmd == "IP-ADDRESS") {
+      cntx->conn_state.replication_info.repl_ip_address = arg;
     } else if (cmd == "CLIENT-ID" && args.size() == 2) {
       auto info = dfly_cmd_->GetReplicaInfo(cntx);
       DCHECK(info != nullptr);
