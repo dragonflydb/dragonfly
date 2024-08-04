@@ -782,6 +782,8 @@ void DflyCmd::SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version)
 }
 
 // Must run under locked replica_info.mu.
+// TODO: it's a bad design that we enforce replies under a lock because Send can potentially
+// block, leading to high contention in some case. Split it and avoid replying under a lock.
 bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& repl_info, SyncState expected,
                                        RedisReplyBuilder* rb) {
   if (repl_info.replica_state != expected) {
