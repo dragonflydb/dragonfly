@@ -18,6 +18,7 @@ enum class OpStatus : uint16_t {
   INVALID_VALUE,
   OUT_OF_RANGE,
   WRONG_TYPE,
+  WRONG_JSON_TYPE,
   TIMED_OUT,
   OUT_OF_MEMORY,
   INVALID_FLOAT,
