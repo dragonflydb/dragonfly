@@ -119,6 +119,9 @@ class DflyCmd {
       return std::shared_lock{shared_mu};
     }
 
+    // Transition into cancelled state, run cleanup.
+    void Cancel();
+
     SyncState replica_state;  // always guarded by shared_mu
     Context cntx;
 
@@ -156,9 +159,6 @@ class DflyCmd {
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
-
-  // Transition into cancelled state, run cleanup.
-  void CancelReplication(uint32_t sync_id, std::shared_ptr<ReplicaInfo> replica_info_ptr);
 
  private:
   // JOURNAL [START/STOP]
@@ -208,9 +208,6 @@ class DflyCmd {
   // Fiber that runs full sync for each flow.
   void FullSyncFb(FlowInfo* flow, Context* cntx);
 
-  // Main entrypoint for stopping replication.
-  void StopReplication(uint32_t sync_id);
-
   // Get ReplicaInfo by sync_id.
   std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id);
 
@@ -223,6 +220,9 @@ class DflyCmd {
                                 facade::RedisReplyBuilder* rb);
 
  private:
+  // Main entrypoint for stopping replication.
+  void StopReplication(uint32_t sync_id);
+
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
   std::map<uint32_t, LSN> ReplicationLagsLocked() const;
