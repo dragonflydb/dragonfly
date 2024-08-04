@@ -206,6 +206,8 @@ class EngineShard {
   void StartPeriodicFiber(util::ProactorBase* pb, std::function<void()> global_handler);
 
   void Heartbeat();
+  void RetireExpiredAndEvict();
+
   void RunPeriodic(std::chrono::milliseconds period_ms, std::function<void()> global_handler);
 
   void CacheStats();
