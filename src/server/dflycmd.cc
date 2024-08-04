@@ -107,7 +107,7 @@ void DflyCmd::ReplicaInfo::Cancel() {
 
   LOG(INFO) << "Disconnecting from replica " << address << ":" << listening_port;
 
-  // Update tate and cancel context.
+  // Update state and cancel context.
   replica_state = SyncState::CANCELLED;
   cntx.Cancel();
 
