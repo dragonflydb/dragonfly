@@ -603,54 +603,8 @@ void EngineShard::Heartbeat() {
 
   CacheStats();
 
-  if (!IsReplica()) {  // Never run expiration on replica.
-    constexpr double kTtlDeleteLimit = 200;
-    constexpr double kRedLimitFactor = 0.1;
-
-    uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
-    uint32_t deleted = GetMovingSum6(TTL_DELETE);
-    unsigned ttl_delete_target = 5;
-
-    if (deleted > 10) {
-      // deleted should be <= traversed.
-      // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
-      // The higher t
-      ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
-    }
-
-    ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
-
-    DbContext db_cntx;
-    db_cntx.time_now_ms = GetCurrentTimeMs();
-
-    // TODO: iterate over all namespaces
-    DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
-    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-      if (!db_slice.IsDbValid(i))
-        continue;
-
-      db_cntx.db_index = i;
-      auto [pt, expt] = db_slice.GetTables(i);
-      if (expt->size() > pt->size() / 4) {
-        DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
-
-        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-        counter_[TTL_DELETE].IncBy(stats.deleted);
-      }
-
-      // if our budget is below the limit
-      if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
-        uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-        db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
-                                         eviction_redline - db_slice.memory_budget());
-      }
-    }
-
-    // Journal entries for expired entries are not writen to socket in the loop above.
-    // Trigger write to socket when loop finishes.
-    if (auto journal = EngineShard::tlocal()->journal(); journal) {
-      TriggerJournalWriteToSink();
-    }
+  if (!IsReplica()) {  // Never run expiry/evictions on replica.
+    RetireExpiredAndEvict();
   }
 
   // Offset CoolMemoryUsage when consider background offloading.
@@ -673,6 +627,57 @@ void EngineShard::Heartbeat() {
         continue;
       tiered_storage_->RunOffloading(i);
     }
+  }
+}
+
+void EngineShard::RetireExpiredAndEvict() {
+  constexpr double kTtlDeleteLimit = 200;
+  constexpr double kRedLimitFactor = 0.1;
+
+  uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
+  uint32_t deleted = GetMovingSum6(TTL_DELETE);
+  unsigned ttl_delete_target = 5;
+
+  if (deleted > 10) {
+    // deleted should be <= traversed.
+    // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
+    // The higher ttl_delete_target the more likely we have lots of expired items that need
+    // to be deleted.
+    ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
+  }
+
+  ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
+
+  DbContext db_cntx;
+  db_cntx.time_now_ms = GetCurrentTimeMs();
+
+  // TODO: iterate over all namespaces
+  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
+  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+    if (!db_slice.IsDbValid(i))
+      continue;
+
+    db_cntx.db_index = i;
+    auto [pt, expt] = db_slice.GetTables(i);
+    if (expt->size() > pt->size() / 4) {
+      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
+
+      counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+      counter_[TTL_DELETE].IncBy(stats.deleted);
+    }
+
+    // if our budget is below the limit
+    if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
+      uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
+      db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
+                                       eviction_redline - db_slice.memory_budget());
+    }
+  }
+
+  // Journal entries for expired entries are not writen to socket in the loop above.
+  // Trigger write to socket when loop finishes.
+  if (auto journal = EngineShard::tlocal()->journal(); journal) {
+    TriggerJournalWriteToSink();
   }
 }
 
