@@ -99,6 +99,32 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 
 }  // namespace
 
+void DflyCmd::ReplicaInfo::Cancel() {
+  lock_guard lk = GetExclusiveLock();
+  if (replica_state == SyncState::CANCELLED) {
+    return;
+  }
+
+  LOG(INFO) << "Disconnecting from replica " << address << ":" << listening_port;
+
+  // Update tate and cancel context.
+  replica_state = SyncState::CANCELLED;
+  cntx.Cancel();
+
+  // Wait for tasks to finish.
+  shard_set->RunBlockingInParallel([this](EngineShard* shard) {
+    FlowInfo* flow = &flows[shard->shard_id()];
+    if (flow->cleanup) {
+      flow->cleanup();
+    }
+
+    flow->full_sync_fb.JoinIfNeeded();
+  });
+
+  // Wait for error handler to quit.
+  cntx.JoinErrorHandler();
+}
+
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 }
 
@@ -605,18 +631,10 @@ auto DflyCmd::GetReplicaInfoFromConnection(ConnectionContext* cntx)
 }
 
 void DflyCmd::OnClose(ConnectionContext* cntx) {
-  unsigned session_id = cntx->conn_state.replication_info.repl_session_id;
-  if (!session_id)
+  unsigned sync_id = cntx->conn_state.replication_info.repl_session_id;
+  if (!sync_id)
     return;
-
-  auto replica_ptr = GetReplicaInfo(session_id);
-  if (!replica_ptr)
-    return;
-
-  // Because CancelReplication holds the per-replica mutex,
-  // aborting connection will block here until cancellation finishes.
-  // This allows keeping resources alive during the cleanup phase.
-  CancelReplication(session_id, replica_ptr);
+  StopReplication(sync_id);
 }
 
 void DflyCmd::StopReplication(uint32_t sync_id) {
@@ -624,42 +642,13 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   if (!replica_ptr)
     return;
 
-  CancelReplication(sync_id, replica_ptr);
-}
+  // Because CancelReplication holds the per-replica mutex,
+  // aborting connection will block here until cancellation finishes.
+  // This allows keeping resources alive during the cleanup phase.
+  replica_ptr->Cancel();
 
-void DflyCmd::CancelReplication(uint32_t sync_id, shared_ptr<ReplicaInfo> replica_ptr) {
-  {
-    lock_guard lk = replica_ptr->GetExclusiveLock();
-    if (replica_ptr->replica_state == SyncState::CANCELLED) {
-      return;
-    }
-
-    LOG(INFO) << "Disconnecting from replica " << replica_ptr->address << ":"
-              << replica_ptr->listening_port;
-
-    // Update replica_ptr state and cancel context.
-    replica_ptr->replica_state = SyncState::CANCELLED;
-    replica_ptr->cntx.Cancel();
-
-    // Wait for tasks to finish.
-    shard_set->RunBlockingInParallel([replica_ptr](EngineShard* shard) {
-      FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
-      if (flow->cleanup) {
-        flow->cleanup();
-      }
-
-      flow->full_sync_fb.JoinIfNeeded();
-    });
-  }
-
-  // Remove ReplicaInfo from global map
-  {
-    lock_guard lk(mu_);
-    replica_infos_.erase(sync_id);
-  }
-
-  // Wait for error handler to quit.
-  replica_ptr->cntx.JoinErrorHandler();
+  lock_guard lk(mu_);
+  replica_infos_.erase(sync_id);
 }
 
 shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
@@ -810,8 +799,8 @@ void DflyCmd::Shutdown() {
     pending = std::move(replica_infos_);
   }
 
-  for (auto [sync_id, replica_ptr] : pending) {
-    CancelReplication(sync_id, replica_ptr);
+  for (auto& [_, replica_ptr] : pending) {
+    replica_ptr->Cancel();
   }
 }
 
