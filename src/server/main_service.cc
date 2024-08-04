@@ -1186,7 +1186,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
-      auto info_ptr = server_family_.GetReplicaInfo(dfly_cntx);
+      auto info_ptr = server_family_.GetReplicaInfoFromConnection(dfly_cntx);
       if (info_ptr) {
         unsigned session_id = dfly_cntx->conn_state.replication_info.repl_session_id;
         DCHECK(session_id);

@@ -113,7 +113,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
                         .replicas = {},
                         .migrations = {}};
 
-  optional<Replica::Info> replication_info = server_family_->GetReplicaInfo();
+  optional<Replica::Summary> replication_info = server_family_->GetReplicaSummary();
   ServerState& etl = *ServerState::tlocal();
   if (!replication_info.has_value()) {
     DCHECK(etl.is_master);

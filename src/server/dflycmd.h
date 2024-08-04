@@ -111,7 +111,15 @@ class DflyCmd {
           flows{flow_count} {
     }
 
-    SyncState replica_state;  // always guarded by ReplicaInfo::mu
+    [[nodiscard]] auto GetExclusiveLock() {
+      return std::lock_guard{shared_mu};
+    }
+
+    [[nodiscard]] auto GetSharedLock() {
+      return std::shared_lock{shared_mu};
+    }
+
+    SyncState replica_state;  // always guarded by shared_mu
     Context cntx;
 
     std::string id;
@@ -122,7 +130,8 @@ class DflyCmd {
     // Flows describe the state of shard-local flow.
     // They are always indexed by the shard index on the master.
     std::vector<FlowInfo> flows;
-    util::fb2::Mutex mu;  // See top of header for locking levels.
+
+    util::fb2::SharedMutex shared_mu;  // See top of header for locking levels.
   };
 
  public:
@@ -138,7 +147,8 @@ class DflyCmd {
   // Create new sync session.
   std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> CreateSyncSession(ConnectionContext* cntx);
 
-  std::shared_ptr<ReplicaInfo> GetReplicaInfo(ConnectionContext* cntx);
+  // Master side acces method to replication info of that connection.
+  std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionContext* cntx);
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const;
 

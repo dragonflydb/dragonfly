@@ -1806,7 +1806,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
 
     master.stop()
     replica.stop()
-    assert master.is_in_logs("Partial sync requested from stale LSN")
+
+    # Partial replication is currently not implemented so the following does not work
+    # assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
 async def test_search(df_factory):
