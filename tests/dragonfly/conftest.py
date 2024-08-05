@@ -30,6 +30,7 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 DATABASE_INDEX = 0
 BASE_LOG_DIR = "/tmp/dragonfly_logs/"
 FAILED_PATH = "/tmp/failed/"
+LAST_LOGS = "/tmp/last_test_log_dir.txt"
 
 
 # runs on pytest start
@@ -56,7 +57,7 @@ def pytest_runtest_setup(item):
     item.log_dir = test_dir
 
     # needs for action.yml to get logs if timedout is happen for test
-    last_logs = open("/tmp/last_test_log_dir.txt", "w")
+    last_logs = open(LAST_LOGS, "w")
     last_logs.write(test_dir)
     last_logs.close()
 
@@ -377,6 +378,11 @@ def copy_failed_logs(log_dir, report):
             file = file.rstrip("\n")
             logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
             shutil.copy(file, test_failed_path)
+
+    # Clean up so we don't get LOGS twice for failed tests
+    last_logs = open(LAST_LOGS, "w")
+    last_logs.write(test_dir)
+    last_logs.close()
 
 
 # tests results we get on the "call" state
