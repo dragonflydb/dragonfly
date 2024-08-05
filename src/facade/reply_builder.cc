@@ -606,12 +606,14 @@ void RedisReplyBuilder::SendStringArrInternal(
           return;
         vec_indx = 0;
         next = meta.data();
+        start = next;
       }
 
       // reference metadata blob before referencing another vector.
-      DCHECK_GT(next - start, 0);
-      vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
-      start = next;
+      if (next - start > 0) {
+        vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
+        start = next;
+      }
       DCHECK_LT(vec_indx, vec.size());
       vec[vec_indx++] = IoVec(src);
     } else if (src.size() > 0) {
@@ -625,6 +627,10 @@ void RedisReplyBuilder::SendStringArrInternal(
 
     // Keep at least kMargin bytes for a small string as well as its length.
     if (vec_indx >= vec.size() || ((meta.end() - next) <= kMargin)) {
+      if (vec_indx == 0 || vec[vec_indx - 1].iov_base <= meta.data() ||
+          vec[vec_indx - 1].iov_base >= meta.data() + meta.size())
+        vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
+
       // Flush the iovec array.
       DVLOG(2) << "i=" << i << "meta size=" << next - meta.data();
       Send(vec.data(), vec_indx);
