@@ -379,9 +379,8 @@ def copy_failed_logs(log_dir, report):
             logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
             shutil.copy(file, test_failed_path)
 
-    # Clean up so we don't get LOGS twice for failed tests
+    # Clean up
     last_logs = open(LAST_LOGS, "w")
-    last_logs.write(test_dir)
     last_logs.close()
 
 

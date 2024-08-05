@@ -37,7 +37,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        timeout 3m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
+        timeout 2m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
@@ -55,9 +55,9 @@ runs:
 
     - name: Print last log on timeout
       if: failure()
+      shell: bash
       run: |
-        mkdir /tmp/failed
-        cat /tmp/last_test_log_dir.txt | xargs -I {} cp -r {}/ /tmp/failed/
+        cat /tmp/last_test_log_dir.txt | xargs -I {} mv {}/ /tmp/failed/
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'
