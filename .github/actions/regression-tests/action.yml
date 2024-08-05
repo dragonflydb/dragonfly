@@ -41,33 +41,18 @@ runs:
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
-          echo "TIMEDOUT=1">> "$GITHUB_OUTPUT";
+          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
+          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
+          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
+          # Copy the last log file because we timedout and pytest did not copy it over
+          # the /tmp/failed/ folder
+          cat /tmp/last_test_log_dir.txt | xargs -I {} mv {}/ /tmp/failed/
           exit 1
         fi
 
         # when a test fails in pytest it returns 1 but there are other return codes as well so we just check if the code is non zero
         if [[ $code -ne 0 ]]; then
           exit 1
-        fi
-
-    - name: Print last log on timeout
-      if: failure()
-      shell: bash
-      env:
-        TIMEDOUT_STEP_1: ${{ steps.first.outputs.TIMEDOUT }}
-        TIMEDOUT_STEP_2: ${{ steps.second.outputs.TIMEDOUT }}
-      run: |
-        if [[ "${{ env.TIMEDOUT_STEP_1 }}" -eq 1 ]] || [[ "${{ env.TIMEDOUT_STEP_2 }}" -eq 1 ]]; then
-          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
-          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
-          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
-
-          # It could be the case that the first test failed and the folder was not created. We need mkdir
-          # therefore so plz do not remove
-          mkdir /tmp/failed
-          # Copy over the logs of the test that timedout. We need this because the exception/failure
-          # handlers do not run when the shell command TIMEOUT sends a SIGTERM to terminate the pytest process.
-          cat /tmp/last_test_log_dir.txt | xargs -I {} cp -r {}/ /tmp/failed/
         fi
 
     - name: Send notification on failure

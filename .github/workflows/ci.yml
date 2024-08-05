@@ -119,7 +119,6 @@ jobs:
           df -h
           echo "-----------------------------"
           ninja src/all
-
       - name: PostFail
         if: failure()
         run: |

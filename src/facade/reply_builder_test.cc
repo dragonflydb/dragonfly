@@ -187,7 +187,7 @@ std::vector<std::string_view> RedisReplyBuilderTest::TokenizeMessage() const {
           << "string/error message must have only one token got " << message_tokens.size();
       break;
     default:
-      CHECK(false) << "invalid start char [" << data[0] << "]";
+      LOG(FATAL) << "invalid start char [" << data[0] << "]";
       break;
   }
   return message_tokens;
