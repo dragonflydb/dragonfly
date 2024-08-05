@@ -854,3 +854,17 @@ async def test_tls_when_read_write_is_interleaved(
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     await client.execute_command("GET foo")
     await client.close()
+
+
+@pytest.mark.opt_only
+@pytest.mark.asyncio
+async def test_large_replies(df_factory):
+    master = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master])
+    c_master = master.client(protocol=2)
+
+    l = [i for i in range(0, 10_000)]
+    await c_master.rpush("list", *l)
+    assert l == await c_master.lrange("list", 0, -1)
+
+    await c_master.close()
