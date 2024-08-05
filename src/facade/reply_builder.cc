@@ -157,16 +157,6 @@ void SinkReplyBuilder::SendError(OpStatus status) {
   }
 }
 
-void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
-  absl::FixedArray<iovec, 16> arr(msg_vec.size());
-
-  for (unsigned i = 0; i < msg_vec.size(); ++i) {
-    arr[i].iov_base = const_cast<char*>(msg_vec[i].data());
-    arr[i].iov_len = msg_vec[i].size();
-  }
-  Send(arr.data(), msg_vec.size());
-}
-
 void SinkReplyBuilder::StartAggregate() {
   DVLOG(1) << "StartAggregate";
   should_aggregate_ = true;
@@ -201,6 +191,73 @@ void SinkReplyBuilder::FlushBatch() {
 
 size_t SinkReplyBuilder::UsedMemory() const {
   return dfly::HeapSize(batch_);
+}
+
+void SinkReplyBuilder2::Write(std::string_view str) {
+  DCHECK(scoped_);
+  if (str.size() >= 32)
+    WriteRef(str);
+  else
+    WritePiece(str);
+}
+
+char* SinkReplyBuilder2::ReservePiece(size_t size) {
+  if (buffer_.AppendBuffer().size() <= size)
+    Flush();
+
+  char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
+  if (vecs_.empty() || !IsInBuf(vecs_.back().iov_base))
+    NextVec({dest, 0});
+
+  return dest;
+}
+
+void SinkReplyBuilder2::CommitPiece(size_t size) {
+  DCHECK(IsInBuf(vecs_.back().iov_base));
+
+  buffer_.CommitWrite(size);
+  vecs_.back().iov_len += size;
+  total_size_ += size;
+}
+
+void SinkReplyBuilder2::WritePiece(std::string_view str) {
+  char* dest = ReservePiece(str.size());
+  memcpy(dest, str.data(), str.size());
+  CommitPiece(str.size());
+}
+
+void SinkReplyBuilder2::WriteRef(std::string_view str) {
+  NextVec(str);
+  total_size_ += str.size();
+}
+
+void SinkReplyBuilder2::Flush() {
+  auto ec = sink_->Write(vecs_.data(), vecs_.size());
+  if (ec)
+    ec_ = ec;
+
+  buffer_.Clear();
+  vecs_.clear();
+  total_size_ = 0;
+}
+
+void SinkReplyBuilder2::FinishScope() {
+  // If batching or aggregations are not enabled, flush
+  Flush();
+
+  // TODO: otherwise iterate over vec_ and copy items to buffer_
+  // whilst also updating their pointers
+}
+
+bool SinkReplyBuilder2::IsInBuf(const void* ptr) const {
+  auto ib = buffer_.InputBuffer();
+  return ptr >= ib.data() && ptr <= ib.data() + ib.size();
+}
+
+void SinkReplyBuilder2::NextVec(std::string_view str) {
+  if (vecs_.size() >= IOV_MAX)
+    Flush();
+  vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
