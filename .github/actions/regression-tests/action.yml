@@ -44,7 +44,9 @@ runs:
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
-          echo "TIMEDOUT=1">> "$GITHUB_OUTPUT";
+          # Copy the last log file because we timedout and pytest did not copy it over
+          # the /tmp/failed/ folder
+          cat /tmp/last_test_log_dir.txt | xargs -I {} mv {}/ /tmp/failed/
           exit 1
         fi
 
@@ -52,12 +54,6 @@ runs:
         if [[ $code -ne 0 ]]; then
           exit 1
         fi
-
-    - name: Print last log on timeout
-      if: failure()
-      shell: bash
-      run: |
-        cat /tmp/last_test_log_dir.txt | xargs -I {} mv {}/ /tmp/failed/
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'
