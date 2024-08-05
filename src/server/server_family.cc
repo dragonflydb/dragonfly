@@ -747,6 +747,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     exit(1);
   }
   ValidateClientTlsFlags();
+  dfly_cmd_ = make_unique<DflyCmd>(this);
 }
 
 ServerFamily::~ServerFamily() {
@@ -776,7 +777,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   listeners_ = std::move(listeners);
-  dfly_cmd_ = make_unique<DflyCmd>(this);
 
   auto os_string = GetOSString();
   LOG_FIRST_N(INFO, 1) << "Host OS: " << os_string << " with " << shard_set->pool()->size()
@@ -938,6 +938,8 @@ struct AggregateLoadResult {
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
 std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& load_path) {
+  DCHECK_GT(shard_count(), 0u);
+
   auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
