@@ -934,7 +934,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
   }
 
   if (!tx_data.IsGlobalCmd()) {
-    VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, tx_data.command);
     return;
   }
