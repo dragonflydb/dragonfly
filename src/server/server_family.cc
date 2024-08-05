@@ -1997,7 +1997,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   if (is_master) {
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
   } else {
-    auto info = GetReplicaInfo();
+    auto info = GetReplicaSummary();
     if (info) {
       result.replica_reconnections = {std::move(info->host), info->port, info->reconnect_count};
     }
