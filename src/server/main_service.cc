@@ -879,10 +879,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_num = pp_.size();
   }
 
+  ChannelStore* cs = new ChannelStore{};
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
   pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
     ServerState::Init(index, shard_num, &user_registry_);
+    ServerState::tlocal()->UpdateChannelStore(cs);
   });
 
   shard_set->Init(shard_num, nullptr);
@@ -893,13 +895,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     acl_family_.Init(listeners.front(), &user_registry_);
   }
 
-  StringFamily::Init(&pp_);
-  GenericFamily::Init(&pp_);
   server_family_.Init(acceptor, std::move(listeners));
-
-  ChannelStore* cs = new ChannelStore{};
-  pp_.AwaitBrief(
-      [cs](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->UpdateChannelStore(cs); });
 }
 
 void Service::Shutdown() {
@@ -918,9 +914,6 @@ void Service::Shutdown() {
   cluster_family_.Shutdown();
 
   server_family_.Shutdown();
-  StringFamily::Shutdown();
-  GenericFamily::Shutdown();
-
   engine_varz.reset();
 
   ChannelStore::Destroy();

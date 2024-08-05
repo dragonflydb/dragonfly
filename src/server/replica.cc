@@ -160,7 +160,18 @@ void Replica::Stop() {
 
 void Replica::Pause(bool pause) {
   VLOG(1) << "Pausing replication";
-  Proactor()->Await([&] { is_paused_ = pause; });
+  Proactor()->Await([&] {
+    is_paused_ = pause;
+    if (num_df_flows_ > 0) {
+      auto partition = Partition(num_df_flows_);
+      auto cb = [&](unsigned index, auto*) {
+        for (auto id : partition[index]) {
+          shard_flows_[id]->Pause(pause);
+        }
+      };
+      shard_set->pool()->AwaitBrief(cb);
+    }
+  });
 }
 
 std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
@@ -761,7 +772,7 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   if (!Sock()->IsOpen()) {
     return std::make_error_code(errc::io_error);
   }
-
+  rdb_loader_.reset();  // we do not need it anymore.
   sync_fb_ =
       fb2::Fiber("shard_stable_sync_read", &DflyShardReplica::StableSyncDflyReadFb, this, cntx);
 
@@ -1117,13 +1128,20 @@ uint64_t DflyShardReplica::JournalExecutedCount() const {
   return journal_rec_executed_.load(std::memory_order_relaxed);
 }
 
+void DflyShardReplica::Pause(bool pause) {
+  if (rdb_loader_) {
+    rdb_loader_->Pause(pause);
+  }
+}
+
 void DflyShardReplica::JoinFlow() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
 }
 
 void DflyShardReplica::Cancel() {
-  rdb_loader_->stop();
+  if (rdb_loader_)
+    rdb_loader_->stop();
   CloseSocket();
   shard_replica_waker_.notifyAll();
 }

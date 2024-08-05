@@ -195,6 +195,8 @@ class DflyShardReplica : public ProtocolClient {
 
   uint64_t JournalExecutedCount() const;
 
+  void Pause(bool pause);
+
  private:
   Service& service_;
   MasterContext master_context_;
