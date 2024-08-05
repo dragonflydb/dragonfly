@@ -1539,7 +1539,6 @@ async def test_cluster_replication_migration(
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + 1000 + i) for i in range(4)
     ]
     df_factory.start_all(instances)
-    m1, r1, m2, r2 = instances
 
     nodes = [await create_node_info(n) for n in instances]
     m1_node, r1_node, m2_node, r2_node = nodes
@@ -1557,24 +1556,15 @@ async def test_cluster_replication_migration(
     )
 
     # generate some data with seederv1
-    seeder = df_seeder_factory.create(keys=2000, port=m1.port, cluster_mode=True)
+    seeder = df_seeder_factory.create(keys=2000, port=instances[0].port, cluster_mode=True)
     await seeder.run(target_deviation=0.1)
 
     # start replication from replicas
     await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
     await r2_node.admin_client.execute_command(f"replicaof localhost {m2_node.instance.port}")
 
-    await wait_available_async(r1_node.admin_client)
-    await wait_available_async(r2_node.admin_client)
-
-    print(
-        "SIZES SIZES 1\n\n\n",
-        await m1_node.admin_client.dbsize(),
-        await r1_node.admin_client.dbsize(),
-        await m2_node.admin_client.dbsize(),
-        await r2_node.admin_client.dbsize(),
-        "\n\n",
-    )
+    await wait_available_async(r1_node.client)
+    await wait_available_async(r2_node.client)
 
     # Create caputres on the replicas with v2 seeder
     r1_caputre = await SeederBase.capture(r1_node.admin_client)
@@ -1595,17 +1585,16 @@ async def test_cluster_replication_migration(
     await wait_for_status(m1_node.admin_client, m2_node.id, "FINISHED")
     await wait_for_status(m2_node.admin_client, m1_node.id, "FINISHED")
 
-    # wait for replicas to catch up
-    await asyncio.sleep(5)
-
-    print(
-        "SIZES SIZES 2\n\n\n",
-        await m1_node.admin_client.dbsize(),
-        await r1_node.admin_client.dbsize(),
-        await m2_node.admin_client.dbsize(),
-        await r2_node.admin_client.dbsize(),
-        "\n\n",
+    m1_node.slots, m2_node.slots = m2_node.slots, m1_node.slots
+    m1_node.migrations = []
+    m2_node.migrations = []
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
     )
+
+    # wait for replicas to catch up
+    await await_no_lag(m1_node.admin_client)
+    await await_no_lag(m2_node.admin_client)
 
     # ensure captures got exchanged
     assert (await SeederBase.capture(r1_node.admin_client)) == r2_caputre
