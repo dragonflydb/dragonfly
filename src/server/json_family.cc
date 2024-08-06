@@ -254,44 +254,6 @@ inline std::optional<JsonType> JsonFromString(std::string_view input) {
   return dfly::JsonFromString(input, CompactObj::memory_resource());
 }
 
-template <typename T, bool ReturnWrongTypeOnNullOpt = false>
-OpResult<JsonCallbackResult<T>> UpdateEntry(const OpArgs& op_args, std::string_view key,
-                                            const WrappedJsonPath& json_path,
-                                            JsonPathMutateCallback<T> cb,
-                                            JsonReplaceVerify verify_op = {}) {
-  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
-  RETURN_ON_BAD_STATUS(it_res);
-
-  PrimeValue& pv = it_res->it->second;
-
-  JsonType* json_val = pv.GetJson();
-  DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
-                   << pv.ObjType() << "'";
-
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
-
-  auto mutate_res = json_path.Mutate(json_val, cb);
-
-  // Make sure that we don't have other internal issue with the operation
-  if (mutate_res && verify_op) {
-    verify_op(*json_val);
-  }
-
-  it_res->post_updater.Run();
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
-
-  if constexpr (ReturnWrongTypeOnNullOpt) {
-    if (mutate_res && mutate_res->IsV1()) {
-      auto& as_v1 = mutate_res->AsV1();
-      if (!as_v1 || !as_v1.value()) {
-        return OpStatus::WRONG_JSON_TYPE;
-      }
-    }
-  }
-
-  return mutate_res;
-}
-
 OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
   auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_JSON);
   if (!it_res.ok())
@@ -476,34 +438,75 @@ size_t CountJsonFields(const JsonType& j) {
   return res;
 }
 
-template <typename T, bool ReturnEmptyResultIfKeyNotFound = false,
-          bool ReturnWrongTypeOnNullOpt = false>
+template <typename T> struct is_optional : std::false_type {};
+
+template <typename T> struct is_optional<std::optional<T>> : std::true_type {};
+
+template <typename T>
+typename std::enable_if_t<!is_optional<T>::value, OpResult<JsonCallbackResult<T>>>
+ReturnWrongTypeOnNullOpt(JsonCallbackResult<T> result) {
+  return result;
+}
+
+template <typename T>
+typename std::enable_if_t<is_optional<T>::value, OpResult<JsonCallbackResult<T>>>
+ReturnWrongTypeOnNullOpt(JsonCallbackResult<T> result) {
+  if (result.IsV1()) {
+    auto& as_v1 = result.AsV1();
+    if (!as_v1 || !as_v1.value()) {
+      return OpStatus::WRONG_JSON_TYPE;
+    }
+  }
+  return result;
+}
+
+struct EvaluateOperationOptions {
+  bool save_first_result = false;
+  bool return_empty_result_if_key_not_found = false;
+};
+
+template <typename T>
 OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std::string_view key,
                                                       const WrappedJsonPath& json_path,
                                                       JsonPathEvaluateCallback<T> cb,
-                                                      bool save_first_result = false) {
+                                                      EvaluateOperationOptions options = {}) {
   OpResult<JsonType*> result = GetJson(op_args, key);
-
-  if constexpr (ReturnEmptyResultIfKeyNotFound) {
-    if (result == OpStatus::KEY_NOTFOUND) {
-      return JsonCallbackResult<T>{};
-    }
+  if (options.return_empty_result_if_key_not_found && result == OpStatus::KEY_NOTFOUND) {
+    return JsonCallbackResult<T>{};
   }
-
   RETURN_ON_BAD_STATUS(result);
+  return ReturnWrongTypeOnNullOpt(
+      json_path.Evaluate<T>(result.value(), cb, options.save_first_result));
+}
 
-  auto eval_result = json_path.Evaluate<T>(result.value(), cb, save_first_result);
+template <typename T>
+OpResult<JsonCallbackResult<T>> UpdateEntry(const OpArgs& op_args, std::string_view key,
+                                            const WrappedJsonPath& json_path,
+                                            JsonPathMutateCallback<T> cb,
+                                            JsonReplaceVerify verify_op = {}) {
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  RETURN_ON_BAD_STATUS(it_res);
 
-  if constexpr (ReturnWrongTypeOnNullOpt) {
-    if (eval_result.IsV1()) {
-      auto& as_v1 = eval_result.AsV1();
-      if (!as_v1 || !as_v1.value()) {
-        return OpStatus::WRONG_JSON_TYPE;
-      }
-    }
+  PrimeValue& pv = it_res->it->second;
+
+  JsonType* json_val = pv.GetJson();
+  DCHECK(json_val) << "should have a valid JSON object for key '" << key << "' the type for it is '"
+                   << pv.ObjType() << "'";
+
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
+
+  auto mutate_res = json_path.Mutate(json_val, cb);
+
+  // Make sure that we don't have other internal issue with the operation
+  if (mutate_res && verify_op) {
+    verify_op(*json_val);
   }
 
-  return eval_result;
+  it_res->post_updater.Run();
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+
+  RETURN_ON_BAD_STATUS(mutate_res);
+  return ReturnWrongTypeOnNullOpt(*std::move(mutate_res));
 }
 
 bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJsonPath>>& paths) {
@@ -585,7 +588,7 @@ auto OpType(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
   auto cb = [](const string_view&, const JsonType& val) -> std::string {
     return JsonTypeToName(val);
   };
-  return JsonEvaluateOperation<std::string, true>(op_args, key, json_path, std::move(cb));
+  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {false, true});
 }
 
 OpResult<JsonCallbackResult<std::optional<size_t>>> OpStrLen(const OpArgs& op_args, string_view key,
@@ -598,8 +601,8 @@ OpResult<JsonCallbackResult<std::optional<size_t>>> OpStrLen(const OpArgs& op_ar
     }
   };
 
-  return JsonEvaluateOperation<std::optional<std::size_t>, true, true>(op_args, key, json_path,
-                                                                       std::move(cb), true);
+  return JsonEvaluateOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb),
+                                                           {true, true});
 }
 
 OpResult<JsonCallbackResult<std::optional<size_t>>> OpObjLen(const OpArgs& op_args, string_view key,
@@ -612,8 +615,8 @@ OpResult<JsonCallbackResult<std::optional<size_t>>> OpObjLen(const OpArgs& op_ar
     }
   };
 
-  return JsonEvaluateOperation<std::optional<std::size_t>, true, true>(op_args, key, json_path,
-                                                                       std::move(cb), true);
+  return JsonEvaluateOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb),
+                                                           {true, true});
 }
 
 OpResult<JsonCallbackResult<std::optional<size_t>>> OpArrLen(const OpArgs& op_args, string_view key,
@@ -625,8 +628,8 @@ OpResult<JsonCallbackResult<std::optional<size_t>>> OpArrLen(const OpArgs& op_ar
       return std::nullopt;
     }
   };
-  return JsonEvaluateOperation<std::optional<std::size_t>, true, true>(op_args, key, json_path,
-                                                                       std::move(cb), true);
+  return JsonEvaluateOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb),
+                                                           {true, true});
 }
 
 template <typename T>
@@ -641,11 +644,11 @@ auto OpToggle(const OpArgs& op_args, string_view key,
     }
     return {false, std::nullopt};
   };
-  return UpdateEntry<std::optional<T>, true>(op_args, key, json_path, std::move(cb));
+  return UpdateEntry<std::optional<T>>(op_args, key, json_path, std::move(cb));
 }
 
 template <typename T>
-auto OpToggle(string_view key, const WrappedJsonPath& json_path, ConnectionContext* cntx) {
+auto ExecuteToggle(string_view key, const WrappedJsonPath& json_path, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpToggle<T>(t->GetOpArgs(shard), key, json_path);
   };
@@ -815,7 +818,7 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
     }
     return vec;
   };
-  return JsonEvaluateOperation<StringVec, true>(op_args, key, json_path, std::move(cb), true);
+  return JsonEvaluateOperation<StringVec>(op_args, key, json_path, std::move(cb), {true, true});
 }
 
 auto OpStrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
@@ -898,7 +901,7 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     val->erase(it);
     return {false, std::move(str)};
   };
-  return UpdateEntry<std::optional<std::string>, true>(op_args, key, path, std::move(cb));
+  return UpdateEntry<std::optional<std::string>>(op_args, key, path, std::move(cb));
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -941,7 +944,7 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
     *val = jsoncons::json_array<JsonType>(trim_start_it, trim_end_it);
     return {false, val->size()};
   };
-  return UpdateEntry<std::optional<std::size_t>, true>(op_args, key, path, std::move(cb));
+  return UpdateEntry<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -994,7 +997,7 @@ OpResult<JsonCallbackResult<std::optional<std::size_t>>> OpArrInsert(
     return {false, val->size()};
   };
 
-  auto res = UpdateEntry<std::optional<std::size_t>, true>(op_args, key, json_path, std::move(cb));
+  auto res = UpdateEntry<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
   if (out_of_boundaries_encountered) {
     return OpStatus::OUT_OF_RANGE;
   }
@@ -1013,7 +1016,7 @@ auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& 
     }
     return {false, val->size()};
   };
-  return UpdateEntry<std::optional<std::size_t>, true>(op_args, key, path, std::move(cb));
+  return UpdateEntry<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
 }
 
 // Returns a numeric vector representing each JSON value first index of the JSON scalar.
@@ -1067,8 +1070,7 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     return pos;
   };
 
-  return JsonEvaluateOperation<std::optional<long>, false, true>(op_args, key, json_path,
-                                                                 std::move(cb));
+  return JsonEvaluateOperation<std::optional<long>>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns string vector that represents the query result of each supplied key.
@@ -1127,8 +1129,7 @@ auto OpFields(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
     return CountJsonFields(val);
   };
 
-  return JsonEvaluateOperation<std::optional<std::size_t>, true>(op_args, key, json_path,
-                                                                 std::move(cb));
+  return JsonEvaluateOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
 }
 
 // Returns json vector that represents the result of the json query.
@@ -1749,9 +1750,9 @@ void JsonFamily::Toggle(CmdArgList args, ConnectionContext* cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   if (json_path.IsLegacyModePath()) {
-    OpToggle<bool>(key, json_path, cntx);
+    ExecuteToggle<bool>(key, json_path, cntx);
   } else {
-    OpToggle<long>(key, json_path, cntx);
+    ExecuteToggle<long>(key, json_path, cntx);
   }
 }
 
