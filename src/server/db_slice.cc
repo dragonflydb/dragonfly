@@ -622,7 +622,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   try {
     it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
-    VLOG(2) << "AddOrFind2: bad alloc exception, budget: " << memory_budget_;
+    VLOG(2) << "AddOrFind: bad alloc exception, budget: " << memory_budget_ + memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
