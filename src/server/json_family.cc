@@ -443,18 +443,13 @@ template <typename T> struct is_optional : std::false_type {};
 template <typename T> struct is_optional<std::optional<T>> : std::true_type {};
 
 template <typename T>
-typename std::enable_if_t<!is_optional<T>::value, OpResult<JsonCallbackResult<T>>>
-ReturnWrongTypeOnNullOpt(JsonCallbackResult<T> result) {
-  return result;
-}
-
-template <typename T>
-typename std::enable_if_t<is_optional<T>::value, OpResult<JsonCallbackResult<T>>>
-ReturnWrongTypeOnNullOpt(JsonCallbackResult<T> result) {
-  if (result.IsV1()) {
-    auto& as_v1 = result.AsV1();
-    if (!as_v1 || !as_v1.value()) {
-      return OpStatus::WRONG_JSON_TYPE;
+OpResult<JsonCallbackResult<T>> ReturnWrongTypeOnNullOpt(JsonCallbackResult<T> result) {
+  if constexpr (is_optional<T>::value) {
+    if (result.IsV1()) {
+      auto& as_v1 = result.AsV1();
+      if (!as_v1 || !as_v1.value()) {
+        return OpStatus::WRONG_JSON_TYPE;
+      }
     }
   }
   return result;
