@@ -380,8 +380,7 @@ def copy_failed_logs(log_dir, report):
             shutil.copy(file, test_failed_path)
 
     # Clean up
-    last_logs = open(LAST_LOGS, "w")
-    last_logs.close()
+    os.remove(LAST_LOGS)
 
 
 # tests results we get on the "call" state
