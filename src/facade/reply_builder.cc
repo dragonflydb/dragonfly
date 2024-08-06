@@ -575,8 +575,8 @@ void RedisReplyBuilder::SendStringArrInternal(
   }
 
   // We limit iovec capacity, vectorized length is limited upto UIO_MAXIOV (Send returns EMSGSIZE).
-  size_t vec_cap = std::min<size_t>(UIO_MAXIOV, size * 2);
-  absl::FixedArray<iovec, 16> vec(vec_cap);
+  size_t vec_cap = std::min<size_t>(UIO_MAXIOV - 1, size * 2);
+  absl::FixedArray<iovec, 16> vec(vec_cap + 1);  // + 1 for trailing meta array
   absl::FixedArray<char, 128> meta(std::max<size_t>(vec_cap * 64, 128u));
 
   char* start = meta.data();
@@ -614,7 +614,7 @@ void RedisReplyBuilder::SendStringArrInternal(
         vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
         start = next;
       }
-      DCHECK_LT(vec_indx, vec.size());
+      DCHECK_LT(vec_indx, vec_cap);
       vec[vec_indx++] = IoVec(src);
     } else if (src.size() > 0) {
       // NOTE!: this is not just optimization. producer may returns a string_piece that will
@@ -626,9 +626,10 @@ void RedisReplyBuilder::SendStringArrInternal(
     constexpr ptrdiff_t kMargin = kSSOLen + 3 /*$\r\n*/ + 2 /*length*/ + 2 /* \r\n*/;  // metadata
 
     // Keep at least kMargin bytes for a small string as well as its length.
-    if (vec_indx >= vec.size() || ((meta.end() - next) <= kMargin)) {
-      if (vec_indx == 0 || vec[vec_indx - 1].iov_base <= meta.data() ||
-          vec[vec_indx - 1].iov_base >= meta.data() + meta.size())
+    if (vec_indx >= vec_cap || ((meta.end() - next) <= kMargin)) {
+      bool meta_present = vec_indx > 0 && vec[vec_indx - 1].iov_base >= meta.data() &&
+                          vec[vec_indx - 1].iov_base <= meta.data() + meta.size();
+      if (vec_indx == 0 || !meta_present)
         vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
 
       // Flush the iovec array.
