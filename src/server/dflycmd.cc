@@ -503,9 +503,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(!flow->full_sync_fb.IsJoinable());
   DCHECK(shard);
-
-  if (flow->conn == nullptr)
-    return OpStatus::CANCELLED;
+  DCHECK(flow->conn);
 
   // The summary contains the LUA scripts, so make sure at least (and exactly one)
   // of the flows also contain them.
@@ -558,15 +556,11 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
 OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   // Create streamer for shard flows.
   DCHECK(shard);
+  DCHECK(flow->conn);
 
-  if (flow->conn == nullptr)
-    return OpStatus::CANCELLED;
-
-  if (shard != nullptr) {
-    flow->streamer.reset(new JournalStreamer(sf_->journal(), cntx));
-    bool send_lsn = flow->version >= DflyVersion::VER4;
-    flow->streamer->Start(flow->conn->socket(), send_lsn);
-  }
+  flow->streamer.reset(new JournalStreamer(sf_->journal(), cntx));
+  bool send_lsn = flow->version >= DflyVersion::VER4;
+  flow->streamer->Start(flow->conn->socket(), send_lsn);
 
   // Register cleanup.
   flow->cleanup = [flow]() {
@@ -660,8 +654,11 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
 
 void DflyCmd::BreakStalledFlowsInShard() {
   unique_lock lk(mu_, try_to_lock);
+
+  // give up on blocking because we run this function periodically in a background fiber,
+  // so it will eventually grab the lock.
   if (!lk.owns_lock())
-    return;  // give up
+    return;
 
   ShardId sid = EngineShard::tlocal()->shard_id();
   vector<uint32_t> deleted;
