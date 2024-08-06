@@ -653,18 +653,18 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
 }
 
 void DflyCmd::BreakStalledFlowsInShard() {
-  unique_lock lk(mu_, try_to_lock);
+  unique_lock global_lock(mu_, try_to_lock);
 
   // give up on blocking because we run this function periodically in a background fiber,
   // so it will eventually grab the lock.
-  if (!lk.owns_lock())
+  if (!global_lock.owns_lock())
     return;
 
   ShardId sid = EngineShard::tlocal()->shard_id();
   vector<uint32_t> deleted;
 
   for (auto [sync_id, replica_ptr] : replica_infos_) {
-    shared_lock lock = replica_ptr->GetSharedLock();
+    shared_lock replica_lock = replica_ptr->GetSharedLock();
 
     if (!replica_ptr->flows[sid].saver)
       continue;
@@ -677,7 +677,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
       VLOG(1) << "Breaking full sync for sync_id " << sync_id << " last_write_ts: " << last_write_ns
               << ", now: " << now;
       deleted.push_back(sync_id);
-      lock.unlock();
+      replica_lock.unlock();
       replica_ptr->Cancel();
     }
   }
