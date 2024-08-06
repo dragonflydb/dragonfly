@@ -90,6 +90,11 @@ struct CmdArgParser {
     }
   }
 
+  // returns next value if exists or default value
+  template <class T = std::string_view> auto NextOrDefault(T default_value = {}) {
+    return HasNext() ? Next<T>() : default_value;
+  }
+
   // check next value ignoring case and consume it
   void ExpectTag(std::string_view tag);
 
