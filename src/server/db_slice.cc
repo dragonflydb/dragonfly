@@ -73,10 +73,12 @@ class PrimeEvictionPolicy {
   static constexpr bool can_evict = true;  // we implement eviction functionality.
   static constexpr bool can_gc = true;
 
-  PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_budget, ssize_t soft_limit,
+  // mem_offset - memory_offset that we should account for in addition to DbSlice::memory_budget.
+  // May be negative.
+  PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_offset, ssize_t soft_limit,
                       DbSlice* db_slice, bool apply_memory_limit)
       : db_slice_(db_slice),
-        mem_budget_(mem_budget),
+        mem_offset_(mem_offset),
         soft_limit_(soft_limit),
         cntx_(cntx),
         can_evict_(can_evict),
@@ -85,7 +87,6 @@ class PrimeEvictionPolicy {
 
   // A hook function that is called every time a segment is full and requires splitting.
   void RecordSplit(PrimeTable::Segment_t* segment) {
-    mem_budget_ -= PrimeTable::kSegBytes;
     DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
 
@@ -93,10 +94,6 @@ class PrimeEvictionPolicy {
 
   unsigned GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
   unsigned Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
-
-  ssize_t mem_budget() const {
-    return mem_budget_;
-  }
 
   unsigned evicted() const {
     return evicted_;
@@ -108,7 +105,7 @@ class PrimeEvictionPolicy {
 
  private:
   DbSlice* db_slice_;
-  ssize_t mem_budget_;
+  ssize_t mem_offset_;
   ssize_t soft_limit_ = 0;
   const DbContext cntx_;
 
@@ -136,7 +133,8 @@ class PrimeBumpPolicy {
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
-  if (!apply_memory_limit_ || mem_budget_ > soft_limit_)
+  ssize_t mem_available = db_slice_->memory_budget() + mem_offset_;
+  if (!apply_memory_limit_ || mem_available > soft_limit_)
     return true;
 
   DCHECK_LE(tbl.size(), tbl.capacity());
@@ -145,11 +143,11 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   // we estimate how much memory we will take with the current capacity
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
-  size_t new_available = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
-  bool res =
-      mem_budget_ > int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available *
-                                                        GetFlag(FLAGS_table_growth_margin));
-  VLOG(2) << "available: " << new_available << ", res: " << res;
+  size_t table_free_items = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
+  size_t obj_bytes_estimation =
+      db_slice_->bytes_per_object() * table_free_items * GetFlag(FLAGS_table_growth_margin);
+  bool res = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
+  VLOG(2) << "available: " << table_free_items << ", res: " << res;
 
   return res;
 }
@@ -575,12 +573,21 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
 
+  ssize_t memory_offset = -key.size();
+
   // If we are low on memory due to cold storage, free some memory.
-  if (memory_budget_ < ssize_t(key.size()) && owner_->tiered_storage()) {
+  if (owner_->tiered_storage()) {
     // At least 40KB bytes to cover potential segment split.
-    size_t goal = std::max<size_t>(key.size() * 2 - memory_budget_, 40_KB);
-    size_t reclaimed = owner_->tiered_storage()->ReclaimMemory(goal);
-    memory_budget_ += reclaimed;
+    ssize_t red_line = std::max<size_t>(key.size() * 2, 40_KB);
+    if (memory_budget_ < red_line) {
+      size_t goal = red_line - memory_budget_;
+      size_t reclaimed = owner_->tiered_storage()->ReclaimMemory(goal);
+      memory_budget_ += reclaimed;
+    }
+
+    // CoolMemoryUsage is the memory that we can always reclaim, like in the block above,
+    // therefore we include it for PrimeEvictionPolicy considerations.
+    memory_offset += owner_->tiered_storage()->CoolMemoryUsage();
   }
 
   // In case we are loading from rdb file or replicating we want to disable conservative memory
@@ -594,37 +601,36 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   bool apply_memory_limit =
       !owner_->IsReplica() && !(ServerState::tlocal()->gstate() == GlobalState::LOADING);
 
-  PrimeEvictionPolicy evp{cntx,
-                          (bool(caching_mode_) && !owner_->IsReplica()),
-                          int64_t(memory_budget_ - key.size()),
-                          ssize_t(soft_budget_limit_),
-                          this,
-                          apply_memory_limit};
-
   // If we are over limit in non-cache scenario, just be conservative and throw.
-  if (apply_memory_limit && !caching_mode_ && evp.mem_budget() < 0) {
-    VLOG(2) << "AddOrFind: over limit, budget: " << evp.mem_budget();
+  if (apply_memory_limit && !caching_mode_ && memory_budget_ + memory_offset < 0) {
+    VLOG(2) << "AddOrFind: over limit, budget: " << memory_budget_;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
+
+  PrimeEvictionPolicy evp{cntx,          (bool(caching_mode_) && !owner_->IsReplica()),
+                          memory_offset, ssize_t(soft_budget_limit_),
+                          this,          apply_memory_limit};
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
   CompactObj co_key{key};
   PrimeIterator it;
 
-  size_t table_before = db.table_memory();
+  ssize_t table_before = db.prime.mem_usage();
 
   try {
     it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
-    VLOG(2) << "AddOrFind2: bad alloc exception, budget: " << evp.mem_budget();
+    VLOG(2) << "AddOrFind2: bad alloc exception, budget: " << memory_budget_;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  size_t evicted_obj_bytes = 0;
-  if (evp.mem_budget() < 0 && apply_memory_limit) {
+  ssize_t table_increase = db.prime.mem_usage() - table_before;
+  memory_budget_ -= table_increase;
+
+  if (memory_budget_ < 0 && apply_memory_limit) {
     // We may reach the state when our memory usage is below the limit even if we
     // do not add new segments. For example, we have half full segments
     // and we add new objects or update the existing ones and our memory usage grows.
@@ -636,12 +642,11 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 #if 0
     size_t evict_goal = std::max<size_t>(512, (-evp.mem_budget()) / 32);
     auto [items, bytes] = FreeMemWithEvictionStep(cntx.db_index, it.segment_id(), evict_goal);
-    evicted_obj_bytes = bytes;
     events_.hard_evictions += items;
 #endif
   }
 
-  table_memory_ += (db.table_memory() - table_before);
+  table_memory_ += table_increase;
   entries_count_++;
 
   db.stats.inline_keys += it->first.IsInline();
@@ -654,8 +659,6 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
-
-  memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
   if (cluster::IsClusterEnabled()) {
     cluster::SlotId sid = cluster::KeySlot(key);
     db.slots_stats[sid].key_count += 1;
@@ -1470,9 +1473,9 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
     shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
   }
 
-  size_t value_heap_size = pv.MallocUsed();
+  ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
-  AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -del_it->first.MallocUsed(),
+  AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
                       table);                                                // Key
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
@@ -1487,8 +1490,14 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   }
 
   table->prime.Erase(del_it.GetInnerIt());
-  table_memory_ += (table->table_memory() - table_before);
+
+  // Note, currently we do not shrink our tables upon deletion.
+  // This DCHECK ensures that if we decide to do so, we will have to update table_memory_
+  // accordingly.
+  DCHECK_EQ(table->table_memory(), table_before);
+
   --entries_count_;
+  memory_budget_ += (value_heap_size + key_size_used);
 
   SendInvalidationTrackingMessage(del_it.key());
 }
