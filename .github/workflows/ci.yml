@@ -48,7 +48,6 @@ jobs:
             cxx_flags: ""
 
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     env:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_CACHE_SIZE: 6G
@@ -129,7 +128,7 @@ jobs:
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
-          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20 ctest -V -L DFLY
 
           echo "Running tests with --force_epoll"
 
@@ -142,20 +141,20 @@ jobs:
           EOF
 
           gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 ctest -V -L DFLY
+          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20 ctest -V -L DFLY
 
           echo "Finished running tests with --force_epoll"
 
           echo "Running tests with --cluster_mode=emulated"
-          FLAGS_cluster_mode=emulated ctest -V -L DFLY
+          FLAGS_cluster_mode=emulated timeout 20 ctest -V -L DFLY
 
           echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
-          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true ctest -V -L DFLY
+          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20 ctest -V -L DFLY
 
-          ./dragonfly_test
-          ./multi_test --multi_exec_mode=1
-          ./multi_test --multi_exec_mode=3
-          ./json_family_test --jsonpathv2=false
+          timeout 5 ./dragonfly_test
+          timeout 5 ./multi_test --multi_exec_mode=1
+          timeout 5 ./multi_test --multi_exec_mode=3
+          timeout 5 ./json_family_test --jsonpathv2=false
 
       - name: Upload unit logs on failure
         if: failure()
