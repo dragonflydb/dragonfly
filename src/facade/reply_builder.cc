@@ -593,27 +593,38 @@ void RedisReplyBuilder::SendStringArrInternal(
   serialize_len(type_char[0], header_len);
   unsigned vec_indx = 0;
   string_view src;
+
+#define FLUSH_IOVEC()           \
+  do {                          \
+    Send(vec.data(), vec_indx); \
+    if (ec_)                    \
+      return;                   \
+    vec_indx = 0;               \
+    next = meta.data();         \
+  } while (false)
+
   for (unsigned i = 0; i < size; ++i) {
+    DCHECK_LT(vec_indx, vec_cap);
+
     src = producer(i);
     serialize_len('$', src.size());
 
     // copy data either by referencing via an iovec or copying inline into meta buf.
     constexpr size_t kSSOLen = 32;
     if (src.size() > kSSOLen) {
-      if (vec_indx + 1 >= vec_cap) {
-        Send(vec.data(), vec_indx);
-        if (ec_)
-          return;
-        vec_indx = 0;
-        next = meta.data();
-      }
-
       // reference metadata blob before referencing another vector.
       DCHECK_GT(next - start, 0);
       vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
-      start = next;
+      if (vec_indx >= vec_cap) {
+        FLUSH_IOVEC();
+      }
+
       DCHECK_LT(vec_indx, vec.size());
       vec[vec_indx++] = IoVec(src);
+      if (vec_indx >= vec_cap) {
+        FLUSH_IOVEC();
+      }
+      start = next;
     } else if (src.size() > 0) {
       // NOTE!: this is not just optimization. producer may returns a string_piece that will
       // be overriden for the next call, so we must do this for correctness.
@@ -621,19 +632,15 @@ void RedisReplyBuilder::SendStringArrInternal(
       next += src.size();
     }
 
-    constexpr ptrdiff_t kMargin = kSSOLen + 3 /*$\r\n*/ + 2 /*length*/ + 2 /* \r\n*/;  // metadata
+    // how much buffer we need to perform the next iteration.
+    constexpr ptrdiff_t kMargin = kSSOLen + 3 /* $\r\n */ + 2 /*length*/ + 2 /* \r\n */;
 
     // Keep at least kMargin bytes for a small string as well as its length.
-    if (vec_indx >= vec.size() || ((meta.end() - next) <= kMargin)) {
+    if (kMargin >= meta.end() - next) {
       // Flush the iovec array.
-      DVLOG(2) << "i=" << i << "meta size=" << next - meta.data();
-      Send(vec.data(), vec_indx);
-      if (ec_)
-        return;
-
-      vec_indx = 0;
-      start = meta.data();
-      next = start;
+      vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
+      FLUSH_IOVEC();
+      start = next;
     }
     *next++ = '\r';
     *next++ = '\n';
