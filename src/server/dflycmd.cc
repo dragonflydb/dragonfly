@@ -671,7 +671,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
 
     // If saver is present - we are currently using it for full sync.
     int64_t last_write_ns = replica_ptr->flows[sid].saver->GetLastWriteTime();
-    int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_replication_timeout)) * 1000000LL;
+    int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_replication_timeout)) * 1'000'000LL;
     int64_t now = absl::GetCurrentTimeNanos();
     if (last_write_ns > 0 && last_write_ns + timeout_ns < now) {
       VLOG(1) << "Breaking full sync for sync_id " << sync_id << " last_write_ts: " << last_write_ns
