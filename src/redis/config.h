@@ -98,9 +98,9 @@
 #endif
 
 #if __GNUC__ >= 4
-#define redis_unreachable __builtin_unreachable
+#define valkey_unreachable __builtin_unreachable
 #else
-#define redis_unreachable abort
+#define valkey_unreachable abort
 #endif
 #if __GNUC__ >= 3
 #define likely(x) __builtin_expect(!!(x), 1)

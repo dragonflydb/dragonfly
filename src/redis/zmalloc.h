@@ -129,7 +129,7 @@ int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* 
  * return 0 if not, 1 if underutilized
  */
 int zmalloc_page_is_underutilized(void *ptr, float ratio);
-// roman: void zlibc_free(void *ptr);
+char *zstrdup(const char *s);
 
 void init_zmalloc_threadlocal(void* heap);
 extern __thread ssize_t zmalloc_used_memory_tl;

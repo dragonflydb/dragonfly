@@ -178,3 +178,11 @@ void init_zmalloc_threadlocal(void* heap) {
 int zmalloc_page_is_underutilized(void* ptr, float ratio) {
   return mi_heap_page_is_underutilized(zmalloc_heap, ptr, ratio);
 }
+
+char *zstrdup(const char *s) {
+  size_t l = strlen(s) + 1;
+  char *p = zmalloc(l);
+
+  memcpy(p, s, l);
+  return p;
+}
