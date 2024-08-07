@@ -482,13 +482,8 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
 
   if (caching_mode_ && IsValid(res.it)) {
     if (!change_cb_.empty()) {
-      {
-        // We need this because we might not be able to acquire this lock within
-        // CallChangeCallbacks and if this happens then Capture Version Change
-        // might be invalid, since the bucket might change after we block waiting
-        // for the lock to be available.
-        std::unique_lock lk(local_mu_);
-      }
+      FetchedItemsRestorer fetched_restorer(&fetched_items_);
+      std::unique_lock lk(local_mu_);
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
@@ -579,6 +574,9 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   }
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
+
+  FetchedItemsRestorer fetched_restorer(&fetched_items_);
+  std::unique_lock lk(local_mu_);
 
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
@@ -1065,6 +1063,8 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 }
 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
+  FetchedItemsRestorer fetched_restorer(&fetched_items_);
+  std::unique_lock lk(local_mu_);
   CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
@@ -1534,8 +1534,6 @@ void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const Change
     return;
 
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << id;
-  FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock lk(local_mu_);
 
   const size_t limit = change_cb_.size();
   auto ccb = change_cb_.begin();
