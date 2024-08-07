@@ -24,7 +24,7 @@ class Node:
         self.port = port
 
     def update_id(node):
-        node.id = send_command(node, ["dflycluster", "myid"])
+        node.id = send_command(node, ["cluster", "myid"])
         print(f"- ID {node.id}")
 
 

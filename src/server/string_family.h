@@ -95,9 +95,6 @@ class SetCmd {
 
 class StringFamily {
  public:
-  static void Init(util::ProactorPool* pp);
-  static void Shutdown();
-
   static void Register(CommandRegistry* registry);
 
  private:

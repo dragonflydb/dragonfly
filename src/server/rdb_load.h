@@ -207,6 +207,10 @@ class RdbLoader : protected RdbLoaderBase {
     stop_early_.store(true);
   }
 
+  void Pause(bool pause) {
+    pause_ = pause;
+  }
+
   // Return the offset that was received with a RDB_OPCODE_JOURNAL_OFFSET command,
   // or 0 if no offset was received.
   std::optional<uint64_t> journal_offset() const {
@@ -276,8 +280,11 @@ class RdbLoader : protected RdbLoaderBase {
   double load_time_ = 0;
 
   DbIndex cur_db_index_ = 0;
-
+  bool pause_ = false;
   AggregateError ec_;
+
+  // We use atomics here because shard threads can notify RdbLoader fiber from another thread
+  // that it should stop early.
   std::atomic_bool stop_early_{false};
   std::atomic_uint blocked_shards_{0};
 

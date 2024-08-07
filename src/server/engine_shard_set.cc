@@ -406,14 +406,15 @@ void EngineShard::StopPeriodicFiber() {
   }
 }
 
-void EngineShard::StartPeriodicFiber(util::ProactorBase* pb) {
+void EngineShard::StartPeriodicFiber(util::ProactorBase* pb, std::function<void()> global_handler) {
   uint32_t clock_cycle_ms = 1000 / std::max<uint32_t>(1, GetFlag(FLAGS_hz));
   if (clock_cycle_ms == 0)
     clock_cycle_ms = 1;
 
-  fiber_periodic_ = MakeFiber([this, index = pb->GetPoolIndex(), period_ms = clock_cycle_ms] {
+  fiber_periodic_ = MakeFiber([this, index = pb->GetPoolIndex(), period_ms = clock_cycle_ms,
+                               handler = std::move(global_handler)] {
     ThisFiber::SetName(absl::StrCat("shard_periodic", index));
-    RunPeriodic(std::chrono::milliseconds(period_ms));
+    RunPeriodic(std::chrono::milliseconds(period_ms), std::move(handler));
   });
 }
 
@@ -602,14 +603,38 @@ void EngineShard::Heartbeat() {
 
   CacheStats();
 
-  if (IsReplica())  // Never run expiration on replica.
-    return;
+  if (!IsReplica()) {  // Never run expiry/evictions on replica.
+    RetireExpiredAndEvict();
+  }
 
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   // Some of the functions below might acquire the lock again so we need to unlock it
   std::unique_lock lk(db_slice.GetSerializationMutex());
 
+  // Offset CoolMemoryUsage when consider background offloading.
+  // TODO: Another approach could be is to align the approach  similarly to how we do with
+  // FreeMemWithEvictionStep, i.e. if memory_budget is below the limit.
+  size_t tiering_offload_threshold =
+      tiered_storage_ ? tiered_storage_->CoolMemoryUsage() +
+                            size_t(max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) /
+                                shard_set->size()
+                      : std::numeric_limits<size_t>::max();
+  size_t used_memory = UsedMemory();
+  if (used_memory > tiering_offload_threshold) {
+    VLOG(1) << "Running Offloading, memory=" << used_memory
+            << " tiering_threshold: " << tiering_offload_threshold
+            << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
+
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (!db_slice.IsDbValid(i))
+        continue;
+      tiered_storage_->RunOffloading(i);
+    }
+  }
+}
+
+void EngineShard::RetireExpiredAndEvict() {
   constexpr double kTtlDeleteLimit = 200;
   constexpr double kRedLimitFactor = 0.1;
 
@@ -620,20 +645,12 @@ void EngineShard::Heartbeat() {
   if (deleted > 10) {
     // deleted should be <= traversed.
     // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
-    // The higher t
+    // The higher ttl_delete_target the more likely we have lots of expired items that need
+    // to be deleted.
     ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
   }
 
   ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
-
-  // Offset CoolMemoryUsage when consider background offloading.
-  // TODO: Another approach could be is to align the approach  similarly to how we do with
-  // FreeMemWithEvictionStep, i.e. if memory_budget is below the limit.
-  size_t tiering_offload_threshold =
-      tiered_storage_ ? tiered_storage_->CoolMemoryUsage() +
-                            size_t(max_memory_limit * GetFlag(FLAGS_tiered_offload_threshold)) /
-                                shard_set->size()
-                      : std::numeric_limits<size_t>::max();
 
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
@@ -657,14 +674,6 @@ void EngineShard::Heartbeat() {
       db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
                                        eviction_redline - db_slice.memory_budget());
     }
-
-    size_t used_memory = UsedMemory();
-    if (used_memory > tiering_offload_threshold) {
-      VLOG(1) << "Running Offloading, memory=" << used_memory
-              << " tiering_threshold: " << tiering_offload_threshold
-              << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
-      tiered_storage_->RunOffloading(i);
-    }
   }
 
   // Because TriggerOnJournalWriteToSink might lock the same lock.
@@ -676,7 +685,8 @@ void EngineShard::Heartbeat() {
   }
 }
 
-void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
+void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms,
+                              std::function<void()> global_handler) {
   VLOG(1) << "RunPeriodic with period " << period_ms.count() << "ms";
 
   bool runs_global_periodic = (shard_id() == 0);  // Only shard 0 runs global periodic.
@@ -721,6 +731,10 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms) {
               rss_mem_peak.store(total_rss, memory_order_relaxed);
           }
         }
+
+        if (global_handler) {
+          global_handler();
+        }
       }
     }
   }
@@ -742,17 +756,9 @@ void EngineShard::CacheStats() {
   size_t current = used_mem_current.fetch_add(delta, memory_order_relaxed) + delta;
   ssize_t free_mem = max_memory_limit - current;
 
-  size_t entries = 0;
-  size_t table_memory = 0;
-  for (size_t i = 0; i < db_slice.db_array_size(); ++i) {
-    DbTable* table = db_slice.GetDBTable(i);
-    if (table) {
-      entries += table->prime.size();
-      table_memory += table->table_memory();
-    }
-  }
-  DCHECK_EQ(table_memory, db_slice.table_memory());
-  DCHECK_EQ(entries, db_slice.entries_count());
+  size_t entries = db_slice.entries_count();
+  size_t table_memory = db_slice.table_memory();
+
   if (tiered_storage_) {
     table_memory += tiered_storage_->CoolMemoryUsage();
   }
@@ -765,12 +771,6 @@ void EngineShard::CacheStats() {
 size_t EngineShard::UsedMemory() const {
   return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal() +
          search_indices()->GetUsedMemory();
-}
-
-void EngineShard::TEST_EnableHeartbeat() {
-  fiber_periodic_ = fb2::Fiber("shard_periodic_TEST", [this, period_ms = 1] {
-    RunPeriodic(std::chrono::milliseconds(period_ms));
-  });
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula justification
@@ -907,7 +907,7 @@ size_t GetTieredFileLimit(size_t threads) {
   return max_shard_file_size;
 }
 
-void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
+void EngineShardSet::Init(uint32_t sz, std::function<void()> global_handler) {
   CHECK_EQ(0u, size());
   shard_queue_.resize(sz);
 
@@ -925,10 +925,8 @@ void EngineShardSet::Init(uint32_t sz, bool update_db_time) {
       auto* shard = EngineShard::tlocal();
       shard->InitTieredStorage(pb, max_shard_file_size);
 
-      if (update_db_time) {
-        // Must be last, as it accesses objects initialized above.
-        shard->StartPeriodicFiber(pb);
-      }
+      // Must be last, as it accesses objects initialized above.
+      shard->StartPeriodicFiber(pb, global_handler);
     }
   });
 }
@@ -952,10 +950,6 @@ void EngineShardSet::InitThreadLocal(ProactorBase* pb) {
   EngineShard::InitThreadLocal(pb);
   EngineShard* es = EngineShard::tlocal();
   shard_queue_[es->shard_id()] = es->GetFiberQueue();
-}
-
-void EngineShardSet::TEST_EnableHeartBeat() {
-  RunBriefInParallel([](EngineShard* shard) { shard->TEST_EnableHeartbeat(); });
 }
 
 void EngineShardSet::TEST_EnableCacheMode() {

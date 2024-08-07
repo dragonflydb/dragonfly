@@ -111,7 +111,18 @@ class DflyCmd {
           flows{flow_count} {
     }
 
-    SyncState replica_state;  // always guarded by ReplicaInfo::mu
+    [[nodiscard]] auto GetExclusiveLock() {
+      return std::lock_guard{shared_mu};
+    }
+
+    [[nodiscard]] auto GetSharedLock() {
+      return std::shared_lock{shared_mu};
+    }
+
+    // Transition into cancelled state, run cleanup.
+    void Cancel();
+
+    SyncState replica_state;  // always guarded by shared_mu
     Context cntx;
 
     std::string id;
@@ -122,7 +133,8 @@ class DflyCmd {
     // Flows describe the state of shard-local flow.
     // They are always indexed by the shard index on the master.
     std::vector<FlowInfo> flows;
-    util::fb2::Mutex mu;  // See top of header for locking levels.
+
+    util::fb2::SharedMutex shared_mu;  // See top of header for locking levels.
   };
 
  public:
@@ -132,15 +144,14 @@ class DflyCmd {
 
   void OnClose(ConnectionContext* cntx);
 
-  void BreakOnShutdown();
-
   // Stop all background processes so we can exit in orderly manner.
   void Shutdown();
 
   // Create new sync session.
   std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> CreateSyncSession(ConnectionContext* cntx);
 
-  std::shared_ptr<ReplicaInfo> GetReplicaInfo(ConnectionContext* cntx);
+  // Master side acces method to replication info of that connection.
+  std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionContext* cntx);
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const;
 
@@ -148,9 +159,6 @@ class DflyCmd {
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
-
-  // Transition into cancelled state, run cleanup.
-  void CancelReplication(uint32_t sync_id, std::shared_ptr<ReplicaInfo> replica_info_ptr);
 
  private:
   // JOURNAL [START/STOP]
@@ -200,9 +208,6 @@ class DflyCmd {
   // Fiber that runs full sync for each flow.
   void FullSyncFb(FlowInfo* flow, Context* cntx);
 
-  // Main entrypoint for stopping replication.
-  void StopReplication(uint32_t sync_id);
-
   // Get ReplicaInfo by sync_id.
   std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id);
 
@@ -214,17 +219,20 @@ class DflyCmd {
   bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
                                 facade::RedisReplyBuilder* rb);
 
+ private:
+  // Main entrypoint for stopping replication.
+  void StopReplication(uint32_t sync_id);
+
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
-  std::map<uint32_t, LSN> ReplicationLags() const;
+  std::map<uint32_t, LSN> ReplicationLagsLocked() const;
 
- private:
   ServerFamily* sf_;  // Not owned
 
   uint32_t next_sync_id_ = 1;
 
   using ReplicaInfoMap = absl::btree_map<uint32_t, std::shared_ptr<ReplicaInfo>>;
-  ReplicaInfoMap replica_infos_;
+  ReplicaInfoMap replica_infos_ ABSL_GUARDED_BY(mu_);
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };

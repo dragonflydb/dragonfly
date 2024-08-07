@@ -1404,12 +1404,6 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-void StringFamily::Init(util::ProactorPool* pp) {
-}
-
-void StringFamily::Shutdown() {
-}
-
 #define HFUNC(x) SetHandler(&StringFamily::x)
 
 namespace acl {

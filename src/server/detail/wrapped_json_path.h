@@ -24,32 +24,15 @@ using JsonExpression = jsoncons::jsonpath::jsonpath_expression<JsonType>;
 template <typename T>
 using JsonPathEvaluateCallback = absl::FunctionRef<T(std::string_view, const JsonType&)>;
 
-template <typename T = Nothing> class MutateCallbackResult {
- public:
+template <typename T = Nothing> struct MutateCallbackResult {
   MutateCallbackResult() = default;
 
-  explicit MutateCallbackResult(bool should_be_deleted) : should_be_deleted_(should_be_deleted_) {
+  MutateCallbackResult(bool should_be_deleted_, T value_)
+      : should_be_deleted(should_be_deleted_), value(std::move(value_)) {
   }
 
-  MutateCallbackResult(bool should_be_deleted, T&& value)
-      : should_be_deleted_(should_be_deleted), value_(std::forward<T>(value)) {
-  }
-
-  bool HasValue() const {
-    return value_.has_value();
-  }
-
-  T&& GetValue() && {
-    return std::move(value_).value();
-  }
-
-  bool ShouldBeDeleted() const {
-    return should_be_deleted_;
-  }
-
- private:
-  bool should_be_deleted_;
-  std::optional<T> value_;
+  bool should_be_deleted = false;
+  std::optional<T> value;
 };
 
 template <typename T>
@@ -81,7 +64,8 @@ template <typename T> class JsonCallbackResult {
 
   JsonCallbackResult() = default;
 
-  explicit JsonCallbackResult(bool legacy_mode_is_enabled) {
+  explicit JsonCallbackResult(bool legacy_mode_is_enabled, bool save_first_result = false)
+      : save_first_result_(save_first_result) {
     if (!legacy_mode_is_enabled) {
       result_ = JsonV2Result{};
     }
@@ -89,7 +73,14 @@ template <typename T> class JsonCallbackResult {
 
   void AddValue(T value) {
     if (IsV1()) {
-      details::OptionalEmplace(std::move(value), &AsV1());
+      if (!save_first_result_) {
+        details::OptionalEmplace(std::move(value), &AsV1());
+      } else {
+        auto& as_v1 = AsV1();
+        if (!as_v1.has_value()) {
+          details::OptionalEmplace(std::move(value), &as_v1);
+        }
+      }
     } else {
       AsV2().emplace_back(std::move(value));
     }
@@ -117,6 +108,7 @@ template <typename T> class JsonCallbackResult {
 
  private:
   std::variant<JsonV1Result, JsonV2Result> result_;
+  bool save_first_result_ = false;
 };
 
 class WrappedJsonPath {
@@ -137,14 +129,15 @@ class WrappedJsonPath {
   }
 
   template <typename T>
-  JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb) const {
-    return Evaluate(json_entry, cb, IsLegacyModePath());
+  JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb,
+                                 bool save_first_result) const {
+    return Evaluate(json_entry, cb, save_first_result, IsLegacyModePath());
   }
 
   template <typename T>
   JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb,
-                                 bool legacy_mode_is_enabled) const {
-    JsonCallbackResult<T> eval_result{legacy_mode_is_enabled};
+                                 bool save_first_result, bool legacy_mode_is_enabled) const {
+    JsonCallbackResult<T> eval_result{legacy_mode_is_enabled, save_first_result};
 
     auto eval_callback = [&cb, &eval_result](std::string_view path, const JsonType& val) {
       eval_result.AddValue(cb(path, val));
@@ -172,10 +165,10 @@ class WrappedJsonPath {
     auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
                                                  JsonType* val) -> bool {
       auto res = cb(path, val);
-      if (res.HasValue()) {
-        mutate_result.AddValue(std::move(res).GetValue());
+      if (res.value.has_value()) {
+        mutate_result.AddValue(std::move(res.value).value());
       }
-      return res.ShouldBeDeleted();
+      return res.should_be_deleted;
     };
 
     if (HoldsJsonPath()) {
@@ -217,7 +210,11 @@ class WrappedJsonPath {
     return is_legacy_mode_path_;
   }
 
- private:
+  bool RefersToRootElement() const {
+    auto path = path_.view();
+    return path.empty() || path == kV1PathRootElement || path == kV2PathRootElement;
+  }
+
   bool HoldsJsonPath() const {
     return std::holds_alternative<json::Path>(parsed_path_);
   }

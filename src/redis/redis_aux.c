@@ -13,9 +13,6 @@ void InitRedisTables() {
   crc64_init();
   memset(&server, 0, sizeof(server));
 
-  server.maxmemory_policy = 0;
-  server.lfu_decay_time = 0;
-
   // been used by t_zset routines that convert listpack to skiplist for cases
   // above these thresholds.
   server.zset_max_listpack_entries = 128;

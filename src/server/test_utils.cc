@@ -167,10 +167,10 @@ void BaseFamilyTest::SetUpTestSuite() {
       SetTestFlag(flag, value);
     }
   }
-  max_memory_limit = INT_MAX;
 }
 
 void BaseFamilyTest::SetUp() {
+  max_memory_limit = INT_MAX;
   ResetService();
 }
 
@@ -207,9 +207,7 @@ void BaseFamilyTest::ResetService() {
   pp_->Run();
   service_ = std::make_unique<Service>(pp_.get());
 
-  Service::InitOpts opts;
-  opts.disable_time_update = true;
-  service_->Init(nullptr, {}, opts);
+  service_->Init(nullptr, {});
   used_mem_current = 0;
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;

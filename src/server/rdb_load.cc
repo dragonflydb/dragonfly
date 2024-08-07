@@ -1980,6 +1980,11 @@ error_code RdbLoader::Load(io::Source* src) {
   auto cleanup = absl::Cleanup([&] { FinishLoad(start, &keys_loaded); });
 
   while (!stop_early_.load(memory_order_relaxed)) {
+    if (pause_) {
+      ThisFiber::SleepFor(100ms);
+      continue;
+    }
+
     /* Read type. */
     SET_OR_RETURN(FetchType(), type);
 

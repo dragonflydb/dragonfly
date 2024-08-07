@@ -192,7 +192,7 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
   for (auto [dbid, hash, item_segment] : ts_->bins_->DeleteBin(segment, page)) {
     // Search for key with the same hash and value pointing to the same segment.
     // If it still exists, it must correspond to the value stored in this bin
-    auto predicate = [item_segment](const PrimeKey& key, const PrimeValue& probe) {
+    auto predicate = [item_segment = item_segment](const PrimeKey& key, const PrimeValue& probe) {
       return probe.IsExternal() && tiering::DiskSegment{probe.GetExternalSlice()} == item_segment;
     };
     auto it = db_slice_.GetDBTable(dbid)->prime.FindFirst(hash, predicate);

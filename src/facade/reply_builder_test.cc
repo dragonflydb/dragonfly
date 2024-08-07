@@ -85,7 +85,7 @@ class RedisReplyBuilderTest : public testing::Test {
     }
 
     bool IsError() const {
-      return args.size() == 1 && args[0].type == RespExpr::ERROR;
+      return result != RedisParser::OK || (args.size() == 1 && args[0].type == RespExpr::ERROR);
     }
 
     bool IsOk() const {
@@ -949,6 +949,18 @@ TEST_F(RedisReplyBuilderTest, VerbatimString) {
   builder_->SendVerbatimString(str);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "$16\r\nA simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
+}
+
+TEST_F(RedisReplyBuilderTest, Issue3449) {
+  vector<string> records;
+  for (unsigned i = 0; i < 10'000; ++i) {
+    records.push_back(absl::StrCat(i));
+  }
+  builder_->SendStringArr(records);
+  ASSERT_TRUE(NoErrors());
+  ParsingResults parse_result = Parse();
+  ASSERT_FALSE(parse_result.IsError());
+  EXPECT_EQ(10000, parse_result.args.size());
 }
 
 static void BM_FormatDouble(benchmark::State& state) {

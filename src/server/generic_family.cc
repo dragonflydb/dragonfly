@@ -727,12 +727,6 @@ OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
 
 }  // namespace
 
-void GenericFamily::Init(util::ProactorPool* pp) {
-}
-
-void GenericFamily::Shutdown() {
-}
-
 void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
   VLOG(1) << "Del " << ArgS(args, 0);

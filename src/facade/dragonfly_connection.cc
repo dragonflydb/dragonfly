@@ -897,7 +897,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   ClearPipelinedMessages();
   DCHECK(dispatch_q_.empty());
 
-  service_->OnClose(cc_.get());
+  service_->OnConnectionClose(cc_.get());
   DecreaseStatsOnClose();
 
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last

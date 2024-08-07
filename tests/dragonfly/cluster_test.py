@@ -13,6 +13,7 @@ from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
+from .seeder import SeederBase
 
 from . import dfly_args
 
@@ -83,24 +84,26 @@ class MigrationInfo:
 
 @dataclass
 class NodeInfo:
+    id: str
     instance: DflyInstance
     client: aioredis.Redis
     admin_client: aioredis.Redis
     slots: list
     migrations: list
-    id: str
+    replicas: list
 
 
-async def create_node_info(instance):
+async def create_node_info(instance) -> NodeInfo:
     client = instance.client()
     node_id = await get_node_id(client)
     ninfo = NodeInfo(
+        id=node_id,
         instance=instance,
         client=client,
         admin_client=instance.admin_client(),
         slots=[],
         migrations=[],
-        id=node_id,
+        replicas=[],
     )
     return ninfo
 
@@ -114,7 +117,14 @@ def generate_config(nodes):
                 "ip": "127.0.0.1",
                 "port": node.instance.port,
             },
-            "replicas": [],
+            "replicas": [
+                {
+                    "id": replica.id,
+                    "ip": "127.0.0.1",
+                    "port": replica.instance.port,
+                }
+                for replica in node.replicas
+            ],
             "migrations": [
                 {
                     "slot_ranges": [{"start": s, "end": e} for (s, e) in m.slots],
@@ -138,17 +148,15 @@ async def push_config(config, admin_connections):
 
 
 async def wait_for_status(admin_client, node_id, status, timeout=10):
-    start = time.time()
-    while (time.time() - start) < timeout:
-        response = await admin_client.execute_command(
-            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
-        )
-        if status in response:
-            return
-        else:
-            logging.debug(f"SLOT-MIGRATION-STATUS is {response}, not {status}")
-            await asyncio.sleep(0.1)
-    raise RuntimeError("Timeout to achieve migrations status")
+    get_status = lambda: admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
+    )
+
+    async for states, breaker in tick_timer(get_status, timeout=timeout):
+        if type(states) != list:
+            states = [states]
+        with breaker:
+            assert all(status in state for state in states), states
 
 
 async def check_for_no_state_status(admin_clients):
@@ -203,7 +211,9 @@ class TestEmulated:
         assert val == [True, "bar"]
 
 
-@dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
+# Unfortunately we can't test --announce_port here because that causes the Python Cluster client to
+# throw if it can't access the port in `CLUSTER SLOTS` :|
+@dfly_args({"cluster_mode": "emulated", "announce_ip": "127.0.0.2"})
 class TestEmulatedWithAnnounceIp:
     def test_cluster_slots_command(self, df_server, cluster_client: redis.RedisCluster):
         expected = {(0, 16383): {"primary": ("127.0.0.2", df_server.port), "replicas": []}}
@@ -327,7 +337,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
     await close_clients(c_master, *c_replicas)
 
 
-@dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
+@dfly_args({"cluster_mode": "emulated"})
 async def test_cluster_info(async_client):
     res = await async_client.execute_command("CLUSTER INFO")
     assert len(res) == 16
@@ -351,7 +361,7 @@ async def test_cluster_info(async_client):
     }
 
 
-@dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
+@dfly_args({"cluster_mode": "emulated", "announce_ip": "127.0.0.2"})
 @pytest.mark.asyncio
 async def test_cluster_nodes(df_server, async_client):
     res = await async_client.execute_command("CLUSTER NODES")
@@ -1103,8 +1113,13 @@ async def test_cluster_flushall_during_migration(
 
     await nodes[0].client.execute_command("flushall")
 
-    assert "FINISHED" not in await nodes[1].admin_client.execute_command(
-        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+    assert (
+        "FINISHED"
+        not in (
+            await nodes[1].admin_client.execute_command(
+                "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+            )
+        )[0]
     ), "Weak test case - finished migration too early"
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
@@ -1177,12 +1192,12 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
         await nodes[0].admin_client.execute_command(
             "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
         )
-    ).startswith(f"out {nodes[1].id} FINISHED keys:7")
+    )[0].startswith(f"out {nodes[1].id} FINISHED keys:7")
     assert (
         await nodes[1].admin_client.execute_command(
             "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
         )
-    ).startswith(f"in {nodes[0].id} FINISHED keys:7")
+    )[0].startswith(f"in {nodes[0].id} FINISHED keys:7")
 
     nodes[0].migrations = []
     nodes[0].slots = [(0, 2999)]
@@ -1506,6 +1521,77 @@ async def test_cluster_config_reapply(df_factory: DflyInstanceFactory):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
 
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_replication_migration(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+):
+    """
+    Test replication with migration. Create the following setup:
+
+    master_1 -> replica_1, master_2 -> replica_2
+
+    with each master owning half the slots. Let them then fully exchange their slots
+    and make sure the captures on the replicas are equal.
+    """
+    instances = [
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + 1000 + i) for i in range(4)
+    ]
+    df_factory.start_all(instances)
+    m1, r1, m2, r2 = instances
+
+    nodes = [await create_node_info(n) for n in instances]
+    m1_node, r1_node, m2_node, r2_node = nodes
+    master_nodes = [m1_node, m2_node]
+
+    # divide node slots by half
+    m1_node.slots = [(0, 8000)]
+    m1_node.replicas = [r1_node]
+    m2_node.slots = [(8001, 16383)]
+    m2_node.replicas = [r2_node]
+
+    # generate some data with seederv1
+    seeder = df_seeder_factory.create(keys=2000, port=m1.port, cluster_mode=True)
+    seeder.run(target_deviation=0.1)
+
+    # start replication from replicas
+    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
+    await r2_node.admin_client.execute_command(f"replicaof localhost {m2_node.instance.port}")
+
+    await wait_available_async(r1_node.admin_client)
+    await wait_available_async(r2_node.admin_client)
+
+    # push this config
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    # Create caputres on the replicas with v2 seeder
+    r1_caputre = await SeederBase.capture(r1_node.admin_client)
+    r2_caputre = await SeederBase.capture(r2_node.admin_client)
+
+    # add migration and update config
+    m1_node.migrations = [
+        MigrationInfo("127.0.0.1", m2_node.instance.admin_port, [(0, 8000)], m2_node.id)
+    ]
+    m2_node.migrations = [
+        MigrationInfo("127.0.0.1", m1_node.instance.admin_port, [(8001, 16383)], m1_node.id)
+    ]
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    # wait for migration to finish
+    await wait_for_status(m1_node.admin_client, m2_node.id, "FINISHED")
+    await wait_for_status(m2_node.admin_client, m1_node.id, "FINISHED")
+
+    # wait for replicas to catch up
+    await asyncio.sleep(2)
+
+    # ensure captures got exchanged
+    assert (await SeederBase.capture(r1_node.admin_client)) == r2_caputre
+    assert (await SeederBase.capture(r2_node.admin_client)) == r1_caputre
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
