@@ -763,6 +763,8 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
 }
 
 TEST_F(MultiTest, UndeclaredKeyFlag) {
+  absl::FlagSaver fs;
+
   const char* script = "return redis.call('GET', 'random-key');";
   Run({"set", "random-key", "works"});
 
