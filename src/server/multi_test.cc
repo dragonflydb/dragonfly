@@ -769,7 +769,7 @@ TEST_F(MultiTest, UndeclaredKeyFlag) {
     return;
   }
 
-  absl::FlagSaver fs;
+  absl::FlagSaver fs;  // lua_undeclared_keys_shas changed via CONFIG cmd below
 
   const char* script = "return redis.call('GET', 'random-key');";
   Run({"set", "random-key", "works"});

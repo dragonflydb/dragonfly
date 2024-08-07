@@ -38,9 +38,11 @@ ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
           "access undeclared keys, automaticaly set the script flag to be able to run with "
           "undeclared key.");
 
-ABSL_FLAG(std::vector<std::string>, lua_undeclared_keys_shas,
-          {"351130589c64523cb98978dc32c64173a31244f3"},  // Sidekiq's scheduler script, see #2442
-          "Comma-separated list of Lua script SHAs which are allowed to access undeclared keys.");
+ABSL_FLAG(
+    std::vector<std::string>, lua_undeclared_keys_shas,
+    {"351130589c64523cb98978dc32c64173a31244f3"},  // Sidekiq's scheduler script, see #2442
+    "Comma-separated list of Lua script SHAs which are allowed to access undeclared keys. SHAs are "
+    "only looked at when loading the script, and new values do not affect already-loaded script.");
 
 namespace dfly {
 using namespace std;
