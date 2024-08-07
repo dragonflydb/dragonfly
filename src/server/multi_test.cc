@@ -380,6 +380,7 @@ TEST_F(MultiTest, Eval) {
     GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
     return;
   }
+  absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_lua_allow_undeclared_auto_correct, true);
 
   RespExpr resp;
@@ -763,6 +764,11 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
 }
 
 TEST_F(MultiTest, UndeclaredKeyFlag) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode != Transaction::LOCK_AHEAD) {
+    GTEST_SKIP() << "Skipped test because multi_exec_mode is not default";
+    return;
+  }
+
   absl::FlagSaver fs;
 
   const char* script = "return redis.call('GET', 'random-key');";
