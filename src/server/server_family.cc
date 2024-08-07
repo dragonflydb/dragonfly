@@ -123,7 +123,7 @@ ABSL_FLAG(bool, s3_ec2_metadata, false,
 ABSL_FLAG(bool, s3_sign_payload, true,
           "whether to sign the s3 request payload when uploading snapshots");
 
-ABSL_FLAG(bool, info_replication_valkey_compatible, false,
+ABSL_FLAG(bool, info_replication_valkey_compatible, true,
           "when true - output valkey compatible values for info-replication");
 
 ABSL_DECLARE_FLAG(int32_t, port);
