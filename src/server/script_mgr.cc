@@ -40,7 +40,10 @@ ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
 
 ABSL_FLAG(
     std::vector<std::string>, lua_undeclared_keys_shas,
-    {"351130589c64523cb98978dc32c64173a31244f3"},  // Sidekiq's scheduler script, see #2442
+    std::vector<std::string>({
+        "351130589c64523cb98978dc32c64173a31244f3",  // Sidekiq, see #2442
+        "6ae15ef4678593dc61f991c9953722d67d822776",  // Sidekiq, see #2442
+    }),
     "Comma-separated list of Lua script SHAs which are allowed to access undeclared keys. SHAs are "
     "only looked at when loading the script, and new values do not affect already-loaded script.");
 
