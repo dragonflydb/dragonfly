@@ -38,6 +38,9 @@ ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
           "access undeclared keys, automaticaly set the script flag to be able to run with "
           "undeclared key.");
 
+ABSL_FLAG(std::vector<std::string>, lua_undeclared_keys_shas, {},
+          "Comma-separated list of Lua script SHAs which are allowed to access undeclared keys.");
+
 namespace dfly {
 using namespace std;
 using namespace facade;
@@ -261,6 +264,11 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
   if (!params_opt)
     return params_opt.get_unexpected();
   auto params = params_opt->value_or(default_params_);
+
+  auto undeclared_shas = absl::GetFlag(FLAGS_lua_undeclared_keys_shas);
+  if (find(undeclared_shas.begin(), undeclared_shas.end(), sha) != undeclared_shas.end()) {
+    params.undeclared_keys = true;
+  }
 
   // If the script is atomic, check for possible squashing optimizations.
   // For non atomic modes, squashing increases the time locks are held, which

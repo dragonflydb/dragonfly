@@ -762,6 +762,30 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
+TEST_F(MultiTest, UndeclaredKeyFlag) {
+  const char* script = "return redis.call('GET', 'random-key');";
+  Run({"set", "random-key", "works"});
+
+  // Get SHA for script in a persistent way
+  string sha = Run({"script", "load", script}).GetString();
+
+  // Make sure we can't run the script before setting the flag
+  EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("undeclared"));
+  EXPECT_THAT(Run({"eval", script, "0"}), ErrArg("undeclared"));
+
+  // Clear all Lua scripts so we can configure the cache
+  EXPECT_THAT(Run({"script", "flush"}), "OK");
+  EXPECT_THAT(Run({"script", "exists", sha}), IntArg(0));
+
+  EXPECT_THAT(
+      Run({"config", "set", "lua_undeclared_keys_shas", absl::StrCat(sha, ",NON-EXISTING-HASH")}),
+      "OK");
+
+  // Check eval finds script flags.
+  EXPECT_EQ(Run({"eval", script, "0"}), "works");
+  EXPECT_EQ(Run({"evalsha", sha, "0"}), "works");
+}
+
 // todo: ASAN fails heres on arm
 #ifndef SANITIZERS
 TEST_F(MultiTest, ScriptBadCommand) {
