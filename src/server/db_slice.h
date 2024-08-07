@@ -575,7 +575,7 @@ class DbSlice {
   bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
-  ssize_t memory_budget_ = SSIZE_MAX;
+  ssize_t memory_budget_ = SSIZE_MAX / 2;
   size_t bytes_per_object_ = 0;
   size_t soft_budget_limit_ = 0;
   size_t table_memory_ = 0;
