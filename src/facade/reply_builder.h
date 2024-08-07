@@ -149,7 +149,6 @@ class SinkReplyBuilder {
 
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
-  void SendRawVec(absl::Span<const std::string_view> msg_vec);
 
   void Send(const iovec* v, uint32_t len);
 
@@ -166,6 +165,56 @@ class SinkReplyBuilder {
   bool should_aggregate_ : 1;
   bool has_replied_ : 1;
   bool send_active_ : 1;
+};
+
+// TMP: New version of reply builder that batches not only to a buffer, but also iovecs.
+class SinkReplyBuilder2 {
+  explicit SinkReplyBuilder2(io::Sink* sink) : sink_(sink) {
+  }
+
+  // Use with care: All send calls within a scope must keep their data alive!
+  // This allows to fully eliminate copies for batches of data by using vectorized io.
+  struct ReplyScope {
+    explicit ReplyScope(SinkReplyBuilder2* rb) : prev_scoped(rb->scoped_), rb(rb) {
+      rb->scoped_ = true;
+    }
+    ~ReplyScope() {
+      if (!prev_scoped) {
+        rb->scoped_ = false;
+        rb->FinishScope();
+      }
+    }
+
+   private:
+    bool prev_scoped;
+    SinkReplyBuilder2* rb;
+  };
+
+ public:
+  void Write(std::string_view str);
+
+ protected:
+  void Flush();        // Send all accumulated data and reset to clear state
+  void FinishScope();  // Called when scope ends
+
+  char* ReservePiece(size_t size);        // Reserve size bytes from buffer
+  void CommitPiece(size_t size);          // Mark size bytes from buffer as used
+  void WritePiece(std::string_view str);  // Reserve + memcpy + Commit
+
+  void WriteRef(std::string_view str);  // Add iovec bypassing buffer
+
+  bool IsInBuf(const void* ptr) const;  // checks if ptr is part of buffer_
+  void NextVec(std::string_view str);
+
+ private:
+  io::Sink* sink_;
+  std::error_code ec_;
+
+  bool scoped_;
+
+  size_t total_size_ = 0;  // sum of vec_ lengths
+  base::IoBuf buffer_;
+  std::vector<iovec> vecs_;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
