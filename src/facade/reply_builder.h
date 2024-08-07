@@ -203,7 +203,7 @@ class SinkReplyBuilder2 {
 
   void WriteRef(std::string_view str);  // Add iovec bypassing buffer
 
-  bool IsInBuf(const void* ptr) const;
+  bool IsInBuf(const void* ptr) const;  // checks if ptr is part of buffer_
   void NextVec(std::string_view str);
 
  private:
