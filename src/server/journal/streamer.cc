@@ -13,9 +13,9 @@
 
 using namespace facade;
 
-ABSL_FLAG(uint32_t, replication_stream_timeout, 500,
-          "Time in milliseconds to wait for the replication output buffer go below "
-          "the throttle limit.");
+ABSL_FLAG(uint32_t, replication_timeout, 10000,
+          "Time in milliseconds to wait for the replication writes being stuck.");
+
 ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
           "Time to wait for the replication output buffer go below the throttle limit");
 
@@ -155,8 +155,8 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (IsStopped() || !IsStalled())
     return;
 
-  auto next = chrono::steady_clock::now() +
-              chrono::milliseconds(absl::GetFlag(FLAGS_replication_stream_timeout));
+  auto next =
+      chrono::steady_clock::now() + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));
   size_t inflight_start = in_flight_bytes_;
   size_t sent_start = total_sent_;
 

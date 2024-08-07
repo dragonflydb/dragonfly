@@ -682,13 +682,14 @@ void EngineShard::RetireExpiredAndEvict() {
 }
 
 void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms,
-                              std::function<void()> global_handler) {
+                              std::function<void()> shard_handler) {
   VLOG(1) << "RunPeriodic with period " << period_ms.count() << "ms";
 
   bool runs_global_periodic = (shard_id() == 0);  // Only shard 0 runs global periodic.
   unsigned global_count = 0;
   int64_t last_stats_time = time(nullptr);
   int64_t last_heartbeat_ms = INT64_MAX;
+  int64_t last_handler_ms = 0;
 
   while (true) {
     if (fiber_periodic_done_.WaitFor(period_ms)) {
@@ -702,6 +703,10 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms,
     }
     Heartbeat();
     last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+    if (shard_handler && last_handler_ms + 100 < last_heartbeat_ms) {
+      last_handler_ms = last_heartbeat_ms;
+      shard_handler();
+    }
 
     if (runs_global_periodic) {
       ++global_count;
@@ -726,10 +731,6 @@ void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms,
             if (rss_mem_peak.load(memory_order_relaxed) < total_rss)
               rss_mem_peak.store(total_rss, memory_order_relaxed);
           }
-        }
-
-        if (global_handler) {
-          global_handler();
         }
       }
     }
@@ -903,7 +904,7 @@ size_t GetTieredFileLimit(size_t threads) {
   return max_shard_file_size;
 }
 
-void EngineShardSet::Init(uint32_t sz, std::function<void()> global_handler) {
+void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
   CHECK_EQ(0u, size());
   shard_queue_.resize(sz);
 
@@ -922,7 +923,8 @@ void EngineShardSet::Init(uint32_t sz, std::function<void()> global_handler) {
       shard->InitTieredStorage(pb, max_shard_file_size);
 
       // Must be last, as it accesses objects initialized above.
-      shard->StartPeriodicFiber(pb, global_handler);
+      // We can not move shard_handler because this code is called multiple times.
+      shard->StartPeriodicFiber(pb, shard_handler);
     }
   });
 }

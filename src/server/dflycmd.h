@@ -147,8 +147,8 @@ class DflyCmd {
   // Stop all background processes so we can exit in orderly manner.
   void Shutdown();
 
-  // Create new sync session.
-  std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> CreateSyncSession(ConnectionContext* cntx);
+  // Create new sync session. Returns (session_id, number of flows)
+  std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionContext* cntx);
 
   // Master side acces method to replication info of that connection.
   std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionContext* cntx);
@@ -159,6 +159,9 @@ class DflyCmd {
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
+
+  // Tries to break those flows that stuck on socket write for too long time.
+  void BreakStalledFlowsInShard();
 
  private:
   // JOURNAL [START/STOP]

@@ -1135,10 +1135,15 @@ class RdbSaver::Impl {
     return &meta_serializer_;
   }
 
+  int64_t last_write_ts() const {
+    return last_write_time_ns_;
+  }
+
  private:
   unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
 
   io::Sink* sink_;
+  int64_t last_write_time_ns_ = -1;  // last write call.
   vector<unique_ptr<SliceSnapshot>> shard_snapshots_;
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
@@ -1263,10 +1268,12 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record->id;
-      auto before = absl::GetCurrentTimeNanos();
+      last_write_time_ns_ = absl::GetCurrentTimeNanos();
       io_error = sink_->Write(io::Buffer(record->value));
-      stats.rdb_save_usec += (absl::GetCurrentTimeNanos() - before) / 1'000;
+
+      stats.rdb_save_usec += (absl::GetCurrentTimeNanos() - last_write_time_ns_) / 1'000;
       stats.rdb_save_count++;
+      last_write_time_ns_ = -1;
       if (io_error) {
         VLOG(1) << "Error writing to sink " << io_error.message();
         break;
@@ -1369,7 +1376,10 @@ RdbSaver::SnapshotStats RdbSaver::Impl::GetCurrentSnapshotProgress() const {
 }
 
 error_code RdbSaver::Impl::FlushSerializer() {
-  return serializer()->FlushToSink(sink_, SerializerBase::FlushState::kFlushMidEntry);
+  last_write_time_ns_ = absl::GetCurrentTimeNanos();
+  auto ec = serializer()->FlushToSink(sink_, SerializerBase::FlushState::kFlushMidEntry);
+  last_write_time_ns_ = -1;
+  return ec;
 }
 
 RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service) {
@@ -1482,7 +1492,6 @@ error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel(cntx->GetCancellation());
     if (io_error) {
-      LOG(ERROR) << "io error " << io_error;
       return io_error;
     }
     if (cntx->GetError()) {
@@ -1570,6 +1579,10 @@ size_t RdbSaver::GetTotalBuffersSize() const {
 
 RdbSaver::SnapshotStats RdbSaver::GetCurrentSnapshotProgress() const {
   return impl_->GetCurrentSnapshotProgress();
+}
+
+int64_t RdbSaver::GetLastWriteTime() const {
+  return impl_->last_write_ts();
 }
 
 void SerializerBase::AllocateCompressorOnce() {

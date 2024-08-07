@@ -2174,7 +2174,7 @@ async def test_replica_reconnect(df_factory, break_conn):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("set k 12345")
+    await c_master.set("k", "12345")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
     assert (await c_replica.info("REPLICATION"))["master_link_status"] == "up"
@@ -2230,3 +2230,34 @@ async def test_announce_ip_port(df_factory):
     host, port, _ = node[0]
     assert host == "overrode-host"
     assert port == "1337"
+
+
+async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
+    # disconnect after 1 second of being blocked
+    master = df_factory.create(replication_timeout=1000)
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("debug", "populate", "200000", "foo", "500")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    @assert_eventually
+    async def check_replica_connected():
+        repl_info = await c_master.info("replication")
+        assert "slave0" in repl_info
+
+    @assert_eventually
+    async def check_replica_disconnected():
+        repl_info = await c_master.info("replication")
+        assert "slave0" not in repl_info
+
+    await check_replica_connected()
+    await c_replica.execute_command("DEBUG REPLICA PAUSE")
+    await check_replica_connected()  # still connected
+    await asyncio.sleep(1)  # wait for the master to recognize it's being blocked
+    await check_replica_disconnected()
+    df_factory.stop_all()
