@@ -380,7 +380,10 @@ def copy_failed_logs(log_dir, report):
             shutil.copy(file, test_failed_path)
 
     # Clean up
-    os.remove(LAST_LOGS)
+    try:
+        os.remove(LAST_LOGS)
+    except OSError:
+        pass
 
 
 # tests results we get on the "call" state
