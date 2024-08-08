@@ -1553,7 +1553,7 @@ async def test_cluster_replication_migration(
 
     # generate some data with seederv1
     seeder = df_seeder_factory.create(keys=2000, port=m1.port, cluster_mode=True)
-    seeder.run(target_deviation=0.1)
+    await seeder.run(target_deviation=0.1)
 
     # start replication from replicas
     await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")

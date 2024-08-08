@@ -18,7 +18,7 @@ def main():
     info = client.info("replication")
     assert info["role"] == "master"
     replication_state = info["slave0"]
-    assert replication_state["state"] == "stable_sync"
+    assert replication_state["state"] == "online"
 
     def is_zero_lag(replication_state):
         return replication_state["lag"] == 0
