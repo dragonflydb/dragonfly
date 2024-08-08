@@ -167,34 +167,98 @@ class SinkReplyBuilder {
   bool send_active_ : 1;
 };
 
-// TMP: New version of reply builder that batches not only to a buffer, but also iovecs.
+// Base class for all reply builders. Offer a simple high level interface for controlling output
+// modes and sending basic response types.
 class SinkReplyBuilder2 {
-  explicit SinkReplyBuilder2(io::Sink* sink) : sink_(sink) {
-  }
-
-  // Use with care: All send calls within a scope must keep their data alive!
-  // This allows to fully eliminate copies for batches of data by using vectorized io.
-  struct ReplyScope {
-    explicit ReplyScope(SinkReplyBuilder2* rb) : prev_scoped(rb->scoped_), rb(rb) {
-      rb->scoped_ = true;
-    }
-    ~ReplyScope() {
-      if (!prev_scoped) {
-        rb->scoped_ = false;
-        rb->FinishScope();
-      }
-    }
-
-   private:
-    bool prev_scoped;
+  struct GuardBase {
+    bool prev;
     SinkReplyBuilder2* rb;
   };
 
  public:
-  void Write(std::string_view str);
+  constexpr static size_t kMaxInlineSize = 32;
+  constexpr static size_t kMaxBufferSize = 8192;
+
+  explicit SinkReplyBuilder2(io::Sink* sink) : sink_(sink) {
+  }
+
+  // USE WITH CARE! ReplyScope assumes that all string views in Send calls keep valid for the scopes
+  // lifetime. This allows the builder to avoid copies by enqueueing long strings directly for
+  // vectorized io.
+  struct ReplyScope : GuardBase {
+    explicit ReplyScope(SinkReplyBuilder2* rb) : GuardBase{std::exchange(rb->scoped_, true), rb} {
+    }
+
+    ~ReplyScope();
+  };
+
+  // Aggregator reduces the number of raw send calls by copying data in an intermediate buffer.
+  // Prefer ReplyScope if possible to additionally reduce the number of copies.
+  struct ReplyAggregator : GuardBase {
+    explicit ReplyAggregator(SinkReplyBuilder2* rb)
+        : GuardBase{std::exchange(rb->batched_, true), rb} {
+    }
+
+    ~ReplyAggregator();
+  };
+
+  void Flush();  // Send all accumulated data and reset to clear state
+
+  std::error_code GetError() const {
+    return ec_;
+  }
+
+  size_t UsedMemory() const {
+    return buffer_.Capacity();
+  }
+
+  bool IsSendActive() {
+    return send_active_;
+  }
+
+  void SetBatchMode(bool b) {
+    batched_ = b;
+  }
+
+  void CloseConnection();
+
+  static const ReplyStats& GetThreadLocalStats() {
+    return tl_facade_stats->reply_stats;
+  }
+
+  static void ResetThreadLocalStats() {
+    tl_facade_stats->reply_stats = {};
+  }
+
+ public:  // High level interface
+  virtual void SendLong(long val) = 0;
+  virtual void SendSimpleString(std::string_view str) = 0;
+
+  virtual void SendStored() = 0;
+  virtual void SendSetSkipped() = 0;
+  void SendOk() {
+    SendSimpleString("OK");
+  }
+
+  virtual void SendError(std::string_view str, std::string_view type = {}) = 0;  // MC and Redis
+  void SendError(OpStatus status);
+  void SendError(ErrorReply error);
+  virtual void SendProtocolError(std::string_view str) = 0;
 
  protected:
-  void Flush();        // Send all accumulated data and reset to clear state
+  void WriteI(std::string_view str) {
+    str.size() > kMaxInlineSize ? WriteRef(str) : WritePiece(str);
+  }
+
+  // Constexpr arrays are assumed to be protocol control sequences, stash them as pieces
+  template <size_t S> void WriteI(const char (&arr)[S]) {
+    WritePiece(std::string_view{arr, S - 1});  // we assume null termination
+  }
+
+  template <typename... Args> void Write(Args&&... strs) {
+    (WriteI(strs), ...);
+  }
+
   void FinishScope();  // Called when scope ends
 
   char* ReservePiece(size_t size);        // Reserve size bytes from buffer
@@ -202,19 +266,23 @@ class SinkReplyBuilder2 {
   void WritePiece(std::string_view str);  // Reserve + memcpy + Commit
 
   void WriteRef(std::string_view str);  // Add iovec bypassing buffer
-
-  bool IsInBuf(const void* ptr) const;  // checks if ptr is part of buffer_
   void NextVec(std::string_view str);
 
  private:
   io::Sink* sink_;
   std::error_code ec_;
 
-  bool scoped_;
+  bool send_active_ = false;
+  bool scoped_ = false, batched_ = false;
 
   size_t total_size_ = 0;  // sum of vec_ lengths
-  base::IoBuf buffer_;
-  std::vector<iovec> vecs_;
+  base::IoBuf buffer_;     // backing buffer for pieces
+
+  // Stores iovecs for a single writev call. Can reference either the buffer (WritePiece) or
+  // external data (WriteRef). Validity is ensured by FinishScope that either flushes before ref
+  // lifetime ends or copies refs to the buffer.
+  absl::InlinedVector<iovec, 16> vecs_;
+  absl::InlinedVector<unsigned, 16> ref_indices_;  // indices of ref vectors
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {

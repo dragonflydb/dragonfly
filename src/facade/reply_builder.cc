@@ -193,28 +193,49 @@ size_t SinkReplyBuilder::UsedMemory() const {
   return dfly::HeapSize(batch_);
 }
 
-void SinkReplyBuilder2::Write(std::string_view str) {
-  DCHECK(scoped_);
-  if (str.size() >= 32)
-    WriteRef(str);
-  else
-    WritePiece(str);
+SinkReplyBuilder2::ReplyAggregator::~ReplyAggregator() {
+  rb->batched_ = prev;
+  if (!prev)
+    rb->Flush();
+}
+
+SinkReplyBuilder2::ReplyScope::~ReplyScope() {
+  rb->scoped_ = prev;
+  if (!prev)
+    rb->FinishScope();
+}
+
+void SinkReplyBuilder2::SendError(ErrorReply error) {
+  if (error.status)
+    return SendError(*error.status);
+  SendError(error.ToSv(), error.kind);
+}
+
+void SinkReplyBuilder2::SendError(OpStatus status) {
+  if (status == OpStatus::OK)
+    return SendOk();
+  SendError(StatusToMsg(status));
+}
+
+void SinkReplyBuilder2::CloseConnection() {
+  if (!ec_)
+    ec_ = std::make_error_code(std::errc::connection_aborted);
 }
 
 char* SinkReplyBuilder2::ReservePiece(size_t size) {
-  if (buffer_.AppendBuffer().size() <= size)
+  if (buffer_.AppendLen() <= size)
     Flush();
 
   char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
-  if (vecs_.empty() || !IsInBuf(vecs_.back().iov_base))
+
+  // Start new vec for piece if last one dones't point at buffer tail
+  if (vecs_.empty() || ((char*)vecs_.back().iov_base) + vecs_.back().iov_len != dest)
     NextVec({dest, 0});
 
   return dest;
 }
 
 void SinkReplyBuilder2::CommitPiece(size_t size) {
-  DCHECK(IsInBuf(vecs_.back().iov_base));
-
   buffer_.CommitWrite(size);
   vecs_.back().iov_len += size;
   total_size_ += size;
@@ -228,34 +249,55 @@ void SinkReplyBuilder2::WritePiece(std::string_view str) {
 
 void SinkReplyBuilder2::WriteRef(std::string_view str) {
   NextVec(str);
+  ref_indices_.push_back(vecs_.size() - 1);
   total_size_ += str.size();
 }
 
 void SinkReplyBuilder2::Flush() {
-  auto ec = sink_->Write(vecs_.data(), vecs_.size());
-  if (ec)
+  auto& reply_stats = tl_facade_stats->reply_stats;
+
+  send_active_ = true;
+  uint64_t before_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  reply_stats.io_write_cnt++;
+  reply_stats.io_write_bytes += total_size_;
+
+  if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
 
+  uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  reply_stats.send_stats.count++;
+  reply_stats.send_stats.total_duration += (after_ns - before_ns) / 1'000;
+  send_active_ = false;
+
+  if (buffer_.InputLen() * 2 > buffer_.Capacity())  // If needed, grow backing buffer
+    buffer_.Reserve(std::min(kMaxBufferSize, buffer_.Capacity() * 2));
+
+  total_size_ = 0;
   buffer_.Clear();
   vecs_.clear();
-  total_size_ = 0;
+  ref_indices_.clear();
 }
 
 void SinkReplyBuilder2::FinishScope() {
-  // If batching or aggregations are not enabled, flush
-  Flush();
+  if (!batched_ || total_size_ * 2 >= kMaxBufferSize)
+    return Flush();
 
-  // TODO: otherwise iterate over vec_ and copy items to buffer_
-  // whilst also updating their pointers
-}
+  // Check if we have enough space to copy all refs to buffer
+  size_t ref_bytes = total_size_ - buffer_.InputLen();
+  if (ref_bytes > buffer_.AppendLen())
+    return Flush();
 
-bool SinkReplyBuilder2::IsInBuf(const void* ptr) const {
-  auto ib = buffer_.InputBuffer();
-  return ptr >= ib.data() && ptr <= ib.data() + ib.size();
+  // Copy all extenral references to buffer to safely keep batching
+  for (unsigned i : ref_indices_) {
+    void* dest = buffer_.AppendBuffer().data();
+    buffer_.WriteAndCommit(vecs_[i].iov_base, vecs_[i].iov_len);
+    vecs_[i].iov_base = dest;
+  }
+  ref_indices_.clear();
 }
 
 void SinkReplyBuilder2::NextVec(std::string_view str) {
-  if (vecs_.size() >= IOV_MAX)
+  if (vecs_.size() >= IOV_MAX - 2)
     Flush();
   vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
 }
