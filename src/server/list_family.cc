@@ -3,6 +3,7 @@
 //
 #include "server/list_family.h"
 
+#include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
 
 extern "C" {
@@ -98,15 +99,9 @@ string ListPop(ListDir dir, quicklist* ql) {
   return res;
 }
 
-optional<ListDir> ParseDir(string_view arg) {
-  if (arg == "LEFT") {
-    return ListDir::LEFT;
-  }
-  if (arg == "RIGHT") {
-    return ListDir::RIGHT;
-  }
-
-  return nullopt;
+ListDir ParseDir(facade::CmdArgParser* parser) {
+  parser->ToUpper();
+  return parser->Switch("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 }
 
 string_view DirToSv(ListDir dir) {
@@ -700,18 +695,15 @@ void RPopLPush(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
-  string_view src = ArgS(args, 0);
-  string_view dest = ArgS(args, 1);
-  string_view timeout_str = ArgS(args, 2);
+  facade::CmdArgParser parser{args};
+  auto [src, dest] = parser.Next<string_view, string_view>();
+  float timeout = parser.Next<float>();
 
-  float timeout;
-  if (!absl::SimpleAtof(timeout_str, &timeout)) {
-    return cntx->SendError("timeout is not a float or out of range");
-  }
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
-  if (timeout < 0) {
+  if (timeout < 0)
     return cntx->SendError("timeout is negative");
-  }
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res = bpop_pusher.Run(cntx, unsigned(timeout * 1000));
@@ -734,29 +726,19 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void BLMove(CmdArgList args, ConnectionContext* cntx) {
-  string_view src = ArgS(args, 0);
-  string_view dest = ArgS(args, 1);
-  string_view timeout_str = ArgS(args, 4);
+  facade::CmdArgParser parser{args};
+  auto [src, dest] = parser.Next<string_view, string_view>();
+  ListDir src_dir = ParseDir(&parser);
+  ListDir dest_dir = ParseDir(&parser);
+  float timeout = parser.Next<float>();
 
-  float timeout;
-  if (!absl::SimpleAtof(timeout_str, &timeout)) {
-    return cntx->SendError("timeout is not a float or out of range");
-  }
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
-  if (timeout < 0) {
+  if (timeout < 0)
     return cntx->SendError("timeout is negative");
-  }
 
-  ToUpper(&args[2]);
-  ToUpper(&args[3]);
-
-  optional<ListDir> src_dir = ParseDir(ArgS(args, 2));
-  optional<ListDir> dest_dir = ParseDir(ArgS(args, 3));
-  if (!src_dir || !dest_dir) {
-    return cntx->SendError(kSyntaxErr);
-  }
-
-  BPopPusher bpop_pusher(src, dest, *src_dir, *dest_dir);
+  BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res = bpop_pusher.Run(cntx, unsigned(timeout * 1000));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -908,34 +890,39 @@ void ListFamily::LLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view elem = ArgS(args, 1);
+  facade::CmdArgParser parser{args};
+  auto [key, elem] = parser.Next<string_view, string_view>();
 
   int rank = 1;
   uint32_t count = 1;
   uint32_t max_len = 0;
   bool skip_count = true;
 
-  for (size_t i = 2; i < args.size(); i++) {
-    ToUpper(&args[i]);
-    const auto& arg_v = ArgS(args, i);
-    if (arg_v == "RANK") {
-      if (!absl::SimpleAtoi(ArgS(args, (i + 1)), &rank) || rank == 0) {
-        return cntx->SendError(kInvalidIntErr);
-      }
+  while (parser.ToUpper().HasNext()) {
+    if (parser.Check("RANK").ExpectTail(1)) {
+      rank = parser.Next<int>();
+      continue;
     }
-    if (arg_v == "COUNT") {
-      if (!absl::SimpleAtoi(ArgS(args, (i + 1)), &count)) {
-        return cntx->SendError(kInvalidIntErr);
-      }
+
+    if (parser.Check("COUNT").ExpectTail(1)) {
+      count = parser.Next<uint32_t>();
       skip_count = false;
+      continue;
     }
-    if (arg_v == "MAXLEN") {
-      if (!absl::SimpleAtoi(ArgS(args, (i + 1)), &max_len)) {
-        return cntx->SendError(kInvalidIntErr);
-      }
+
+    if (parser.Check("MAXLEN").ExpectTail(1)) {
+      max_len = parser.Next<uint32_t>();
+      continue;
     }
+
+    parser.Skip(1);
   }
+
+  if (rank == 0)
+    return cntx->SendError(kInvalidIntErr);
+
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
@@ -993,20 +980,13 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
 void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view param = ArgS(args, 1);
-  string_view pivot = ArgS(args, 2);
-  string_view elem = ArgS(args, 3);
-  InsertParam where;
+  facade::CmdArgParser parser{args};
+  string_view key = parser.Next();
+  InsertParam where = parser.ToUpper().Switch("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
+  auto [pivot, elem] = parser.Next<string_view, string_view>();
 
-  ToUpper(&args[1]);
-  if (param == "AFTER") {
-    where = INSERT_AFTER;
-  } else if (param == "BEFORE") {
-    where = INSERT_BEFORE;
-  } else {
-    return cntx->SendError(kSyntaxErr);
-  }
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
@@ -1116,21 +1096,15 @@ void ListFamily::BRPop(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ListFamily::LMove(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view src = ArgS(args, 0);
-  std::string_view dest = ArgS(args, 1);
-  std::string_view src_dir_str = ArgS(args, 2);
-  std::string_view dest_dir_str = ArgS(args, 3);
+  facade::CmdArgParser parser{args};
+  auto [src, dest] = parser.Next<string_view, string_view>();
+  ListDir src_dir = ParseDir(&parser);
+  ListDir dest_dir = ParseDir(&parser);
 
-  ToUpper(&args[2]);
-  ToUpper(&args[3]);
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
-  optional<ListDir> src_dir = ParseDir(src_dir_str);
-  optional<ListDir> dest_dir = ParseDir(dest_dir_str);
-  if (!src_dir || !dest_dir) {
-    return cntx->SendError(kSyntaxErr);
-  }
-
-  MoveGeneric(cntx, src, dest, *src_dir, *dest_dir);
+  MoveGeneric(cntx, src, dest, src_dir, dest_dir);
 }
 
 void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {
@@ -1200,25 +1174,18 @@ void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
 }
 
 void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  int32_t count = 1;
+  facade::CmdArgParser parser{args};
+  string_view key = parser.Next();
+
+  uint32_t count = 1;
   bool return_arr = false;
-
-  if (args.size() > 1) {
-    if (args.size() > 2) {
-      return cntx->SendError(WrongNumArgsError(cntx->cid->name()));
-    }
-
-    string_view count_s = ArgS(args, 1);
-    if (!absl::SimpleAtoi(count_s, &count)) {
-      return cntx->SendError(kInvalidIntErr);
-    }
-
-    if (count < 0) {
-      return cntx->SendError(kUintErr);
-    }
+  if (parser.HasNext()) {
+    count = parser.Next<uint32_t>();
     return_arr = true;
   }
+
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
