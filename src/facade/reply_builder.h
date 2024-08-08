@@ -377,18 +377,18 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2 {
   }
 
   virtual void SendNull();
-  void SendSimpleString(std::string_view str);        // becomes override
+  void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
 
-  void SendLong(long val);              // becomes override
+  void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number
 
   virtual void SendNullArray();
   virtual void StartCollection(unsigned len, CollectionType ct);
 
-  // using SinkReplyBuilder::SendError;
-  void SendError(std::string_view str, std::string_view type = {});  // becomes override
-  void SendProtocolError(std::string_view str);                      // becomes override
+  using SinkReplyBuilder2::SendError;
+  void SendError(std::string_view str, std::string_view type = {}) override;
+  void SendProtocolError(std::string_view str) override;
 
   static char* FormatDouble(double d, char* dest, unsigned len);
 
