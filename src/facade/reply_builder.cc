@@ -31,6 +31,8 @@ inline iovec constexpr IoVec(std::string_view s) {
 constexpr char kCRLF[] = "\r\n";
 constexpr char kErrPref[] = "-ERR ";
 constexpr char kSimplePref[] = "+";
+constexpr char kNullStringR2[] = "$-1\r\n";
+constexpr char kNullStringR3[] = "_\r\n";
 
 constexpr unsigned kConvFlags =
     DoubleToStringConverter::UNIQUE_ZERO | DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN;
@@ -760,6 +762,94 @@ void ReqSerializer::SendCommand(std::string_view str) {
 
   iovec v[] = {IoVec(str), IoVec(kCRLF)};
   ec_ = sink_->Write(v, ABSL_ARRAYSIZE(v));
+}
+
+void RedisReplyBuilder2Base::SendNull() {
+  ReplyScope scope(this);
+  resp3_ ? Write(kNullStringR3) : Write(kNullStringR2);
+}
+
+void RedisReplyBuilder2Base::SendSimpleString(std::string_view str) {
+  ReplyScope scope(this);
+  Write(kSimplePref, str, kCRLF);
+}
+
+void RedisReplyBuilder2Base::SendBulkString(std::string_view str) {
+  ReplyScope scope(this);
+  WriteIntWithPrefix('$', str.size());
+  Write(kCRLF, str, kCRLF);
+}
+
+void RedisReplyBuilder2Base::SendLong(long val) {
+  ReplyScope scope(this);
+  WriteIntWithPrefix(':', val);
+  Write(kCRLF);
+}
+
+void RedisReplyBuilder2Base::SendDouble(double val) {
+  char buf[DoubleToStringConverter::kBase10MaximalLength + 1];
+  static_assert(ABSL_ARRAYSIZE(buf) < kMaxInlineSize, "Write temporary string from buf inline");
+  string_view val_str = FormatDouble(val, buf, ABSL_ARRAYSIZE(buf));
+
+  if (!resp3_)
+    return SendBulkString(val_str);
+
+  ReplyScope scope(this);
+  Write(",", val_str, kCRLF);
+}
+
+void RedisReplyBuilder2Base::SendNullArray() {
+  ReplyScope scope(this);
+  Write("*-1", kCRLF);
+}
+
+constexpr static const char START_SYMBOLS2[4] = {'*', '~', '%', '>'};
+static_assert(START_SYMBOLS2[RedisReplyBuilder2Base::MAP] == '%' &&
+              START_SYMBOLS2[RedisReplyBuilder2Base::SET] == '~');
+
+void RedisReplyBuilder2Base::StartCollection(unsigned len, CollectionType ct) {
+  if (!IsResp3()) {  // RESP2 supports only arrays
+    if (ct == MAP)
+      len *= 2;
+    ct = ARRAY;
+  }
+  ReplyScope scope(this);
+  WriteIntWithPrefix(START_SYMBOLS2[ct], len);
+  WritePiece(kCRLF);
+}
+
+void RedisReplyBuilder2Base::WriteIntWithPrefix(char prefix, int64_t val) {
+  char* dest = ReservePiece(absl::numbers_internal::kFastToBufferSize + 1);
+  char* next = dest;
+  *next++ = prefix;
+  next = absl::numbers_internal::FastIntToBuffer(val, next);
+  CommitPiece(next - dest);
+}
+
+void RedisReplyBuilder2Base::SendError(std::string_view str, std::string_view type) {
+  ReplyScope scope(this);
+
+  if (type.empty()) {
+    type = str;
+    if (type == kSyntaxErr)
+      type = kSyntaxErrType;
+  }
+  tl_facade_stats->reply_stats.err_count[type]++;
+
+  if (str[0] != '-')
+    WritePiece(kErrPref);
+  WritePiece(str);
+  WritePiece(kCRLF);
+}
+
+void RedisReplyBuilder2Base::SendProtocolError(std::string_view str) {
+  SendError(absl::StrCat("-ERR Protocol error: ", str), "protocol_error");
+}
+
+char* RedisReplyBuilder2Base::FormatDouble(double d, char* dest, unsigned len) {
+  StringBuilder sb(dest, len);
+  CHECK(dfly_conv.ToShortest(d, &sb));
+  return sb.Finalize();
 }
 
 }  // namespace facade

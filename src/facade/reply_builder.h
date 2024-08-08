@@ -366,6 +366,46 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   bool is_resp3_ = false;
 };
 
+// Redis reply builder interface for sending RESP data.
+class RedisReplyBuilder2Base : public SinkReplyBuilder2 {
+ public:
+  enum CollectionType { ARRAY, SET, MAP, PUSH };
+
+  enum VerbatimFormat { TXT, MARKDOWN };
+
+  explicit RedisReplyBuilder2Base(io::Sink* sink) : SinkReplyBuilder2(sink) {
+  }
+
+  virtual void SendNull();
+  void SendSimpleString(std::string_view str);        // becomes override
+  virtual void SendBulkString(std::string_view str);  // RESP: Blob String
+
+  void SendLong(long val);              // becomes override
+  virtual void SendDouble(double val);  // RESP: Number
+
+  virtual void SendNullArray();
+  virtual void StartCollection(unsigned len, CollectionType ct);
+
+  // using SinkReplyBuilder::SendError;
+  void SendError(std::string_view str, std::string_view type = {});  // becomes override
+  void SendProtocolError(std::string_view str);                      // becomes override
+
+  static char* FormatDouble(double d, char* dest, unsigned len);
+
+  bool IsResp3() const {
+    return resp3_;
+  }
+
+  void SetResp3(bool resp3) {
+    resp3_ = resp3;
+  }
+
+ private:
+  void WriteIntWithPrefix(char prefix, int64_t val);  // FastIntToBuffer directly into ReservePiece
+
+  bool resp3_ = false;
+};
+
 class ReqSerializer {
  public:
   explicit ReqSerializer(::io::Sink* stream) : sink_(stream) {
