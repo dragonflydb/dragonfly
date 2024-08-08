@@ -9,6 +9,7 @@ import pymemcache
 import logging
 import tarfile
 import urllib.request
+import shutil
 from redis import asyncio as aioredis
 from .utility import *
 from .instance import DflyInstanceFactory, DflyInstance
@@ -2268,8 +2269,16 @@ async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
 
 
 def download_dragonfly_release(version):
-    path = f"/tmp/{tmp_file_name()}"
-    os.mkdir(path)
+    path = f"/tmp/old_df/{version}"
+    binary = f"{path}/dragonfly-x86_64"
+    if os.path.isfile(binary):
+        return binary
+
+    # Cleanup in case there's partial files
+    if os.path.exists(path):
+        shutil.rmtree(path)
+
+    os.makedirs(path)
     gzfile = f"{path}/dragonfly.tar.gz"
     logging.debug(f"Downloading Dragonfly release into {gzfile}...")
 
@@ -2285,7 +2294,7 @@ def download_dragonfly_release(version):
     file.close()
 
     # Return path
-    return f"{path}/dragonfly-x86_64"
+    return binary
 
 
 @pytest.mark.parametrize(
