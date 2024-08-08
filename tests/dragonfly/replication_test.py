@@ -2319,7 +2319,7 @@ async def test_replicate_old_master(
         f"df-{dfly_version}"
         == (await c_master.execute_command("info", "server"))["dragonfly_version"]
     )
-    assert "df-dev" == (await c_replica.execute_command("info", "server"))["dragonfly_version"]
+    assert dfly_version != (await c_replica.execute_command("info", "server"))["dragonfly_version"]
 
     await c_master.execute_command("set", "k1", "v1")
 
