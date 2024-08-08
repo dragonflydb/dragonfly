@@ -852,4 +852,60 @@ char* RedisReplyBuilder2Base::FormatDouble(double d, char* dest, unsigned len) {
   return sb.Finalize();
 }
 
+void RedisReplyBuilder2Base::SendVerbatimString(std::string_view str, VerbatimFormat format) {
+  DCHECK(format <= VerbatimFormat::MARKDOWN);
+  if (!IsResp3())
+    return SendBulkString(str);
+
+  ReplyScope scope(this);
+  WriteIntWithPrefix('=', str.size() + 4);
+  Write(kCRLF);
+  WritePiece(format == VerbatimFormat::MARKDOWN ? "mkd:" : "txt:");
+  Write(str);
+  WritePiece(kCRLF);
+}
+
+void RedisReplyBuilder2::SendSimpleStrArr(const facade::ArgRange& strs) {
+  ReplyScope scope(this);
+  StartArray(strs.Size());
+  for (std::string_view str : strs)
+    SendSimpleString(str);
+}
+
+void RedisReplyBuilder2::SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct) {
+  ReplyScope scope(this);
+  StartCollection(ct == CollectionType::MAP ? strs.Size() / 2 : strs.Size(), ct);
+  for (std::string_view str : strs)
+    SendBulkString(str);
+}
+
+void RedisReplyBuilder2::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
+                                         bool with_scores) {
+  ReplyScope scope(this);
+  StartArray((with_scores && !IsResp3()) ? arr.size() * 2 : arr.size());
+  for (const auto& [str, score] : arr) {
+    if (with_scores && IsResp3())
+      StartArray(2);
+    SendBulkString(str);
+    if (with_scores)
+      SendDouble(score);
+  }
+}
+
+void RedisReplyBuilder2::SendStored() {
+  SendSimpleString("OK");
+}
+
+void RedisReplyBuilder2::SendSetSkipped() {
+  SendSimpleString("SKIPPED");
+}
+
+void RedisReplyBuilder2::StartArray(unsigned len) {
+  StartCollection(len, CollectionType::ARRAY);
+}
+
+void RedisReplyBuilder2::SendEmptyArray() {
+  StartArray(0);
+}
+
 }  // namespace facade
