@@ -1551,20 +1551,48 @@ async def test_cluster_replication_migration(
     m2_node.slots = [(8001, 16383)]
     m2_node.replicas = [r2_node]
 
+    # push this config
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
     # generate some data with seederv1
     seeder = df_seeder_factory.create(keys=2000, port=m1.port, cluster_mode=True)
-    seeder.run(target_deviation=0.1)
+    await seeder.run(target_deviation=0.1)
+
+    print(
+        "SIZES SIZES 0\n\n\n",
+        await m1_node.admin_client.dbsize(),
+        await m2_node.admin_client.dbsize(),
+        "\n\n",
+    )
 
     # start replication from replicas
     await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
     await r2_node.admin_client.execute_command(f"replicaof localhost {m2_node.instance.port}")
 
-    await wait_available_async(r1_node.admin_client)
-    await wait_available_async(r2_node.admin_client)
+    await wait_available_async(r1_node.client)
+    await wait_available_async(r2_node.client)
 
-    # push this config
-    await push_config(
-        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    await asyncio.sleep(8)
+    assert (await m1_node.admin_client.dbsize()) == (await r1_node.admin_client.dbsize())
+    assert (await m2_node.admin_client.dbsize()) == (await r2_node.admin_client.dbsize())
+
+    # k1 = set(await m1_node.admin_client.keys("*"))
+    # k2 = set(await r1_node.admin_client.keys("*"))
+    # print(k1.difference(k2), k2.difference(k1))
+
+    # k1 = set(await m2_node.admin_client.keys("*"))
+    # k2 = set(await r2_node.admin_client.keys("*"))
+    # print(k1.difference(k2), k2.difference(k1))
+
+    print(
+        "SIZES SIZES 1\n\n\n",
+        await m1_node.admin_client.dbsize(),
+        await r1_node.admin_client.dbsize(),
+        await m2_node.admin_client.dbsize(),
+        await r2_node.admin_client.dbsize(),
+        "\n\n",
     )
 
     # Create caputres on the replicas with v2 seeder
@@ -1586,8 +1614,24 @@ async def test_cluster_replication_migration(
     await wait_for_status(m1_node.admin_client, m2_node.id, "FINISHED")
     await wait_for_status(m2_node.admin_client, m1_node.id, "FINISHED")
 
+    m1_node.slots, m2_node.slots = m2_node.slots, m1_node.slots
+    m1_node.migrations = []
+    m2_node.migrations = []
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
     # wait for replicas to catch up
-    await asyncio.sleep(2)
+    await asyncio.sleep(5)
+
+    print(
+        "SIZES SIZES 2\n\n\n",
+        await m1_node.admin_client.dbsize(),
+        await r1_node.admin_client.dbsize(),
+        await m2_node.admin_client.dbsize(),
+        await r2_node.admin_client.dbsize(),
+        "\n\n",
+    )
 
     # ensure captures got exchanged
     assert (await SeederBase.capture(r1_node.admin_client)) == r2_caputre
