@@ -334,7 +334,7 @@ class DflyInstanceFactory:
         self.params = params
         self.instances = []
 
-    def create(self, existing_port=None, **kwargs) -> DflyInstance:
+    def create(self, existing_port=None, path=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
         args.setdefault("noversion_check", None)
@@ -352,6 +352,10 @@ class DflyInstanceFactory:
             params = dataclasses.replace(self.params, existing_port=existing_port)
         else:
             params = self.params
+
+        if path is not None:
+            params = dataclasses.replace(self.params, path=path)
+
         instance = DflyInstance(params, args)
         self.instances.append(instance)
         return instance
