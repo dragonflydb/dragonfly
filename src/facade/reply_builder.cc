@@ -373,6 +373,60 @@ void MCReplyBuilder::SendNotFound() {
   SendSimpleString("NOT_FOUND");
 }
 
+MCReplyBuilder2::MCReplyBuilder2(::io::Sink* sink) : SinkReplyBuilder2(sink), noreply_(false) {
+}
+
+void MCReplyBuilder2::SendValue(std::string_view key, std::string_view value, uint64_t mc_ver,
+                                uint32_t mc_flag) {
+  ReplyScope scope(this);
+  Write("VALUE ", key, " ", absl::StrCat(mc_flag), " ", absl::StrCat(value.size()));
+  if (mc_ver)
+    Write(" ", absl::StrCat(mc_ver));
+  Write(value, kCRLF);
+}
+
+void MCReplyBuilder2::SendSimpleString(std::string_view str) {
+  if (noreply_)
+    return;
+
+  ReplyScope scope(this);
+  Write(str, kCRLF);
+}
+
+void MCReplyBuilder2::SendStored() {
+  SendSimpleString("STORED");
+}
+
+void MCReplyBuilder2::SendLong(long val) {
+  SendSimplePiece(absl::StrCat(val));
+}
+
+void MCReplyBuilder2::SendError(string_view str, std::string_view type) {
+  SendSimplePiece(absl::StrCat("SERVER_ERROR ", str));
+}
+
+void MCReplyBuilder2::SendProtocolError(std::string_view str) {
+  SendSimplePiece(absl::StrCat("CLIENT_ERROR ", str));
+}
+
+void MCReplyBuilder2::SendClientError(string_view str) {
+  SendSimplePiece(absl::StrCat("CLIENT_ERROR", str));
+}
+
+void MCReplyBuilder2::SendSetSkipped() {
+  SendSimpleString("NOT_STORED");
+}
+
+void MCReplyBuilder2::SendNotFound() {
+  SendSimpleString("NOT_FOUND");
+}
+
+void MCReplyBuilder2::SendSimplePiece(std::string&& str) {
+  ReplyScope scope(this);
+  WritePiece(str);
+  WritePiece(kCRLF);
+}
+
 char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len) {
   StringBuilder sb(dest, dest_len);
   CHECK(dfly_conv.ToShortest(val, &sb));
