@@ -249,7 +249,6 @@ void SinkReplyBuilder2::WritePiece(std::string_view str) {
 
 void SinkReplyBuilder2::WriteRef(std::string_view str) {
   NextVec(str);
-  ref_indices_.push_back(vecs_.size() - 1);
   total_size_ += str.size();
 }
 
@@ -275,7 +274,7 @@ void SinkReplyBuilder2::Flush() {
   total_size_ = 0;
   buffer_.Clear();
   vecs_.clear();
-  ref_indices_.clear();
+  guaranteed_pieces_ = 0;
 }
 
 void SinkReplyBuilder2::FinishScope() {
@@ -288,14 +287,18 @@ void SinkReplyBuilder2::FinishScope() {
     return Flush();
 
   // Copy all extenral references to buffer to safely keep batching
-  for (unsigned i : ref_indices_) {
+  for (size_t i = guaranteed_pieces_; i < vecs_.size(); i++) {
+    auto ib = buffer_.InputBuffer();
+    if (vecs_[i].iov_base >= ib.data() && vecs_[i].iov_base <= ib.data() + ib.size())
+      continue;  // this is a piece
+
     DCHECK_LE(buffer_.AppendLen(), vecs_[i].iov_len);
     void* dest = buffer_.AppendBuffer().data();
     memcpy(dest, vecs_[i].iov_base, vecs_[i].iov_len);
     buffer_.CommitWrite(vecs_[i].iov_len);
     vecs_[i].iov_base = dest;
   }
-  ref_indices_.clear();
+  guaranteed_pieces_ = vecs_.size();  // all vecs are pieces
 }
 
 void SinkReplyBuilder2::NextVec(std::string_view str) {

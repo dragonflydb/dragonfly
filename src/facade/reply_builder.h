@@ -282,7 +282,7 @@ class SinkReplyBuilder2 {
   // external data (WriteRef). Validity is ensured by FinishScope that either flushes before ref
   // lifetime ends or copies refs to the buffer.
   absl::InlinedVector<iovec, 16> vecs_;
-  absl::InlinedVector<unsigned, 16> ref_indices_;  // indices of ref vectors
+  size_t guaranteed_pieces_ = 0;  // length of prefix of vecs_ that are guaranteed to be pieces
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
