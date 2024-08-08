@@ -289,8 +289,10 @@ void SinkReplyBuilder2::FinishScope() {
 
   // Copy all extenral references to buffer to safely keep batching
   for (unsigned i : ref_indices_) {
+    DCHECK_LE(buffer_.AppendLen(), vecs_[i].iov_len);
     void* dest = buffer_.AppendBuffer().data();
-    buffer_.WriteAndCommit(vecs_[i].iov_base, vecs_[i].iov_len);
+    memcpy(dest, vecs_[i].iov_base, vecs_[i].iov_len);
+    buffer_.CommitWrite(vecs_[i].iov_len);
     vecs_[i].iov_base = dest;
   }
   ref_indices_.clear();
