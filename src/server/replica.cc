@@ -42,6 +42,8 @@ ABSL_FLAG(bool, break_replication_on_master_restart, false,
           "When in replica mode, and master restarts, break replication from master to avoid "
           "flushing the replica's data.");
 ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_DECLARE_FLAG(uint16_t, announce_port);
+ABSL_DECLARE_FLAG(std::string, announce_ip);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
@@ -158,7 +160,18 @@ void Replica::Stop() {
 
 void Replica::Pause(bool pause) {
   VLOG(1) << "Pausing replication";
-  Proactor()->Await([&] { is_paused_ = pause; });
+  Proactor()->Await([&] {
+    is_paused_ = pause;
+    if (num_df_flows_ > 0) {
+      auto partition = Partition(num_df_flows_);
+      auto cb = [&](unsigned index, auto*) {
+        for (auto id : partition[index]) {
+          shard_flows_[id]->Pause(pause);
+        }
+      };
+      shard_set->pool()->AwaitBrief(cb);
+    }
+  });
 }
 
 std::error_code Replica::TakeOver(std::string_view timeout, bool save_flag) {
@@ -266,9 +279,18 @@ error_code Replica::Greet() {
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
-  auto port = absl::GetFlag(FLAGS_port);
+  uint16_t port = absl::GetFlag(FLAGS_announce_port);
+  if (port == 0) {
+    port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port));
+  }
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port)));
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+
+  auto announce_ip = absl::GetFlag(FLAGS_announce_ip);
+  if (!announce_ip.empty()) {
+    RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF ip-address ", announce_ip)));
+    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  }
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa eof capa psync2"));
@@ -750,7 +772,7 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   if (!Sock()->IsOpen()) {
     return std::make_error_code(errc::io_error);
   }
-
+  rdb_loader_.reset();  // we do not need it anymore.
   sync_fb_ =
       fb2::Fiber("shard_stable_sync_read", &DflyShardReplica::StableSyncDflyReadFb, this, cntx);
 
@@ -923,7 +945,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
   }
 
   if (!tx_data.IsGlobalCmd()) {
-    VLOG(2) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
+    VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
     executor_->Execute(tx_data.dbid, tx_data.command);
     return;
   }
@@ -1048,14 +1070,14 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
   return error_code{};
 }
 
-Replica::Info Replica::GetInfo() const {
+auto Replica::GetSummary() const -> Summary {
   auto f = [this]() {
     auto last_io_time = LastIoTime();
     for (const auto& flow : shard_flows_) {  // Get last io time from all sub flows.
       last_io_time = std::max(last_io_time, flow->LastIoTime());
     }
 
-    Info res;
+    Summary res;
     res.host = server().host;
     res.port = server().port;
     res.master_link_established = (state_mask_.load() & R_TCP_CONNECTED);
@@ -1106,13 +1128,20 @@ uint64_t DflyShardReplica::JournalExecutedCount() const {
   return journal_rec_executed_.load(std::memory_order_relaxed);
 }
 
+void DflyShardReplica::Pause(bool pause) {
+  if (rdb_loader_) {
+    rdb_loader_->Pause(pause);
+  }
+}
+
 void DflyShardReplica::JoinFlow() {
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
 }
 
 void DflyShardReplica::Cancel() {
-  rdb_loader_->stop();
+  if (rdb_loader_)
+    rdb_loader_->stop();
   CloseSocket();
   shard_replica_waker_.notifyAll();
 }

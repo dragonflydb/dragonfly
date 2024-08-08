@@ -22,7 +22,7 @@ async def test_basic_json_get_set(async_client: aioredis.Redis):
     result = await get_set_json(connection=async_client, key=key_name, value=jane)
     assert result, "failed to set JSON value"
     the_type = await async_client.type(key_name)
-    assert the_type == "rejson-rl"
+    assert the_type == "ReJSON-RL"
     assert len(result) == 1
     assert result[0]["name"] == "Jane"
     assert result[0]["Age"] == 33
@@ -34,7 +34,7 @@ async def test_access_json_value_as_string(async_client: aioredis.Redis):
     assert result is not None, "failed to set JSON value"
     # make sure that we have valid JSON here
     the_type = await async_client.type(key_name)
-    assert the_type == "rejson-rl"
+    assert the_type == "ReJSON-RL"
     # you cannot access this key as string
     try:
         result = await async_client.get(key_name)
@@ -49,7 +49,7 @@ async def test_reset_key_to_string(async_client: aioredis.Redis):
     assert result is not None, "failed to set JSON value"
     # make sure that we have valid JSON here
     the_type = await async_client.type(key_name)
-    assert the_type == "rejson-rl"
+    assert the_type == "ReJSON-RL"
 
     # set the key to be string - this is legal
     await async_client.set(key_name, "some random value")
@@ -60,7 +60,7 @@ async def test_reset_key_to_string(async_client: aioredis.Redis):
     # to change the type to JSON and override it
     result = await get_set_json(async_client, key=key_name, value=jane)
     the_type = await async_client.type(key_name)
-    assert the_type == "rejson-rl"
+    assert the_type == "ReJSON-RL"
 
 
 async def test_update_value(async_client: aioredis.Redis):
@@ -69,7 +69,7 @@ async def test_update_value(async_client: aioredis.Redis):
     assert result is not None, "failed to set JSON value"
     # make sure that we have valid JSON here
     the_type = await async_client.type(key_name)
-    assert the_type == "rejson-rl"
+    assert the_type == "ReJSON-RL"
     result = await get_set_json(async_client, value="0", key=key_name, path="$.a.*")
     assert len(result) == 3
     # make sure that all the values under 'a' where set to 0

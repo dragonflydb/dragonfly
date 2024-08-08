@@ -25,12 +25,15 @@
 #include "server/server_family.h"
 #include "server/server_state.h"
 
-ABSL_FLAG(std::string, cluster_announce_ip, "", "ip that cluster commands announce to the client");
+ABSL_FLAG(std::string, cluster_announce_ip, "", "DEPRECATED: use --announce_ip");
+
 ABSL_FLAG(std::string, cluster_node_id, "",
           "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
           "replication ID (random string)");
 
 ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_DECLARE_FLAG(std::string, announce_ip);
+ABSL_DECLARE_FLAG(uint16_t, announce_port);
 
 namespace dfly {
 namespace acl {
@@ -66,6 +69,16 @@ ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(serve
 
   InitializeCluster();
 
+  // TODO: Remove flag cluster_announce_ip in v1.23+
+  if (!absl::GetFlag(FLAGS_cluster_announce_ip).empty()) {
+    CHECK(absl::GetFlag(FLAGS_announce_ip).empty())
+        << "Can't use both --cluster_announce_ip and --announce_ip";
+
+    LOG(WARNING) << "WARNING: Flag --cluster_announce_ip is deprecated in favor of --announce_ip. "
+                    "Use the latter, as the former will be removed in a future release.";
+    absl::SetFlag(&FLAGS_announce_ip, absl::GetFlag(FLAGS_cluster_announce_ip));
+  }
+
   id_ = absl::GetFlag(FLAGS_cluster_node_id);
   if (id_.empty()) {
     id_ = server_family_->master_replid();
@@ -79,23 +92,40 @@ ClusterConfig* ClusterFamily::cluster_config() {
   return tl_cluster_config.get();
 }
 
+void ClusterFamily::Shutdown() {
+  shard_set->pool()->at(0)->Await([this] {
+    lock_guard lk(set_config_mu);
+    if (!tl_cluster_config)
+      return;
+
+    auto empty_config = tl_cluster_config->CloneWithoutMigrations();
+    RemoveOutgoingMigrations(empty_config, tl_cluster_config);
+    RemoveIncomingMigrations(empty_config->GetFinishedIncomingMigrations(tl_cluster_config));
+
+    DCHECK(outgoing_migration_jobs_.empty());
+    DCHECK(incoming_migrations_jobs_.empty());
+  });
+}
+
 ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
   ClusterShardInfo info{.slot_ranges = SlotRanges({{.start = 0, .end = kMaxSlotNum}}),
                         .master = {},
                         .replicas = {},
                         .migrations = {}};
 
-  optional<Replica::Info> replication_info = server_family_->GetReplicaInfo();
+  optional<Replica::Summary> replication_info = server_family_->GetReplicaSummary();
   ServerState& etl = *ServerState::tlocal();
   if (!replication_info.has_value()) {
     DCHECK(etl.is_master);
-    std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
+    std::string cluster_announce_ip = absl::GetFlag(FLAGS_announce_ip);
     std::string preferred_endpoint =
         cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
+    uint16_t cluster_announce_port = absl::GetFlag(FLAGS_announce_port);
+    uint16_t preferred_port = cluster_announce_port == 0
+                                  ? static_cast<uint16_t>(absl::GetFlag(FLAGS_port))
+                                  : cluster_announce_port;
 
-    info.master = {.id = id_,
-                   .ip = preferred_endpoint,
-                   .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))};
+    info.master = {.id = id_, .ip = preferred_endpoint, .port = preferred_port};
 
     for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
       info.replicas.push_back({.id = replica.id,
@@ -702,9 +732,6 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
 
   if (reply.empty()) {
     rb->SendSimpleString(StateToStr(MigrationState::C_NO_STATE));
-  } else if (!node_id.empty()) {
-    DCHECK_EQ(reply.size(), 1UL);
-    rb->SendSimpleString(reply[0]);
   } else {
     rb->SendStringArr(reply);
   }

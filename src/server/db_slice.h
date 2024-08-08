@@ -57,6 +57,7 @@ struct SliceEvents {
 
   // ram hit/miss when tiering is enabled
   size_t ram_hits = 0;
+  size_t ram_cool_hits = 0;
   size_t ram_misses = 0;
 
   // how many insertions were rejected due to OOM.
@@ -390,7 +391,6 @@ class DbSlice {
   // Returns existing keys count in the db.
   size_t DbSize(DbIndex db_ind) const;
 
-  // Callback functions called upon writing to the existing key.
   DbTableStats* MutableStats(DbIndex db_ind) {
     return &db_arr_[db_ind]->stats;
   }
@@ -416,12 +416,20 @@ class DbSlice {
     return table_memory_;
   }
 
+  size_t entries_count() const {
+    return entries_count_;
+  }
+
   using ChangeCallback = std::function<void(DbIndex, const ChangeReq&)>;
 
   //! Registers the callback to be called for each change.
   //! Returns the registration id which is also the unique version of the dbslice
   //! at a time of the call.
   uint64_t RegisterOnChange(ChangeCallback cb);
+
+  bool HasRegisteredCallbacks() const {
+    return !change_cb_.empty();
+  }
 
   // Call registered callbacks with version less than upper_bound.
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
@@ -440,9 +448,9 @@ class DbSlice {
 
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
-  // Returnes number of bytes freed due to evictions.
-  size_t FreeMemWithEvictionStep(DbIndex db_indx, size_t starting_segment_id,
-                                 size_t increase_goal_bytes);
+  // Returnes number of (elements,bytes) freed due to evictions.
+  std::pair<uint64_t, size_t> FreeMemWithEvictionStep(DbIndex db_indx, size_t starting_segment_id,
+                                                      size_t increase_goal_bytes);
   void ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
@@ -488,6 +496,20 @@ class DbSlice {
   // Delete a key referred by its iterator.
   void PerformDeletion(Iterator del_it, DbTable* table);
   void PerformDeletion(PrimeIterator del_it, DbTable* table);
+
+  // Provides access to the internal lock of db_slice for flows that serialize
+  // entries with preemption and need to synchronize with Traverse below which
+  // acquires the same lock.
+  ThreadLocalMutex* GetSerializationMutex() {
+    return &local_mu_;
+  }
+
+  // Wrapper around DashTable::Traverse that allows preemptions
+  template <typename Cb, typename DashTable>
+  PrimeTable::Cursor Traverse(DashTable* pt, PrimeTable::Cursor cursor, Cb&& cb) {
+    std::unique_lock lk(local_mu_);
+    return pt->Traverse(cursor, std::forward<Cb>(cb));
+  }
 
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
@@ -542,37 +564,8 @@ class DbSlice {
 
   void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
 
-  class LocalBlockingCounter {
-   public:
-    void lock() {
-      ++mutating_;
-    }
-
-    void unlock() {
-      DCHECK(mutating_ > 0);
-      --mutating_;
-      if (mutating_ == 0) {
-        cond_var_.notify_one();
-      }
-    }
-
-    void Wait() {
-      util::fb2::NoOpLock noop_lk_;
-      cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
-    }
-
-   private:
-    util::fb2::CondVarAny cond_var_;
-    size_t mutating_ = 0;
-  };
-
-  // We need this because registered callbacks might yield. If RegisterOnChange
-  // gets called after we preempt while iterating over the registered callbacks
-  // (let's say in FlushChangeToEarlierCallbacks) we will get UB, because we pushed
-  // into a vector which might get resized, invalidating the iterators that are being
-  // used by the preempted FlushChangeToEarlierCallbacks. LocalBlockingCounter
-  // protects us against this case.
-  mutable LocalBlockingCounter block_counter_;
+  // Used to provide exclusive access while Traversing segments
+  mutable ThreadLocalMutex local_mu_;
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
 
@@ -582,10 +575,11 @@ class DbSlice {
   bool expire_allowed_ = true;
 
   uint64_t version_ = 1;  // Used to version entries in the PrimeTable.
-  ssize_t memory_budget_ = SSIZE_MAX;
+  ssize_t memory_budget_ = SSIZE_MAX / 2;
   size_t bytes_per_object_ = 0;
   size_t soft_budget_limit_ = 0;
   size_t table_memory_ = 0;
+  uint64_t entries_count_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 
@@ -595,7 +589,7 @@ class DbSlice {
   mutable absl::flat_hash_set<uint64_t> uniq_fps_;
 
   // ordered from the smallest to largest version.
-  std::vector<std::pair<uint64_t, ChangeCallback>> change_cb_;
+  std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
   mutable absl::flat_hash_set<CompactObjectView> fetched_items_;

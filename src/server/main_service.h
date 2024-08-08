@@ -29,18 +29,10 @@ using facade::MemcacheParser;
 
 class Service : public facade::ServiceInterface {
  public:
-  struct InitOpts {
-    bool disable_time_update;
-
-    InitOpts() : disable_time_update{false} {
-    }
-  };
-
   explicit Service(util::ProactorPool* pp);
   ~Service();
 
-  void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
-            const InitOpts& opts = InitOpts{});
+  void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
 
   void Shutdown();
 
@@ -93,7 +85,7 @@ class Service : public facade::ServiceInterface {
   GlobalState GetGlobalState() const;
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
-  void OnClose(facade::ConnectionContext* cntx) final;
+  void OnConnectionClose(facade::ConnectionContext* cntx) final;
 
   Service::ContextInfo GetContextInfo(facade::ConnectionContext* cntx) const final;
 

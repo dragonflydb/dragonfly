@@ -9,6 +9,8 @@
 
 namespace dfly {
 
+// Allows reading and modifying pre-registered configuration values by string names.
+// This class treats dashes (-) are as underscores (_).
 class ConfigRegistry {
  public:
   // Accepts the new value as argument. Return true if config was successfully updated.

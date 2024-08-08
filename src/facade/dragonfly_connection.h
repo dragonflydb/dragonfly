@@ -152,7 +152,8 @@ class Connection : public util::Connection {
     }
 
     bool IsPipelineMsg() const {
-      return std::holds_alternative<PipelineMessagePtr>(handle);
+      return std::holds_alternative<PipelineMessagePtr>(handle) ||
+             std::holds_alternative<MCPipelineMessagePtr>(handle);
     }
 
     bool IsPubMsg() const {
@@ -404,7 +405,7 @@ class Connection : public util::Connection {
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
-  size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued async commands in dispatch_q
+  size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
 
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;

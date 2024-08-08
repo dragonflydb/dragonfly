@@ -26,6 +26,7 @@ ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
+ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 
 namespace dfly {
 
@@ -189,7 +190,9 @@ TEST_F(TieredStorageTest, Defrag) {
 
   // This tirggers defragmentation, as only 3 < 7/2 remain left
   Run({"GET", string(1, 'd')});
-  Run({"GET", string(1, 'd')});
+
+  // Wait that any reads caused by defrags has been finished.
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_read_cnt == 0; });
   metrics = GetMetrics();
   EXPECT_EQ(metrics.tiered_stats.total_defrags, 3u);
   EXPECT_EQ(metrics.tiered_stats.small_bins_cnt, 0u);
@@ -200,10 +203,12 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
 
+  // The setup works without cooling buffers.
+  SetFlag(&FLAGS_tiered_experimental_cooling, false);
+
   const int kNum = 500;
 
   max_memory_limit = kNum * 4096;
-  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->TEST_EnableHeartbeat(); });
 
   // Stash all values
   string value = BuildString(3000);
@@ -245,6 +250,13 @@ TEST_F(TieredStorageTest, BackgroundOffloading) {
 TEST_F(TieredStorageTest, FlushAll) {
   absl::FlagSaver saver;
   SetFlag(&FLAGS_tiered_offload_threshold, 0.0f);  // offload all values
+
+  // We want to cover the interaction of FlushAll with concurrent reads from disk.
+  // For that we disable tiered_experimental_cooling.
+  // TODO: seems that our replacement policy will upload the entries to RAM in any case,
+  // making this test ineffective. We should add the ability to disable promotion of offloaded
+  // entries to RAM upon reads.
+  SetFlag(&FLAGS_tiered_experimental_cooling, false);
 
   const int kNum = 500;
   for (size_t i = 0; i < kNum; i++) {
@@ -289,17 +301,16 @@ TEST_F(TieredStorageTest, FlushPending) {
 
 TEST_F(TieredStorageTest, MemoryPressure) {
   max_memory_limit = 20_MB;
-  pp_->at(0)->AwaitBrief([] {
-    EngineShard::tlocal()->TEST_EnableHeartbeat();
-    EngineShard::tlocal()->tiered_storage()->SetMemoryLowLimit(2_MB);
-  });
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->SetMemoryLowLimit(2_MB); });
 
   constexpr size_t kNum = 10000;
   for (size_t i = 0; i < kNum; i++) {
     auto resp = Run({"SET", absl::StrCat("k", i), BuildString(10000)});
-    ASSERT_EQ(resp, "OK") << i;
-    // TODO: to remove it once used_mem_current is updated frequently.
-    ThisFiber::SleepFor(10us);
+    if (resp != "OK"sv) {
+      resp = Run({"INFO", "ALL"});
+      ASSERT_FALSE(true) << i << "\nInfo ALL:\n" << resp.GetString();
+    }
+    ThisFiber::SleepFor(100us);
   }
 
   EXPECT_LT(used_mem_peak.load(), 20_MB);

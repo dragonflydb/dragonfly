@@ -35,9 +35,6 @@ enum ExpireFlags {
 
 class GenericFamily {
  public:
-  static void Init(util::ProactorPool* pp);
-  static void Shutdown();
-
   static void Register(CommandRegistry* registry);
 
   // Accessed by Service::Exec and Service::Watch as an utility.

@@ -551,7 +551,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   if (!IsValid(it))
     return false;
 
-  bool matches = opts.type_filter.empty() || ObjTypeName(it->second.ObjType()) == opts.type_filter;
+  bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
 
   if (!matches)
     return false;
@@ -582,8 +582,9 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
   string scratch;
   do {
-    cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+    cur = db_slice.Traverse(prime_table, cur, [&](PrimeIterator it) {
+      cnt += ScanCb(op_args, it, scan_opts, &scratch, vec);
+    });
   } while (cur && cnt < scan_opts.limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
@@ -725,12 +726,6 @@ OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
 }
 
 }  // namespace
-
-void GenericFamily::Init(util::ProactorPool* pp) {
-}
-
-void GenericFamily::Shutdown() {
-}
 
 void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
@@ -1386,7 +1381,7 @@ void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
 void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
   std::string_view key = ArgS(args, 0);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<int> {
+  auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CompactObjType> {
     auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
     auto it = db_slice.FindReadOnly(t->GetDbContext(), key).it;
     if (!it.is_done()) {
@@ -1395,11 +1390,11 @@ void GenericFamily::Type(CmdArgList args, ConnectionContext* cntx) {
       return OpStatus::KEY_NOTFOUND;
     }
   };
-  OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<CompactObjType> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (!result) {
     cntx->SendSimpleString("none");
   } else {
-    cntx->SendSimpleString(ObjTypeName(result.value()));
+    cntx->SendSimpleString(ObjTypeToString(result.value()));
   }
 }
 

@@ -15,6 +15,8 @@
 #include <string_view>
 #include <vector>
 
+#include "base/logging.h"
+#include "core/compact_object.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "util/fibers/fibers.h"
@@ -72,6 +74,8 @@ struct TieredStats {
 
   // How many times the system did not perform Stash call (disjoint with total_stashes).
   uint64_t total_stash_overflows = 0;
+  uint64_t total_offloading_steps = 0;
+  uint64_t total_offloading_stashes = 0;
 
   size_t allocated_bytes = 0;
   size_t capacity_bytes = 0;
@@ -120,7 +124,6 @@ inline void ToLower(const MutableSlice* val) {
 
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
 bool ParseDouble(std::string_view src, double* value);
-const char* ObjTypeName(int type);
 
 const char* RdbTypeName(unsigned type);
 
@@ -294,7 +297,7 @@ class Context : protected Cancellation {
 struct ScanOpts {
   std::string_view pattern;
   size_t limit = 10;
-  std::string_view type_filter;
+  std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;
 
   bool Matches(std::string_view val_name) const;
@@ -364,21 +367,18 @@ struct ConditionFlag {
 };
 
 // Helper class used to guarantee atomicity between serialization of buckets
-class ConditionGuard {
+class ThreadLocalMutex {
  public:
-  explicit ConditionGuard(ConditionFlag* enclosing) : enclosing_(enclosing) {
-    util::fb2::NoOpLock noop_lk_;
-    enclosing_->cond_var.wait(noop_lk_, [this]() { return !enclosing_->flag; });
-    enclosing_->flag = true;
-  }
+  ThreadLocalMutex();
+  ~ThreadLocalMutex();
 
-  ~ConditionGuard() {
-    enclosing_->flag = false;
-    enclosing_->cond_var.notify_one();
-  }
+  void lock();
+  void unlock();
 
  private:
-  ConditionFlag* enclosing_;
+  EngineShard* shard_;
+  util::fb2::CondVarAny cond_var_;
+  bool flag_ = false;
 };
 
 }  // namespace dfly

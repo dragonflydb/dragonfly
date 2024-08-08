@@ -22,7 +22,10 @@
 #include "util/fibers/synchronization.h"
 
 using facade::operator""_MB;
-ABSL_FLAG(size_t, serialization_max_chunk_size, 10_MB, "Total bytes before flushing big entries");
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
+          "Maximum size of a value that may be serialized at once during snapshotting or full "
+          "sync. Values bigger than this threshold will be serialized using streaming "
+          "serialization. 0 - to disable streaming mode");
 
 namespace dfly {
 
@@ -221,7 +224,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
         return;
 
       PrimeTable::Cursor next =
-          pt->Traverse(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
+          db_slice_->Traverse(pt, cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
       cursor = next;
       PushSerializedToChannel(false);
 
@@ -253,8 +256,6 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
-  ConditionGuard guard(&bucket_ser_);
-
   ++stats_.savecb_calls;
 
   auto check = [&](auto v) {
@@ -301,6 +302,9 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
 void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
                                    optional<uint64_t> expire, RdbSerializer* serializer) {
+  if (pv.IsExternal() && pv.IsCool())
+    return SerializeEntry(db_indx, pk, pv.GetCool().record->value, expire, serializer);
+
   time_t expire_time = expire.value_or(0);
   if (!expire && pv.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
@@ -361,8 +365,6 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  ConditionGuard guard(&bucket_ser_);
-
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 
@@ -387,7 +389,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerializedToChannel.
-  ConditionGuard guard(&bucket_ser_);
+  std::unique_lock lk(*db_slice_->GetSerializationMutex());
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }
@@ -400,7 +402,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
 }
 
 void SliceSnapshot::CloseRecordChannel() {
-  ConditionGuard guard(&bucket_ser_);
+  std::unique_lock lk(*db_slice_->GetSerializationMutex());
 
   CHECK(!serialize_bucket_running_);
   // Make sure we close the channel only once with a CAS check.

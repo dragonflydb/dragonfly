@@ -187,6 +187,10 @@ class ServerState {  // public struct - to allow initialization.
 
   void ResetInterpreter();
 
+  // Invoke function on all free interpreters. They are marked atomically as
+  // used and the function is allowed to suspend.
+  void AlterInterpreters(std::function<void(Interpreter*)> modf);
+
   // Returns sum of all requests in the last 6 seconds
   // (not including the current one).
   uint32_t MovingSum6() const {

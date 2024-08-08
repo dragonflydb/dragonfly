@@ -16,6 +16,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "core/string_map.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
@@ -271,7 +272,7 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
       continue;
     PrimeTable::Cursor cursor;
     do {
-      cursor = dbt->prime.Traverse(cursor, [&](PrimeIterator it) {
+      cursor = db_slice.Traverse(&dbt->prime, cursor, [&](PrimeIterator it) {
         unsigned obj_type = it->second.ObjType();
         auto& hist_ptr = (*obj_hist_map)[obj_type];
         if (!hist_ptr) {
@@ -908,7 +909,7 @@ void DebugCmd::ObjHist() {
   absl::StrAppend(&result, "___begin object histogram___\n\n");
 
   for (auto& [obj_type, hist_ptr] : obj_hist_map_arr[0]) {
-    StrAppend(&result, "OBJECT:", ObjTypeName(obj_type), "\n");
+    StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
     StrAppend(&result, "Key length histogram:\n", hist_ptr->key_len.ToString(), "\n");
     StrAppend(&result, "Value length histogram:\n", hist_ptr->val_len.ToString(), "\n");
@@ -927,6 +928,7 @@ void DebugCmd::Stacktrace() {
     std::unique_lock lk(m);
     fb2::detail::FiberInterface::PrintAllFiberStackTraces();
   });
+  base::FlushLogs();
   cntx_->SendOk();
 }
 

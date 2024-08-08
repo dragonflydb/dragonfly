@@ -107,6 +107,7 @@ struct Metrics {
   // Max length of the all the tx shard-queues.
   uint32_t tx_queue_len = 0;
   uint32_t worker_fiber_count = 0;
+  uint32_t blocked_tasks = 0;
   size_t worker_fiber_stack_size = 0;
 
   InterpreterManager::Stats lua_stats;
@@ -217,16 +218,17 @@ class ServerFamily {
 
   std::vector<facade::Listener*> GetNonPriviligedListeners() const;
 
-  bool HasReplica() const;
-  std::optional<Replica::Info> GetReplicaInfo() const;
+  // Replica-side method. Returns replication summary if this server is a replica,
+  // nullopt otherwise.
+  std::optional<Replica::Summary> GetReplicaSummary() const;
 
-  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfo(ConnectionContext* cntx) const {
-    return dfly_cmd_->GetReplicaInfo(cntx);
+  // Master-side acces method to replication info of that connection.
+  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfoFromConnection(
+      ConnectionContext* cntx) const {
+    return dfly_cmd_->GetReplicaInfoFromConnection(cntx);
   }
 
   void OnClose(ConnectionContext* cntx);
-
-  void BreakOnShutdown();
 
   void CancelBlockingOnThread(std::function<facade::OpStatus(ArgSlice)> = {});
 

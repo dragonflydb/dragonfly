@@ -23,13 +23,14 @@ from tempfile import gettempdir, mkdtemp
 
 from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
 from . import PortPicker, dfly_args
-from .utility import DflySeederFactory, gen_ca_cert, gen_certificate
+from .utility import DflySeederFactory, gen_ca_cert, gen_certificate, skip_if_not_in_github
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 DATABASE_INDEX = 0
 BASE_LOG_DIR = "/tmp/dragonfly_logs/"
 FAILED_PATH = "/tmp/failed/"
+LAST_LOGS = "/tmp/last_test_log_dir.txt"
 
 
 # runs on pytest start
@@ -56,7 +57,7 @@ def pytest_runtest_setup(item):
     item.log_dir = test_dir
 
     # needs for action.yml to get logs if timedout is happen for test
-    last_logs = open("/tmp/last_test_log_dir.txt", "w")
+    last_logs = open(LAST_LOGS, "w")
     last_logs.write(test_dir)
     last_logs.close()
 
@@ -378,6 +379,12 @@ def copy_failed_logs(log_dir, report):
             logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
             shutil.copy(file, test_failed_path)
 
+    # Clean up
+    try:
+        os.remove(LAST_LOGS)
+    except OSError:
+        pass
+
 
 # tests results we get on the "call" state
 # but we can not copy logs until "teardown" state because the server isn't stoped
@@ -406,8 +413,8 @@ def redis_server(port_picker) -> RedisServer:
     try:
         s.start()
     except FileNotFoundError as e:
-        pytest.skip("Redis server not found")
-        return None
+        skip_if_not_in_github()
+        raise
     time.sleep(1)
     yield s
     s.stop()

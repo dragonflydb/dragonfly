@@ -86,7 +86,7 @@ class RdbSaver {
   ~RdbSaver();
 
   // Initiates the serialization in the shard's thread.
-  // TODO: to implement break functionality to allow stopping early.
+  // cll allows breaking in the middle.
   void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
 
   // Send only the incremental snapshot since start_lsn.
@@ -121,6 +121,10 @@ class RdbSaver {
 
   // Fetch global data to be serialized in summary part of a snapshot / full sync.
   static GlobalData GetGlobalData(const Service* service);
+
+  // Returns time in nanos of start of the last pending write interaction.
+  // Returns -1 if no write operations are currently pending.
+  int64_t GetLastWriteTime() const;
 
  private:
   class Impl;

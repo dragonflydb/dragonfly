@@ -8,11 +8,11 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "generic_family.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/generic_family.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -40,7 +40,7 @@ namespace dfly {
 using namespace std;
 using namespace util;
 using absl::GetFlag;
-using facade::OpStatus;
+using namespace facade;
 using Payload = journal::Entry::Payload;
 
 namespace {
@@ -73,10 +73,12 @@ class PrimeEvictionPolicy {
   static constexpr bool can_evict = true;  // we implement eviction functionality.
   static constexpr bool can_gc = true;
 
-  PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_budget, ssize_t soft_limit,
+  // mem_offset - memory_offset that we should account for in addition to DbSlice::memory_budget.
+  // May be negative.
+  PrimeEvictionPolicy(const DbContext& cntx, bool can_evict, ssize_t mem_offset, ssize_t soft_limit,
                       DbSlice* db_slice, bool apply_memory_limit)
       : db_slice_(db_slice),
-        mem_budget_(mem_budget),
+        mem_offset_(mem_offset),
         soft_limit_(soft_limit),
         cntx_(cntx),
         can_evict_(can_evict),
@@ -85,7 +87,6 @@ class PrimeEvictionPolicy {
 
   // A hook function that is called every time a segment is full and requires splitting.
   void RecordSplit(PrimeTable::Segment_t* segment) {
-    mem_budget_ -= PrimeTable::kSegBytes;
     DVLOG(2) << "split: " << segment->SlowSize() << "/" << segment->capacity();
   }
 
@@ -93,10 +94,6 @@ class PrimeEvictionPolicy {
 
   unsigned GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
   unsigned Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me);
-
-  ssize_t mem_budget() const {
-    return mem_budget_;
-  }
 
   unsigned evicted() const {
     return evicted_;
@@ -108,7 +105,7 @@ class PrimeEvictionPolicy {
 
  private:
   DbSlice* db_slice_;
-  ssize_t mem_budget_;
+  ssize_t mem_offset_;
   ssize_t soft_limit_ = 0;
   const DbContext cntx_;
 
@@ -136,7 +133,8 @@ class PrimeBumpPolicy {
 };
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
-  if (!apply_memory_limit_ || mem_budget_ > soft_limit_)
+  ssize_t mem_available = db_slice_->memory_budget() + mem_offset_;
+  if (!apply_memory_limit_ || mem_available > soft_limit_)
     return true;
 
   DCHECK_LE(tbl.size(), tbl.capacity());
@@ -145,11 +143,11 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   // we estimate how much memory we will take with the current capacity
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
-  size_t new_available = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
-  bool res =
-      mem_budget_ > int64_t(PrimeTable::kSegBytes + db_slice_->bytes_per_object() * new_available *
-                                                        GetFlag(FLAGS_table_growth_margin));
-  VLOG(2) << "available: " << new_available << ", res: " << res;
+  size_t table_free_items = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
+  size_t obj_bytes_estimation =
+      db_slice_->bytes_per_object() * table_free_items * GetFlag(FLAGS_table_growth_margin);
+  bool res = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
+  VLOG(2) << "available: " << table_free_items << ", res: " << res;
 
   return res;
 }
@@ -255,7 +253,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 112, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 120, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -270,6 +268,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(insertion_rejections);
   ADD(update);
   ADD(ram_hits);
+  ADD(ram_cool_hits);
   ADD(ram_misses);
 
   return *this;
@@ -493,20 +492,6 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     fetched_items_.insert(res.it->first.AsRef());
   }
 
-  // If the value has a pending stash, cancel it before any modification are applied.
-  // Rationale: we either look it up for reads - and then it's hot, or alternatively,
-  // we follow up with modifications during mutation operations, and in that case storing on disk
-  // does not make much sense.
-  if (res.it->second.HasStashPending()) {
-    owner_->tiered_storage()->CancelStash(cntx.db_index, key, &res.it->second);
-  }
-
-  // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
-  // attribute of the entry in case of value overrides.
-  res.it->first.SetTouched(true);
-
-  db.top_keys.Touch(key);
-
   std::move(update_stats_on_miss).Cancel();
   switch (stats_mode) {
     case UpdateStatsMode::kMutableStats:
@@ -518,12 +503,37 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
         db.slots_stats[cluster::KeySlot(key)].total_reads++;
       }
       if (res.it->second.IsExternal()) {
-        events_.ram_misses++;
+        if (res.it->second.IsCool())
+          events_.ram_cool_hits++;
+        else
+          events_.ram_misses++;
       } else {
         events_.ram_hits++;
       }
       break;
   }
+
+  auto& pv = res.it->second;
+
+  // Cancel any pending stashes of looked up values
+  // Rationale: we either look it up for reads - and then it's hot, or alternatively,
+  // we follow up with modifications, so the pending stash becomes outdated.
+  if (pv.HasStashPending()) {
+    owner_->tiered_storage()->CancelStash(cntx.db_index, key, &pv);
+  }
+
+  // Fetch back cool items
+  if (pv.IsExternal() && pv.IsCool()) {
+    pv = owner_->tiered_storage()->Warmup(cntx.db_index, pv.GetCool());
+  }
+
+  // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
+  // attribute of the entry in case of value overrides.
+  res.it->first.SetTouched(true);
+
+  // We do not use TopKey feature, so disable it until we redesign it.
+  // db.top_keys.Touch(key);
+
   return res;
 }
 
@@ -563,6 +573,23 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
 
+  ssize_t memory_offset = -key.size();
+
+  // If we are low on memory due to cold storage, free some memory.
+  if (owner_->tiered_storage()) {
+    // At least 40KB bytes to cover potential segment split.
+    ssize_t red_line = std::max<size_t>(key.size() * 2, 40_KB);
+    if (memory_budget_ < red_line) {
+      size_t goal = red_line - memory_budget_;
+      size_t reclaimed = owner_->tiered_storage()->ReclaimMemory(goal);
+      memory_budget_ += reclaimed;
+    }
+
+    // CoolMemoryUsage is the memory that we can always reclaim, like in the block above,
+    // therefore we include it for PrimeEvictionPolicy considerations.
+    memory_offset += owner_->tiered_storage()->CoolMemoryUsage();
+  }
+
   // In case we are loading from rdb file or replicating we want to disable conservative memory
   // checks (inside PrimeEvictionPolicy::CanGrow) and reject insertions only after we pass max
   // memory limit. When loading a snapshot created by the same server configuration (memory and
@@ -574,48 +601,53 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   bool apply_memory_limit =
       !owner_->IsReplica() && !(ServerState::tlocal()->gstate() == GlobalState::LOADING);
 
-  PrimeEvictionPolicy evp{cntx,
-                          (bool(caching_mode_) && !owner_->IsReplica()),
-                          int64_t(memory_budget_ - key.size()),
-                          ssize_t(soft_budget_limit_),
-                          this,
-                          apply_memory_limit};
-
   // If we are over limit in non-cache scenario, just be conservative and throw.
-  if (apply_memory_limit && !caching_mode_ && evp.mem_budget() < 0) {
-    VLOG(2) << "AddOrFind: over limit, budget: " << evp.mem_budget();
+  if (apply_memory_limit && !caching_mode_ && memory_budget_ + memory_offset < 0) {
+    VLOG(2) << "AddOrFind: over limit, budget: " << memory_budget_;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
+
+  PrimeEvictionPolicy evp{cntx,          (bool(caching_mode_) && !owner_->IsReplica()),
+                          memory_offset, ssize_t(soft_budget_limit_),
+                          this,          apply_memory_limit};
 
   // Fast-path if change_cb_ is empty so we Find or Add using
   // the insert operation: twice more efficient.
   CompactObj co_key{key};
   PrimeIterator it;
 
-  size_t table_before = db.table_memory();
+  ssize_t table_before = db.prime.mem_usage();
 
   try {
     it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
-    VLOG(2) << "AddOrFind2: bad alloc exception, budget: " << evp.mem_budget();
+    VLOG(2) << "AddOrFind: bad alloc exception, budget: " << memory_budget_ + memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  size_t evicted_obj_bytes = 0;
-  if (evp.mem_budget() < 0 && apply_memory_limit) {
+  ssize_t table_increase = db.prime.mem_usage() - table_before;
+  memory_budget_ -= table_increase;
+
+  if (memory_budget_ < 0 && apply_memory_limit) {
     // We may reach the state when our memory usage is below the limit even if we
     // do not add new segments. For example, we have half full segments
     // and we add new objects or update the existing ones and our memory usage grows.
     // We do not require for a single operation to unload the whole negative debt.
     // Instead, we create a positive, converging force that should help with freeing enough memory.
-    // Free at least 256 bytes or 3% of the total debt.
-    size_t evict_goal = std::max<size_t>(256, (-evp.mem_budget()) / 32);
-    evicted_obj_bytes = FreeMemWithEvictionStep(cntx.db_index, it.segment_id(), evict_goal);
+    // Free at least K bytes or 3% of the total debt.
+    // TODO: to reenable and optimize this - this call significantly slows down server
+    // when evictions are running.
+#if 0
+    size_t evict_goal = std::max<size_t>(512, (-evp.mem_budget()) / 32);
+    auto [items, bytes] = FreeMemWithEvictionStep(cntx.db_index, it.segment_id(), evict_goal);
+    events_.hard_evictions += items;
+#endif
   }
 
-  table_memory_ += (db.table_memory() - table_before);
+  table_memory_ += table_increase;
+  entries_count_++;
 
   db.stats.inline_keys += it->first.IsInline();
   AccountObjectMemory(key, it->first.ObjType(), it->first.MallocUsed(), &db);  // Account for key
@@ -627,8 +659,6 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
-
-  memory_budget_ = evp.mem_budget() + evicted_obj_bytes;
   if (cluster::IsClusterEnabled()) {
     cluster::SlotId sid = cluster::KeySlot(key);
     db.slots_stats[sid].key_count += 1;
@@ -718,7 +748,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   PrimeTable::Cursor cursor;
   uint64_t i = 0;
   do {
-    PrimeTable::Cursor next = pt->Traverse(cursor, del_entry_cb);
+    PrimeTable::Cursor next = Traverse(pt, cursor, del_entry_cb);
     ++i;
     cursor = next;
     if (i % 100 == 0) {
@@ -750,6 +780,8 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 
   for (DbIndex index : indexes) {
     table_memory_ -= db_arr_[index]->table_memory();
+    entries_count_ -= db_arr_[index]->prime.size();
+
     InvalidateDbWatches(index);
     flush_db_arr[index] = std::move(db_arr_[index]);
 
@@ -758,6 +790,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   }
 
   CHECK(fetched_items_.empty());
+
   auto cb = [indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
     ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
@@ -1120,40 +1153,41 @@ void DbSlice::ExpireAllIfNeeded() {
 
     ExpireTable::Cursor cursor;
     do {
-      cursor = db.expire.Traverse(cursor, cb);
+      cursor = Traverse(&db.expire, cursor, cb);
     } while (cursor);
   }
 }
 
 uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
-  block_counter_.Wait();
   return change_cb_.emplace_back(NextVersion(), std::move(cb)).first;
 }
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
 
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
   DVLOG(2) << "Running callbacks in dbid " << db_ind << " with bucket_version=" << bucket_version
            << ", upper_bound=" << upper_bound;
 
-  for (const auto& ccb : change_cb_) {
-    uint64_t cb_version = ccb.first;
+  const size_t limit = change_cb_.size();
+  auto ccb = change_cb_.begin();
+  for (size_t i = 0; i < limit; ++i) {
+    uint64_t cb_version = ccb->first;
     DCHECK_LE(cb_version, upper_bound);
     if (cb_version == upper_bound) {
       return;
     }
     if (bucket_version < cb_version) {
-      ccb.second(db_ind, ChangeReq{it.GetInnerIt()});
+      ccb->second(db_ind, ChangeReq{it.GetInnerIt()});
     }
+    ++ccb;
   }
 }
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
-  block_counter_.Wait();
+  std::unique_lock lk(local_mu_);
   auto it = find_if(change_cb_.begin(), change_cb_.end(),
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
@@ -1185,13 +1219,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   unsigned i = 0;
   for (; i < count / 3; ++i) {
-    db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+    db.expire_cursor = Traverse(&db.expire, db.expire_cursor, cb);
   }
 
   // continue traversing only if we had strong deletion rate based on the first sample.
   if (result.deleted * 4 > result.traversed) {
     for (; i < count; ++i) {
-      db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
+      db.expire_cursor = Traverse(&db.expire, db.expire_cursor, cb);
     }
   }
 
@@ -1211,11 +1245,20 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
          db_arr_[db_ind]->prime.GetSegmentCount();
 }
 
-size_t DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t starting_segment_id,
-                                        size_t increase_goal_bytes) {
+pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t starting_segment_id,
+                                                        size_t increase_goal_bytes) {
   DCHECK(!owner_->IsReplica());
+
+  size_t evicted_items = 0, evicted_bytes = 0;
+
+  if (owner_->tiered_storage()) {
+    evicted_bytes = owner_->tiered_storage()->ReclaimMemory(increase_goal_bytes);
+    if (evicted_bytes >= increase_goal_bytes)
+      return {0, evicted_bytes};
+  }
+
   if ((!caching_mode_) || !expire_allowed_)
-    return 0;
+    return {0, 0};
 
   auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);
   auto max_segment_to_consider = GetFlag(FLAGS_max_segment_to_consider);
@@ -1225,7 +1268,6 @@ size_t DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t starting_segment_
   constexpr int32_t num_buckets = PrimeTable::Segment_t::kTotalBuckets;
   constexpr int32_t num_slots = PrimeTable::Segment_t::kSlotNum;
 
-  size_t evicted_items = 0, evicted_bytes = 0;
   string tmp;
 
   bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
@@ -1289,7 +1331,7 @@ finish:
   DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted_items << "/"
            << max_eviction_per_hb;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
-  return evicted_bytes;
+  return {evicted_items, evicted_bytes};
 }
 
 void DbSlice::CreateDb(DbIndex db_ind) {
@@ -1349,7 +1391,7 @@ void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbT
     // Delete all tiered entries
     PrimeTable::Cursor cursor;
     do {
-      cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
+      cursor = Traverse(&db_ptr->prime, cursor, [&](PrimeIterator it) {
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, &it->second);
         } else if (it->second.HasStashPending()) {
@@ -1431,9 +1473,9 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
     shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
   }
 
-  size_t value_heap_size = pv.MallocUsed();
+  ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
   stats.inline_keys -= del_it->first.IsInline();
-  AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -del_it->first.MallocUsed(),
+  AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
                       table);                                                // Key
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
@@ -1448,7 +1490,14 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   }
 
   table->prime.Erase(del_it.GetInnerIt());
-  table_memory_ += (table->table_memory() - table_before);
+
+  // Note, currently we do not shrink our tables upon deletion.
+  // This DCHECK ensures that if we decide to do so, we will have to update table_memory_
+  // accordingly.
+  DCHECK_EQ(table->table_memory(), table_before);
+
+  --entries_count_;
+  memory_budget_ += (value_heap_size + key_size_used);
 
   SendInvalidationTrackingMessage(del_it.key());
 }
@@ -1475,11 +1524,14 @@ void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const Change
 
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << id;
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
+  std::unique_lock lk(local_mu_);
 
-  for (const auto& ccb : change_cb_) {
-    CHECK(ccb.second);
-    ccb.second(id, cr);
+  const size_t limit = change_cb_.size();
+  auto ccb = change_cb_.begin();
+  for (size_t i = 0; i < limit; ++i) {
+    CHECK(ccb->second);
+    ccb->second(id, cr);
+    ++ccb;
   }
 }
 

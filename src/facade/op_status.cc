@@ -14,6 +14,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kKeyNotFoundErr;
     case OpStatus::WRONG_TYPE:
       return kWrongTypeErr;
+    case OpStatus::WRONG_JSON_TYPE:
+      return kWrongJsonTypeErr;
     case OpStatus::OUT_OF_RANGE:
       return kIndexOutOfRange;
     case OpStatus::INVALID_FLOAT:

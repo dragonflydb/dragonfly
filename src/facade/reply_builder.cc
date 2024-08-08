@@ -103,12 +103,18 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
     DVLOG(3) << "Sending batch to stream :" << absl::CHexEscape(batch_);
 
     tl_facade_stats->reply_stats.io_write_bytes += batch_.size();
-
-    iovec tmp[len + 1];
-    tmp[0].iov_base = batch_.data();
-    tmp[0].iov_len = batch_.size();
-    copy(v, v + len, tmp + 1);
-    ec = sink_->Write(tmp, len + 1);
+    if (len == UIO_MAXIOV) {
+      ec = sink_->Write(io::Buffer(batch_));
+      if (!ec) {
+        ec = sink_->Write(v, len);
+      }
+    } else {
+      iovec tmp[len + 1];
+      tmp[0].iov_base = batch_.data();
+      tmp[0].iov_len = batch_.size();
+      copy(v, v + len, tmp + 1);
+      ec = sink_->Write(tmp, len + 1);
+    }
     batch_.clear();
   }
   send_active_ = false;
@@ -151,16 +157,6 @@ void SinkReplyBuilder::SendError(OpStatus status) {
   }
 }
 
-void SinkReplyBuilder::SendRawVec(absl::Span<const std::string_view> msg_vec) {
-  absl::FixedArray<iovec, 16> arr(msg_vec.size());
-
-  for (unsigned i = 0; i < msg_vec.size(); ++i) {
-    arr[i].iov_base = const_cast<char*>(msg_vec[i].data());
-    arr[i].iov_len = msg_vec[i].size();
-  }
-  Send(arr.data(), msg_vec.size());
-}
-
 void SinkReplyBuilder::StartAggregate() {
   DVLOG(1) << "StartAggregate";
   should_aggregate_ = true;
@@ -195,6 +191,73 @@ void SinkReplyBuilder::FlushBatch() {
 
 size_t SinkReplyBuilder::UsedMemory() const {
   return dfly::HeapSize(batch_);
+}
+
+void SinkReplyBuilder2::Write(std::string_view str) {
+  DCHECK(scoped_);
+  if (str.size() >= 32)
+    WriteRef(str);
+  else
+    WritePiece(str);
+}
+
+char* SinkReplyBuilder2::ReservePiece(size_t size) {
+  if (buffer_.AppendBuffer().size() <= size)
+    Flush();
+
+  char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
+  if (vecs_.empty() || !IsInBuf(vecs_.back().iov_base))
+    NextVec({dest, 0});
+
+  return dest;
+}
+
+void SinkReplyBuilder2::CommitPiece(size_t size) {
+  DCHECK(IsInBuf(vecs_.back().iov_base));
+
+  buffer_.CommitWrite(size);
+  vecs_.back().iov_len += size;
+  total_size_ += size;
+}
+
+void SinkReplyBuilder2::WritePiece(std::string_view str) {
+  char* dest = ReservePiece(str.size());
+  memcpy(dest, str.data(), str.size());
+  CommitPiece(str.size());
+}
+
+void SinkReplyBuilder2::WriteRef(std::string_view str) {
+  NextVec(str);
+  total_size_ += str.size();
+}
+
+void SinkReplyBuilder2::Flush() {
+  auto ec = sink_->Write(vecs_.data(), vecs_.size());
+  if (ec)
+    ec_ = ec;
+
+  buffer_.Clear();
+  vecs_.clear();
+  total_size_ = 0;
+}
+
+void SinkReplyBuilder2::FinishScope() {
+  // If batching or aggregations are not enabled, flush
+  Flush();
+
+  // TODO: otherwise iterate over vec_ and copy items to buffer_
+  // whilst also updating their pointers
+}
+
+bool SinkReplyBuilder2::IsInBuf(const void* ptr) const {
+  auto ib = buffer_.InputBuffer();
+  return ptr >= ib.data() && ptr <= ib.data() + ib.size();
+}
+
+void SinkReplyBuilder2::NextVec(std::string_view str) {
+  if (vecs_.size() >= IOV_MAX)
+    Flush();
+  vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
@@ -549,9 +612,9 @@ void RedisReplyBuilder::StartCollection(unsigned len, CollectionType type) {
 }
 
 // This implementation a bit complicated because it uses vectorized
-// send to send an array. The problem with that is the OS limits vector length
-// to low numbers (around 1024). Therefore, to make it robust we send the array in batches.
-// We limit the vector length to 256 and when it fills up we flush it to the socket and continue
+// send to send an array. The problem with that is the OS limits vector length to UIO_MAXIOV.
+// Therefore, to make it robust we send the array in batches.
+// We limit the vector length, and when it fills up we flush it to the socket and continue
 // iterating.
 void RedisReplyBuilder::SendStringArrInternal(
     size_t size, absl::FunctionRef<std::string_view(unsigned)> producer, CollectionType type) {
@@ -568,68 +631,80 @@ void RedisReplyBuilder::SendStringArrInternal(
     return;
   }
 
-  // When vector length is too long, Send returns EMSGSIZE.
-  size_t vec_len = std::min<size_t>(124u, size);
+  // We limit iovec capacity, vectorized length is limited upto UIO_MAXIOV (Send returns EMSGSIZE).
+  size_t vec_cap = std::min<size_t>(UIO_MAXIOV, size * 2);
+  absl::FixedArray<iovec, 16> vec(vec_cap);
+  absl::FixedArray<char, 128> meta(std::max<size_t>(vec_cap * 64, 128u));
 
-  absl::FixedArray<iovec, 16> vec(vec_len * 2 + 2);
-  absl::FixedArray<char, 128> meta(vec_len * 32 + 64);  // 32 bytes per element + spare space
+  char* start = meta.data();
+  char* next = start;
 
-  char* next = meta.data();
-
+  // at most 35 chars.
   auto serialize_len = [&](char prefix, size_t len) {
     *next++ = prefix;
-    next = absl::numbers_internal::FastIntToBuffer(len, next);
+    next = absl::numbers_internal::FastIntToBuffer(len, next);  // at most 32 chars
     *next++ = '\r';
     *next++ = '\n';
   };
 
   serialize_len(type_char[0], header_len);
-  vec[0] = IoVec(string_view{meta.data(), size_t(next - meta.data())});
-  char* start = next;
-
-  unsigned vec_indx = 1;
+  unsigned vec_indx = 0;
   string_view src;
+
+#define FLUSH_IOVEC()           \
+  do {                          \
+    Send(vec.data(), vec_indx); \
+    if (ec_)                    \
+      return;                   \
+    vec_indx = 0;               \
+    next = meta.data();         \
+  } while (false)
+
   for (unsigned i = 0; i < size; ++i) {
+    DCHECK_LT(vec_indx, vec_cap);
+
     src = producer(i);
     serialize_len('$', src.size());
 
-    // add serialized len blob
-    vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
-    DCHECK_GT(next - start, 0);
-
-    start = next;
-
     // copy data either by referencing via an iovec or copying inline into meta buf.
-    if (src.size() >= 30) {
+    constexpr size_t kSSOLen = 32;
+    if (src.size() > kSSOLen) {
+      // reference metadata blob before referencing another vector.
+      DCHECK_GT(next - start, 0);
+      vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
+      if (vec_indx >= vec_cap) {
+        FLUSH_IOVEC();
+      }
+
+      DCHECK_LT(vec_indx, vec.size());
       vec[vec_indx++] = IoVec(src);
+      if (vec_indx >= vec_cap) {
+        FLUSH_IOVEC();
+      }
+      start = next;
     } else if (src.size() > 0) {
+      // NOTE!: this is not just optimization. producer may returns a string_piece that will
+      // be overriden for the next call, so we must do this for correctness.
       memcpy(next, src.data(), src.size());
-      vec[vec_indx - 1].iov_len += src.size();  // extend the reference
       next += src.size();
+    }
+
+    // how much buffer we need to perform the next iteration.
+    constexpr ptrdiff_t kMargin = kSSOLen + 3 /* $\r\n */ + 2 /*length*/ + 2 /* \r\n */;
+
+    // Keep at least kMargin bytes for a small string as well as its length.
+    if (kMargin >= meta.end() - next) {
+      // Flush the iovec array.
+      vec[vec_indx++] = IoVec(string_view{start, size_t(next - start)});
+      FLUSH_IOVEC();
       start = next;
     }
     *next++ = '\r';
     *next++ = '\n';
-
-    // we keep at least 40 bytes to have enough place for a small string as well as its length.
-    if (vec_indx + 1 >= vec.size() || (meta.end() - next < 40)) {
-      // Flush the iovec array.
-      if (i < size - 1 || vec_indx == vec.size()) {
-        Send(vec.data(), vec_indx);
-        if (ec_)
-          return;
-
-        vec_indx = 0;
-        start = meta.data();
-        next = start + 2;
-        start[0] = '\r';
-        start[1] = '\n';
-      }
-    }
   }
 
   vec[vec_indx].iov_base = start;
-  vec[vec_indx].iov_len = 2;
+  vec[vec_indx].iov_len = next - start;
   Send(vec.data(), vec_indx + 1);
 }
 

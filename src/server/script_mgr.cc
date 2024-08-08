@@ -38,6 +38,15 @@ ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
           "access undeclared keys, automaticaly set the script flag to be able to run with "
           "undeclared key.");
 
+ABSL_FLAG(
+    std::vector<std::string>, lua_undeclared_keys_shas,
+    std::vector<std::string>({
+        "351130589c64523cb98978dc32c64173a31244f3",  // Sidekiq, see #2442
+        "6ae15ef4678593dc61f991c9953722d67d822776",  // Sidekiq, see #2442
+    }),
+    "Comma-separated list of Lua script SHAs which are allowed to access undeclared keys. SHAs are "
+    "only looked at when loading the script, and new values do not affect already-loaded script.");
+
 namespace dfly {
 using namespace std;
 using namespace facade;
@@ -72,7 +81,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
         "FLAGS <sha> [flags ...]",
-        "   Set specific flags for script. Can be called before the sript is loaded."
+        "   Set specific flags for script. Can be called before the sript is loaded.",
         "   The following flags are possible: ",
         "      - Use 'allow-undeclared-keys' to allow accessing undeclared keys",
         "      - Use 'disable-atomicity' to allow running scripts non-atomically",
@@ -80,7 +89,9 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Lists loaded scripts.",
         "LATENCY",
         "   Prints latency histograms in usec for every called function.",
-        "HELP"
+        "GC",
+        "   Invokes garbage collection on all unused interpreter instances.",
+        "HELP",
         "   Prints this help."};
     auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     return rb->SendSimpleStrArr(kHelp);
@@ -104,6 +115,9 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
   if (subcmd == "FLAGS" && args.size() > 2)
     return ConfigCmd(args, cntx);
 
+  if (subcmd == "GC")
+    return GCCmd(cntx);
+
   string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                             "'. Try SCRIPT HELP.");
   cntx->SendError(err, kSyntaxErrType);
@@ -122,7 +136,6 @@ void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
   for (uint8_t v : res) {
     rb->SendLong(v);
   }
-  return;
 }
 
 void ScriptMgr::FlushCmd(CmdArgList args, ConnectionContext* cntx) {
@@ -207,6 +220,16 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   }
 }
 
+void ScriptMgr::GCCmd(ConnectionContext* cntx) const {
+  auto cb = [](Interpreter* ir) {
+    ir->RunGC();
+    ThisFiber::Yield();
+  };
+  shard_set->pool()->AwaitFiberOnAll(
+      [cb](auto* pb) { ServerState::tlocal()->AlterInterpreters(cb); });
+  return cntx->SendOk();
+}
+
 // Check if script starts with shebang (#!lua). If present, look for flags parameter and truncate
 // it.
 io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_view* body) {
@@ -247,6 +270,11 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
   if (!params_opt)
     return params_opt.get_unexpected();
   auto params = params_opt->value_or(default_params_);
+
+  auto undeclared_shas = absl::GetFlag(FLAGS_lua_undeclared_keys_shas);
+  if (find(undeclared_shas.begin(), undeclared_shas.end(), sha) != undeclared_shas.end()) {
+    params.undeclared_keys = true;
+  }
 
   // If the script is atomic, check for possible squashing optimizations.
   // For non atomic modes, squashing increases the time locks are held, which

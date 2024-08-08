@@ -68,7 +68,6 @@ jobs:
             ctest -V -L DFLY
 
   build-macos:
-    if: false
     runs-on: macos-13
     timeout-minutes: 45
     steps:
@@ -94,8 +93,7 @@ jobs:
           rm /usr/local/bin/idle3* || :
           rm /usr/local/bin/pydoc* || :
           rm /usr/local/bin/python3* || :
-          brew update && brew install ninja boost openssl automake gcc zstd bison c-ares \
-              autoconf libtool automake
+          brew update && brew install ninja boost automake zstd bison
 
           mkdir -p $GITHUB_WORKSPACE/build
 
@@ -110,7 +108,7 @@ jobs:
 
           echo "*************************** START BUILDING **************************************"
           CC=gcc-12 CXX=g++-12 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-ld_classic"
 
           ninja src/all
 

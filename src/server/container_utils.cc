@@ -116,7 +116,7 @@ OpResult<ShardFFResult> FindFirstNonEmpty(Transaction* trans, int req_obj_type) 
     return OpStatus::WRONG_TYPE;
 
   // Order result by their keys position in the command arguments, push errors to back
-  auto comp = [trans](const OpResult<FFResult>& lhs, const OpResult<FFResult>& rhs) {
+  auto comp = [](const OpResult<FFResult>& lhs, const OpResult<FFResult>& rhs) {
     if (!lhs || !rhs)
       return lhs.ok();
     size_t i1 = std::get<1>(*lhs);

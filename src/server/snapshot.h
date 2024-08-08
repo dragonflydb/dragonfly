@@ -179,8 +179,6 @@ class SliceSnapshot {
     size_t savecb_calls = 0;
     size_t keys_total = 0;
   } stats_;
-
-  ConditionFlag bucket_ser_;
 };
 
 }  // namespace dfly

@@ -150,8 +150,6 @@ class EngineShard {
     return continuation_trans_;
   }
 
-  void TEST_EnableHeartbeat();
-
   void StopPeriodicFiber();
 
   struct TxQueueInfo {
@@ -205,10 +203,12 @@ class EngineShard {
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
 
-  void StartPeriodicFiber(util::ProactorBase* pb);
+  void StartPeriodicFiber(util::ProactorBase* pb, std::function<void()> shard_handler);
 
   void Heartbeat();
-  void RunPeriodic(std::chrono::milliseconds period_ms);
+  void RetireExpiredAndEvict();
+
+  void RunPeriodic(std::chrono::milliseconds period_ms, std::function<void()> shard_handler);
 
   void CacheStats();
 
@@ -288,7 +288,7 @@ class EngineShardSet {
     return pp_;
   }
 
-  void Init(uint32_t size, bool update_db_time);
+  void Init(uint32_t size, std::function<void()> shard_handler);
 
   // Shutdown sequence:
   // - EngineShardSet.PreShutDown()
@@ -342,7 +342,6 @@ class EngineShardSet {
   }
 
   // Used in tests
-  void TEST_EnableHeartBeat();
   void TEST_EnableCacheMode();
 
  private:

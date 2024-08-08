@@ -27,11 +27,7 @@
 
 using namespace facade;
 
-ABSL_FLAG(uint32_t, tiered_storage_memory_margin, 10_MB,
-          "In bytes. If memory budget on a shard goes below this limit, tiering stops "
-          "hot-loading values into ram.");
-
-ABSL_FLAG(bool, tiered_experimental_cooling, false,
+ABSL_FLAG(bool, tiered_experimental_cooling, true,
           "If true, uses intermidate cooling layer "
           "when offloading values to storage");
 
@@ -75,10 +71,7 @@ string DecodeString(bool is_raw, string_view str, PrimeValue decoder) {
 }
 
 tiering::DiskSegment FromCoolItem(const PrimeValue::CoolItem& item) {
-  tiering::DiskSegment res;
-  res.length = item.serialized_size;
-  res.offset = size_t(item.record->page_index) * 4096 + item.page_offset;
-  return res;
+  return {item.record->page_index * tiering::kPageSize + item.page_offset, item.serialized_size};
 }
 
 }  // anonymous namespace
@@ -89,7 +82,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
  public:
   ShardOpManager(TieredStorage* ts, DbSlice* db_slice, size_t max_size)
       : tiering::OpManager{max_size}, ts_{ts}, db_slice_{*db_slice} {
-    memory_margin_ = absl::GetFlag(FLAGS_tiered_storage_memory_margin);
   }
 
   // Clear IO pending flag for entry
@@ -152,8 +144,6 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   // Find entry by key in db_slice and store external segment in place of original value.
   // Update memory stats
   void SetExternal(OpManager::KeyRef key, tiering::DiskSegment segment) {
-    // TODO: to rename it to CoolEntry or something.
-
     if (auto* pv = Find(key); pv) {
       auto* stats = GetDbTableStats(key.first);
 
@@ -164,12 +154,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
       if (absl::GetFlag(FLAGS_tiered_experimental_cooling)) {
         RetireColdEntries(pv->MallocUsed());
-        detail::TieredColdRecord* record = ts_->cool_queue_.PushFront(
-            key.first, CompactObj::HashCode(key.second), segment.offset / 4096, std::move(*pv));
-        DCHECK(record);
-
-        pv->SetCool(segment.offset, segment.length, record);
-        DCHECK_EQ(pv->Size(), record->value.Size());
+        ts_->CoolDown(key.first, key.second, segment, pv);
       } else {
         stats->AddTypeMemoryUsage(pv->ObjType(), -pv->MallocUsed());
         pv->SetExternal(segment.offset, segment.length);
@@ -186,10 +171,10 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
   }
 
   bool HasEnoughMemoryMargin(int64_t value_len) {
-    return db_slice_.memory_budget() - memory_margin_ - value_len > 0;
+    return db_slice_.memory_budget() - value_len > ssize_t(memory_low_limit_);
   }
 
-  int64_t memory_margin_ = 0;  // TODO: get rid of memory_margin_
+  // being compared to db_slice_.memory_budget().
   size_t memory_low_limit_;
 
   struct {
@@ -207,7 +192,7 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
   for (auto [dbid, hash, item_segment] : ts_->bins_->DeleteBin(segment, page)) {
     // Search for key with the same hash and value pointing to the same segment.
     // If it still exists, it must correspond to the value stored in this bin
-    auto predicate = [item_segment](const PrimeKey& key, const PrimeValue& probe) {
+    auto predicate = [item_segment = item_segment](const PrimeKey& key, const PrimeValue& probe) {
       return probe.IsExternal() && tiering::DiskSegment{probe.GetExternalSlice()} == item_segment;
     };
     auto it = db_slice_.GetDBTable(dbid)->prime.FindFirst(hash, predicate);
@@ -221,8 +206,7 @@ void TieredStorage::ShardOpManager::Defragment(tiering::DiskSegment segment, str
       tiering::DiskSegment segment = FromCoolItem(item);
 
       // We remove it from both cool storage and the offline storage.
-      PrimeValue hot = ts_->cool_queue_.Erase(item.record);
-      pv = std::move(hot);
+      pv = ts_->DeleteCool(item.record);
       auto* stats = GetDbTableStats(dbid);
       stats->tiered_entries--;
       stats->tiered_used_bytes -= segment.length;
@@ -273,6 +257,8 @@ bool TieredStorage::ShardOpManager::NotifyFetched(EntryId id, string_view value,
 }
 
 bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
+  DVLOG(2) << "NotifyDelete [" << segment.offset << "," << segment.length << "]";
+
   if (OccupiesWholePages(segment.length))
     return true;
 
@@ -303,34 +289,7 @@ void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) 
     const double kHighFactor = 1.0;
     size_t needed_to_free =
         (threshold - db_slice_.memory_budget()) + memory_low_limit_ * kHighFactor;
-    size_t gained = 0;
-
-    do {
-      size_t memory_before = ts_->cool_queue_.UsedMemory();
-      detail::TieredColdRecord* record = ts_->cool_queue_.PopBack();
-      if (record == nullptr)  // nothing to pull anymore
-        break;
-
-      gained += memory_before - ts_->cool_queue_.UsedMemory();
-
-      // Find the entry that points to the cool item and externalize it.
-      auto predicate = [record](const PrimeKey& key, const PrimeValue& probe) {
-        return probe.IsExternal() && probe.IsCool() && probe.GetCool().record == record;
-      };
-
-      PrimeIterator it =
-          db_slice_.GetDBTable(record->db_index)->prime.FindFirst(record->key_hash, predicate);
-      CHECK(IsValid(it));
-      PrimeValue& pv = it->second;
-      tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
-
-      // Now the item is only in storage.
-      pv.SetExternal(segment.offset, segment.length);
-
-      auto* stats = GetDbTableStats(record->db_index);
-      stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
-      CompactObj::DeleteMR<detail::TieredColdRecord>(record);
-    } while (gained < needed_to_free);
+    size_t gained = ts_->ReclaimMemory(needed_to_free);
 
     VLOG(1) << "Memory budget: " << db_slice_.memory_budget() << ", gained " << gained;
 
@@ -359,8 +318,11 @@ TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
 TieredStorage::~TieredStorage() {
 }
 
-error_code TieredStorage::Open(string_view path) {
-  return op_manager_->Open(absl::StrCat(path, ProactorBase::me()->GetPoolIndex()));
+error_code TieredStorage::Open(string_view base_path) {
+  // dts - dragonfly tiered storage.
+  string path = absl::StrCat(
+      base_path, "-", absl::Dec(ProactorBase::me()->GetPoolIndex(), absl::kZeroPad4), ".dts");
+  return op_manager_->Open(path);
 }
 
 void TieredStorage::Close() {
@@ -374,53 +336,25 @@ void TieredStorage::SetMemoryLowLimit(size_t mem_limit) {
 
 util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                               const PrimeValue& value) {
-  DCHECK(value.IsExternal());
-  util::fb2::Future<string> future;
-  if (value.IsCool()) {
-    // If we read a cool record - bring it back to primary table.
-    PrimeValue hot = Warmup(dbid, value.GetCool());
-    string tmp;
-
-    DCHECK_EQ(value.Size(), hot.Size());
-    hot.GetString(&tmp);
-    future.Resolve(tmp);
-
-    // TODO: An awful hack - to fix later.
-    const_cast<PrimeValue&>(value) = std::move(hot);
-  } else {
-    // The raw_val passed to cb might need decoding based on the encoding mask of the "value"
-    // object. We save the mask in decoder and use it to decode the final string that Read should
-    // resolve.
-    PrimeValue decoder;
-    decoder.ImportExternal(value);
-
-    auto cb = [future, decoder = std::move(decoder)](bool is_raw, const string* raw_val) mutable {
-      future.Resolve(DecodeString(is_raw, *raw_val, std::move(decoder)));
-      return false;  // was not modified
-    };
-
-    op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
-  }
-  return future;
+  util::fb2::Future<std::string> fut;
+  Read(dbid, key, value, [fut](const std::string& value) mutable { fut.Resolve(value); });
+  return fut;
 }
 
 void TieredStorage::Read(DbIndex dbid, std::string_view key, const PrimeValue& value,
                          std::function<void(const std::string&)> readf) {
   DCHECK(value.IsExternal());
-  if (value.IsCool()) {
-    util::fb2::Future<string> res = Read(dbid, key, value);
-    readf(res.Get());
-  } else {
-    PrimeValue decoder;
-    decoder.ImportExternal(value);
+  DCHECK(!value.IsCool());
 
-    auto cb = [readf = std::move(readf), decoder = std::move(decoder)](
-                  bool is_raw, const string* raw_val) mutable {
-      readf(DecodeString(is_raw, *raw_val, std::move(decoder)));
-      return false;
-    };
-    op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
-  }
+  PrimeValue decoder;
+  decoder.ImportExternal(value);
+
+  auto cb = [readf = std::move(readf), decoder = std::move(decoder)](
+                bool is_raw, const string* raw_val) mutable {
+    readf(DecodeString(is_raw, *raw_val, std::move(decoder)));
+    return false;
+  };
+  op_manager_->Enqueue(KeyRef(dbid, key), value.GetExternalSlice(), std::move(cb));
 }
 
 template <typename T>
@@ -428,7 +362,6 @@ util::fb2::Future<T> TieredStorage::Modify(DbIndex dbid, std::string_view key,
                                            const PrimeValue& value,
                                            std::function<T(std::string*)> modf) {
   DCHECK(value.IsExternal());
-  DCHECK(!value.IsCool());  // TBD
 
   util::fb2::Future<T> future;
   PrimeValue decoder;
@@ -492,21 +425,14 @@ void TieredStorage::Delete(DbIndex dbid, PrimeValue* value) {
   DCHECK(value->IsExternal());
   ++stats_.total_deletes;
 
-  tiering::DiskSegment segment;
+  tiering::DiskSegment segment = value->GetExternalSlice();
   if (value->IsCool()) {
-    // Delete the cool item.
-    PrimeValue::CoolItem item = value->GetCool();
-    segment.length = item.serialized_size;
-    segment.offset = item.page_offset + item.record->page_index * 4096;
-
-    PrimeValue hot = cool_queue_.Erase(item.record);
-    DCHECK_EQ(OBJ_STRING, hot.ObjType());
-  } else {
-    segment = value->GetExternalSlice();
+    auto hot = DeleteCool(value->GetCool().record);
+    DCHECK_EQ(hot.ObjType(), OBJ_STRING);
   }
+
   // In any case we delete the offloaded segment and reset the value.
   value->Reset();
-  stats_.total_deletes++;
   op_manager_->DeleteOffloaded(dbid, segment);
 }
 
@@ -555,7 +481,9 @@ TieredStats TieredStorage::GetStats() const {
 
   {  // Own stats
     stats.total_stash_overflows = stats_.stash_overflow_cnt;
-    stats.cold_storage_bytes = cool_queue_.UsedMemory();
+    stats.cold_storage_bytes = stats_.cool_memory_used;
+    stats.total_offloading_steps = stats_.offloading_steps;
+    stats.total_offloading_stashes = stats_.offloading_stashes;
   }
   return stats;
 }
@@ -574,10 +502,12 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   string tmp;
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
+    stats_.offloading_steps++;
     if (ShouldStash(it->second)) {
       if (it->first.WasTouched()) {
         it->first.SetTouched(false);
       } else {
+        stats_.offloading_stashes++;
         TryStash(dbid, it->first.GetSlice(&tmp), &it->second);
       }
     }
@@ -596,25 +526,91 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   } while (offloading_cursor_ != start_cursor && iterations++ < kMaxIterations);
 }
 
+size_t TieredStorage::ReclaimMemory(size_t goal) {
+  size_t gained = 0;
+  do {
+    size_t memory_before = stats_.cool_memory_used;
+    detail::TieredColdRecord* record = PopCool();
+    if (record == nullptr)  // nothing to pull anymore
+      break;
+
+    gained += memory_before - stats_.cool_memory_used;
+
+    // Find the entry that points to the cool item and externalize it.
+    auto predicate = [record](const PrimeKey& key, const PrimeValue& probe) {
+      return probe.IsExternal() && probe.IsCool() && probe.GetCool().record == record;
+    };
+
+    PrimeIterator it = op_manager_->db_slice_.GetDBTable(record->db_index)
+                           ->prime.FindFirst(record->key_hash, predicate);
+    CHECK(IsValid(it));
+    PrimeValue& pv = it->second;
+    tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
+
+    // Now the item is only in storage.
+    pv.SetExternal(segment.offset, segment.length);
+
+    auto* stats = op_manager_->GetDbTableStats(record->db_index);
+    stats->AddTypeMemoryUsage(record->value.ObjType(), -record->value.MallocUsed());
+    CompactObj::DeleteMR<detail::TieredColdRecord>(record);
+  } while (gained < goal);
+
+  return gained;
+}
+
 bool TieredStorage::ShouldStash(const PrimeValue& pv) const {
-  auto disk_stats = op_manager_->GetStats().disk_stats;
+  const auto& disk_stats = op_manager_->GetStats().disk_stats;
   return !pv.IsExternal() && !pv.HasStashPending() && pv.ObjType() == OBJ_STRING &&
          pv.Size() >= kMinValueSize &&
          disk_stats.allocated_bytes + tiering::kPageSize + pv.Size() < disk_stats.max_file_size;
+}
+
+void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
+                             const tiering::DiskSegment& segment, PrimeValue* pv) {
+  detail::TieredColdRecord* record = CompactObj::AllocateMR<detail::TieredColdRecord>();
+  cool_queue_.push_front(*record);
+  stats_.cool_memory_used += (sizeof(detail::TieredColdRecord) + pv->MallocUsed());
+
+  record->key_hash = CompactObj::HashCode(str);
+  record->db_index = db_ind;
+  record->page_index = segment.offset / tiering::kPageSize;
+  record->value = std::move(*pv);
+
+  pv->SetCool(segment.offset, segment.length, record);
+  DCHECK_EQ(pv->Size(), record->value.Size());
 }
 
 PrimeValue TieredStorage::Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
   tiering::DiskSegment segment = FromCoolItem(item);
 
   // We remove it from both cool storage and the offline storage.
-  PrimeValue hot = cool_queue_.Erase(item.record);
+  PrimeValue hot = DeleteCool(item.record);
   op_manager_->DeleteOffloaded(dbid, segment);
 
   // Bring it back to the PrimeTable.
   DCHECK(hot.ObjType() == OBJ_STRING);
-  hot.SetTouched(true);
 
   return hot;
+}
+
+PrimeValue TieredStorage::DeleteCool(detail::TieredColdRecord* record) {
+  auto it = CoolQueue::s_iterator_to(*record);
+  cool_queue_.erase(it);
+
+  PrimeValue hot = std::move(record->value);
+  stats_.cool_memory_used -= (sizeof(detail::TieredColdRecord) + hot.MallocUsed());
+  CompactObj::DeleteMR<detail::TieredColdRecord>(record);
+  return hot;
+}
+
+detail::TieredColdRecord* TieredStorage::PopCool() {
+  if (cool_queue_.empty())
+    return nullptr;
+
+  detail::TieredColdRecord& res = cool_queue_.back();
+  cool_queue_.pop_back();
+  stats_.cool_memory_used -= (sizeof(detail::TieredColdRecord) + res.value.MallocUsed());
+  return &res;
 }
 
 }  // namespace dfly

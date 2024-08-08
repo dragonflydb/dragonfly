@@ -143,11 +143,6 @@ std::string_view JournalSlice::GetEntry(LSN lsn) const {
 }
 
 void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
-  optional<FiberAtomicGuard> guard;
-  if (!await) {
-    guard.emplace();  // Guard is non-movable/copyable, so we must use emplace()
-  }
-
   DCHECK(ring_buffer_);
 
   JournalItem dummy;
@@ -192,8 +187,11 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
              << " num callbacks: " << change_cb_arr_.size();
 
-    for (const auto& k_v : change_cb_arr_) {
-      k_v.second(*item, await);
+    const size_t size = change_cb_arr_.size();
+    auto k_v = change_cb_arr_.begin();
+    for (size_t i = 0; i < size; ++i) {
+      k_v->second(*item, await);
+      ++k_v;
     }
   }
 }

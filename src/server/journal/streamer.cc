@@ -13,9 +13,9 @@
 
 using namespace facade;
 
-ABSL_FLAG(uint32_t, replication_stream_timeout, 500,
-          "Time in milliseconds to wait for the replication output buffer go below "
-          "the throttle limit.");
+ABSL_FLAG(uint32_t, replication_timeout, 10000,
+          "Time in milliseconds to wait for the replication writes being stuck.");
+
 ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,
           "Time to wait for the replication output buffer go below the throttle limit");
 
@@ -155,8 +155,8 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (IsStopped() || !IsStalled())
     return;
 
-  auto next = chrono::steady_clock::now() +
-              chrono::milliseconds(absl::GetFlag(FLAGS_replication_stream_timeout));
+  auto next =
+      chrono::steady_clock::now() + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));
   size_t inflight_start = in_flight_bytes_;
   size_t sent_start = total_sent_;
 
@@ -213,9 +213,7 @@ void RestoreStreamer::Run() {
       return;
 
     bool written = false;
-    cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
-      ConditionGuard guard(&bucket_ser_);
-
+    cursor = db_slice_->Traverse(pt, cursor, [&](PrimeTable::bucket_iterator it) {
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
       if (WriteBucket(it)) {
@@ -312,8 +310,6 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
-
-  ConditionGuard guard(&bucket_ser_);
 
   PrimeTable* table = db_slice_->GetTables(0).first;
 

@@ -300,6 +300,13 @@ std::shared_ptr<ClusterConfig> ClusterConfig::CloneWithChanges(
   return new_config;
 }
 
+std::shared_ptr<ClusterConfig> ClusterConfig::CloneWithoutMigrations() const {
+  auto new_config = std::make_shared<ClusterConfig>(*this);
+  new_config->my_incoming_migrations_.clear();
+  new_config->my_outgoing_migrations_.clear();
+  return new_config;
+}
+
 bool ClusterConfig::IsMySlot(SlotId id) const {
   if (id > cluster::kMaxSlotNum) {
     DCHECK(false) << "Requesting a non-existing slot id " << id;

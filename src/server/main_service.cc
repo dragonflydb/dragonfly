@@ -67,6 +67,11 @@ using facade::ErrorReply;
 ABSL_FLAG(int32_t, port, 6379,
           "Redis port. 0 disables the port, -1 will bind on a random available port.");
 
+ABSL_FLAG(std::string, announce_ip, "",
+          "IP address that Dragonfly announces to cluster clients and replication master");
+ABSL_FLAG(uint16_t, announce_port, 0,
+          "Port that Dragonfly announces to cluster clients and replication master");
+
 ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
@@ -842,8 +847,7 @@ Service::~Service() {
   shard_set = nullptr;
 }
 
-void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners,
-                   const InitOpts& opts) {
+void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
 
   config_registry.RegisterMutable("maxmemory", [](const absl::CommandLineFlag& flag) {
@@ -875,13 +879,14 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_num = pp_.size();
   }
 
+  ChannelStore* cs = new ChannelStore{};
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
   pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
     ServerState::Init(index, shard_num, &user_registry_);
+    ServerState::tlocal()->UpdateChannelStore(cs);
   });
 
-  shard_set->Init(shard_num, !opts.disable_time_update);
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
@@ -889,13 +894,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     acl_family_.Init(listeners.front(), &user_registry_);
   }
 
-  StringFamily::Init(&pp_);
-  GenericFamily::Init(&pp_);
-  server_family_.Init(acceptor, std::move(listeners));
+  // Initialize shard_set with a global callback running once in a while in the shard threads.
+  shard_set->Init(shard_num, [this] { server_family_.GetDflyCmd()->BreakStalledFlowsInShard(); });
 
-  ChannelStore* cs = new ChannelStore{};
-  pp_.AwaitBrief(
-      [cs](uint32_t index, ProactorBase* pb) { ServerState::tlocal()->UpdateChannelStore(cs); });
+  // Requires that shard_set will be initialized before because server_family_.Init might
+  // load the snapshot.
+  server_family_.Init(acceptor, std::move(listeners));
 }
 
 void Service::Shutdown() {
@@ -910,11 +914,10 @@ void Service::Shutdown() {
 
   config_registry.Reset();
 
-  // to shutdown all the runtime components that depend on EngineShard.
-  server_family_.Shutdown();
-  StringFamily::Shutdown();
-  GenericFamily::Shutdown();
+  // to shutdown all the runtime components that depend on EngineShard
+  cluster_family_.Shutdown();
 
+  server_family_.Shutdown();
   engine_varz.reset();
 
   ChannelStore::Destroy();
@@ -1180,12 +1183,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
-      auto info_ptr = server_family_.GetReplicaInfo(dfly_cntx);
-      if (info_ptr) {
-        unsigned session_id = dfly_cntx->conn_state.replication_info.repl_session_id;
-        DCHECK(session_id);
-        server_family_.GetDflyCmd()->CancelReplication(session_id, std::move(info_ptr));
-      }
+      server_family_.GetDflyCmd()->OnClose(dfly_cntx);
       return;
     }
     dfly_cntx->SendError(std::move(*err));
@@ -1598,10 +1596,9 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
 
   // a bit of a hack. I set up breaker callback here for the owner.
   // Should work though it's confusing to have it here.
-  owner->RegisterBreakHook([res, this](uint32_t) {
+  owner->RegisterBreakHook([res](uint32_t) {
     if (res->transaction)
       res->transaction->CancelBlocking(nullptr);
-    this->server_family().BreakOnShutdown();
   });
 
   return res;
@@ -2527,7 +2524,7 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
   }
 }
 
-void Service::OnClose(facade::ConnectionContext* cntx) {
+void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
   ConnectionState& conn_state = server_cntx->conn_state;
 

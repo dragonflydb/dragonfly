@@ -683,7 +683,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
-  shard_set->pool()->AwaitBrief([&tracker, pause_state, ns](unsigned, util::ProactorBase*) {
+  shard_set->pool()->AwaitBrief([&tracker, pause_state](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
     // it's impossible to deadlock on waiting for a command that will be paused.
     tracker.TrackOnThread();
@@ -747,6 +747,7 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
     exit(1);
   }
   ValidateClientTlsFlags();
+  dfly_cmd_ = make_unique<DflyCmd>(this);
 }
 
 ServerFamily::~ServerFamily() {
@@ -776,7 +777,6 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
   listeners_ = std::move(listeners);
-  dfly_cmd_ = make_unique<DflyCmd>(this);
 
   auto os_string = GetOSString();
   LOG_FIRST_N(INFO, 1) << "Host OS: " << os_string << " with " << shard_set->pool()->size()
@@ -823,6 +823,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_key_file");
   config_registry.RegisterMutable("tls_ca_cert_file");
   config_registry.RegisterMutable("tls_ca_cert_dir");
+  config_registry.RegisterMutable("replica_priority");
+  config_registry.RegisterMutable("lua_undeclared_keys_shas");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -937,6 +939,8 @@ struct AggregateLoadResult {
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
 std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& load_path) {
+  DCHECK_GT(shard_count(), 0u);
+
   auto paths_result = snapshot_storage_->LoadPaths(load_path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
@@ -1157,6 +1161,7 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("fibers_count", "", m.worker_fiber_count, MetricType::GAUGE,
                             &resp->body());
+  AppendMetricWithoutLabels("blocked_tasks", "", m.blocked_tasks, MetricType::GAUGE, &resp->body());
 
   AppendMetricWithoutLabels("memory_max_bytes", "", max_memory_limit, MetricType::GAUGE,
                             &resp->body());
@@ -1196,7 +1201,7 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
       size_t mem = total.memory_usage_by_type[type];
       if (mem > 0) {
-        AppendMetricValue("type_used_memory", mem, {"type"}, {CompactObj::ObjTypeToString(type)},
+        AppendMetricValue("type_used_memory", mem, {"type"}, {ObjTypeToString(type)},
                           &type_used_memory_metric);
         added = true;
       }
@@ -1388,17 +1393,12 @@ vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
   return listeners;
 }
 
-bool ServerFamily::HasReplica() const {
-  unique_lock lk(replicaof_mu_);
-  return replica_ != nullptr;
-}
-
-optional<Replica::Info> ServerFamily::GetReplicaInfo() const {
+optional<Replica::Summary> ServerFamily::GetReplicaSummary() const {
   unique_lock lk(replicaof_mu_);
   if (replica_ == nullptr) {
     return nullopt;
   } else {
-    return replica_->GetInfo();
+    return replica_->GetSummary();
   }
 }
 
@@ -1558,10 +1558,6 @@ void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
       [](ShardId) { return true; });
 
   return cntx->SendLong(num_keys.load(memory_order_relaxed));
-}
-
-void ServerFamily::BreakOnShutdown() {
-  dfly_cmd_->BreakOnShutdown();
 }
 
 void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> status_cb) {
@@ -1765,9 +1761,12 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       vector<string> names = config_registry.List(param);
 
       for (const auto& name : names) {
-        absl::CommandLineFlag* flag = CHECK_NOTNULL(absl::FindCommandLineFlag(name));
-        res.push_back(name);
-        res.push_back(flag->CurrentValue());
+        auto value = config_registry.Get(name);
+        DCHECK(value.has_value());
+        if (value.has_value()) {
+          res.push_back(name);
+          res.push_back(*value);
+        }
       }
     }
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -1933,6 +1932,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     result.fiber_longrun_usec += fb2::FiberLongRunSumUsec();
     result.worker_fiber_stack_size += fb2::WorkerFibersStackSize();
     result.worker_fiber_count += fb2::WorkerFibersCount();
+    result.blocked_tasks += TaskQueue::blocked_submitters();
 
     result.coordinator_stats.Add(ss->stats);
 
@@ -2078,7 +2078,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     for (unsigned type = 0; type < total.memory_usage_by_type.size(); type++) {
       size_t mem = total.memory_usage_by_type[type];
       if (mem > 0) {
-        append(absl::StrCat("type_used_memory_", CompactObj::ObjTypeToString(type)), mem);
+        append(absl::StrCat("type_used_memory_", ObjTypeToString(type)), mem);
       }
     }
     append("table_used_memory", total.table_mem_usage);
@@ -2161,9 +2161,6 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("reply_count", reply_stats.send_stats.count);
     append("reply_latency_usec", reply_stats.send_stats.total_duration);
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
-    append("ram_hits", m.events.ram_hits);
-    append("ram_misses", m.events.ram_misses);
-
     append("lua_interpreter_cnt", m.lua_stats.interpreter_cnt);
     append("lua_blocked", m.lua_stats.blocked_cnt);
   }
@@ -2191,6 +2188,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
     append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
     append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
+    append("tiered_offloading_steps", m.tiered_stats.total_offloading_steps);
+    append("tiered_offloading_stashes", m.tiered_stats.total_offloading_stashes);
+    append("tiered_ram_hits", m.events.ram_hits);
+    append("tiered_ram_cool_hits", m.events.ram_cool_hits);
+    append("tiered_ram_misses", m.events.ram_misses);
   }
 
   if (should_enter("PERSISTENCE", true)) {
@@ -2280,7 +2282,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     } else {
       append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
-      auto replication_info_cb = [&](Replica::Info rinfo) {
+      auto replication_info_cb = [&](Replica::Summary rinfo) {
         append("master_host", rinfo.host);
         append("master_port", rinfo.port);
 
@@ -2292,9 +2294,9 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
       };
-      replication_info_cb(replica_->GetInfo());
+      replication_info_cb(replica_->GetSummary());
       for (const auto& replica : cluster_replicas_) {
-        replication_info_cb(replica->GetInfo());
+        replication_info_cb(replica->GetSummary());
       }
     }
   }
@@ -2636,7 +2638,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
-  auto info = replica_->GetInfo();
+  auto info = replica_->GetSummary();
   if (!info.full_sync_done) {
     return cntx->SendError("Full sync not done");
   }
@@ -2664,7 +2666,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
-        auto [sid, replica_info] = dfly_cmd_->CreateSyncSession(cntx);
+        auto [sid, flow_count] = dfly_cmd_->CreateSyncSession(cntx);
         cntx->conn()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
@@ -2680,7 +2682,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         rb->StartArray(4);
         rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
-        rb->SendLong(replica_info->flows.size());
+        rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
         return;
       }
@@ -2691,8 +2693,15 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         return;
       }
       cntx->conn_state.replication_info.repl_listening_port = replica_listening_port;
+      // We set a default value of ip_address here, because LISTENING-PORT is a mandatory field
+      // but IP-ADDRESS is optional
+      if (cntx->conn_state.replication_info.repl_ip_address.empty()) {
+        cntx->conn_state.replication_info.repl_ip_address = cntx->conn()->RemoteEndpointAddress();
+      }
+    } else if (cmd == "IP-ADDRESS") {
+      cntx->conn_state.replication_info.repl_ip_address = arg;
     } else if (cmd == "CLIENT-ID" && args.size() == 2) {
-      auto info = dfly_cmd_->GetReplicaInfo(cntx);
+      auto info = dfly_cmd_->GetReplicaInfoFromConnection(cntx);
       DCHECK(info != nullptr);
       if (info) {
         info->id = arg;
@@ -2761,7 +2770,7 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
     rb->StartArray(4 + cluster_replicas_.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
-    auto send_replica_info = [rb](Replica::Info rinfo) {
+    auto send_replica_info = [rb](Replica::Summary rinfo) {
       rb->SendBulkString(rinfo.host);
       rb->SendBulkString(absl::StrCat(rinfo.port));
       if (rinfo.full_sync_done) {
@@ -2775,9 +2784,9 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
         rb->SendBulkString("connecting");
       }
     };
-    send_replica_info(replica_->GetInfo());
+    send_replica_info(replica_->GetSummary());
     for (const auto& replica : cluster_replicas_) {
-      send_replica_info(replica->GetInfo());
+      send_replica_info(replica->GetSummary());
     }
   }
 }
