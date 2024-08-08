@@ -289,7 +289,8 @@ error_code Replica::Greet() {
   auto announce_ip = absl::GetFlag(FLAGS_announce_ip);
   if (!announce_ip.empty()) {
     RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF ip-address ", announce_ip)));
-    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    LOG_IF(WARNING, !CheckRespIsSimpleReply("OK"))
+        << "Master did not OK announced IP address, perhaps it is using an old version";
   }
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
