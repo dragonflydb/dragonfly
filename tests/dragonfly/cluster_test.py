@@ -1750,7 +1750,7 @@ async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
         role = await m_client.execute_command("role")
         return role == [
             "master",
-            [["127.0.0.1", str(replica_port), "stable_sync"]],
+            [["127.0.0.1", str(replica_port), "online"]],
         ]
 
     while (time.time() - start) < timeout:

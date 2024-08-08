@@ -24,12 +24,12 @@ M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
 
 
-async def wait_for_replicas_state(*clients, state="stable_sync", timeout=0.05):
+async def wait_for_replicas_state(*clients, state="online", timeout=0.05):
     """Wait until all clients (replicas) reach passed state"""
     while len(clients) > 0:
         await asyncio.sleep(timeout)
         roles = await asyncio.gather(*(c.role() for c in clients))
-        clients = [c for c, role in zip(clients, roles) if role[0] != "replica" or role[3] != state]
+        clients = [c for c, role in zip(clients, roles) if role[0] != "slave" or role[3] != state]
 
 
 """
@@ -132,7 +132,7 @@ async def test_replication_all(
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
     role = await c_replica.role()
-    if role[0] != "replica" or role[3] != "stable_sync":
+    if role[0] != "slave" or role[3] != "online":
         return False
     syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
 
@@ -977,13 +977,13 @@ async def test_role_command(df_factory, n_keys=20):
 
     assert await c_master.execute_command("role") == [
         "master",
-        [["127.0.0.1", str(replica.port), "stable_sync"]],
+        [["127.0.0.1", str(replica.port), "online"]],
     ]
     assert await c_replica.execute_command("role") == [
-        "replica",
+        "slave",
         "localhost",
         str(master.port),
-        "stable_sync",
+        "online",
     ]
 
     # This tests that we react fast to socket shutdowns and don't hang on
@@ -991,7 +991,7 @@ async def test_role_command(df_factory, n_keys=20):
     master.stop()
     await asyncio.sleep(0.1)
     assert await c_replica.execute_command("role") == [
-        "replica",
+        "slave",
         "localhost",
         str(master.port),
         "connecting",
@@ -1341,13 +1341,13 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
 
     assert await c_master.execute_command("role") == [
         "master",
-        [["127.0.0.1", str(replica.port), "stable_sync"]],
+        [["127.0.0.1", str(replica.port), "online"]],
     ]
     assert await c_replica.execute_command("role") == [
-        "replica",
+        "slave",
         "localhost",
         str(master.port),
-        "stable_sync",
+        "online",
     ]
 
     await disconnect_clients(c_master, c_replica)
@@ -1555,7 +1555,7 @@ async def test_replicaof_flag_replication_waits(df_factory):
 
     # check that it is in replica mode, yet status is down
     info = await c_replica.info("replication")
-    assert info["role"] == "replica"
+    assert info["role"] == "slave"
     assert info["master_host"] == "localhost"
     assert info["master_port"] == BASE_PORT
     assert info["master_link_status"] == "down"
@@ -2005,6 +2005,7 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     keys_replica = await c_replica.execute_command("keys k*")
 
     assert set(keys_replica).difference(keys_master) == set()
+    assert set(keys_master).difference(keys_replica) == set()
 
     await disconnect_clients(c_master, *[c_replica])
 
