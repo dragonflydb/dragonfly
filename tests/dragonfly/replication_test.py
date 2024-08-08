@@ -1033,6 +1033,25 @@ async def assert_lag_condition(inst, client, condition):
         assert False, "Lag has never satisfied condition!"
 
 
+async def get_replica_reconnect_count(replica_inst):
+    """
+    Returns dragonfly_replica_reconnect_count metric.
+    """
+    return (await replica_inst.metrics())["dragonfly_replica_reconnect_count"].samples[0].value
+
+
+async def assert_replica_reconnection(replica_inst, initial_reconnect_count):
+    """
+    TODO:
+    """
+    reconnect_count = await get_replica_reconnect_count(replica_inst)
+    if reconnect_count == initial_reconnect_count + 1:
+        return
+    assert (
+        False
+    ), f"Expected reconnect count to increase by 1, but it increased by {reconnect_count - initial_reconnect_count}"
+
+
 @dfly_args({"proactor_threads": 2})
 @pytest.mark.asyncio
 async def test_replication_info(df_factory: DflyInstanceFactory, df_seeder_factory, n_keys=2000):
@@ -1698,6 +1717,8 @@ async def test_network_disconnect(df_factory, df_seeder_factory):
         try:
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
+            initial_reconnect_count = await get_replica_reconnect_count(replica)
+
             for _ in range(10):
                 await asyncio.sleep(random.randint(0, 10) / 10)
                 proxy.drop_connection()
@@ -1706,6 +1727,9 @@ async def test_network_disconnect(df_factory, df_seeder_factory):
             await asyncio.sleep(1.0)
             await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
+
+            # Check that the replica reconnected
+            await assert_replica_reconnection(replica, initial_reconnect_count)
 
             capture = await seeder.capture()
             assert await seeder.compare(capture, replica.port)
@@ -1734,6 +1758,8 @@ async def test_network_disconnect_active_stream(df_factory, df_seeder_factory):
 
             fill_task = asyncio.create_task(seeder.run(target_ops=4000))
 
+            initial_reconnect_count = await get_replica_reconnect_count(replica)
+
             for _ in range(3):
                 await asyncio.sleep(random.randint(10, 20) / 10)
                 proxy.drop_connection()
@@ -1745,6 +1771,9 @@ async def test_network_disconnect_active_stream(df_factory, df_seeder_factory):
             await asyncio.sleep(1.0)
             await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
+
+            # Check that the replica reconnected
+            await assert_replica_reconnection(replica, initial_reconnect_count)
 
             logging.debug(await c_replica.execute_command("INFO REPLICATION"))
             logging.debug(await c_master.execute_command("INFO REPLICATION"))
@@ -1781,6 +1810,8 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
             # at the end of the test will always fail
             fill_task = asyncio.create_task(seeder.run())
 
+            initial_reconnect_count = await get_replica_reconnect_count(replica)
+
             for _ in range(3):
                 await asyncio.sleep(random.randint(5, 10) / 10)
                 proxy.drop_connection()
@@ -1792,6 +1823,9 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
             await asyncio.sleep(1.0)
             await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
+
+            # Check that the replica reconnected
+            await assert_replica_reconnection(replica, initial_reconnect_count)
 
             # logging.debug(await c_replica.execute_command("INFO REPLICATION"))
             # logging.debug(await c_master.execute_command("INFO REPLICATION"))
