@@ -29,6 +29,10 @@ def find_main_file(path: Path, pattern):
     return next(iter(glob.glob(str(path) + "/" + pattern)), None)
 
 
+def tmp_db_filename():
+    return f"dump_{tmp_file_name()}"
+
+
 @pytest.mark.opt_only
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @pytest.mark.parametrize(
@@ -45,7 +49,7 @@ async def test_consistency(df_factory, format: str, seeder_opts: dict):
     """
     Test consistency over a large variety of data with different sizes
     """
-    dbfilename = f"dump_{tmp_file_name()}"
+    dbfilename = tmp_db_filename()
     instance = df_factory.create(dbfilename=dbfilename)
     instance.start()
     async_client = instance.client()
@@ -71,7 +75,7 @@ async def test_multidb(df_factory, format: str):
     """
     Test serialization of multiple logical databases
     """
-    dbfilename = f"test-multidb{rand(0, 5000)}"
+    dbfilename = tmp_db_filename()
     instance = df_factory.create(dbfilename=dbfilename)
     instance.start()
     async_client = instance.client()
@@ -378,7 +382,7 @@ class TestDflySnapshotOnShutdown:
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @dfly_args({**BASIC_ARGS, "dbfilename": "info-while-snapshot"})
 async def test_infomemory_while_snapshoting(df_factory, format: str):
-    instance = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
+    instance = df_factory.create(dbfilename=tmp_db_filename())
     instance.start()
     async_client = instance.client()
     await async_client.execute_command("DEBUG POPULATE 10000 key 4048 RAND")
