@@ -4,8 +4,11 @@ import re
 import pytest
 import asyncio
 import async_timeout
+import platform
 import pymemcache
 import logging
+import tarfile
+import urllib.request
 from redis import asyncio as aioredis
 from .utility import *
 from .instance import DflyInstanceFactory, DflyInstance
@@ -2232,3 +2235,67 @@ async def test_announce_ip_port(df_factory):
     host, port, _ = node[0]
     assert host == "overrode-host"
     assert port == "1337"
+
+
+def download_dragonfly_release(version):
+    path = f"/tmp/{tmp_file_name()}"
+    os.mkdir(path)
+    gzfile = f"{path}/dragonfly.tar.gz"
+    logging.debug(f"Downloading Dragonfly release into {gzfile}...")
+
+    # Download
+    urllib.request.urlretrieve(
+        f"https://github.com/dragonflydb/dragonfly/releases/download/{version}/dragonfly-x86_64.tar.gz",
+        gzfile,
+    )
+
+    # Extract
+    file = tarfile.open(gzfile)
+    file.extractall(path)
+    file.close()
+
+    # Return path
+    return f"{path}/dragonfly-x86_64"
+
+
+@pytest.mark.parametrize(
+    "cluster_mode, announce_ip, announce_port",
+    [
+        ("", "localhost", 7000),
+        ("emulated", "", 0),
+        ("emulated", "localhost", 7000),
+    ],
+)
+async def test_replicate_old_master(
+    df_factory: DflyInstanceFactory, cluster_mode, announce_ip, announce_port
+):
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
+
+    dfly_version = "v1.19.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+    master = df_factory.create(path=released_dfly_path, cluster_mode=cluster_mode)
+    replica = df_factory.create(
+        cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
+    )
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    assert (
+        f"df-{dfly_version}"
+        == (await c_master.execute_command("info", "server"))["dragonfly_version"]
+    )
+    assert "df-dev" == (await c_replica.execute_command("info", "server"))["dragonfly_version"]
+
+    await c_master.execute_command("set", "k1", "v1")
+
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+    await wait_available_async(c_replica)
+
+    assert await c_replica.execute_command("get", "k1") == "v1"
+
+    await disconnect_clients(c_master, c_replica)
