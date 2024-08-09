@@ -298,6 +298,8 @@ class ServerFamily {
   GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
   void StopAllClusterReplicas();
 
+  bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password) const;
+
   util::fb2::Fiber snapshot_schedule_fb_;
   std::optional<util::fb2::Future<GenericError>> load_result_;
 
