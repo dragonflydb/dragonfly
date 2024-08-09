@@ -179,7 +179,7 @@ template <> void Send(const std::vector<std::string>& vec, RedisReplyBuilder* rb
   if (vec.empty()) {
     rb->SendEmptyArray();
   } else {
-    rb->SendStringArr(vec);
+    rb->SendBulkStrArr(vec);
   }
 }
 

@@ -427,14 +427,30 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 // fetch_mask values
 constexpr uint8_t FETCH_MCFLAG = 0x1;
 constexpr uint8_t FETCH_MCVER = 0x2;
-SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask,
-                                      const Transaction* t, EngineShard* shard) {
+
+struct GetResp {
+  string key;  // TODO: to use backing storage to optimize this as well.
+  string_view value;
+  uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
+  uint32_t mc_flag = 0;
+};
+
+struct MGetResponse {
+  explicit MGetResponse(size_t size = 0) : resp_arr(size) {
+  }
+
+  std::string storage;
+  absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
+};
+
+MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
+                    EngineShard* shard) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
   auto& db_slice = t->GetDbSlice(shard->shard_id());
 
-  SinkReplyBuilder::MGetResponse response(keys.Size());
+  MGetResponse response(keys.Size());
   absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
 
   // First, fetch all iterators and count total size ahead
@@ -449,8 +465,8 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_
   }
 
   // Allocate enough for all values
-  response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
-  char* next = response.storage_list->data;
+  response.storage.resize(total_size);
+  char* next = response.storage.data();
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
   for (size_t i = 0; i < iters.size(); ++i) {
@@ -1123,7 +1139,6 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1U);
   Transaction* transaction = cntx->transaction;
-  std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_set->size());
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   uint8_t fetch_mask = 0;
@@ -1135,6 +1150,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   // Count of pending tiered reads
   util::fb2::BlockingCounter tiering_bc{0};
+  std::vector<MGetResponse> mget_resp(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
     mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mask, t, shard);
     return OpStatus::OK;
@@ -1146,18 +1162,13 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
   // wait for all tiered reads to finish
   tiering_bc->Wait();
 
-  // reorder the responses back according to the order of their corresponding
-  // keys.
-  SinkReplyBuilder::MGetResponse res(args.size());
-
+  // reorder shard results back according to argument order
+  absl::FixedArray<optional<GetResp>, 8> res(args.size());
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!transaction->IsActive(sid))
       continue;
 
-    SinkReplyBuilder::MGetResponse& src = mget_resp[sid];
-    src.storage_list->next = res.storage_list;
-    res.storage_list = src.storage_list;
-    src.storage_list = nullptr;
+    auto& src = mget_resp[sid];
     ShardArgs shard_args = transaction->GetShardArgs(sid);
     unsigned src_indx = 0;
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
@@ -1165,15 +1176,32 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
         continue;
 
       uint32_t indx = it.index();
-
-      res.resp_arr[indx] = std::move(src.resp_arr[src_indx]);
+      res[indx] = std::move(src.resp_arr[src_indx]);
       if (cntx->protocol() == Protocol::MEMCACHE) {
-        res.resp_arr[indx]->key = *it;
+        res[indx]->key = *it;
       }
     }
   }
 
-  return cntx->reply_builder()->SendMGetResponse(std::move(res));
+  SinkReplyBuilder::ReplyScope scope(cntx->reply_builder());
+  if (cntx->protocol() == Protocol::MEMCACHE) {
+    auto* rb = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+    for (const auto& entry : res) {
+      if (!entry)
+        continue;
+      rb->SendValue(entry->key, entry->value, entry->mc_ver, entry->mc_flag);
+    }
+    rb->SendSimpleString("END");
+  } else {
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->StartArray(res.size());
+    for (const auto& entry : res) {
+      if (entry)
+        rb->SendBulkString(entry->value);
+      else
+        rb->SendNull();
+    }
+  }
 }
 
 void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {

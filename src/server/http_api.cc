@@ -131,16 +131,6 @@ struct CaptureVisitor {
     absl::StrAppend(&str, "\"", facade::StatusToMsg(status), "\"");
   }
 
-  void operator()(const CapturingReplyBuilder::StrArrPayload& sa) {
-    absl::StrAppend(&str, "[");
-    for (const auto& val : sa.arr) {
-      absl::StrAppend(&str, JsonEscape(val), ",");
-    }
-    if (sa.arr.size())
-      str.pop_back();
-    absl::StrAppend(&str, "]");
-  }
-
   void operator()(unique_ptr<CapturingReplyBuilder::CollectionPayload> cp) {
     if (!cp) {
       absl::StrAppend(&str, "null");
@@ -155,32 +145,6 @@ struct CaptureVisitor {
     for (auto& pl : cp->arr) {
       visit(*this, std::move(pl));
     }
-  }
-
-  void operator()(facade::SinkReplyBuilder::MGetResponse resp) {
-    absl::StrAppend(&str, "[");
-    for (const auto& val : resp.resp_arr) {
-      if (val) {
-        absl::StrAppend(&str, JsonEscape(val->value), ",");
-      } else {
-        absl::StrAppend(&str, "null,");
-      }
-    }
-
-    if (resp.resp_arr.size())
-      str.pop_back();
-    absl::StrAppend(&str, "]");
-  }
-
-  void operator()(const CapturingReplyBuilder::ScoredArray& sarr) {
-    absl::StrAppend(&str, "[");
-    for (const auto& [key, score] : sarr.arr) {
-      absl::StrAppend(&str, "{", JsonEscape(key), ":", score, "},");
-    }
-    if (sarr.arr.size() > 0) {
-      str.pop_back();
-    }
-    absl::StrAppend(&str, "]");
   }
 
   string str;

@@ -20,10 +20,6 @@
 #include "server/version.h"
 #include "util/fiber_socket_base.h"
 
-namespace facade {
-class ReqSerializer;
-};  // namespace facade
-
 namespace dfly {
 
 class Service;

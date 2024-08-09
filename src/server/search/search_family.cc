@@ -675,7 +675,7 @@ void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
     return OpStatus::OK;
   });
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendStringArr(names);
+  rb->SendBulkStrArr(names);
 }
 
 void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {

@@ -436,8 +436,8 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   }
   arr[i++] = pub_msg.channel;
   arr[i++] = pub_msg.message;
-  rbuilder->SendStringArr(absl::Span<string_view>{arr.data(), i},
-                          RedisReplyBuilder::CollectionType::PUSH);
+  rbuilder->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
+                           RedisReplyBuilder::CollectionType::PUSH);
 }
 
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
@@ -473,7 +473,7 @@ void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) 
     rbuilder->SendNull();
   } else {
     std::string_view keys[] = {msg.key};
-    rbuilder->SendStringArr(keys);
+    rbuilder->SendBulkStrArr(keys);
   }
 }
 

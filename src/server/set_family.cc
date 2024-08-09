@@ -1001,9 +1001,9 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   if (result == OpStatus::KEY_NOTFOUND) {
     memberships.assign(vals.size(), "0");
-    return rb->SendStringArr(memberships);
+    return rb->SendBulkStrArr(memberships);
   } else if (result == OpStatus::OK) {
-    return rb->SendStringArr(memberships);
+    return rb->SendBulkStrArr(memberships);
   }
   cntx->SendError(result.status());
 }
@@ -1094,7 +1094,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
         rb->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      rb->SendStringArr(*result, RedisReplyBuilder::SET);
+      rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
     }
     return;
   }
@@ -1131,7 +1131,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
     sort(arr.begin(), arr.end());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendStringArr(arr, RedisReplyBuilder::SET);
+  rb->SendBulkStrArr(arr, RedisReplyBuilder::SET);
 }
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
@@ -1200,7 +1200,7 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
       sort(svec.begin(), svec.end());
     }
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->SendStringArr(*result, RedisReplyBuilder::SET);
+    rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
   } else {
     cntx->SendError(result.status());
   }
@@ -1226,10 +1226,10 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    rb->SendStringArr(*result, RedisReplyBuilder::SET);
+    rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
-      rb->SendStringArr(StringVec(), RedisReplyBuilder::SET);
+      rb->SendBulkStrArr(StringVec(), RedisReplyBuilder::SET);
     } else {
       rb->SendNull();
     }
@@ -1255,7 +1255,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
       sort(arr.begin(), arr.end());
     }
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->SendStringArr(arr, RedisReplyBuilder::SET);
+    rb->SendBulkStrArr(arr, RedisReplyBuilder::SET);
   } else {
     cntx->SendError(result.status());
   }
@@ -1343,7 +1343,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
       sort(arr.begin(), arr.end());
     }
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->SendStringArr(arr, RedisReplyBuilder::SET);
+    rb->SendBulkStrArr(arr, RedisReplyBuilder::SET);
   } else {
     cntx->SendError(unionset.status());
   }

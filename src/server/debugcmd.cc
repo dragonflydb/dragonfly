@@ -865,9 +865,9 @@ void DebugCmd::Watched() {
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
-  rb->SendStringArr(awaked_trans);
+  rb->SendBulkStrArr(awaked_trans);
   rb->SendBulkString("watched");
-  rb->SendStringArr(watched_keys);
+  rb->SendBulkStrArr(watched_keys);
 }
 
 void DebugCmd::TxAnalysis() {

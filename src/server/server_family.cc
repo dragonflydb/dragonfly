@@ -1770,7 +1770,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       }
     }
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    return rb->SendStringArr(res, RedisReplyBuilder::MAP);
+    return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
   }
 
   if (sub_cmd == "RESETSTAT") {

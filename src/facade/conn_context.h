@@ -61,10 +61,6 @@ class ConnectionContext {
     rbuilder_->SendSetSkipped();
   }
 
-  void SendMGetResponse(SinkReplyBuilder::MGetResponse resp) {
-    rbuilder_->SendMGetResponse(std::move(resp));
-  }
-
   void SendLong(long val) {
     rbuilder_->SendLong(val);
   }
