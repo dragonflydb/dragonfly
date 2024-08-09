@@ -305,33 +305,34 @@ class DbSlice {
     AddOrFindResult& operator=(ItAndUpdater&& o);
   };
 
-  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key);
+  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key)
+      ABSL_LOCKS_EXCLUDED(local_mu_);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   OpResult<AddOrFindResult> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
-                                        uint64_t expire_at_ms);
+                                        uint64_t expire_at_ms) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // Returns OpStatus::OUT_OF_MEMORY if bad_alloc is thrown
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
-                                uint64_t expire_at_ms);
+                                uint64_t expire_at_ms) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it, ExpIterator exp_it,
-                                         const ExpireParams& params);
+                                         const ExpireParams& params) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   // Adds expiry information.
-  void AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
+  void AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   // Removes the corresponing expiry information if exists.
   // Returns true if expiry existed (and removed).
-  bool RemoveExpire(DbIndex db_ind, Iterator main_it);
+  bool RemoveExpire(DbIndex db_ind, Iterator main_it) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
-  bool UpdateExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
+  bool UpdateExpire(DbIndex db_ind, Iterator main_it, uint64_t at) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
@@ -339,12 +340,15 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  bool Del(Context cntx, Iterator it);
+  // Delete a key referred by its iterator.
+  void PerformDeletion(Iterator del_it, DbTable* table);
+
+  bool Del(Context cntx, Iterator it) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
   // Flushes db_ind or all databases if kDbAll is passed
-  void FlushDb(DbIndex db_ind);
+  void FlushDb(DbIndex db_ind) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   // Flushes the data of given slot ranges.
   void FlushSlots(cluster::SlotRanges slot_ranges);
@@ -435,7 +439,7 @@ class DbSlice {
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
 
   //! Unregisters the callback.
-  void UnregisterOnChange(uint64_t id);
+  void UnregisterOnChange(uint64_t id) ABSL_LOCKS_EXCLUDED(local_mu_);
 
   struct DeleteExpiredStats {
     uint32_t deleted = 0;         // number of deleted items due to expiry (less than traversed).
@@ -451,7 +455,6 @@ class DbSlice {
   // Returnes number of (elements,bytes) freed due to evictions.
   std::pair<uint64_t, size_t> FreeMemWithEvictionStep(DbIndex db_indx, size_t starting_segment_id,
                                                       size_t increase_goal_bytes);
-  void ScheduleForOffloadStep(DbIndex db_indx, size_t increase_goal_bytes);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
@@ -493,20 +496,17 @@ class DbSlice {
     client_tracking_map_[key].insert(conn_ref);
   }
 
-  // Delete a key referred by its iterator.
-  void PerformDeletion(Iterator del_it, DbTable* table);
-  void PerformDeletion(PrimeIterator del_it, DbTable* table);
-
   // Provides access to the internal lock of db_slice for flows that serialize
   // entries with preemption and need to synchronize with Traverse below which
   // acquires the same lock.
-  ThreadLocalMutex* GetSerializationMutex() {
-    return &local_mu_;
+  ThreadLocalMutex& GetSerializationMutex() {
+    return local_mu_;
   }
 
   // Wrapper around DashTable::Traverse that allows preemptions
   template <typename Cb, typename DashTable>
-  PrimeTable::Cursor Traverse(DashTable* pt, PrimeTable::Cursor cursor, Cb&& cb) {
+  PrimeTable::Cursor Traverse(DashTable* pt, PrimeTable::Cursor cursor, Cb&& cb)
+      ABSL_LOCKS_EXCLUDED(local_mu_) {
     std::unique_lock lk(local_mu_);
     return pt->Traverse(cursor, std::forward<Cb>(cb));
   }
@@ -532,6 +532,7 @@ class DbSlice {
   void ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbTableArray& db_arr);
 
   void PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* table);
+  void PerformDeletion(PrimeIterator del_it, DbTable* table);
 
   // Send invalidation message to the clients that are tracking the change to a key.
   void SendInvalidationTrackingMessage(std::string_view key);
@@ -562,7 +563,8 @@ class DbSlice {
     return version_++;
   }
 
-  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
+  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const
+      ABSL_EXCLUSIVE_LOCKS_REQUIRED(local_mu_);
 
   // Used to provide exclusive access while Traversing segments
   mutable ThreadLocalMutex local_mu_;

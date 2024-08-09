@@ -155,7 +155,7 @@ class Seeder(SeederBase):
         )
 
     async def stop(self, client: aioredis.Redis):
-        """Reqeust seeder seeder if it's running without a target, future returned from start() must still be awaited"""
+        """Request seeder seeder if it's running without a target, future returned from start() must still be awaited"""
 
         await asyncio.gather(*(client.set(unit.stop_key, "X") for unit in self.units))
 
