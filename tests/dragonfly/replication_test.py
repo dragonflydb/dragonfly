@@ -860,7 +860,6 @@ return 'OK'
 """
 
 
-@pytest.mark.skip(reason="Failing")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, num_ops, num_keys, num_par, flags", script_cases)
 async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_par, flags):
@@ -891,7 +890,9 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
         for key_set in key_sets:
             for j, k in enumerate(key_set):
                 l = await c_replica.lrange(k, 0, -1)
-                assert l == [f"{j}".encode()] * num_ops
+                assert l == [f"{j}"] * num_ops
+
+    await close_clients(c_master, *c_replicas)
 
 
 @dfly_args({"proactor_threads": 4})
