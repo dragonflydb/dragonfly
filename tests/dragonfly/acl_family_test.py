@@ -220,27 +220,31 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     await client.close()
 
 
-@pytest.mark.skip("Skip because it fails on arm release")
 @pytest.mark.asyncio
 async def test_acl_deluser(df_server):
     client = aioredis.Redis(port=df_server.port)
 
-    res = await client.execute_command("ACL SETUSER george ON >pass +@transaction +@string")
-    assert res == b"OK"
+    assert (
+        await client.execute_command("ACL SETUSER george ON >pass +@transaction +set ~*") == b"OK"
+    )
+    assert await client.execute_command("AUTH george pass") == b"OK"
 
-    res = await client.execute_command("AUTH george pass")
-    assert res == b"OK"
-
-    await client.execute_command("MULTI")
-    await client.execute_command("SET key 44")
+    assert await client.execute_command("MULTI") == b"OK"
+    assert await client.execute_command("SET the_answer 42") == b"QUEUED"
 
     admin_client = aioredis.Redis(port=df_server.port)
-    await admin_client.execute_command("ACL DELUSER george")
+    assert await admin_client.execute_command("ACL DELUSER george") == 1
 
-    with pytest.raises(redis.exceptions.ConnectionError):
+    # the connection was destroyed so EXEC will be executed in the new connection without MULTI
+    with pytest.raises(redis.exceptions.ResponseError):
         await client.execute_command("EXEC")
 
-    await admin_client.close()
+    assert await client.execute_command("ACL WHOAMI") == "User is default"
+
+    with pytest.raises(redis.exceptions.AuthenticationError):
+        await client.execute_command("AUTH george pass")
+
+    await close_clients(admin_client, client)
 
 
 script = """
