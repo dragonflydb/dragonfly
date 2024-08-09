@@ -314,6 +314,37 @@ class MCReplyBuilder : public SinkReplyBuilder {
   bool NoReply() const;
 };
 
+class MCReplyBuilder2 : public SinkReplyBuilder2 {
+ public:
+  explicit MCReplyBuilder2(::io::Sink* sink);
+
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
+
+  void SendStored() final;
+  void SendLong(long val) final;
+  void SendSetSkipped() final;
+
+  void SendClientError(std::string_view str);
+  void SendNotFound();
+
+  void SendValue(std::string_view key, std::string_view value, uint64_t mc_ver, uint32_t mc_flag);
+  void SendSimpleString(std::string_view str) final;
+  void SendProtocolError(std::string_view str) final;
+
+  void SetNoreply(bool noreply) {
+    noreply_ = noreply;
+  }
+
+  bool NoReply() const {
+    return noreply_;
+  }
+
+ private:
+  void SendSimplePiece(std::string&& str);  // Send simple string as piece (for short lived data)
+
+  bool noreply_ = false;
+};
+
 class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   enum CollectionType { ARRAY, SET, MAP, PUSH };
