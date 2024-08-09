@@ -334,7 +334,7 @@ class DflyInstanceFactory:
         self.params = params
         self.instances = []
 
-    def create(self, existing_port=None, path=None, skip_stop=False, **kwargs) -> DflyInstance:
+    def create(self, existing_port=None, path=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
         args.setdefault("noversion_check", None)
@@ -358,7 +358,7 @@ class DflyInstanceFactory:
 
         instance = DflyInstance(params, args)
         self.instances.append(instance)
-        self.skip_stop = skip_stop
+        self.skip_stop = False
         return instance
 
     def start_all(self, instances: List[DflyInstance]):
@@ -371,11 +371,14 @@ class DflyInstanceFactory:
 
     def stop_all(self):
         """Stop all launched instances."""
-        if self.skip_stop == True:
+        if self.skip_stop:
             return
 
         for instance in self.instances:
             instance.stop()
+
+    def set_skip_stop(self):
+        self.skip_stop = True
 
     def __repr__(self) -> str:
         return f"Factory({self.args})"
