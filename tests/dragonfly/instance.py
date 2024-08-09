@@ -358,6 +358,7 @@ class DflyInstanceFactory:
 
         instance = DflyInstance(params, args)
         self.instances.append(instance)
+        self.skip_stop = False
         return instance
 
     def start_all(self, instances: List[DflyInstance]):
@@ -370,8 +371,14 @@ class DflyInstanceFactory:
 
     def stop_all(self):
         """Stop all launched instances."""
+        if self.skip_stop:
+            return
+
         for instance in self.instances:
             instance.stop()
+
+    def set_skip_stop(self):
+        self.skip_stop = True
 
     def __repr__(self) -> str:
         return f"Factory({self.args})"
