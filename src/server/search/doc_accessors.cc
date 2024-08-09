@@ -213,7 +213,7 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
   }
 
   if (!ptr) {
-    LOG(WARNING) << "Invalid Json path: " << field << ' ' << ec_msg;
+    VLOG(2) << "Invalid Json path: " << field << ' ' << ec_msg;
     return nullptr;
   }
 
