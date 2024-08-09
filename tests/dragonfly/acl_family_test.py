@@ -222,15 +222,13 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
 
 @pytest.mark.asyncio
 async def test_acl_deluser(df_server):
-    client = aioredis.Redis(port=df_server.port)
+    client = df_server.client()
 
-    assert (
-        await client.execute_command("ACL SETUSER george ON >pass +@transaction +set ~*") == b"OK"
-    )
-    assert await client.execute_command("AUTH george pass") == b"OK"
+    assert await client.execute_command("ACL SETUSER george ON >pass +@transaction +set ~*") == "OK"
+    assert await client.execute_command("AUTH george pass") == "OK"
 
-    assert await client.execute_command("MULTI") == b"OK"
-    assert await client.execute_command("SET the_answer 42") == b"QUEUED"
+    assert await client.execute_command("MULTI") == "OK"
+    assert await client.execute_command("SET the_answer 42") == "QUEUED"
 
     admin_client = aioredis.Redis(port=df_server.port)
     assert await admin_client.execute_command("ACL DELUSER george") == 1
