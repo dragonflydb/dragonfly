@@ -40,6 +40,13 @@ imagePullSecrets:
 securityContext:
   {{- toYaml . | trim | nindent 2 }}
 {{- end }}
+{{- if and (eq (typeOf .Values.hostNetwork) "bool") .Values.hostNetwork }}
+hostNetwork: true
+{{- end }}
+{{- with .Values.topologySpreadConstraints }}
+topologySpreadConstraints:
+  {{- toYaml . | trim | nindent 2 }}
+{{- end }}
 {{- with .Values.initContainers }}
 initContainers:
   {{- if eq (typeOf .) "string" }}
