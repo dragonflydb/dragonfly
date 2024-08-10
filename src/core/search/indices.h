@@ -51,6 +51,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Pointer is valid as long as index is not mutated. Nullptr if not found
   const Container* Matching(std::string_view str) const;
 
+  // Returns all the terms that appear as keys in the reverse index.
+  std::vector<std::string> GetTerms() const;
+
  protected:
   Container* GetOrCreate(std::string_view word);
 

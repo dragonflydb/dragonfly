@@ -101,6 +101,7 @@ const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong"
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
 const char kConfigErrType[] = "config_error";
+const char kSearchErrType[] = "search_error";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {

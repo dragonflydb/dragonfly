@@ -798,6 +798,48 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void SearchFamily::FtTagVals(CmdArgList args, ConnectionContext* cntx) {
+  string_view index_name = ArgS(args, 0);
+  string_view field_name = ArgS(args, 1);
+  VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
+
+  vector<OpResult<vector<string>>> shard_results(shard_set->size(), OpStatus::KEY_NOTFOUND);
+
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    if (auto* index = es->search_indices()->GetIndex(index_name); index)
+      shard_results[es->shard_id()] = index->GetTagVals(field_name);
+    return OpStatus::OK;
+  });
+
+  absl::flat_hash_set<string> result_set;
+
+  // Check first if either shard had errors. Also merge the results into a single set.
+  for (auto& res : shard_results) {
+    if (res) {
+      // TODO: to move string.
+      result_set.insert(res->begin(), res->end());
+    } else {
+      switch (res.status()) {
+        case OpStatus::KEY_NOTFOUND:
+          return cntx->SendError("-Unknown Index name", facade::kSearchErrType);
+        case OpStatus::MEMBER_NOTFOUND:
+          return cntx->SendError("-No such field", facade::kSearchErrType);
+        case OpStatus::WRONG_TYPE:
+          return cntx->SendError("-Not a tag field");
+        default:
+          LOG(DFATAL) << "Unexpected error " << res.status();
+          return cntx->SendError(res.status());
+      }
+    }
+  }
+
+  shard_results.clear();
+  vector<string> vec(result_set.begin(), result_set.end());
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendStringArr(vec, RedisReplyBuilder::SET);
+}
+
 void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
   const auto params = ParseAggregatorParamsOrReply(args, cntx);
   if (!params)
@@ -871,7 +913,8 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
             << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
             << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
-            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile);
+            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
+            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals);
 }
 
 }  // namespace dfly

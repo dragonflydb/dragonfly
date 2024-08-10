@@ -10,6 +10,7 @@
 
 #include "base/logging.h"
 #include "core/overloaded.h"
+#include "core/search/indices.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_accessors.h"
 #include "server/server_state.h"
@@ -17,6 +18,7 @@
 namespace dfly {
 
 using namespace std;
+using facade::OpStatus;
 
 namespace {
 
@@ -267,6 +269,20 @@ vector<absl::flat_hash_map<string, search::SortableValue>> ShardDocIndex::Search
 
 DocIndexInfo ShardDocIndex::GetInfo() const {
   return {*base_, key_index_.Size()};
+}
+
+facade::OpResult<vector<string>> ShardDocIndex::GetTagVals(string_view field) const {
+  string_view real_name = base_->schema.LookupAlias(field);
+  search::BaseIndex* base_index = indices_.GetIndex(real_name);
+  if (base_index == nullptr) {
+    return OpStatus::MEMBER_NOTFOUND;
+  }
+
+  search::TagIndex* tag_index = dynamic_cast<search::TagIndex*>(base_index);
+  if (tag_index == nullptr)
+    return OpStatus::WRONG_TYPE;
+
+  return tag_index->GetTerms();
 }
 
 ShardDocIndices::ShardDocIndices() : local_mr_{ServerState::tlocal()->data_heap()} {
