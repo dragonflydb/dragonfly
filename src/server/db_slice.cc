@@ -580,14 +580,14 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   CallChangeCallbacks(cntx.db_index, key, {key});
 
   ssize_t memory_offset = -key.size();
-
+  size_t reclaimed = 0;
   // If we are low on memory due to cold storage, free some memory.
   if (owner_->tiered_storage()) {
     // At least 40KB bytes to cover potential segment split.
     ssize_t red_line = std::max<size_t>(key.size() * 2, 40_KB);
     if (memory_budget_ < red_line) {
       size_t goal = red_line - memory_budget_;
-      size_t reclaimed = owner_->tiered_storage()->ReclaimMemory(goal);
+      reclaimed = owner_->tiered_storage()->ReclaimMemory(goal);
       memory_budget_ += reclaimed;
     }
 
@@ -609,7 +609,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (apply_memory_limit && !caching_mode_ && memory_budget_ + memory_offset < 0) {
-    VLOG(2) << "AddOrFind: over limit, budget: " << memory_budget_;
+    LOG_EVERY_T(ERROR, 1) << "AddOrFind: over limit, budget: " << memory_budget_
+                          << " reclaimed: " << reclaimed << " offset: " << memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -628,7 +629,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   try {
     it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
-    VLOG(2) << "AddOrFind: bad alloc exception, budget: " << memory_budget_ + memory_offset;
+    LOG_EVERY_T(ERROR, 1) << "AddOrFind: InsertNew failed, budget: " << memory_budget_
+                          << " reclaimed: " << reclaimed << " offset: " << memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
