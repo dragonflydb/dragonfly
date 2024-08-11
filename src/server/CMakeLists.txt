@@ -72,6 +72,7 @@ endif()
 
 if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(dfly_transaction PRIVATE SANITIZERS)
+  target_compile_definitions(dragonfly_lib PRIVATE SANITIZERS)
 endif()
 
 find_library(ZSTD_LIB NAMES libzstd.a libzstdstatic.a zstd NAMES_PER_DIR REQUIRED)
