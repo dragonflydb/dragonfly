@@ -86,11 +86,11 @@ jobs:
             ctest -V -L DFLY
 
       - name: Send notifications on failure
-        #todo add only for main here
-        if: failure()
+        if: failure() && github.ref == 'refs/heads/main'
+        shell: bash
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          message="Benchmark tests failed.\\n Job Link: ${job_link}\\n"
+          message="Daily sanitizers failed.\\n Job Link: ${job_link}\\n"
 
           curl -s \
             -X POST \
