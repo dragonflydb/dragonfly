@@ -138,7 +138,7 @@ class ShardDocIndex {
 
   DocIndexInfo GetInfo() const;
 
-  facade::OpResult<std::vector<std::string>> GetTagVals(std::string_view field) const;
+  io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.

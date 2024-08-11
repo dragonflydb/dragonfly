@@ -18,7 +18,8 @@
 namespace dfly {
 
 using namespace std;
-using facade::OpStatus;
+using facade::ErrorReply;
+using nonstd::make_unexpected;
 
 namespace {
 
@@ -271,16 +272,16 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
   return {*base_, key_index_.Size()};
 }
 
-facade::OpResult<vector<string>> ShardDocIndex::GetTagVals(string_view field) const {
-  string_view real_name = base_->schema.LookupAlias(field);
-  search::BaseIndex* base_index = indices_.GetIndex(real_name);
+io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
+  search::BaseIndex* base_index = indices_.GetIndex(field);
   if (base_index == nullptr) {
-    return OpStatus::MEMBER_NOTFOUND;
+    return make_unexpected(ErrorReply{"-No such field"});
   }
 
   search::TagIndex* tag_index = dynamic_cast<search::TagIndex*>(base_index);
-  if (tag_index == nullptr)
-    return OpStatus::WRONG_TYPE;
+  if (tag_index == nullptr) {
+    return make_unexpected(ErrorReply{"-Not a tag field"});
+  }
 
   return tag_index->GetTerms();
 }

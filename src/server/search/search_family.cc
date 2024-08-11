@@ -803,11 +803,14 @@ void SearchFamily::FtTagVals(CmdArgList args, ConnectionContext* cntx) {
   string_view field_name = ArgS(args, 1);
   VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
 
-  vector<OpResult<vector<string>>> shard_results(shard_set->size(), OpStatus::KEY_NOTFOUND);
+  vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
 
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
+    else
+      shard_results[es->shard_id()] = nonstd::make_unexpected(ErrorReply("-Unknown Index name"));
+
     return OpStatus::OK;
   });
 
@@ -816,20 +819,10 @@ void SearchFamily::FtTagVals(CmdArgList args, ConnectionContext* cntx) {
   // Check first if either shard had errors. Also merge the results into a single set.
   for (auto& res : shard_results) {
     if (res) {
-      // TODO: to move string.
-      result_set.insert(res->begin(), res->end());
+      result_set.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
     } else {
-      switch (res.status()) {
-        case OpStatus::KEY_NOTFOUND:
-          return cntx->SendError("-Unknown Index name", facade::kSearchErrType);
-        case OpStatus::MEMBER_NOTFOUND:
-          return cntx->SendError("-No such field", facade::kSearchErrType);
-        case OpStatus::WRONG_TYPE:
-          return cntx->SendError("-Not a tag field");
-        default:
-          LOG(DFATAL) << "Unexpected error " << res.status();
-          return cntx->SendError(res.status());
-      }
+      res.error().kind = facade::kSearchErrType;
+      return cntx->SendError(res.error());
     }
   }
 
