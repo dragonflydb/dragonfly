@@ -77,7 +77,7 @@ ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
 ABSL_FLAG(uint32_t, multi_exec_mode, 2,
-          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
+          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
@@ -848,6 +848,12 @@ Service::~Service() {
 }
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
+  unsigned exec_mode = absl::GetFlag(FLAGS_multi_exec_mode);
+  if (exec_mode > 2 || exec_mode == 0) {
+    LOG(ERROR) << "Unsupported exec mode: " << exec_mode;
+    exit(1);
+  }
+
   InitRedisTables();
 
   config_registry.RegisterMutable("maxmemory", [](const absl::CommandLineFlag& flag) {
@@ -1398,6 +1404,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   intrusive_ptr<Transaction> dist_trans;
 
   size_t dispatched = 0;
+  auto* ss = dfly::ServerState::tlocal();
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1416,11 +1423,12 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
+    ss->stats.squashed_commands += stored_cmds.size();
     stored_cmds.clear();
   };
 
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (dfly::ServerState::tlocal()->IsPaused())
+  if (ss->IsPaused())
     return 0;
 
   for (auto args : args_list) {
@@ -1451,7 +1459,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     perform_squash();
 
     // Stop accumulating when a pause is requested, fall back to regular dispatch
-    if (dfly::ServerState::tlocal()->IsPaused())
+    if (ss->IsPaused())
       break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
@@ -2191,6 +2199,7 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   bool scheduled = false;
   if (multi_mode != Transaction::NOT_DETERMINED) {
+    DCHECK(multi_mode != Transaction::NON_ATOMIC);
     StartMultiExec(cntx, &exec_info, multi_mode);
     scheduled = true;
   }

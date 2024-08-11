@@ -693,18 +693,6 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   Run({"move", "a", "1"});
   Run({"exec"});
   EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_global_cnt);
-
-  ClearMetrics();
-
-  // Check non atomic mode does not fall back to global.
-  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::NON_ATOMIC);
-  Run({"multi"});
-  Run({"set", "a", "1"});  // will run ooo(quick)
-  Run({"move", "a", "1"});
-  Run({"exec"});
-
-  auto stats = GetMetrics().coordinator_stats;
-  EXPECT_EQ(1, stats.tx_normal_cnt);  // move is global
 }
 
 #ifndef SANITIZERS
