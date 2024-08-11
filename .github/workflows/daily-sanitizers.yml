@@ -86,13 +86,14 @@ jobs:
             ctest -V -L DFLY
 
       - name: Send notifications on failure
+        #todo add only for main here
         if: failure()
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          message="Daily sanitizers failed.\\n The commit is: ${{github.sha}}.\\n Job Link: ${job_link}\\n"
+          message="Benchmark tests failed.\\n Job Link: ${job_link}\\n"
 
           curl -s \
             -X POST \
             -H 'Content-Type: application/json' \
-            '${{ inputs.gspace-secret }}' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
             -d '{"text": "'"${message}"'"}'
