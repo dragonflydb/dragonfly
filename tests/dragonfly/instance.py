@@ -155,6 +155,9 @@ class DflyInstance:
             sed_cmd.remove("-u")
         subprocess.Popen(sed_cmd, stdin=self.proc.stdout)
 
+    def set_proc_to_none(self):
+        self.proc = None
+
     def stop(self, kill=False):
         proc, self.proc = self.proc, None
         if proc is None:
