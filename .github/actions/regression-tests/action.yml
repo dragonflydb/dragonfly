@@ -41,6 +41,8 @@ runs:
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
+          # Add an extra new line here because when tests timeout the first line below continues from the test failure name
+          echo "\n"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
           echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
