@@ -1629,6 +1629,7 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
 bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
                           std::string_view password) const {
   const auto* registry = ServerState::tlocal()->user_registry;
+  CHECK(registry);
   const bool is_authorized = registry->AuthUser(username, password);
   if (is_authorized) {
     cntx->authed_username = username;
@@ -1643,8 +1644,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
 
 void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
-    cntx->SendError(kSyntaxErr);
-    return;
+    return cntx->SendError(kSyntaxErr);
   }
 
   // non admin port auth
@@ -1654,21 +1654,18 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
     const size_t index = one_arg ? 0 : 1;
     std::string_view password = facade::ToSV(args[index]);
     if (DoAuth(cntx, username, password)) {
-      cntx->SendOk();
-      return;
+      return cntx->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    cntx->SendError(facade::kAuthRejected);
-    return;
+    return cntx->SendError(facade::kAuthRejected);
   }
 
   if (!cntx->req_auth) {
-    cntx->SendError(
+    return cntx->SendError(
         "AUTH <password> called without any password configured for "
         "admin port. Are you sure your configuration is correct?");
-    return;
   }
 
   string_view pass = ArgS(args, 0);
@@ -2429,8 +2426,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (has_auth && !DoAuth(cntx, username, password)) {
-    cntx->SendError(facade::kAuthRejected);
-    return;
+    return cntx->SendError(facade::kAuthRejected);
   }
 
   if (cntx->req_auth && !cntx->authenticated) {
