@@ -326,6 +326,9 @@ class DflyInstance:
         mem_info = process.memory_info()
         return mem_info.rss
 
+    def clear_max_chunk_flag(self):
+        del self.args["serialization_max_chunk_size"]
+
 
 class DflyInstanceFactory:
     """
