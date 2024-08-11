@@ -2316,6 +2316,7 @@ async def test_replicate_old_master(
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master = df_factory.create(path=released_dfly_path, cluster_mode=cluster_mode)
+    master.clear_max_chunk_flag()
     replica = df_factory.create(
         cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
     )
