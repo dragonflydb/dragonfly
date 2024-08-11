@@ -88,7 +88,7 @@ class DflyInstance:
                 self.args["num_shards"] = threads - 1
 
         # Add 1 byte limit for big values
-        # self.args["serialization_max_chunk_size"] = 1
+        self.args["serialization_max_chunk_size"] = 1
 
     def __del__(self):
         assert self.proc == None
@@ -154,6 +154,9 @@ class DflyInstance:
         if self.params.buffered_out:
             sed_cmd.remove("-u")
         subprocess.Popen(sed_cmd, stdin=self.proc.stdout)
+
+    def set_proc_to_none(self):
+        self.proc = None
 
     def stop(self, kill=False):
         proc, self.proc = self.proc, None

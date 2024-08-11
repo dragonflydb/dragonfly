@@ -361,11 +361,6 @@ class UniquePicksGenerator : public PicksGenerator {
   absl::BitGen bitgen_{};
 };
 
-struct ConditionFlag {
-  util::fb2::CondVarAny cond_var;
-  bool flag = false;
-};
-
 // Helper class used to guarantee atomicity between serialization of buckets
 class ThreadLocalMutex {
  public:

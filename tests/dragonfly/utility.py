@@ -91,7 +91,7 @@ async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
         yield x
 
 
-async def wait_available_async(client: aioredis.Redis, timeout=10):
+async def wait_available_async(client: aioredis.Redis, timeout=120):
     """Block until instance exits loading phase"""
     its = 0
     start = time.time()
