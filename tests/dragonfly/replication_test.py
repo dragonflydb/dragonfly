@@ -860,7 +860,6 @@ return 'OK'
 """
 
 
-@pytest.mark.skip(reason="Failing")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, num_ops, num_keys, num_par, flags", script_cases)
 async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_par, flags):
@@ -891,7 +890,9 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
         for key_set in key_sets:
             for j, k in enumerate(key_set):
                 l = await c_replica.lrange(k, 0, -1)
-                assert l == [f"{j}".encode()] * num_ops
+                assert l == [f"{j}"] * num_ops
+
+    await close_clients(c_master, *c_replicas)
 
 
 @dfly_args({"proactor_threads": 4})
@@ -2315,6 +2316,7 @@ async def test_replicate_old_master(
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master = df_factory.create(path=released_dfly_path, cluster_mode=cluster_mode)
+    master.clear_max_chunk_flag()
     replica = df_factory.create(
         cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
     )

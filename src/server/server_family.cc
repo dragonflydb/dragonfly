@@ -1626,6 +1626,22 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
+                          std::string_view password) const {
+  const auto* registry = ServerState::tlocal()->user_registry;
+  CHECK(registry);
+  const bool is_authorized = registry->AuthUser(username, password);
+  if (is_authorized) {
+    cntx->authed_username = username;
+    auto cred = registry->GetCredentials(username);
+    cntx->acl_commands = cred.acl_commands;
+    cntx->keys = std::move(cred.keys);
+    cntx->ns = &namespaces.GetOrInsert(cred.ns);
+    cntx->authenticated = true;
+  }
+  return is_authorized;
+}
+
 void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
     return cntx->SendError(kSyntaxErr);
@@ -1633,19 +1649,11 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 
   // non admin port auth
   if (!cntx->conn()->IsPrivileged()) {
-    const auto* registry = ServerState::tlocal()->user_registry;
     const bool one_arg = args.size() == 1;
     std::string_view username = one_arg ? "default" : facade::ToSV(args[0]);
     const size_t index = one_arg ? 0 : 1;
     std::string_view password = facade::ToSV(args[index]);
-    auto is_authorized = registry->AuthUser(username, password);
-    if (is_authorized) {
-      cntx->authed_username = username;
-      auto cred = registry->GetCredentials(username);
-      cntx->acl_commands = cred.acl_commands;
-      cntx->keys = std::move(cred.keys);
-      cntx->ns = &namespaces.GetOrInsert(cred.ns);
-      cntx->authenticated = true;
+    if (DoAuth(cntx, username, password)) {
       return cntx->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
@@ -2417,13 +2425,8 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  if (has_auth) {
-    if (username == "default" && password == GetPassword()) {
-      cntx->authenticated = true;
-    } else {
-      cntx->SendError(facade::kAuthRejected);
-      return;
-    }
+  if (has_auth && !DoAuth(cntx, username, password)) {
+    return cntx->SendError(facade::kAuthRejected);
   }
 
   if (cntx->req_auth && !cntx->authenticated) {

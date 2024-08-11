@@ -314,6 +314,37 @@ class MCReplyBuilder : public SinkReplyBuilder {
   bool NoReply() const;
 };
 
+class MCReplyBuilder2 : public SinkReplyBuilder2 {
+ public:
+  explicit MCReplyBuilder2(::io::Sink* sink);
+
+  void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
+
+  void SendStored() final;
+  void SendLong(long val) final;
+  void SendSetSkipped() final;
+
+  void SendClientError(std::string_view str);
+  void SendNotFound();
+
+  void SendValue(std::string_view key, std::string_view value, uint64_t mc_ver, uint32_t mc_flag);
+  void SendSimpleString(std::string_view str) final;
+  void SendProtocolError(std::string_view str) final;
+
+  void SetNoreply(bool noreply) {
+    noreply_ = noreply;
+  }
+
+  bool NoReply() const {
+    return noreply_;
+  }
+
+ private:
+  void SendSimplePiece(std::string&& str);  // Send simple string as piece (for short lived data)
+
+  bool noreply_ = false;
+};
+
 class RedisReplyBuilder : public SinkReplyBuilder {
  public:
   enum CollectionType { ARRAY, SET, MAP, PUSH };
@@ -364,6 +395,66 @@ class RedisReplyBuilder : public SinkReplyBuilder {
                              CollectionType type);
 
   bool is_resp3_ = false;
+};
+
+// Redis reply builder interface for sending RESP data.
+class RedisReplyBuilder2Base : public SinkReplyBuilder2 {
+ public:
+  enum CollectionType { ARRAY, SET, MAP, PUSH };
+
+  enum VerbatimFormat { TXT, MARKDOWN };
+
+  explicit RedisReplyBuilder2Base(io::Sink* sink) : SinkReplyBuilder2(sink) {
+  }
+
+  virtual void SendNull();
+  void SendSimpleString(std::string_view str) override;
+  virtual void SendBulkString(std::string_view str);  // RESP: Blob String
+
+  void SendLong(long val) override;
+  virtual void SendDouble(double val);  // RESP: Number
+
+  virtual void SendNullArray();
+  virtual void StartCollection(unsigned len, CollectionType ct);
+
+  using SinkReplyBuilder2::SendError;
+  void SendError(std::string_view str, std::string_view type = {}) override;
+  void SendProtocolError(std::string_view str) override;
+
+  static char* FormatDouble(double d, char* dest, unsigned len);
+  virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
+
+  bool IsResp3() const {
+    return resp3_;
+  }
+
+  void SetResp3(bool resp3) {
+    resp3_ = resp3;
+  }
+
+ private:
+  void WriteIntWithPrefix(char prefix, int64_t val);  // FastIntToBuffer directly into ReservePiece
+
+  bool resp3_ = false;
+};
+
+// Non essential rediss reply builder functions implemented on top of the base resp protocol
+class RedisReplyBuilder2 : public RedisReplyBuilder2Base {
+ public:
+  RedisReplyBuilder2(io::Sink* sink) : RedisReplyBuilder2Base(sink) {
+  }
+
+  void SendSimpleStrArr(const facade::ArgRange& strs);
+  void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
+  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr, bool with_scores);
+
+  void SendStored() final;
+  void SendSetSkipped() final;
+
+  void StartArray(unsigned len);
+  void SendEmptyArray();
+
+  static std::string SerializeCommmand(std::string_view cmd);
 };
 
 class ReqSerializer {
