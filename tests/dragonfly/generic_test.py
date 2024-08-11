@@ -100,12 +100,10 @@ async def test_arg_from_environ(df_factory):
 
 async def test_unknown_dfly_env(df_factory, export_dfly_password):
     with EnvironCntx(DFLY_abcdef="xyz"):
-        try:
-            dfly = df_factory.create()
+        dfly = df_factory.create()
+        with pytest.raises(DflyStartException):
             dfly.start()
-            assert False
-        except DflyStartException:
-            df_factory.set_skip_stop()
+        dfly.set_proc_to_none()
 
 
 async def test_restricted_commands(df_factory):
