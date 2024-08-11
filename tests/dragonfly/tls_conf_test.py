@@ -141,7 +141,7 @@ async def test_config_enable_tls(
             await client.ping()
 
         # Connecting without TLS should fail.
-        with pytest.raises(redis.exceptions.ResponseError):
+        with pytest.raises(redis.exceptions.ConnectionError):
             async with server.client() as client_unauth:
                 await client_unauth.ping()
 
