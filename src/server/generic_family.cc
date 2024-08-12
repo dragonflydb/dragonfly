@@ -1211,7 +1211,7 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
     if (result.value()) {
       return cntx->SendOk();
     } else {
-      return cntx->SendError("Bad data formatasdfasdf");
+      return cntx->SendError("Bad data format");
     }
   } else {
     switch (result.status()) {
