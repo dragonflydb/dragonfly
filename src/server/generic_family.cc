@@ -1213,15 +1213,10 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
     } else {
       return cntx->SendError("Bad data format");
     }
+  } else if (result.status() == OpStatus::KEY_EXISTS) {
+    return cntx->SendError("BUSYKEY: key name already exists.");
   } else {
-    switch (result.status()) {
-      case OpStatus::KEY_EXISTS:
-        return cntx->SendError("BUSYKEY: key name already exists.");
-      case OpStatus::WRONG_TYPE:
-        return cntx->SendError("Bad data format");
-      default:
-        return cntx->SendError(result.status());
-    }
+    return cntx->SendError(result.status());
   }
 }
 
