@@ -86,13 +86,14 @@ jobs:
             ctest -V -L DFLY
 
       - name: Send notifications on failure
-        if: failure()
+        if: failure() && github.ref == 'refs/heads/main'
+        shell: bash
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          message="Daily sanitizers failed.\\n The commit is: ${{github.sha}}.\\n Job Link: ${job_link}\\n"
+          message="Daily sanitizers failed.\\n Job Link: ${job_link}\\n"
 
           curl -s \
             -X POST \
             -H 'Content-Type: application/json' \
-            '${{ inputs.gspace-secret }}' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
             -d '{"text": "'"${message}"'"}'
