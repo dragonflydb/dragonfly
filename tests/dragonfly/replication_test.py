@@ -1012,6 +1012,10 @@ def parse_lag(replication_info: str):
     return int(lags[0])
 
 
+async def get_metric_value(inst, metric_name, sample_index=0):
+    return (await inst.metrics())[metric_name].samples[sample_index].value
+
+
 async def assert_lag_condition(inst, client, condition):
     """
     Since lag is a bit random, and we want stable tests, we check
@@ -1021,7 +1025,7 @@ async def assert_lag_condition(inst, client, condition):
     prometheus endpoint.
     """
     for _ in range(10):
-        lag = (await inst.metrics())["dragonfly_connected_replica_lag_records"].samples[0].value
+        lag = await get_metric_value(inst, "dragonfly_connected_replica_lag_records")
         if condition(lag):
             break
         print("current prometheus lag =", lag)
@@ -1036,6 +1040,23 @@ async def assert_lag_condition(inst, client, condition):
         await asyncio.sleep(0.05)
     else:
         assert False, "Lag has never satisfied condition!"
+
+
+async def get_replica_reconnects_count(replica_inst):
+    return await get_metric_value(replica_inst, "dragonfly_replica_reconnect_count")
+
+
+async def assert_replica_reconnections(replica_inst, initial_reconnects_count):
+    """
+    Asserts that the replica has attempted to reconnect at least once.
+    """
+    reconnects_count = await get_replica_reconnects_count(replica_inst)
+    if reconnects_count > initial_reconnects_count:
+        return
+
+    assert (
+        False
+    ), f"Expected reconnect count to increase by at least 1, but it did not. Initial dragonfly_replica_reconnect_count: {initial_reconnects_count}, current count: {reconnects_count}"
 
 
 @dfly_args({"proactor_threads": 2})
@@ -1812,6 +1833,56 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
     # assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
+async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=6)
+    replica = df_factory.create(proactor_threads=4)
+
+    df_factory.start_all([replica, master])
+    seeder = df_seeder_factory.create(port=master.port)
+
+    async with replica.client() as c_replica:
+        await seeder.run(target_deviation=0.1)
+
+        proxy = Proxy("127.0.0.1", 1115, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
+        try:
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+            # Wait replica to be up and synchronized with master
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            initial_reconnects_count = await get_replica_reconnects_count(replica)
+
+            # Fully drop the server
+            await proxy.close(task)
+
+            # After dropping the connection replica should try to reconnect
+            await wait_for_replica_status(c_replica, status="down")
+            await asyncio.sleep(2)
+
+            # Restart the proxy
+            await proxy.start()
+            task = asyncio.create_task(proxy.serve())
+
+            # Wait replica to be reconnected and synchronized with master
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
+
+            # Assert replica reconnects metrics increased
+            await assert_replica_reconnections(replica, initial_reconnects_count)
+
+        finally:
+            await proxy.close(task)
+
+    master.stop()
+    replica.stop()
+
+
 async def test_search(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -2316,6 +2387,7 @@ async def test_replicate_old_master(
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master = df_factory.create(path=released_dfly_path, cluster_mode=cluster_mode)
+    master.clear_max_chunk_flag()
     replica = df_factory.create(
         cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
     )

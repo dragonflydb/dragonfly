@@ -18,6 +18,7 @@
 #include "server/journal/streamer.h"
 #include "server/main_service.h"
 #include "server/server_family.h"
+#include "util/fibers/synchronization.h"
 
 ABSL_FLAG(int, slot_migration_connection_timeout_ms, 2000, "Timeout for network operations");
 
@@ -112,7 +113,7 @@ OutgoingMigration::~OutgoingMigration() {
 }
 
 bool OutgoingMigration::ChangeState(MigrationState new_state) {
-  std::lock_guard lk(state_mu_);
+  util::fb2::LockGuard lk(state_mu_);
   if (state_ == MigrationState::C_FINISHED) {
     return false;
   }
@@ -136,7 +137,7 @@ void OutgoingMigration::Finish(bool is_error) {
   bool should_cancel_flows = false;
 
   {
-    std::lock_guard lk(state_mu_);
+    util::fb2::LockGuard lk(state_mu_);
     switch (state_) {
       case MigrationState::C_FINISHED:
         return;  // Already finished, nothing else to do
@@ -164,7 +165,7 @@ void OutgoingMigration::Finish(bool is_error) {
 }
 
 MigrationState OutgoingMigration::GetState() const {
-  std::lock_guard lk(state_mu_);
+  util::fb2::LockGuard lk(state_mu_);
   return state_;
 }
 

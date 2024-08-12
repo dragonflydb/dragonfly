@@ -67,6 +67,12 @@ struct ReplicationMemoryStats {
   size_t full_sync_buf_bytes = 0;          // total bytes used for full sync buffers
 };
 
+struct ReplicaReconnectionsInfo {
+  std::string host;
+  uint16_t port;
+  uint32_t reconnect_count;
+};
+
 // Global peak stats recorded after aggregating metrics over all shards.
 // Note that those values are only updated during GetMetrics calls.
 struct PeakStats {
@@ -115,6 +121,7 @@ struct Metrics {
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
   std::vector<ReplicaRoleInfo> replication_metrics;
+  std::optional<ReplicaReconnectionsInfo> replica_reconnections;
 };
 
 struct LastSaveInfo {
@@ -152,7 +159,7 @@ class ServerFamily {
 
   void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
   void Register(CommandRegistry* registry);
-  void Shutdown();
+  void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void ShutdownCmd(CmdArgList args, ConnectionContext* cntx);
 
@@ -187,7 +194,7 @@ class ServerFamily {
   // if kDbAll is passed, burns all the databases to the ground.
   std::error_code Drakarys(Transaction* transaction, DbIndex db_ind);
 
-  LastSaveInfo GetLastSaveInfo() const;
+  LastSaveInfo GetLastSaveInfo() const ABSL_LOCKS_EXCLUDED(save_mu_);
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
@@ -197,8 +204,8 @@ class ServerFamily {
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
-  void PauseReplication(bool pause);
-  std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo();
+  void PauseReplication(bool pause) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   const std::string& master_replid() const {
     return master_replid_;
@@ -252,15 +259,15 @@ class ServerFamily {
   void Memory(CmdArgList args, ConnectionContext* cntx);
   void FlushDb(CmdArgList args, ConnectionContext* cntx);
   void FlushAll(CmdArgList args, ConnectionContext* cntx);
-  void Info(CmdArgList args, ConnectionContext* cntx);
+  void Info(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(save_mu_, replicaof_mu_);
   void Hello(CmdArgList args, ConnectionContext* cntx);
-  void LastSave(CmdArgList args, ConnectionContext* cntx);
+  void LastSave(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(save_mu_);
   void Latency(CmdArgList args, ConnectionContext* cntx);
   void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
   void AddReplicaOf(CmdArgList args, ConnectionContext* cntx);
-  void ReplTakeOver(CmdArgList args, ConnectionContext* cntx);
+  void ReplTakeOver(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void ReplConf(CmdArgList args, ConnectionContext* cntx);
-  void Role(CmdArgList args, ConnectionContext* cntx);
+  void Role(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
   void Save(CmdArgList args, ConnectionContext* cntx);
   void BgSave(CmdArgList args, ConnectionContext* cntx);
   void Script(CmdArgList args, ConnectionContext* cntx);
@@ -276,7 +283,8 @@ class ServerFamily {
   };
 
   // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ActionOnConnectionFail on_error);
+  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ActionOnConnectionFail on_error)
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file);
@@ -293,10 +301,11 @@ class ServerFamily {
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
   GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
-                                   bool ignore_state = false);
+                                   bool ignore_state = false) ABSL_LOCKS_EXCLUDED(save_mu_);
 
-  GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false);
-  void StopAllClusterReplicas();
+  GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false)
+      ABSL_LOCKS_EXCLUDED(save_mu_);
+  void StopAllClusterReplicas() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
 
   bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password) const;
 

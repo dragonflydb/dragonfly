@@ -138,6 +138,8 @@ class ShardDocIndex {
 
   DocIndexInfo GetInfo() const;
 
+  io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
+
  private:
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);

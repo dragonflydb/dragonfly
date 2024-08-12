@@ -3,7 +3,7 @@ import logging
 import os
 import glob
 import asyncio
-import async_timeout
+from async_timeout import timeout
 import redis
 from redis import asyncio as aioredis
 from pathlib import Path
@@ -169,7 +169,7 @@ async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     file = None
-    with async_timeout.timeout(65):
+    async with timeout(65):
         while file is None:
             await asyncio.sleep(1)
             file = find_main_file(tmp_dir, "test-cron-summary.dfs")
@@ -185,7 +185,7 @@ async def test_set_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await async_client.config_set("snapshot_cron", "* * * * *")
 
     file = None
-    with async_timeout.timeout(65):
+    async with timeout(65):
         while file is None:
             await asyncio.sleep(1)
             file = find_main_file(tmp_dir, "test-cron-set-summary.dfs")

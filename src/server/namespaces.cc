@@ -60,7 +60,7 @@ bool Namespaces::IsInitialized() const {
 }
 
 void Namespaces::Clear() {
-  std::unique_lock guard(mu_);
+  util::fb2::LockGuard guard(mu_);
 
   namespaces.default_namespace_ = nullptr;
 
@@ -95,7 +95,7 @@ Namespace& Namespaces::GetOrInsert(std::string_view ns) {
 
   {
     // Key was not found, so we create create it under unique lock
-    std::unique_lock guard(mu_);
+    util::fb2::LockGuard guard(mu_);
     return namespaces_[ns];
   }
 }

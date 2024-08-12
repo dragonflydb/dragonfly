@@ -209,7 +209,8 @@ void Replica::MainReplicationFb() {
       // Give a lower timeout for connect, because we're
       ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_reconnect_timeout_ms) * 1ms, &cntx_);
       if (ec) {
-        LOG(ERROR) << "Error connecting to " << server().Description() << " " << ec;
+        reconnect_count_++;
+        LOG(WARNING) << "Error connecting to " << server().Description() << " " << ec;
         continue;
       }
       VLOG(1) << "Replica socket connected";
@@ -1086,6 +1087,7 @@ auto Replica::GetSummary() const -> Summary {
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     res.master_id = master_context_.master_repl_id;
+    res.reconnect_count = reconnect_count_;
     return res;
   };
 

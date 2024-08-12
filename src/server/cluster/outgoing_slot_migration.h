@@ -32,9 +32,9 @@ class OutgoingMigration : private ProtocolClient {
 
   // mark migration as FINISHED and cancel migration if it's not finished yet
   // can be called from any thread, but only after Start()
-  void Finish(bool is_error = false);
+  void Finish(bool is_error = false) ABSL_LOCKS_EXCLUDED(state_mu_);
 
-  MigrationState GetState() const;
+  MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
   const std::string& GetHostIp() const {
     return server().host;
@@ -56,7 +56,7 @@ class OutgoingMigration : private ProtocolClient {
     return last_error_.Format();
   }
 
-  size_t GetKeyCount() const;
+  size_t GetKeyCount() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(state_mu_);
 
   static constexpr long kInvalidAttempt = -1;
   static constexpr std::string_view kUnknownMigration = "UNKNOWN_MIGRATION";

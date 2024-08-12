@@ -69,8 +69,11 @@ class Proxy:
         if self.server is not None:
             self.server.close()
             self.server = None
+
         for cb in self.stop_connections:
             cb()
+        self.stop_connections = []
+
         if not task == None:
             try:
                 await task

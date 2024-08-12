@@ -5,6 +5,7 @@
 #include "server/main_service.h"
 
 #include "facade/resp_expr.h"
+#include "util/fibers/synchronization.h"
 
 #ifdef __FreeBSD__
 #include <pthread_np.h>
@@ -823,7 +824,7 @@ Service::Service(ProactorPool* pp)
     LOG(INFO) << "Received " << strsignal(signal);
     util::fb2::Mutex m;
     pp_.AwaitFiberOnAll([&m](unsigned index, util::ProactorBase* base) {
-      std::unique_lock lk(m);
+      util::fb2::LockGuard lk(m);
       util::fb2::detail::FiberInterface::PrintAllFiberStackTraces();
     });
   });
@@ -2457,7 +2458,7 @@ VarzValue::Map Service::GetVarzStats() {
 }
 
 GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
-  lock_guard lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   if (global_state_ != from) {
     return global_state_;
   }
@@ -2470,7 +2471,7 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
 }
 
 void Service::RequestLoadingState() {
-  unique_lock lk(mu_);
+  std::unique_lock lk(mu_);
   ++loading_state_counter_;
   if (global_state_ != GlobalState::LOADING) {
     DCHECK_EQ(global_state_, GlobalState::ACTIVE);
@@ -2491,7 +2492,7 @@ void Service::RemoveLoadingState() {
 }
 
 GlobalState Service::GetGlobalState() const {
-  lock_guard lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   return global_state_;
 }
 
