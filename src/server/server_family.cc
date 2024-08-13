@@ -123,7 +123,7 @@ ABSL_FLAG(bool, s3_ec2_metadata, false,
 ABSL_FLAG(bool, s3_sign_payload, true,
           "whether to sign the s3 request payload when uploading snapshots");
 
-ABSL_FLAG(bool, info_replication_valkey_compatible, false,
+ABSL_FLAG(bool, info_replication_valkey_compatible, true,
           "when true - output valkey compatible values for info-replication");
 
 ABSL_DECLARE_FLAG(int32_t, port);
@@ -824,6 +824,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_ca_cert_file");
   config_registry.RegisterMutable("tls_ca_cert_dir");
   config_registry.RegisterMutable("replica_priority");
+  config_registry.RegisterMutable("lua_undeclared_keys_shas");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1625,6 +1626,22 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
+                          std::string_view password) const {
+  const auto* registry = ServerState::tlocal()->user_registry;
+  CHECK(registry);
+  const bool is_authorized = registry->AuthUser(username, password);
+  if (is_authorized) {
+    cntx->authed_username = username;
+    auto cred = registry->GetCredentials(username);
+    cntx->acl_commands = cred.acl_commands;
+    cntx->keys = std::move(cred.keys);
+    cntx->ns = &namespaces.GetOrInsert(cred.ns);
+    cntx->authenticated = true;
+  }
+  return is_authorized;
+}
+
 void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
     return cntx->SendError(kSyntaxErr);
@@ -1632,19 +1649,11 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 
   // non admin port auth
   if (!cntx->conn()->IsPrivileged()) {
-    const auto* registry = ServerState::tlocal()->user_registry;
     const bool one_arg = args.size() == 1;
     std::string_view username = one_arg ? "default" : facade::ToSV(args[0]);
     const size_t index = one_arg ? 0 : 1;
     std::string_view password = facade::ToSV(args[index]);
-    auto is_authorized = registry->AuthUser(username, password);
-    if (is_authorized) {
-      cntx->authed_username = username;
-      auto cred = registry->GetCredentials(username);
-      cntx->acl_commands = cred.acl_commands;
-      cntx->keys = std::move(cred.keys);
-      cntx->ns = &namespaces.GetOrInsert(cred.ns);
-      cntx->authenticated = true;
+    if (DoAuth(cntx, username, password)) {
       return cntx->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
@@ -2416,13 +2425,8 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  if (has_auth) {
-    if (username == "default" && password == GetPassword()) {
-      cntx->authenticated = true;
-    } else {
-      cntx->SendError(facade::kAuthRejected);
-      return;
-    }
+  if (has_auth && !DoAuth(cntx, username, password)) {
+    return cntx->SendError(facade::kAuthRejected);
   }
 
   if (cntx->req_auth && !cntx->authenticated) {
@@ -2665,7 +2669,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
-        auto [sid, replica_info] = dfly_cmd_->CreateSyncSession(cntx);
+        auto [sid, flow_count] = dfly_cmd_->CreateSyncSession(cntx);
         cntx->conn()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
@@ -2681,7 +2685,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         rb->StartArray(4);
         rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
-        rb->SendLong(replica_info->flows.size());
+        rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
         return;
       }

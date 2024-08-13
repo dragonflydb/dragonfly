@@ -79,6 +79,7 @@ string ConfigSetFailed(string_view config_name) {
 
 const char kSyntaxErr[] = "syntax error";
 const char kWrongTypeErr[] = "-WRONGTYPE Operation against a key holding the wrong kind of value";
+const char kWrongJsonTypeErr[] = "-WRONGTYPE wrong JSON type of path value";
 const char kKeyNotFoundErr[] = "no such key";
 const char kInvalidIntErr[] = "value is not an integer or out of range";
 const char kInvalidFloatErr[] = "value is not a valid float";
@@ -100,6 +101,7 @@ const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong"
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
 const char kConfigErrType[] = "config_error";
+const char kSearchErrType[] = "search_error";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {

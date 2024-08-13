@@ -234,7 +234,7 @@ def attach(args):
     if args.attach_as_replica:
         newcomer = Node(args.attach_host, args.attach_port)
         replica_resp = send_command(newcomer, ["info", "replication"])
-        if replica_resp["role"] != "replica":
+        if replica_resp["role"] != "slave":
             die_with_err("Node is not in replica mode")
         if (
             replica_resp["master_host"] != args.target_host

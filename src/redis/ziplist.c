@@ -350,7 +350,7 @@ static inline unsigned int zipIntSize(unsigned char encoding) {
     if (encoding >= ZIP_INT_IMM_MIN && encoding <= ZIP_INT_IMM_MAX)
         return 0; /* 4 bit immediate */
     /* bad encoding, covered by a previous call to ZIP_ASSERT_ENCODING */
-    redis_unreachable();
+    valkey_unreachable();
     return 0;
 }
 

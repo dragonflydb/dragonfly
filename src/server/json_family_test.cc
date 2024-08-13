@@ -24,6 +24,36 @@ class JsonFamilyTest : public BaseFamilyTest {
  protected:
 };
 
+MATCHER_P(ElementsAreArraysMatcher, matchers, "") {
+  const auto& vec = arg.GetVec();
+  const size_t expected_size = std::tuple_size<decltype(matchers)>::value;
+
+  if (vec.size() != expected_size) {
+    *result_listener << "size mismatch: expected " << expected_size << " but got " << vec.size();
+    return false;
+  }
+
+  bool result = true;
+  size_t index = 0;
+
+  auto check_matcher = [&](const auto& matcher) {
+    if (!ExplainMatchResult(matcher, vec[index].GetVec(), result_listener)) {
+      *result_listener << " at index " << index;
+      result = false;
+    }
+    index++;
+  };
+
+  std::apply([&check_matcher](const auto&... matchers) { (check_matcher(matchers), ...); },
+             matchers);
+
+  return result;
+}
+
+template <typename... Matchers> auto ElementsAreArrays(Matchers&&... matchers) {
+  return ElementsAreArraysMatcher(std::make_tuple(std::forward<Matchers>(matchers)...));
+}
+
 TEST_F(JsonFamilyTest, SetGetBasic) {
   string json = R"(
     {
@@ -87,6 +117,9 @@ TEST_F(JsonFamilyTest, GetLegacy) {
 
   auto resp = Run({"JSON.SET", "json", "$", json});
   ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json"});  // V1 Response
+  ASSERT_THAT(resp, "{\"lastSeen\":1478476800,\"loggedOut\":true,\"name\":\"Leonard Cohen\"}");
 
   resp = Run({"JSON.GET", "json", "."});  // V1 Response
   ASSERT_THAT(resp, "{\"lastSeen\":1478476800,\"loggedOut\":true,\"name\":\"Leonard Cohen\"}");
@@ -203,10 +236,53 @@ TEST_F(JsonFamilyTest, Type) {
                                           "object", "array")));
 
   resp = Run({"JSON.TYPE", "json", "$[10]"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
 
   resp = Run({"JSON.TYPE", "not_exist_key", "$[10]"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
+TEST_F(JsonFamilyTest, TypeLegacy) {
+  string json = R"(
+    {
+      "firstName":"John",
+      "lastName":"Smith",
+      "age":27,
+      "weight":135.25,
+      "isAlive":true,
+      "address":{"street":"21 2nd Street","city":"New York","state":"NY","zipcode":"10021-3100"},
+      "phoneNumbers":[{"type":"home","number":"212 555-1234"},{"type":"office","number":"646 555-4567"}],
+      "children":[],
+      "spouse":null
+    }
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.TYPE", "json"});
+  EXPECT_EQ(resp, "object");
+
+  resp = Run({"JSON.TYPE", "json", ".children"});
+  EXPECT_EQ(resp, "array");
+
+  resp = Run({"JSON.TYPE", "json", ".firstName"});
+  EXPECT_EQ(resp, "string");
+
+  resp = Run({"JSON.TYPE", "json", ".age"});
+  EXPECT_EQ(resp, "integer");
+
+  resp = Run({"JSON.TYPE", "json", ".weight"});
+  EXPECT_EQ(resp, "number");
+
+  resp = Run({"JSON.TYPE", "json", ".isAlive"});
+  EXPECT_EQ(resp, "boolean");
+
+  resp = Run({"JSON.TYPE", "json", ".spouse"});
+  EXPECT_EQ(resp, "null");
+
+  resp = Run({"JSON.TYPE", "not_exist_key", ".some_field"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(JsonFamilyTest, StrLen) {
@@ -217,23 +293,76 @@ TEST_F(JsonFamilyTest, StrLen) {
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
+  /* Test simple response from only one value */
+
   resp = Run({"JSON.STRLEN", "json", "$.a.a"});
   EXPECT_THAT(resp, IntArg(1));
 
+  resp = Run({"JSON.STRLEN", "json", "$.a"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
   resp = Run({"JSON.STRLEN", "json", "$.a.*"});
   EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.STRLEN", "json", "$.c.b"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.STRLEN", "non_existent_key", "$.c.b"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  /*
+  Test response from several possible values
+  In JSON V2, the response is an array of all possible values
+  */
 
   resp = Run({"JSON.STRLEN", "json", "$.c.*"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(2)));
 
-  resp = Run({"JSON.STRLEN", "json", "$.c.b"});
-  EXPECT_THAT(resp, IntArg(2));
-
   resp = Run({"JSON.STRLEN", "json", "$.d.*"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(),
               ElementsAre(ArgType(RespExpr::NIL), IntArg(1), ArgType(RespExpr::NIL)));
+}
+
+TEST_F(JsonFamilyTest, StrLenLegacy) {
+  string json = R"(
+    {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":3}}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  /* Test simple response from only one value */
+
+  resp = Run({"JSON.STRLEN", "json"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.STRLEN", "json", ".a.a"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.STRLEN", "json", ".a"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.STRLEN", "json", ".a.*"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.STRLEN", "json", ".c.b"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.STRLEN", "non_existent_key", ".c.b"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  /*
+  Test response from several possible values
+  In JSON legacy mode, the response contains only one value - the first string's length.
+  */
+
+  resp = Run({"JSON.STRLEN", "json", ".c.*"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.STRLEN", "json", ".d.*"});
+  EXPECT_THAT(resp, IntArg(1));
 }
 
 TEST_F(JsonFamilyTest, ObjLen) {
@@ -244,11 +373,13 @@ TEST_F(JsonFamilyTest, ObjLen) {
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
+  /* Test simple response from only one value */
+
   resp = Run({"JSON.OBJLEN", "json", "$.a"});
   EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"JSON.OBJLEN", "json", "$.a.*"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
 
   resp = Run({"JSON.OBJLEN", "json", "$.b"});
   EXPECT_THAT(resp, IntArg(1));
@@ -259,12 +390,20 @@ TEST_F(JsonFamilyTest, ObjLen) {
   resp = Run({"JSON.OBJLEN", "json", "$.c"});
   EXPECT_THAT(resp, IntArg(2));
 
+  resp = Run({"JSON.OBJLEN", "json", "$.d"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.OBJLEN", "non_existent_key", "$.a"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  /*
+  Test response from several possible values
+  In JSON V2, the response is an array of all possible values
+  */
+
   resp = Run({"JSON.OBJLEN", "json", "$.c.*"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::NIL)));
-
-  resp = Run({"JSON.OBJLEN", "json", "$.d"});
-  EXPECT_THAT(resp, IntArg(3));
 
   resp = Run({"JSON.OBJLEN", "json", "$.d.*"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
@@ -275,6 +414,55 @@ TEST_F(JsonFamilyTest, ObjLen) {
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(1), IntArg(2), IntArg(3), ArgType(RespExpr::NIL)));
+}
+
+TEST_F(JsonFamilyTest, ObjLenLegacy) {
+  string json = R"(
+    {"a":{}, "b":{"a":"a"}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":{"a":3,"b":4}}, "e":1}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  /* Test simple response from only one value */
+
+  resp = Run({"JSON.STRLEN", "json"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.OBJLEN", "json", ".a"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.OBJLEN", "json", ".a.*"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.OBJLEN", "json", ".b"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.OBJLEN", "json", ".b.*"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.OBJLEN", "json", ".c"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.OBJLEN", "json", ".d"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.OBJLEN", "non_existent_key", ".a"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  /*
+  Test response from several possible values
+  In JSON legacy mode, the response contains only one value - the first object's length.
+  */
+
+  resp = Run({"JSON.OBJLEN", "json", ".c.*"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.OBJLEN", "json", ".d.*"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.OBJLEN", "json", ".*"});
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(JsonFamilyTest, ArrLen) {
@@ -300,6 +488,46 @@ TEST_F(JsonFamilyTest, ArrLen) {
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), ElementsAre(IntArg(0), ArgType(RespExpr::NIL), IntArg(2), IntArg(3),
                                          ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.OBJLEN", "non_existent_key", "$[*]"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
+TEST_F(JsonFamilyTest, ArrLenLegacy) {
+  string json = R"(
+    [[], ["a"], ["a", "b"], ["a", "b", "c"]]
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRLEN", "json"});
+  EXPECT_THAT(resp, IntArg(4));
+
+  resp = Run({"JSON.ARRLEN", "json", "[*]"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.ARRLEN", "json", "[3]"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  json = R"(
+    [[], "a", ["a", "b"], ["a", "b", "c"], 4]
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRLEN", "json", "[*]"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"JSON.ARRLEN", "json", "[1]"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.ARRLEN", "json", "[2]"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.OBJLEN", "non_existent_key", "[*]"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(JsonFamilyTest, Toggle) {
@@ -309,9 +537,6 @@ TEST_F(JsonFamilyTest, Toggle) {
 
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
-
-  resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(R"([true,false,1,null,"foo",[],{}])", resp);
 
   resp = Run({"JSON.TOGGLE", "json", "$.*"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
@@ -332,6 +557,49 @@ TEST_F(JsonFamilyTest, Toggle) {
   EXPECT_EQ(resp, R"([true,false,1,null,"foo",[],{}])");
 }
 
+TEST_F(JsonFamilyTest, ToggleLegacy) {
+  string json = R"(
+    {"a":true, "b":false, "c":1, "d":null, "e":"foo", "f":[], "g":{}}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.TOGGLE", "json"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.TOGGLE", "json", ".*"});
+  EXPECT_EQ(resp, "true");
+
+  resp = Run({"JSON.TOGGLE", "json", ".*"});
+  EXPECT_EQ(resp, "false");
+
+  resp = Run({"JSON.GET", "json", "$.*"});
+  EXPECT_EQ(R"([true,false,1,null,"foo",[],{}])", resp);
+
+  resp = Run({"JSON.SET", "json", ".", "true"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.TOGGLE", "json", "."});
+  EXPECT_EQ(resp, "false");
+
+  resp = Run({"JSON.TOGGLE", "json", "."});
+  EXPECT_EQ(resp, "true");
+
+  json = R"(
+    {"isAvailable": false}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.TOGGLE", "json", ".isAvailable"});
+  EXPECT_EQ(resp, "true");
+
+  resp = Run({"JSON.TOGGLE", "json", ".isAvailable"});
+  EXPECT_EQ(resp, "false");
+}
+
 TEST_F(JsonFamilyTest, NumIncrBy) {
   string json = R"(
     {"e":1.5,"a":1}
@@ -348,10 +616,6 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
 
   resp = Run({"JSON.NUMINCRBY", "json", "$.e", "inf"});
   EXPECT_THAT(resp, ErrArg("ERR result is not a number"));
-
-  json = R"(
-    {"e":1.5,"a":1}
-  )";
 
   resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
@@ -378,10 +642,6 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   resp = Run({"JSON.GET", "json", "$.d[*]"});
   EXPECT_EQ(resp, "[11,12,13]");
 
-  json = R"(
-    {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
-  )";
-
   resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
@@ -400,8 +660,8 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   resp = Run({"JSON.NUMINCRBY", "json", "$.d[2]", "1"});
   EXPECT_EQ(resp, "[5]");
 
-  resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(resp, R"([[],[2],[2,3],[2,3,5]])");
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[],"b":[2],"c":[2,3],"d":[2,3,5]})");
 
   json = R"(
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
@@ -422,8 +682,8 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   resp = Run({"JSON.NUMINCRBY", "json", "$.d.*", "1"});
   EXPECT_EQ(resp, "[2,3,4]");
 
-  resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(resp, R"([{},{"a":2},{"a":2,"b":3},{"a":2,"b":3,"c":4}])");
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{},"b":{"a":2},"c":{"a":2,"b":3},"d":{"a":2,"b":3,"c":4}})");
 
   json = R"(
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"b"}, "d":{"a":1, "b":"b", "c":3}}
@@ -444,8 +704,120 @@ TEST_F(JsonFamilyTest, NumIncrBy) {
   resp = Run({"JSON.NUMINCRBY", "json", "$.d.*", "1"});
   EXPECT_EQ(resp, "[2,null,4]");
 
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"a"},"b":{"a":"a","b":2},"c":{"a":"a","b":"b"},"d":{"a":2,"b":"b","c":4}})");
+}
+
+TEST_F(JsonFamilyTest, NumIncrByLegacy) {
+  string json = R"(
+    {"e":1.5,"a":1}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".a", "1.1"});
+  EXPECT_EQ(resp, "2.1");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".e", "1"});
+  EXPECT_EQ(resp, "2.5");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".e", "inf"});
+  EXPECT_THAT(resp, ErrArg("ERR result is not a number"));
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".e", "1.7e308"});
+  EXPECT_EQ(resp, "1.7e+308");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".e", "1.7e308"});
+  EXPECT_THAT(resp, ErrArg("ERR result is not a number"));
+
   resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(resp, R"([{"a":"a"},{"a":"a","b":2},{"a":"a","b":"b"},{"a":2,"b":"b","c":4}])");
+  EXPECT_EQ(resp, R"([1,1.7e+308])");
+
+  json = R"(
+    {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".d[*]", "10"});
+  EXPECT_EQ(resp, "13");
+
+  resp = Run({"JSON.GET", "json", "$.d[*]"});
+  EXPECT_EQ(resp, "[11,12,13]");
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".a[*]", "1"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".b[*]", "1"});
+  EXPECT_EQ(resp, "2");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".c[*]", "1"});
+  EXPECT_EQ(resp, "3");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".d[*]", "1"});
+  EXPECT_EQ(resp, "4");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".d[2]", "1"});
+  EXPECT_EQ(resp, "5");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[],"b":[2],"c":[2,3],"d":[2,3,5]})");
+
+  json = R"(
+    {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".a.*", "1"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".b.*", "1"});
+  EXPECT_EQ(resp, "2");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".c.*", "1"});
+  EXPECT_EQ(resp, "3");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".d.*", "1"});
+  EXPECT_EQ(resp, "4");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{},"b":{"a":2},"c":{"a":2,"b":3},"d":{"a":2,"b":3,"c":4}})");
+
+  json = R"(
+    {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"b"}, "d":{"a":1, "b":"b", "c":3}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".a.*", "1"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".b.*", "1"});
+  EXPECT_EQ(resp, "2");
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".c.*", "1"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.NUMINCRBY", "json", ".d.*", "1"});
+  EXPECT_EQ(resp, "4");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"a"},"b":{"a":"a","b":2},"c":{"a":"a","b":"b"},"d":{"a":2,"b":"b","c":4}})");
 }
 
 TEST_F(JsonFamilyTest, NumMultBy) {
@@ -462,10 +834,6 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   resp = Run({"JSON.GET", "json", "$.d[*]"});
   EXPECT_EQ(resp, R"([2,4,6])");
 
-  json = R"(
-    {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
-  )";
-
   resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
@@ -481,8 +849,8 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   resp = Run({"JSON.NUMMULTBY", "json", "$.d[*]", "2"});
   EXPECT_EQ(resp, "[2,4,6]");
 
-  resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(resp, R"([[],[2],[2,4],[2,4,6]])");
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[],"b":[2],"c":[2,4],"d":[2,4,6]})");
 
   json = R"(
     {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
@@ -503,8 +871,8 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   resp = Run({"JSON.NUMMULTBY", "json", "$.d.*", "2"});
   EXPECT_EQ(resp, "[2,4,6]");
 
-  resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(resp, R"([{},{"a":2},{"a":2,"b":4},{"a":2,"b":4,"c":6}])");
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{},"b":{"a":2},"c":{"a":2,"b":4},"d":{"a":2,"b":4,"c":6}})");
 
   json = R"(
     {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"b"}, "d":{"a":1, "b":"b", "c":3}}
@@ -525,8 +893,89 @@ TEST_F(JsonFamilyTest, NumMultBy) {
   resp = Run({"JSON.NUMMULTBY", "json", "$.d.*", "2"});
   EXPECT_EQ(resp, "[2,null,6]");
 
-  resp = Run({"JSON.GET", "json", "$.*"});
-  EXPECT_EQ(resp, R"([{"a":"a"},{"a":"a","b":2},{"a":"a","b":"b"},{"a":2,"b":"b","c":6}])");
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"a"},"b":{"a":"a","b":2},"c":{"a":"a","b":"b"},"d":{"a":2,"b":"b","c":6}})");
+}
+
+TEST_F(JsonFamilyTest, NumMultByLegacy) {
+  string json = R"(
+    {"a":[], "b":[1], "c":[1,2], "d":[1,2,3]}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".d[*]", "2"});
+  EXPECT_EQ(resp, "6");
+
+  resp = Run({"JSON.GET", "json", "$.d[*]"});
+  EXPECT_EQ(resp, R"([2,4,6])");
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".a[*]", "2"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".b[*]", "2"});
+  EXPECT_EQ(resp, "2");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".c[*]", "2"});
+  EXPECT_EQ(resp, "4");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".d[*]", "2"});
+  EXPECT_EQ(resp, "6");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[],"b":[2],"c":[2,4],"d":[2,4,6]})");
+
+  json = R"(
+    {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".a.*", "2"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".b.*", "2"});
+  EXPECT_EQ(resp, "2");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".c.*", "2"});
+  EXPECT_EQ(resp, "4");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".d.*", "2"});
+  EXPECT_EQ(resp, "6");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{},"b":{"a":2},"c":{"a":2,"b":4},"d":{"a":2,"b":4,"c":6}})");
+
+  json = R"(
+    {"a":{"a":"a"}, "b":{"a":"a", "b":1}, "c":{"a":"a", "b":"b"}, "d":{"a":1, "b":"b", "c":3}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".a.*", "2"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".b.*", "2"});
+  EXPECT_EQ(resp, "2");
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".c.*", "2"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+
+  resp = Run({"JSON.NUMMULTBY", "json", ".d.*", "2"});
+  EXPECT_EQ(resp, "6");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(
+      resp,
+      R"({"a":{"a":"a"},"b":{"a":"a","b":2},"c":{"a":"a","b":"b"},"d":{"a":2,"b":"b","c":6}})");
 }
 
 TEST_F(JsonFamilyTest, Del) {
@@ -561,6 +1010,7 @@ TEST_F(JsonFamilyTest, Del) {
 
   resp = Run({"JSON.DEL", "json"});
   EXPECT_THAT(resp, IntArg(1));
+
   resp = Run({"GET", "json"});  // This is legal since the key was removed
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
@@ -579,6 +1029,7 @@ TEST_F(JsonFamilyTest, Del) {
 
   resp = Run({"GET", "json"});  // not a legal type
   EXPECT_THAT(resp, ErrArg("Operation against a key holding the wrong kind of value"));
+
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"({"a":[{"b":[2,3]}],"b":[{"c":2}],"c']":[1,2,3]})");
 
@@ -594,9 +1045,93 @@ TEST_F(JsonFamilyTest, Del) {
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"({})");
 
-  Run({"JSON.SET", "json", "$", R"({"a": 1})"});
+  resp = Run({"JSON.SET", "json", "$", R"({"a": 1})"});
+  ASSERT_THAT(resp, "OK");
+
   resp = Run({"JSON.DEL", "json", "$"});
   EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
+TEST_F(JsonFamilyTest, DelLegacy) {
+  string json = R"(
+    {"a":{}, "b":{"a":1}, "c":{"a":1, "b":2}, "d":{"a":1, "b":2, "c":3}, "e": [1,2,3,4,5]}}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEL", "json", ".d.*"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{},"b":{"a":1},"c":{"a":1,"b":2},"d":{},"e":[1,2,3,4,5]})");
+
+  resp = Run({"JSON.DEL", "json", ".e[*]"});
+  EXPECT_THAT(resp, IntArg(5));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":{},"b":{"a":1},"c":{"a":1,"b":2},"d":{},"e":[]})");
+
+  resp = Run({"JSON.DEL", "json", "..*"});
+  EXPECT_GE(resp.GetInt(), 5);
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({})");
+
+  resp = Run({"JSON.DEL", "json"});
+  EXPECT_THAT(resp, IntArg(1));
+  resp = Run({"GET", "json"});  // This is legal since the key was removed
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  json = R"(
+    {"a":[{"b": [1,2,3]}], "b": [{"c": 2}], "c']":[1,2,3]}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEL", "json", ".a[0].b[0]"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"GET", "json"});  // not a legal type
+  EXPECT_THAT(resp, ErrArg("Operation against a key holding the wrong kind of value"));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[{"b":[2,3]}],"b":[{"c":2}],"c']":[1,2,3]})");
+
+  resp = Run({"JSON.DEL", "json", ".b[0].c"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[{"b":[2,3]}],"b":[{}],"c']":[1,2,3]})");
+
+  resp = Run({"JSON.DEL", "json", ".*"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({})");
+
+  resp = Run({"JSON.SET", "json", ".", R"({"a": 1})"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEL", "json", "."});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEL", "json"});
+  EXPECT_THAT(resp, IntArg(1));
+
   resp = Run({"JSON.GET", "json"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
@@ -609,62 +1144,89 @@ TEST_F(JsonFamilyTest, ObjKeys) {
   auto resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
-  resp = Run({"JSON.OBJKEYS", "json"});
+  resp = Run({"JSON.OBJKEYS", "json", "$"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b", "c", "d", "e"));
 
   resp = Run({"JSON.OBJKEYS", "json", "$.a"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
 
   resp = Run({"JSON.OBJKEYS", "json", "$.b"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a"));
 
-  resp = Run({"JSON.OBJKEYS", "json", ".b"});
-  EXPECT_THAT(resp.GetVec(), ElementsAre("a"));
-
-  resp = Run({"JSON.OBJKEYS", "json", "b"});
-  EXPECT_THAT(resp.GetVec(), ElementsAre("a"));
-
   resp = Run({"JSON.OBJKEYS", "json", "$.*"});
-  ASSERT_THAT(resp, ArrLen(5));
-  const auto& arr = resp.GetVec();
-  EXPECT_THAT(arr[0], ArgType(RespExpr::NIL_ARRAY));
-  EXPECT_THAT(arr[1].GetVec(), ElementsAre("a"));
-  EXPECT_THAT(arr[2].GetVec(), ElementsAre("a", "b"));
-  EXPECT_THAT(arr[3].GetVec(), ElementsAre("a", "b", "c"));
-  EXPECT_THAT(arr[4], ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp, ElementsAreArrays(IsEmpty(), ElementsAre("a"), ElementsAre("a", "b"),
+                                      ElementsAre("a", "b", "c"), IsEmpty()));
 
   resp = Run({"JSON.OBJKEYS", "json", "$.notfound"});
-  EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
 
   json = R"(
-    {"a":[7], "inner": {"a": {"b": 2, "c": 1337}}}
-  )";
+     {"a":[7], "inner": {"a": {"b": 2, "c": 1337}}}
+   )";
 
   resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJKEYS", "json", "$..a"});
-  ASSERT_THAT(resp, ArrLen(2));
-  const auto& arr1 = resp.GetVec();
-  EXPECT_THAT(arr1[0], ArgType(RespExpr::NIL_ARRAY));
-  EXPECT_THAT(arr1[1], RespArray(ElementsAre("b", "c")));
+  EXPECT_THAT(resp, ElementsAreArrays(IsEmpty(), ElementsAre("b", "c")));
 
   json = R"(
-    {"a":{}, "b":{"c":{"d": {"e": 1337}}}}
-  )";
+     {"a":{}, "b":{"c":{"d": {"e": 1337}}}}
+   )";
 
   resp = Run({"JSON.SET", "json", ".", json});
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.OBJKEYS", "json", "$..*"});
-  ASSERT_THAT(resp, ArrLen(5));
-  const auto& arr2 = resp.GetVec();
-  EXPECT_THAT(arr2[0], ArgType(RespExpr::NIL_ARRAY));
-  EXPECT_THAT(arr2[1].GetVec(), ElementsAre("c"));
-  EXPECT_THAT(arr2[2].GetVec(), ElementsAre("d"));
-  EXPECT_THAT(arr2[3].GetVec(), ElementsAre("e"));
-  EXPECT_THAT(arr2[4], ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(resp, ElementsAreArrays(IsEmpty(), ElementsAre("c"), ElementsAre("d"),
+                                      ElementsAre("e"), IsEmpty()));
+}
+
+TEST_F(JsonFamilyTest, ObjKeysLegacy) {
+  string json = R"(
+    {"a":{}, "b":{"a":"a"}, "c":{"a":"a", "b":"bb"}, "d":{"a":1, "b":"b", "c":{"a":3,"b":4}}, "e":1}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJKEYS", "json"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b", "c", "d", "e"));
+
+  resp = Run({"JSON.OBJKEYS", "json", "."});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "b", "c", "d", "e"));
+
+  resp = Run({"JSON.OBJKEYS", "json", ".a"});
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
+
+  resp = Run({"JSON.OBJKEYS", "json", ".b"});
+  EXPECT_THAT(resp, "a");
+
+  resp = Run({"JSON.OBJKEYS", "json", ".*"});
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
+
+  resp = Run({"JSON.OBJKEYS", "json", ".notfound"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  json = R"(
+     {"a":[7], "inner": {"a": {"b": 2, "c": 1337}}}
+   )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJKEYS", "json", "..a"});
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
+
+  json = R"(
+     {"a":{}, "b":{"c":{"d": {"e": 1337}}}}
+   )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.OBJKEYS", "json", "..*"});
+  EXPECT_THAT(resp.GetVec(), IsEmpty());
 }
 
 TEST_F(JsonFamilyTest, StrAppend) {
@@ -1016,6 +1578,55 @@ TEST_F(JsonFamilyTest, Clear) {
   EXPECT_EQ(resp, R"({})");
 }
 
+TEST_F(JsonFamilyTest, ClearLegacy) {
+  string json = R"(
+    [[], [0], [0,1], [0,1,2], 1, true, null, "d"]
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.CLEAR", "json", "[*]"});
+  EXPECT_THAT(resp, IntArg(5));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([[],[],[],[],0,true,null,"d"])");
+
+  resp = Run({"JSON.CLEAR", "json", "."});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([])");
+
+  json = R"(
+    {"children": ["Yossi", "Rafi", "Benni", "Avraham", "Yehoshua", "Moshe"]}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.CLEAR", "json", ".children"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"children":[]})");
+
+  resp = Run({"JSON.CLEAR", "json", "."});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({})");
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.CLEAR", "json"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({})");
+}
+
 TEST_F(JsonFamilyTest, ArrPop) {
   string json = R"(
     [[6,1,6], [7,2,7], [8,3,8]]
@@ -1030,6 +1641,70 @@ TEST_F(JsonFamilyTest, ArrPop) {
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"([[6,6],[7,7],[8,8]])");
+
+  json = R"(
+    [[], ["a"], ["a", "b"]]
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRPOP", "json", "$[*]"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(ArgType(RespExpr::NIL), R"("a")", R"("b")"));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([[],[],["a"]])");
+}
+
+TEST_F(JsonFamilyTest, ArrPopLegacy) {
+  string json = R"(
+    [[6,1,6], [7,2,7], [8,3,8]]
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRPOP", "json", "[*]", "-2"});
+  EXPECT_EQ(resp, R"(3)");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([[6,6],[7,7],[8,8]])");
+
+  json = R"(
+    [[], ["a"], ["a", "b"]]
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRPOP", "json", "."});
+  EXPECT_EQ(resp, R"(["a","b"])");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([[],["a"]])");
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRPOP", "json", ".", "0"});
+  EXPECT_EQ(resp, "[]");
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([["a"],["a","b"]])");
+
+  resp = Run({"JSON.ARRPOP", "json"});
+  EXPECT_EQ(resp, R"(["a","b"])");
+
+  json = R"(
+    {"a":"b"}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRPOP", "json", "."});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
 }
 
 TEST_F(JsonFamilyTest, ArrTrim) {
@@ -1089,6 +1764,70 @@ TEST_F(JsonFamilyTest, ArrTrim) {
   EXPECT_EQ(resp, R"([3,4])");
 }
 
+TEST_F(JsonFamilyTest, ArrTrimLegacy) {
+  string json = R"(
+    [[], ["a"], ["a", "b"], ["a", "b", "c"]]
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", "[*]", "0", "1"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([[],["a"],["a","b"],["a","b"]])");
+
+  json = R"(
+    {"a":[], "nested": {"a": [1,4]}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", "..a", "0", "1"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[],"nested":{"a":[1,4]}})");
+
+  json = R"(
+    {"a":[1,2,3,2], "nested": {"a": false}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", "..a", "1", "2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"({"a":[2,3],"nested":{"a":false}})");
+
+  json = R"(
+    [1,2,3,4,5,6,7]
+  )";
+
+  resp = Run({"JSON.SET", "json", "$", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", ".", "2", "3"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([3,4])");
+
+  json = R"(
+    {"a":"b"}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRTRIM", "json", ".", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+}
+
 TEST_F(JsonFamilyTest, ArrInsert) {
   string json = R"(
     [[], ["a"], ["a", "b"]]
@@ -1117,6 +1856,44 @@ TEST_F(JsonFamilyTest, ArrInsert) {
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"([["b","c","a"],["a","c","b","a"],["a","c","a","b","b"]])");
+
+  json = R"(
+    {"a":{"b":"c"}, "b":[["a"], ["a", "b"]]}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRINSERT", "json", "$.a", "0", R"("c")"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
+TEST_F(JsonFamilyTest, ArrInsertLegacy) {
+  string json = R"(
+    [[], ["a"], ["a", "b"]]
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRINSERT", "json", "[*]", "0", R"("c")"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.ARRINSERT", "json", ".", "0", R"("c")"});
+  EXPECT_THAT(resp, IntArg(4));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"(["c",["c"],["c","a"],["c","a","b"]])");
+
+  json = R"(
+    {"a":{"b":"c"}, "b":[["a"], ["a", "b"]]}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRINSERT", "json", ".a", "0", R"("c")"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
 }
 
 TEST_F(JsonFamilyTest, ArrAppend) {
@@ -1147,6 +1924,34 @@ TEST_F(JsonFamilyTest, ArrAppend) {
 
   resp = Run({"JSON.GET", "json"});
   EXPECT_EQ(resp, R"({"a":[1,3],"nested":{"a":[1,2,3],"nested2":{"a":42}}})");
+}
+
+TEST_F(JsonFamilyTest, ArrAppendLegacy) {
+  string json = R"(
+    [[], ["a"], ["a", "b"]]
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRAPPEND", "json", "[-1]", R"("c")"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.ARRAPPEND", "json", ".*", R"("c")"});
+  EXPECT_THAT(resp, IntArg(4));
+
+  resp = Run({"JSON.GET", "json"});
+  EXPECT_EQ(resp, R"([["c"],["a","c"],["a","b","c","c"]])");
+
+  json = R"(
+    {"a":"b"}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRAPPEND", "json", ".", R"("c")"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
 }
 
 TEST_F(JsonFamilyTest, ArrIndex) {
@@ -1193,6 +1998,31 @@ TEST_F(JsonFamilyTest, ArrIndex) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
+TEST_F(JsonFamilyTest, ArrIndexLegacy) {
+  string json = R"(
+    {"children": ["John", "Jack", "Tom", "Bob", "Mike"]}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRINDEX", "json", ".children", R"("Tom")"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"JSON.ARRINDEX", "json", ".children", R"("DoesNotExist")"});
+  EXPECT_THAT(resp, IntArg(-1));
+
+  json = R"(
+    {"a":"b"}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRINDEX", "json", ".", R"("Tom")"});
+  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+}
+
 TEST_F(JsonFamilyTest, MGet) {
   string json[] = {
       R"(
@@ -1233,6 +2063,42 @@ TEST_F(JsonFamilyTest, MGet) {
   resp = Run({"JSON.MGET", "json3", "json4", "$..a"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   EXPECT_THAT(resp.GetVec(), ElementsAre(R"([1,3])", R"([4,6])"));
+}
+
+TEST_F(JsonFamilyTest, MGetLegacy) {
+  string json[] = {
+      R"(
+    {"address":{"street":"14 Imber Street","city":"Petah-Tikva","country":"Israel","zipcode":"49511"}}
+  )",
+      R"(
+    {"address":{"street":"Oranienburger Str. 27","city":"Berlin","country":"Germany","zipcode":"10117"}}
+  )",
+      R"(
+    {"a":1, "b": 2, "nested": {"a": 3}, "c": null}
+  )",
+      R"(
+    {"a":4, "b": 5, "nested": {"a": 6}, "c": null}
+  )"};
+
+  auto resp = Run({"JSON.SET", "json1", ".", json[0]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json2", ".", json[1]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.MGET", "json1", "json2", "json3", ".address.country"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(R"("Israel")", R"("Germany")", ArgType(RespExpr::NIL)));
+
+  resp = Run({"JSON.SET", "json3", ".", json[2]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json4", ".", json[3]});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.MGET", "json3", "json4", "..a"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  EXPECT_THAT(resp.GetVec(), ElementsAre(R"(3)", R"(6)"));
 }
 
 TEST_F(JsonFamilyTest, DebugFields) {
@@ -1277,11 +2143,53 @@ TEST_F(JsonFamilyTest, DebugFields) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
+TEST_F(JsonFamilyTest, DebugFieldsLegacy) {
+  string json = R"(
+    [1, 2.3, "foo", true, null, {}, [], {"a":1, "b":2}, [1,2,3]]
+  )";
+
+  auto resp = Run({"JSON.SET", "json1", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "[*]"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "."});
+  EXPECT_THAT(resp, IntArg(14));
+
+  resp = Run({"JSON.DEBUG", "fields", "json1"});
+  EXPECT_THAT(resp, IntArg(14));
+
+  json = R"(
+    [[1,2,3, [4,5,6,[6,7,8]]], {"a": {"b": {"c": 1337}}}]
+  )";
+
+  resp = Run({"JSON.SET", "json1", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "[*]"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  resp = Run({"JSON.DEBUG", "fields", "json1", "."});
+  EXPECT_THAT(resp, IntArg(16));
+
+  json = R"({"a":1, "b":2, "c":{"k1":1,"k2":2}})";
+
+  resp = Run({"JSON.SET", "obj_doc", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.DEBUG", "FIELDS", "obj_doc", ".a"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"JSON.DEBUG", "fields", "obj_doc", ".a"});
+  EXPECT_THAT(resp, IntArg(1));
+}
+
 TEST_F(JsonFamilyTest, Resp) {
   auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
   ASSERT_THAT(resp, "OK");
 
-  resp = Run({"JSON.RESP", "json"});
+  resp = Run({"JSON.RESP", "json", "$"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
 
   resp = Run({"JSON.RESP", "json", "$.address.*"});
@@ -1298,6 +2206,26 @@ TEST_F(JsonFamilyTest, Resp) {
   EXPECT_THAT(resp, "135.25");
 }
 
+TEST_F(JsonFamilyTest, RespLegacy) {
+  auto resp = Run({"JSON.SET", "json", ".", PhonebookJson});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.RESP", "json"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+
+  resp = Run({"JSON.RESP", "json", ".address.*"});
+  EXPECT_THAT(resp, "10021-3100");
+
+  resp = Run({"JSON.RESP", "json", ".isAlive"});
+  EXPECT_THAT(resp, "true");
+
+  resp = Run({"JSON.RESP", "json", ".age"});
+  EXPECT_THAT(resp, IntArg(27));
+
+  resp = Run({"JSON.RESP", "json", ".weight"});
+  EXPECT_THAT(resp, "135.25");
+}
+
 TEST_F(JsonFamilyTest, Set) {
   string json = R"(
     {"a":{"a":1, "b":2, "c":3}}
@@ -1309,8 +2237,8 @@ TEST_F(JsonFamilyTest, Set) {
   resp = Run({"JSON.SET", "json1", "$.a.*", "0"});
   EXPECT_THAT(resp, "OK");
 
-  resp = Run({"JSON.GET", "json1", "$"});
-  EXPECT_EQ(resp, R"([{"a":{"a":0,"b":0,"c":0}}])");
+  resp = Run({"JSON.GET", "json1"});
+  EXPECT_EQ(resp, R"({"a":{"a":0,"b":0,"c":0}})");
 
   json = R"(
     {"a": [1,2,3,4,5]}
@@ -1322,8 +2250,8 @@ TEST_F(JsonFamilyTest, Set) {
   resp = Run({"JSON.SET", "json2", "$.a[*]", "0"});
   EXPECT_THAT(resp, "OK");
 
-  resp = Run({"JSON.GET", "json2", "$"});
-  EXPECT_EQ(resp, R"([{"a":[0,0,0,0,0]}])");
+  resp = Run({"JSON.GET", "json2"});
+  EXPECT_EQ(resp, R"({"a":[0,0,0,0,0]})");
 
   json = R"(
     {"a": 2}
@@ -1344,8 +2272,58 @@ TEST_F(JsonFamilyTest, Set) {
   resp = Run({"JSON.SET", "json3", "$.b", "4", "NX"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
-  resp = Run({"JSON.GET", "json3", "$"});
-  EXPECT_EQ(resp, R"([{"a":2,"b":8,"c":[1,2,3]}])");
+  resp = Run({"JSON.GET", "json3"});
+  EXPECT_EQ(resp, R"({"a":2,"b":8,"c":[1,2,3]})");
+}
+
+TEST_F(JsonFamilyTest, SetLegacy) {
+  string json = R"(
+    {"a":{"a":1, "b":2, "c":3}}
+  )";
+
+  auto resp = Run({"JSON.SET", "json1", ".", json});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json1", ".a.*", "0"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json1"});
+  EXPECT_EQ(resp, R"({"a":{"a":0,"b":0,"c":0}})");
+
+  json = R"(
+    {"a": [1,2,3,4,5]}
+  )";
+
+  resp = Run({"JSON.SET", "json2", ".", json});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json2", ".a[*]", "0"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json2"});
+  EXPECT_EQ(resp, R"({"a":[0,0,0,0,0]})");
+
+  json = R"(
+    {"a": 2}
+  )";
+
+  resp = Run({"JSON.SET", "json3", "$", json});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", "$.b", "8"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", "$.c", "[1,2,3]"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", "$.z", "3", "XX"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.SET", "json3", "$.b", "4", "NX"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.GET", "json3"});
+  EXPECT_EQ(resp, R"({"a":2,"b":8,"c":[1,2,3]})");
 }
 
 TEST_F(JsonFamilyTest, MSet) {
@@ -1365,6 +2343,23 @@ TEST_F(JsonFamilyTest, MSet) {
                                          "[" + json2 + "]"));
 }
 
+TEST_F(JsonFamilyTest, MSetLegacy) {
+  string json1 = R"({"a":{"a":1,"b":2,"c":3}})";
+  string json2 = R"({"a":{"a":4,"b":5,"c":6}})";
+
+  auto resp = Run({"JSON.MSET", "j1", "."});
+  EXPECT_THAT(resp, ErrArg("wrong number"));
+  resp = Run({"JSON.MSET", "j1", ".", json1, "j3", "."});
+  EXPECT_THAT(resp, ErrArg("wrong number"));
+
+  resp = Run({"JSON.MSET", "j1", ".", json1, "j2", ".", json2, "j3", ".", json1, "j4", ".", json2});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.MGET", "j1", "j2", "j3", "j4", "$"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("[" + json1 + "]", "[" + json2 + "]", "[" + json1 + "]",
+                                         "[" + json2 + "]"));
+}
+
 TEST_F(JsonFamilyTest, Merge) {
   string json = R"(
   { "a": "b",
@@ -1374,6 +2369,7 @@ TEST_F(JsonFamilyTest, Merge) {
     }
   }
   )";
+
   auto resp = Run({"JSON.SET", "j1", "$", json});
   EXPECT_EQ(resp, "OK");
 
@@ -1385,21 +2381,24 @@ TEST_F(JsonFamilyTest, Merge) {
       }
     }
   )";
+
   resp = Run({"JSON.MERGE", "new", "$", patch});
   EXPECT_EQ(resp, "OK");
-  resp = Run({"JSON.GET", "new", "$"});
-  EXPECT_EQ(resp, R"([{"a":"z","c":{"f":null}}])");
+
+  resp = Run({"JSON.GET", "new"});
+  EXPECT_EQ(resp, R"({"a":"z","c":{"f":null}})");
+
   resp = Run({"JSON.MERGE", "j1", "$", patch});
   EXPECT_EQ(resp, "OK");
-  resp = Run({"JSON.GET", "j1", "$"});
-  EXPECT_EQ(resp, R"([{"a":"z","c":{"d":"e"}}])");
+  resp = Run({"JSON.GET", "j1"});
+  EXPECT_EQ(resp, R"({"a":"z","c":{"d":"e"}})");
 
   resp = Run({"JSON.SET", "foo", "$", R"("{"f1":1, "common":2}")"});
   EXPECT_EQ(resp, "OK");
   resp = Run({"JSON.MERGE", "foo", "$", R"({"f2":2, "common":4})"});
   EXPECT_EQ(resp, "OK");
-  resp = Run({"JSON.GET", "foo", "$"});
-  EXPECT_EQ(resp, R"([{"common":4,"f2":2}])");
+  resp = Run({"JSON.GET", "foo"});
+  EXPECT_EQ(resp, R"({"common":4,"f2":2})");
 
   json = R"({
   "ans": {
@@ -1428,15 +2427,93 @@ TEST_F(JsonFamilyTest, Merge) {
   resp = Run({"JSON.MERGE", "j2", "$.ans.x", patch});
 
   EXPECT_EQ(resp, "OK");
-  resp = Run({"JSON.GET", "j2", "$"});
-  EXPECT_EQ(resp, R"([{"ans":{"x":{"y":{"answers":["foo","bar"],"doubled":true},)"
-                  R"("z":{"answers":["xxx","yyy"],"doubled":false}}}}])");
+  resp = Run({"JSON.GET", "j2"});
+  EXPECT_EQ(resp, R"({"ans":{"x":{"y":{"answers":["foo","bar"],"doubled":true},)"
+                  R"("z":{"answers":["xxx","yyy"],"doubled":false}}}})");
 
   // Test not existing entry
   resp = Run({"JSON.MERGE", "j3", "$", patch});
   EXPECT_EQ(resp, "OK");
-  resp = Run({"JSON.GET", "j3", "$"});
-  EXPECT_EQ(resp, R"([{"y":{"doubled":true},"z":{"answers":["xxx","yyy"],"doubled":false}}])");
+  resp = Run({"JSON.GET", "j3"});
+  EXPECT_EQ(resp, R"({"y":{"doubled":true},"z":{"answers":["xxx","yyy"],"doubled":false}})");
+}
+
+TEST_F(JsonFamilyTest, MergeLegacy) {
+  string json = R"(
+  { "a": "b",
+    "c": {
+      "d": "e",
+      "f": "g"
+    }
+  }
+  )";
+
+  auto resp = Run({"JSON.SET", "j1", "$", json});
+  EXPECT_EQ(resp, "OK");
+
+  string patch = R"(
+    {
+      "a":"z",
+      "c": {
+      "f": null
+      }
+    }
+  )";
+
+  resp = Run({"JSON.MERGE", "new", ".", patch});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"JSON.GET", "new"});
+  EXPECT_EQ(resp, R"({"a":"z","c":{"f":null}})");
+
+  resp = Run({"JSON.MERGE", "j1", ".", patch});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.GET", "j1"});
+  EXPECT_EQ(resp, R"({"a":"z","c":{"d":"e"}})");
+
+  resp = Run({"JSON.SET", "foo", "$", R"("{"f1":1, "common":2}")"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.MERGE", "foo", ".", R"({"f2":2, "common":4})"});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.GET", "foo"});
+  EXPECT_EQ(resp, R"({"common":4,"f2":2})");
+
+  json = R"({
+  "ans": {
+    "x": {
+      "y" : {
+        "doubled": false,
+        "answers": [
+          "foo",
+          "bar"
+        ]
+      }
+    }
+  }
+  })";
+  resp = Run({"JSON.SET", "j2", "$", json});
+  ASSERT_EQ(resp, "OK");
+
+  patch = R"(
+    {"z": {
+      "doubled": false,
+      "answers": ["xxx",  "yyy"]
+     },
+     "y": { "doubled": true}
+     })";
+
+  resp = Run({"JSON.MERGE", "j2", ".ans.x", patch});
+
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.GET", "j2"});
+  EXPECT_EQ(resp, R"({"ans":{"x":{"y":{"answers":["foo","bar"],"doubled":true},)"
+                  R"("z":{"answers":["xxx","yyy"],"doubled":false}}}})");
+
+  // Test not existing entry
+  resp = Run({"JSON.MERGE", "j3", ".", patch});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"JSON.GET", "j3"});
+  EXPECT_EQ(resp, R"({"y":{"doubled":true},"z":{"answers":["xxx","yyy"],"doubled":false}})");
 }
 
 }  // namespace dfly

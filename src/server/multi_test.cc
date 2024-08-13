@@ -380,6 +380,7 @@ TEST_F(MultiTest, Eval) {
     GTEST_SKIP() << "Skipped Eval test because default_lua_flags is set";
     return;
   }
+  absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_lua_allow_undeclared_auto_correct, true);
 
   RespExpr resp;
@@ -762,8 +763,39 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
-// todo: ASAN fails heres on arm
+// Flaky because of https://github.com/google/sanitizers/issues/1760
 #ifndef SANITIZERS
+TEST_F(MultiTest, UndeclaredKeyFlag) {
+  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode != Transaction::LOCK_AHEAD) {
+    GTEST_SKIP() << "Skipped test because multi_exec_mode is not default";
+    return;
+  }
+
+  absl::FlagSaver fs;  // lua_undeclared_keys_shas changed via CONFIG cmd below
+
+  const char* script = "return redis.call('GET', 'random-key');";
+  Run({"set", "random-key", "works"});
+
+  // Get SHA for script in a persistent way
+  string sha = Run({"script", "load", script}).GetString();
+
+  // Make sure we can't run the script before setting the flag
+  EXPECT_THAT(Run({"evalsha", sha, "0"}), ErrArg("undeclared"));
+  EXPECT_THAT(Run({"eval", script, "0"}), ErrArg("undeclared"));
+
+  // Clear all Lua scripts so we can configure the cache
+  EXPECT_THAT(Run({"script", "flush"}), "OK");
+  EXPECT_THAT(Run({"script", "exists", sha}), IntArg(0));
+
+  EXPECT_THAT(
+      Run({"config", "set", "lua_undeclared_keys_shas", absl::StrCat(sha, ",NON-EXISTING-HASH")}),
+      "OK");
+
+  // Check eval finds script flags.
+  EXPECT_EQ(Run({"eval", script, "0"}), "works");
+  EXPECT_EQ(Run({"evalsha", sha, "0"}), "works");
+}
+
 TEST_F(MultiTest, ScriptBadCommand) {
   const char* s1 = "redis.call('FLUSHALL')";
   const char* s2 = "redis.call('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
@@ -1068,6 +1100,8 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
   EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+// Flaky because of https://github.com/google/sanitizers/issues/1760
+#ifndef SANITIZERS
 TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_lua_auto_async, true);
@@ -1086,6 +1120,7 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
   EXPECT_THAT(Run({"EVAL", s, "1", "A"}), ErrArg("unknown command `SECOND WRONG`"));
   EXPECT_EQ(Run({"get", "A"}), "2");
 }
+#endif
 
 TEST_F(MultiEvalTest, MultiAndEval) {
   if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {

@@ -1555,7 +1555,6 @@ async def test_cluster_replication_migration(
         json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
     )
 
-    # generate some data with seederv1
     seeder = df_seeder_factory.create(keys=2000, port=instances[0].port, cluster_mode=True)
     await seeder.run(target_deviation=0.1)
 
@@ -1757,7 +1756,7 @@ async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
         role = await m_client.execute_command("role")
         return role == [
             "master",
-            [["127.0.0.1", str(replica_port), "stable_sync"]],
+            [["127.0.0.1", str(replica_port), "online"]],
         ]
 
     while (time.time() - start) < timeout:
