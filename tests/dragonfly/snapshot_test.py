@@ -271,7 +271,7 @@ async def test_s3_snapshot(self, async_client):
         await async_client.execute_command("SAVE DF snapshot")
         assert await async_client.flushall()
         await async_client.execute_command(
-            "DEBUG LOAD "
+            "DFLY LOAD "
             + os.environ["DRAGONFLY_S3_BUCKET"]
             + str(self.tmp_dir)
             + "/snapshot-summary.dfs"

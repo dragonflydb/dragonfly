@@ -85,14 +85,14 @@ TEST_F(RdbTest, Crc) {
 
 TEST_F(RdbTest, LoadEmpty) {
   io::FileSource fs = GetSource("empty.rdb");
-  RdbLoader loader(NULL);
+  RdbLoader loader(NULL, RdbLoader::ExistingKeys::kFail);
   auto ec = loader.Load(&fs);
   CHECK(!ec);
 }
 
 TEST_F(RdbTest, LoadSmall6) {
   io::FileSource fs = GetSource("redis6_small.rdb");
-  RdbLoader loader{service_.get()};
+  RdbLoader loader{service_.get(), RdbLoader::ExistingKeys::kFail};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
@@ -129,7 +129,7 @@ TEST_F(RdbTest, LoadSmall6) {
 
 TEST_F(RdbTest, Stream) {
   io::FileSource fs = GetSource("redis6_stream.rdb");
-  RdbLoader loader{service_.get()};
+  RdbLoader loader{service_.get(), RdbLoader::ExistingKeys::kFail};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
@@ -167,7 +167,7 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     ASSERT_EQ(resp, "OK");
 
     auto save_info = service_->server_family().GetLastSaveInfo();
-    resp = Run({"debug", "load", save_info.file_name});
+    resp = Run({"dfly", "load", save_info.file_name});
     ASSERT_EQ(resp, "OK");
     ASSERT_EQ(50000, CheckedInt({"dbsize"}));
   }
@@ -182,7 +182,7 @@ TEST_F(RdbTest, RdbLoaderOnReadCompressedDataShouldNotEnterEnsureReadFlow) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"debug", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info.file_name});
   ASSERT_EQ(resp, "OK");
 }
 
@@ -265,7 +265,7 @@ TEST_F(RdbTest, ReloadExpired) {
   ASSERT_EQ(resp, "OK");
   auto save_info = service_->server_family().GetLastSaveInfo();
   AdvanceTime(2000);
-  resp = Run({"debug", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info.file_name});
   ASSERT_EQ(resp, "OK");
   resp = Run({"get", "key"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
@@ -448,7 +448,7 @@ class HllRdbTest : public RdbTest, public testing::WithParamInterface<string> {}
 
 TEST_P(HllRdbTest, Hll) {
   io::FileSource fs = GetSource("hll.rdb");
-  RdbLoader loader{service_.get()};
+  RdbLoader loader{service_.get(), RdbLoader::ExistingKeys::kFail};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
@@ -479,7 +479,7 @@ TEST_F(RdbTest, LoadSmall7) {
   // 3. A set called my-set encoded as RDB_TYPE_SET_LISTPACK
   // 4. A zset called my-zset encoded as RDB_TYPE_ZSET_LISTPACK
   io::FileSource fs = GetSource("redis7_small.rdb");
-  RdbLoader loader{service_.get()};
+  RdbLoader loader{service_.get(), RdbLoader::ExistingKeys::kFail};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
@@ -521,7 +521,7 @@ TEST_F(RdbTest, RedisJson) {
   // '{"company":"DragonflyDB","product":"Dragonfly","website":"https://dragondlydb.io","years-active":[2021,2022,2023,2024,"and
   // more!"]}'
   io::FileSource fs = GetSource("redis_json.rdb");
-  RdbLoader loader{service_.get()};
+  RdbLoader loader{service_.get(), RdbLoader::ExistingKeys::kFail};
 
   // must run in proactor thread in order to avoid polluting the serverstate
   // in the main, testing thread.
