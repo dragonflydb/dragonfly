@@ -316,4 +316,3 @@ async def test_disconnect_master(
     await check_data(seeder, replicas, c_replicas)
 
     await proxy.close(proxy_task)
-    await asyncio.sleep(0.1)
