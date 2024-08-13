@@ -431,10 +431,6 @@ void DebugCmd::Run(CmdArgList args) {
     return Watched();
   }
 
-  if (subcmd == "LOAD" && args.size() == 2) {
-    return Load(ArgS(args, 1));
-  }
-
   if (subcmd == "OBJECT" && args.size() >= 2) {
     string_view key = ArgS(args, 1);
     args.remove_prefix(2);
@@ -500,7 +496,19 @@ void DebugCmd::Reload(CmdArgList args) {
   }
 
   string last_save_file = sf_.GetLastSaveInfo().file_name;
-  Load(last_save_file);
+
+  sf_.FlushAll(cntx_);
+
+  if (auto fut_ec = sf_.Load(last_save_file, RdbLoader::ExistingKeys::kFail); fut_ec) {
+    GenericError ec = fut_ec->Get();
+    if (ec) {
+      string msg = ec.Format();
+      LOG(WARNING) << "Could not load file " << msg;
+      return cntx_->SendError(msg);
+    }
+  }
+
+  cntx_->SendOk();
 }
 
 void DebugCmd::Replica(CmdArgList args) {
@@ -527,52 +535,6 @@ void DebugCmd::Replica(CmdArgList args) {
     }
   }
   return cntx_->SendError(UnknownSubCmd("replica", "DEBUG"));
-}
-
-void DebugCmd::Load(string_view filename) {
-  if (!ServerState::tlocal()->is_master) {
-    return cntx_->SendError("Replica cannot load data");
-  }
-
-  auto new_state = sf_.service().SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-
-  if (new_state != GlobalState::LOADING) {
-    LOG(WARNING) << new_state << " in progress, ignored";
-    return cntx_->SendError("Could not load file");
-  }
-
-  absl::Cleanup rev_state = [this] {
-    sf_.service().SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-  };
-
-  const CommandId* cid = sf_.service().FindCmd("FLUSHALL");
-  intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
-  flush_trans->InitByArgs(cntx_->ns, 0, {});
-  VLOG(1) << "Performing flush";
-  error_code ec = sf_.Drakarys(flush_trans.get(), DbSlice::kDbAll);
-  if (ec) {
-    LOG(ERROR) << "Error flushing db " << ec.message();
-  }
-
-  fs::path path(filename);
-
-  if (filename.empty()) {
-    fs::path dir_path(GetFlag(FLAGS_dir));
-    string filename = GetFlag(FLAGS_dbfilename);
-    dir_path.append(filename);
-    path = dir_path;
-  }
-
-  if (auto fut_ec = sf_.Load(path.generic_string()); fut_ec) {
-    GenericError ec = fut_ec->Get();
-    if (ec) {
-      string msg = ec.Format();
-      LOG(WARNING) << "Could not load file " << msg;
-      return cntx_->SendError(msg);
-    }
-  }
-
-  cntx_->SendOk();
 }
 
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args) {

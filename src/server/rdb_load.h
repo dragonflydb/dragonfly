@@ -177,7 +177,8 @@ class RdbLoaderBase {
 
 class RdbLoader : protected RdbLoaderBase {
  public:
-  explicit RdbLoader(Service* service);
+  enum class ExistingKeys { kFail, kOverride };
+  explicit RdbLoader(Service* service, ExistingKeys existing_keys);
 
   ~RdbLoader();
 
@@ -273,6 +274,7 @@ class RdbLoader : protected RdbLoaderBase {
 
  private:
   Service* service_;
+  ExistingKeys existing_keys_;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
 

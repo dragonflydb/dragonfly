@@ -423,7 +423,7 @@ error_code Replica::InitiatePSync() {
       JournalExecutor{&service_}.FlushAll();
     }
 
-    RdbLoader loader(NULL);
+    RdbLoader loader(NULL, RdbLoader::ExistingKeys::kFail);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
     // Also to allow updating last_io_time_.
@@ -933,7 +933,7 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
       multi_shard_exe_(multi_shard_exe),
       flow_id_(flow_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
-  rdb_loader_ = std::make_unique<RdbLoader>(&service_);
+  rdb_loader_ = std::make_unique<RdbLoader>(&service_, RdbLoader::ExistingKeys::kFail);
 }
 
 DflyShardReplica::~DflyShardReplica() {

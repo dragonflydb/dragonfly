@@ -163,11 +163,25 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
     return ReplicaOffset(args, cntx);
   }
 
-  if (sub_cmd == "LOAD" && args.size() == 2) {
-    DebugCmd debug_cmd{sf_, cntx};
-    debug_cmd.Load(ArgS(args, 1));
-    return;
+  if (sub_cmd == "LOAD") {
+    return Load(args, cntx);
   }
+
+  if (sub_cmd == "HELP") {
+    // TODO: expand this to all sub commands
+    string_view help_arr[] = {
+        "DFLY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "LOAD <filename> [APPEND]",
+        "    Loads <filename> RDB/DFS file into the data store.",
+        "    * APPEND: Existing keys are NOT removed before loading the file, conflicting ",
+        "      keys (that exist in both data store and in file) are overridden.",
+        "HELP",
+        "    Prints this help.",
+    };
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendSimpleStrArr(help_arr);
+  }
+
   cntx->SendError(kSyntaxErr);
 }
 
@@ -498,6 +512,41 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   for (size_t shard_id = 0; shard_id < shard_set->size(); ++shard_id) {
     rb->SendLong(lsns[shard_id]);
   }
+}
+
+void DflyCmd::Load(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  parser.ExpectTag("LOAD");
+  string_view filename = parser.Next();
+  RdbLoader::ExistingKeys existing_keys = RdbLoader::ExistingKeys::kFail;
+
+  if (parser.HasNext()) {
+    parser.ExpectTag("APPEND");
+    existing_keys = RdbLoader::ExistingKeys::kOverride;
+  }
+
+  if (parser.HasNext()) {
+    parser.Error();
+  }
+
+  if (parser.HasError()) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  if (existing_keys == RdbLoader::ExistingKeys::kFail) {
+    sf_->FlushAll(cntx);
+  }
+
+  if (auto fut_ec = sf_->Load(filename, existing_keys); fut_ec) {
+    GenericError ec = fut_ec->Get();
+    if (ec) {
+      string msg = ec.Format();
+      LOG(WARNING) << "Could not load file " << msg;
+      return cntx->SendError(msg);
+    }
+  }
+
+  cntx->SendOk();
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {

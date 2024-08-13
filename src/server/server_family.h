@@ -16,6 +16,7 @@
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
+#include "server/rdb_load.h"
 #include "server/replica.h"
 #include "server/server_state.h"
 #include "util/fibers/fiberqueue_threadpool.h"
@@ -189,9 +190,12 @@ class ServerFamily {
 
   LastSaveInfo GetLastSaveInfo() const;
 
+  void FlushAll(ConnectionContext* cntx);
+
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name);
+  std::optional<util::fb2::Future<GenericError>> Load(std::string_view file_name,
+                                                      RdbLoader::ExistingKeys existing_keys);
 
   bool TEST_IsSaving() const;
 
@@ -279,7 +283,7 @@ class ServerFamily {
   void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ActionOnConnectionFail on_error);
 
   // Returns the number of loaded keys if successful.
-  io::Result<size_t> LoadRdb(const std::string& rdb_file);
+  io::Result<size_t> LoadRdb(const std::string& rdb_file, RdbLoader::ExistingKeys existing_keys);
 
   void SnapshotScheduling();
 
