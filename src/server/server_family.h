@@ -68,6 +68,12 @@ struct ReplicationMemoryStats {
   size_t full_sync_buf_bytes = 0;          // total bytes used for full sync buffers
 };
 
+struct ReplicaReconnectionsInfo {
+  std::string host;
+  uint16_t port;
+  uint32_t reconnect_count;
+};
+
 // Global peak stats recorded after aggregating metrics over all shards.
 // Note that those values are only updated during GetMetrics calls.
 struct PeakStats {
@@ -116,6 +122,7 @@ struct Metrics {
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
   std::vector<ReplicaRoleInfo> replication_metrics;
+  std::optional<ReplicaReconnectionsInfo> replica_reconnections;
 };
 
 struct LastSaveInfo {

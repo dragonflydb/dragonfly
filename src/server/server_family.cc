@@ -1321,6 +1321,16 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     absl::StrAppend(&resp->body(), replication_lag_metrics);
   }
 
+  if (m.replica_reconnections) {
+    auto& replica_reconnections = m.replica_reconnections.value();
+    AppendMetricHeader("replica_reconnect_count", "Number of replica reconnects",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("replica_reconnect_count", replica_reconnections.reconnect_count,
+                      {"replica_host", "replica_port"},
+                      {replica_reconnections.host, absl::StrCat(replica_reconnections.port)},
+                      &resp->body());
+  }
+
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
                             &resp->body());
   double delay_seconds = m.fiber_switch_delay_usec * 1e-6;
@@ -2011,8 +2021,14 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   result.delete_ttl_per_sec /= 6;
 
   bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
-  if (is_master)
+  if (is_master) {
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
+  } else {
+    auto info = GetReplicaSummary();
+    if (info) {
+      result.replica_reconnections = {std::move(info->host), info->port, info->reconnect_count};
+    }
+  }
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
