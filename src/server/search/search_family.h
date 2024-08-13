@@ -22,6 +22,7 @@ class SearchFamily {
   static void FtSearch(CmdArgList args, ConnectionContext* cntx);
   static void FtProfile(CmdArgList args, ConnectionContext* cntx);
   static void FtAggregate(CmdArgList args, ConnectionContext* cntx);
+  static void FtTagVals(CmdArgList args, ConnectionContext* cntx);
 
  public:
   static void Register(CommandRegistry* registry);

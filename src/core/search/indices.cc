@@ -149,6 +149,15 @@ void BaseStringIndex<C>::Remove(DocId id, DocumentAccessor* doc, string_view fie
   }
 }
 
+template <typename C> vector<string> BaseStringIndex<C>::GetTerms() const {
+  vector<string> res;
+  res.reserve(entries_.size());
+  for (const auto& [term, _] : entries_) {
+    res.push_back(string{term});
+  }
+  return res;
+}
+
 template struct BaseStringIndex<CompressedSortedSet>;
 template struct BaseStringIndex<SortedVector>;
 

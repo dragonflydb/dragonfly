@@ -90,7 +90,7 @@ jobs:
         shell: bash
         run: |
           job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          message="Daily sanitizers tests failed.\\n Job Link: ${job_link}\\n"
+          message="Daily sanitizers failed.\\n Job Link: ${job_link}\\n"
 
           curl -s \
             -X POST \
