@@ -63,6 +63,14 @@ class DflyEngineTest : public BaseFamilyTest {
   }
 };
 
+class DflyEngineTestWithRegistry : public BaseFamilyTest {
+ protected:
+  DflyEngineTestWithRegistry() : BaseFamilyTest() {
+    num_threads_ = kPoolThreadCount;
+    ResetService();
+  }
+};
+
 class SingleThreadDflyEngineTest : public BaseFamilyTest {
  protected:
   SingleThreadDflyEngineTest() : BaseFamilyTest() {
@@ -289,7 +297,7 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   EXPECT_THAT(1, resp.GetInt());
 }
 
-TEST_F(DflyEngineTest, Hello) {
+TEST_F(DflyEngineTestWithRegistry, Hello) {
   auto resp = Run({"hello"});
   ASSERT_THAT(resp, ArrLen(14));
   resp = Run({"hello", "2"});
@@ -316,9 +324,14 @@ TEST_F(DflyEngineTest, Hello) {
               ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
 
   resp = Run({"hello", "3", "AUTH", "default", ""});
+  ASSERT_THAT(resp, ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+
+  TestInitAclFam();
+
+  resp = Run({"hello", "3", "AUTH", "default", "tmp"});
   ASSERT_THAT(resp, ArrLen(14));
 
-  resp = Run({"hello", "3", "AUTH", "default", "", "SETNAME", "myname"});
+  resp = Run({"hello", "3", "AUTH", "default", "tmp", "SETNAME", "myname"});
   ASSERT_THAT(resp, ArrLen(14));
 }
 
