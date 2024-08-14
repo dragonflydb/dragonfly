@@ -4,8 +4,12 @@ import re
 import pytest
 import asyncio
 import async_timeout
+import platform
 import pymemcache
 import logging
+import tarfile
+import urllib.request
+import shutil
 from redis import asyncio as aioredis
 from .utility import *
 from .instance import DflyInstanceFactory, DflyInstance
@@ -24,12 +28,12 @@ M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
 
 
-async def wait_for_replicas_state(*clients, state="stable_sync", timeout=0.05):
+async def wait_for_replicas_state(*clients, state="online", timeout=0.05):
     """Wait until all clients (replicas) reach passed state"""
     while len(clients) > 0:
         await asyncio.sleep(timeout)
         roles = await asyncio.gather(*(c.role() for c in clients))
-        clients = [c for c, role in zip(clients, roles) if role[0] != "replica" or role[3] != state]
+        clients = [c for c, role in zip(clients, roles) if role[0] != "slave" or role[3] != state]
 
 
 """
@@ -132,7 +136,7 @@ async def test_replication_all(
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
     role = await c_replica.role()
-    if role[0] != "replica" or role[3] != "stable_sync":
+    if role[0] != "slave" or role[3] != "online":
         return False
     syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
 
@@ -856,7 +860,6 @@ return 'OK'
 """
 
 
-@pytest.mark.skip(reason="Failing")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, num_ops, num_keys, num_par, flags", script_cases)
 async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_par, flags):
@@ -887,7 +890,9 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
         for key_set in key_sets:
             for j, k in enumerate(key_set):
                 l = await c_replica.lrange(k, 0, -1)
-                assert l == [f"{j}".encode()] * num_ops
+                assert l == [f"{j}"] * num_ops
+
+    await close_clients(c_master, *c_replicas)
 
 
 @dfly_args({"proactor_threads": 4})
@@ -977,13 +982,13 @@ async def test_role_command(df_factory, n_keys=20):
 
     assert await c_master.execute_command("role") == [
         "master",
-        [["127.0.0.1", str(replica.port), "stable_sync"]],
+        [["127.0.0.1", str(replica.port), "online"]],
     ]
     assert await c_replica.execute_command("role") == [
-        "replica",
+        "slave",
         "localhost",
         str(master.port),
-        "stable_sync",
+        "online",
     ]
 
     # This tests that we react fast to socket shutdowns and don't hang on
@@ -991,7 +996,7 @@ async def test_role_command(df_factory, n_keys=20):
     master.stop()
     await asyncio.sleep(0.1)
     assert await c_replica.execute_command("role") == [
-        "replica",
+        "slave",
         "localhost",
         str(master.port),
         "connecting",
@@ -1007,6 +1012,10 @@ def parse_lag(replication_info: str):
     return int(lags[0])
 
 
+async def get_metric_value(inst, metric_name, sample_index=0):
+    return (await inst.metrics())[metric_name].samples[sample_index].value
+
+
 async def assert_lag_condition(inst, client, condition):
     """
     Since lag is a bit random, and we want stable tests, we check
@@ -1016,7 +1025,7 @@ async def assert_lag_condition(inst, client, condition):
     prometheus endpoint.
     """
     for _ in range(10):
-        lag = (await inst.metrics())["dragonfly_connected_replica_lag_records"].samples[0].value
+        lag = await get_metric_value(inst, "dragonfly_connected_replica_lag_records")
         if condition(lag):
             break
         print("current prometheus lag =", lag)
@@ -1031,6 +1040,23 @@ async def assert_lag_condition(inst, client, condition):
         await asyncio.sleep(0.05)
     else:
         assert False, "Lag has never satisfied condition!"
+
+
+async def get_replica_reconnects_count(replica_inst):
+    return await get_metric_value(replica_inst, "dragonfly_replica_reconnect_count")
+
+
+async def assert_replica_reconnections(replica_inst, initial_reconnects_count):
+    """
+    Asserts that the replica has attempted to reconnect at least once.
+    """
+    reconnects_count = await get_replica_reconnects_count(replica_inst)
+    if reconnects_count > initial_reconnects_count:
+        return
+
+    assert (
+        False
+    ), f"Expected reconnect count to increase by at least 1, but it did not. Initial dragonfly_replica_reconnect_count: {initial_reconnects_count}, current count: {reconnects_count}"
 
 
 @dfly_args({"proactor_threads": 2})
@@ -1341,13 +1367,13 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
 
     assert await c_master.execute_command("role") == [
         "master",
-        [["127.0.0.1", str(replica.port), "stable_sync"]],
+        [["127.0.0.1", str(replica.port), "online"]],
     ]
     assert await c_replica.execute_command("role") == [
-        "replica",
+        "slave",
         "localhost",
         str(master.port),
-        "stable_sync",
+        "online",
     ]
 
     await disconnect_clients(c_master, c_replica)
@@ -1555,7 +1581,7 @@ async def test_replicaof_flag_replication_waits(df_factory):
 
     # check that it is in replica mode, yet status is down
     info = await c_replica.info("replication")
-    assert info["role"] == "replica"
+    assert info["role"] == "slave"
     assert info["master_host"] == "localhost"
     assert info["master_port"] == BASE_PORT
     assert info["master_link_status"] == "down"
@@ -1807,6 +1833,56 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
     # assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
+async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=6)
+    replica = df_factory.create(proactor_threads=4)
+
+    df_factory.start_all([replica, master])
+    seeder = df_seeder_factory.create(port=master.port)
+
+    async with replica.client() as c_replica:
+        await seeder.run(target_deviation=0.1)
+
+        proxy = Proxy("127.0.0.1", 1115, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
+        try:
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+            # Wait replica to be up and synchronized with master
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            initial_reconnects_count = await get_replica_reconnects_count(replica)
+
+            # Fully drop the server
+            await proxy.close(task)
+
+            # After dropping the connection replica should try to reconnect
+            await wait_for_replica_status(c_replica, status="down")
+            await asyncio.sleep(2)
+
+            # Restart the proxy
+            await proxy.start()
+            task = asyncio.create_task(proxy.serve())
+
+            # Wait replica to be reconnected and synchronized with master
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
+
+            # Assert replica reconnects metrics increased
+            await assert_replica_reconnections(replica, initial_reconnects_count)
+
+        finally:
+            await proxy.close(task)
+
+    master.stop()
+    replica.stop()
+
+
 async def test_search(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -2005,6 +2081,7 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     keys_replica = await c_replica.execute_command("keys k*")
 
     assert set(keys_replica).difference(keys_master) == set()
+    assert set(keys_master).difference(keys_replica) == set()
 
     await disconnect_clients(c_master, *[c_replica])
 
@@ -2261,3 +2338,76 @@ async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     await asyncio.sleep(1)  # wait for the master to recognize it's being blocked
     await check_replica_disconnected()
     df_factory.stop_all()
+
+
+def download_dragonfly_release(version):
+    path = f"/tmp/old_df/{version}"
+    binary = f"{path}/dragonfly-x86_64"
+    if os.path.isfile(binary):
+        return binary
+
+    # Cleanup in case there's partial files
+    if os.path.exists(path):
+        shutil.rmtree(path)
+
+    os.makedirs(path)
+    gzfile = f"{path}/dragonfly.tar.gz"
+    logging.debug(f"Downloading Dragonfly release into {gzfile}...")
+
+    # Download
+    urllib.request.urlretrieve(
+        f"https://github.com/dragonflydb/dragonfly/releases/download/{version}/dragonfly-x86_64.tar.gz",
+        gzfile,
+    )
+
+    # Extract
+    file = tarfile.open(gzfile)
+    file.extractall(path)
+    file.close()
+
+    # Return path
+    return binary
+
+
+@pytest.mark.parametrize(
+    "cluster_mode, announce_ip, announce_port",
+    [
+        ("", "localhost", 7000),
+        ("emulated", "", 0),
+        ("emulated", "localhost", 7000),
+    ],
+)
+async def test_replicate_old_master(
+    df_factory: DflyInstanceFactory, cluster_mode, announce_ip, announce_port
+):
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
+
+    dfly_version = "v1.19.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+    master = df_factory.create(path=released_dfly_path, cluster_mode=cluster_mode)
+    master.clear_max_chunk_flag()
+    replica = df_factory.create(
+        cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
+    )
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    assert (
+        f"df-{dfly_version}"
+        == (await c_master.execute_command("info", "server"))["dragonfly_version"]
+    )
+    assert dfly_version != (await c_replica.execute_command("info", "server"))["dragonfly_version"]
+
+    await c_master.execute_command("set", "k1", "v1")
+
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+    await wait_available_async(c_replica)
+
+    assert await c_replica.execute_command("get", "k1") == "v1"
+
+    await disconnect_clients(c_master, c_replica)

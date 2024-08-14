@@ -88,7 +88,7 @@ class DflyInstance:
                 self.args["num_shards"] = threads - 1
 
         # Add 1 byte limit for big values
-        # self.args["serialization_max_chunk_size"] = 1
+        self.args["serialization_max_chunk_size"] = 1
 
     def __del__(self):
         assert self.proc == None
@@ -154,6 +154,9 @@ class DflyInstance:
         if self.params.buffered_out:
             sed_cmd.remove("-u")
         subprocess.Popen(sed_cmd, stdin=self.proc.stdout)
+
+    def set_proc_to_none(self):
+        self.proc = None
 
     def stop(self, kill=False):
         proc, self.proc = self.proc, None
@@ -323,6 +326,9 @@ class DflyInstance:
         mem_info = process.memory_info()
         return mem_info.rss
 
+    def clear_max_chunk_flag(self):
+        del self.args["serialization_max_chunk_size"]
+
 
 class DflyInstanceFactory:
     """
@@ -334,7 +340,7 @@ class DflyInstanceFactory:
         self.params = params
         self.instances = []
 
-    def create(self, existing_port=None, **kwargs) -> DflyInstance:
+    def create(self, existing_port=None, path=None, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
         args.setdefault("noversion_check", None)
@@ -352,6 +358,10 @@ class DflyInstanceFactory:
             params = dataclasses.replace(self.params, existing_port=existing_port)
         else:
             params = self.params
+
+        if path is not None:
+            params = dataclasses.replace(self.params, path=path)
+
         instance = DflyInstance(params, args)
         self.instances.append(instance)
         return instance

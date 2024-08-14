@@ -209,7 +209,8 @@ void Replica::MainReplicationFb() {
       // Give a lower timeout for connect, because we're
       ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_reconnect_timeout_ms) * 1ms, &cntx_);
       if (ec) {
-        LOG(ERROR) << "Error connecting to " << server().Description() << " " << ec;
+        reconnect_count_++;
+        LOG(WARNING) << "Error connecting to " << server().Description() << " " << ec;
         continue;
       }
       VLOG(1) << "Replica socket connected";
@@ -289,7 +290,8 @@ error_code Replica::Greet() {
   auto announce_ip = absl::GetFlag(FLAGS_announce_ip);
   if (!announce_ip.empty()) {
     RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF ip-address ", announce_ip)));
-    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    LOG_IF(WARNING, !CheckRespIsSimpleReply("OK"))
+        << "Master did not OK announced IP address, perhaps it is using an old version";
   }
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
@@ -1085,6 +1087,7 @@ auto Replica::GetSummary() const -> Summary {
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     res.master_id = master_context_.master_repl_id;
+    res.reconnect_count = reconnect_count_;
     return res;
   };
 

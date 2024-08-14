@@ -47,7 +47,6 @@ def test_basic(memcached_client: MCClient):
 # Noreply (and pipeline) tests
 
 
-@pytest.mark.dbg_only
 @dfly_args(DEFAULT_ARGS)
 def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     """

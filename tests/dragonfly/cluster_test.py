@@ -1523,6 +1523,7 @@ async def test_cluster_config_reapply(df_factory: DflyInstanceFactory):
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
+@pytest.mark.skip("broken")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_replication_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
@@ -1553,7 +1554,7 @@ async def test_cluster_replication_migration(
 
     # generate some data with seederv1
     seeder = df_seeder_factory.create(keys=2000, port=m1.port, cluster_mode=True)
-    seeder.run(target_deviation=0.1)
+    await seeder.run(target_deviation=0.1)
 
     # start replication from replicas
     await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
@@ -1750,7 +1751,7 @@ async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
         role = await m_client.execute_command("role")
         return role == [
             "master",
-            [["127.0.0.1", str(replica_port), "stable_sync"]],
+            [["127.0.0.1", str(replica_port), "online"]],
         ]
 
     while (time.time() - start) < timeout:

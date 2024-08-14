@@ -54,6 +54,7 @@ using absl::StrFormat;
 using facade::RedisParser;
 using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
+using absl::StrCat;
 
 constexpr string_view kKeyPlaceholder = "__key__"sv;
 
@@ -321,7 +322,7 @@ string KeyGenerator::operator()() {
       break;
   }
 
-  return absl::StrCat(prefix_, key_suffix);
+  return StrCat(prefix_, key_suffix);
 }
 
 void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
@@ -509,7 +510,7 @@ void TLocalClient::Connect(tcp::endpoint ep) {
 
   for (size_t i = 0; i < fbs.size(); ++i) {
     fbs[i] = MakeFiber([&, i] {
-      ThisFiber::SetName(absl::StrCat("connect/", i));
+      ThisFiber::SetName(StrCat("connect/", i));
       drivers_[i]->Connect(i, ep);
     });
   }
@@ -529,7 +530,7 @@ void TLocalClient::Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns) 
   start_time_ = absl::GetCurrentTimeNanos();
 
   for (size_t i = 0; i < driver_fbs_.size(); ++i) {
-    driver_fbs_[i] = fb2::Fiber(absl::StrCat("run/", i), [&, i] {
+    driver_fbs_[i] = fb2::Fiber(StrCat("run/", i), [&, i] {
       drivers_[i]->Run(cur_cycle_ns_ ? &cur_cycle_ns_ : nullptr, &cmd_gen_.value());
     });
   }
@@ -733,9 +734,11 @@ int main(int argc, char* argv[]) {
     client.reset();
   });
 
+  unsigned dur_sec = duration / absl::Seconds(1);
+
   CONSOLE_INFO << "\nTotal time: " << duration
                << ". Overall number of requests: " << summary.num_responses
-               << ", QPS: " << summary.num_responses / (duration / absl::Seconds(1));
+               << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan");
 
   if (summary.num_errors) {
     CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";

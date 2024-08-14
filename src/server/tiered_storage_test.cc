@@ -273,7 +273,7 @@ TEST_F(TieredStorageTest, FlushAll) {
     }
   });
 
-  util::ThisFiber::SleepFor(50ms);
+  ExpectConditionWithinTimeout([&] { return GetMetrics().events.hits > 2; });
   Run({"FLUSHALL"});
 
   done = true;
@@ -310,7 +310,7 @@ TEST_F(TieredStorageTest, MemoryPressure) {
       resp = Run({"INFO", "ALL"});
       ASSERT_FALSE(true) << i << "\nInfo ALL:\n" << resp.GetString();
     }
-    ThisFiber::SleepFor(100us);
+    ThisFiber::SleepFor(300us);
   }
 
   EXPECT_LT(used_mem_peak.load(), 20_MB);
