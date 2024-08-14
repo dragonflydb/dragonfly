@@ -45,7 +45,7 @@ class EngineShardSet {
   }
 
   uint32_t size() const {
-    return uint32_t(shard_queue_.size());
+    return size_;
   }
 
   util::ProactorPool* pool() {
@@ -63,13 +63,17 @@ class EngineShardSet {
 
   // Uses a shard queue to dispatch. Callback runs in a dedicated fiber.
   template <typename F> auto Await(ShardId sid, F&& f) {
-    return shard_queue_[sid]->Await(std::forward<F>(f));
+    return shards_[sid]->GetFiberQueue()->Await(std::forward<F>(f));
   }
 
   // Uses a shard queue to dispatch. Callback runs in a dedicated fiber.
   template <typename F> auto Add(ShardId sid, F&& f) {
-    assert(sid < shard_queue_.size());
-    return shard_queue_[sid]->Add(std::forward<F>(f));
+    assert(sid < size_);
+    return shards_[sid]->GetFiberQueue()->Add(std::forward<F>(f));
+  }
+
+  template <typename F> auto AddL2(ShardId sid, F&& f) {
+    return shards_[sid]->GetSecondaryQueue()->Add(std::forward<F>(f));
   }
 
   // Runs a brief function on all shards. Waits for it to complete.
@@ -94,8 +98,8 @@ class EngineShardSet {
   // The functions running inside the shard queue run atomically (sequentially)
   // with respect each other on the same shard.
   template <typename U> void AwaitRunningOnShardQueue(U&& func) {
-    util::fb2::BlockingCounter bc(shard_queue_.size());
-    for (size_t i = 0; i < shard_queue_.size(); ++i) {
+    util::fb2::BlockingCounter bc(size_);
+    for (size_t i = 0; i < size_; ++i) {
       Add(i, [&func, bc]() mutable {
         func(EngineShard::tlocal());
         bc->Dec();
@@ -112,7 +116,8 @@ class EngineShardSet {
   void InitThreadLocal(util::ProactorBase* pb);
 
   util::ProactorPool* pp_;
-  std::vector<TaskQueue*> shard_queue_;
+  std::unique_ptr<EngineShard*[]> shards_;
+  uint32_t size_ = 0;
 };
 
 template <typename U, typename P>

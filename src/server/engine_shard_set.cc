@@ -103,11 +103,11 @@ EngineShardSet* shard_set = nullptr;
 
 void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
   CHECK_EQ(0u, size());
-  shard_queue_.resize(sz);
-
+  shards_.reset(new EngineShard*[sz]);
+  size_ = sz;
   size_t max_shard_file_size = GetTieredFileLimit(sz);
-  pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
-    if (index < shard_queue_.size()) {
+  pp_->AwaitFiberOnAll([this](uint32_t index, ProactorBase* pb) {
+    if (index < size_) {
       InitThreadLocal(pb);
     }
   });
@@ -115,7 +115,7 @@ void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
   namespaces.Init();
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
-    if (index < shard_queue_.size()) {
+    if (index < size_) {
       auto* shard = EngineShard::tlocal();
       shard->InitTieredStorage(pb, max_shard_file_size);
 
@@ -144,7 +144,7 @@ void EngineShardSet::Shutdown() {
 void EngineShardSet::InitThreadLocal(ProactorBase* pb) {
   EngineShard::InitThreadLocal(pb);
   EngineShard* es = EngineShard::tlocal();
-  shard_queue_[es->shard_id()] = es->GetFiberQueue();
+  shards_[es->shard_id()] = es;
 }
 
 void EngineShardSet::TEST_EnableCacheMode() {

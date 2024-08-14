@@ -371,7 +371,8 @@ uint32_t EngineShard::DefragTask() {
 }
 
 EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
-    : queue_(kQueueLen),
+    : queue_(kQueueLen, 1, 1),
+      queue2_(kQueueLen / 2, 2, 2),
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
       shard_id_(pb->GetPoolIndex()) {
@@ -379,6 +380,7 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
 
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
   queue_.Start(absl::StrCat("shard_queue_", shard_id()));
+  queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
 
 EngineShard::~EngineShard() {
@@ -389,7 +391,7 @@ void EngineShard::Shutdown() {
   DVLOG(1) << "EngineShard::Shutdown";
 
   queue_.Shutdown();
-
+  queue2_.Shutdown();
   DCHECK(!fiber_periodic_.IsJoinable());
 
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
