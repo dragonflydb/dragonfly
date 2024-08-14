@@ -747,7 +747,7 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
 
 TEST_F(MultiTest, ScriptFlagsEmbedded) {
   const char* s1 = R"(
-  #!lua flags=allow-undeclared-keys
+  --!df flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
 )";
 
@@ -756,7 +756,7 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_EQ(Run({"eval", s1, "0"}), "works");
 
   const char* s2 = R"(
-  #!lua flags=this-is-an-error
+  --!df flags=this-is-an-error
   redis.call('SET', 'random-key', 'failed')
   )";
 
@@ -801,7 +801,7 @@ TEST_F(MultiTest, ScriptBadCommand) {
   const char* s2 = "redis.call('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
   const char* s3 = "redis.acall('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
   const char* s4 = R"(
-    #!lua flags=disable-atomicity
+    --!df flags=disable-atomicity
     redis.call('FLUSHALL');
     return "OK";
   )";
@@ -827,7 +827,7 @@ TEST_F(MultiTest, MultiEvalModeConflict) {
   }
 
   const char* s1 = R"(
-  #!lua flags=allow-undeclared-keys
+  --!df flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
 )";
 
