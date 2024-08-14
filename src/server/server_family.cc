@@ -961,7 +961,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
   DCHECK_GT(shard_count(), 0u);
 
-  if (!ServerState::tlocal()->is_master) {
+  if (ServerState::tlocal() && !ServerState::tlocal()->is_master) {
     fb2::Future<GenericError> future;
     future.Resolve(string("Replica cannot load data"));
     return future;
