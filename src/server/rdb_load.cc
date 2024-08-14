@@ -2463,13 +2463,13 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   for (const auto* item : ib) {
     PrimeValue pv;
     if (ec_ = FromOpaque(item->val, &pv); ec_) {
-      if (ec_ == rdb::errc::empty_key) {
-        LOG(WARNING) << "Found empty key: " << item->key << " in DB " << db_ind;
-        continue;
-      }
       LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
       stop_early_ = true;
       break;
+    }
+    if (pv.Size() == 0) {
+      LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind;
+      continue;
     }
 
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)

@@ -433,10 +433,16 @@ DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_vi
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                       unsigned req_obj_type) const {
+                                                       unsigned req_obj_type) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats);
   if (res.ok()) {
-    return ConstIterator(res->it, StringOrView::FromView(key));
+    auto it = ConstIterator(res->it, StringOrView::FromView(key));
+    //    if(!it->second.HasJsonTag() && it->second.Size() == 0) {
+    //      LOG(ERROR) << "Found empty key: " << key << " with obj type " << req_obj_type;
+    //      Del(cntx, FindMutable(cntx, key).it);
+    //      return OpStatus::KEY_NOTFOUND;
+    //    }
+    return it;
   }
   return res.status();
 }

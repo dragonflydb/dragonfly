@@ -2422,14 +2422,14 @@ async def test_empty_hash_as_zipmap_bug(df_factory: DflyInstanceFactory):
 
     c_master = master.client()
     await c_master.execute_command("HSET foo a_field a_value")
-    await c_master.execute_command("HSETEX foo 5 b_field b_value")
+    await c_master.execute_command("HSETEX foo 1 b_field b_value")
     await c_master.execute_command("HDEL foo a_field")
-    async with async_timeout.timeout(15):
-        while True:
-            await asyncio.sleep(5)
-            res = await c_master.execute_command("HGETALL foo")
-            if res == []:
-                break
+
+    @assert_eventually
+    async def check_if_empty():
+        assert await c_master.execute_command("HGETALL foo") == []
+
+    await check_if_empty()
 
     # Key exists and it's empty
     assert await c_master.execute_command(f"EXISTS foo") == 1

@@ -294,7 +294,7 @@ class DbSlice {
 
   ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                       unsigned req_obj_type) const;
+                                       unsigned req_obj_type);
 
   struct AddOrFindResult {
     Iterator it;

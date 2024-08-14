@@ -574,6 +574,12 @@ size_t CompactObj::Size() const {
       case ROBJ_TAG:
         raw_size = u_.r_obj.Size();
         break;
+      case JSON_TAG:
+        raw_size = u_.json_obj.json_len;
+        break;
+      case SBF_TAG:
+        raw_size = u_.sbf->current_size();
+        break;
       default:
         LOG(DFATAL) << "Should not reach " << int(taglen_);
     }
@@ -684,9 +690,11 @@ void CompactObj::SetJson(JsonType&& j) {
   if (taglen_ == JSON_TAG && u_.json_obj.encoding == kEncodingJsonCons) {
     // already json
     DCHECK(u_.json_obj.json_ptr != nullptr);  // must be allocated
+    u_.json_obj.json_len = j.size();
     u_.json_obj.json_ptr->swap(j);
   } else {
     SetMeta(JSON_TAG);
+    u_.json_obj.json_len = j.size();
     u_.json_obj.json_ptr = AllocateMR<JsonType>(std::move(j));
     u_.json_obj.encoding = kEncodingJsonCons;
   }

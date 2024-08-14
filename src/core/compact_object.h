@@ -398,6 +398,14 @@ class CompactObj {
 
   bool HasAllocated() const;
 
+  bool HasJsonOrInlineTag() const {
+    return taglen_ <= 6 || taglen_ == JSON_TAG;
+  }
+
+  uint8_t Tag() const {
+    return taglen_;
+  }
+
  private:
   void EncodeString(std::string_view str);
   size_t DecodedLen(size_t sz) const;
