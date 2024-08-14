@@ -191,8 +191,12 @@ bool MultiCommandSquasher::ExecuteSquashed() {
   if (order_.empty())
     return true;
 
-  for (auto& sd : sharded_)
+  unsigned num_shards = 0;
+  for (auto& sd : sharded_) {
     sd.replies.reserve(sd.cmds.size());
+    if (!sd.cmds.empty())
+      ++num_shards;
+  }
 
   Transaction* tx = cntx_->transaction;
   ServerState::tlocal()->stats.multi_squash_executions++;
@@ -207,8 +211,24 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     tx->PrepareSquashedMultiHop(base_cid_, cb);
     tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
   } else {
+#if 1
+    fb2::BlockingCounter bc(num_shards);
+    DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
+
+    auto cb = [this, tx, bc]() mutable {
+      this->SquashedHopCb(tx, EngineShard::tlocal());
+      bc->Dec();
+    };
+
+    for (unsigned i = 0; i < sharded_.size(); ++i) {
+      if (!sharded_[i].cmds.empty())
+        shard_set->AddL2(i, cb);
+    }
+    bc->Wait();
+#else
     shard_set->RunBlockingInParallel([this, tx](auto* es) { SquashedHopCb(tx, es); },
                                      [this](auto sid) { return !sharded_[sid].cmds.empty(); });
+#endif
   }
 
   uint64_t after_hop = proactor->GetMonotonicTimeNs();

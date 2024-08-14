@@ -1398,6 +1398,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   intrusive_ptr<Transaction> dist_trans;
 
   size_t dispatched = 0;
+  auto* ss = dfly::ServerState::tlocal();
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1416,11 +1417,12 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
+    ss->stats.squashed_commands += stored_cmds.size();
     stored_cmds.clear();
   };
 
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (dfly::ServerState::tlocal()->IsPaused())
+  if (ss->IsPaused())
     return 0;
 
   for (auto args : args_list) {
@@ -1451,7 +1453,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     perform_squash();
 
     // Stop accumulating when a pause is requested, fall back to regular dispatch
-    if (dfly::ServerState::tlocal()->IsPaused())
+    if (ss->IsPaused())
       break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied

@@ -2154,7 +2154,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_commands_processed", conn_stats.command_cnt);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
-    append("total_pipelined_squashed_commands", conn_stats.squashed_commands);
+    append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);
