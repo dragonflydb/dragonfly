@@ -44,7 +44,12 @@ local function action_del()
     keys[key_idx], keys[#keys] = keys[#keys], keys[key_idx]
 
     local key = table.remove(keys)
-    redis.acall('DEL', key)
+
+    if math.random() < 0.3 then
+        redis.acall('PEXPIRE', key, 1)
+    else
+        redis.acall('DEL', key)
+    end
 end
 
 -- set equilibrium point as key target, see intensity calculations below

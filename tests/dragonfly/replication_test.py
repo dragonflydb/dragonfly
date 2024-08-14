@@ -200,7 +200,6 @@ disconnect_cases = [
 @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
 async def test_disconnect_replica(
     df_factory: DflyInstanceFactory,
-    df_seeder_factory,
     t_master,
     t_crash_fs,
     t_crash_ss,
@@ -396,42 +395,49 @@ async def test_disconnect_master(
 Test re-connecting replica to different masters.
 """
 
-rotating_master_cases = [(4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))]
+rotating_master_cases = [(4, [4, 4, 4, 4], 10_000)]
 
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-@pytest.mark.parametrize("t_replica, t_masters, seeder_config", rotating_master_cases)
-async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_masters, seeder_config):
+@pytest.mark.parametrize("t_replica, t_masters, key_target", rotating_master_cases)
+async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_masters, key_target):
     replica = df_factory.create(proactor_threads=t_replica)
-    masters = [df_factory.create(proactor_threads=t) for i, t in enumerate(t_masters)]
+    masters = [df_factory.create(proactor_threads=t) for _, t in enumerate(t_masters)]
     df_factory.start_all([replica] + masters)
 
-    seeders = [df_seeder_factory.create(port=m.port, **seeder_config) for m in masters]
-
+    seeders = [SeederV2(key_target=key_target) for _ in masters]
     c_replica = replica.client()
 
-    await asyncio.gather(*(seeder.run(target_deviation=0.1) for seeder in seeders))
+    await asyncio.gather(
+        *(
+            seeder.run(master.client(), target_deviation=0.1)
+            for master, seeder in zip(masters, seeders)
+        )
+    )
 
     fill_seeder = None
     fill_task = None
 
     for master, seeder in zip(masters, seeders):
         if fill_task is not None:
-            fill_seeder.stop()
+            fill_seeder.stop(fill_client)
             fill_task.cancel()
 
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         await wait_available_async(c_replica)
 
-        capture = await seeder.capture()
-        assert await seeder.compare(capture, port=replica.port)
+        master_client = master.client()
+        master_capture = await SeederV2.capture(master_client)
+        replica_capture = await SeederV2.capture(c_replica)
+        assert master_capture == replica_capture
 
-        fill_task = asyncio.create_task(seeder.run())
+        fill_task = asyncio.create_task(seeder.run(master_client))
         fill_seeder = seeder
+        fill_client = master_client
 
     if fill_task is not None:
-        fill_seeder.stop()
+        fill_seeder.stop(fill_client)
         fill_task.cancel()
 
 
