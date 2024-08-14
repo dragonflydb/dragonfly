@@ -77,7 +77,7 @@ ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
 ABSL_FLAG(uint32_t, multi_exec_mode, 2,
-          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead");
+          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
@@ -848,12 +848,6 @@ Service::~Service() {
 }
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
-  unsigned exec_mode = absl::GetFlag(FLAGS_multi_exec_mode);
-  if (exec_mode > 2 || exec_mode == 0) {
-    LOG(ERROR) << "Unsupported exec mode: " << exec_mode;
-    exit(1);
-  }
-
   InitRedisTables();
 
   config_registry.RegisterMutable("maxmemory", [](const absl::CommandLineFlag& flag) {
@@ -2199,7 +2193,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   bool scheduled = false;
   if (multi_mode != Transaction::NOT_DETERMINED) {
-    DCHECK(multi_mode != Transaction::NON_ATOMIC);
     StartMultiExec(cntx, &exec_info, multi_mode);
     scheduled = true;
   }
