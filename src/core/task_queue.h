@@ -15,8 +15,8 @@ namespace dfly {
  */
 class TaskQueue {
  public:
-  explicit TaskQueue(unsigned queue_size = 128) : queue_(queue_size) {
-  }
+  // TODO: to add a mechanism to moderate pool size. Currently it's static with pool_start_size.
+  TaskQueue(unsigned queue_size, unsigned pool_start_size, unsigned pool_max_size);
 
   template <typename F> bool TryAdd(F&& f) {
     return queue_.TryAdd(std::forward<F>(f));
@@ -51,18 +51,13 @@ class TaskQueue {
    * @brief Start running consumer loop in the caller thread by spawning fibers.
    *        Returns immediately.
    */
-  void Start(std::string_view base_name) {
-    consumer_fiber_ = util::fb2::Fiber(base_name, [this] { queue_.Run(); });
-  }
+  void Start(std::string_view base_name);
 
   /**
    * @brief Notifies Run() function to empty the queue and to exit and waits for the consumer
    *        fiber to finish.
    */
-  void Shutdown() {
-    queue_.Shutdown();
-    consumer_fiber_.JoinIfNeeded();
-  }
+  void Shutdown();
 
   static unsigned blocked_submitters() {
     return blocked_submitters_;
@@ -70,7 +65,9 @@ class TaskQueue {
 
  private:
   util::fb2::FiberQueue queue_;
-  util::fb2::Fiber consumer_fiber_;
+  std::vector<util::fb2::Fiber> consumer_fibers_;
+  unsigned pool_max_size_;
+
   static __thread unsigned blocked_submitters_;
 };
 

@@ -81,7 +81,7 @@ class ClusterShardMigration {
   std::error_code Cancel() {
     std::lock_guard lk(mu_);
     if (socket_ != nullptr) {
-      return socket_->proactor()->Await([s = socket_, sid = source_shard_id_]() {
+      return socket_->proactor()->Await([s = socket_]() {
         if (s->IsOpen()) {
           return s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
         }
