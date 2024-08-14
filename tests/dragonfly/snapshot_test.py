@@ -451,7 +451,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE", "DF")
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         "tiered-entries-summary.dfs",
     )
@@ -488,7 +488,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
     load_task = asyncio.create_task(
         async_client.execute_command(
-            "DEBUG",
+            "DFLY",
             "LOAD",
             "tiered-entries-summary.dfs",
         )
