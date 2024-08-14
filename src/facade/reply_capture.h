@@ -42,7 +42,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendSimpleString(std::string_view str) override;
 
   void SendBulkString(std::string_view str) override;
-  void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                        bool with_scores) override;
 
   void StartCollection(unsigned len, CollectionType type) override;

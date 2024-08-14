@@ -140,10 +140,6 @@ void SinkReplyBuilder::ExpectReply() {
   has_replied_ = false;
 }
 
-bool SinkReplyBuilder::HasReplied() const {
-  return has_replied_;
-}
-
 void SinkReplyBuilder::SendError(ErrorReply error) {
   if (error.status)
     return SendError(*error.status);
@@ -215,7 +211,7 @@ void SinkReplyBuilder2::SendError(ErrorReply error) {
 
 void SinkReplyBuilder2::SendError(OpStatus status) {
   if (status == OpStatus::OK)
-    return SendOk();
+    return SendSimpleString("OK");
   SendError(StatusToMsg(status));
 }
 
@@ -529,7 +525,7 @@ void RedisReplyBuilder::SendLong(long num) {
   SendRaw(str);
 }
 
-void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+void RedisReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                                         bool with_scores) {
   ReplyAggregator agg(this);
   if (!with_scores) {
@@ -546,10 +542,10 @@ void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string,
       if (indx % 2 == 0)
         return arr[indx / 2].first;
 
-      // NOTE: we reuse the same buffer, assuming that SendStringArrInternal does not reference
-      // previous string_views. The assumption holds for small strings like
-      // doubles because SendStringArrInternal employs small string optimization.
-      // It's a bit hacky but saves allocations.
+      // NOTE: we reuse the same buffer, assuming that SendStringArrInternal
+      // does not reference previous string_views. The assumption holds for
+      // small strings like doubles because SendStringArrInternal employs small
+      // string optimization. It's a bit hacky but saves allocations.
       return FormatDouble(arr[indx / 2].second, buf, sizeof(buf));
     };
 
@@ -558,8 +554,8 @@ void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string,
   }
 
   // Resp3 formats withscores as array of (key, score) pairs.
-  // TODO: to implement efficient serializing by extending SendStringArrInternal to support
-  // 2-level arrays.
+  // TODO: to implement efficient serializing by extending SendStringArrInternal
+  // to support 2-level arrays.
   StartArray(arr.size());
   for (const auto& p : arr) {
     StartArray(2);
@@ -591,7 +587,8 @@ void RedisReplyBuilder::SendMGetResponse(MGetResponse resp) {
   constexpr size_t kBatchLen = 32 * 2 + 2;  // (blob_size, blob) * 32 + 2 spares
   iovec vec_batch[kBatchLen];
 
-  // for all the meta data to fill the vec batch. 10 digits for the blob size and 6 for
+  // for all the meta data to fill the vec batch. 10 digits for the blob size
+  // and 6 for
   // $, \r, \n, \r, \n
   absl::FixedArray<char, 64> meta((vec_len + 2) * 16);  // 2 for header and next item meta data.
 
@@ -608,7 +605,8 @@ void RedisReplyBuilder::SendMGetResponse(MGetResponse resp) {
   auto get_pending_metabuf = [&] { return string_view{cur_meta, size_t(next - cur_meta)}; };
 
   for (unsigned i = 0; i < size; ++i) {
-    DCHECK_GE(meta.end() - next, 16);  // We have at least 16 bytes for the meta data.
+    DCHECK_GE(meta.end() - next,
+              16);  // We have at least 16 bytes for the meta data.
     if (resp.resp_arr[i]) {
       string_view blob = resp.resp_arr[i]->value;
 
@@ -629,12 +627,13 @@ void RedisReplyBuilder::SendMGetResponse(MGetResponse resp) {
     }
 
     if (vec_indx >= (kBatchLen - 2) || (meta.end() - next < 16)) {
-      // we have space for at least one iovec because in the worst case we reached (kBatchLen - 3)
-      // and then filled 2 vectors in the previous iteration.
+      // we have space for at least one iovec because in the worst case we
+      // reached (kBatchLen - 3) and then filled 2 vectors in the previous
+      // iteration.
       DCHECK_LE(vec_indx, kBatchLen - 1);
 
-      // if we do not have enough space in the meta buffer, we add the meta data to the
-      // vector batch and reset it.
+      // if we do not have enough space in the meta buffer, we add the meta data
+      // to the vector batch and reset it.
       if (meta.end() - next < 16) {
         vec_batch[vec_indx++] = IoVec(get_pending_metabuf());
         next = meta.data();
@@ -706,8 +705,8 @@ void RedisReplyBuilder::StartCollection(unsigned len, CollectionType type) {
   DVLOG(2) << "StartCollection(" << len << ", " << type << ")";
 
   // We do not want to send multiple packets for small responses because these
-  // trigger TCP-related artifacts (e.g. Nagle's algorithm) that slow down the delivery of the whole
-  // response.
+  // trigger TCP-related artifacts (e.g. Nagle's algorithm) that slow down the
+  // delivery of the whole response.
   bool prev = should_aggregate_;
   should_aggregate_ |= (len > 0);
   SendRaw(absl::StrCat(START_SYMBOLS[type], len, kCRLF));
@@ -715,10 +714,10 @@ void RedisReplyBuilder::StartCollection(unsigned len, CollectionType type) {
 }
 
 // This implementation a bit complicated because it uses vectorized
-// send to send an array. The problem with that is the OS limits vector length to UIO_MAXIOV.
-// Therefore, to make it robust we send the array in batches.
-// We limit the vector length, and when it fills up we flush it to the socket and continue
-// iterating.
+// send to send an array. The problem with that is the OS limits vector length
+// to UIO_MAXIOV. Therefore, to make it robust we send the array in batches. We
+// limit the vector length, and when it fills up we flush it to the socket and
+// continue iterating.
 void RedisReplyBuilder::SendStringArrInternal(
     size_t size, absl::FunctionRef<std::string_view(unsigned)> producer, CollectionType type) {
   size_t header_len = size;
@@ -734,7 +733,8 @@ void RedisReplyBuilder::SendStringArrInternal(
     return;
   }
 
-  // We limit iovec capacity, vectorized length is limited upto UIO_MAXIOV (Send returns EMSGSIZE).
+  // We limit iovec capacity, vectorized length is limited upto UIO_MAXIOV (Send
+  // returns EMSGSIZE).
   size_t vec_cap = std::min<size_t>(UIO_MAXIOV, size * 2);
   absl::FixedArray<iovec, 16> vec(vec_cap);
   absl::FixedArray<char, 128> meta(std::max<size_t>(vec_cap * 64, 128u));
@@ -769,7 +769,8 @@ void RedisReplyBuilder::SendStringArrInternal(
     src = producer(i);
     serialize_len('$', src.size());
 
-    // copy data either by referencing via an iovec or copying inline into meta buf.
+    // copy data either by referencing via an iovec or copying inline into meta
+    // buf.
     constexpr size_t kSSOLen = 32;
     if (src.size() > kSSOLen) {
       // reference metadata blob before referencing another vector.
@@ -786,8 +787,9 @@ void RedisReplyBuilder::SendStringArrInternal(
       }
       start = next;
     } else if (src.size() > 0) {
-      // NOTE!: this is not just optimization. producer may returns a string_piece that will
-      // be overriden for the next call, so we must do this for correctness.
+      // NOTE!: this is not just optimization. producer may returns a
+      // string_piece that will be overriden for the next call, so we must do
+      // this for correctness.
       memcpy(next, src.data(), src.size());
       next += src.size();
     }
@@ -919,7 +921,7 @@ void RedisReplyBuilder2Base::SendVerbatimString(std::string_view str, VerbatimFo
   WritePiece(kCRLF);
 }
 
-void RedisReplyBuilder2::SendSimpleStrArr(const facade::ArgRange& strs) {
+void RedisReplyBuilder2::SendSimpleStrArr2(const facade::ArgRange& strs) {
   ReplyScope scope(this);
   StartArray(strs.Size());
   for (std::string_view str : strs)
@@ -960,6 +962,17 @@ void RedisReplyBuilder2::StartArray(unsigned len) {
 
 void RedisReplyBuilder2::SendEmptyArray() {
   StartArray(0);
+}
+
+void RedisReplyBuilder2::SendMGetResponse(SinkReplyBuilder::MGetResponse resp) {
+  ReplyScope scope(this);
+  StartArray(resp.resp_arr.size());
+  for (const auto& entry : resp.resp_arr) {
+    if (entry)
+      SendBulkString(entry->value);
+    else
+      SendNull();
+  }
 }
 
 }  // namespace facade
