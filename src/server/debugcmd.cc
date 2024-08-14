@@ -373,7 +373,6 @@ void DebugCmd::Run(CmdArgList args) {
         "    arguments. Each descriptor is prefixed by its frequency count",
         "OBJECT <key> [COMPRESS]",
         "    Show low-level info about `key` and associated value.",
-        "LOAD <filename>",
         "RELOAD [option ...]",
         "    Save the RDB on disk and reload it back to memory. Valid <option> values:",
         "    * NOSAVE: the database will be loaded from an existing RDB file.",

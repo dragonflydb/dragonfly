@@ -168,9 +168,17 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sub_cmd == "HELP") {
-    // TODO: expand this to all sub commands
     string_view help_arr[] = {
         "DFLY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        "THREAD",
+        "    Returns connection thread index and number of threads",
+        "THREAD <thread-id>",
+        "    Migrates connection to thread <thread-id>",
+        "EXPIRE",
+        "    Collects all expired items.",
+        "REPLICAOFFSET",
+        "    Returns LSN (log sequence number) per shard. These are the sequential ids of the ",
+        "    journal entry.",
         "LOAD <filename> [APPEND]",
         "    Loads <filename> RDB/DFS file into the data store.",
         "    * APPEND: Existing keys are NOT removed before loading the file, conflicting ",
