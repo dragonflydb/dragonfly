@@ -68,6 +68,10 @@ class EngineShard {
     return &queue_;
   }
 
+  TaskQueue* GetSecondaryQueue() {
+    return &queue2_;
+  }
+
   // Processes TxQueue, blocked transactions or any other execution state related to that
   // shard. Tries executing the passed transaction if possible (does not guarantee though).
   void PollExecution(const char* context, Transaction* trans);
@@ -223,7 +227,7 @@ class EngineShard {
   // return true if we did not complete the shard scan
   bool DoDefrag();
 
-  TaskQueue queue_;
+  TaskQueue queue_, queue2_;
 
   TxQueue txq_;
   MiMemoryResource mi_resource_;
