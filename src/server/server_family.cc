@@ -873,7 +873,7 @@ void ServerFamily::LoadFromSnapshot() {
   if (load_path_result) {
     const std::string load_path = *load_path_result;
     if (!load_path.empty()) {
-      load_result_ = Load(load_path, RdbLoader::ExistingKeys::kFail);
+      load_result_ = Load(load_path, LoadExistingKeys::kFail);
     }
   } else {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
@@ -949,7 +949,7 @@ void ServerFamily::FlushAll(ConnectionContext* cntx) {
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
 std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_path,
-                                                            RdbLoader::ExistingKeys existing_keys) {
+                                                            LoadExistingKeys existing_keys) {
   fs::path path(load_path);
 
   if (load_path.empty()) {
@@ -1067,13 +1067,17 @@ void ServerFamily::SnapshotScheduling() {
 }
 
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
-                                         RdbLoader::ExistingKeys existing_keys) {
+                                         LoadExistingKeys existing_keys) {
   error_code ec;
   io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
   if (res) {
     io::FileSource fs(*res);
 
-    RdbLoader loader{&service_, existing_keys};
+    RdbLoader loader{&service_};
+    if (existing_keys == LoadExistingKeys::kOverride) {
+      loader.SetOverrideExistingKeys(true);
+    }
+
     ec = loader.Load(&fs);
     if (!ec) {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();

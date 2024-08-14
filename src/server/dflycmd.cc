@@ -526,11 +526,11 @@ void DflyCmd::Load(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   parser.ExpectTag("LOAD");
   string_view filename = parser.Next();
-  RdbLoader::ExistingKeys existing_keys = RdbLoader::ExistingKeys::kFail;
+  ServerFamily::LoadExistingKeys existing_keys = ServerFamily::LoadExistingKeys::kFail;
 
   if (parser.HasNext()) {
     parser.ExpectTag("APPEND");
-    existing_keys = RdbLoader::ExistingKeys::kOverride;
+    existing_keys = ServerFamily::LoadExistingKeys::kOverride;
   }
 
   if (parser.HasNext()) {
@@ -541,7 +541,7 @@ void DflyCmd::Load(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kSyntaxErr);
   }
 
-  if (existing_keys == RdbLoader::ExistingKeys::kFail) {
+  if (existing_keys == ServerFamily::LoadExistingKeys::kFail) {
     sf_->FlushAll(cntx);
   }
 

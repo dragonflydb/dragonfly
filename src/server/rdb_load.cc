@@ -1919,9 +1919,8 @@ struct RdbLoader::ObjSettings {
   ObjSettings() = default;
 };
 
-RdbLoader::RdbLoader(Service* service, ExistingKeys existing_keys)
+RdbLoader::RdbLoader(Service* service)
     : service_{service},
-      existing_keys_{existing_keys},
       script_mgr_{service == nullptr ? nullptr : service->script_mgr()},
       shard_buf_{shard_set->size()} {
 }
@@ -2484,7 +2483,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
     auto& res = *op_res;
     res.it->first.SetSticky(item->is_sticky);
-    if (existing_keys_ == ExistingKeys::kFail && !res.is_new) {
+    if (!override_existing_keys_ && !res.is_new) {
       LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
 
@@ -2523,7 +2522,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     return ec;
   }
 
-  if (cluster::IsClusterEnabled()) {
+  if (!load_unowned_slots_ && cluster::IsClusterEnabled()) {
     const cluster::ClusterConfig* cluster_config = cluster::ClusterFamily::cluster_config();
     if (cluster_config != nullptr && !cluster_config->IsMySlot(item->key)) {
       return kOk;  // Ignoring item

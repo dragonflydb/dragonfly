@@ -498,7 +498,7 @@ void DebugCmd::Reload(CmdArgList args) {
 
   sf_.FlushAll(cntx_);
 
-  if (auto fut_ec = sf_.Load(last_save_file, RdbLoader::ExistingKeys::kFail); fut_ec) {
+  if (auto fut_ec = sf_.Load(last_save_file, ServerFamily::LoadExistingKeys::kFail); fut_ec) {
     GenericError ec = fut_ec->Get();
     if (ec) {
       string msg = ec.Format();

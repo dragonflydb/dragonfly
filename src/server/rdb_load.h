@@ -177,12 +177,20 @@ class RdbLoaderBase {
 
 class RdbLoader : protected RdbLoaderBase {
  public:
-  enum class ExistingKeys { kFail, kOverride };
-  explicit RdbLoader(Service* service, ExistingKeys existing_keys);
+  explicit RdbLoader(Service* service);
 
   ~RdbLoader();
 
+  void SetOverrideExistingKeys(bool override) {
+    override_existing_keys_ = override;
+  }
+
+  void SetLoadUnownedSlots(bool load_unowned) {
+    load_unowned_slots_ = load_unowned;
+  }
+
   std::error_code Load(::io::Source* src);
+
   void set_source_limit(size_t n) {
     source_limit_ = n;
   }
@@ -274,7 +282,8 @@ class RdbLoader : protected RdbLoaderBase {
 
  private:
   Service* service_;
-  ExistingKeys existing_keys_;
+  bool override_existing_keys_ = false;
+  bool load_unowned_slots_ = false;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
 

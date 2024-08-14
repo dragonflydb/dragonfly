@@ -201,8 +201,9 @@ class ServerFamily {
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
+  enum class LoadExistingKeys { kFail, kOverride };
   std::optional<util::fb2::Future<GenericError>> Load(std::string_view file_name,
-                                                      RdbLoader::ExistingKeys existing_keys);
+                                                      LoadExistingKeys existing_keys);
 
   bool TEST_IsSaving() const;
 
@@ -290,7 +291,7 @@ class ServerFamily {
   void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ActionOnConnectionFail on_error);
 
   // Returns the number of loaded keys if successful.
-  io::Result<size_t> LoadRdb(const std::string& rdb_file, RdbLoader::ExistingKeys existing_keys);
+  io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys);
 
   void SnapshotScheduling();
 
