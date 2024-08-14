@@ -57,7 +57,7 @@ async def test_consistency(df_factory, format: str, seeder_opts: dict):
     await async_client.execute_command("SAVE", format)
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
@@ -85,7 +85,7 @@ async def test_multidb(df_factory, format: str):
     await async_client.execute_command("SAVE", format)
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
