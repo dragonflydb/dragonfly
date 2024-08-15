@@ -1,0 +1,84 @@
+---
+name: Test Dragonfly/Fakeredis
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+
+
+concurrency:
+  group: dragon-fly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: 3.12
+  DRAGONFLY_VERSION: latest
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        tests:
+          - "test_json"
+          - "test_mixins"
+          - "test_stack"
+          - "test_connection.py"
+          - "test_asyncredis.py"
+          - "test_general.py"
+          - "test_scan.py"
+          - "test_zadd.py"
+          - "test_translations.py"
+          - "test_sortedset_commands.py"
+    permissions:
+      pull-requests: write
+    services:
+      redis:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:${{env.DRAGONFLY_VERSION}}
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          cache-dependency-path: tests/fakeredis/requirements.txt
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        env:
+          PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+        run: |
+          python -m pip --quiet install poetry
+          echo "$HOME/.poetry/bin" >> $GITHUB_PATH
+          poetry install
+          poetry run pip install "fakeredis[json,bf,cf,lua]"
+
+      - name: Test without coverage
+        run: |
+          poetry run pytest test/${{ matrix.tests }} --html=report-${{ matrix.tests }}.html --self-contained-html -v -m "not slow"
+      - name: Upload Tests Result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-result-${{ matrix.tests }}
+          path: report-${{ matrix.tests }}.html
+
+  upload-results:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect Tests Result
+        uses: actions/upload-artifact/merge@v4
+        with:
+          delete-merged: true

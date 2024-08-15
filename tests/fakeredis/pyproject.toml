@@ -1,0 +1,44 @@
+[build-system]
+requires = ["poetry_core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "dragonfly-fakeredis-tests"
+packages = [
+    { include = "test" },
+]
+version = "0.1.0"
+description = "Tests running against dragonfly and fakeredis to check compatibility"
+authors = [
+    "Daniel Moran <daniel@moransoftware.ca>",
+]
+maintainers = [
+    "Daniel Moran <daniel@moransoftware.ca>",
+]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+redis = ">=5"
+fakeredis= "^2.23"
+
+[tool.poetry.group.test.dependencies]
+hypothesis = "^6.70"
+pytest = "^7.4"
+pytest-timeout = "^2.3.1"
+pytest-asyncio = "^0.21"
+pytest-cov = "^4.1"
+pytest-mock = { version = "^3.14", python = ">=3.8.1" }
+pytest-html = { version = "^4.1", python = ">=3.8.1" }
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "fake: run tests only with fake redis",
+    "real: run tests with a locally running real Redis server",
+    "disconnected",
+    "min_server",
+    "max_server",
+    "decode_responses",
+]
+asyncio_mode = "strict"
+generate_report_on_test = true
