@@ -66,6 +66,7 @@ jobs:
           poetry install
 
       - name: Test without coverage
+        working-directory: tests/fakeredis
         run: |
           poetry run pytest test/${{ matrix.tests }} --html=report-${{ matrix.tests }}.html --self-contained-html -v 
 
@@ -74,7 +75,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tests-result-${{ matrix.tests }}
-          path: report-${{ matrix.tests }}.html
+          path: tests/fakeredis/report-${{ matrix.tests }}.html
 
   upload-results:
     needs: test
