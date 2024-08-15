@@ -12,10 +12,6 @@ concurrency:
   group: dragon-fly-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  PYTHON_VERSION: 3.12
-  DRAGONFLY_VERSION: latest
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -23,6 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        PYTHON_VERSION:
+          - "3.12"
+        DRAGONFLY_VERSION:
+          - "latest"
         tests:
           - "test_json"
           - "test_mixins"
@@ -38,7 +38,7 @@ jobs:
       pull-requests: write
     services:
       redis:
-        image: docker.dragonflydb.io/dragonflydb/dragonfly:${{env.DRAGONFLY_VERSION}}
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:${{ matrix.DRAGONFLY_VERSION }}
         ports:
           - 6380:6379
         options: >-
@@ -52,7 +52,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           cache-dependency-path: tests/fakeredis/poetry.lock
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: ${{ matrix.PYTHON_VERSION }}
 
       - name: Install dependencies
         env:
