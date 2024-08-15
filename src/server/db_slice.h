@@ -292,7 +292,7 @@ class DbSlice {
     ExpConstIterator exp_it;
   };
 
-  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
+  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
                                        unsigned req_obj_type);
 
@@ -515,6 +515,8 @@ class DbSlice {
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
 
+  bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
+
   OpResult<AddOrFindResult> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                                 PrimeValue obj, uint64_t expire_at_ms,
                                                 bool force_update);
@@ -555,7 +557,7 @@ class DbSlice {
 
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode) const;
+                                       UpdateStatsMode stats_mode);
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type);
 

@@ -2414,30 +2414,18 @@ async def test_replicate_old_master(
 
 
 @pytest.mark.asyncio
-async def test_empty_hash_as_zipmap_bug(df_factory: DflyInstanceFactory):
-    master = df_factory.create()
-    master.start()
-    replica = df_factory.create()
-    replica.start()
+async def test_empty_hash_as_zipmap_bug(async_client):
+    await async_client.execute_command("HSET foo a_field a_value")
+    await async_client.execute_command("HSETEX foo 1 b_field b_value")
+    await async_client.execute_command("HDEL foo a_field")
 
-    c_master = master.client()
-    await c_master.execute_command("HSET foo a_field a_value")
-    await c_master.execute_command("HSETEX foo 1 b_field b_value")
-    await c_master.execute_command("HDEL foo a_field")
+    await asyncio.sleep(2)
 
     @assert_eventually
     async def check_if_empty():
-        assert await c_master.execute_command("HGETALL foo") == []
+        assert await async_client.execute_command("HGETALL foo") == []
 
     await check_if_empty()
 
-    # Key exists and it's empty
-    assert await c_master.execute_command(f"EXISTS foo") == 1
-
-    c_replica = replica.client()
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_for_replicas_state(c_replica)
-    # Key does not exist in replica because we skipped it
-    assert await c_replica.execute_command(f"EXISTS foo") == 0
-
-    await close_clients(c_master, c_replica)
+    # Key does not exist and it's empty
+    assert await async_client.execute_command(f"EXISTS foo") == 0

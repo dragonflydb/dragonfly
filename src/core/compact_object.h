@@ -398,9 +398,7 @@ class CompactObj {
 
   bool HasAllocated() const;
 
-  bool HasJsonOrInlineTag() const {
-    return taglen_ <= 6 || taglen_ == JSON_TAG;
-  }
+  bool TagAllowsEmptyValue() const;
 
   uint8_t Tag() const {
     return taglen_;

@@ -2467,8 +2467,9 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       stop_early_ = true;
       break;
     }
-    if (pv.Size() == 0) {
-      LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind;
+    if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+      LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
+                 << item->val.rdb_type;
       continue;
     }
 

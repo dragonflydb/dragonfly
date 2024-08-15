@@ -337,13 +337,12 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
 // Called by snapshot
 io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
                                              uint64_t expire_ms, DbIndex dbid) {
-  // We skip empty entries of any PrimeValue
-  //  if (!pv.HasJsonTag() && pv.Size() == 0) {
-  //    string_view key = pk.GetSlice(&tmp_str_);
-  //    LOG(ERROR) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "
-  //            << pv.Tag();
-  //    return 0;
-  //  }
+  if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+    string_view key = pk.GetSlice(&tmp_str_);
+    LOG(ERROR) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "
+               << pv.Tag();
+    return 0;
+  }
 
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   SelectDb(dbid);
