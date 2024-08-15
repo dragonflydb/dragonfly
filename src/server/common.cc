@@ -45,6 +45,8 @@ ABSL_FLAG(unsigned, locktag_skip_n_end_delimiters, 0,
 ABSL_FLAG(std::string, locktag_prefix, "",
           "Only keys with this prefix participate in tag extraction.");
 
+ABSL_DECLARE_FLAG(size_t, serialization_max_chunk_size);
+
 namespace dfly {
 
 using namespace std;
@@ -453,7 +455,8 @@ RandomPick UniquePicksGenerator::Generate() {
   return max_index;
 }
 
-ThreadLocalMutex::ThreadLocalMutex() {
+ThreadLocalMutex::ThreadLocalMutex()
+    : big_value_enabled_(absl::GetFlag(FLAGS_serialization_max_chunk_size) != 0) {
   shard_ = EngineShard::tlocal();
 }
 
@@ -462,16 +465,26 @@ ThreadLocalMutex::~ThreadLocalMutex() {
 }
 
 void ThreadLocalMutex::lock() {
-  DCHECK_EQ(EngineShard::tlocal(), shard_);
-  util::fb2::NoOpLock noop_lk_;
-  cond_var_.wait(noop_lk_, [this]() { return !flag_; });
-  flag_ = true;
+  if (big_value_enabled_) {
+    DCHECK_EQ(EngineShard::tlocal(), shard_);
+    util::fb2::NoOpLock noop_lk_;
+    if (locked_fiber_ != nullptr) {
+      DCHECK(util::fb2::detail::FiberActive() != locked_fiber_);
+    }
+    cond_var_.wait(noop_lk_, [this]() { return !flag_; });
+    flag_ = true;
+    DCHECK_EQ(locked_fiber_, nullptr);
+    locked_fiber_ = util::fb2::detail::FiberActive();
+  }
 }
 
 void ThreadLocalMutex::unlock() {
-  DCHECK_EQ(EngineShard::tlocal(), shard_);
-  flag_ = false;
-  cond_var_.notify_one();
+  if (big_value_enabled_) {
+    DCHECK_EQ(EngineShard::tlocal(), shard_);
+    flag_ = false;
+    cond_var_.notify_one();
+    locked_fiber_ = nullptr;
+  }
 }
 
 }  // namespace dfly

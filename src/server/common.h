@@ -371,9 +371,11 @@ class ThreadLocalMutex {
   void unlock();
 
  private:
+  const bool big_value_enabled_;
   EngineShard* shard_;
   util::fb2::CondVarAny cond_var_;
   bool flag_ = false;
+  util::fb2::detail::FiberInterface* locked_fiber_{nullptr};
 };
 
 }  // namespace dfly
