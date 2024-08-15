@@ -50,6 +50,7 @@ extern "C" {
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
 #include "server/protocol_client.h"
+#include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/script_mgr.h"
 #include "server/server_state.h"

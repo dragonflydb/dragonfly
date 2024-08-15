@@ -16,7 +16,6 @@
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
-#include "server/rdb_load.h"
 #include "server/replica.h"
 #include "server/server_state.h"
 #include "util/fibers/fiberqueue_threadpool.h"
