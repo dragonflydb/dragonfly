@@ -99,9 +99,15 @@ ABSL_FLAG(dfly::MemoryBytesFlag, maxmemory, dfly::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database. "
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
+
 ABSL_FLAG(double, oom_deny_ratio, 1.1,
           "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
           "memory is above this value");
+
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
+          "Maximum size of a value that may be serialized at once during snapshotting or full "
+          "sync. Values bigger than this threshold will be serialized using streaming "
+          "serialization. 0 - to disable streaming mode");
 
 namespace dfly {
 
@@ -871,6 +877,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("dbfilename");
   config_registry.RegisterMutable("table_growth_margin");
 
+  serialization_max_chunk_size = GetFlag(FLAGS_serialization_max_chunk_size);
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
     LOG_IF(WARNING, shard_num > pp_.size())

@@ -45,8 +45,6 @@ ABSL_FLAG(unsigned, locktag_skip_n_end_delimiters, 0,
 ABSL_FLAG(std::string, locktag_prefix, "",
           "Only keys with this prefix participate in tag extraction.");
 
-ABSL_DECLARE_FLAG(size_t, serialization_max_chunk_size);
-
 namespace dfly {
 
 using namespace std;
@@ -119,6 +117,7 @@ atomic_uint64_t rss_mem_peak(0);
 
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
+size_t serialization_max_chunk_size = 0;
 
 const char* GlobalStateName(GlobalState s) {
   switch (s) {
@@ -455,8 +454,7 @@ RandomPick UniquePicksGenerator::Generate() {
   return max_index;
 }
 
-ThreadLocalMutex::ThreadLocalMutex()
-    : big_value_enabled_(absl::GetFlag(FLAGS_serialization_max_chunk_size) != 0) {
+ThreadLocalMutex::ThreadLocalMutex() {
   shard_ = EngineShard::tlocal();
 }
 
@@ -465,7 +463,7 @@ ThreadLocalMutex::~ThreadLocalMutex() {
 }
 
 void ThreadLocalMutex::lock() {
-  if (big_value_enabled_) {
+  if (serialization_max_chunk_size != 0) {
     DCHECK_EQ(EngineShard::tlocal(), shard_);
     util::fb2::NoOpLock noop_lk_;
     if (locked_fiber_ != nullptr) {
@@ -479,7 +477,7 @@ void ThreadLocalMutex::lock() {
 }
 
 void ThreadLocalMutex::unlock() {
-  if (big_value_enabled_) {
+  if (serialization_max_chunk_size != 0) {
     DCHECK_EQ(EngineShard::tlocal(), shard_);
     flag_ = false;
     cond_var_.notify_one();
