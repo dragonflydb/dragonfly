@@ -19,7 +19,7 @@ maintainers = [
 [tool.poetry.dependencies]
 python = "^3.12"
 redis = ">=5"
-fakeredis= "^2.23"
+fakeredis = { version = "^2.23", extras = ["json", "bf", "cf", "lua"] }
 
 [tool.poetry.group.test.dependencies]
 hypothesis = "^6.70"

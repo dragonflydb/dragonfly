@@ -51,21 +51,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          cache-dependency-path: tests/fakeredis/requirements.txt
+          cache-dependency-path: tests/fakeredis/poetry.lock
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install dependencies
         env:
           PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+        shell: bash
+        working-directory: tests/fakeredis
         run: |
           python -m pip --quiet install poetry
           echo "$HOME/.poetry/bin" >> $GITHUB_PATH
           poetry install
-          poetry run pip install "fakeredis[json,bf,cf,lua]"
 
       - name: Test without coverage
         run: |
-          poetry run pytest test/${{ matrix.tests }} --html=report-${{ matrix.tests }}.html --self-contained-html -v -m "not slow"
+          poetry run pytest test/${{ matrix.tests }} --html=report-${{ matrix.tests }}.html --self-contained-html -v 
+
       - name: Upload Tests Result
         if: always()
         uses: actions/upload-artifact@v4
