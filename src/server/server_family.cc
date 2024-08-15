@@ -1281,13 +1281,13 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
   AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
                             &resp->body());
 
-  AppendMetricWithoutLabels("backup_count", "", m.loading_stats.backup_count, MetricType::COUNTER,
+  AppendMetricWithoutLabels("backups_total", "", m.loading_stats.backup_count, MetricType::COUNTER,
                             &resp->body());
-  AppendMetricWithoutLabels("failed_backup_count", "", m.loading_stats.failed_backup_count,
+  AppendMetricWithoutLabels("failed_backups_total", "", m.loading_stats.failed_backup_count,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("restore_count", "", m.loading_stats.restore_count, MetricType::COUNTER,
-                            &resp->body());
-  AppendMetricWithoutLabels("failed_restore_count", "", m.loading_stats.failed_restore_count,
+  AppendMetricWithoutLabels("restores_total", "", m.loading_stats.restore_count,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("failed_restores_total", "", m.loading_stats.failed_restore_count,
                             MetricType::COUNTER, &resp->body());
 
   // Net metrics
