@@ -34,6 +34,7 @@ jobs:
           - "test_zadd.py"
           - "test_translations.py"
           - "test_sortedset_commands.py"
+    name: "Run tests: ${{ matrix.tests }}"
     permissions:
       pull-requests: write
     services:

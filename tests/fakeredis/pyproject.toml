@@ -20,8 +20,6 @@ maintainers = [
 python = "^3.12"
 redis = ">=5"
 fakeredis = { version = "^2.23", extras = ["json", "bf", "cf", "lua"] }
-
-[tool.poetry.group.test.dependencies]
 hypothesis = "^6.70"
 pytest = "^7.4"
 pytest-timeout = "^2.3.1"
