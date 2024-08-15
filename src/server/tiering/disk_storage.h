@@ -48,12 +48,14 @@ class DiskStorage {
   Stats GetStats() const;
 
  private:
+  bool CanGrow() const;
+
   std::error_code Grow(off_t grow_size);
 
   // Returns a buffer with size greater or equal to len.
   util::fb2::UringBuf PrepareBuf(size_t len);
 
-  off_t size_, max_size_;
+  off_t max_size_;
   size_t pending_ops_ = 0;  // number of ongoing ops for safe shutdown
 
   // how many times we allocate registered/heap buffers.

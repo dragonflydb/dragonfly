@@ -23,7 +23,7 @@ class ExtentTree {
   std::optional<std::pair<size_t, size_t>> GetRange(size_t len, size_t align);
 
  private:
-  absl::btree_map<size_t, size_t> extents_;                 // start -> end.
+  absl::btree_map<size_t, size_t> extents_;                 // start -> end).
   absl::btree_set<std::pair<size_t, size_t>> len_extents_;  // (length, start)
 };
 

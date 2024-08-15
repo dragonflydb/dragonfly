@@ -83,8 +83,7 @@ error_code DiskStorage::Open(string_view path) {
   RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFallocate, fd, 0, 0L, kInitialSize));
   RETURN_ON_ERR(DoFiberCall(&SubmitEntry::PrepFadvise, fd, 0L, 0L, POSIX_FADV_RANDOM));
 
-  size_ = kInitialSize;
-  alloc_.AddStorage(0, size_);
+  alloc_.AddStorage(0, kInitialSize);
 
   auto* up = static_cast<UringProactor*>(ProactorBase::me());
   if (int io_res = up->RegisterBuffers(absl::GetFlag(FLAGS_registered_buffer_size)); io_res < 0)
@@ -143,13 +142,16 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, io::Bytes footer, StashCb cb
 
   // If we've run out of space, block and grow as much as needed
   if (offset < 0) {
-    // TODO: To introduce asynchronous call that starts resizing before we reach this step.
-    // Right now we do it synchronously as well (see Grow(256MB) call.)
-    RETURN_ON_ERR(Grow(-offset));
-
+    if (CanGrow()) {
+      // TODO: To introduce asynchronous call that starts resizing before we reach this step.
+      // Right now we do it synchronously as well (see Grow(256MB) call.)
+      RETURN_ON_ERR(Grow(-offset));
+    } else {
+      return make_error_code(errc::file_too_large);
+    }
     offset = alloc_.Malloc(len);
     if (offset < 0)  // we can't fit it even after resizing
-      return std::make_error_code(std::errc::file_too_large);
+      return make_error_code(errc::file_too_large);
   }
 
   UringBuf buf = PrepareBuf(len);
@@ -175,9 +177,10 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, io::Bytes footer, StashCb cb
     backing_file_->WriteAsync(buf.bytes, offset, std::move(io_cb));
 
   // Grow in advance if needed and possible
-  if (alloc_.allocated_bytes() > (size_ * 0.85) &&
-      size_ + ExternalAllocator::kExtAlignment < static_cast<size_t>(max_size_) && !grow_pending_) {
-    auto ec = Grow(265_MB);
+  size_t capacity = alloc_.capacity();
+  size_t available = capacity - alloc_.allocated_bytes();
+  if ((available < 256_MB) && (available < capacity * 0.15) && !grow_pending_ && CanGrow()) {
+    auto ec = Grow(256_MB);
     LOG_IF(ERROR, ec) << "Could not call grow :" << ec.message();
     return ec;
   }
@@ -189,24 +192,26 @@ DiskStorage::Stats DiskStorage::GetStats() const {
           static_cast<size_t>(max_size_)};
 }
 
-std::error_code DiskStorage::Grow(off_t grow_size) {
-  off_t start = size_;
+bool DiskStorage::CanGrow() const {
+  return alloc_.capacity() + ExternalAllocator::kExtAlignment <= static_cast<size_t>(max_size_);
+}
 
-  if (off_t(alloc_.capacity()) + grow_size > max_size_)
-    return std::make_error_code(std::errc::no_space_on_device);
+error_code DiskStorage::Grow(off_t grow_size) {
+  DCHECK(CanGrow());
 
   if (std::exchange(grow_pending_, true)) {
     // TODO: to introduce future like semantics where multiple flow can block on the
     // ongoing Grow operation.
     LOG(WARNING) << "Concurrent grow request detected ";
-    return std::make_error_code(std::errc::operation_in_progress);
+    return make_error_code(errc::operation_in_progress);
   }
-  auto err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, size_, grow_size);
+  off_t end = alloc_.capacity();
+  auto err = DoFiberCall(&SubmitEntry::PrepFallocate, backing_file_->fd(), 0, end, grow_size);
   grow_pending_ = false;
   RETURN_ON_ERR(err);
 
-  size_ += grow_size;
-  alloc_.AddStorage(start, grow_size);
+  alloc_.AddStorage(end, grow_size);
+
   return {};
 }
 

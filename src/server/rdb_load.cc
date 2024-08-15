@@ -35,6 +35,8 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "server/cluster/cluster_defs.h"
+#include "server/cluster/cluster_family.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
@@ -2481,7 +2483,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
     auto& res = *op_res;
     res.it->first.SetSticky(item->is_sticky);
-    if (!res.is_new) {
+    if (!override_existing_keys_ && !res.is_new) {
       LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
 
@@ -2518,6 +2520,13 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   if (ec) {
     VLOG(1) << "ReadObj error " << ec << " for key " << item->key;
     return ec;
+  }
+
+  if (!load_unowned_slots_ && cluster::IsClusterEnabled()) {
+    const cluster::ClusterConfig* cluster_config = cluster::ClusterFamily::cluster_config();
+    if (cluster_config != nullptr && !cluster_config->IsMySlot(item->key)) {
+      return kOk;  // Ignoring item
+    }
   }
 
   /* Check if the key already expired. This function is used when loading

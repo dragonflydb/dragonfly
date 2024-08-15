@@ -55,4 +55,12 @@ TEST_F(ExtentTreeTest, Basic) {
   EXPECT_THAT(*op, testing::Pair(60, 92));
 }
 
+TEST_F(ExtentTreeTest, Union) {
+  tree_.Add(0, 16);
+  tree_.Add(16, 16);
+  auto range = tree_.GetRange(32, 1);
+  ASSERT_TRUE(range);
+  EXPECT_THAT(*range, testing::Pair(0, 32));
+}
+
 }  // namespace dfly

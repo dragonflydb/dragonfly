@@ -30,9 +30,6 @@ class DebugCmd {
 
   void Run(CmdArgList args);
 
-  // A public function that loads a snapshot.
-  void Load(std::string_view filename);
-
   static void Shutdown();
 
  private:

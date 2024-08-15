@@ -404,6 +404,8 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
 }
 
 void ExternalAllocator::AddStorage(size_t start, size_t size) {
+  VLOG(1) << "AddStorage " << start << "/" << size;
+
   extent_tree_.Add(start, size);
   capacity_ += size;
 }
