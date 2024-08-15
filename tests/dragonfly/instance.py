@@ -87,9 +87,6 @@ class DflyInstance:
             if threads > 1:
                 self.args["num_shards"] = threads - 1
 
-        # Add 1 byte limit for big values
-        self.args["serialization_max_chunk_size"] = 1
-
     def __del__(self):
         assert self.proc == None
 
@@ -326,9 +323,6 @@ class DflyInstance:
         mem_info = process.memory_info()
         return mem_info.rss
 
-    def clear_max_chunk_flag(self):
-        del self.args["serialization_max_chunk_size"]
-
 
 class DflyInstanceFactory:
     """
@@ -340,17 +334,23 @@ class DflyInstanceFactory:
         self.params = params
         self.instances = []
 
-    def create(self, existing_port=None, path=None, **kwargs) -> DflyInstance:
+    def create(self, existing_port=None, path=None, version=100, **kwargs) -> DflyInstance:
         args = {**self.args, **kwargs}
         args.setdefault("dbfilename", "")
         args.setdefault("noversion_check", None)
-        args.setdefault("use_new_io")
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
         vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
         args.setdefault("log_dir", self.params.log_dir)
+
+        if version >= 1.21:
+            # Add 1 byte limit for big values
+            args.setdefault("serialization_max_chunk_size", 1)
+
+        if version >= 1.21:
+            args.setdefault("use_new_io")
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v

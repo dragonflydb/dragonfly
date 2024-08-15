@@ -104,14 +104,14 @@ class SinkReplyBuilder {
   virtual void FlushBatch();
 
   // Used for QUIT - > should move to conn_context?
-  void CloseConnection();
+  virtual void CloseConnection();
 
-  std::error_code GetError() const {
+  virtual std::error_code GetError() const {
     return ec_;
   }
 
   bool IsSendActive() const {
-    return send_active_;
+    return send_active_;  // BROKEN
   }
 
   struct ReplyAggregator {
@@ -361,7 +361,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   RedisReplyBuilder(::io::Sink* stream);
 
-  void SetResp3(bool is_resp3);
+  virtual void SetResp3(bool is_resp3);
   bool IsResp3() const {
     return is_resp3_;
   }
@@ -437,7 +437,8 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
     return resp3_;
   }
 
-  void SetResp3(bool resp3) {
+  // REMOVE THIS override
+  void SetResp3(bool resp3) override {
     resp3_ = resp3;
   }
 
@@ -456,6 +457,16 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
 
   void FlushBatch() override {
     SinkReplyBuilder2::Flush();
+  }
+
+  // REMOVE THIS
+
+  void CloseConnection() override {
+    SinkReplyBuilder2::CloseConnection();
+  }
+
+  std::error_code GetError() const override {
+    return SinkReplyBuilder2::GetError();
   }
 
  private:
