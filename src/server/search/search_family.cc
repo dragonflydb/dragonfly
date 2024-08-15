@@ -798,6 +798,41 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void SearchFamily::FtTagVals(CmdArgList args, ConnectionContext* cntx) {
+  string_view index_name = ArgS(args, 0);
+  string_view field_name = ArgS(args, 1);
+  VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
+
+  vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
+
+  cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+    if (auto* index = es->search_indices()->GetIndex(index_name); index)
+      shard_results[es->shard_id()] = index->GetTagVals(field_name);
+    else
+      shard_results[es->shard_id()] = nonstd::make_unexpected(ErrorReply("-Unknown Index name"));
+
+    return OpStatus::OK;
+  });
+
+  absl::flat_hash_set<string> result_set;
+
+  // Check first if either shard had errors. Also merge the results into a single set.
+  for (auto& res : shard_results) {
+    if (res) {
+      result_set.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
+    } else {
+      res.error().kind = facade::kSearchErrType;
+      return cntx->SendError(res.error());
+    }
+  }
+
+  shard_results.clear();
+  vector<string> vec(result_set.begin(), result_set.end());
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  rb->SendStringArr(vec, RedisReplyBuilder::SET);
+}
+
 void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
   const auto params = ParseAggregatorParamsOrReply(args, cntx);
   if (!params)
@@ -871,7 +906,8 @@ void SearchFamily::Register(CommandRegistry* registry) {
             << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
             << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
             << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
-            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile);
+            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
+            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals);
 }
 
 }  // namespace dfly

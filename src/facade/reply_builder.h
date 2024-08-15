@@ -184,6 +184,8 @@ class SinkReplyBuilder2 {
   explicit SinkReplyBuilder2(io::Sink* sink) : sink_(sink) {
   }
 
+  virtual ~SinkReplyBuilder2() = default;
+
   // USE WITH CARE! ReplyScope assumes that all string views in Send calls keep valid for the scopes
   // lifetime. This allows the builder to avoid copies by enqueueing long strings directly for
   // vectorized io.
@@ -320,6 +322,8 @@ class MCReplyBuilder2 : public SinkReplyBuilder2 {
  public:
   explicit MCReplyBuilder2(::io::Sink* sink);
 
+  ~MCReplyBuilder2() override = default;
+
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
 
   void SendStored() final;
@@ -409,7 +413,10 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
       : SinkReplyBuilder2(sink), RedisReplyBuilder(nullptr) {
   }
 
+  ~RedisReplyBuilder2Base() override = default;
+
   void SendNull() override;
+
   void SendSimpleString(std::string_view str) override;
   void SendBulkString(std::string_view str);  // RESP: Blob String
 
@@ -464,7 +471,10 @@ class RedisReplyBuilder2 : public RedisReplyBuilder2Base {
   RedisReplyBuilder2(io::Sink* sink) : RedisReplyBuilder2Base(sink) {
   }
 
+  ~RedisReplyBuilder2() override = default;
+
   void SendSimpleStrArr2(const facade::ArgRange& strs);
+
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
   void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                        bool with_scores) override;

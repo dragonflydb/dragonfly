@@ -117,7 +117,7 @@ struct ConnectionStats {
   uint32_t num_replicas = 0;
   uint32_t num_blocked_clients = 0;
   uint64_t num_migrations = 0;
-  uint64_t squashed_commands = 0;
+
   ConnectionStats& operator+=(const ConnectionStats& o);
 };
 

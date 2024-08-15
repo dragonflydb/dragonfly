@@ -263,7 +263,7 @@ bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
     // On FLUSH* we restart the migration
     CHECK(dest_ != nullptr);
     cntx_->ReportError("FLUSH command during migration");
-    dest_->Shutdown(SHUT_RDWR);
+    std::ignore = dest_->Shutdown(SHUT_RDWR);
     return false;
   }
 

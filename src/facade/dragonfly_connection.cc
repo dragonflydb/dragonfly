@@ -1280,7 +1280,7 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
     auto& pmsg = get<PipelineMessagePtr>(msg.handle);
     squash_cmds.push_back(absl::MakeSpan(pmsg->args));
   }
-  stats_->squashed_commands += squash_cmds.size();
+
   cc_->async_dispatch = true;
 
   size_t dispatched = service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());

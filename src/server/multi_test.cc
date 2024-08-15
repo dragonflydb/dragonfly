@@ -747,7 +747,7 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
 
 TEST_F(MultiTest, ScriptFlagsEmbedded) {
   const char* s1 = R"(
-  #!lua flags=allow-undeclared-keys
+  --!df flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
 )";
 
@@ -756,13 +756,15 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_EQ(Run({"eval", s1, "0"}), "works");
 
   const char* s2 = R"(
-  #!lua flags=this-is-an-error
+  --!df flags=this-is-an-error
   redis.call('SET', 'random-key', 'failed')
   )";
 
   EXPECT_THAT(Run({"eval", s2, "0"}), ErrArg("Invalid flag: this-is-an-error"));
 }
 
+// Flaky because of https://github.com/google/sanitizers/issues/1760
+#ifndef SANITIZERS
 TEST_F(MultiTest, UndeclaredKeyFlag) {
   if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode != Transaction::LOCK_AHEAD) {
     GTEST_SKIP() << "Skipped test because multi_exec_mode is not default";
@@ -794,14 +796,12 @@ TEST_F(MultiTest, UndeclaredKeyFlag) {
   EXPECT_EQ(Run({"evalsha", sha, "0"}), "works");
 }
 
-// todo: ASAN fails heres on arm
-#ifndef SANITIZERS
 TEST_F(MultiTest, ScriptBadCommand) {
   const char* s1 = "redis.call('FLUSHALL')";
   const char* s2 = "redis.call('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
   const char* s3 = "redis.acall('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
   const char* s4 = R"(
-    #!lua flags=disable-atomicity
+    --!df flags=disable-atomicity
     redis.call('FLUSHALL');
     return "OK";
   )";
@@ -827,7 +827,7 @@ TEST_F(MultiTest, MultiEvalModeConflict) {
   }
 
   const char* s1 = R"(
-  #!lua flags=allow-undeclared-keys
+  --!df flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
 )";
 
@@ -1100,6 +1100,8 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
   EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+// Flaky because of https://github.com/google/sanitizers/issues/1760
+#ifndef SANITIZERS
 TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_lua_auto_async, true);
@@ -1118,6 +1120,7 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
   EXPECT_THAT(Run({"EVAL", s, "1", "A"}), ErrArg("unknown command `SECOND WRONG`"));
   EXPECT_EQ(Run({"get", "A"}), "2");
 }
+#endif
 
 TEST_F(MultiEvalTest, MultiAndEval) {
   if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {

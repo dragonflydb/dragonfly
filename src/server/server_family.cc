@@ -1294,6 +1294,16 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     absl::StrAppend(&resp->body(), replication_lag_metrics);
   }
 
+  if (m.replica_reconnections) {
+    auto& replica_reconnections = m.replica_reconnections.value();
+    AppendMetricHeader("replica_reconnect_count", "Number of replica reconnects",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("replica_reconnect_count", replica_reconnections.reconnect_count,
+                      {"replica_host", "replica_port"},
+                      {replica_reconnections.host, absl::StrCat(replica_reconnections.port)},
+                      &resp->body());
+  }
+
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
                             &resp->body());
   double delay_seconds = m.fiber_switch_delay_usec * 1e-6;
@@ -1626,6 +1636,22 @@ void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
+                          std::string_view password) const {
+  const auto* registry = ServerState::tlocal()->user_registry;
+  CHECK(registry);
+  const bool is_authorized = registry->AuthUser(username, password);
+  if (is_authorized) {
+    cntx->authed_username = username;
+    auto cred = registry->GetCredentials(username);
+    cntx->acl_commands = cred.acl_commands;
+    cntx->keys = std::move(cred.keys);
+    cntx->ns = &namespaces.GetOrInsert(cred.ns);
+    cntx->authenticated = true;
+  }
+  return is_authorized;
+}
+
 void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() > 2) {
     return cntx->SendError(kSyntaxErr);
@@ -1633,19 +1659,11 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 
   // non admin port auth
   if (!cntx->conn()->IsPrivileged()) {
-    const auto* registry = ServerState::tlocal()->user_registry;
     const bool one_arg = args.size() == 1;
     std::string_view username = one_arg ? "default" : facade::ToSV(args[0]);
     const size_t index = one_arg ? 0 : 1;
     std::string_view password = facade::ToSV(args[index]);
-    auto is_authorized = registry->AuthUser(username, password);
-    if (is_authorized) {
-      cntx->authed_username = username;
-      auto cred = registry->GetCredentials(username);
-      cntx->acl_commands = cred.acl_commands;
-      cntx->keys = std::move(cred.keys);
-      cntx->ns = &namespaces.GetOrInsert(cred.ns);
-      cntx->authenticated = true;
+    if (DoAuth(cntx, username, password)) {
       return cntx->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
@@ -1976,8 +1994,14 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   result.delete_ttl_per_sec /= 6;
 
   bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
-  if (is_master)
+  if (is_master) {
     result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
+  } else {
+    auto info = GetReplicaSummary();
+    if (info) {
+      result.replica_reconnections = {std::move(info->host), info->port, info->reconnect_count};
+    }
+  }
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
@@ -2130,7 +2154,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_commands_processed", conn_stats.command_cnt);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
-    append("total_pipelined_squashed_commands", conn_stats.squashed_commands);
+    append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);
@@ -2417,13 +2441,8 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  if (has_auth) {
-    if (username == "default" && password == GetPassword()) {
-      cntx->authenticated = true;
-    } else {
-      cntx->SendError(facade::kAuthRejected);
-      return;
-    }
+  if (has_auth && !DoAuth(cntx, username, password)) {
+    return cntx->SendError(facade::kAuthRejected);
   }
 
   if (cntx->req_auth && !cntx->authenticated) {
