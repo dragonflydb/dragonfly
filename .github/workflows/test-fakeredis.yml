@@ -69,9 +69,9 @@ jobs:
         working-directory: tests/fakeredis
         run: |
           poetry run pytest test/${{ matrix.tests }} \
-             --junit-xml=results-${{ matrix.tests }}.xml \ 
-             --html=report-${{ matrix.tests }}.html \
-             --self-contained-html -v
+            --junit-xml=results-${{ matrix.tests }}.xml \
+            --html=report-${{ matrix.tests }}.html \
+            -v
 
       - name: Upload Tests Result xml
         if: always()
