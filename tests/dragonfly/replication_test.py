@@ -62,7 +62,7 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, True, marks=M_STRESS),
     ],
 )
-@pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
+@pytest.mark.parametrize("mode", [False, True])
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
@@ -146,6 +146,7 @@ async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
 
 async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
     logging.debug("Waiting for replicas to finish")
+    await c_master.execute_command("DFLY EXPIRE")  # let master expire all keys
 
     waiting_for = list(c_replicas)
     start = time.time()

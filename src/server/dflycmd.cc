@@ -479,6 +479,10 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
   RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   cntx->transaction->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
     t->GetDbSlice(shard->shard_id()).ExpireAllIfNeeded();
+
+    if (auto journal = EngineShard::tlocal()->journal(); journal) {
+      TriggerJournalWriteToSink();
+    }
     return OpStatus::OK;
   });
 
