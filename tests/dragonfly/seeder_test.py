@@ -23,10 +23,14 @@ async def test_seeder_key_target(async_client: aioredis.Redis):
     async with async_timeout.timeout(1 + 4):
         # Fill with 5k keys, 1% derivation = 50
         await s.run(async_client, target_deviation=0.01)
+
+        await async_client.execute_command("DFLY EXPIRE")
         assert abs(await async_client.dbsize() - 5000) <= 50
 
         # Run 1k ops, ensure key balance stays the "more or less" the same
         await s.run(async_client, target_ops=1000)
+
+        await async_client.execute_command("DFLY EXPIRE")
         assert abs(await async_client.dbsize() - 5000) <= 100
 
         # Run one second until stopped
@@ -38,6 +42,8 @@ async def test_seeder_key_target(async_client: aioredis.Redis):
         # Change key target, 100 is actual minimum because "math breaks"
         s.change_key_target(0)
         await s.run(async_client, target_deviation=0.5)  # don't set low precision with low values
+
+        await async_client.execute_command("DFLY EXPIRE")
         assert await async_client.dbsize() < 200
 
         # Get cmdstat calls

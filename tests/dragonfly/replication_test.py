@@ -201,6 +201,7 @@ disconnect_cases = [
 @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
 async def test_disconnect_replica(
     df_factory: DflyInstanceFactory,
+    df_seeder_factory,
     t_master,
     t_crash_fs,
     t_crash_ss,
