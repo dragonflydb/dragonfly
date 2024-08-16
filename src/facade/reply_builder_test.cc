@@ -205,7 +205,7 @@ RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
 
 TEST_F(RedisReplyBuilderTest, MessageSend) {
   // Test each message that is "sent" to the sink
-  builder_->SendOk();
+  builder_->SinkReplyBuilder2::SendOk();
   ASSERT_EQ(TakePayload(), kOKMessage);
   builder_->StartArray(10);
 

@@ -297,7 +297,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendBulkString(std::string_view str) final;
 
   void StartCollection(unsigned len, CollectionType type) final;
-  void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                        bool with_scores) final;
 
  private:
@@ -472,7 +472,7 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
   }
 }
 
-void InterpreterReplier::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+void InterpreterReplier::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                                          bool with_scores) {
   if (with_scores) {
     if (IsResp3()) {
@@ -1727,7 +1727,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   info->async_cmds.clear();
 
   auto reply = crb.Take();
-  return CapturingReplyBuilder::GetError(reply) ? make_optional(std::move(reply)) : nullopt;
+  return CapturingReplyBuilder::TryExtractError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
@@ -2030,7 +2030,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     result = interpreter->RunFunction(eval_args.sha, &error);
 
     if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
-      auto err_ref = CapturingReplyBuilder::GetError(*err);
+      auto err_ref = CapturingReplyBuilder::TryExtractError(*err);
       result = Interpreter::RUN_ERR;
       error = absl::StrCat(err_ref->first);
     }

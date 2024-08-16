@@ -140,10 +140,6 @@ void SinkReplyBuilder::ExpectReply() {
   has_replied_ = false;
 }
 
-bool SinkReplyBuilder::HasReplied() const {
-  return has_replied_;
-}
-
 void SinkReplyBuilder::SendError(ErrorReply error) {
   if (error.status)
     return SendError(*error.status);
@@ -215,7 +211,8 @@ void SinkReplyBuilder2::SendError(ErrorReply error) {
 
 void SinkReplyBuilder2::SendError(OpStatus status) {
   if (status == OpStatus::OK)
-    return SendOk();
+    return SendSimpleString("OK");
+  //    return SendOk();
   SendError(StatusToMsg(status));
 }
 
@@ -294,7 +291,7 @@ void SinkReplyBuilder2::FinishScope() {
     if (vecs_[i].iov_base >= ib.data() && vecs_[i].iov_base <= ib.data() + ib.size())
       continue;  // this is a piece
 
-    DCHECK_LE(buffer_.AppendLen(), vecs_[i].iov_len);
+    DCHECK_LE(vecs_[i].iov_len, buffer_.AppendLen());
     void* dest = buffer_.AppendBuffer().data();
     memcpy(dest, vecs_[i].iov_base, vecs_[i].iov_len);
     buffer_.CommitWrite(vecs_[i].iov_len);
@@ -529,7 +526,7 @@ void RedisReplyBuilder::SendLong(long num) {
   SendRaw(str);
 }
 
-void RedisReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+void RedisReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                                         bool with_scores) {
   ReplyAggregator agg(this);
   if (!with_scores) {
@@ -919,7 +916,7 @@ void RedisReplyBuilder2Base::SendVerbatimString(std::string_view str, VerbatimFo
   WritePiece(kCRLF);
 }
 
-void RedisReplyBuilder2::SendSimpleStrArr(const facade::ArgRange& strs) {
+void RedisReplyBuilder2::SendSimpleStrArr2(const facade::ArgRange& strs) {
   ReplyScope scope(this);
   StartArray(strs.Size());
   for (std::string_view str : strs)
@@ -960,6 +957,17 @@ void RedisReplyBuilder2::StartArray(unsigned len) {
 
 void RedisReplyBuilder2::SendEmptyArray() {
   StartArray(0);
+}
+
+void RedisReplyBuilder2::SendMGetResponse(SinkReplyBuilder::MGetResponse resp) {
+  ReplyScope scope(this);
+  StartArray(resp.resp_arr.size());
+  for (const auto& entry : resp.resp_arr) {
+    if (entry)
+      SendBulkString(entry->value);
+    else
+      SendNull();
+  }
 }
 
 }  // namespace facade
