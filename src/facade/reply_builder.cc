@@ -291,7 +291,7 @@ void SinkReplyBuilder2::FinishScope() {
     if (vecs_[i].iov_base >= ib.data() && vecs_[i].iov_base <= ib.data() + ib.size())
       continue;  // this is a piece
 
-    DCHECK_LE(buffer_.AppendLen(), vecs_[i].iov_len);
+    DCHECK_LE(vecs_[i].iov_len, buffer_.AppendLen());
     void* dest = buffer_.AppendBuffer().data();
     memcpy(dest, vecs_[i].iov_base, vecs_[i].iov_len);
     buffer_.CommitWrite(vecs_[i].iov_len);

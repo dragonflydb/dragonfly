@@ -418,7 +418,7 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
   void SendNull() override;
 
   void SendSimpleString(std::string_view str) override;
-  void SendBulkString(std::string_view str);  // RESP: Blob String
+  void SendBulkString(std::string_view str) override;  // RESP: Blob String
 
   void SendLong(long val) override;
   void SendDouble(double val) override;  // RESP: Number
