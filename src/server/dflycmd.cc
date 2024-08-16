@@ -481,7 +481,7 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
     t->GetDbSlice(shard->shard_id()).ExpireAllIfNeeded();
 
     if (auto journal = EngineShard::tlocal()->journal(); journal) {
-      TriggerJournalWriteToSink();
+      // TriggerJournalWriteToSink();
     }
     return OpStatus::OK;
   });

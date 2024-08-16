@@ -46,7 +46,7 @@ local function action_del()
     local key = table.remove(keys)
 
     if math.random() < 0.3 then
-        redis.acall('PEXPIRE', key, 1)
+        redis.acall('PEXPIRE', key, math.random(5) + 1)
     else
         redis.acall('DEL', key)
     end
