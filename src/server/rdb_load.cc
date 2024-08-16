@@ -2597,7 +2597,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   service_->DispatchCommand(absl::MakeSpan(arg_vec), &cntx);
 
   auto response = crb.Take();
-  if (auto err = facade::CapturingReplyBuilder::GetError(response); err) {
+  if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
     LOG(ERROR) << "Bad index definition: " << def << " " << err->first;
   }
 }

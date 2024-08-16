@@ -1720,7 +1720,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   info->async_cmds.clear();
 
   auto reply = crb.Take();
-  return CapturingReplyBuilder::GetError(reply) ? make_optional(std::move(reply)) : nullopt;
+  return CapturingReplyBuilder::TryExtractError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
@@ -2023,7 +2023,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     result = interpreter->RunFunction(eval_args.sha, &error);
 
     if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
-      auto err_ref = CapturingReplyBuilder::GetError(*err);
+      auto err_ref = CapturingReplyBuilder::TryExtractError(*err);
       result = Interpreter::RUN_ERR;
       error = absl::StrCat(err_ref->first);
     }

@@ -221,7 +221,8 @@ void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {
   current_ = monostate{};
 }
 
-optional<CapturingReplyBuilder::ErrorRef> CapturingReplyBuilder::GetError(const Payload& pl) {
+optional<CapturingReplyBuilder::ErrorRef> CapturingReplyBuilder::TryExtractError(
+    const Payload& pl) {
   if (auto* err = get_if<Error>(&pl); err != nullptr) {
     return ErrorRef{err->first, err->second};
   }
