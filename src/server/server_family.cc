@@ -869,7 +869,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 }
 
 void ServerFamily::LoadFromSnapshot() {
-  loading_stats_.restore_count++;
+  {
+    std::lock_guard lk{loading_stats_mu_};
+    loading_stats_.restore_count++;
+  }
 
   const auto load_path_result =
       snapshot_storage_->LoadPath(GetFlag(FLAGS_dir), GetFlag(FLAGS_dbfilename));
@@ -883,6 +886,7 @@ void ServerFamily::LoadFromSnapshot() {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
       LOG(WARNING) << "Load snapshot: No snapshot found";
     } else {
+      std::lock_guard lk{loading_stats_mu_};
       loading_stats_.failed_restore_count++;
       LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
     }
@@ -909,6 +913,8 @@ void ServerFamily::Shutdown() {
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
       GenericError ec = DoSave();
+
+      std::lock_guard lk{loading_stats_mu_};
       loading_stats_.backup_count++;
 
       if (ec) {
@@ -1069,6 +1075,8 @@ void ServerFamily::SnapshotScheduling() {
     };
 
     GenericError ec = DoSave();
+
+    std::lock_guard lk{loading_stats_mu_};
     loading_stats_.backup_count++;
 
     if (ec) {
@@ -2055,7 +2063,10 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     }
   }
 
-  result.loading_stats = loading_stats_;
+  {
+    std::lock_guard lk{loading_stats_mu_};
+    result.loading_stats = loading_stats_;
+  }
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
