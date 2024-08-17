@@ -56,6 +56,8 @@ class GenericFamily {
 
   static void Rename(CmdArgList args, ConnectionContext* cntx);
   static void RenameNx(CmdArgList args, ConnectionContext* cntx);
+  static void ExpireTime(CmdArgList args, ConnectionContext* cntx);
+  static void PExpireTime(CmdArgList args, ConnectionContext* cntx);
   static void Ttl(CmdArgList args, ConnectionContext* cntx);
   static void Pttl(CmdArgList args, ConnectionContext* cntx);
 
@@ -71,8 +73,11 @@ class GenericFamily {
 
   static ErrorReply RenameGeneric(CmdArgList args, bool destination_should_not_exist,
                                   ConnectionContext* cntx);
+
+  static void ExpireTimeGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
   static void TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
 
+  static OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, std::string_view key);
   static OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, std::string_view key);
   static OpResult<void> OpRen(const OpArgs& op_args, std::string_view from, std::string_view to,
                               bool destination_should_not_exist);
