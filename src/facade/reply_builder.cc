@@ -31,6 +31,9 @@ inline iovec constexpr IoVec(std::string_view s) {
 constexpr char kCRLF[] = "\r\n";
 constexpr char kErrPref[] = "-ERR ";
 constexpr char kSimplePref[] = "+";
+constexpr char kLengthPrefix[] = "$";
+constexpr char kDoublePref[] = ",";
+constexpr char kLongPref[] = ":";
 constexpr char kNullStringR2[] = "$-1\r\n";
 constexpr char kNullStringR3[] = "_\r\n";
 
@@ -41,6 +44,27 @@ DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 
 const char* NullString(bool resp3) {
   return resp3 ? "_\r\n" : "$-1\r\n";
+}
+
+template <typename T> size_t piece_size(const T& v) {
+  if constexpr (is_array_v<T>)
+    return ABSL_ARRAYSIZE(v) - 1;  // expect null terminated
+  else if constexpr (is_integral_v<T>)
+    return absl::numbers_internal::kFastToBufferSize;
+  else  // string_view
+    return v.size();
+}
+
+template <size_t S> char* write_piece(char* dest, const char (&arr)[S]) {
+  return (char*)memcpy(dest, arr, S - 1) + (S - 1);
+}
+
+template <typename T> enable_if_t<is_integral_v<T>, char*> write_piece(char* dest, T num) {
+  return absl::numbers_internal::FastIntToBuffer(num, dest);
+}
+
+char* write_piece(char* dest, string_view str) {
+  return (char*)memcpy(dest, str.data(), str.size()) + str.size();
 }
 
 }  // namespace
@@ -221,29 +245,22 @@ void SinkReplyBuilder2::CloseConnection() {
     ec_ = std::make_error_code(std::errc::connection_aborted);
 }
 
-char* SinkReplyBuilder2::ReservePiece(size_t size) {
-  if (buffer_.AppendLen() <= size)
+template <typename... Ts> void SinkReplyBuilder2::WritePieces(Ts&&... pieces) {
+  if (buffer_.AppendLen() <= (piece_size(pieces) + ...))
     Flush();
 
   char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
-
-  // Start new vec for piece if last one dones't point at buffer tail
   if (vecs_.empty() || ((char*)vecs_.back().iov_base) + vecs_.back().iov_len != dest)
     NextVec({dest, 0});
 
-  return dest;
-}
+  dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
+  char* ptr = dest;
+  ([&]() { ptr = write_piece(ptr, pieces); }(), ...);
 
-void SinkReplyBuilder2::CommitPiece(size_t size) {
-  buffer_.CommitWrite(size);
-  vecs_.back().iov_len += size;
-  total_size_ += size;
-}
-
-void SinkReplyBuilder2::WritePiece(std::string_view str) {
-  char* dest = ReservePiece(str.size());
-  memcpy(dest, str.data(), str.size());
-  CommitPiece(str.size());
+  size_t written = ptr - dest;
+  buffer_.CommitWrite(written);
+  vecs_.back().iov_len += written;
+  total_size_ += written;
 }
 
 void SinkReplyBuilder2::WriteRef(std::string_view str) {
@@ -258,6 +275,11 @@ void SinkReplyBuilder2::Flush() {
   uint64_t before_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
+
+  // VLOG(0) << vecs_.size();
+  // for (iovec v: vecs_)
+  //   VLOG(0) << "Flushing " << v.iov_len << "::" << string_view((char*) v.iov_base, v.iov_len) <<
+  //   "::";
 
   if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
@@ -378,10 +400,10 @@ MCReplyBuilder2::MCReplyBuilder2(::io::Sink* sink) : SinkReplyBuilder2(sink), no
 void MCReplyBuilder2::SendValue(std::string_view key, std::string_view value, uint64_t mc_ver,
                                 uint32_t mc_flag) {
   ReplyScope scope(this);
-  Write("VALUE ", key, " ", absl::StrCat(mc_flag), " ", absl::StrCat(value.size()));
-  if (mc_ver)
-    Write(" ", absl::StrCat(mc_ver));
-  Write(value, kCRLF);
+  // Write("VALUE ", key, " ", absl::StrCat(mc_flag), " ", absl::StrCat(value.size()));
+  // if (mc_ver)
+  //   Write(" ", absl::StrCat(mc_ver));
+  // Write(value, kCRLF);
 }
 
 void MCReplyBuilder2::SendSimpleString(std::string_view str) {
@@ -389,7 +411,7 @@ void MCReplyBuilder2::SendSimpleString(std::string_view str) {
     return;
 
   ReplyScope scope(this);
-  Write(str, kCRLF);
+  // Write(str, kCRLF);
 }
 
 void MCReplyBuilder2::SendStored() {
@@ -422,8 +444,8 @@ void MCReplyBuilder2::SendNotFound() {
 
 void MCReplyBuilder2::SendSimplePiece(std::string&& str) {
   ReplyScope scope(this);
-  WritePiece(str);
-  WritePiece(kCRLF);
+  // WritePiece(str);
+  // WritePiece(kCRLF);
 }
 
 char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len) {
@@ -817,24 +839,27 @@ void ReqSerializer::SendCommand(std::string_view str) {
 
 void RedisReplyBuilder2Base::SendNull() {
   ReplyScope scope(this);
-  resp3_ ? Write(kNullStringR3) : Write(kNullStringR2);
+  resp3_ ? WritePieces(kNullStringR3) : WritePieces(kNullStringR2);
 }
 
 void RedisReplyBuilder2Base::SendSimpleString(std::string_view str) {
   ReplyScope scope(this);
-  Write(kSimplePref, str, kCRLF);
+  WritePieces(kSimplePref, str, kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendBulkString(std::string_view str) {
   ReplyScope scope(this);
-  WriteIntWithPrefix('$', str.size());
-  Write(kCRLF, str, kCRLF);
+  if (str.size() <= kMaxInlineSize)
+    return WritePieces(kLengthPrefix, uint32_t(str.size()), kCRLF, str, kCRLF);
+
+  WritePieces(kLengthPrefix, uint32_t(str.size()), kCRLF);
+  WriteRef(str);
+  WritePieces(kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendLong(long val) {
   ReplyScope scope(this);
-  WriteIntWithPrefix(':', val);
-  Write(kCRLF);
+  WritePieces(kLongPref, val, kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendDouble(double val) {
@@ -846,17 +871,17 @@ void RedisReplyBuilder2Base::SendDouble(double val) {
     return SendBulkString(val_str);
 
   ReplyScope scope(this);
-  Write(",", val_str, kCRLF);
+  WritePieces(kDoublePref, val_str, kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendNullArray() {
   ReplyScope scope(this);
-  Write("*-1", kCRLF);
+  WritePieces("*-1", kCRLF);
 }
 
-constexpr static const char START_SYMBOLS2[4] = {'*', '~', '%', '>'};
-static_assert(START_SYMBOLS2[RedisReplyBuilder2Base::MAP] == '%' &&
-              START_SYMBOLS2[RedisReplyBuilder2Base::SET] == '~');
+constexpr static const char START_SYMBOLS2[4][2] = {"*", "~", "%", ">"};
+static_assert(START_SYMBOLS2[RedisReplyBuilder2Base::MAP][0] == '%' &&
+              START_SYMBOLS2[RedisReplyBuilder2Base::SET][0] == '~');
 
 void RedisReplyBuilder2Base::StartCollection(unsigned len, CollectionType ct) {
   if (!IsResp3()) {  // RESP2 supports only arrays
@@ -865,16 +890,7 @@ void RedisReplyBuilder2Base::StartCollection(unsigned len, CollectionType ct) {
     ct = ARRAY;
   }
   ReplyScope scope(this);
-  WriteIntWithPrefix(START_SYMBOLS2[ct], len);
-  WritePiece(kCRLF);
-}
-
-void RedisReplyBuilder2Base::WriteIntWithPrefix(char prefix, int64_t val) {
-  char* dest = ReservePiece(absl::numbers_internal::kFastToBufferSize + 1);
-  char* next = dest;
-  *next++ = prefix;
-  next = absl::numbers_internal::FastIntToBuffer(val, next);
-  CommitPiece(next - dest);
+  WritePieces(START_SYMBOLS2[ct], len, kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendError(std::string_view str, std::string_view type) {
@@ -888,9 +904,9 @@ void RedisReplyBuilder2Base::SendError(std::string_view str, std::string_view ty
   tl_facade_stats->reply_stats.err_count[type]++;
 
   if (str[0] != '-')
-    WritePiece(kErrPref);
-  WritePiece(str);
-  WritePiece(kCRLF);
+    WritePieces("-ERR ", str, kCRLF);
+  else
+    WritePieces(str, kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendProtocolError(std::string_view str) {
@@ -909,11 +925,12 @@ void RedisReplyBuilder2Base::SendVerbatimString(std::string_view str, VerbatimFo
     return SendBulkString(str);
 
   ReplyScope scope(this);
-  WriteIntWithPrefix('=', str.size() + 4);
-  Write(kCRLF);
-  WritePiece(format == VerbatimFormat::MARKDOWN ? "mkd:" : "txt:");
-  Write(str);
-  WritePiece(kCRLF);
+  WritePieces('=', str.size() + 4, kCRLF, format == VerbatimFormat::MARKDOWN ? "mkd:" : "txt:");
+  if (str.size() <= kMaxInlineSize)
+    WritePieces(str);
+  else
+    WriteRef(str);
+  WritePieces(kCRLF);
 }
 
 void RedisReplyBuilder2::SendSimpleStrArr2(const facade::ArgRange& strs) {

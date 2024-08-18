@@ -250,26 +250,11 @@ class SinkReplyBuilder2 {
   virtual void SendProtocolError(std::string_view str) = 0;
 
  protected:
-  void WriteI(std::string_view str) {
-    str.size() > kMaxInlineSize ? WriteRef(str) : WritePiece(str);
-  }
-
-  // Constexpr arrays are assumed to be protocol control sequences, stash them as pieces
-  template <size_t S> void WriteI(const char (&arr)[S]) {
-    WritePiece(std::string_view{arr, S - 1});  // we assume null termination
-  }
-
-  template <typename... Args> void Write(Args&&... strs) {
-    (WriteI(strs), ...);
-  }
+  template <typename... Ts>
+  void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
+  void WriteRef(std::string_view str);  // Add iovec bypassing buffer
 
   void FinishScope();  // Called when scope ends
-
-  char* ReservePiece(size_t size);        // Reserve size bytes from buffer
-  void CommitPiece(size_t size);          // Mark size bytes from buffer as used
-  void WritePiece(std::string_view str);  // Reserve + memcpy + Commit
-
-  void WriteRef(std::string_view str);  // Add iovec bypassing buffer
   void NextVec(std::string_view str);
 
  private:
@@ -470,8 +455,6 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
   }
 
  private:
-  void WriteIntWithPrefix(char prefix, int64_t val);  // FastIntToBuffer directly into ReservePiece
-
   std::vector<SinkReplyBuilder2::ReplyAggregator> aggregators_;
   bool resp3_ = false;
 };
