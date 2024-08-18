@@ -60,6 +60,7 @@ template <size_t S> char* write_piece(char* dest, const char (&arr)[S]) {
 }
 
 template <typename T> enable_if_t<is_integral_v<T>, char*> write_piece(char* dest, T num) {
+  static_assert(!is_same_v<T, char>, "Use arrays for single chars");
   return absl::numbers_internal::FastIntToBuffer(num, dest);
 }
 
@@ -246,9 +247,10 @@ void SinkReplyBuilder2::CloseConnection() {
 }
 
 template <typename... Ts> void SinkReplyBuilder2::WritePieces(Ts&&... pieces) {
-  if (buffer_.AppendLen() <= (piece_size(pieces) + ...))
-    Flush();
+  if (size_t required = (piece_size(pieces) + ...); buffer_.AppendLen() <= required)
+    Flush(required);
 
+  // Ensure last iovec points to buffer segment
   char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
   if (vecs_.empty() || ((char*)vecs_.back().iov_base) + vecs_.back().iov_len != dest)
     NextVec({dest, 0});
@@ -268,18 +270,30 @@ void SinkReplyBuilder2::WriteRef(std::string_view str) {
   total_size_ += str.size();
 }
 
-void SinkReplyBuilder2::Flush() {
+void SinkReplyBuilder2::Flush(size_t expected_buffer_cap) {
+  Send();
+
+  // Grow backing buffer if was at least half full and still below it's max size
+  if (buffer_.InputLen() * 2 > buffer_.Capacity() && buffer_.Capacity() * 2 <= kMaxBufferSize)
+    expected_buffer_cap = max(expected_buffer_cap, buffer_.Capacity() * 2);
+
+  total_size_ = 0;
+  buffer_.Clear();
+  vecs_.clear();
+  guaranteed_pieces_ = 0;
+
+  DCHECK_LE(expected_buffer_cap, kMaxBufferSize);
+  if (expected_buffer_cap > buffer_.Capacity())
+    buffer_.Reserve(expected_buffer_cap);
+}
+
+void SinkReplyBuilder2::Send() {
   auto& reply_stats = tl_facade_stats->reply_stats;
 
   send_active_ = true;
   uint64_t before_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
-
-  // VLOG(0) << vecs_.size();
-  // for (iovec v: vecs_)
-  //   VLOG(0) << "Flushing " << v.iov_len << "::" << string_view((char*) v.iov_base, v.iov_len) <<
-  //   "::";
 
   if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
@@ -288,14 +302,6 @@ void SinkReplyBuilder2::Flush() {
   reply_stats.send_stats.count++;
   reply_stats.send_stats.total_duration += (after_ns - before_ns) / 1'000;
   send_active_ = false;
-
-  if (buffer_.InputLen() * 2 > buffer_.Capacity())  // If needed, grow backing buffer
-    buffer_.Reserve(std::min(kMaxBufferSize, buffer_.Capacity() * 2));
-
-  total_size_ = 0;
-  buffer_.Clear();
-  vecs_.clear();
-  guaranteed_pieces_ = 0;
 }
 
 void SinkReplyBuilder2::FinishScope() {
@@ -305,7 +311,7 @@ void SinkReplyBuilder2::FinishScope() {
   // Check if we have enough space to copy all refs to buffer
   size_t ref_bytes = total_size_ - buffer_.InputLen();
   if (ref_bytes > buffer_.AppendLen())
-    return Flush();
+    return Flush(ref_bytes);
 
   // Copy all extenral references to buffer to safely keep batching
   for (size_t i = guaranteed_pieces_; i < vecs_.size(); i++) {
@@ -400,10 +406,16 @@ MCReplyBuilder2::MCReplyBuilder2(::io::Sink* sink) : SinkReplyBuilder2(sink), no
 void MCReplyBuilder2::SendValue(std::string_view key, std::string_view value, uint64_t mc_ver,
                                 uint32_t mc_flag) {
   ReplyScope scope(this);
-  // Write("VALUE ", key, " ", absl::StrCat(mc_flag), " ", absl::StrCat(value.size()));
-  // if (mc_ver)
-  //   Write(" ", absl::StrCat(mc_ver));
-  // Write(value, kCRLF);
+  WritePieces("VALUE ", key, " ", mc_flag, " ", value.size());
+  if (mc_ver)
+    WritePieces(" ", mc_ver);
+
+  if (value.size() <= kMaxInlineSize) {
+    WritePieces(value, kCRLF);
+  } else {
+    WriteRef(value);
+    WritePieces(kCRLF);
+  }
 }
 
 void MCReplyBuilder2::SendSimpleString(std::string_view str) {
@@ -411,7 +423,7 @@ void MCReplyBuilder2::SendSimpleString(std::string_view str) {
     return;
 
   ReplyScope scope(this);
-  // Write(str, kCRLF);
+  WritePieces(str, kCRLF);
 }
 
 void MCReplyBuilder2::SendStored() {
@@ -419,19 +431,19 @@ void MCReplyBuilder2::SendStored() {
 }
 
 void MCReplyBuilder2::SendLong(long val) {
-  SendSimplePiece(absl::StrCat(val));
+  SendSimpleString(absl::StrCat(val));
 }
 
 void MCReplyBuilder2::SendError(string_view str, std::string_view type) {
-  SendSimplePiece(absl::StrCat("SERVER_ERROR ", str));
+  SendSimpleString(absl::StrCat("SERVER_ERROR ", str));
 }
 
 void MCReplyBuilder2::SendProtocolError(std::string_view str) {
-  SendSimplePiece(absl::StrCat("CLIENT_ERROR ", str));
+  SendSimpleString(absl::StrCat("CLIENT_ERROR ", str));
 }
 
 void MCReplyBuilder2::SendClientError(string_view str) {
-  SendSimplePiece(absl::StrCat("CLIENT_ERROR", str));
+  SendSimpleString(absl::StrCat("CLIENT_ERROR", str));
 }
 
 void MCReplyBuilder2::SendSetSkipped() {
@@ -440,12 +452,6 @@ void MCReplyBuilder2::SendSetSkipped() {
 
 void MCReplyBuilder2::SendNotFound() {
   SendSimpleString("NOT_FOUND");
-}
-
-void MCReplyBuilder2::SendSimplePiece(std::string&& str) {
-  ReplyScope scope(this);
-  // WritePiece(str);
-  // WritePiece(kCRLF);
 }
 
 char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len) {
@@ -844,7 +850,12 @@ void RedisReplyBuilder2Base::SendNull() {
 
 void RedisReplyBuilder2Base::SendSimpleString(std::string_view str) {
   ReplyScope scope(this);
-  WritePieces(kSimplePref, str, kCRLF);
+  if (str.size() <= kMaxInlineSize * 2)
+    return WritePieces(kSimplePref, str, kCRLF);
+
+  WritePieces(kSimplePref);
+  WriteRef(str);
+  WritePieces(kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendBulkString(std::string_view str) {
@@ -925,7 +936,7 @@ void RedisReplyBuilder2Base::SendVerbatimString(std::string_view str, VerbatimFo
     return SendBulkString(str);
 
   ReplyScope scope(this);
-  WritePieces('=', str.size() + 4, kCRLF, format == VerbatimFormat::MARKDOWN ? "mkd:" : "txt:");
+  WritePieces("=", str.size() + 4, kCRLF, format == VerbatimFormat::MARKDOWN ? "mkd:" : "txt:");
   if (str.size() <= kMaxInlineSize)
     WritePieces(str);
   else

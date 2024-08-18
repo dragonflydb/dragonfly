@@ -206,7 +206,7 @@ class SinkReplyBuilder2 {
     ~ReplyAggregator();
   };
 
-  void Flush();  // Send all accumulated data and reset to clear state
+  void Flush(size_t expected_buffer_cap = 0);  // Send all accumulated data and reset to clear state
 
   std::error_code GetError() const {
     return ec_;
@@ -256,6 +256,8 @@ class SinkReplyBuilder2 {
 
   void FinishScope();  // Called when scope ends
   void NextVec(std::string_view str);
+
+  void Send();
 
  private:
   io::Sink* sink_;
@@ -331,8 +333,6 @@ class MCReplyBuilder2 : public SinkReplyBuilder2 {
   }
 
  private:
-  void SendSimplePiece(std::string&& str);  // Send simple string as piece (for short lived data)
-
   bool noreply_ = false;
 };
 
