@@ -447,8 +447,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, stri
                                                        unsigned req_obj_type) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats);
   if (res.ok()) {
-    auto it = ConstIterator(res->it, StringOrView::FromView(key));
-    return it;
+    return ConstIterator(res->it, StringOrView::FromView(key));
   }
   return res.status();
 }
@@ -549,9 +548,9 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   // We do not use TopKey feature, so disable it until we redesign it.
   // db.top_keys.Touch(key);
 
-  if (DelEmptyPrimeValue(cntx, Iterator(res.it, StringOrView::FromView(key)))) {
-    return OpStatus::KEY_NOTFOUND;
-  }
+  // if (DelEmptyPrimeValue(cntx, Iterator(res.it, StringOrView::FromView(key)))) {
+  //   return OpStatus::KEY_NOTFOUND;
+  // }
   return res;
 }
 

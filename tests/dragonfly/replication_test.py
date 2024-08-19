@@ -28,12 +28,12 @@ M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
 
 
-async def wait_for_replicas_state(*clients, state="online", timeout=0.05):
+async def wait_for_replicas_state(*clients, state="online", node_role="slave", timeout=0.05):
     """Wait until all clients (replicas) reach passed state"""
     while len(clients) > 0:
         await asyncio.sleep(timeout)
         roles = await asyncio.gather(*(c.role() for c in clients))
-        clients = [c for c, role in zip(clients, roles) if role[0] != "slave" or role[3] != state]
+        clients = [c for c, role in zip(clients, roles) if role[0] != node_role or role[3] != state]
 
 
 """
@@ -2414,18 +2414,63 @@ async def test_replicate_old_master(
 
 
 @pytest.mark.asyncio
-async def test_empty_hash_as_zipmap_bug(async_client):
-    await async_client.execute_command("HSET foo a_field a_value")
-    await async_client.execute_command("HSETEX foo 1 b_field b_value")
-    await async_client.execute_command("HDEL foo a_field")
+async def test_empty_hash_map_replicate_old_master(df_factory):
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
 
-    await asyncio.sleep(2)
+    dfly_version = "v1.21.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+
+    master = df_factory.create(path=released_dfly_path)
+    master.clear_max_chunk_flag()
+    master.start()
+
+    replica = df_factory.create(path=released_dfly_path)
+    replica.clear_max_chunk_flag()
+    replica.start()
+
+    c_master = master.client()
+    # Create an empty hashmap
+    await c_master.execute_command("HSET foo a_field a_value")
+    await c_master.execute_command("HSETEX foo 2 b_field b_value")
+    await c_master.execute_command("HDEL foo a_field")
 
     @assert_eventually
     async def check_if_empty():
-        assert await async_client.execute_command("HGETALL foo") == []
+        assert await c_master.execute_command("HGETALL foo") == []
 
     await check_if_empty()
+    assert await c_master.execute_command(f"EXISTS foo") == 1
 
-    # Key does not exist and it's empty
-    assert await async_client.execute_command(f"EXISTS foo") == 0
+    c_replica = replica.client()
+    # Round one
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica, state="stable_sync", node_role="replica")
+
+    assert await c_replica.execute_command(f"EXISTS foo") == 1
+    # Replica is now master
+    await c_replica.execute_command("REPLTAKEOVER 1")
+    master.start()
+    c_master = master.client()
+    # Master is now replica
+    await c_master.execute_command(f"REPLICAOF localhost {replica.port}")
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_master, state="stable_sync", node_role="replica")
+    # Promote master back to master
+    await c_master.execute_command("REPLTAKEOVER 1")
+
+    # New replica with latest version that includes the bug fix -- we should be able to load
+    replica = df_factory.create()
+    replica.start()
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica)
+    assert await c_replica.execute_command(f"EXISTS foo") == 0
+    assert await c_replica.execute_command("REPLTAKEOVER 1") == "OK"
+    role, node = await c_replica.execute_command("role")
+    assert role == "master"
+
+    await close_clients(c_master, c_replica)
