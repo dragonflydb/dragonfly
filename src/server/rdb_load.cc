@@ -2472,6 +2472,12 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       stop_early_ = true;
       break;
     }
+    // We need this extra check because we don't return empty_key
+    if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+      LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
+                 << item->val.rdb_type;
+      continue;
+    }
 
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
       continue;

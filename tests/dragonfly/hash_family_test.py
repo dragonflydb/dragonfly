@@ -9,8 +9,6 @@ async def test_empty_hash_as_zipmap_bug(async_client):
     await async_client.execute_command("HSETEX foo 1 b_field b_value")
     await async_client.execute_command("HDEL foo a_field")
 
-    await asyncio.sleep(2)
-
     @assert_eventually
     async def check_if_empty():
         assert await async_client.execute_command("HGETALL foo") == []
