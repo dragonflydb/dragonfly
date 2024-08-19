@@ -484,7 +484,6 @@ TEST_F(DflyEngineTest, Bug207) {
     ASSERT_EQ(resp, "OK");
   }
 }
-#endif
 
 TEST_F(DflyEngineTest, StickyEviction) {
   shard_set->TEST_EnableCacheMode();
@@ -524,6 +523,8 @@ TEST_F(DflyEngineTest, StickyEviction) {
     ASSERT_THAT(Run({"exists", StrCat("key", i)}), IntArg(1));
   }
 }
+
+#endif
 
 TEST_F(DflyEngineTest, PSubscribe) {
   single_response_ = false;
