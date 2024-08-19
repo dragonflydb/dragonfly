@@ -413,7 +413,7 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
   }
 
   if (ec) {
-    LOG(ERROR) << "Stash failed immediately" << ec.message();
+    LOG_IF(ERROR, ec != errc::file_too_large) << "Stash failed immediately" << ec.message();
     visit([this](auto id) { op_manager_->ClearIoPending(id); }, id);
     return false;
   }

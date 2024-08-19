@@ -36,12 +36,13 @@ void ExtentTree::Add(size_t start, size_t len) {
       merged = true;
       len_extents_.erase(pair{prev->second - prev->first, prev->first});
 
-      if (end == it->first) {  // [first, end = it->first, it->second)
+      // check if we join: prev, [start, end), [it->first, it->second]
+      if (it != extents_.end() && end == it->first) {  // [first, end = it->first, it->second)
         prev->second = it->second;
         len_extents_.erase(pair{it->second - it->first, it->first});
         extents_.erase(it);
       } else {
-        prev->second = end;
+        prev->second = end;  // just extend prev
       }
       len_extents_.emplace(prev->second - prev->first, prev->first);
     }

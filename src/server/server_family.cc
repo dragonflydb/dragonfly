@@ -874,7 +874,7 @@ void ServerFamily::LoadFromSnapshot() {
   if (load_path_result) {
     const std::string load_path = *load_path_result;
     if (!load_path.empty()) {
-      load_result_ = Load(load_path);
+      load_result_ = Load(load_path, LoadExistingKeys::kFail);
     }
   } else {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
@@ -935,13 +935,40 @@ struct AggregateLoadResult {
   std::atomic<size_t> keys_read;
 };
 
+void ServerFamily::FlushAll(ConnectionContext* cntx) {
+  const CommandId* cid = service_.FindCmd("FLUSHALL");
+  boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
+  flush_trans->InitByArgs(cntx->ns, 0, {});
+  VLOG(1) << "Performing flush";
+  error_code ec = Drakarys(flush_trans.get(), DbSlice::kDbAll);
+  if (ec) {
+    LOG(ERROR) << "Error flushing db " << ec.message();
+  }
+}
+
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& load_path) {
+std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_path,
+                                                            LoadExistingKeys existing_keys) {
+  fs::path path(load_path);
+
+  if (load_path.empty()) {
+    fs::path dir_path(GetFlag(FLAGS_dir));
+    string filename = GetFlag(FLAGS_dbfilename);
+    dir_path.append(filename);
+    path = dir_path;
+  }
+
   DCHECK_GT(shard_count(), 0u);
 
-  auto paths_result = snapshot_storage_->LoadPaths(load_path);
+  if (ServerState::tlocal() && !ServerState::tlocal()->is_master) {
+    fb2::Future<GenericError> future;
+    future.Resolve(string("Replica cannot load data"));
+    return future;
+  }
+
+  auto paths_result = snapshot_storage_->LoadPaths(path.generic_string());
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
@@ -952,7 +979,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& l
 
   std::vector<std::string> paths = *paths_result;
 
-  LOG(INFO) << "Loading " << load_path;
+  LOG(INFO) << "Loading " << path.generic_string();
 
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
@@ -979,8 +1006,8 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& l
       proactor = pool.GetNextProactor();
     }
 
-    auto load_fiber = [this, aggregated_result, path = std::move(path)]() {
-      auto load_result = LoadRdb(path);
+    auto load_fiber = [this, aggregated_result, existing_keys, path = std::move(path)]() {
+      auto load_result = LoadRdb(path, existing_keys);
       if (load_result.has_value())
         aggregated_result->keys_read.fetch_add(*load_result);
       else
@@ -1040,13 +1067,18 @@ void ServerFamily::SnapshotScheduling() {
   }
 }
 
-io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file) {
+io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
+                                         LoadExistingKeys existing_keys) {
   error_code ec;
   io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
   if (res) {
     io::FileSource fs(*res);
 
     RdbLoader loader{&service_};
+    if (existing_keys == LoadExistingKeys::kOverride) {
+      loader.SetOverrideExistingKeys(true);
+    }
+
     ec = loader.Load(&fs);
     if (!ec) {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
@@ -2154,7 +2186,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("total_commands_processed", conn_stats.command_cnt);
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
-    append("total_pipelined_squashed_commands", conn_stats.squashed_commands);
+    append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);

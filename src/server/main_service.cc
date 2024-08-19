@@ -99,9 +99,15 @@ ABSL_FLAG(dfly::MemoryBytesFlag, maxmemory, dfly::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database. "
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
+
 ABSL_FLAG(double, oom_deny_ratio, 1.1,
           "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
           "memory is above this value");
+
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
+          "Maximum size of a value that may be serialized at once during snapshotting or full "
+          "sync. Values bigger than this threshold will be serialized using streaming "
+          "serialization. 0 - to disable streaming mode");
 
 namespace dfly {
 
@@ -291,7 +297,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendBulkString(std::string_view str) final;
 
   void StartCollection(unsigned len, CollectionType type) final;
-  void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                        bool with_scores) final;
 
  private:
@@ -466,7 +472,7 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
   }
 }
 
-void InterpreterReplier::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+void InterpreterReplier::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                                          bool with_scores) {
   if (with_scores) {
     if (IsResp3()) {
@@ -871,6 +877,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("dbfilename");
   config_registry.RegisterMutable("table_growth_margin");
 
+  serialization_max_chunk_size = GetFlag(FLAGS_serialization_max_chunk_size);
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
     LOG_IF(WARNING, shard_num > pp_.size())
@@ -1398,6 +1405,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
   intrusive_ptr<Transaction> dist_trans;
 
   size_t dispatched = 0;
+  auto* ss = dfly::ServerState::tlocal();
 
   auto perform_squash = [&] {
     if (stored_cmds.empty())
@@ -1416,11 +1424,12 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
+    ss->stats.squashed_commands += stored_cmds.size();
     stored_cmds.clear();
   };
 
   // Don't even start when paused. We can only continue if DispatchTracker is aware of us running.
-  if (dfly::ServerState::tlocal()->IsPaused())
+  if (ss->IsPaused())
     return 0;
 
   for (auto args : args_list) {
@@ -1451,7 +1460,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     perform_squash();
 
     // Stop accumulating when a pause is requested, fall back to regular dispatch
-    if (dfly::ServerState::tlocal()->IsPaused())
+    if (ss->IsPaused())
       break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
@@ -1718,7 +1727,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   info->async_cmds.clear();
 
   auto reply = crb.Take();
-  return CapturingReplyBuilder::GetError(reply) ? make_optional(std::move(reply)) : nullopt;
+  return CapturingReplyBuilder::TryExtractError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
@@ -2021,7 +2030,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     result = interpreter->RunFunction(eval_args.sha, &error);
 
     if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
-      auto err_ref = CapturingReplyBuilder::GetError(*err);
+      auto err_ref = CapturingReplyBuilder::TryExtractError(*err);
       result = Interpreter::RUN_ERR;
       error = absl::StrCat(err_ref->first);
     }

@@ -127,6 +127,7 @@ if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(multi_test PRIVATE SANITIZERS)
   target_compile_definitions(search_family_test PRIVATE SANITIZERS)
   target_compile_definitions(json_family_test PRIVATE SANITIZERS)
+  target_compile_definitions(dragonfly_test PRIVATE SANITIZERS)
 endif()
 cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 

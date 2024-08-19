@@ -57,7 +57,7 @@ async def test_consistency(df_factory, format: str, seeder_opts: dict):
     await async_client.execute_command("SAVE", format)
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
@@ -85,7 +85,7 @@ async def test_multidb(df_factory, format: str):
     await async_client.execute_command("SAVE", format)
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
@@ -271,7 +271,7 @@ async def test_s3_snapshot(self, async_client):
         await async_client.execute_command("SAVE DF snapshot")
         assert await async_client.flushall()
         await async_client.execute_command(
-            "DEBUG LOAD "
+            "DFLY LOAD "
             + os.environ["DRAGONFLY_S3_BUCKET"]
             + str(self.tmp_dir)
             + "/snapshot-summary.dfs"
@@ -451,7 +451,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE", "DF")
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         "tiered-entries-summary.dfs",
     )
@@ -488,7 +488,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
     load_task = asyncio.create_task(
         async_client.execute_command(
-            "DEBUG",
+            "DFLY",
             "LOAD",
             "tiered-entries-summary.dfs",
         )

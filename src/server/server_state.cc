@@ -27,25 +27,29 @@ ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 16 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 17 * 8, "Stats size mismatch");
 
-  this->eval_io_coordination_cnt += other.eval_io_coordination_cnt;
-  this->eval_shardlocal_coordination_cnt += other.eval_shardlocal_coordination_cnt;
-  this->eval_squashed_flushes += other.eval_squashed_flushes;
+#define ADD(x) this->x += (other.x)
 
-  this->tx_global_cnt += other.tx_global_cnt;
-  this->tx_normal_cnt += other.tx_normal_cnt;
-  this->tx_inline_runs += other.tx_inline_runs;
-  this->tx_schedule_cancel_cnt += other.tx_schedule_cancel_cnt;
+  ADD(eval_io_coordination_cnt);
 
-  this->multi_squash_executions += other.multi_squash_executions;
-  this->multi_squash_exec_hop_usec += other.multi_squash_exec_hop_usec;
-  this->multi_squash_exec_reply_usec += other.multi_squash_exec_reply_usec;
+  ADD(eval_shardlocal_coordination_cnt);
+  ADD(eval_squashed_flushes);
 
-  this->blocked_on_interpreter += other.blocked_on_interpreter;
-  this->rdb_save_usec += other.rdb_save_usec;
-  this->rdb_save_count += other.rdb_save_count;
-  this->oom_error_cmd_cnt += other.oom_error_cmd_cnt;
+  ADD(tx_global_cnt);
+  ADD(tx_normal_cnt);
+  ADD(tx_inline_runs);
+  ADD(tx_schedule_cancel_cnt);
+
+  ADD(multi_squash_executions);
+  ADD(multi_squash_exec_hop_usec);
+  ADD(multi_squash_exec_reply_usec);
+  ADD(squashed_commands);
+
+  ADD(blocked_on_interpreter);
+  ADD(rdb_save_usec);
+  ADD(rdb_save_count);
+  ADD(oom_error_cmd_cnt);
 
   if (this->tx_width_freq_arr.size() > 0) {
     DCHECK_EQ(this->tx_width_freq_arr.size(), other.tx_width_freq_arr.size());
@@ -54,6 +58,7 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
     this->tx_width_freq_arr = other.tx_width_freq_arr;
   }
   return *this;
+#undef ADD
 }
 
 void MonitorsRepo::Add(facade::Connection* connection) {

@@ -874,7 +874,7 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         await wait_available_async(c_replica)
 
-    script = script_test_s1.format(flags=f"#!lua flags={flags}" if flags else "")
+    script = script_test_s1.format(flags=f"--!df flags={flags}" if flags else "")
     sha = await c_master.script_load(script)
 
     key_sets = [[f"{i}-{j}" for j in range(num_keys)] for i in range(num_par)]
@@ -2386,8 +2386,7 @@ async def test_replicate_old_master(
 
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
-    master = df_factory.create(path=released_dfly_path, cluster_mode=cluster_mode)
-    master.clear_max_chunk_flag()
+    master = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode=cluster_mode)
     replica = df_factory.create(
         cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
     )
