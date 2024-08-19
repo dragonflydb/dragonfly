@@ -1,4 +1,5 @@
 import random
+
 from itertools import chain, repeat
 import re
 import pytest
@@ -2426,7 +2427,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
     dfly_version = "v1.21.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
     # old versions
-    instances = [df_factory.create(path=released_dfly_path) for i in range(3)]
+    instances = [df_factory.create(path=released_dfly_path, version=1.21) for i in range(3)]
     # new version
     instances.append(df_factory.create())
 
@@ -2446,26 +2447,26 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
     assert await old_c_master.execute_command(f"EXISTS foo") == 1
     await old_c_master.close()
 
+    async def assert_body(client, result=1, state="online", node_role="slave"):
+        async with async_timeout.timeout(10):
+            await wait_for_replicas_state(client, state=state, node_role=node_role)
+
+        assert await client.execute_command(f"EXISTS foo") == result
+        assert await client.execute_command("REPLTAKEOVER 1") == "OK"
+
     index = 0
     last_old_replica = 2
+
+    # Adjacent pairs
     for a, b in zip(instances, instances[1:]):
-        client_a = a.client()
+        logging.debug(index)
         client_b = b.client()
         assert await client_b.execute_command(f"REPLICAOF localhost {a.port}") == "OK"
 
         if index != last_old_replica:
-            async with async_timeout.timeout(10):
-                await wait_for_replicas_state(client_b, state="stable_sync", node_role="replica")
-
-            assert await client_b.execute_command(f"EXISTS foo") == 1
-            assert await client_b.execute_command("REPLTAKEOVER 1") == "OK"
+            await assert_body(client_b, state="stable_sync", node_role="replica")
         else:
-            async with async_timeout.timeout(10):
-                await wait_for_replicas_state(client_b)
-            assert await client_b.execute_command(f"EXISTS foo") == 0
-            assert await client_b.execute_command("REPLTAKEOVER 1") == "OK"
-            role, node = await client_b.execute_command("role")
-            assert role == "master"
+            await assert_body(client_b, result=0)
 
         index = index + 1
         await client_b.close()
@@ -2485,7 +2486,7 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
     dfly_version = "v1.21.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
 
-    master = df_factory.create(path=released_dfly_path)
+    master = df_factory.create(path=released_dfly_path, version=1.21)
     master.start()
 
     c_master = master.client()

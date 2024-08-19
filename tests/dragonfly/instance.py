@@ -349,7 +349,7 @@ class DflyInstanceFactory:
             # Add 1 byte limit for big values
             args.setdefault("serialization_max_chunk_size", 1)
 
-        if version >= 1.21:
+        if version > 1.21:
             args.setdefault("use_new_io")
 
         for k, v in args.items():
