@@ -48,6 +48,7 @@ type ClientWorker struct {
 	redis     *redis.Client
 	incoming  chan Record
 	processed uint
+	pipe      redis.Pipeliner
 }
 
 // Handles a single file and distributes messages to clients
@@ -61,7 +62,7 @@ type FileWorker struct {
 	clients   uint64
 }
 
-func (c ClientWorker) Run(worker *FileWorker) {
+func (c *ClientWorker) Run(worker *FileWorker) {
 	for msg := range c.incoming {
 		if c.processed == 0 && msg.DbIndex != 0 {
 			// There is no easy way to switch, we rely on connection pool consisting only of one connection
@@ -74,10 +75,21 @@ func (c ClientWorker) Run(worker *FileWorker) {
 		}
 		time.Sleep(lag)
 
-		c.redis.Do(context.Background(), msg.values...).Result()
+		c.pipe.Do(context.Background(), msg.values...).Result()
 		atomic.AddUint64(&worker.processed, 1)
-		c.processed += 1
+
+		if msg.HasMore == 0 {
+			size := c.pipe.Len()
+			c.pipe.Exec(context.Background())
+			c.processed += uint(size)
+		}
 	}
+
+	if size := c.pipe.Len(); size >= 0 {
+		c.pipe.Exec(context.Background())
+		c.processed += uint(size)
+	}
+
 	worker.clientGroup.Done()
 }
 
@@ -86,6 +98,8 @@ func NewClient(w *FileWorker) *ClientWorker {
 		redis:    redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true}),
 		incoming: make(chan Record, *fClientBuffer),
 	}
+	client.pipe = client.redis.Pipeline()
+
 	atomic.AddUint64(&w.clients, 1)
 	w.clientGroup.Add(1)
 	go client.Run(w)
