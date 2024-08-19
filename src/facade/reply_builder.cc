@@ -55,16 +55,16 @@ template <typename T> size_t piece_size(const T& v) {
     return v.size();
 }
 
-template <size_t S> char* write_piece(char* dest, const char (&arr)[S]) {
+template <size_t S> char* write_piece(const char (&arr)[S], char* dest) {
   return (char*)memcpy(dest, arr, S - 1) + (S - 1);
 }
 
-template <typename T> enable_if_t<is_integral_v<T>, char*> write_piece(char* dest, T num) {
+template <typename T> enable_if_t<is_integral_v<T>, char*> write_piece(T num, char* dest) {
   static_assert(!is_same_v<T, char>, "Use arrays for single chars");
   return absl::numbers_internal::FastIntToBuffer(num, dest);
 }
 
-char* write_piece(char* dest, string_view str) {
+char* write_piece(string_view str, char* dest) {
   return (char*)memcpy(dest, str.data(), str.size()) + str.size();
 }
 
@@ -257,7 +257,7 @@ template <typename... Ts> void SinkReplyBuilder2::WritePieces(Ts&&... pieces) {
 
   dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
   char* ptr = dest;
-  ([&]() { ptr = write_piece(ptr, pieces); }(), ...);
+  ([&]() { ptr = write_piece(pieces, ptr); }(), ...);
 
   size_t written = ptr - dest;
   buffer_.CommitWrite(written);
@@ -282,7 +282,7 @@ void SinkReplyBuilder2::Flush(size_t expected_buffer_cap) {
   vecs_.clear();
   guaranteed_pieces_ = 0;
 
-  DCHECK_LE(expected_buffer_cap, kMaxBufferSize);
+  DCHECK_LE(expected_buffer_cap, kMaxBufferSize);  // big strings should be enqueued as iovecs
   if (expected_buffer_cap > buffer_.Capacity())
     buffer_.Reserve(expected_buffer_cap);
 }
