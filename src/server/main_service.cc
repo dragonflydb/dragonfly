@@ -876,6 +876,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("enable_heartbeat_eviction");
   config_registry.RegisterMutable("dbfilename");
   config_registry.RegisterMutable("table_growth_margin");
+  config_registry.RegisterMutable("pipeline_squash");
 
   serialization_max_chunk_size = GetFlag(FLAGS_serialization_max_chunk_size);
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
