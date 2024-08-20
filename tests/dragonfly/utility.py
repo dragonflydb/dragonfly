@@ -14,6 +14,7 @@ import json
 import subprocess
 import pytest
 import os
+import typing
 from enum import Enum
 
 
@@ -115,7 +116,7 @@ class Replicas:
     """Utility class for managing replica operations"""
 
     master: aioredis.Redis
-    clients: list[aioredis.Redis]
+    clients: typing.List[aioredis.Redis]
 
     def __init__(self, master, *clients):
         self.master = master
