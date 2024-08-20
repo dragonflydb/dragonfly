@@ -95,9 +95,6 @@ jobs:
     permissions:
       pages: write      # to deploy to Pages
       id-token: write   # to verify the deployment originates from an appropriate source
-    matrix:
-      PYTHON_VERSION:
-        - "3.12"
     steps:
       - name: Bundle Tests Result to one artifact
         uses: actions/upload-artifact/merge@v4
@@ -115,7 +112,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           cache-dependency-path: tests/fakeredis/poetry.lock
-          python-version: ${{ matrix.PYTHON_VERSION }}
+          python-version: "3.12"
 
       - name: Merge html results
         run:
