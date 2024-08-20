@@ -4,7 +4,12 @@
 
 #include "facade/conn_context.h"
 
+#include "absl/flags/internal/flag.h"
+#include "base/flags.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/reply_builder.h"
+
+ABSL_FLAG(bool, use_new_io, false, "Use new IO by default");
 
 namespace facade {
 
@@ -15,9 +20,12 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
 
   if (stream) {
     switch (protocol_) {
-      case Protocol::REDIS:
-        rbuilder_.reset(new RedisReplyBuilder(stream));
+      case Protocol::REDIS: {
+        RedisReplyBuilder* rb = absl::GetFlag(FLAGS_use_new_io) ? new RedisReplyBuilder2(stream)
+                                                                : new RedisReplyBuilder(stream);
+        rbuilder_.reset(rb);
         break;
+      }
       case Protocol::MEMCACHE:
         rbuilder_.reset(new MCReplyBuilder(stream));
         break;

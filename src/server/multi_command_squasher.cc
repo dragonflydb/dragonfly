@@ -239,7 +239,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
     auto& replies = sharded_[idx].replies;
     CHECK(!replies.empty());
 
-    aborted |= error_abort_ && CapturingReplyBuilder::GetError(replies.back());
+    aborted |= error_abort_ && CapturingReplyBuilder::TryExtractError(replies.back());
 
     CapturingReplyBuilder::Apply(std::move(replies.back()), rb);
     replies.pop_back();
