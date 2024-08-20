@@ -95,8 +95,9 @@ jobs:
     permissions:
       pages: write      # to deploy to Pages
       id-token: write   # to verify the deployment originates from an appropriate source
-    outputs:
-      pages-url: ${{ steps.deployment.outputs.page_url }}
+    matrix:
+      PYTHON_VERSION:
+        - "3.12"
     steps:
       - name: Bundle Tests Result to one artifact
         uses: actions/upload-artifact/merge@v4
@@ -111,10 +112,20 @@ jobs:
           name: test-results-html
           path: results/
 
+      - uses: actions/setup-python@v5
+        with:
+          cache-dependency-path: tests/fakeredis/poetry.lock
+          python-version: ${{ matrix.PYTHON_VERSION }}
+
+      - name: Merge html results
+        run:
+          pip install pytest-html-merger
+          pytest_html_merger -i results/ -o index.html
+
       - name: Publish to GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
-          path: results
+          path: index.html
 
       - name: Deploy to GitHub Pages
         id: deployment
