@@ -102,19 +102,13 @@ jobs:
         uses: actions/upload-artifact/merge@v4
         with:
           delete-merged: true
-          name: tests-result-html
+          name: github-pages
           pattern: '*.html'
-
-      - name: Download Tests Result
-        uses: actions/download-artifact@v4
-        with:
-          name: tests-result-html
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
-        with:
-          artifact_name: tests-result-html
+        uses: actions/upload-pages-artifact@v3
+
 
   bundle-results-xml:
     name: publish summary to workflow run
