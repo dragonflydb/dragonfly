@@ -115,7 +115,7 @@ jobs:
           python-version: "3.12"
 
       - name: Merge html results
-        run:
+        run: | 
           pip install pytest-html-merger
           pytest_html_merger -i results/ -o index.html
 
