@@ -1,5 +1,4 @@
 import random
-from itertools import chain, repeat
 import re
 import pytest
 import asyncio
@@ -10,7 +9,10 @@ import logging
 import tarfile
 import urllib.request
 import shutil
+from itertools import chain, repeat
 from redis import asyncio as aioredis
+from enum import Enum
+
 from .utility import *
 from .instance import DflyInstanceFactory, DflyInstance
 from .seeder import Seeder as SeederV2
@@ -19,21 +21,9 @@ from .proxy import Proxy
 
 ADMIN_PORT = 1211
 
-DISCONNECT_CRASH_FULL_SYNC = 0
-DISCONNECT_CRASH_STABLE_SYNC = 1
-DISCONNECT_NORMAL_STABLE_SYNC = 2
-
 M_OPT = [pytest.mark.opt_only]
 M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
-
-
-async def wait_for_replicas_state(*clients, state="online", timeout=0.05):
-    """Wait until all clients (replicas) reach passed state"""
-    while len(clients) > 0:
-        await asyncio.sleep(timeout)
-        roles = await asyncio.gather(*(c.role() for c in clients))
-        clients = [c for c, role in zip(clients, roles) if role[0] != "slave" or role[3] != state]
 
 
 """
@@ -91,7 +81,7 @@ async def test_replication_all(
     # Start instances and connect clients
     df_factory.start_all([master] + replicas)
     c_master = master.client()
-    c_replicas = [replica.client() for replica in replicas]
+    replicas = Replicas(c_master, *(replica.client() for replica in replicas))
 
     # Fill master with test data
     seeder = SeederV2(**seeder_config)
@@ -102,69 +92,24 @@ async def test_replication_all(
     await asyncio.sleep(0.0)
 
     # Start replication
-    master_port = master.port if not from_admin_port else master.admin_port
-    await asyncio.gather(
-        *(
-            asyncio.create_task(c.execute_command("REPLICAOF localhost " + str(master_port)))
-            for c in c_replicas
-        )
-    )
+    await replicas.connect(master.port if not from_admin_port else master.admin_port)
 
     # Wait for all replicas to transition into stable sync
-    async with async_timeout.timeout(240):
-        await wait_for_replicas_state(*c_replicas)
-
+    await replicas.wait_for_state(timeout=240)
     # Stop streaming data once every replica is in stable sync
     await seeder.stop(c_master)
     await stream_task
 
     # Check data after full sync
-    async def check():
-        await check_all_replicas_finished(c_replicas, c_master)
-        hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master] + c_replicas))
-        assert len(set(hashes)) == 1
+    await replicas.check_captures_v2()
 
-    await check()
     # Stream more data in stable state
     await seeder.run(c_master, target_ops=stream_target)
 
     # Check data after stable state stream
-    await check()
+    await replicas.check_captures_v2()
 
-    await disconnect_clients(c_master, *c_replicas)
-
-
-async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
-    role = await c_replica.role()
-    if role[0] != "slave" or role[3] != "online":
-        return False
-    syncid, r_offset = await c_replica.execute_command("DEBUG REPLICA OFFSET")
-
-    logging.debug(f"  offset {syncid} {r_offset} {m_offset}")
-    return r_offset == m_offset
-
-
-async def check_all_replicas_finished(c_replicas, c_master, timeout=20):
-    logging.debug("Waiting for replicas to finish")
-    await c_master.execute_command("DFLY EXPIRE")  # let master expire all keys
-
-    waiting_for = list(c_replicas)
-    start = time.time()
-    while (time.time() - start) < timeout:
-        if not waiting_for:
-            return
-        await asyncio.sleep(0.2)
-        m_offset = await c_master.execute_command("DFLY REPLICAOFFSET")
-        finished_list = await asyncio.gather(
-            *(check_replica_finished_exec(c, m_offset) for c in waiting_for)
-        )
-
-        # Remove clients that finished from waiting list
-        waiting_for = [c for (c, finished) in zip(waiting_for, finished_list) if not finished]
-
-    first_r: aioredis.Redis = waiting_for[0]
-    logging.error("Replica not finished, role %s", await first_r.role())
-    raise RuntimeError("Not all replicas finished in time!")
+    await disconnect_clients(c_master, *replicas.clients)
 
 
 """
@@ -225,11 +170,9 @@ async def test_disconnect_replica(
         )
     ]
 
-    logging.debug("Start master")
     master.start()
     c_master = master.client(single_connection_client=True)
 
-    logging.debug("Start replicas and create clients")
     df_factory.start_all([replica for replica, _ in replicas])
 
     c_replicas = [(replica, replica.client(), crash_type) for replica, crash_type in replicas]
@@ -400,9 +343,13 @@ Test re-connecting replica to different masters.
 rotating_master_cases = [(4, [4, 4, 4, 4], 10_000)]
 
 
-@pytest.mark.asyncio
-@pytest.mark.slow
-@pytest.mark.parametrize("t_replica, t_masters, key_target", rotating_master_cases)
+@pytest.mark.parametrize(
+    "t_replica, t_masters, key_target",
+    [
+        pytest.param(4, [4, 4, 4, 4], 10_000, marks=M_SLOW),
+        pytest.param(4, [4, 4, 4, 4], 100_000, marks=M_STRESS),
+    ],
+)
 async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_masters, key_target):
     replica = df_factory.create(proactor_threads=t_replica)
     masters = [df_factory.create(proactor_threads=t) for _, t in enumerate(t_masters)]
@@ -425,22 +372,22 @@ async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_mast
         if fill_task is not None:
             fill_seeder.stop(fill_client)
             fill_task.cancel()
+            await close_clients(fill_client)
 
-        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        await wait_available_async(c_replica)
+        c_master = master.client()
+        rp = Replicas(c_master, c_replica)
+        await rp.connect(master.port)
+        await rp.wait_for_state()
+        await rp.check_captures_v2()
 
-        master_client = master.client()
-        master_capture = await SeederV2.capture(master_client)
-        replica_capture = await SeederV2.capture(c_replica)
-        assert master_capture == replica_capture
-
-        fill_task = asyncio.create_task(seeder.run(master_client))
+        fill_task = asyncio.create_task(seeder.run(c_master))
         fill_seeder = seeder
-        fill_client = master_client
+        fill_client = c_master
 
     if fill_task is not None:
         fill_seeder.stop(fill_client)
         fill_task.cancel()
+        await close_clients(fill_client)
 
 
 @pytest.mark.asyncio

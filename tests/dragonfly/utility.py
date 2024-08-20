@@ -74,7 +74,9 @@ async def tick_timer(func, timeout=5, step=0.1):
     start = time.time()
     while time.time() - start < timeout:
         breaker = ticker_breaker()
-        yield (await func(), breaker)
+        obj = func()
+        res = await asyncio.gather(*obj) if hasattr(obj, "__iter__") else await obj
+        yield (res, breaker)
         if breaker.entered and not breaker.exc:
             return
 
@@ -107,6 +109,56 @@ async def wait_available_async(client: aioredis.Redis, timeout=10):
         await asyncio.sleep(0.01)
         its += 1
     raise RuntimeError("Client did not become available in time!")
+
+
+class Replicas:
+    """Utility class for managing replica operations"""
+
+    master: aioredis.Redis
+    clients: list[aioredis.Redis]
+
+    def __init__(self, master, *clients):
+        self.master = master
+        self.clients = clients
+
+    async def connect(self, port):
+        await asyncio.gather(
+            *(
+                asyncio.create_task(c.execute_command("REPLICAOF localhost " + str(port)))
+                for c in self.clients
+            )
+        )
+
+    async def wait_for_state(self, state="stable_sync", **time_args):
+        """Wait until all replicas reach given state"""
+        async for roles, breaker in tick_timer(
+            lambda: (c.role() for c in self.clients), **time_args
+        ):
+            with breaker:
+                assert [r[3] for r in roles] == [state] * len(roles)
+
+    async def wait_for_offset(self):
+        """Wait for offset to catch up with master"""
+
+        async def read_offset(replica: aioredis.Redis):
+            _, offset = await replica.execute_command("DEBUG REPLICA OFFSET")
+            return offset
+
+        master_offset = await self.master.execute_command("DFLY REPLICAOFFSET")
+        async for offsets, breaker in tick_timer(lambda: (read_offset(c) for c in self.clients)):
+            with breaker:
+                assert offsets == [master_offset] * len(offsets)
+
+    async def check_captures_v2(self):
+        master_capture = await SeederV2.capture(self.master)
+
+        # master might have caused expirations, wait for replicas to catch up
+        await self.wait_for_offset()
+
+        replica_captures = await asyncio.gather(
+            *(SeederV2.capture(replica) for replica in self.clients)
+        )
+        assert len(set([master_capture]) | set(replica_captures)) == 1
 
 
 class SizeChange(Enum):
