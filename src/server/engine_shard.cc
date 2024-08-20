@@ -635,7 +635,12 @@ void EngineShard::RetireExpiredAndEvict() {
   DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
   // Some of the functions below might acquire the same lock again so we need to unlock it
   // asap. We won't yield before we relock the mutex again, so the code below is atomic
-  // in respect to preemptions.
+  // in respect to preemptions of big values. An example of that is the call to
+  // DeleteExpiredStep() below, which eventually calls ExpireIfNeeded()
+  // and within that the call to RecordExpiry() will trigger the registered
+  // callback OnJournalEntry which locks the exact same mutex.
+  // We need to lock below and immediately release because there should be no other fiber
+  // that is serializing a big value.
   { std::unique_lock lk(db_slice.GetSerializationMutex()); }
   constexpr double kTtlDeleteLimit = 200;
   constexpr double kRedLimitFactor = 0.1;
