@@ -117,12 +117,12 @@ jobs:
       - name: Merge html results
         run: | 
           pip install pytest-html-merger
-          pytest_html_merger -i results/ -o index.html
+          pytest_html_merger -i results/ -o results/index.html
 
       - name: Publish to GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
-          path: index.html
+          path: results/
 
       - name: Deploy to GitHub Pages
         id: deployment
