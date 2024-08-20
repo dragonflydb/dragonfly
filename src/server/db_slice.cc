@@ -426,14 +426,25 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   }
 }
 
-DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
+bool DbSlice::DelEmptyPrimeValue(const Context& cntx, Iterator it) {
+  auto& pv = it->second;
+  if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+    auto key = it.key();
+    LOG(ERROR) << "Found empty key: " << key << " with obj type " << pv.ObjType();
+    Del(cntx, it);
+    return true;
+  }
+  return false;
+}
+
+DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats);
   return {ConstIterator(res->it, StringOrView::FromView(key)),
           ExpConstIterator(res->exp_it, StringOrView::FromView(key))};
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                       unsigned req_obj_type) const {
+                                                       unsigned req_obj_type) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats);
   if (res.ok()) {
     return ConstIterator(res->it, StringOrView::FromView(key));
@@ -443,7 +454,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, stri
 
 OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std::string_view key,
                                                        std::optional<unsigned> req_obj_type,
-                                                       UpdateStatsMode stats_mode) const {
+                                                       UpdateStatsMode stats_mode) {
   if (!IsDbValid(cntx.db_index)) {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -537,6 +548,9 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   // We do not use TopKey feature, so disable it until we redesign it.
   // db.top_keys.Touch(key);
 
+  if (DelEmptyPrimeValue(cntx, Iterator(res.it, StringOrView::FromView(key)))) {
+    return OpStatus::KEY_NOTFOUND;
+  }
   return res;
 }
 

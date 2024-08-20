@@ -59,7 +59,7 @@ class RdbLoaderBase {
 
   struct OpaqueObj {
     RdbVariant obj;
-    int rdb_type;
+    int rdb_type{0};
   };
 
   struct LoadBlob {
