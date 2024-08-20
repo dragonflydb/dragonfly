@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 from .instance import DflyInstanceFactory, DflyInstance
 from .utility import *
-from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
@@ -566,7 +565,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
         # Setup replication and make sure that it works properly.
         await c_master.set("key", "value")
         await c_replica.execute_command("REPLICAOF", "localhost", master.port)
-        await check_all_replicas_finished([c_replica], c_master)
+        await Replicas(c_master, c_replica).wait_for_offset()
         assert (await c_replica.get("key")) == "value"
         assert await c_replica.execute_command("dbsize") == 1
 
@@ -615,7 +614,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
 
         # Set another key on the master, which it owns but the replica does not own.
         await c_master.set("key2", "value")
-        await check_all_replicas_finished([c_replica], c_master)
+        await Replicas(c_master, c_replica).wait_for_offset()
 
         # See that the key exists in both replica and master
         assert await c_master.execute_command("dbsize") == 2
@@ -682,7 +681,7 @@ async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceF
 
     # Setup replication and make sure that it works properly.
     await c_replica.execute_command("REPLICAOF", "localhost", master.port)
-    await check_all_replicas_finished([c_replica], c_master)
+    await Replicas(c_master, c_replica).wait_for_offset()
     assert await c_replica.execute_command("dbsize") == 100_000
 
     resp = await c_master_admin.execute_command("dflycluster", "getslotinfo", "slots", "0")

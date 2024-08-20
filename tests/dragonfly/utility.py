@@ -15,6 +15,7 @@ import subprocess
 import pytest
 import os
 import typing
+from .seeder import Seeder as SeederV2
 from enum import Enum
 
 
@@ -130,11 +131,9 @@ class Replicas:
             )
         )
 
-    async def wait_for_state(self, state="stable_sync", **time_args):
+    async def wait_for_state(self, state="online", **targs):
         """Wait until all replicas reach given state"""
-        async for roles, breaker in tick_timer(
-            lambda: (c.role() for c in self.clients), **time_args
-        ):
+        async for roles, breaker in tick_timer(lambda: (c.role() for c in self.clients), **targs):
             with breaker:
                 assert [r[3] for r in roles] == [state] * len(roles)
 
