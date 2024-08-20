@@ -25,7 +25,7 @@ jobs:
           - "latest"
         tests:
           - "test_json"
-#          - "test_mixins"
+          #          - "test_mixins"
           - "test_stack"
           - "test_connection.py"
           - "test_asyncredis.py"
@@ -114,8 +114,11 @@ jobs:
       - name: Publish to GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
-            path: results
+          path: results
 
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
   bundle-results-xml:
     name: publish summary to workflow run
