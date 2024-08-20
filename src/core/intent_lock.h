@@ -3,6 +3,8 @@
 //
 #include <assert.h>
 
+#include <ostream>
+
 #pragma once
 
 namespace dfly {

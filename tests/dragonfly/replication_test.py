@@ -25,7 +25,6 @@ M_OPT = [pytest.mark.opt_only]
 M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
 
-
 """
 Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """
@@ -829,7 +828,7 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         await wait_available_async(c_replica)
 
-    script = script_test_s1.format(flags=f"#!lua flags={flags}" if flags else "")
+    script = script_test_s1.format(flags=f"--!df flags={flags}" if flags else "")
     sha = await c_master.script_load(script)
 
     key_sets = [[f"{i}-{j}" for j in range(num_keys)] for i in range(num_par)]
@@ -967,6 +966,10 @@ def parse_lag(replication_info: str):
     return int(lags[0])
 
 
+async def get_metric_value(inst, metric_name, sample_index=0):
+    return (await inst.metrics())[metric_name].samples[sample_index].value
+
+
 async def assert_lag_condition(inst, client, condition):
     """
     Since lag is a bit random, and we want stable tests, we check
@@ -976,7 +979,7 @@ async def assert_lag_condition(inst, client, condition):
     prometheus endpoint.
     """
     for _ in range(10):
-        lag = (await inst.metrics())["dragonfly_connected_replica_lag_records"].samples[0].value
+        lag = await get_metric_value(inst, "dragonfly_connected_replica_lag_records")
         if condition(lag):
             break
         print("current prometheus lag =", lag)
@@ -991,6 +994,23 @@ async def assert_lag_condition(inst, client, condition):
         await asyncio.sleep(0.05)
     else:
         assert False, "Lag has never satisfied condition!"
+
+
+async def get_replica_reconnects_count(replica_inst):
+    return await get_metric_value(replica_inst, "dragonfly_replica_reconnect_count")
+
+
+async def assert_replica_reconnections(replica_inst, initial_reconnects_count):
+    """
+    Asserts that the replica has attempted to reconnect at least once.
+    """
+    reconnects_count = await get_replica_reconnects_count(replica_inst)
+    if reconnects_count > initial_reconnects_count:
+        return
+
+    assert (
+        False
+    ), f"Expected reconnect count to increase by at least 1, but it did not. Initial dragonfly_replica_reconnect_count: {initial_reconnects_count}, current count: {reconnects_count}"
 
 
 @dfly_args({"proactor_threads": 2})
@@ -1767,6 +1787,56 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
     # assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
+async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=6)
+    replica = df_factory.create(proactor_threads=4)
+
+    df_factory.start_all([replica, master])
+    seeder = df_seeder_factory.create(port=master.port)
+
+    async with replica.client() as c_replica:
+        await seeder.run(target_deviation=0.1)
+
+        proxy = Proxy("127.0.0.1", 1115, "127.0.0.1", master.port)
+        await proxy.start()
+        task = asyncio.create_task(proxy.serve())
+        try:
+            await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
+
+            # Wait replica to be up and synchronized with master
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            initial_reconnects_count = await get_replica_reconnects_count(replica)
+
+            # Fully drop the server
+            await proxy.close(task)
+
+            # After dropping the connection replica should try to reconnect
+            await wait_for_replica_status(c_replica, status="down")
+            await asyncio.sleep(2)
+
+            # Restart the proxy
+            await proxy.start()
+            task = asyncio.create_task(proxy.serve())
+
+            # Wait replica to be reconnected and synchronized with master
+            await wait_for_replica_status(c_replica, status="up")
+            await wait_available_async(c_replica)
+
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
+
+            # Assert replica reconnects metrics increased
+            await assert_replica_reconnections(replica, initial_reconnects_count)
+
+        finally:
+            await proxy.close(task)
+
+    master.stop()
+    replica.stop()
+
+
 async def test_search(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -2270,7 +2340,7 @@ async def test_replicate_old_master(
 
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
-    master = df_factory.create(path=released_dfly_path, cluster_mode=cluster_mode)
+    master = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode=cluster_mode)
     replica = df_factory.create(
         cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
     )
@@ -2294,3 +2364,103 @@ async def test_replicate_old_master(
     assert await c_replica.execute_command("get", "k1") == "v1"
 
     await disconnect_clients(c_master, c_replica)
+
+
+# This Test was intorduced in response to a bug when replicating empty hashmaps (encoded as
+# ziplists) created with HSET, HSETEX, HDEL and then replicated 2 times.
+# For more information plz refer to the issue on gh:
+# https://github.com/dragonflydb/dragonfly/issues/3504
+@dfly_args({"proactor_threads": 1})
+@pytest.mark.asyncio
+async def test_empty_hash_map_replicate_old_master(df_factory):
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
+
+    dfly_version = "v1.21.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+    # old versions
+    instances = [df_factory.create(path=released_dfly_path, version=1.21) for i in range(3)]
+    # new version
+    instances.append(df_factory.create())
+
+    df_factory.start_all(instances)
+
+    old_c_master = instances[0].client()
+    # Create an empty hashmap
+    await old_c_master.execute_command("HSET foo a_field a_value")
+    await old_c_master.execute_command("HSETEX foo 2 b_field b_value")
+    await old_c_master.execute_command("HDEL foo a_field")
+
+    @assert_eventually
+    async def check_if_empty():
+        assert await old_c_master.execute_command("HGETALL foo") == []
+
+    await check_if_empty()
+    assert await old_c_master.execute_command(f"EXISTS foo") == 1
+    await old_c_master.close()
+
+    async def assert_body(client, result=1, state="online", node_role="slave"):
+        async with async_timeout.timeout(10):
+            await wait_for_replicas_state(client, state=state, node_role=node_role)
+
+        assert await client.execute_command(f"EXISTS foo") == result
+        assert await client.execute_command("REPLTAKEOVER 1") == "OK"
+
+    index = 0
+    last_old_replica = 2
+
+    # Adjacent pairs
+    for a, b in zip(instances, instances[1:]):
+        logging.debug(index)
+        client_b = b.client()
+        assert await client_b.execute_command(f"REPLICAOF localhost {a.port}") == "OK"
+
+        if index != last_old_replica:
+            await assert_body(client_b, state="stable_sync", node_role="replica")
+        else:
+            await assert_body(client_b, result=0)
+
+        index = index + 1
+        await client_b.close()
+
+
+# This Test was intorduced in response to a bug when replicating empty hash maps with
+# HSET, HSETEX, HDEL and then loaded via replication.
+# For more information plz refer to the issue on gh:
+# https://github.com/dragonflydb/dragonfly/issues/3504
+@dfly_args({"proactor_threads": 1})
+@pytest.mark.asyncio
+async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
+
+    dfly_version = "v1.21.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+
+    master = df_factory.create(path=released_dfly_path, version=1.21)
+    master.start()
+
+    c_master = master.client()
+    # Create an empty hashmap
+    await c_master.execute_command("HSET foo a_field a_value")
+    await c_master.execute_command("HSETEX foo 2 b_field b_value")
+    await c_master.execute_command("HDEL foo a_field")
+
+    @assert_eventually
+    async def check_if_empty():
+        assert await c_master.execute_command("HGETALL foo") == []
+
+    await check_if_empty()
+    assert await c_master.execute_command(f"EXISTS foo") == 1
+
+    replica = df_factory.create()
+    replica.start()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+    assert await c_replica.execute_command(f"dbsize") == 0
+
+    await close_clients(c_master, c_replica)

@@ -206,7 +206,8 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiry(cntx_.db_index, key);
     }
-
+    // Safe we already acquired std::unique_lock lk(db_slice_->GetSerializationMutex());
+    // on the flows that call this function
     db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
 
     ++evicted_;
@@ -425,14 +426,25 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   }
 }
 
-DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
+bool DbSlice::DelEmptyPrimeValue(const Context& cntx, Iterator it) {
+  auto& pv = it->second;
+  if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+    auto key = it.key();
+    LOG(ERROR) << "Found empty key: " << key << " with obj type " << pv.ObjType();
+    Del(cntx, it);
+    return true;
+  }
+  return false;
+}
+
+DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats);
   return {ConstIterator(res->it, StringOrView::FromView(key)),
           ExpConstIterator(res->exp_it, StringOrView::FromView(key))};
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                       unsigned req_obj_type) const {
+                                                       unsigned req_obj_type) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats);
   if (res.ok()) {
     return ConstIterator(res->it, StringOrView::FromView(key));
@@ -442,7 +454,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, stri
 
 OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std::string_view key,
                                                        std::optional<unsigned> req_obj_type,
-                                                       UpdateStatsMode stats_mode) const {
+                                                       UpdateStatsMode stats_mode) {
   if (!IsDbValid(cntx.db_index)) {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -479,6 +491,8 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
 
   if (caching_mode_ && IsValid(res.it)) {
     if (!change_cb_.empty()) {
+      FetchedItemsRestorer fetched_restorer(&fetched_items_);
+      std::unique_lock lk(local_mu_);
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
@@ -534,6 +548,9 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   // We do not use TopKey feature, so disable it until we redesign it.
   // db.top_keys.Touch(key);
 
+  if (DelEmptyPrimeValue(cntx, Iterator(res.it, StringOrView::FromView(key)))) {
+    return OpStatus::KEY_NOTFOUND;
+  }
   return res;
 }
 
@@ -570,18 +587,21 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
+  FetchedItemsRestorer fetched_restorer(&fetched_items_);
+  std::unique_lock lk(local_mu_);
+
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
 
   ssize_t memory_offset = -key.size();
-
+  size_t reclaimed = 0;
   // If we are low on memory due to cold storage, free some memory.
   if (owner_->tiered_storage()) {
     // At least 40KB bytes to cover potential segment split.
     ssize_t red_line = std::max<size_t>(key.size() * 2, 40_KB);
     if (memory_budget_ < red_line) {
       size_t goal = red_line - memory_budget_;
-      size_t reclaimed = owner_->tiered_storage()->ReclaimMemory(goal);
+      reclaimed = owner_->tiered_storage()->ReclaimMemory(goal);
       memory_budget_ += reclaimed;
     }
 
@@ -603,7 +623,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (apply_memory_limit && !caching_mode_ && memory_budget_ + memory_offset < 0) {
-    VLOG(2) << "AddOrFind: over limit, budget: " << memory_budget_;
+    LOG_EVERY_T(ERROR, 1) << "AddOrFind: over limit, budget: " << memory_budget_
+                          << " reclaimed: " << reclaimed << " offset: " << memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -622,7 +643,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   try {
     it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
-    VLOG(2) << "AddOrFind: bad alloc exception, budget: " << memory_budget_ + memory_offset;
+    LOG_EVERY_T(ERROR, 1) << "AddOrFind: InsertNew failed, budget: " << memory_budget_
+                          << " reclaimed: " << reclaimed << " offset: " << memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -682,6 +704,8 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 }
 
 bool DbSlice::Del(Context cntx, Iterator it) {
+  std::unique_lock lk(local_mu_);
+
   if (!IsValid(it)) {
     return false;
   }
@@ -801,6 +825,10 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
+  // We should not flush if serialization of a big value is in progress because this
+  // could lead to UB or assertion failures (while DashTable::Traverse is iterating over
+  // a logical bucket).
+  std::unique_lock lk(local_mu_);
   // clear client tracking map.
   client_tracking_map_.clear();
 
@@ -822,6 +850,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
+  std::unique_lock lk(local_mu_);
   uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
   auto& db = *db_arr_[db_ind];
   size_t table_before = db.expire.mem_usage();
@@ -831,6 +860,7 @@ void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
+  std::unique_lock lk(local_mu_);
   if (main_it->second.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
@@ -1052,6 +1082,8 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 }
 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
+  FetchedItemsRestorer fetched_restorer(&fetched_items_);
+  std::unique_lock lk(local_mu_);
   CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
@@ -1219,13 +1251,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
 
   unsigned i = 0;
   for (; i < count / 3; ++i) {
-    db.expire_cursor = Traverse(&db.expire, db.expire_cursor, cb);
+    db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
   }
 
   // continue traversing only if we had strong deletion rate based on the first sample.
   if (result.deleted * 4 > result.traversed) {
     for (; i < count; ++i) {
-      db.expire_cursor = Traverse(&db.expire, db.expire_cursor, cb);
+      db.expire_cursor = db.expire.Traverse(db.expire_cursor, cb);
     }
   }
 
@@ -1344,10 +1376,14 @@ void DbSlice::CreateDb(DbIndex db_ind) {
 
 void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
                                  ConnectionState::ExecInfo* exec_info) {
+  // Because we might insert while another fiber is preempted
+  std::unique_lock lk(local_mu_);
   db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
 }
 
 void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
+  // Because we might remove while another fiber is preempted and miss a notification
+  std::unique_lock lk(local_mu_);
   for (const auto& [db_indx, key] : exec_info->watched_keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {
@@ -1391,7 +1427,7 @@ void DbSlice::ClearOffloadedEntries(absl::Span<const DbIndex> indices, const DbT
     // Delete all tiered entries
     PrimeTable::Cursor cursor;
     do {
-      cursor = Traverse(&db_ptr->prime, cursor, [&](PrimeIterator it) {
+      cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, &it->second);
         } else if (it->second.HasStashPending()) {
@@ -1523,8 +1559,6 @@ void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const Change
     return;
 
   DVLOG(2) << "Running callbacks for key " << key << " in dbid " << id;
-  FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock lk(local_mu_);
 
   const size_t limit = change_cb_.size();
   auto ccb = change_cb_.begin();

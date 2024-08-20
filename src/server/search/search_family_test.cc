@@ -310,7 +310,13 @@ TEST_F(SearchFamilyTest, Tags) {
   Run({"hset", "d:5", "color", "green"});
   Run({"hset", "d:6", "color", "blue"});
 
-  EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag"}), "OK");
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag", "dummy", "numeric"}),
+            "OK");
+  EXPECT_THAT(Run({"ft.tagvals", "i2", "color"}), ErrArg("Unknown Index name"));
+  EXPECT_THAT(Run({"ft.tagvals", "i1", "foo"}), ErrArg("No such field"));
+  EXPECT_THAT(Run({"ft.tagvals", "i1", "dummy"}), ErrArg("Not a tag field"));
+  auto resp = Run({"ft.tagvals", "i1", "color"});
+  ASSERT_THAT(resp, IsUnordArray("red", "blue", "green"));
 
   // Tags don't participate in full text search
   EXPECT_THAT(Run({"ft.search", "i1", "red"}), kNoResults);
@@ -323,6 +329,14 @@ TEST_F(SearchFamilyTest, Tags) {
               AreDocIds("d:1", "d:2", "d:3", "d:4", "d:5"));
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue | green}"}),
               AreDocIds("d:1", "d:2", "d:3", "d:5", "d:6"));
+
+  EXPECT_EQ(Run({"ft.create", "i2", "on", "hash", "schema", "c1", "as", "c2", "tag"}), "OK");
+
+  // TODO: there is a discrepancy here between redis stack and Dragonfly,
+  // we accept the original field when it has alias, while redis stack does not.
+  //
+  // EXPECT_THAT(Run({"ft.tagvals", "i2", "c1"}), ErrArg("No such field"));
+  EXPECT_THAT(Run({"ft.tagvals", "i2", "c2"}), ArrLen(0));
 }
 
 TEST_F(SearchFamilyTest, TagOptions) {

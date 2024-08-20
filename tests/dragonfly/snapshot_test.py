@@ -3,7 +3,7 @@ import logging
 import os
 import glob
 import asyncio
-import async_timeout
+from async_timeout import timeout
 import redis
 from redis import asyncio as aioredis
 from pathlib import Path
@@ -57,7 +57,7 @@ async def test_consistency(df_factory, format: str, seeder_opts: dict):
     await async_client.execute_command("SAVE", format)
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
@@ -85,7 +85,7 @@ async def test_multidb(df_factory, format: str):
     await async_client.execute_command("SAVE", format)
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
@@ -169,7 +169,7 @@ async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
     file = None
-    with async_timeout.timeout(65):
+    async with timeout(65):
         while file is None:
             await asyncio.sleep(1)
             file = find_main_file(tmp_dir, "test-cron-summary.dfs")
@@ -185,7 +185,7 @@ async def test_set_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     await async_client.config_set("snapshot_cron", "* * * * *")
 
     file = None
-    with async_timeout.timeout(65):
+    async with timeout(65):
         while file is None:
             await asyncio.sleep(1)
             file = find_main_file(tmp_dir, "test-cron-set-summary.dfs")
@@ -271,7 +271,7 @@ async def test_s3_snapshot(self, async_client):
         await async_client.execute_command("SAVE DF snapshot")
         assert await async_client.flushall()
         await async_client.execute_command(
-            "DEBUG LOAD "
+            "DFLY LOAD "
             + os.environ["DRAGONFLY_S3_BUCKET"]
             + str(self.tmp_dir)
             + "/snapshot-summary.dfs"
@@ -451,7 +451,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE", "DF")
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         "tiered-entries-summary.dfs",
     )
@@ -488,7 +488,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
     load_task = asyncio.create_task(
         async_client.execute_command(
-            "DEBUG",
+            "DFLY",
             "LOAD",
             "tiered-entries-summary.dfs",
         )

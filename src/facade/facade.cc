@@ -20,7 +20,7 @@ constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   // To break this code deliberately if we add/remove a field to this struct.
-  static_assert(kSizeConnStats == 120u);
+  static_assert(kSizeConnStats == 112u);
 
   ADD(read_buf_capacity);
   ADD(dispatch_queue_entries);
@@ -37,7 +37,6 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(num_replicas);
   ADD(num_blocked_clients);
   ADD(num_migrations);
-  ADD(squashed_commands);
 
   return *this;
 }
@@ -101,6 +100,7 @@ const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong"
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
 const char kConfigErrType[] = "config_error";
+const char kSearchErrType[] = "search_error";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {

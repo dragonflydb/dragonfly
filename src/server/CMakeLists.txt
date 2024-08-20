@@ -43,8 +43,9 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
   cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
-add_library(dragonfly_lib bloom_family.cc engine_shard_set.cc
-            config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc
+add_library(dragonfly_lib bloom_family.cc
+            config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc engine_shard.cc
+            engine_shard_set.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
@@ -126,6 +127,7 @@ if (WITH_ASAN OR WITH_USAN)
   target_compile_definitions(multi_test PRIVATE SANITIZERS)
   target_compile_definitions(search_family_test PRIVATE SANITIZERS)
   target_compile_definitions(json_family_test PRIVATE SANITIZERS)
+  target_compile_definitions(dragonfly_test PRIVATE SANITIZERS)
 endif()
 cxx_test(search/aggregator_test dfly_test_lib LABELS DFLY)
 

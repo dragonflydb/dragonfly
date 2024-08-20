@@ -22,10 +22,6 @@
 #include "util/fibers/synchronization.h"
 
 using facade::operator""_MB;
-ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
-          "Maximum size of a value that may be serialized at once during snapshotting or full "
-          "sync. Values bigger than this threshold will be serialized using streaming "
-          "serialization. 0 - to disable streaming mode");
 
 namespace dfly {
 
@@ -76,7 +72,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  const auto flush_threshold = absl::GetFlag(FLAGS_serialization_max_chunk_size);
+  const auto flush_threshold = serialization_max_chunk_size;
   std::function<void(size_t, RdbSerializer::FlushState)> flush_fun;
   if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
     flush_fun = [this, flush_threshold](size_t bytes_serialized,
@@ -389,7 +385,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerializedToChannel.
-  std::unique_lock lk(*db_slice_->GetSerializationMutex());
+  std::unique_lock lk(db_slice_->GetSerializationMutex());
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }
@@ -402,7 +398,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
 }
 
 void SliceSnapshot::CloseRecordChannel() {
-  std::unique_lock lk(*db_slice_->GetSerializationMutex());
+  std::unique_lock lk(db_slice_->GetSerializationMutex());
 
   CHECK(!serialize_bucket_running_);
   // Make sure we close the channel only once with a CAS check.

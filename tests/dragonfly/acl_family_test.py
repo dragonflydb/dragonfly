@@ -135,51 +135,51 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     df.start()
 
     # Testing acl categories
-    client = aioredis.Redis(port=df.port)
+    client = aioredis.Redis(port=df.port, decode_responses=True)
     res = await client.execute_command("ACL SETUSER kk ON >kk +@transaction +@string ~*")
-    assert res == b"OK"
+    assert res == "OK"
 
     res = await client.execute_command("AUTH kk kk")
-    assert res == b"OK"
+    assert res == "OK"
 
     await client.execute_command("MULTI")
-    assert res == b"OK"
+    assert res == "OK"
     for x in range(33):
         await client.execute_command(f"SET x{x} {x}")
     await client.execute_command("EXEC")
 
-    client = aioredis.Redis(port=df.port)
     await client.close()
+    client = aioredis.Redis(port=df.port, decode_responses=True)
 
     # NOPERM while executing multi
     await client.execute_command("ACL SETUSER kk -@string")
-    assert res == b"OK"
+    assert res == "OK"
     await client.execute_command("AUTH kk kk")
-    assert res == b"OK"
+    assert res == "OK"
     await client.execute_command("MULTI")
-    assert res == b"OK"
+    assert res == "OK"
 
     with pytest.raises(redis.exceptions.NoPermissionError):
         await client.execute_command(f"SET x{x} {x}")
     await client.close()
 
     # NOPERM between multi and exec
-    admin_client = aioredis.Redis(port=df.port)
+    admin_client = aioredis.Redis(port=df.port, decode_responses=True)
     res = await client.execute_command("ACL SETUSER kk +@string")
-    assert res == b"OK"
+    assert res == "OK"
 
-    client = aioredis.Redis(port=df.port)
+    client = aioredis.Redis(port=df.port, decode_responses=True)
     res = await client.execute_command("AUTH kk kk")
-    assert res == b"OK"
+    assert res == "OK"
     # CLIENT has permissions, starts MULTI and issues a bunch of SET commands
     await client.execute_command("MULTI")
-    assert res == b"OK"
+    assert res == "OK"
     for x in range(33):
         await client.execute_command(f"SET x{x} {x}")
 
     # admin revokes permissions
     res = await admin_client.execute_command("ACL SETUSER kk -@string")
-    assert res == b"OK"
+    assert res == "OK"
 
     res = await client.execute_command("EXEC")
     # TODO(we need to fix this, basiscally SQUASHED/MULTI transaction commands
@@ -192,23 +192,23 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     await client.close()
 
     # Testing acl commands
-    client = aioredis.Redis(port=df.port)
+    client = aioredis.Redis(port=df.port, decode_responses=True)
     res = await client.execute_command("ACL SETUSER myuser ON >kk +@transaction +set ~*")
-    assert res == b"OK"
+    assert res == "OK"
 
     res = await client.execute_command("AUTH myuser kk")
-    assert res == b"OK"
+    assert res == "OK"
 
     await client.execute_command("MULTI")
-    assert res == b"OK"
+    assert res == "OK"
     for x in range(33):
         await client.execute_command(f"SET x{x} {x}")
     await client.execute_command("EXEC")
 
     # NOPERM between multi and exec
-    admin_client = aioredis.Redis(port=df.port)
+    admin_client = aioredis.Redis(port=df.port, decode_responses=True)
     res = await admin_client.execute_command("ACL SETUSER myuser -set")
-    assert res == b"OK"
+    assert res == "OK"
 
     # NOPERM while executing multi
     await client.execute_command("MULTI")
@@ -220,27 +220,26 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     await client.close()
 
 
-@pytest.mark.skip("Skip because it fails on arm release")
 @pytest.mark.asyncio
 async def test_acl_deluser(df_server):
-    client = aioredis.Redis(port=df_server.port)
+    client = df_server.client()
 
-    res = await client.execute_command("ACL SETUSER george ON >pass +@transaction +@string")
-    assert res == b"OK"
+    assert await client.execute_command("ACL SETUSER george ON >pass +@transaction +set ~*") == "OK"
+    assert await client.execute_command("AUTH george pass") == "OK"
 
-    res = await client.execute_command("AUTH george pass")
-    assert res == b"OK"
+    assert await client.execute_command("MULTI") == "OK"
+    assert await client.execute_command("SET the_answer 42") == "QUEUED"
 
-    await client.execute_command("MULTI")
-    await client.execute_command("SET key 44")
+    admin_client = df_server.client()
+    assert await admin_client.execute_command("ACL DELUSER george") == 1
 
-    admin_client = aioredis.Redis(port=df_server.port)
-    await admin_client.execute_command("ACL DELUSER george")
-
-    with pytest.raises(redis.exceptions.ConnectionError):
+    # the connection was destroyed so EXEC will be executed in the new connection without MULTI
+    with pytest.raises(redis.exceptions.ResponseError):
         await client.execute_command("EXEC")
 
-    await admin_client.close()
+    assert await client.execute_command("ACL WHOAMI") == "User is default"
+
+    await close_clients(admin_client, client)
 
 
 script = """
@@ -259,7 +258,7 @@ async def test_acl_del_user_while_running_lua_script(df_server):
     client = aioredis.Redis(port=df_server.port)
     await client.execute_command("ACL SETUSER kostas ON >kk +@string +@scripting")
     await client.execute_command("AUTH kostas kk")
-    admin_client = aioredis.Redis(port=df_server.port)
+    admin_client = aioredis.Redis(port=df_server.port, decode_responses=True)
 
     with pytest.raises(redis.exceptions.ConnectionError):
         await asyncio.gather(
@@ -269,7 +268,7 @@ async def test_acl_del_user_while_running_lua_script(df_server):
 
     for i in range(1, 4):
         res = await admin_client.get(f"key{i}")
-        assert res == b"100000"
+        assert res == "100000"
 
     await admin_client.close()
 
@@ -280,7 +279,7 @@ async def test_acl_with_long_running_script(df_server):
     client = aioredis.Redis(port=df_server.port)
     await client.execute_command("ACL SETUSER roman ON >yoman +@string +@scripting")
     await client.execute_command("AUTH roman yoman")
-    admin_client = aioredis.Redis(port=df_server.port)
+    admin_client = aioredis.Redis(port=df_server.port, decode_responses=True)
 
     await asyncio.gather(
         client.eval(script, 4, "key", "key1", "key2", "key3"),
@@ -289,7 +288,7 @@ async def test_acl_with_long_running_script(df_server):
 
     for i in range(1, 4):
         res = await admin_client.get(f"key{i}")
-        assert res == b"100000"
+        assert res == "100000"
 
     await client.close()
     await admin_client.close()
@@ -437,22 +436,22 @@ async def test_require_pass(df_factory):
     with pytest.raises(redis.exceptions.AuthenticationError):
         await client.execute_command("AUTH default wrongpass")
 
-    client = aioredis.Redis(password="mypass", port=df.port)
+    client = aioredis.Redis(password="mypass", port=df.port, decode_responses=True)
 
     res = await client.execute_command("AUTH default mypass")
-    assert res == b"OK"
+    assert res == "OK"
 
     res = await client.execute_command("CONFIG SET requirepass newpass")
-    assert res == b"OK"
+    assert res == "OK"
 
     res = await client.execute_command("AUTH default newpass")
-    assert res == b"OK"
+    assert res == "OK"
 
-    client = aioredis.Redis(password="newpass", port=df.admin_port)
+    client = aioredis.Redis(password="newpass", port=df.admin_port, decode_responses=True)
 
     await client.execute_command("SET foo 44")
     res = await client.execute_command("GET foo")
-    assert res == b"44"
+    assert res == "44"
 
     await client.close()
 
@@ -568,54 +567,71 @@ async def test_acl_keys(async_client):
 
 
 @pytest.mark.asyncio
-async def test_namespaces(df_factory):
-    df = df_factory.create()
-    df.start()
-
-    admin = aioredis.Redis(port=df.port)
-    assert await admin.execute_command("SET foo admin") == b"OK"
-    assert await admin.execute_command("GET foo") == b"admin"
+async def test_namespaces(df_server):
+    admin = df_server.client()
+    assert await admin.execute_command("SET foo admin") == "OK"
+    assert await admin.execute_command("GET foo") == "admin"
 
     # Create ns space named 'ns1'
     await admin.execute_command("ACL SETUSER adi NAMESPACE:ns1 ON >adi_pass +@all ~*")
 
-    adi = aioredis.Redis(port=df.port)
-    assert await adi.execute_command("AUTH adi adi_pass") == b"OK"
-    assert await adi.execute_command("SET foo bar") == b"OK"
-    assert await adi.execute_command("GET foo") == b"bar"
-    assert await admin.execute_command("GET foo") == b"admin"
+    adi = df_server.client()
+    assert await adi.execute_command("AUTH adi adi_pass") == "OK"
+    assert await adi.execute_command("SET foo bar") == "OK"
+    assert await adi.execute_command("GET foo") == "bar"
+    assert await admin.execute_command("GET foo") == "admin"
 
     # Adi and Shahar are on the same team
     await admin.execute_command("ACL SETUSER shahar NAMESPACE:ns1 ON >shahar_pass +@all ~*")
 
-    shahar = aioredis.Redis(port=df.port)
-    assert await shahar.execute_command("AUTH shahar shahar_pass") == b"OK"
-    assert await shahar.execute_command("GET foo") == b"bar"
-    assert await shahar.execute_command("SET foo bar2") == b"OK"
-    assert await adi.execute_command("GET foo") == b"bar2"
+    shahar = df_server.client()
+    assert await shahar.execute_command("AUTH shahar shahar_pass") == "OK"
+    assert await shahar.execute_command("GET foo") == "bar"
+    assert await shahar.execute_command("SET foo bar2") == "OK"
+    assert await adi.execute_command("GET foo") == "bar2"
 
     # Roman is a CTO, he has his own private space
     await admin.execute_command("ACL SETUSER roman NAMESPACE:ns2 ON >roman_pass +@all ~*")
 
-    roman = aioredis.Redis(port=df.port)
-    assert await roman.execute_command("AUTH roman roman_pass") == b"OK"
+    roman = df_server.client()
+    assert await roman.execute_command("AUTH roman roman_pass") == "OK"
     assert await roman.execute_command("GET foo") == None
 
     await close_clients(admin, adi, shahar, roman)
 
 
 @pytest.mark.asyncio
-async def default_user_bug(df_factory):
-    df.start()
+async def test_default_user_bug(df_server):
+    client = df_server.client()
 
-    client = aioredis.Redis(port=df.port)
-
-    await async_client.execute_command("ACL SETUSER default -@all")
+    await client.execute_command("ACL SETUSER default -@all")
     await client.close()
 
-    client = aioredis.Redis(port=df.port)
+    client = df_server.client()
 
     with pytest.raises(redis.exceptions.ResponseError):
         await client.execute_command("SET foo bar")
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_auth_resp3_bug(df_factory):
+    df = df_factory.create()
+    df.start()
+
+    client = aioredis.Redis(port=df.port, protocol=3, decode_responses=True)
+
+    await client.execute_command("ACL SETUSER kostas +@all ON >tmp")
+    res = await client.execute_command("HELLO 3 AUTH kostas tmp")
+    assert res == {
+        "server": "redis",
+        "version": "6.2.11",
+        "dragonfly_version": "df-dev",
+        "proto": 3,
+        "id": 1,
+        "mode": "standalone",
+        "role": "master",
+    }
 
     await client.close()

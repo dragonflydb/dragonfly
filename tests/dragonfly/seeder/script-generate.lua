@@ -1,4 +1,4 @@
-#!lua flags=disable-atomicity
+--!df flags=disable-atomicity
 
 --[[
 Script for quickly generating various data

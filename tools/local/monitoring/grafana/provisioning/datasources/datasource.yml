@@ -40,6 +40,7 @@ datasources:
      graphiteVersion: "1.1"
      tlsAuth: false
      tlsAuthWithCACert: false
+     timeInterval: 1s  # Based on https://stackoverflow.com/a/66830690
   # <string> json object of data that will be encrypted.
   secureJsonData:
     tlsCACert: "..."

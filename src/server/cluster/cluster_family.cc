@@ -711,8 +711,8 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   vector<string> reply;
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
-  auto append_answer = [rb, &reply](string_view direction, string_view node_id, string_view filter,
-                                    MigrationState state, size_t keys_number, string_view error) {
+  auto append_answer = [&reply](string_view direction, string_view node_id, string_view filter,
+                                MigrationState state, size_t keys_number, string_view error) {
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
       reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
@@ -794,10 +794,11 @@ SlotRanges ClusterFamily::RemoveOutgoingMigrations(shared_ptr<ClusterConfig> new
 }
 
 namespace {
+
 // returns removed incoming migration
 bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigration>>& jobs,
-                                 string source_id) {
-  auto it = std::find_if(jobs.begin(), jobs.end(), [&source_id](const auto& im) {
+                                 string_view source_id) {
+  auto it = std::find_if(jobs.begin(), jobs.end(), [source_id](const auto& im) {
     // we can have only one migration per target-source pair
     return source_id == im->GetSourceID();
   });
@@ -840,7 +841,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Create incoming migration, args: " << args;
   CmdArgParser parser{args};
 
-  auto [source_id, flows_num] = parser.Next<std::string, uint32_t>();
+  auto [source_id, flows_num] = parser.Next<string_view, uint32_t>();
 
   std::vector<SlotRange> slots;
   do {
@@ -853,7 +854,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   const auto& incoming_migrations = cluster_config()->GetIncomingMigrations();
   bool found = any_of(incoming_migrations.begin(), incoming_migrations.end(),
-                      [&](const MigrationInfo& info) {
+                      [source_id = source_id](const MigrationInfo& info) {
                         // TODO: also compare slot ranges (in an order-agnostic way)
                         return info.node_info.id == source_id;
                       });
@@ -869,7 +870,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
   LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
-      std::move(source_id), &server_family_->service(), SlotRanges(std::move(slots)), flows_num));
+      string(source_id), &server_family_->service(), SlotRanges(std::move(slots)), flows_num));
 
   return cntx->SendOk();
 }
@@ -961,8 +962,9 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, ConnectionContext* cntx) {
 
   VLOG(1) << "DFLYMIGRATE ACK" << args;
   auto in_migrations = tl_cluster_config->GetIncomingMigrations();
-  auto m_it = std::find_if(in_migrations.begin(), in_migrations.end(),
-                           [source_id](const auto& m) { return m.node_info.id == source_id; });
+  auto m_it =
+      std::find_if(in_migrations.begin(), in_migrations.end(),
+                   [source_id = source_id](const auto& m) { return m.node_info.id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
     return cntx->SendLong(OutgoingMigration::kInvalidAttempt);

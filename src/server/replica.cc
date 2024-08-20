@@ -209,7 +209,8 @@ void Replica::MainReplicationFb() {
       // Give a lower timeout for connect, because we're
       ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_reconnect_timeout_ms) * 1ms, &cntx_);
       if (ec) {
-        LOG(ERROR) << "Error connecting to " << server().Description() << " " << ec;
+        reconnect_count_++;
+        LOG(WARNING) << "Error connecting to " << server().Description() << " " << ec;
         continue;
       }
       VLOG(1) << "Replica socket connected";
@@ -424,6 +425,7 @@ error_code Replica::InitiatePSync() {
     }
 
     RdbLoader loader(NULL);
+    loader.SetLoadUnownedSlots(true);
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
     // Also to allow updating last_io_time_.
@@ -934,6 +936,7 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
       flow_id_(flow_id) {
   executor_ = std::make_unique<JournalExecutor>(service);
   rdb_loader_ = std::make_unique<RdbLoader>(&service_);
+  rdb_loader_->SetLoadUnownedSlots(true);
 }
 
 DflyShardReplica::~DflyShardReplica() {
@@ -1086,6 +1089,7 @@ auto Replica::GetSummary() const -> Summary {
     res.full_sync_done = (state_mask_.load() & R_SYNC_OK);
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     res.master_id = master_context_.master_repl_id;
+    res.reconnect_count = reconnect_count_;
     return res;
   };
 

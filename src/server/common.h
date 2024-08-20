@@ -361,11 +361,6 @@ class UniquePicksGenerator : public PicksGenerator {
   absl::BitGen bitgen_{};
 };
 
-struct ConditionFlag {
-  util::fb2::CondVarAny cond_var;
-  bool flag = false;
-};
-
 // Helper class used to guarantee atomicity between serialization of buckets
 class ThreadLocalMutex {
  public:
@@ -379,6 +374,9 @@ class ThreadLocalMutex {
   EngineShard* shard_;
   util::fb2::CondVarAny cond_var_;
   bool flag_ = false;
+  util::fb2::detail::FiberInterface* locked_fiber_{nullptr};
 };
+
+extern size_t serialization_max_chunk_size;
 
 }  // namespace dfly
