@@ -486,14 +486,18 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     return;
 
   if (trans_mask & Transaction::AWAKED_Q) {
-    CHECK(continuation_trans_ == nullptr || continuation_trans_ == trans)
+    CHECK(trans->GetNamespace().GetBlockingController(shard_id_)->HasAwakedTransaction());
+    CHECK(continuation_trans_ == nullptr)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
         << "cont_mask: " << continuation_trans_->DEBUG_GetLocalMask(sid) << " vs "
         << trans->DEBUG_GetLocalMask(sid);
 
     // Commands like BRPOPLPUSH don't conclude immediately
     if (trans->RunInShard(this, false)) {
-      continuation_trans_ = trans;
+      // execution is blocked while HasAwakedTransaction() returns true, so no need to set
+      // continuation_trans_. Moreover, setting it for wakened multi-hop transactions may lead to
+      // inconcistency, see BLMoveSimultaneously test.
+      // continuation_trans_ = trans;
       return;
     }
 
