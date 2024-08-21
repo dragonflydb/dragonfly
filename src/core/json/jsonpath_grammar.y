@@ -63,7 +63,7 @@ using namespace std;
 %token <int>  INT "integer"
 
 %nterm <std::string> identifier
-%nterm <PathSegment> bracket_key
+%nterm <PathSegment> bracket_index
 %nterm <std::string> single_quoted_string
 %nterm <std::string> double_quoted_string
 
@@ -88,9 +88,9 @@ relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
 
 identifier: UNQ_STR
 
-bracket_expr: LBRACKET bracket_key RBRACKET { driver->AddSegment($2); } opt_relative_location
+bracket_expr: LBRACKET bracket_index RBRACKET { driver->AddSegment($2); } opt_relative_location
 
-bracket_key: single_quoted_string { $$ = PathSegment(SegmentType::IDENTIFIER, $1); }
+bracket_index: single_quoted_string { $$ = PathSegment(SegmentType::IDENTIFIER, $1); }
               | double_quoted_string { $$ = PathSegment(SegmentType::IDENTIFIER, $1); }
               | WILDCARD { $$ = PathSegment{SegmentType::INDEX, IndexExpr::All()}; }
               | INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr($1, $1)); }

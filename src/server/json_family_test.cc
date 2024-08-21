@@ -267,6 +267,25 @@ TEST_F(JsonFamilyTest, GetBrackets) {
 
   resp = Run({"JSON.GET", "json", "$[\"first\"]"});
   ASSERT_THAT(resp, "[]");
+
+  json = R"(
+    {"a":{"b":{"c":"first"}}, "b":{"b":{"c":"second"}}, "c":{"b":{"c":"third"}}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json", R"($["a"]['b']["c"])"});
+  ASSERT_THAT(resp, "[\"first\"]");
+
+  resp = Run({"JSON.GET", "json", R"($["a"].b['c'])"});
+  ASSERT_THAT(resp, "[\"first\"]");
+
+  resp = Run({"JSON.GET", "json", R"($..['b']["c"])"});
+  ASSERT_THAT(resp, R"(["first","second","third"])");
+
+  resp = Run({"JSON.GET", "json", R"($.c['b']["c"])"});
+  ASSERT_THAT(resp, "[\"third\"]");
 }
 
 TEST_F(JsonFamilyTest, Type) {
