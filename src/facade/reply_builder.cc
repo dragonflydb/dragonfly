@@ -19,6 +19,7 @@
 #ifndef IOV_MAX
 // Some versions of MacOSX dont have IOV_MAX
 #define IOV_MAX 1024
+#define UIO_MAXIOV IOV_MAX
 #endif
 #endif
 
