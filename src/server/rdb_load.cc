@@ -2646,10 +2646,8 @@ void RdbLoader::PerformPreLoad(Service* service) {
   if (cmd == nullptr)
     return;  // MacOS
 
-  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-    for (const auto& name : es->search_indices()->GetIndexNames())
-      es->search_indices()->DropIndex(name);
-  });
+  shard_set->AwaitRunningOnShardQueue(
+      [](EngineShard* es) { es->search_indices()->DropAllIndices(); });
 }
 
 void RdbLoader::PerformPostLoad(Service* service) {
