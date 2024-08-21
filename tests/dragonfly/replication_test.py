@@ -740,6 +740,7 @@ async def test_simple_scripts(df_factory: DflyInstanceFactory):
 
     # Connect replicas and wait for sync to finish
     await replicas.connect(master.port)
+    await replicas.wait_for_state()
     await replicas.wait_for_offset()
 
     # Generate some scripts and run them
@@ -820,7 +821,7 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
     )
     assert rsps == ["OK"] * num_par
 
-    await check_all_replicas_finished(c_replicas, c_master)
+    await Replicas(c_master, *c_replicas).wait_for_offset()
 
     for c_replica in c_replicas:
         for key_set in key_sets:
@@ -1043,9 +1044,9 @@ async def test_flushall_in_full_sync(df_factory):
     await seeder.run(c_master, target_deviation=0.1)
 
     # Start replication and wait for full sync
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    async with async_timeout.timeout(3):
-        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.05)
+    rp = Replicas(c_master, c_replicas)
+    await rp.connect(master.port)
+    await rp.wait_for_state()
 
     syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
 
@@ -2164,7 +2165,7 @@ async def test_user_acl_replication(df_factory):
 
     # reinstate and let replication continue
     await c_master.execute_command("ACL SETUSER tmp +replconf")
-    await check_all_replicas_finished([c_replica], c_master, 5)
+    await Replicas(c_master, c_replica).wait_for_offset()
     assert 2 == await c_replica.execute_command("DBSIZE")
 
 
@@ -2383,8 +2384,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
     await old_c_master.close()
 
     async def assert_body(client, result=1, state="online", node_role="slave"):
-        async with async_timeout.timeout(10):
-            await wait_for_replicas_state(client, state=state, node_role=node_role)
+        Replicas(None, client).wait_for_state(state=state)
 
         assert await client.execute_command(f"EXISTS foo") == result
         assert await client.execute_command("REPLTAKEOVER 1") == "OK"
@@ -2441,8 +2441,9 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
     replica.start()
     c_replica = replica.client()
 
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_for_replicas_state(c_replica)
-    assert await c_replica.execute_command(f"dbsize") == 0
+    rp = Replicas(c_master, c_replica)
+    await rp.connect(master.port)
+    await rp.wait_for_state()
+    assert await c_replica.dbsize() == 0
 
     await close_clients(c_master, c_replica)
