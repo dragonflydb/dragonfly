@@ -16,10 +16,9 @@
 #include "util/fibers/proactor_base.h"
 
 #ifdef __APPLE__
-#ifndef IOV_MAX
+#ifndef UIO_MAXIOV
 // Some versions of MacOSX dont have IOV_MAX
-#define IOV_MAX 1024
-#define UIO_MAXIOV IOV_MAX
+#define UIO_MAXIOV 1024
 #endif
 #endif
 
