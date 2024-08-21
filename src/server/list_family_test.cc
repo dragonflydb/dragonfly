@@ -772,10 +772,10 @@ TEST_F(ListFamilyTest, BLMoveSimultaneously) {
             Shard("src1", shard_set->size()));  // Trigger MoveTwoShards
 
   auto f1 = pp_->at(1)->LaunchFiber([this]() {
-    Run({"blmove", "src1", "dest110", "LEFT", "RIGHT", "0"});
+    Run("c1", {"blmove", "src1", "dest110", "LEFT", "RIGHT", "0"});
   });
   auto f2 = pp_->at(1)->LaunchFiber([this]() {
-    Run({"blmove", "src10", "dest110", "LEFT", "RIGHT", "0"});
+    Run("c2", {"blmove", "src10", "dest110", "LEFT", "RIGHT", "0"});
   });
 
   ThisFiber::SleepFor(5ms);
@@ -797,7 +797,7 @@ TEST_F(ListFamilyTest, BLMoveRings) {
     auto key1 = to_string(i);
     auto key2 = to_string(i + 1);
     fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([=]() {
-      Run({"blmove", key1, key2, "LEFT", "RIGHT", "0"});
+      Run(key1, {"blmove", key1, key2, "LEFT", "RIGHT", "0"});
     }));
   }
 
