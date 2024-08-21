@@ -495,7 +495,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
     // Commands like BRPOPLPUSH don't conclude immediately
     if (trans->RunInShard(this, false)) {
-      continuation_trans_ = trans;
       return;
     }
 
