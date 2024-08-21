@@ -462,6 +462,10 @@ void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
+  if (cntx->conn_state.db_index != 0) {
+    return cntx->SendError("Cannot create index on db != 0"sv);
+  }
+
   DocIndex index{};
 
   CmdArgParser parser{args};
