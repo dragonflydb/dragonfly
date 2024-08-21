@@ -765,6 +765,32 @@ TEST_F(ListFamilyTest, BLMove) {
   ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
 }
 
+TEST_F(ListFamilyTest, BLMove22) {
+  EXPECT_EQ(Shard("src1", shard_set->size()),
+            Shard("src10", shard_set->size()));  // wake on same shard
+  EXPECT_NE(Shard("dest110", shard_set->size()),
+            Shard("src1", shard_set->size()));  // Trigger MoveTwoShards
+
+  auto f1 = pp_->at(1)->LaunchFiber([this]() {
+    Run({"blmove", "src1", "dest110", "LEFT", "RIGHT", "0"});
+  });
+  auto f2 = pp_->at(1)->LaunchFiber([this]() {
+    Run({"blmove", "src10", "dest110", "LEFT", "RIGHT", "0"});
+  });
+
+  ThisFiber::SleepFor(10ms);
+  Run({"multi"});
+  Run({"rpush", "src1", "v1"});
+  Run({"rpush", "src10", "v2"});
+  Run({"exec"});
+
+  f1.Join();
+  f2.Join();
+
+  auto res = Run({"lrange", "dest110", "0", "-1"});
+  EXPECT_THAT(res.GetVec(), UnorderedElementsAre("v1", "v2"));
+}
+
 TEST_F(ListFamilyTest, LPushX) {
   // No push for 'lpushx' on nonexisting key.
   EXPECT_THAT(Run({"lpushx", kKey1, "val1"}), IntArg(0));
