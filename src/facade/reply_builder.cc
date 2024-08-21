@@ -15,6 +15,13 @@
 #include "facade/error.h"
 #include "util/fibers/proactor_base.h"
 
+#ifdef __APPLE__
+#ifndef IOV_MAX
+// Some versions of MacOSX dont have IOV_MAX
+#define IOV_MAX 1024
+#endif
+#endif
+
 using namespace std;
 using absl::StrAppend;
 using namespace double_conversion;
