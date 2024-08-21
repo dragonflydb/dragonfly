@@ -565,7 +565,7 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
         # Setup replication and make sure that it works properly.
         await c_master.set("key", "value")
         await c_replica.execute_command("REPLICAOF", "localhost", master.port)
-        await Replicas(c_master, c_replica).wait_for_offset()
+        await Replicas(c_master, c_replica).wait_synced()
         assert (await c_replica.get("key")) == "value"
         assert await c_replica.execute_command("dbsize") == 1
 
@@ -681,7 +681,7 @@ async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceF
 
     # Setup replication and make sure that it works properly.
     await c_replica.execute_command("REPLICAOF", "localhost", master.port)
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
     assert await c_replica.execute_command("dbsize") == 100_000
 
     resp = await c_master_admin.execute_command("dflycluster", "getslotinfo", "slots", "0")

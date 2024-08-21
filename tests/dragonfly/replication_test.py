@@ -152,6 +152,10 @@ async def test_disconnect_replica(
     t_disonnect,
     n_keys,
 ):
+    DISCONNECT_CRASH_FULL_SYNC = 0
+    DISCONNECT_CRASH_STABLE_SYNC = 1
+    DISCONNECT_NORMAL_STABLE_SYNC = 2
+
     master = df_factory.create(
         proactor_threads=t_master, vmodule="replica=2,dflycmd=2,server_family=2"
     )
@@ -678,7 +682,7 @@ async def test_expiry(df_factory: DflyInstanceFactory, n_keys=1000):
     await pipe.execute()
 
     # Check replica finished executing the replicated commands
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
     # Check keys are on replica
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is not None for v in res)
@@ -806,10 +810,9 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
     df_factory.start_all([master] + replicas)
 
     c_master = master.client()
-    c_replicas = [replica.client() for replica in replicas]
-    for c_replica in c_replicas:
-        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        await wait_available_async(c_replica)
+    replicas = Replicas(c_master, *(replica.client() for replica in replicas))
+    await replicas.connect(master.port)
+    await replicas.wait_for_state()
 
     script = script_test_s1.format(flags=f"--!df flags={flags}" if flags else "")
     sha = await c_master.script_load(script)
@@ -821,15 +824,15 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
     )
     assert rsps == ["OK"] * num_par
 
-    await Replicas(c_master, *c_replicas).wait_for_offset()
+    await replicas.wait_for_offset()
 
-    for c_replica in c_replicas:
+    for c_replica in replicas.clients:
         for key_set in key_sets:
             for j, k in enumerate(key_set):
                 l = await c_replica.lrange(k, 0, -1)
                 assert l == [f"{j}"] * num_ops
 
-    await close_clients(c_master, *c_replicas)
+    await close_clients(c_master, *replicas.clients)
 
 
 @dfly_args({"proactor_threads": 4})
@@ -854,7 +857,7 @@ async def test_auth_master(df_factory, n_keys=20):
     await pipe.execute()
 
     # Check replica finished executing the replicated commands
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
     # Check keys are on replica
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is not None for v in res)
@@ -874,6 +877,7 @@ async def test_script_transfer(df_factory):
 
     c_master = master.client()
     c_replica = replica.client()
+    replica = Replicas(c_master, c_replica)
 
     # Load some scripts into master ahead
     scripts = []
@@ -881,15 +885,15 @@ async def test_script_transfer(df_factory):
         sha = await c_master.script_load(SCRIPT_TEMPLATE.format(i))
         scripts.append(sha)
 
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(c_replica)
+    await replica.connect(master.port)
+    await replica.wait_for_state()
 
     # transfer in stable state
     for i in range(10, 20):
         sha = await c_master.script_load(SCRIPT_TEMPLATE.format(i))
         scripts.append(sha)
 
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await replica.wait_for_offset()
     await c_replica.execute_command("REPLICAOF NO ONE")
 
     for i, sha in enumerate(scripts):
@@ -1062,11 +1066,7 @@ async def test_flushall_in_full_sync(df_factory):
     post_seeder = SeederV2(key_target=100)
     await post_seeder.run(c_master, target_deviation=0.1)
 
-    await Replicas(c_master, c_replica).wait_for_offset()
-
-    # Check replica data consisten
-    hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
-    assert hash1 == hash2
+    await rp.check_captures_v2()
 
     # Make sure that a new sync ID is present, meaning replication restarted following FLUSHALL.
     new_syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
@@ -1357,7 +1357,7 @@ async def test_no_tls_on_admin_port(
     c_replica = replica.admin_client(password="XXX")
     res = await c_replica.execute_command("REPLICAOF localhost " + str(master.admin_port))
     assert "OK" == res
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
 
     # 3. Verify that replica dbsize == debug populate key size -- replication works
     db_size = await c_replica.execute_command("DBSIZE")
@@ -1413,7 +1413,7 @@ async def test_tls_replication(
     c_replica = replica.client(**with_ca_tls_client_args)
     res = await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port))
     assert "OK" == res
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
 
     # 3. Verify that replica dbsize == debug populate key size -- replication works
     db_size = await c_replica.execute_command("DBSIZE")
@@ -1430,7 +1430,7 @@ async def test_tls_replication(
     db_size = await c_master.execute_command("DBSIZE")
     assert 101 == db_size
 
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
     db_size = await c_replica.execute_command("DBSIZE")
     assert 101 == db_size
 
@@ -1489,11 +1489,7 @@ async def test_replicaof_flag(df_factory):
     # set up replica. check that it is replicating
     replica.start()
     c_replica = replica.client()
-
-    await wait_available_async(c_replica)  # give it time to startup
-    # wait until we have a connection
-    await wait_for_replica_status(c_replica, status="up")
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
 
     dbsize = await c_replica.dbsize()
     assert 1 == dbsize
@@ -1571,9 +1567,7 @@ async def test_replicaof_flag_disconnect(df_factory):
     replica.start()
 
     c_replica = replica.client()
-    await wait_available_async(c_replica)
-    await wait_for_replica_status(c_replica, status="up")
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
 
     dbsize = await c_replica.dbsize()
     assert 1 == dbsize
@@ -1978,7 +1972,7 @@ async def test_heartbeat_eviction_propagation(df_factory):
         else:
             print("waiting for eviction to finish...", end="\r", flush=True)
 
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
     keys_master = await c_master.execute_command("keys *")
     keys_replica = await c_replica.execute_command("keys *")
     assert set(keys_master) == set(keys_replica)
@@ -2013,7 +2007,7 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     info = await c_master.info("stats")
     assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
 
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
     keys_master = await c_master.execute_command("keys k*")
     keys_replica = await c_replica.execute_command("keys k*")
 
@@ -2070,7 +2064,7 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     await wait_available_async(c_replica)
     await stream_task
 
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
     keys_master = await c_master.execute_command("keys *")
     keys_replica = await c_replica.execute_command("keys *")
     assert set(keys_master) == set(keys_replica)
@@ -2165,7 +2159,7 @@ async def test_user_acl_replication(df_factory):
 
     # reinstate and let replication continue
     await c_master.execute_command("ACL SETUSER tmp +replconf")
-    await Replicas(c_master, c_replica).wait_for_offset()
+    await Replicas(c_master, c_replica).wait_synced()
     assert 2 == await c_replica.execute_command("DBSIZE")
 
 
@@ -2213,7 +2207,7 @@ async def test_replica_reconnect(df_factory, break_conn):
         assert await c_master.execute_command("get k") == None
         assert await c_replica.execute_command("get k") == None
         assert await c_master.execute_command("set k 6789")
-        await Replicas(c_master, c_replica).wait_for_offset()
+        await Replicas(c_master, c_replica).wait_synced()
         assert await c_replica.execute_command("get k") == "6789"
         assert (await c_replica.info("REPLICATION"))["master_link_status"] == "up"
 
@@ -2384,7 +2378,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
     await old_c_master.close()
 
     async def assert_body(client, result=1, state="online", node_role="slave"):
-        Replicas(None, client).wait_for_state(state=state)
+        await Replicas(None, client).wait_for_state(state=state)
 
         assert await client.execute_command(f"EXISTS foo") == result
         assert await client.execute_command("REPLTAKEOVER 1") == "OK"

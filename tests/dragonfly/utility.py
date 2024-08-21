@@ -15,7 +15,7 @@ import subprocess
 import pytest
 import os
 import typing
-from .seeder import Seeder as SeederV2
+from .seeder import SeederBase as SeederV2Base
 from enum import Enum
 
 
@@ -149,14 +149,18 @@ class Replicas:
             with breaker:
                 assert offsets == [master_offset] * len(offsets)
 
+    async def wait_synced(self):
+        await self.wait_for_state()
+        await self.wait_for_offset()
+
     async def check_captures_v2(self):
-        master_capture = await SeederV2.capture(self.master)
+        master_capture = await SeederV2Base.capture(self.master)
 
         # master might have caused expirations, wait for replicas to catch up
         await self.wait_for_offset()
 
         replica_captures = await asyncio.gather(
-            *(SeederV2.capture(replica) for replica in self.clients)
+            *(SeederV2Base.capture(replica) for replica in self.clients)
         )
         assert len(set([master_capture]) | set(replica_captures)) == 1
 
