@@ -88,6 +88,33 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_EQ(Run({"ft._list"}), "idx-3");
 }
 
+TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
+  // Create index on db 0
+  auto resp =
+      Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"select", "1"}), "OK");  // change database
+
+  // Creating an index on non zero database must fail
+  resp = Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"});
+  EXPECT_THAT(resp, ErrArg("ERR Cannot create index on db != 0"));
+
+  // Add some data to the index
+  Run({"hset", "doc-0", "name", "Name of 0"});
+
+  // ft.search must work on the another database
+  resp = Run({"ft.search", "idx-1", "*"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "doc-0", IsArray("name", "Name of 0")));
+
+  // ft.dropindex must work on the another database
+  EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
+
+  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
+  EXPECT_EQ(Run({"select", "0"}), "OK");
+  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
+}
+
 TEST_F(SearchFamilyTest, AlterIndex) {
   Run({"hset", "d:1", "color", "blue", "cost", "150"});
   Run({"hset", "d:2", "color", "green", "cost", "200"});
