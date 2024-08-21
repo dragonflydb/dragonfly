@@ -486,8 +486,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     return;
 
   if (trans_mask & Transaction::AWAKED_Q) {
-    DCHECK(trans->GetNamespace().GetBlockingController(shard_id_)->HasAwakedTransaction());
-    CHECK(continuation_trans_ == nullptr || continuation_trans_ == trans)
+    CHECK(trans->GetNamespace().GetBlockingController(shard_id_)->HasAwakedTransaction());
+    CHECK(continuation_trans_ == nullptr)
         << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
         << "cont_mask: " << continuation_trans_->DEBUG_GetLocalMask(sid) << " vs "
         << trans->DEBUG_GetLocalMask(sid);

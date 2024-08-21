@@ -765,7 +765,7 @@ TEST_F(ListFamilyTest, BLMove) {
   ASSERT_THAT(resp.GetVec(), ElementsAre("val1", "val2"));
 }
 
-TEST_F(ListFamilyTest, BLMove22) {
+TEST_F(ListFamilyTest, BLMoveSimultaneously) {
   EXPECT_EQ(Shard("src1", shard_set->size()),
             Shard("src10", shard_set->size()));  // wake on same shard
   EXPECT_NE(Shard("dest110", shard_set->size()),
@@ -778,7 +778,7 @@ TEST_F(ListFamilyTest, BLMove22) {
     Run({"blmove", "src10", "dest110", "LEFT", "RIGHT", "0"});
   });
 
-  ThisFiber::SleepFor(10ms);
+  ThisFiber::SleepFor(5ms);
   Run({"multi"});
   Run({"rpush", "src1", "v1"});
   Run({"rpush", "src10", "v2"});
@@ -789,6 +789,27 @@ TEST_F(ListFamilyTest, BLMove22) {
 
   auto res = Run({"lrange", "dest110", "0", "-1"});
   EXPECT_THAT(res.GetVec(), UnorderedElementsAre("v1", "v2"));
+}
+
+TEST_F(ListFamilyTest, BLMoveRings) {
+  vector<fb2::Fiber> fibers;
+  for (int i = 0; i < 10; i++) {
+    auto key1 = to_string(i);
+    auto key2 = to_string(i + 1);
+    fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([=]() {
+      Run({"blmove", key1, key2, "LEFT", "RIGHT", "0"});
+    }));
+  }
+
+  ThisFiber::SleepFor(5ms);
+
+  Run({"lpush", "0", "v1"});
+  for (auto& fiber : fibers)
+    fiber.Join();
+
+  for (int i = 0; i < 10; i++)
+    EXPECT_THAT(Run({"llen", to_string(i)}), IntArg(0));
+  EXPECT_EQ(Run({"lrange", "10", "0", "-1"}), "v1");
 }
 
 TEST_F(ListFamilyTest, LPushX) {
