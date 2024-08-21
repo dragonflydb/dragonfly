@@ -247,6 +247,8 @@ class RdbLoader : protected RdbLoaderBase {
     uint64_t expire_ms;
     std::atomic<Item*> next;
     bool is_sticky = false;
+    bool has_mc_flags = false;
+    uint32_t mc_flags = 0;
 
     friend void MPSC_intrusive_store_next(Item* dest, Item* nxt) {
       dest->next.store(nxt, std::memory_order_release);

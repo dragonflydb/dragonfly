@@ -44,3 +44,4 @@ constexpr uint8_t RDB_OPCODE_DF_MASK = 220; /* Mask for key properties */
 
 // RDB_OPCODE_DF_MASK define 4byte field with next flags
 constexpr uint32_t DF_MASK_FLAG_STICKY = (1 << 0);
+constexpr uint32_t DF_MASK_FLAG_MC_FLAGS = (1 << 1);

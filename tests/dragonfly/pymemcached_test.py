@@ -138,5 +138,6 @@ def test_flags(memcached_client: MCClient):
         memcached_client.set("a", "real-value", flags=flags, noreply=True)
 
         res = memcached_client.raw_command("get a", "END\r\n").split()
+        # workaround sometimes memcached_client.raw_command returns empty str
         if len(res) > 0:
             assert res[2].decode() == str(flags)

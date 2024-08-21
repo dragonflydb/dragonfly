@@ -12,9 +12,10 @@ from .instance import RedisServer
 from random import randint as rand
 import string
 import random
+from pymemcache.client.base import Client as MCClient
 
 from . import dfly_args
-from .utility import wait_available_async, is_saving, tmp_file_name
+from .utility import close_clients, wait_available_async, is_saving, tmp_file_name
 
 from .seeder import StaticSeeder
 
@@ -554,3 +555,40 @@ async def test_big_value_serialization_memory_limit(df_factory, query):
     checker.cancel()
     await client.execute_command("FLUSHALL")
     await client.close()
+
+
+@dfly_args(
+    {
+        "dir": "{DRAGONFLY_TMP}/",
+        "memcached_port": 11211,
+        "proactor_threads": 4,
+        "dbfilename": "test-MC-flags",
+    }
+)
+async def test_mc_flags_saving(memcached_client: MCClient, async_client: aioredis.Redis):
+    async def check_flag(key, flag):
+        res = memcached_client.raw_command("get " + key, "END\r\n").split()
+        # workaround sometimes memcached_client.raw_command returns empty str
+        if len(res) > 2:
+            assert res[2].decode() == str(flag)
+
+    assert memcached_client.set("key1", "value1", noreply=True)
+    assert memcached_client.set("key2", "value1", noreply=True, expire=3600, flags=123456)
+    assert memcached_client.replace("key1", "value2", expire=4000, flags=2, noreply=True)
+
+    await check_flag("key1", 2)
+    await check_flag("key2", 123456)
+
+    await async_client.execute_command("SAVE", "DF")
+    assert await async_client.flushall()
+
+    await async_client.execute_command(
+        "DFLY",
+        "LOAD",
+        "test-MC-flags-summary.dfs",
+    )
+
+    await check_flag("key1", 2)
+    await check_flag("key2", 123456)
+
+    await close_clients(async_client)
