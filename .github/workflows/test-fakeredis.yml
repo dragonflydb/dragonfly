@@ -25,7 +25,7 @@ jobs:
           - "latest"
         tests:
           - "test_json"
-          #          - "test_mixins"
+          - "test_mixins"
           - "test_stack"
           - "test_connection.py"
           - "test_asyncredis.py"
