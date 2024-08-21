@@ -494,7 +494,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
     // Commands like BRPOPLPUSH don't conclude immediately
     if (trans->RunInShard(this, false)) {
-      // execution is blocked while the awakened set set is non-empty, so no need to set
+      // execution is blocked while HasAwakedTransaction() returns true, so no need to set continuation_trans_. 
+     // Moreover, setting it for wakened multi-hop transactions may lead to inconcistency, see BLMove22 test.
       // continuation continuation_trans_ = trans;
       return;
     }
