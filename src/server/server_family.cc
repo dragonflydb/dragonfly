@@ -1606,6 +1606,9 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   transaction->Execute(
       [db_ind](Transaction* t, EngineShard* shard) {
         t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
+        if (!db_ind || db_ind == DbSlice::kDbAll) {
+          shard->search_indices()->DropAllIndices();
+        }
         return OpStatus::OK;
       },
       true);
