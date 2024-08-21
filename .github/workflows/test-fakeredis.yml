@@ -3,10 +3,6 @@ name: Test Dragonfly/Fakeredis
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-
 
 concurrency:
   group: dragon-fly-${{ github.workflow }}-${{ github.ref }}
