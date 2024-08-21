@@ -2511,3 +2511,35 @@ async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
     assert await c_replica.execute_command(f"dbsize") == 0
 
     await close_clients(c_master, c_replica)
+
+
+async def test_replicating_mc_flags(df_factory):
+    master = df_factory.create(memcached_port=11211, proactor_threads=1)
+    replica = df_factory.create(
+        memcached_port=11212, proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}"
+    )
+    df_factory.start_all([master, replica])
+
+    c_mc_master = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+
+    c_replica = replica.client()
+
+    assert c_mc_master.set("key1", "value1", noreply=True)
+    assert c_mc_master.set("key2", "value1", noreply=True, expire=3600, flags=123456)
+    assert c_mc_master.replace("key1", "value2", expire=4000, flags=2, noreply=True)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    c_mc_replica = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
+
+    async def check_flag(key, flag):
+        res = c_mc_replica.raw_command("get " + key, "END\r\n").split()
+        # workaround sometimes memcached_client.raw_command returns empty str
+        if len(res) > 2:
+            assert res[2].decode() == str(flag)
+
+    await check_flag("key1", 2)
+    await check_flag("key2", 123456)
+
+    await close_clients(c_replica)
