@@ -712,7 +712,7 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
     cmds.push_back(absl::StrCat(params.memcache_flags));
   }
 
-  // Skip NX/XX because SET operation was exectued.
+  // Skip NX/XX because SET operation was executed.
   // Skip GET, because its not important on replica.
 
   dfly::RecordJournal(op_args_, "SET", ArgSlice{cmds});
@@ -782,7 +782,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(GetCurrentTimeMs(), true);
     } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {
-      sparams.memcache_flags = parser.Next<uint16_t>();
+      sparams.memcache_flags = parser.Next<uint32_t>();
     } else {
       uint16_t flag = parser.Switch(  //
           "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,

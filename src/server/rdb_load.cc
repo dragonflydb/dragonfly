@@ -1900,20 +1900,28 @@ io::Result<uint8_t> RdbLoaderBase::FetchType() {
 struct RdbLoader::ObjSettings {
   long long now;           // current epoch time in ms.
   int64_t expiretime = 0;  // expire epoch time in ms
+  uint32_t mc_flags = 0;
 
   bool has_expired = false;
 
   bool is_sticky = false;
+  bool has_mc_flags;
 
   void Reset() {
     expiretime = 0;
     has_expired = false;
     is_sticky = false;
+    has_mc_flags = false;
   }
 
   void SetExpire(int64_t val) {
     expiretime = val;
     has_expired = (val <= now);
+  }
+
+  void SetMCFlags(uint32_t flags) {
+    has_mc_flags = true;
+    mc_flags = flags;
   }
 
   ObjSettings() = default;
@@ -2012,6 +2020,10 @@ error_code RdbLoader::Load(io::Source* src) {
       uint32_t mask;
       SET_OR_RETURN(FetchInt<uint32_t>(), mask);
       settings.is_sticky = mask & DF_MASK_FLAG_STICKY;
+      settings.has_mc_flags = mask & DF_MASK_FLAG_MC_FLAGS;
+      if (settings.has_mc_flags) {
+        SET_OR_RETURN(FetchInt<uint32_t>(), settings.mc_flags);
+      }
       continue; /* Read next opcode. */
     }
 
@@ -2494,6 +2506,11 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
     auto& res = *op_res;
     res.it->first.SetSticky(item->is_sticky);
+    if (item->has_mc_flags) {
+      res.it->second.SetFlag(true);
+      db_slice.SetMCFlag(db_cntx.db_index, res.it->first.AsRef(), item->mc_flags);
+    }
+
     if (!override_existing_keys_ && !res.is_new) {
       LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
@@ -2555,6 +2572,8 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   }
 
   item->is_sticky = settings->is_sticky;
+  item->has_mc_flags = settings->has_mc_flags;
+  item->mc_flags = settings->mc_flags;
 
   ShardId sid = Shard(item->key, shard_set->size());
   item->expire_ms = settings->expiretime;

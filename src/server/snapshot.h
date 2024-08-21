@@ -147,6 +147,7 @@ class SliceSnapshot {
     CompactObj key;
     util::fb2::Future<PrimeValue> value;
     time_t expire;
+    uint32_t mc_flags;
   };
 
   DbSlice* db_slice_;
