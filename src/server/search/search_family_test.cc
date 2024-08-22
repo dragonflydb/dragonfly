@@ -250,6 +250,20 @@ TEST_F(SearchFamilyTest, JsonAttributesPaths) {
   EXPECT_THAT(Run({"ft.search", "i1", "yes"}), AreDocIds("k2"));
 }
 
+TEST_F(SearchFamilyTest, JsonIdentifierWithBrackets) {
+  Run({"json.set", "k1", ".", R"({"name":"London","population":8.8,"continent":"Europe"})"});
+  Run({"json.set", "k2", ".", R"({"name":"Athens","population":3.1,"continent":"Europe"})"});
+  Run({"json.set", "k3", ".", R"({"name":"Tel-Aviv","population":1.3,"continent":"Asia"})"});
+  Run({"json.set", "k4", ".", R"({"name":"Hyderabad","population":9.8,"continent":"Asia"})"});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "$[\"name\"]", "as", "name", "tag",
+                 "$[\"population\"]", "as", "population", "numeric", "sortable", "$[\"continent\"]",
+                 "as", "continent", "tag"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "(@continent:{Europe})"}), AreDocIds("k1", "k2"));
+}
+
 // todo: fails on arm build
 #ifndef SANITIZERS
 TEST_F(SearchFamilyTest, JsonArrayValues) {

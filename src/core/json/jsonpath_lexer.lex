@@ -51,6 +51,8 @@
 "*"         return Parser::make_WILDCARD(loc());
 "("         return Parser::make_LPARENT(loc());
 ")"         return Parser::make_RPARENT(loc());
+"'"         return Parser::make_SINGLE_QUOTE(loc());
+"\""        return Parser::make_DOUBLE_QUOTE(loc());
 -?[0-9]{1,9}  {
               int val;
               CHECK(absl::SimpleAtoi(str(), &val));
