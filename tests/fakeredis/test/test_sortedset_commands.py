@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
+from test import testtools
 from typing import Tuple, List, Optional
 
 import pytest
 import redis
 import redis.client
 from packaging.version import Version
-
-from test import testtools
 
 REDIS_VERSION = Version(redis.__version__)
 
@@ -69,12 +68,34 @@ def test_zrange_with_rev_and_bylex(r: redis.Redis):
     r.zadd("foo", {"two_a": 0})
     r.zadd("foo", {"two_b": 0})
     r.zadd("foo", {"three_a": 0})
-    assert r.zrange("foo", b"+", b"(t", desc=True, bylex=True) == [b"two_b", b"two_a", b"three_a"]
-    assert r.zrange("foo", b"[two_b", b"(t", desc=True, bylex=True) == [b"two_b", b"two_a", b"three_a"]
-    assert r.zrange("foo", b"(two_b", b"(t", desc=True, bylex=True) == [b"two_a", b"three_a"]
-    assert r.zrange("foo", b"[two_b", b"[three_a", desc=True, bylex=True) == [b"two_b", b"two_a", b"three_a"]
-    assert r.zrange("foo", b"[two_b", b"(three_a", desc=True, bylex=True) == [b"two_b", b"two_a"]
-    assert r.zrange("foo", b"(two_b", b"-", desc=True, bylex=True) == [b"two_a", b"three_a", b"one_a"]
+    assert r.zrange("foo", b"+", b"(t", desc=True, bylex=True) == [
+        b"two_b",
+        b"two_a",
+        b"three_a",
+    ]
+    assert r.zrange("foo", b"[two_b", b"(t", desc=True, bylex=True) == [
+        b"two_b",
+        b"two_a",
+        b"three_a",
+    ]
+    assert r.zrange("foo", b"(two_b", b"(t", desc=True, bylex=True) == [
+        b"two_a",
+        b"three_a",
+    ]
+    assert r.zrange("foo", b"[two_b", b"[three_a", desc=True, bylex=True) == [
+        b"two_b",
+        b"two_a",
+        b"three_a",
+    ]
+    assert r.zrange("foo", b"[two_b", b"(three_a", desc=True, bylex=True) == [
+        b"two_b",
+        b"two_a",
+    ]
+    assert r.zrange("foo", b"(two_b", b"-", desc=True, bylex=True) == [
+        b"two_a",
+        b"three_a",
+        b"one_a",
+    ]
     assert r.zrange("foo", b"(two_b", b"[two_b", bylex=True) == []
     # reversed max + and min - boundaries
     # these will be always empty, but allowed by redis
@@ -89,11 +110,23 @@ def test_zrange_with_bylex(r: redis.Redis):
     r.zadd("foo", {"two_b": 0})
     r.zadd("foo", {"three_a": 0})
     assert r.zrange("foo", b"(t", b"+", bylex=True) == [b"three_a", b"two_a", b"two_b"]
-    assert r.zrange("foo", b"(t", b"[two_b", bylex=True) == [b"three_a", b"two_a", b"two_b"]
+    assert r.zrange("foo", b"(t", b"[two_b", bylex=True) == [
+        b"three_a",
+        b"two_a",
+        b"two_b",
+    ]
     assert r.zrange("foo", b"(t", b"(two_b", bylex=True) == [b"three_a", b"two_a"]
-    assert r.zrange("foo", b"[three_a", b"[two_b", bylex=True) == [b"three_a", b"two_a", b"two_b"]
+    assert r.zrange("foo", b"[three_a", b"[two_b", bylex=True) == [
+        b"three_a",
+        b"two_a",
+        b"two_b",
+    ]
     assert r.zrange("foo", b"(three_a", b"[two_b", bylex=True) == [b"two_a", b"two_b"]
-    assert r.zrange("foo", b"-", b"(two_b", bylex=True) == [b"one_a", b"three_a", b"two_a"]
+    assert r.zrange("foo", b"-", b"(two_b", bylex=True) == [
+        b"one_a",
+        b"three_a",
+        b"two_a",
+    ]
     assert r.zrange("foo", b"[two_b", b"(two_b", bylex=True) == []
     # reversed max + and min - boundaries
     # these will be always empty, but allowed by redis
@@ -110,10 +143,27 @@ def test_zrange_with_byscore(r: redis.Redis):
     r.zadd("foo", {"four": 4})
     assert r.zrange("foo", 1, 3, byscore=True) == [b"two", b"two_a_also", b"two_b_also"]
     assert r.zrange("foo", 2, 3, byscore=True) == [b"two", b"two_a_also", b"two_b_also"]
-    assert r.zrange("foo", 0, 4, byscore=True) == [b"zero", b"two", b"two_a_also", b"two_b_also", b"four"]
+    assert r.zrange("foo", 0, 4, byscore=True) == [
+        b"zero",
+        b"two",
+        b"two_a_also",
+        b"two_b_also",
+        b"four",
+    ]
     assert r.zrange("foo", "-inf", 1, byscore=True) == [b"zero"]
-    assert r.zrange("foo", 2, "+inf", byscore=True) == [b"two", b"two_a_also", b"two_b_also", b"four"]
-    assert r.zrange("foo", "-inf", "+inf", byscore=True) == [b"zero", b"two", b"two_a_also", b"two_b_also", b"four"]
+    assert r.zrange("foo", 2, "+inf", byscore=True) == [
+        b"two",
+        b"two_a_also",
+        b"two_b_also",
+        b"four",
+    ]
+    assert r.zrange("foo", "-inf", "+inf", byscore=True) == [
+        b"zero",
+        b"two",
+        b"two_a_also",
+        b"two_b_also",
+        b"four",
+    ]
 
 
 def test_zcard(r: redis.Redis):
@@ -186,7 +236,11 @@ def test_zrange_descending_with_scores(r: redis.Redis):
     r.zadd("foo", {"one": 1})
     r.zadd("foo", {"two": 2})
     r.zadd("foo", {"three": 3})
-    assert r.zrange("foo", 0, -1, desc=True, withscores=True) == [(b"three", 3), (b"two", 2), (b"one", 1)]
+    assert r.zrange("foo", 0, -1, desc=True, withscores=True) == [
+        (b"three", 3),
+        (b"two", 2),
+        (b"one", 1),
+    ]
 
 
 def test_zrange_with_positive_indices(r: redis.Redis):
@@ -209,7 +263,10 @@ def test_zrange_score_cast(r: redis.Redis):
     expected_without_cast_round = [(b"one", 1.2), (b"two", 2.2)]
     expected_with_cast_round = [(b"one", 1.0), (b"two", 2.0)]
     assert r.zrange("foo", 0, 2, withscores=True) == expected_without_cast_round
-    assert r.zrange("foo", 0, 2, withscores=True, score_cast_func=round_str) == expected_with_cast_round
+    assert (
+        r.zrange("foo", 0, 2, withscores=True, score_cast_func=round_str)
+        == expected_with_cast_round
+    )
 
 
 def test_zrank(r: redis.Redis):
@@ -326,13 +383,23 @@ def test_zmscore_mixed_membership(r: redis.Redis):
 
     r.zadd(
         cache_key,
-        dict((member, scores[idx]) for (idx, member) in enumerate(members) if idx % 2 != 0),
+        dict(
+            (member, scores[idx])
+            for (idx, member) in enumerate(members)
+            if idx % 2 != 0
+        ),
     )
 
     cached_scores: List[Optional[float]] = r.zmscore(cache_key, list(members))
 
-    assert all(cached_scores[idx] is None for (idx, score) in enumerate(scores) if idx % 2 == 0)
-    assert all(cached_scores[idx] == score for (idx, score) in enumerate(scores) if idx % 2 != 0)
+    assert all(
+        cached_scores[idx] is None for (idx, score) in enumerate(scores) if idx % 2 == 0
+    )
+    assert all(
+        cached_scores[idx] == score
+        for (idx, score) in enumerate(scores)
+        if idx % 2 != 0
+    )
 
 
 def test_zrevrank(r: redis.Redis):
@@ -384,13 +451,20 @@ def test_zrevrange_score_cast(r: redis.Redis):
     expected_without_cast_round = [(b"two", 2.2), (b"one", 1.2)]
     expected_with_cast_round = [(b"two", 2.0), (b"one", 1.0)]
     assert r.zrevrange("foo", 0, 2, withscores=True) == expected_without_cast_round
-    assert r.zrevrange("foo", 0, 2, withscores=True, score_cast_func=round_str) == expected_with_cast_round
+    assert (
+        r.zrevrange("foo", 0, 2, withscores=True, score_cast_func=round_str)
+        == expected_with_cast_round
+    )
 
 
 def test_zrange_with_large_int(r: redis.Redis):
-    with pytest.raises(redis.ResponseError, match="value is not an integer or out of range"):
+    with pytest.raises(
+        redis.ResponseError, match="value is not an integer or out of range"
+    ):
         r.zrange("", 0, 9223372036854775808)
-    with pytest.raises(redis.ResponseError, match="value is not an integer or out of range"):
+    with pytest.raises(
+        redis.ResponseError, match="value is not an integer or out of range"
+    ):
         r.zrange("", 0, -9223372036854775809)
 
 
@@ -402,10 +476,27 @@ def test_zrangebyscore(r: redis.Redis):
     r.zadd("foo", {"four": 4})
     assert r.zrangebyscore("foo", 1, 3) == [b"two", b"two_a_also", b"two_b_also"]
     assert r.zrangebyscore("foo", 2, 3) == [b"two", b"two_a_also", b"two_b_also"]
-    assert r.zrangebyscore("foo", 0, 4) == [b"zero", b"two", b"two_a_also", b"two_b_also", b"four"]
+    assert r.zrangebyscore("foo", 0, 4) == [
+        b"zero",
+        b"two",
+        b"two_a_also",
+        b"two_b_also",
+        b"four",
+    ]
     assert r.zrangebyscore("foo", "-inf", 1) == [b"zero"]
-    assert r.zrangebyscore("foo", 2, "+inf") == [b"two", b"two_a_also", b"two_b_also", b"four"]
-    assert r.zrangebyscore("foo", "-inf", "+inf") == [b"zero", b"two", b"two_a_also", b"two_b_also", b"four"]
+    assert r.zrangebyscore("foo", 2, "+inf") == [
+        b"two",
+        b"two_a_also",
+        b"two_b_also",
+        b"four",
+    ]
+    assert r.zrangebyscore("foo", "-inf", "+inf") == [
+        b"zero",
+        b"two",
+        b"two_a_also",
+        b"two_b_also",
+        b"four",
+    ]
 
 
 def test_zrangebysore_exclusive(r: redis.Redis):
@@ -460,10 +551,12 @@ def test_zrangebyscore_cast_scores(r: redis.Redis):
 
     expected_without_cast_round = [(b"two", 2.0), (b"two_a_also", 2.2)]
     expected_with_cast_round = [(b"two", 2.0), (b"two_a_also", 2.0)]
-    assert sorted(r.zrangebyscore("foo", 2, 3, withscores=True)) == sorted(expected_without_cast_round)
-    assert sorted(r.zrangebyscore("foo", 2, 3, withscores=True, score_cast_func=round_str)) == sorted(
-        expected_with_cast_round
+    assert sorted(r.zrangebyscore("foo", 2, 3, withscores=True)) == sorted(
+        expected_without_cast_round
     )
+    assert sorted(
+        r.zrangebyscore("foo", 2, 3, withscores=True, score_cast_func=round_str)
+    ) == sorted(expected_with_cast_round)
 
 
 def test_zrevrangebyscore(r: redis.Redis):
@@ -512,9 +605,14 @@ def test_zrevrangebyscore_cast_scores(r: redis.Redis):
     r.zadd("foo", {"two": 2})
     r.zadd("foo", {"two_a_also": 2.2})
 
-    assert r.zrevrangebyscore("foo", 3, 2, withscores=True) == [(b"two_a_also", 2.2), (b"two", 2.0)]
+    assert r.zrevrangebyscore("foo", 3, 2, withscores=True) == [
+        (b"two_a_also", 2.2),
+        (b"two", 2.0),
+    ]
 
-    assert r.zrevrangebyscore("foo", 3, 2, withscores=True, score_cast_func=round_str) == [
+    assert r.zrevrangebyscore(
+        "foo", 3, 2, withscores=True, score_cast_func=round_str
+    ) == [
         (b"two_a_also", 2.0),
         (b"two", 2.0),
     ]
@@ -528,7 +626,11 @@ def test_zrangebylex(r: redis.Redis):
     assert r.zrangebylex("foo", b"(t", b"+") == [b"three_a", b"two_a", b"two_b"]
     assert r.zrangebylex("foo", b"(t", b"[two_b") == [b"three_a", b"two_a", b"two_b"]
     assert r.zrangebylex("foo", b"(t", b"(two_b") == [b"three_a", b"two_a"]
-    assert r.zrangebylex("foo", b"[three_a", b"[two_b") == [b"three_a", b"two_a", b"two_b"]
+    assert r.zrangebylex("foo", b"[three_a", b"[two_b") == [
+        b"three_a",
+        b"two_a",
+        b"two_b",
+    ]
     assert r.zrangebylex("foo", b"(three_a", b"[two_b") == [b"two_a", b"two_b"]
     assert r.zrangebylex("foo", b"-", b"(two_b") == [b"one_a", b"three_a", b"two_a"]
     assert r.zrangebylex("foo", b"[two_b", b"(two_b") == []
@@ -581,7 +683,12 @@ def test_zrangebylex_with_limit(r: redis.Redis):
     assert r.zrangebylex("foo", b"-", b"+", -1, 3) == []
 
     # negative limit ignored
-    assert r.zrangebylex("foo", b"-", b"+", 0, -2) == [b"one_a", b"three_a", b"two_a", b"two_b"]
+    assert r.zrangebylex("foo", b"-", b"+", 0, -2) == [
+        b"one_a",
+        b"three_a",
+        b"two_a",
+        b"two_b",
+    ]
     assert r.zrangebylex("foo", b"-", b"+", 1, -2) == [b"three_a", b"two_a", b"two_b"]
     assert r.zrangebylex("foo", b"+", b"-", 1, 1) == []
 
@@ -619,7 +726,11 @@ def test_zrevrangebylex(r: redis.Redis):
     assert r.zrevrangebylex("foo", b"+", b"(t") == [b"two_b", b"two_a", b"three_a"]
     assert r.zrevrangebylex("foo", b"[two_b", b"(t") == [b"two_b", b"two_a", b"three_a"]
     assert r.zrevrangebylex("foo", b"(two_b", b"(t") == [b"two_a", b"three_a"]
-    assert r.zrevrangebylex("foo", b"[two_b", b"[three_a") == [b"two_b", b"two_a", b"three_a"]
+    assert r.zrevrangebylex("foo", b"[two_b", b"[three_a") == [
+        b"two_b",
+        b"two_a",
+        b"three_a",
+    ]
     assert r.zrevrangebylex("foo", b"[two_b", b"(three_a") == [b"two_b", b"two_a"]
     assert r.zrevrangebylex("foo", b"(two_b", b"-") == [b"two_a", b"three_a", b"one_a"]
     assert r.zrangebylex("foo", b"(two_b", b"[two_b") == []
@@ -798,7 +909,11 @@ def test_zunionstore(r: redis.Redis):
     r.zadd("bar", {"two": 2})
     r.zadd("bar", {"three": 3})
     r.zunionstore("baz", ["foo", "bar"])
-    assert r.zrange("baz", 0, -1, withscores=True) == [(b"one", 2), (b"three", 3), (b"two", 4)]
+    assert r.zrange("baz", 0, -1, withscores=True) == [
+        (b"one", 2),
+        (b"three", 3),
+        (b"two", 4),
+    ]
 
 
 def test_zunionstore_sum(r: redis.Redis):
@@ -808,7 +923,11 @@ def test_zunionstore_sum(r: redis.Redis):
     r.zadd("bar", {"two": 2})
     r.zadd("bar", {"three": 3})
     r.zunionstore("baz", ["foo", "bar"], aggregate="SUM")
-    assert r.zrange("baz", 0, -1, withscores=True) == [(b"one", 2), (b"three", 3), (b"two", 4)]
+    assert r.zrange("baz", 0, -1, withscores=True) == [
+        (b"one", 2),
+        (b"three", 3),
+        (b"two", 4),
+    ]
 
 
 def test_zunionstore_max(r: redis.Redis):
@@ -818,7 +937,11 @@ def test_zunionstore_max(r: redis.Redis):
     r.zadd("bar", {"two": 2})
     r.zadd("bar", {"three": 3})
     r.zunionstore("baz", ["foo", "bar"], aggregate="MAX")
-    assert r.zrange("baz", 0, -1, withscores=True) == [(b"one", 1), (b"two", 2), (b"three", 3)]
+    assert r.zrange("baz", 0, -1, withscores=True) == [
+        (b"one", 1),
+        (b"two", 2),
+        (b"three", 3),
+    ]
 
 
 def test_zunionstore_min(r: redis.Redis):
@@ -828,7 +951,11 @@ def test_zunionstore_min(r: redis.Redis):
     r.zadd("bar", {"two": 0})
     r.zadd("bar", {"three": 3})
     r.zunionstore("baz", ["foo", "bar"], aggregate="MIN")
-    assert r.zrange("baz", 0, -1, withscores=True) == [(b"one", 0), (b"two", 0), (b"three", 3)]
+    assert r.zrange("baz", 0, -1, withscores=True) == [
+        (b"one", 0),
+        (b"two", 0),
+        (b"three", 3),
+    ]
 
 
 def test_zunionstore_weights(r: redis.Redis):
@@ -838,7 +965,11 @@ def test_zunionstore_weights(r: redis.Redis):
     r.zadd("bar", {"two": 2})
     r.zadd("bar", {"four": 4})
     r.zunionstore("baz", {"foo": 1, "bar": 2}, aggregate="SUM")
-    assert r.zrange("baz", 0, -1, withscores=True) == [(b"one", 3), (b"two", 6), (b"four", 8)]
+    assert r.zrange("baz", 0, -1, withscores=True) == [
+        (b"one", 3),
+        (b"two", 6),
+        (b"four", 8),
+    ]
 
 
 def test_zunionstore_nan_to_zero(r: redis.Redis):
@@ -876,7 +1007,11 @@ def test_zunionstore_mixed_set_types(r: redis.Redis):
     r.zadd("bar", {"two": 2})
     r.zadd("bar", {"three": 3})
     r.zunionstore("baz", ["foo", "bar"], aggregate="SUM")
-    assert r.zrange("baz", 0, -1, withscores=True) == [(b"one", 2), (b"three", 3), (b"two", 3)]
+    assert r.zrange("baz", 0, -1, withscores=True) == [
+        (b"one", 2),
+        (b"three", 3),
+        (b"two", 3),
+    ]
 
 
 def test_zunionstore_badkey(r: redis.Redis):

@@ -14,7 +14,14 @@ def test_zadd(r: redis.Redis):
     assert r.zadd("foo", {"two": 2, "one": 1, "zero": 0}) == 3
     assert r.zrange("foo", 0, -1) == [b"zero", b"one", b"two", b"three", b"four"]
     assert r.zadd("foo", {"zero": 7, "one": 1, "five": 5}) == 1
-    assert r.zrange("foo", 0, -1) == [b"one", b"two", b"three", b"four", b"five", b"zero"]
+    assert r.zrange("foo", 0, -1) == [
+        b"one",
+        b"two",
+        b"three",
+        b"four",
+        b"five",
+        b"zero",
+    ]
 
 
 def test_zadd_empty(r: redis.Redis):
@@ -54,8 +61,16 @@ def test_zadd_multiple(r: redis.Redis):
     "param,return_value,state",
     [
         ({"four": 2.0, "three": 1.0}, 0, [(b"three", 3.0), (b"four", 4.0)]),
-        ({"four": 2.0, "three": 1.0, "zero": 0.0}, 1, [(b"zero", 0.0), (b"three", 3.0), (b"four", 4.0)]),
-        ({"two": 2.0, "one": 1.0}, 2, [(b"one", 1.0), (b"two", 2.0), (b"three", 3.0), (b"four", 4.0)]),
+        (
+            {"four": 2.0, "three": 1.0, "zero": 0.0},
+            1,
+            [(b"zero", 0.0), (b"three", 3.0), (b"four", 4.0)],
+        ),
+        (
+            {"two": 2.0, "one": 1.0},
+            2,
+            [(b"one", 1.0), (b"two", 2.0), (b"three", 3.0), (b"four", 4.0)],
+        ),
     ],
 )
 @pytest.mark.parametrize("ch", [False, True])
@@ -78,7 +93,11 @@ def test_zadd_with_nx(r, param, return_value, state, ch):
                 (b"four", 5.0),
             ],
         ),
-        ({"two": 2.0, "one": 1.0}, 2, [(b"one", 1.0), (b"two", 2.0), (b"three", 3.0), (b"four", 4.0)]),
+        (
+            {"two": 2.0, "one": 1.0},
+            2,
+            [(b"one", 1.0), (b"two", 2.0), (b"three", 3.0), (b"four", 4.0)],
+        ),
     ],
 )
 def test_zadd_with_gt_and_ch(r, param, return_value, state):
@@ -91,8 +110,16 @@ def test_zadd_with_gt_and_ch(r, param, return_value, state):
     "param,return_value,state",
     [
         ({"four": 2.0, "three": 1.0}, 0, [(b"three", 3.0), (b"four", 4.0)]),
-        ({"four": 5.0, "three": 1.0, "zero": 0.0}, 1, [(b"zero", 0.0), (b"three", 3.0), (b"four", 5.0)]),
-        ({"two": 2.0, "one": 1.0}, 2, [(b"one", 1.0), (b"two", 2.0), (b"three", 3.0), (b"four", 4.0)]),
+        (
+            {"four": 5.0, "three": 1.0, "zero": 0.0},
+            1,
+            [(b"zero", 0.0), (b"three", 3.0), (b"four", 5.0)],
+        ),
+        (
+            {"two": 2.0, "one": 1.0},
+            2,
+            [(b"one", 1.0), (b"two", 2.0), (b"three", 3.0), (b"four", 4.0)],
+        ),
     ],
 )
 def test_zadd_with_gt(r, param, return_value, state):
@@ -105,8 +132,16 @@ def test_zadd_with_gt(r, param, return_value, state):
     "param,return_value,state",
     [
         ({"four": 4.0, "three": 1.0}, 1, [(b"three", 1.0), (b"four", 4.0)]),
-        ({"four": 4.0, "three": 1.0, "zero": 0.0}, 2, [(b"zero", 0.0), (b"three", 1.0), (b"four", 4.0)]),
-        ({"two": 2.0, "one": 1.0}, 2, [(b"one", 1.0), (b"two", 2.0), (b"three", 3.0), (b"four", 4.0)]),
+        (
+            {"four": 4.0, "three": 1.0, "zero": 0.0},
+            2,
+            [(b"zero", 0.0), (b"three", 1.0), (b"four", 4.0)],
+        ),
+        (
+            {"two": 2.0, "one": 1.0},
+            2,
+            [(b"one", 1.0), (b"two", 2.0), (b"three", 3.0), (b"four", 4.0)],
+        ),
     ],
 )
 def test_zadd_with_ch(r, param, return_value, state):
@@ -119,7 +154,11 @@ def test_zadd_with_ch(r, param, return_value, state):
     "param,changed,state",
     [
         ({"four": 2.0, "three": 1.0}, 2, [(b"three", 1.0), (b"four", 2.0)]),
-        ({"four": 4.0, "three": 3.0, "zero": 0.0}, 0, [(b"three", 3.0), (b"four", 4.0)]),
+        (
+            {"four": 4.0, "three": 3.0, "zero": 0.0},
+            0,
+            [(b"three", 3.0), (b"four", 4.0)],
+        ),
         ({"two": 2.0, "one": 1.0}, 0, [(b"three", 3.0), (b"four", 4.0)]),
     ],
 )

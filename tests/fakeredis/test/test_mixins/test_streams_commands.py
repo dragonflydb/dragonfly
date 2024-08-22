@@ -1,13 +1,12 @@
 import threading
 import time
+from test import testtools
 from typing import List
 
 import pytest
 import redis
-
 from fakeredis import _msgs as msgs
 from fakeredis._stream import XStream, StreamRangeTest
-from test import testtools
 
 
 def get_ids(results):
@@ -109,7 +108,9 @@ def test_xadd_maxlen(r: redis.Redis):
     results = r.xrange(stream, id_list[0])
     assert get_ids(results) == id_list[len(id_list) - maxlen :]
     with pytest.raises(redis.ResponseError):
-        testtools.raw_command(r, "xadd", stream, "maxlen", "3", "minid", "sometestvalue", "field", "value")
+        testtools.raw_command(
+            r, "xadd", stream, "maxlen", "3", "minid", "sometestvalue", "field", "value"
+        )
     assert r.set("non-a-stream", 1) == 1
     with pytest.raises(redis.ResponseError):
         r.xlen("non-a-stream")
@@ -152,7 +153,9 @@ def test_xtrim_minlen_and_length_args(r: redis.Redis):
         assert r.xtrim(stream, maxlen=3, minid="sometestvalue")
 
     with pytest.raises(redis.ResponseError):
-        testtools.raw_command(r, "xtrim", stream, "maxlen", "3", "minid", "sometestvalue")
+        testtools.raw_command(
+            r, "xtrim", stream, "maxlen", "3", "minid", "sometestvalue"
+        )
     # minid with a limit
     stream = "s2"
     m1 = add_items(r, stream, 4)[0]
@@ -213,7 +216,9 @@ def test_xrange(r: redis.Redis):
     ]
 
     stream = "stream2"
-    m = testtools.raw_command(r, "xadd", stream, "*", b"field", b"value", b"foo", b"bar")
+    m = testtools.raw_command(
+        r, "xadd", stream, "*", b"field", b"value", b"foo", b"bar"
+    )
 
     assert r.xrevrange(stream) == [
         (m, {b"field": b"value", b"foo": b"bar"}),
@@ -457,7 +462,8 @@ def test_xreadgroup(r: redis.Redis):
     m1 = r.xadd(stream, c1)
     m2 = r.xadd(stream, c2)
     with pytest.raises(
-        redis.exceptions.ResponseError, match=msgs.XREADGROUP_KEY_OR_GROUP_NOT_FOUND_MSG.format(stream, group)
+        redis.exceptions.ResponseError,
+        match=msgs.XREADGROUP_KEY_OR_GROUP_NOT_FOUND_MSG.format(stream, group),
     ):
         r.xreadgroup(group, consumer, streams={stream: ">"})
     r.xgroup_create(stream, group, 0)
@@ -491,7 +497,9 @@ def test_xreadgroup(r: redis.Redis):
     # xreadgroup with noack does not have any items in the PEL
     r.xgroup_destroy(stream, group)
     r.xgroup_create(stream, group, "0")
-    assert len(r.xreadgroup(group, consumer, streams={stream: ">"}, noack=True)[0][1]) == 2
+    assert (
+        len(r.xreadgroup(group, consumer, streams={stream: ">"}, noack=True)[0][1]) == 2
+    )
     # now there should be nothing pending
     res = r.xreadgroup(group, consumer, streams={stream: "0"})
     assert len(res[0][1]) == 0
@@ -499,7 +507,9 @@ def test_xreadgroup(r: redis.Redis):
     r.xgroup_destroy(stream, group)
     r.xgroup_create(stream, group, "0")
 
-    assert r.xreadgroup(group, consumer, streams={stream: ">"}) == [[stream.encode(), [(m1, c1), (m2, c2)]]]
+    assert r.xreadgroup(group, consumer, streams={stream: ">"}) == [
+        [stream.encode(), [(m1, c1), (m2, c2)]]
+    ]
     # delete all the messages in the stream
     assert r.xtrim(stream, 0) == 2
     # TODO groups keep ids of deleted messages
@@ -519,13 +529,17 @@ def test_xinfo_stream(r: redis.Redis):
     assert info["last-entry"] == get_stream_message(r, stream, m2)
 
 
-def assert_consumer_info(r: redis.Redis, stream: str, group: str, equal_keys: List) -> List:
+def assert_consumer_info(
+    r: redis.Redis, stream: str, group: str, equal_keys: List
+) -> List:
     res = r.xinfo_consumers(stream, group)
     assert len(res) == len(equal_keys)
     for i in range(len(equal_keys)):
         for k in res[i]:
             if k in equal_keys[i]:
-                assert res[i][k] == equal_keys[i][k], f"res[{i}][{k}] mismatch, {res}!={equal_keys}"
+                assert (
+                    res[i][k] == equal_keys[i][k]
+                ), f"res[{i}][{k}] mismatch, {res}!={equal_keys}"
             else:
                 print(f"res[{i}][{k}]={res[i][k]}")
     return res
@@ -641,7 +655,9 @@ def test_xpending_range(r: redis.Redis):
     assert response[1]["consumer"] == consumer2.encode()
 
     # test with consumer name
-    response = r.xpending_range(stream, group, min="-", max="+", count=5, consumername=consumer1)
+    response = r.xpending_range(
+        stream, group, min="-", max="+", count=5, consumername=consumer1
+    )
     assert response[0]["message_id"] == m1
     assert response[0]["consumer"] == consumer1.encode()
 
@@ -705,11 +721,15 @@ def test_xautoclaim_redis6(r: redis.Redis):
 
     # reclaim the messages as consumer1, but use the justid argument
     # which only returns message ids
-    assert r.xautoclaim(stream, group, consumer1, min_idle_time=0, start_id=0, justid=True) == [
+    assert r.xautoclaim(
+        stream, group, consumer1, min_idle_time=0, start_id=0, justid=True
+    ) == [
         message_id1,
         message_id2,
     ]
-    assert r.xautoclaim(stream, group, consumer1, min_idle_time=0, start_id=message_id2, justid=True) == [message_id2]
+    assert r.xautoclaim(
+        stream, group, consumer1, min_idle_time=0, start_id=message_id2, justid=True
+    ) == [message_id2]
 
 
 @pytest.mark.min_server("7")
@@ -735,11 +755,15 @@ def test_xautoclaim_redis7(r: redis.Redis):
 
     # reclaim the messages as consumer1, but use the justid argument
     # which only returns message ids
-    assert r.xautoclaim(stream, group, consumer1, min_idle_time=0, start_id=0, justid=True) == [
+    assert r.xautoclaim(
+        stream, group, consumer1, min_idle_time=0, start_id=0, justid=True
+    ) == [
         message_id1,
         message_id2,
     ]
-    assert r.xautoclaim(stream, group, consumer1, min_idle_time=0, start_id=message_id2, justid=True) == [message_id2]
+    assert r.xautoclaim(
+        stream, group, consumer1, min_idle_time=0, start_id=message_id2, justid=True
+    ) == [message_id2]
 
 
 @pytest.mark.min_server("7")
@@ -775,13 +799,18 @@ def test_xclaim(r: redis.Redis):
 
     # trying to claim a message that isn't already pending doesn't
     # do anything
-    assert r.xclaim(stream, group, consumer2, min_idle_time=0, message_ids=(message_id,)) == []
+    assert (
+        r.xclaim(stream, group, consumer2, min_idle_time=0, message_ids=(message_id,))
+        == []
+    )
 
     # read the group as consumer1 to initially claim the messages
     r.xreadgroup(group, consumer1, streams={stream: ">"})
 
     # claim the message as consumer2
-    assert r.xclaim(stream, group, consumer2, min_idle_time=0, message_ids=(message_id,)) == [
+    assert r.xclaim(
+        stream, group, consumer2, min_idle_time=0, message_ids=(message_id,)
+    ) == [
         message,
     ]
 

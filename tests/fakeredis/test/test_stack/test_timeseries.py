@@ -4,7 +4,6 @@ from time import sleep
 
 import pytest
 import redis
-
 from fakeredis import _msgs as msgs
 
 timeseries_tests = pytest.importorskip("probables")
@@ -77,7 +76,10 @@ def test_alter(r: redis.Redis):
     # Test for a chunk size of 50 Bytes on TS.ALTER
     with pytest.raises(redis.ResponseError) as e:
         r.ts().alter(1, chunk_size=50)
-    assert str(e.value) == "TSDB: CHUNK_SIZE value must be a multiple of 8 in the range [48 .. 1048576]"
+    assert (
+        str(e.value)
+        == "TSDB: CHUNK_SIZE value must be a multiple of 8 in the range [48 .. 1048576]"
+    )
 
 
 @pytest.mark.unsupported_server_types("dragonfly")
@@ -96,7 +98,9 @@ def test_add(r: redis.Redis):
     assert 1 == r.ts().add(1, 1, 1)
     assert 2 == r.ts().add(2, 2, 3, retention_msecs=10)
     assert 3 == r.ts().add(3, 3, 2, labels={"Redis": "Labs"})
-    assert 4 == r.ts().add(4, 4, 2, retention_msecs=10, labels={"Redis": "Labs", "Time": "Series"})
+    assert 4 == r.ts().add(
+        4, 4, 2, retention_msecs=10, labels={"Redis": "Labs", "Time": "Series"}
+    )
 
     info = r.ts().info(4)
     assert 10 == info.get("retention_msecs")
@@ -138,7 +142,10 @@ def test_add_duplicate_policy(r: redis.Redis):
     assert 1 == r.ts().add("time-serie-add-ooo-block", 1, 5.0)
     with pytest.raises(Exception) as e:
         r.ts().add("time-serie-add-ooo-block", 1, 5.0, on_duplicate="block")
-    assert str(e.value) == "TSDB: Error at upsert, update is not supported when DUPLICATE_POLICY is set to BLOCK mode"
+    assert (
+        str(e.value)
+        == "TSDB: Error at upsert, update is not supported when DUPLICATE_POLICY is set to BLOCK mode"
+    )
 
     # Test for duplicate policy LAST
     assert 1 == r.ts().add("time-serie-add-ooo-last", 1, 5.0)
@@ -329,13 +336,17 @@ def test_range_empty(r: redis.Redis):
     timeseries.add("t1", 51, 3)
     timeseries.add("t1", 73, 5)
     timeseries.add("t1", 75, 3)
-    assert timeseries.range("t1", 0, 100, aggregation_type="max", bucket_size_msec=10) == [
+    assert timeseries.range(
+        "t1", 0, 100, aggregation_type="max", bucket_size_msec=10
+    ) == [
         (10, 4.0),
         (50, 3.0),
         (70, 5.0),
     ]
 
-    res = timeseries.range("t1", 0, 100, aggregation_type="max", bucket_size_msec=10, empty=True)
+    res = timeseries.range(
+        "t1", 0, 100, aggregation_type="max", bucket_size_msec=10, empty=True
+    )
     for i in range(len(res)):
         if math.isnan(res[i][1]):
             res[i] = (res[i][0], None)
@@ -359,7 +370,9 @@ def test_rev_range(r: redis.Redis):
     for i in range(100):
         r.ts().add(1, i + 200, i % 7)
     assert 200 == len(r.ts().range(1, 0, 500))
-    assert 20 == len(r.ts().revrange(1, 0, 500, aggregation_type="avg", bucket_size_msec=10))
+    assert 20 == len(
+        r.ts().revrange(1, 0, 500, aggregation_type="avg", bucket_size_msec=10)
+    )
     assert 10 == len(r.ts().revrange(1, 0, 500, count=10))
     assert 2 == len(
         r.ts().revrange(
@@ -371,7 +384,10 @@ def test_rev_range(r: redis.Redis):
             filter_by_max_value=2,
         )
     )
-    assert r.ts().revrange(1, 0, 10, aggregation_type="count", bucket_size_msec=10) == [(10, 1.0), (0, 10.0)]
+    assert r.ts().revrange(1, 0, 10, aggregation_type="count", bucket_size_msec=10) == [
+        (10, 1.0),
+        (0, 10.0),
+    ]
 
     assert r.ts().revrange(1, 0, 10, aggregation_type="twa", bucket_size_msec=10) == [
         (10, pytest.approx(3.0, 0.1)),
@@ -405,7 +421,9 @@ def test_revrange_bucket_timestamp(r: redis.Redis):
     timeseries.add("t1", 51, 3)
     timeseries.add("t1", 73, 5)
     timeseries.add("t1", 75, 3)
-    assert timeseries.revrange("t1", 0, 100, align=0, aggregation_type="max", bucket_size_msec=10) == [
+    assert timeseries.revrange(
+        "t1", 0, 100, align=0, aggregation_type="max", bucket_size_msec=10
+    ) == [
         (70, 5.0),
         (50, 3.0),
         (10, 4.0),
@@ -430,12 +448,16 @@ def test_revrange_empty(r: redis.Redis):
     timeseries.add("t1", 51, 3)
     timeseries.add("t1", 73, 5)
     timeseries.add("t1", 75, 3)
-    assert timeseries.revrange("t1", 0, 100, align=0, aggregation_type="max", bucket_size_msec=10) == [
+    assert timeseries.revrange(
+        "t1", 0, 100, align=0, aggregation_type="max", bucket_size_msec=10
+    ) == [
         (70, 5.0),
         (50, 3.0),
         (10, 4.0),
     ]
-    res = timeseries.revrange("t1", 0, 100, align=0, aggregation_type="max", bucket_size_msec=10, empty=True)
+    res = timeseries.revrange(
+        "t1", 0, 100, align=0, aggregation_type="max", bucket_size_msec=10, empty=True
+    )
     for i in range(len(res)):
         if math.isnan(res[i][1]):
             res[i] = (res[i][0], None)
@@ -469,7 +491,9 @@ def test_mrange(r: redis.Redis):
 
     for i in range(100):
         r.ts().add(1, i + 200, i % 7)
-    res = r.ts().mrange(0, 500, filters=["Test=This"], aggregation_type="avg", bucket_size_msec=10)
+    res = r.ts().mrange(
+        0, 500, filters=["Test=This"], aggregation_type="avg", bucket_size_msec=10
+    )
     assert 2 == len(res)
     assert 20 == len(res[0]["1"][1])
 
@@ -578,7 +602,9 @@ def test_multi_reverse_range(r: redis.Redis):
 
     for i in range(100):
         r.ts().add(1, i + 200, i % 7)
-    res = r.ts().mrevrange(0, 500, filters=["Test=This"], aggregation_type="avg", bucket_size_msec=10)
+    res = r.ts().mrevrange(
+        0, 500, filters=["Test=This"], aggregation_type="avg", bucket_size_msec=10
+    )
     assert 2 == len(res)
 
     assert 20 == len(res[0]["1"][1])

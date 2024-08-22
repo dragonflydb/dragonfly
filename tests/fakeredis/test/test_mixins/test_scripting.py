@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import logging
+from test import testtools
 
+import fakeredis
 import pytest
 import redis
 import redis.client
 from redis.exceptions import ResponseError
-
-import fakeredis
-from test import testtools
 from test.testtools import raw_command
 
 json_tests = pytest.importorskip("lupa")
@@ -89,10 +88,12 @@ def test_script_help(r: redis.Redis):
         b"DEBUG (YES|SYNC|NO)",
         b"    Set the debug mode for subsequent scripts executed.",
         b"EXISTS <sha1> [<sha1> ...]",
-        b"    Return information about the existence of the scripts in the script cach" b"e.",
+        b"    Return information about the existence of the scripts in the script cach"
+        b"e.",
         b"FLUSH [ASYNC|SYNC]",
         b"    Flush the Lua scripts cache. Very dangerous on replicas.",
-        b"    When called without the optional mode argument, the behavior is determin" b"ed by the",
+        b"    When called without the optional mode argument, the behavior is determin"
+        b"ed by the",
         b"    lazyfree-lazy-user-flush configuration directive. Valid modes are:",
         b"    * ASYNC: Asynchronously flush the scripts cache.",
         b"    * SYNC: Synchronously flush the scripts cache.",
@@ -112,10 +113,12 @@ def test_script_help71(r: redis.Redis):
         b"DEBUG (YES|SYNC|NO)",
         b"    Set the debug mode for subsequent scripts executed.",
         b"EXISTS <sha1> [<sha1> ...]",
-        b"    Return information about the existence of the scripts in the script cach" b"e.",
+        b"    Return information about the existence of the scripts in the script cach"
+        b"e.",
         b"FLUSH [ASYNC|SYNC]",
         b"    Flush the Lua scripts cache. Very dangerous on replicas.",
-        b"    When called without the optional mode argument, the behavior is determin" b"ed by the",
+        b"    When called without the optional mode argument, the behavior is determin"
+        b"ed by the",
         b"    lazyfree-lazy-user-flush configuration directive. Valid modes are:",
         b"    * ASYNC: Asynchronously flush the scripts cache.",
         b"    * SYNC: Synchronously flush the scripts cache.",
@@ -131,7 +134,9 @@ def test_script_help71(r: redis.Redis):
 @pytest.mark.max_server("7.1")
 def test_eval_blpop(r: redis.Redis):
     r.rpush("foo", "bar")
-    with pytest.raises(redis.ResponseError, match="This Redis command is not allowed from script"):
+    with pytest.raises(
+        redis.ResponseError, match="This Redis command is not allowed from script"
+    ):
         r.eval('return redis.pcall("BLPOP", KEYS[1], 1)', 1, "foo")
 
 
@@ -336,14 +341,20 @@ def test_eval_convert_bool(r: redis.Redis):
 @pytest.mark.max_server("6.2.7")
 def test_eval_call_bool6(r: redis.Redis):
     # Redis doesn't allow Lua bools to be passed to [p]call
-    with pytest.raises(redis.ResponseError, match=r"Lua redis\(\) command arguments must be strings or integers"):
+    with pytest.raises(
+        redis.ResponseError,
+        match=r"Lua redis\(\) command arguments must be strings or integers",
+    ):
         r.eval('return redis.call("SET", KEYS[1], true)', 1, "testkey")
 
 
 @pytest.mark.min_server("7")
 def test_eval_call_bool7(r: redis.Redis):
     # Redis doesn't allow Lua bools to be passed to [p]call
-    with pytest.raises(redis.ResponseError, match=r"Lua redis lib command arguments must be strings or integers"):
+    with pytest.raises(
+        redis.ResponseError,
+        match=r"Lua redis lib command arguments must be strings or integers",
+    ):
         r.eval('return redis.call("SET", KEYS[1], true)', 1, "testkey")
 
 
@@ -567,7 +578,9 @@ def test_lua_log_different_types(r, caplog):
     script = r.register_script(script)
     with caplog.at_level("DEBUG"):
         script()
-    assert caplog.record_tuples == [(logger.name, logging.DEBUG, "string 1 3.14 string")]
+    assert caplog.record_tuples == [
+        (logger.name, logging.DEBUG, "string 1 3.14 string")
+    ]
 
 
 def test_lua_log_wrong_level(r: redis.Redis):

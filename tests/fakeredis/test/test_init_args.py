@@ -1,6 +1,5 @@
-import pytest
-
 import fakeredis
+import pytest
 
 
 def test_multidb(create_redis):
@@ -58,7 +57,9 @@ class TestInitArgs:
         assert db.get("foo") == b"bar"
 
     def test_from_url_user_password(self):
-        db = fakeredis.FakeStrictRedis.from_url("redis://user:password@localhost:6380/0")
+        db = fakeredis.FakeStrictRedis.from_url(
+            "redis://user:password@localhost:6380/0"
+        )
         db.set("foo", "bar")
         assert db.get("foo") == b"bar"
 
@@ -79,7 +80,9 @@ class TestInitArgs:
         assert db.connection_pool.connection_kwargs.get("db", 0) == 0
 
     def test_can_pass_through_extra_args(self):
-        db = fakeredis.FakeStrictRedis.from_url("redis://localhost:6380/0", decode_responses=True)
+        db = fakeredis.FakeStrictRedis.from_url(
+            "redis://localhost:6380/0", decode_responses=True
+        )
         db.set("foo", "bar")
         assert db.get("foo") == "bar"
 

@@ -42,5 +42,5 @@ asyncio_mode = "strict"
 generate_report_on_test = true
 render_collapsed = "failed,error"
 addopts = [
-     "--self-contained-html",
+    "--self-contained-html",
 ]

@@ -190,7 +190,13 @@ def test_mget_mixed_types(r: redis.Redis):
     r.sadd("set", "member")
     r.rpush("list", "item1")
     r.set("string", "value")
-    assert r.mget(["hash", "zset", "set", "string", "absent"]) == [None, None, None, b"value", None]
+    assert r.mget(["hash", "zset", "set", "string", "absent"]) == [
+        None,
+        None,
+        None,
+        b"value",
+        None,
+    ]
 
 
 def test_mset_with_no_keys(r: redis.Redis):
@@ -538,7 +544,12 @@ def test_lcs(r: redis.Redis):
         b"len",
         6,
     ]
-    assert r.lcs("key1", "key2", idx=True, minmatchlen=3) == [b"matches", [[[4, 7], [5, 8]]], b"len", 6]
+    assert r.lcs("key1", "key2", idx=True, minmatchlen=3) == [
+        b"matches",
+        [[[4, 7], [5, 8]]],
+        b"len",
+        6,
+    ]
 
     with pytest.raises(redis.ResponseError):
         assert r.lcs("key1", "key2", len=True, idx=True)

@@ -5,12 +5,11 @@ Tests for `fakeredis-py`'s emulation of Redis's JSON.GET command subset.
 from __future__ import annotations
 
 import json
+from test import testtools
 
 import pytest
 import redis
 from redis.commands.json.path import Path
-
-from test import testtools
 
 json_tests = pytest.importorskip("jsonpath_ng")
 
@@ -72,7 +71,10 @@ def test_json_delete_with_dollar(r: redis.Redis):
     doc2 = {"a": {"a": 2, "b": 3}, "b": ["a", "b"], "nested": {"b": [True, "a", "b"]}}
     r.json().set("doc2", "$", doc2)
     assert r.json().delete("doc2", "$..a") == 1
-    assert r.json().get("doc2", Path.root_path()) == {"nested": {"b": [True, "a", "b"]}, "b": ["a", "b"]}
+    assert r.json().get("doc2", Path.root_path()) == {
+        "nested": {"b": [True, "a", "b"]},
+        "b": ["a", "b"],
+    }
 
     doc3 = [
         {
@@ -169,19 +171,41 @@ def test_jsonset_flags_should_be_mutually_exclusive(r: redis.Redis):
     with pytest.raises(Exception):
         r.json().set("obj", Path("foo"), "baz", nx=True, xx=True)
     with pytest.raises(redis.ResponseError):
-        testtools.raw_command(r, "json.set", "obj", "$", json.dumps({"foo": "bar"}), "NX", "XX")
+        testtools.raw_command(
+            r, "json.set", "obj", "$", json.dumps({"foo": "bar"}), "NX", "XX"
+        )
 
 
 def test_json_unknown_param(r: redis.Redis):
     with pytest.raises(redis.ResponseError):
-        testtools.raw_command(r, "json.set", "obj", "$", json.dumps({"foo": "bar"}), "unknown")
+        testtools.raw_command(
+            r, "json.set", "obj", "$", json.dumps({"foo": "bar"}), "unknown"
+        )
 
 
 def test_jsonmget(r: redis.Redis):
     # Test mget with multi paths
-    r.json().set("doc1", "$", {"a": 1, "b": 2, "nested": {"a": 3}, "c": None, "nested2": {"a": None}})
-    r.json().set("doc2", "$", {"a": 4, "b": 5, "nested": {"a": 6}, "c": None, "nested2": {"a": [None]}})
-    r.json().set("doc3", "$", {"a": 5, "b": 5, "nested": {"a": 8}, "c": None, "nested2": {"a": {"b": "nested3"}}})
+    r.json().set(
+        "doc1",
+        "$",
+        {"a": 1, "b": 2, "nested": {"a": 3}, "c": None, "nested2": {"a": None}},
+    )
+    r.json().set(
+        "doc2",
+        "$",
+        {"a": 4, "b": 5, "nested": {"a": 6}, "c": None, "nested2": {"a": [None]}},
+    )
+    r.json().set(
+        "doc3",
+        "$",
+        {
+            "a": 5,
+            "b": 5,
+            "nested": {"a": 8},
+            "c": None,
+            "nested2": {"a": {"b": "nested3"}},
+        },
+    )
     # Compare also to single JSON.GET
     assert r.json().get("doc1", Path("$..a")) == [1, 3, None]
     assert r.json().get("doc2", "$..a") == [4, 6, [None]]
@@ -191,7 +215,11 @@ def test_jsonmget(r: redis.Redis):
     assert r.json().mget(["doc1"], "$..a") == [[1, 3, None]]
 
     # Test mget with multi path
-    assert r.json().mget(["doc1", "doc2", "doc3"], "$..a") == [[1, 3, None], [4, 6, [None]], [5, 8, {"b": "nested3"}]]
+    assert r.json().mget(["doc1", "doc2", "doc3"], "$..a") == [
+        [1, 3, None],
+        [4, 6, [None]],
+        [5, 8, {"b": "nested3"}],
+    ]
 
     # Test missing key
     assert r.json().mget(["doc1", "missing_doc"], "$..a") == [[1, 3, None], None]
@@ -279,7 +307,9 @@ def test_jsonstrlen(r: redis.Redis):
     r.json().set("str", Path.root_path(), "foo")
     assert r.json().strlen("str", Path.root_path()) == 3
     # Test multi
-    r.json().set("doc1", "$", {"a": "foo", "nested1": {"a": "hello"}, "nested2": {"a": 31}})
+    r.json().set(
+        "doc1", "$", {"a": "foo", "nested1": {"a": "hello"}, "nested2": {"a": 31}}
+    )
     assert r.json().strlen("doc1", "$..a") == [3, 5, None]
 
     res2 = r.json().strappend("doc1", "bar", "$..a")
@@ -519,7 +549,9 @@ def test_type(r: redis.Redis):
     data = {k: {"a": meta_data[k]} for k in meta_data}
     r.json().set("doc1", "$", data)
     # Test multi
-    assert r.json().type("doc1", "$..a") == [k.encode() for k in meta_data.keys()]  # noqa: E721
+    assert r.json().type("doc1", "$..a") == [
+        k.encode() for k in meta_data.keys()
+    ]  # noqa: E721
 
     # Test single
     assert r.json().type("doc1", "$.integer.a") == [b"integer"]  # noqa: E721
@@ -678,18 +710,28 @@ def test_json_merge(r: redis.Redis):
         "$",
         {"person1": {"personal_data": {"name": "John"}}},
     )
-    assert r.json().merge("person_data", "$", {"person1": {"personal_data": {"hobbies": "reading"}}})
-    assert r.json().get("person_data") == {"person1": {"personal_data": {"name": "John", "hobbies": "reading"}}}
+    assert r.json().merge(
+        "person_data", "$", {"person1": {"personal_data": {"hobbies": "reading"}}}
+    )
+    assert r.json().get("person_data") == {
+        "person1": {"personal_data": {"name": "John", "hobbies": "reading"}}
+    }
 
     # Test with root path path $.person1.personal_data
-    assert r.json().merge("person_data", "$.person1.personal_data", {"country": "Israel"})
+    assert r.json().merge(
+        "person_data", "$.person1.personal_data", {"country": "Israel"}
+    )
     assert r.json().get("person_data") == {
-        "person1": {"personal_data": {"name": "John", "hobbies": "reading", "country": "Israel"}}
+        "person1": {
+            "personal_data": {"name": "John", "hobbies": "reading", "country": "Israel"}
+        }
     }
 
     # Test with null value to delete a value
     assert r.json().merge("person_data", "$.person1.personal_data", {"name": None})
-    assert r.json().get("person_data") == {"person1": {"personal_data": {"country": "Israel", "hobbies": "reading"}}}
+    assert r.json().get("person_data") == {
+        "person1": {"personal_data": {"country": "Israel", "hobbies": "reading"}}
+    }
 
 
 @testtools.run_test_if_redispy_ver("gte", "4.6")

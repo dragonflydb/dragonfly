@@ -3,9 +3,8 @@ from time import sleep, time
 
 import pytest
 import redis
-from redis.exceptions import ResponseError
-
 from fakeredis import _msgs as msgs
+from redis.exceptions import ResponseError
 from test.testtools import raw_command
 
 
@@ -46,7 +45,9 @@ def test_del_operator(r: redis.Redis):
 
 def test_expire_should_not_handle_floating_point_values(r: redis.Redis):
     r.set("foo", "bar")
-    with pytest.raises(redis.ResponseError, match="value is not an integer or out of range"):
+    with pytest.raises(
+        redis.ResponseError, match="value is not an integer or out of range"
+    ):
         r.expire("something_new", 1.2)
         r.pexpire("something_new", 1000.2)
         r.expire("some_unused_key", 1.2)
@@ -152,7 +153,12 @@ def test_sort_with_by_and_get_option(r: redis.Redis):
     r["data_3"] = "three"
     r["data_4"] = "four"
 
-    assert r.sort("foo", by="weight_*", get="data_*") == [b"four", b"three", b"two", b"one"]
+    assert r.sort("foo", by="weight_*", get="data_*") == [
+        b"four",
+        b"three",
+        b"two",
+        b"one",
+    ]
     assert r.sort("foo", by="weight_*", get="#") == [b"4", b"3", b"2", b"1"]
     assert r.sort("foo", by="weight_*", get=("data_*", "#")) == [
         b"four",
@@ -166,7 +172,9 @@ def test_sort_with_by_and_get_option(r: redis.Redis):
     ]
     assert r.sort("foo", by="weight_*", get="data_1") == [None, None, None, None]
     # Test sort with different parameters order
-    assert raw_command(r, "sort", "foo", "get", "data_*", "by", "weight_*", "get", "#") == [
+    assert raw_command(
+        r, "sort", "foo", "get", "data_*", "by", "weight_*", "get", "#"
+    ) == [
         b"four",
         b"4",
         b"three",
@@ -192,7 +200,11 @@ def test_sort_with_hash(r: redis.Redis):
     r.hset("record_eldest", "name", "adult")
 
     assert r.sort("foo", by="record_*->age") == [b"youngest", b"middle", b"eldest"]
-    assert r.sort("foo", by="record_*->age", get="record_*->name") == [b"baby", b"teen", b"adult"]
+    assert r.sort("foo", by="record_*->age", get="record_*->name") == [
+        b"baby",
+        b"teen",
+        b"adult",
+    ]
 
 
 def test_sort_with_set(r: redis.Redis):
@@ -286,7 +298,9 @@ def test_exists(r: redis.Redis):
     assert "foo" not in r
     r.set("foo", "bar")
     assert "foo" in r
-    with pytest.raises(redis.ResponseError, match=msgs.WRONG_ARGS_MSG6.format("exists")[4:]):
+    with pytest.raises(
+        redis.ResponseError, match=msgs.WRONG_ARGS_MSG6.format("exists")[4:]
+    ):
         raw_command(r, "exists")
 
 

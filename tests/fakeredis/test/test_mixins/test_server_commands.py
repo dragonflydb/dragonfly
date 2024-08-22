@@ -3,9 +3,8 @@ from time import sleep
 
 import pytest
 import redis
-from redis.exceptions import ResponseError
-
 from fakeredis._commands import SUPPORTED_COMMANDS
+from redis.exceptions import ResponseError
 from test.testtools import fake_only
 
 
@@ -56,7 +55,9 @@ def test_command(r: redis.Redis):
 
 @fake_only
 def test_command_count(r: redis.Redis):
-    assert r.command_count() >= len([cmd for cmd in SUPPORTED_COMMANDS if " " not in cmd])
+    assert r.command_count() >= len(
+        [cmd for cmd in SUPPORTED_COMMANDS if " " not in cmd]
+    )
 
 
 @pytest.mark.unsupported_server_types("dragonfly")
