@@ -27,7 +27,9 @@ def test_extract_args__should_raise_error():
 def test_extract_args__should_return_something():
     args = (b"nx", b"ex", b"324", b"xx", b"something")
 
-    (xx, nx, ex, keepttl), left = extract_args(args, ("nx", "xx", "+ex", "keepttl"), error_on_unexpected=False)
+    (xx, nx, ex, keepttl), left = extract_args(
+        args, ("nx", "xx", "+ex", "keepttl"), error_on_unexpected=False
+    )
     assert xx
     assert nx
     assert ex == 324
@@ -43,7 +45,10 @@ def test_extract_args__should_return_something():
     )
 
     (xx, nx, ex, keepttl), left = extract_args(
-        args, ("nx", "xx", "+ex", "keepttl"), error_on_unexpected=False, left_from_first_unexpected=False
+        args,
+        ("nx", "xx", "+ex", "keepttl"),
+        error_on_unexpected=False,
+        left_from_first_unexpected=False,
     )
     assert xx
     assert nx
@@ -132,7 +137,9 @@ def test_extract_args__extract_maxlen():
         b"xx",
     )
 
-    (nx, maxlen, xx, limit, sortby), _ = extract_args(args, ("nx", "~+maxlen", "xx", "++limit", "*by"))
+    (nx, maxlen, xx, limit, sortby), _ = extract_args(
+        args, ("nx", "~+maxlen", "xx", "++limit", "*by")
+    )
     assert xx
     assert nx
     assert maxlen == 10

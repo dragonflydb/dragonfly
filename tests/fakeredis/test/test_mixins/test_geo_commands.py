@@ -392,7 +392,10 @@ def test_geosearch(r: redis.Redis):
     # test count
     assert r.geosearch(
         "barcelona", member="place3", radius=100, unit="km", count=2
-    ) == [b"place3", b"place2"]
+    ) == [
+        b"place3",
+        b"place2",
+    ]
     assert r.geosearch(
         "barcelona", member="place3", radius=100, unit="km", count=1, any=True
     )[0] in [

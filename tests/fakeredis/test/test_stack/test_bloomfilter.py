@@ -64,7 +64,9 @@ def test_bf_mexists(r: redis.Redis):
 def test_bf_reserve(r: redis.Redis):
     assert r.bf().reserve("bloom", 0.01, 1000)
     assert r.bf().reserve("bloom_ns", 0.01, 1000, noScale=True)
-    with pytest.raises(redis.exceptions.ResponseError, match=msgs.NONSCALING_FILTERS_CANNOT_EXPAND_MSG):
+    with pytest.raises(
+        redis.exceptions.ResponseError, match=msgs.NONSCALING_FILTERS_CANNOT_EXPAND_MSG
+    ):
         assert r.bf().reserve("bloom_e", 0.01, 1000, expansion=1, noScale=True)
     with pytest.raises(redis.exceptions.ResponseError, match=msgs.ITEM_EXISTS_MSG):
         assert r.bf().reserve("bloom", 0.01, 1000)
