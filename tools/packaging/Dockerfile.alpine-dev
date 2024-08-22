@@ -30,7 +30,7 @@ COPY tools/docker/healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY --from=builder /build/build-release/dragonfly /usr/local/bin/
 
 RUN apk --no-cache add libgcc libstdc++  \
-     su-exec netcat-openbsd boost-context && ldd /usr/local/bin/dragonfly
+     setpriv netcat-openbsd boost-context && ldd /usr/local/bin/dragonfly
 
 RUN addgroup -S -g 1000 dfly && adduser -S -G dfly -u 999 dfly
 RUN mkdir /data && chown dfly:dfly /data
@@ -42,7 +42,5 @@ HEALTHCHECK CMD /usr/local/bin/healthcheck.sh
 ENTRYPOINT ["entrypoint.sh"]
 
 EXPOSE 6379
-
-USER dfly
 
 CMD ["dragonfly", "--logtostderr"]
