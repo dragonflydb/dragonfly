@@ -793,13 +793,20 @@ TEST_F(ListFamilyTest, BLMoveSimultaneously) {
 
 TEST_F(ListFamilyTest, BLMoveRings) {
   vector<fb2::Fiber> fibers;
+  fibers.reserve(10);
+#pragma GCC diagnostic push
+// We compile this code both with C++17 and C++20 and if you capture
+// by [=, this] it becomes an error on C++17 and if you capture
+// by [=] it becomes and error in C++20
+#pragma GCC diagnostic ignored "-Wdeprecated"
   for (int i = 0; i < 10; i++) {
-    auto key1 = to_string(i);
-    auto key2 = to_string(i + 1);
-    fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([&]() {
+    fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([=]() {
+      auto key1 = to_string(i);
+      auto key2 = to_string(i + 1);
       Run(key1, {"blmove", key1, key2, "LEFT", "RIGHT", "0"});
     }));
   }
+#pragma GCC diagnostic pop
 
   ThisFiber::SleepFor(5ms);
 
