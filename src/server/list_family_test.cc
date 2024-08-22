@@ -796,7 +796,7 @@ TEST_F(ListFamilyTest, BLMoveRings) {
   for (int i = 0; i < 10; i++) {
     auto key1 = to_string(i);
     auto key2 = to_string(i + 1);
-    fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([=]() {
+    fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([&]() {
       Run(key1, {"blmove", key1, key2, "LEFT", "RIGHT", "0"});
     }));
   }
