@@ -264,6 +264,48 @@ TYPED_TEST(JsonPathTest, Descent) {
   EXPECT_NE(0, this->Parse("$...foo"));
 }
 
+TYPED_TEST(JsonPathTest, QuotedStrings) {
+  EXPECT_EQ(0, this->Parse("$[\"foo\"]"));
+  Path path = this->driver_.TakePath();
+
+  ASSERT_EQ(1, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::IDENTIFIER));
+  EXPECT_EQ("foo", path[0].identifier());
+
+  EXPECT_EQ(0, this->Parse("$['foo']"));  // single quoted string
+  path = this->driver_.TakePath();
+
+  ASSERT_EQ(1, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::IDENTIFIER));
+  EXPECT_EQ("foo", path[0].identifier());
+
+  EXPECT_EQ(0, this->Parse("$.[\"foo\"]"));
+  path = this->driver_.TakePath();
+
+  ASSERT_EQ(1, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::IDENTIFIER));
+  EXPECT_EQ("foo", path[0].identifier());
+
+  EXPECT_EQ(0, this->Parse("$..[\"foo\"]"));
+  path = this->driver_.TakePath();
+
+  ASSERT_EQ(2, path.size());
+  EXPECT_THAT(path[0], SegType(SegmentType::DESCENT));
+  EXPECT_THAT(path[1], SegType(SegmentType::IDENTIFIER));
+  EXPECT_EQ("foo", path[1].identifier());
+
+  EXPECT_NE(0, this->Parse("\"a\""));
+  EXPECT_NE(0, this->Parse("$\"a\""));
+  EXPECT_NE(0, this->Parse("$.\"a\""));
+  EXPECT_NE(0, this->Parse("$..\"a\""));
+
+  // Single quoted string
+  EXPECT_NE(0, this->Parse("'a'"));
+  EXPECT_NE(0, this->Parse("$'a'"));
+  EXPECT_NE(0, this->Parse("$.'a'"));
+  EXPECT_NE(0, this->Parse("$..'a'"));
+}
+
 TYPED_TEST(JsonPathTest, Path) {
   Path path;
   TypeParam json = ValidJson<TypeParam>(R"({"v11":{ "f" : 1, "a2": [0]}, "v12": {"f": 2, "a2": [1]},

@@ -223,6 +223,71 @@ TEST_F(JsonFamilyTest, SetGetFromPhonebook) {
       R"([st{stt"number":s"212 555-1234",stt"type":s"home"st},st{stt"number":s"646 555-4567",stt"type":s"office"st}s])");
 }
 
+TEST_F(JsonFamilyTest, GetBrackets) {
+  string json = R"(
+    {"a":"first", "b":{"a":"second"}}
+  )";
+
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json", "$[\"a\"]"});
+  ASSERT_THAT(resp, "[\"first\"]");
+
+  resp = Run({"JSON.GET", "json", "$..[\"a\"]"});
+  ASSERT_THAT(resp, R"(["first","second"])");
+
+  resp = Run({"JSON.GET", "json", "$.b[\"a\"]"});
+  ASSERT_THAT(resp, "[\"second\"]");
+
+  resp = Run({"JSON.GET", "json", "[\"a\"]"});
+  ASSERT_THAT(resp, "\"first\"");
+
+  resp = Run({"JSON.GET", "json", "..[\"a\"]"});
+  ASSERT_THAT(resp, "\"second\"");
+
+  json = R"(
+    ["first", ["second"]]
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json", "$[0]"});
+  ASSERT_THAT(resp, "[\"first\"]");
+
+  resp = Run({"JSON.GET", "json", "$..[0]"});
+  ASSERT_THAT(resp, R"(["first","second"])");
+
+  resp = Run({"JSON.GET", "json", "[0]"});
+  ASSERT_THAT(resp, "\"first\"");
+
+  resp = Run({"JSON.GET", "json", "..[0]"});
+  ASSERT_THAT(resp, "\"second\"");
+
+  resp = Run({"JSON.GET", "json", "$[\"first\"]"});
+  ASSERT_THAT(resp, "[]");
+
+  json = R"(
+    {"a":{"b":{"c":"first"}}, "b":{"b":{"c":"second"}}, "c":{"b":{"c":"third"}}}
+  )";
+
+  resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json", R"($["a"]['b']["c"])"});
+  ASSERT_THAT(resp, "[\"first\"]");
+
+  resp = Run({"JSON.GET", "json", R"($["a"].b['c'])"});
+  ASSERT_THAT(resp, "[\"first\"]");
+
+  resp = Run({"JSON.GET", "json", R"($..['b']["c"])"});
+  ASSERT_THAT(resp, R"(["first","second","third"])");
+
+  resp = Run({"JSON.GET", "json", R"($.c['b']["c"])"});
+  ASSERT_THAT(resp, "[\"third\"]");
+}
+
 TEST_F(JsonFamilyTest, Type) {
   string json = R"(
     [1, 2.3, "foo", true, null, {}, []]
