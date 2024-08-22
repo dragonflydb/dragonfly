@@ -11,7 +11,6 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     strategy:
       fail-fast: false
       matrix:
@@ -111,7 +110,7 @@ jobs:
           python-version: "3.12"
 
       - name: Merge html results
-        run: | 
+        run: |
           pip install pytest-html-merger
           pytest_html_merger -i results/ -o results/index.html
 
