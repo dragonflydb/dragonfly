@@ -13,6 +13,7 @@ import pytest
 
 json_tests = pytest.importorskip("jsonpath_ng")
 
+
 SAMPLE_DATA = {
     "a": ["foo"],
     "nested1": {"a": ["hello", None, "world"]},

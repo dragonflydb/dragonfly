@@ -139,7 +139,12 @@ def test_smismember(r: redis.Redis):
     assert r.smismember("foo", ["member1", "member2", "member3"]) == [0, 0, 0]
     r.sadd("foo", "member1", "member2", "member3")
     assert r.smismember("foo", ["member1", "member2", "member3"]) == [1, 1, 1]
-    assert r.smismember("foo", ["member1", "member2", "member3", "member4"]) == [1, 1, 1, 0]
+    assert r.smismember("foo", ["member1", "member2", "member3", "member4"]) == [
+        1,
+        1,
+        1,
+        0,
+    ]
     assert r.smismember("foo", ["member4", "member2", "member3"]) == [0, 1, 1]
     # should also work if provided values as arguments
     assert r.smismember("foo", "member4", "member2", "member3") == [0, 1, 1]

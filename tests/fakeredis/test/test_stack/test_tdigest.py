@@ -37,7 +37,9 @@ def test_tdigest_merge(r: redis.Redis):
     assert r.tdigest().create("from-override-2", 10)
     assert r.tdigest().add("from-override", [3.0] * 10)
     assert r.tdigest().add("from-override-2", [4.0] * 10)
-    assert r.tdigest().merge("to-tDigest", 2, "from-override", "from-override-2", override=True)
+    assert r.tdigest().merge(
+        "to-tDigest", 2, "from-override", "from-override-2", override=True
+    )
     assert 3.0 == r.tdigest().min("to-tDigest")
     assert 4.0 == r.tdigest().max("to-tDigest")
 
