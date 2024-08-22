@@ -81,9 +81,10 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
   while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
     if (absl::Now() > end_time) {
-      LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: " << replica->address
-                   << ":" << replica->listening_port << ", last acked: " << flow->last_acked_lsn
-                   << ", expecting " << shard->journal()->GetLsn();
+      LOG(WARNING) << "Couldn't synchronize with replica for takeover in time: "
+                   << replica->remote_address << ":" << replica->listening_port
+                   << ", last acked: " << flow->last_acked_lsn << ", expecting "
+                   << shard->journal()->GetLsn();
       return false;
     }
     if (replica->cntx.IsCancelled()) {
@@ -321,7 +322,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
       return cntx->SendError(kInvalidState);
   }
 
-  LOG(INFO) << "Started sync with replica " << replica_ptr->address << ":"
+  LOG(INFO) << "Started sync with replica " << replica_ptr->remote_address << ":"
             << replica_ptr->listening_port;
 
   // protected by lk above.
@@ -359,7 +360,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
       return cntx->SendError(kInvalidState);
   }
 
-  LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->address << ":"
+  LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->remote_address << ":"
             << replica_ptr->listening_port;
 
   replica_ptr->replica_state = SyncState::STABLE_SYNC;
@@ -603,12 +604,13 @@ auto DflyCmd::CreateSyncSession(ConnectionContext* cntx)
   };
 
   string address = cntx->conn_state.replication_info.repl_ip_address;
+  string remote_address = cntx->conn()->RemoteEndpointAddress();
   uint32_t port = cntx->conn_state.replication_info.repl_listening_port;
 
-  LOG(INFO) << "Registered replica " << address << ":" << port;
+  LOG(INFO) << "Registered replica " << remote_address << ":" << port;
 
-  auto replica_ptr =
-      make_shared<ReplicaInfo>(flow_count, std::move(address), port, std::move(err_handler));
+  auto replica_ptr = make_shared<ReplicaInfo>(
+      flow_count, std::move(address), std::move(remote_address), port, std::move(err_handler));
   auto [it, inserted] = replica_infos_.emplace(sync_id, std::move(replica_ptr));
   CHECK(inserted);
 

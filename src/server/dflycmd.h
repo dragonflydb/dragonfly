@@ -102,11 +102,12 @@ class DflyCmd {
 
   // Stores information related to a single replica.
   struct ReplicaInfo {
-    ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
-                Context::ErrHandler err_handler)
+    ReplicaInfo(unsigned flow_count, std::string address, std::string remote_addr,
+                uint32_t listening_port, Context::ErrHandler err_handler)
         : replica_state{SyncState::PREPARATION},
           cntx{std::move(err_handler)},
           address{std::move(address)},
+          remote_address(std::move(remote_addr)),
           listening_port(listening_port),
           flows{flow_count} {
     }
@@ -126,7 +127,7 @@ class DflyCmd {
     Context cntx;
 
     std::string id;
-    std::string address;
+    std::string address, remote_address;
     uint32_t listening_port;
     DflyVersion version = DflyVersion::VER0;
 
