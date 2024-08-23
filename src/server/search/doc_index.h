@@ -143,6 +143,7 @@ class ShardDocIndex {
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
  private:
+  bool was_built_ = false;
   std::shared_ptr<const DocIndex> base_;
   search::FieldIndices indices_;
   DocKeyIndex key_index_;

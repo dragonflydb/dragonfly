@@ -1858,6 +1858,42 @@ async def test_search(df_factory):
     ].id == "k0"
 
 
+@dfly_args({"proactor_threads": 4})
+async def test_search_with_stream(df_factory: DflyInstanceFactory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # fill master with hsets and create index
+    p = c_master.pipeline(transaction=False)
+    for i in range(10_000):
+        p.hset(f"k{i}", mapping={"name": f"name of {i}"})
+    await p.execute()
+
+    await c_master.execute_command("FT.CREATE i1 SCHEMA name text")
+
+    # start replication and issue one add command and delete commands on master in parallel
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await c_master.hset("secret-key", mapping={"name": "new-secret"})
+    for i in range(1_000):
+        await c_master.delete(f"k{i}")
+
+    # expect replica to see only 10k - 1k + 1 = 9001 keys in it's index
+    await wait_available_async(c_replica)
+    assert await c_replica.execute_command("FT.SEARCH i1 * LIMIT 0 0") == [9_001]
+    assert await c_replica.execute_command('FT.SEARCH i1 "secret"') == [
+        1,
+        "secret-key",
+        ["name", "new-secret"],
+    ]
+
+    await close_clients(c_master, c_replica)
+
+
 # @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_client_pause_with_replica(df_factory, df_seeder_factory):

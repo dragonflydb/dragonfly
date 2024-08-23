@@ -182,15 +182,22 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);
 
+  was_built_ = true;
   VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
 }
 
 void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  if (!was_built_)
+    return;
+
   auto accessor = GetAccessor(db_cntx, pv);
   indices_.Add(key_index_.Add(key), accessor.get());
 }
 
 void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
+  if (!was_built_)
+    return;
+
   auto accessor = GetAccessor(db_cntx, pv);
   DocId id = key_index_.Remove(key);
   indices_.Remove(id, accessor.get());
