@@ -303,10 +303,15 @@ class Connection : public util::Connection {
 
   bool IsHttp() const;
 
+  // Sets max queue length locally in the calling thread.
+  static void SetMaxQueueLenThreadLocal(uint32_t val);
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
   void OnPostMigrateThread() override;
+
+  std::unique_ptr<ConnectionContext> cc_;  // Null for http connections
 
  private:
   enum ParserStatus { OK, NEED_MORE, ERROR };
@@ -327,7 +332,7 @@ class Connection : public util::Connection {
 
     // Used by publisher/subscriber actors to make sure we do not publish too many messages
     // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
-    util::fb2::EventCount ec;
+    util::fb2::EventCount pubsub_ec;
     std::atomic_size_t subscriber_bytes = 0;
 
     // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
@@ -339,7 +344,6 @@ class Connection : public util::Connection {
     size_t pipeline_buffer_limit = 0;  // cached flag for buffer size in bytes
   };
 
- private:
   // Check protocol and handle connection.
   void HandleRequests() final;
 
@@ -394,10 +398,6 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
- protected:
-  std::unique_ptr<ConnectionContext> cc_;  // Null for http connections
-
- private:
   void DecreaseStatsOnClose();
   void BreakOnce(uint32_t ev_mask);
 
