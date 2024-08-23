@@ -869,8 +869,14 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 }
 
 void ServerFamily::LoadFromSnapshot() {
+  {
+    std::lock_guard lk{loading_stats_mu_};
+    loading_stats_.restore_count++;
+  }
+
   const auto load_path_result =
       snapshot_storage_->LoadPath(GetFlag(FLAGS_dir), GetFlag(FLAGS_dbfilename));
+
   if (load_path_result) {
     const std::string load_path = *load_path_result;
     if (!load_path.empty()) {
@@ -880,6 +886,8 @@ void ServerFamily::LoadFromSnapshot() {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
       LOG(WARNING) << "Load snapshot: No snapshot found";
     } else {
+      std::lock_guard lk{loading_stats_mu_};
+      loading_stats_.failed_restore_count++;
       LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
     }
   }
@@ -904,7 +912,13 @@ void ServerFamily::Shutdown() {
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
     shard_set->pool()->GetNextProactor()->Await([this] {
-      if (GenericError ec = DoSave(); ec) {
+      GenericError ec = DoSave();
+
+      std::lock_guard lk{loading_stats_mu_};
+      loading_stats_.backup_count++;
+
+      if (ec) {
+        loading_stats_.failed_backup_count++;
         LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
       }
     });
@@ -1061,7 +1075,12 @@ void ServerFamily::SnapshotScheduling() {
     };
 
     GenericError ec = DoSave();
+
+    std::lock_guard lk{loading_stats_mu_};
+    loading_stats_.backup_count++;
+
     if (ec) {
+      loading_stats_.failed_backup_count++;
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
   }
@@ -1269,6 +1288,15 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             &resp->body());
   AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
                             &resp->body());
+
+  AppendMetricWithoutLabels("backups_total", "", m.loading_stats.backup_count, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("failed_backups_total", "", m.loading_stats.failed_backup_count,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("restores_total", "", m.loading_stats.restore_count,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("failed_restores_total", "", m.loading_stats.failed_restore_count,
+                            MetricType::COUNTER, &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
@@ -2033,6 +2061,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     if (info) {
       result.replica_reconnections = {std::move(info->host), info->port, info->reconnect_count};
     }
+  }
+
+  {
+    std::lock_guard lk{loading_stats_mu_};
+    result.loading_stats = loading_stats_;
   }
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to

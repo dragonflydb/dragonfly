@@ -30,6 +30,17 @@ def find_main_file(path: Path, pattern):
     return next(iter(glob.glob(str(path) + "/" + pattern)), None)
 
 
+async def get_metric_value(inst, metric_name, sample_index=0):
+    return (await inst.metrics())[metric_name].samples[sample_index].value
+
+
+async def assert_metric_value(inst, metric_name, expected_value):
+    actual_value = await get_metric_value(inst, metric_name)
+    assert (
+        actual_value == expected_value
+    ), f"Expected {metric_name} to be {expected_value}, got ${actual_value}"
+
+
 @pytest.mark.opt_only
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @pytest.mark.parametrize(
@@ -176,6 +187,45 @@ async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
             file = find_main_file(tmp_dir, "test-cron-summary.dfs")
 
     assert file is not None, os.listdir(tmp_dir)
+
+
+@pytest.mark.slow
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-failed-saving", "snapshot_cron": "* * * * *"})
+async def test_cron_snapshot_failed_saving(df_server, tmp_dir: Path, async_client: aioredis.Redis):
+    await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
+
+    backups_total = await get_metric_value(df_server, "dragonfly_backups")
+    failed_backups_total = await get_metric_value(df_server, "dragonfly_failed_backups")
+
+    file = None
+    async with timeout(65):
+        while file is None:
+            await asyncio.sleep(1)
+            file = find_main_file(tmp_dir, "test-failed-saving-summary.dfs")
+
+    assert file is not None, os.listdir(tmp_dir)
+
+    await assert_metric_value(df_server, "dragonfly_backups", backups_total + 1)
+    await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total)
+
+    # Remove all files from directory
+    for dir_file in tmp_dir.iterdir():
+        os.unlink(dir_file)
+
+    # Make directory read-only
+    os.chmod(tmp_dir, 0o555)
+
+    # Wait for the next SAVE command
+    await asyncio.sleep(65)
+    file = find_main_file(tmp_dir, "test-failed-saving-summary.dfs")
+
+    # Make directory writable again
+    os.chmod(tmp_dir, 0o777)
+
+    assert file is None, os.listdir(tmp_dir)
+
+    await assert_metric_value(df_server, "dragonfly_backups", backups_total + 2)
+    await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total + 1)
 
 
 @pytest.mark.slow
