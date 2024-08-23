@@ -1867,15 +1867,18 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
             await proxy.start()
             task = asyncio.create_task(proxy.serve())
 
+            await wait_available_async(master.client())
+
             # Wait replica to be reconnected and synchronized with master
             await wait_for_replica_status(c_replica, status="up")
+            await asyncio.sleep(2)
             await wait_available_async(c_replica)
-
-            capture = await seeder.capture()
-            assert await seeder.compare(capture, replica.port)
 
             # Assert replica reconnects metrics increased
             await assert_replica_reconnections(replica, initial_reconnects_count)
+
+            capture = await seeder.capture()
+            assert await seeder.compare(capture, replica.port)
 
         finally:
             await proxy.close(task)
