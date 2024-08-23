@@ -66,14 +66,24 @@ void AllocationTracker::ProcessNew(void* ptr, size_t size) {
       continue;
     }
 
-    LOG(INFO) << "Allocating " << size << " bytes (" << ptr
+    size_t usable = mi_usable_size(ptr);
+    DCHECK_GE(usable, size);
+    LOG(INFO) << "Allocating " << usable << " bytes (" << ptr
               << "). Stack: " << util::fb2::GetStacktrace();
+    break;
   }
   inside_process_new = false;
 }
 
 void AllocationTracker::ProcessDelete(void* ptr) {
-  // We currently do not handle delete.
+  // we partially handle deletes, specifically when specifying a single range with
+  // 100% sampling rate.
+  if (tracking_.size() == 1 && tracking_.front().sample_odds == 1) {
+    size_t usable = mi_usable_size(ptr);
+    if (usable <= tracking_.front().upper_bound && usable >= tracking_.front().lower_bound) {
+      LOG(INFO) << "Deallocating " << usable << " bytes (" << ptr << ")";
+    }
+  }
 }
 
 }  // namespace dfly
