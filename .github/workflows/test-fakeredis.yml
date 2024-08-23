@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         PYTHON_VERSION:
-          - "3.12"
+          - "3.10"
         DRAGONFLY_VERSION:
           - "latest"
         tests:
