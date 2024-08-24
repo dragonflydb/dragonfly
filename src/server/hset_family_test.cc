@@ -9,8 +9,6 @@ extern "C" {
 #include "redis/sds.h"
 }
 
-#include <chrono>
-
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
