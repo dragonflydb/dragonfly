@@ -2279,9 +2279,6 @@ void ZSetFamily::ZRevRangeByLex(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRangeByLexInternal(CmdArgList args, bool reverse, ConnectionContext* cntx) {
-  uint32_t offset = 0;
-  uint32_t count = kuint32max;
-
   RangeParams range_params;
   range_params.interval_type = RangeParams::IntervalType::LEX;
   range_params.reverse = reverse;
@@ -2297,8 +2294,6 @@ void ZSetFamily::ZRangeByLexInternal(CmdArgList args, bool reverse, ConnectionCo
     if (!ParseLimit(ArgS(args, 4), ArgS(args, 5), &range_params))
       return cntx->SendError(kInvalidIntErr);
   }
-  range_params.offset = offset;
-  range_params.limit = count;
 
   ZRangeGeneric(args, range_params, cntx);
 }
