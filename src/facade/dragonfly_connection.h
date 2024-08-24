@@ -320,30 +320,6 @@ class Connection : public util::Connection {
   struct DispatchCleanup;
   struct Shutdown;
 
-  // Keeps track of total per-thread sizes of dispatch queues to limit memory taken up by messages
-  // in these queues.
-  struct QueueBackpressure {
-    // Block until subscriber memory usage is below limit, can be called from any thread.
-    void EnsureBelowLimit();
-
-    bool IsPipelineBufferOverLimit(size_t size) const {
-      return size >= pipeline_buffer_limit;
-    }
-
-    // Used by publisher/subscriber actors to make sure we do not publish too many messages
-    // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
-    util::fb2::EventCount pubsub_ec;
-    std::atomic_size_t subscriber_bytes = 0;
-
-    // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
-    // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
-    util::fb2::CondVarAny pipeline_cnd;
-
-    size_t publish_buffer_limit = 0;   // cached flag publish_buffer_limit
-    size_t pipeline_cache_limit = 0;   // cached flag pipeline_cache_limit
-    size_t pipeline_buffer_limit = 0;  // cached flag for buffer size in bytes
-  };
-
   // Check protocol and handle connection.
   void HandleRequests() final;
 

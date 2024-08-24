@@ -58,8 +58,10 @@ ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin
 
 ABSL_FLAG(uint32_t, pipeline_squash, 10,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
+
 ABSL_FLAG(uint32_t, pipeline_queue_limit, 1000,
-          "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
+          "Pipeline queue max length, the server will stop reading from the client socket"
+          " once the pipeline reaches this limit");
 
 // When changing this constant, also update `test_large_cmd` test in connection_test.py.
 ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
@@ -252,13 +254,35 @@ constexpr size_t kMinReadSize = 256;
 
 thread_local uint32_t free_req_release_weight = 0;
 
-// A cached value from FLAGS_pipeline_queue_limit.
-__thread uint32_t pipeline_queue_limit_cached = 256;
-
 const char* kPhaseName[Connection::NUM_PHASES] = {"SETUP", "READ", "PROCESS", "SHUTTING_DOWN",
                                                   "PRECLOSE"};
 
 }  // namespace
+
+// Keeps track of total per-thread sizes of dispatch queues to limit memory taken up by messages
+// in these queues.
+struct Connection::QueueBackpressure {
+  // Block until subscriber memory usage is below limit, can be called from any thread.
+  void EnsureBelowLimit();
+
+  bool IsPipelineBufferOverLimit(size_t size, uint32_t q_len) const {
+    return size >= pipeline_buffer_limit || q_len > pipeline_queue_max_len;
+  }
+
+  // Used by publisher/subscriber actors to make sure we do not publish too many messages
+  // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
+  util::fb2::EventCount pubsub_ec;
+  std::atomic_size_t subscriber_bytes = 0;
+
+  // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
+  // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
+  util::fb2::CondVarAny pipeline_cnd;
+
+  size_t publish_buffer_limit = 0;        // cached flag publish_buffer_limit
+  size_t pipeline_cache_limit = 0;        // cached flag pipeline_cache_limit
+  size_t pipeline_buffer_limit = 0;       // cached flag for buffer size in bytes
+  uint32_t pipeline_queue_max_len = 256;  // cached flag for pipeline queue max length.
+};
 
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
 thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
@@ -595,12 +619,13 @@ void Connection::OnConnectionStart() {
     tl_queue_backpressure_.publish_buffer_limit = GetFlag(FLAGS_publish_buffer_limit);
     tl_queue_backpressure_.pipeline_cache_limit = GetFlag(FLAGS_request_cache_limit);
     tl_queue_backpressure_.pipeline_buffer_limit = GetFlag(FLAGS_pipeline_buffer_limit);
-    pipeline_queue_limit_cached = GetFlag(FLAGS_pipeline_queue_limit);
+    tl_queue_backpressure_.pipeline_queue_max_len = GetFlag(FLAGS_pipeline_queue_limit);
 
     if (tl_queue_backpressure_.publish_buffer_limit == 0 ||
         tl_queue_backpressure_.pipeline_cache_limit == 0 ||
-        tl_queue_backpressure_.pipeline_buffer_limit == 0) {
-      LOG(ERROR) << "Buffer limit settings are 0";
+        tl_queue_backpressure_.pipeline_buffer_limit == 0 ||
+        tl_queue_backpressure_.pipeline_queue_max_len == 0) {
+      LOG(ERROR) << "pipeline flag limit is 0";
       exit(-1);
     }
   }
@@ -955,14 +980,12 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
   bool optimize_for_async = has_more;
 
-  if (optimize_for_async &&
-      (queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes) ||
-       dispatch_q_.size() > pipeline_queue_limit_cached)) {
+  if (optimize_for_async && queue_backpressure_->IsPipelineBufferOverLimit(
+                                stats_->dispatch_queue_bytes, dispatch_q_.size())) {
     fb2::NoOpLock noop;
     queue_backpressure_->pipeline_cnd.wait(noop, [this] {
-      bool over_limits =
-          queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes) ||
-          (dispatch_q_.size() > pipeline_queue_limit_cached);
+      bool over_limits = queue_backpressure_->IsPipelineBufferOverLimit(
+          stats_->dispatch_queue_bytes, dispatch_q_.size());
       return !over_limits || (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
     });
     if (cc_->conn_closing)
@@ -1436,8 +1459,8 @@ void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
     }
 
     DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
-    if ((!queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes) &&
-         dispatch_q_.size() <= pipeline_queue_limit_cached) ||
+    if (!queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes,
+                                                        dispatch_q_.size()) ||
         dispatch_q_.empty()) {
       queue_backpressure_->pipeline_cnd.notify_all();  // very cheap if noone is waiting on it.
     }
@@ -1762,7 +1785,7 @@ void Connection::BreakOnce(uint32_t ev_mask) {
 }
 
 void Connection::SetMaxQueueLenThreadLocal(uint32_t val) {
-  pipeline_queue_limit_cached = val;
+  tl_queue_backpressure_.pipeline_queue_max_len = val;
 }
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
