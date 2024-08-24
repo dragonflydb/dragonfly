@@ -73,6 +73,14 @@ struct ReplicaReconnectionsInfo {
   uint32_t reconnect_count;
 };
 
+struct LoadingStats {
+  size_t restore_count = 0;
+  size_t failed_restore_count = 0;
+
+  size_t backup_count = 0;
+  size_t failed_backup_count = 0;
+};
+
 // Global peak stats recorded after aggregating metrics over all shards.
 // Note that those values are only updated during GetMetrics calls.
 struct PeakStats {
@@ -122,6 +130,8 @@ struct Metrics {
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
   std::vector<ReplicaRoleInfo> replication_metrics;
   std::optional<ReplicaReconnectionsInfo> replica_reconnections;
+
+  LoadingStats loading_stats;
 };
 
 struct LastSaveInfo {
@@ -350,6 +360,9 @@ class ServerFamily {
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;
+
+  mutable util::fb2::Mutex loading_stats_mu_;
+  LoadingStats loading_stats_ ABSL_GUARDED_BY(loading_stats_mu_);
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress

@@ -80,6 +80,7 @@ using namespace std;
 %nterm <bool> opt_lparen
 %nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr numeric_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
+%nterm <std::string> tag_list_element
 
 %nterm <AstKnnNode> knn_query
 %nterm <std::string> opt_knn_alias
@@ -170,10 +171,13 @@ field_unary_expr:
   | UINT32                                       { $$ = AstTermNode(to_string($1)); }
 
 tag_list:
-  TERM                       { $$ = AstTagsNode(std::move($1)); }
-  | UINT32                   { $$ = AstTagsNode(to_string($1)); }
-  | tag_list OR_OP TERM      { $$ = AstTagsNode(std::move($1), std::move($3)); }
-  | tag_list OR_OP DOUBLE    { $$ = AstTagsNode(std::move($1), to_string($3)); }
+  tag_list_element                       { $$ = AstTagsNode(std::move($1)); }
+  | tag_list OR_OP tag_list_element      { $$ = AstTagsNode(std::move($1), std::move($3)); }
+
+tag_list_element:
+  TERM { $$ = std::move($1); }
+  | UINT32 { $$ = to_string($1); }
+  | DOUBLE { $$ = to_string($1); }
 
 
 %%

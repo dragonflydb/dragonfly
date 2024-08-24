@@ -395,6 +395,22 @@ TEST_F(SearchFamilyTest, TagOptions) {
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), AreDocIds("d:2", "d:4"));
 }
 
+TEST_F(SearchFamilyTest, TagNumbers) {
+  Run({"hset", "d:1", "number", "1"});
+  Run({"hset", "d:2", "number", "2"});
+  Run({"hset", "d:3", "number", "3"});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "number", "tag"}), "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2}"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2|3}"}), AreDocIds("d:1", "d:2", "d:3"));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1.0|2|3.0}"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2|3.0}"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|hello|2}"}), AreDocIds("d:1", "d:2"));
+}
+
 TEST_F(SearchFamilyTest, Numbers) {
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {
@@ -433,15 +449,12 @@ TEST_F(SearchFamilyTest, Numbers) {
 
   // Test negation of ranges:
   EXPECT_THAT(Run({"ft.search", "i1", "@i:[9 9] -@j:[1 10]"}), AreDocIds("i9j0"));
+  EXPECT_THAT(Run({"ft.search", "i1", "-@i:[0 9] -@j:[1 10]"}), AreDocIds("i10j0"));
 
-  // TODO: Check on new algo
-  // EXPECT_THAT(Run({"ft.search", "i1", "-@i:[0 9] -@j:[1 10]"}), AreDocIds("i10j0"));
-
-  /*
-  TODO: Breaks the parser
-  EXPECT_THAT(Run({"ft.search", "i1", "(@i:[1 3] ! @i:[2 2]) @j:[7 7]"}),
-              DocIds(vector<string>{"i1j7", "i3j7"}));
-  */
+  // Test empty range
+  EXPECT_THAT(Run({"ft.search", "i1", "@i:[9 1]"}), AreDocIds());
+  EXPECT_THAT(Run({"ft.search", "i1", "@j:[5 0]"}), AreDocIds());
+  EXPECT_THAT(Run({"ft.search", "i1", "@i:[7 1] @j:[6 2]"}), AreDocIds());
 }
 
 TEST_F(SearchFamilyTest, TestLimit) {

@@ -536,6 +536,11 @@ TEST_F(ZSetFamilyTest, ZUnion) {
   resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "d", "b", "c"));
 
+  // Cover union of sets and zsets
+  EXPECT_EQ(2, CheckedInt({"sadd", "s2", "b", "c"}));
+  resp = Run({"zunion", "2", "z1", "s2", "weights", "1", "2", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "c", "2", "b", "5"));
+
   resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "d", "2", "b", "5", "c", "5"));
 
@@ -642,6 +647,11 @@ TEST_F(ZSetFamilyTest, ZInterStore) {
   EXPECT_EQ(1, CheckedInt({"zinterstore", "b", "2", "z1", "s2"}));
   resp = Run({"zrange", "b", "0", "-1", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("b", "3"));
+
+  Run({"ZADD", "foo", "10", "a"});
+  EXPECT_EQ(1, CheckedInt({"ZINTERSTORE", "bar", "1", "foo", "weights", "2"}));
+  resp = Run({"zrange", "bar", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "20"));
 }
 
 TEST_F(ZSetFamilyTest, ZInter) {

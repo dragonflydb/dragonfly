@@ -17,7 +17,7 @@ maintainers = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.10"
 redis = ">=5"
 fakeredis = { version = "^2.23", extras = ["json", "bf", "cf", "lua"] }
 hypothesis = "^6.70"

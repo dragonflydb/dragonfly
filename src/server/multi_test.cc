@@ -484,6 +484,14 @@ TEST_F(MultiTest, Watch) {
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
 
+  // Check watch with nonempty exec body
+  EXPECT_EQ(Run({"watch", "a"}), "OK");
+  Run({"multi"});
+  Run({"get", "a"});
+  Run({"get", "b"});
+  Run({"get", "c"});
+  ASSERT_THAT(Run({"exec"}), kExecSuccess);
+
   // Check watch data cleared after EXEC.
   Run({"set", "a", "1"});
   Run({"multi"});
@@ -499,10 +507,9 @@ TEST_F(MultiTest, Watch) {
   // Check EXEC doesn't miss watched key expiration.
   Run({"watch", "a"});
   Run({"expire", "a", "1"});
-
   AdvanceTime(1000);
-
   Run({"multi"});
+  Run({"get", "a"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
 
   // Check unwatch.

@@ -737,6 +737,15 @@ ScoredMap FromObject(const CompactObj& co, double weight) {
   return res;
 }
 
+ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight) {
+  ScoredMap result;
+  container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {
+    result.emplace(ce.ToString(), weight);
+    return true;
+  });
+  return result;
+}
+
 double Aggregate(double v1, double v2, AggType atype) {
   switch (atype) {
     case AggType::SUM:
@@ -797,12 +806,18 @@ using KeyIterWeightVec = vector<pair<DbSlice::ConstIterator, double>>;
 
 ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type) {
   ScoredMap result;
-  for (const auto& key_iter_weight : key_iter_weight_vec) {
-    if (key_iter_weight.first.is_done()) {
+  for (const auto& [it, weight] : key_iter_weight_vec) {
+    if (it.is_done()) {
       continue;
     }
 
-    ScoredMap sm = FromObject(key_iter_weight.first->second, key_iter_weight.second);
+    ScoredMap sm;
+    if (it->second.ObjType() == OBJ_ZSET)
+      sm = FromObject(it->second, weight);
+    else {
+      DCHECK_EQ(it->second.ObjType(), OBJ_SET);
+      sm = ScoreMapFromSet(it->second, weight);
+    }
     if (result.empty()) {
       result.swap(sm);
     } else {
@@ -812,23 +827,22 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
   return result;
 }
 
-double GetKeyWeight(Transaction* t, ShardId shard_id, const vector<double>& weights,
-                    unsigned key_index, unsigned cmdargs_keys_offset) {
+double GetKeyWeight(const vector<double>& weights, unsigned windex) {
   if (weights.empty()) {
     return 1;
   }
 
-  unsigned windex = key_index - cmdargs_keys_offset;
   DCHECK_LT(windex, weights.size());
   return weights[windex];
 }
 
-OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
-                            const vector<double>& weights, bool store) {
-  ShardArgs keys = t->GetShardArgs(shard->shard_id());
+OpResult<KeyIterWeightVec> PrepareWeightedSets(const Transaction& trans, bool store,
+                                               string_view dest, const vector<double>& weights,
+                                               EngineShard* shard) {
+  ShardArgs keys = trans.GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
-  unsigned cmdargs_keys_offset = 1;  // after {numkeys} for ZUNION
+  unsigned cmdargs_keys_offset = 1;  // after {numkeys} for ZUNION/ZINTER
   unsigned removed_keys = 0;
 
   ShardArgs::Iterator start = keys.begin(), end = keys.end();
@@ -848,92 +862,66 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
     }
   }
 
-  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  auto& db_slice = trans.GetDbSlice(shard->shard_id());
   KeyIterWeightVec key_weight_vec(keys.Size() - removed_keys);
   unsigned index = 0;
+  DCHECK_GE(start.index(), cmdargs_keys_offset);
+
   for (; start != end; ++start) {
-    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), *start, OBJ_ZSET);
-    if (it_res == OpStatus::WRONG_TYPE)  // TODO: support SET type with default score 1.
-      return it_res.status();
-    if (!it_res) {
+    auto it_res = db_slice.FindReadOnly(trans.GetDbContext(), *start);
+
+    if (!IsValid(it_res.it)) {
       ++index;
       continue;
     }
-    key_weight_vec[index] = {
-        *it_res, GetKeyWeight(t, shard->shard_id(), weights, start.index(), cmdargs_keys_offset)};
-    ++index;
-  }
 
-  return UnionShardKeysWithScore(key_weight_vec, agg_type);
-}
-
-ScoredMap ZSetFromSet(const PrimeValue& pv, double weight) {
-  ScoredMap result;
-  container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {
-    result.emplace(ce.ToString(), weight);
-    return true;
-  });
-  return result;
-}
-
-OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
-                            const vector<double>& weights, bool store) {
-  ShardArgs keys = t->GetShardArgs(shard->shard_id());
-  DCHECK(!keys.Empty());
-
-  unsigned removed_keys = 0;
-  unsigned cmdargs_keys_offset = 1;
-  ShardArgs::Iterator start = keys.begin(), end = keys.end();
-
-  if (store) {
-    // first global index is 2 after {destkey, numkeys}.
-    ++cmdargs_keys_offset;
-
-    if (*start == dest) {
-      ++start;
-      ++removed_keys;
-
-      // In case ONLY the destination key is hosted in this shard no work on this shard should be
-      // done in this step
-      if (start == end) {
-        return OpStatus::SKIPPED;
-      }
-    }
-  }
-
-  auto& db_slice = t->GetDbSlice(shard->shard_id());
-  vector<pair<DbSlice::ItAndUpdater, double>> it_arr(keys.Size() - removed_keys);
-
-  unsigned index = 0;
-  for (; start != end; ++start) {
-    auto it_res = db_slice.FindMutable(t->GetDbContext(), *start);
-    if (!IsValid(it_res.it)) {
-      ++index;
-      continue;  // we exit in the next loop
-    }
-
-    // sets are supported for ZINTER* commands:
     auto obj_type = it_res.it->second.ObjType();
     if (obj_type != OBJ_ZSET && obj_type != OBJ_SET)
       return OpStatus::WRONG_TYPE;
 
-    it_arr[index] = {std::move(it_res), GetKeyWeight(t, shard->shard_id(), weights,
-                                                     index + removed_keys, cmdargs_keys_offset)};
+    key_weight_vec[index] = {it_res.it, GetKeyWeight(weights, start.index() - cmdargs_keys_offset)};
     ++index;
   }
 
+  return key_weight_vec;
+}
+
+OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
+                            const vector<double>& weights, bool store) {
+  OpResult<KeyIterWeightVec> key_vec_res = PrepareWeightedSets(*t, store, dest, weights, shard);
+  if (!key_vec_res)
+    return key_vec_res.status();
+
+  // Only dest is hosted on this shard.
+  if (key_vec_res->empty())
+    return OpStatus::OK;
+
+  return UnionShardKeysWithScore(*key_vec_res, agg_type);
+}
+
+OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
+                            const vector<double>& weights, bool store) {
+  OpResult<KeyIterWeightVec> key_vec_res = PrepareWeightedSets(*t, store, dest, weights, shard);
+  if (!key_vec_res)
+    return key_vec_res.status();
+
+  // Only dest is hosted on this shard.
+  if (key_vec_res->empty())
+    return OpStatus::SKIPPED;
+
   ScoredMap result;
-  for (auto it = it_arr.begin(); it != it_arr.end(); ++it) {
-    if (it->first.it.is_done()) {
+  for (const auto& [it, weight] : *key_vec_res) {
+    if (it.is_done()) {
       return ScoredMap{};
     }
 
     ScoredMap sm;
-    if (it->first.it->second.ObjType() == OBJ_ZSET)
-      sm = FromObject(it->first.it->second, it->second);
-    else
-      sm = ZSetFromSet(it->first.it->second, it->second);
-
+    if (it->second.ObjType() == OBJ_ZSET)
+      sm = FromObject(it->second, weight);
+    else {
+      DCHECK_EQ(it->second.ObjType(), OBJ_SET);
+      sm = ScoreMapFromSet(it->second, weight);
+    }
     if (result.empty())
       result.swap(sm);
     else

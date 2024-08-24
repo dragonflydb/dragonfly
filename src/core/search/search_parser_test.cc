@@ -110,6 +110,10 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(0, Parse(" -(foo) @foo:bar @ss:[1 2]"));
   EXPECT_EQ(0, Parse("@foo:{ tag1 | tag2 }"));
 
+  EXPECT_EQ(0, Parse("@foo:{1|2}"));
+  EXPECT_EQ(0, Parse("@foo:{1|2.0|4|3.0}"));
+  EXPECT_EQ(0, Parse("@foo:{1|hello|3.0|world|4}"));
+
   EXPECT_EQ(1, Parse(" -(foo "));
   EXPECT_EQ(1, Parse(" foo:bar "));
   EXPECT_EQ(1, Parse(" @foo:@bar "));

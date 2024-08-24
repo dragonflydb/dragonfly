@@ -2070,8 +2070,8 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
 }
 
 // Return true if non of the connections watched keys expired.
-bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& registry) {
-  static char EXISTS[] = "EXISTS";
+bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
+                           const CommandId* exec_cid) {
   auto& exec_info = cntx->conn_state.exec_info;
 
   CmdArgVec str_list(exec_info.watched_keys.size());
@@ -2089,10 +2089,13 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
     return OpStatus::OK;
   };
 
-  cntx->transaction->MultiSwitchCmd(registry.Find(EXISTS));
+  cntx->transaction->MultiSwitchCmd(exists_cid);
   cntx->transaction->InitByArgs(cntx->ns, cntx->conn_state.db_index, CmdArgList{str_list});
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
+
+  // Reset cid to EXEC as it was before
+  cntx->transaction->MultiSwitchCmd(exec_cid);
 
   // The comparison can still be true even if a key expired due to another one being created.
   // So we have to check the watched_dirty flag, which is set if a key expired.
@@ -2206,7 +2209,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   // EXEC should not run if any of the watched keys expired.
-  if (!exec_info.watched_keys.empty() && !CheckWatchedKeyExpiry(cntx, registry_)) {
+  if (!exec_info.watched_keys.empty() &&
+      !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
     cntx->transaction->UnlockMulti();
     return rb->SendNull();
   }
