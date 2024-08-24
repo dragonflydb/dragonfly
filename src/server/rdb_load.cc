@@ -485,7 +485,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbTieredSegment& src) {
-  CHECK(false) << "unreachable";
+  LOG(FATAL) << "unrechable";
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
@@ -2163,6 +2163,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
   // Flush all small items
   HandleSmallItems(true);
+  DeleteTieredPages();
 
   FlushAllShards();
 
@@ -2679,6 +2680,16 @@ void RdbLoader::HandleSmallItems(bool flush) {
       item->val.obj = std::move(arr);
       Add(item);
     }
+  }
+}
+
+void RdbLoader::DeleteTieredPages() {
+  auto& store = EngineShard::tlocal()->tiered_storage()->BorrowStorage();
+  for (auto& [offset, page] : small_items_pages_) {
+    if (!holds_alternative<tiering::DiskSegment>(page))
+      continue;
+    auto segment = get<tiering::DiskSegment>(page);
+    store.MarkAsFree(segment);
   }
 }
 

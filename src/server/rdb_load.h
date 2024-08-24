@@ -277,7 +277,10 @@ class RdbLoader : protected RdbLoaderBase {
 
   void LoadScriptFromAux(std::string&& value);
 
+  // Materialize small items pages with most hits until a limited amount of entries is left.
+  // When flush is set, all pages are materialized.
   void HandleSmallItems(bool flush);
+  void DeleteSmallItemsPages();  // Delete all small items pages
   std::error_code LoadTieredPage();
 
   // Load index definition from RESP string describing it in FT.CREATE format,
