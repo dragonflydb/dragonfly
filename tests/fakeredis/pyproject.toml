@@ -37,6 +37,7 @@ markers = [
     "min_server",
     "max_server",
     "decode_responses",
+    "unsupported_server_types",
 ]
 asyncio_mode = "strict"
 generate_report_on_test = true
