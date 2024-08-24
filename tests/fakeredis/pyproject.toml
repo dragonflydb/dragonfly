@@ -20,15 +20,16 @@ maintainers = [
 python = "^3.10"
 redis = ">=5"
 fakeredis = { version = "^2.23", extras = ["json", "bf", "cf", "lua"] }
-hypothesis = "^6.70"
-pytest = "^7.4"
+hypothesis = "^6.111"
+pytest = "^8.3"
 pytest-timeout = "^2.3.1"
-pytest-asyncio = "^0.21"
-pytest-cov = "^4.1"
-pytest-mock = { version = "^3.14", python = ">=3.8.1" }
-pytest-html = { version = "^4.1", python = ">=3.8.1" }
+pytest-asyncio = "^0.24"
+pytest-cov = "^5.0"
+pytest-mock =  "^3.14"
+pytest-html = "^4.1"
 
 [tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "fake: run tests only with fake redis",
@@ -37,6 +38,7 @@ markers = [
     "min_server",
     "max_server",
     "decode_responses",
+    "unsupported_server_types",
 ]
 asyncio_mode = "strict"
 generate_report_on_test = true
