@@ -802,10 +802,10 @@ TEST_F(ListFamilyTest, BLMoveRings) {
 #pragma GCC diagnostic ignored "-Wdeprecated"
   for (int j = 0; j < 5; j++) {
     for (int i = 0; i < 10; i++) {
-      fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([=]() {
+      fibers.emplace_back(pp_->at(i % pp_->size())->LaunchFiber([=]() {
         auto key1 = to_string(i);
-        auto key2 = to_string(i + 1);
-        Run(key1, {"blmove", key1, key2, "LEFT", "RIGHT", "0"});
+        auto key2 = to_string((i + 1) % 10);
+        Run(key1 + to_string(j), {"blmove", key1, key2, "LEFT", "RIGHT", "0"});
       }));
     }
   }
