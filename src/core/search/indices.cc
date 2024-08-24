@@ -85,8 +85,12 @@ void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
 }
 
 vector<DocId> NumericIndex::Range(double l, double r) const {
+  if (r < l)
+    return {};
+
   auto it_l = entries_.lower_bound({l, 0});
   auto it_r = entries_.lower_bound({r, numeric_limits<DocId>::max()});
+  DCHECK_GE(it_r - it_l, 0);
 
   vector<DocId> out;
   for (auto it = it_l; it != it_r; ++it)
