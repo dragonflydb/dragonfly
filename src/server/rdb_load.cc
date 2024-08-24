@@ -2672,8 +2672,6 @@ void RdbLoader::HandleSmallItems(bool flush) {
       co.SetEncodingMask(segment.enc_mask);
       co.Materialize({page.data() + (segment.offset - offset), segment.length}, true);
 
-      VLOG(0) << "Loaded " << co.ToString();
-
       base::PODArray<char> arr(co.Size(), nullptr);
       co.GetString(arr.data());
 

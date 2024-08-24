@@ -282,7 +282,6 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment) {
 
   auto bin = ts_->bins_->Delete(segment);
   if (bin.empty) {
-    //    CHECK(false) << "Not supported";
     return true;
   }
 

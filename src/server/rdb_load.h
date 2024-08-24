@@ -63,11 +63,6 @@ class RdbLoaderBase {
     uint8_t enc_mask;
   };
 
-  struct RdbTieredPage {
-    size_t offset;
-    std::string blob;
-  };
-
   using RdbVariant = std::variant<long long, base::PODArray<char>, LzfString,
                                   std::unique_ptr<LoadTrace>, RdbSBF, RdbTieredSegment>;
 
