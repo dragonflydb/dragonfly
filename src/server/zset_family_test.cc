@@ -348,6 +348,12 @@ TEST_F(ZSetFamilyTest, ByLex) {
   resp = Run({"zrangebylex", "key", "[a", "+"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   ASSERT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool", "down", "elephant", "foo"));
+
+  resp = Run({"zrangebylex", "key", "-", "+", "LIMIT", "2", "3"});
+  ASSERT_THAT(resp.GetVec(), ElementsAre("cool", "down", "elephant"));
+
+  resp = Run({"zrangebylex", "key", "-", "+", "LIMIT", "5", "1"});
+  ASSERT_THAT(resp, "foo");
 }
 
 TEST_F(ZSetFamilyTest, ZRevRangeByLex) {
