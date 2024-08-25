@@ -675,6 +675,14 @@ TEST_F(ZSetFamilyTest, ZInter) {
 
   resp = Run({"zinter", "3", "z3", "z4", "z5"});
   EXPECT_THAT(resp, ArrLen(0));
+
+  // zinter output sorts keys with equal scores lexicographically
+  Run({"del", "z1", "z2", "z3", "z4", "z5"});
+  Run({"zadd", "z1", "1", "e", "1", "a", "1", "b", "1", "x"});
+  Run({"zadd", "z2", "1", "e", "1", "a", "1", "b", "1", "y"});
+  Run({"zadd", "z3", "1", "e", "1", "a", "1", "b", "1", "z"});
+  Run({"zadd", "z4", "1", "e", "1", "a", "1", "b", "1", "o"});
+  EXPECT_THAT(Run({"zinter", "4", "z1", "z2", "z3", "z4"}).GetVec(), ElementsAre("a", "b", "e"));
 }
 
 TEST_F(ZSetFamilyTest, ZInterCard) {

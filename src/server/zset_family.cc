@@ -2123,7 +2123,7 @@ void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
 
   std::sort(scored_array.begin(), scored_array.end(),
             [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) {
-              return a.second < b.second;
+              return tie(a.second, a.first) < tie(b.second, b.first);
             });
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
