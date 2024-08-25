@@ -286,26 +286,22 @@ TEST_F(SetFamilyTest, SMIsMember) {
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"smismember", "foo1", "a", "b"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("0", "0"));
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(0))));
 
   resp = Run({"smismember", "foo", "a", "c"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("1", "0"));
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(0))));
 
   resp = Run({"smismember", "foo", "a", "b"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("1", "1"));
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), IntArg(1))));
 
   resp = Run({"smismember", "foo", "d", "e"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("0", "0"));
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(0))));
 
   resp = Run({"smismember", "foo", "b"});
-  EXPECT_THAT(resp, "1");
+  EXPECT_THAT(resp, IntArg(1));
 
   resp = Run({"smismember", "foo", "x"});
-  EXPECT_THAT(resp, "0");
+  EXPECT_THAT(resp, IntArg(0));
 }
 
 TEST_F(SetFamilyTest, Empty) {

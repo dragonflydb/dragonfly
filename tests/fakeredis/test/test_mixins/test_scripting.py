@@ -320,6 +320,8 @@ def test_eval_global_and_return_ok(r: redis.Redis):
         )
 
 
+# Dragonfly uses lua5.4, so it natively supports doubles.
+# To use legacy rounding of doubles to integers run dragonfly with --lua_resp2_legacy_float
 def test_eval_convert_number(r: redis.Redis):
     # Redis forces all Lua numbers to integer
     val = r.eval("return 3.2", 0)
@@ -349,6 +351,7 @@ def test_eval_call_bool6(r: redis.Redis):
 
 
 @pytest.mark.min_server("7")
+@pytest.mark.unsupported_server_types("dragonfly")  # dragonfly allows this
 def test_eval_call_bool7(r: redis.Redis):
     # Redis doesn't allow Lua bools to be passed to [p]call
     with pytest.raises(
@@ -429,6 +432,7 @@ def test_eval_exists(r: redis.Redis):
     assert val == 1
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_eval_flushdb(r: redis.Redis):
     r.set("foo", "bar")
     val = r.eval(
@@ -441,6 +445,7 @@ def test_eval_flushdb(r: redis.Redis):
     assert val == 1
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_eval_flushall(r, create_redis):
     r1 = create_redis(db=2)
     r2 = create_redis(db=3)
@@ -461,6 +466,8 @@ def test_eval_flushall(r, create_redis):
     assert "r2" not in r2
 
 
+# Dragonfly lua supports doubles
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_eval_incrbyfloat(r: redis.Redis):
     r.set("foo", 0.5)
     val = r.eval(
