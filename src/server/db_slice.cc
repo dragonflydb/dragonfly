@@ -926,12 +926,17 @@ int64_t DbSlice::ExpireParams::Cap(int64_t value, TimeUnit unit) {
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool cap) const {
   if (persist)
     return {0, 0};
+
+  // return a negative absolute time if we overflow.
+  if (unit == TimeUnit::SEC && value > INT64_MAX / 1000) {
+    return {0, -1};
+  }
+
   int64_t msec = (unit == TimeUnit::SEC) ? value * 1000 : value;
-  int64_t now_msec = now_ms;
-  int64_t rel_msec = absolute ? msec - now_msec : msec;
+  int64_t rel_msec = absolute ? msec - now_ms : msec;
   if (cap)
     rel_msec = Cap(rel_msec, TimeUnit::MSEC);
-  return make_pair(rel_msec, now_msec + rel_msec);
+  return make_pair(rel_msec, now_ms + rel_msec);
 }
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
@@ -945,8 +950,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return kPersistValue;
   }
 
-  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms);
-  if (rel_msec > kMaxExpireDeadlineMs) {
+  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms, false);
+  if (abs_msec < 0 || rel_msec > kMaxExpireDeadlineMs) {
     return OpStatus::OUT_OF_RANGE;
   }
 

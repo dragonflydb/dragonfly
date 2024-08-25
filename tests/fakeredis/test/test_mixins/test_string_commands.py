@@ -533,6 +533,7 @@ def test_getex(r: redis.Redis):
 
 
 @pytest.mark.min_server("7")
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_lcs(r: redis.Redis):
     r.mset({"key1": "ohmytext", "key2": "mynewtext"})
     assert r.lcs("key1", "key2") == b"mytext"

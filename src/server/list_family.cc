@@ -256,8 +256,9 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
   if (skip_notexist) {
     auto tmp_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
-    if (!tmp_res)
+    if (tmp_res == OpStatus::KEY_NOTFOUND)
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
+    RETURN_ON_BAD_STATUS(tmp_res);
     res = std::move(*tmp_res);
   } else {
     auto op_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
@@ -314,6 +315,9 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
+
+  if (count == 0)
+    return StringVec{};
 
   auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
@@ -993,8 +997,8 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    return cntx->SendLong(result.value());
+  if (result || result == OpStatus::KEY_NOTFOUND) {
+    return cntx->SendLong(result.value_or(0));
   }
 
   cntx->SendError(result.status());
@@ -1014,8 +1018,10 @@ void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
-  cntx->transaction->ScheduleSingleHop(std::move(cb));
-  cntx->SendOk();
+  OpStatus st = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  if (st == OpStatus::KEY_NOTFOUND)
+    st = OpStatus::OK;
+  cntx->SendError(st);
 }
 
 void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
@@ -1058,11 +1064,10 @@ void ListFamily::LRem(CmdArgList args, ConnectionContext* cntx) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    cntx->SendLong(result.value());
-  } else {
-    cntx->SendLong(0);
+  if (result || result == OpStatus::KEY_NOTFOUND) {
+    return cntx->SendLong(result.value_or(0));
   }
+  cntx->SendError(result.status());
 }
 
 void ListFamily::LSet(CmdArgList args, ConnectionContext* cntx) {
@@ -1202,13 +1207,9 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
   }
 
   if (return_arr) {
-    if (result->empty()) {
-      rb->SendNullArray();
-    } else {
-      rb->StartArray(result->size());
-      for (const auto& k : *result) {
-        rb->SendBulkString(k);
-      }
+    rb->StartArray(result->size());
+    for (const auto& k : *result) {
+      rb->SendBulkString(k);
     }
   } else {
     DCHECK_EQ(1u, result->size());

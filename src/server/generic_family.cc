@@ -907,7 +907,10 @@ void GenericFamily::Keys(CmdArgList args, ConnectionContext* cntx) {
   StringVec keys;
 
   ScanOpts scan_opts;
-  scan_opts.pattern = pattern;
+  if (pattern != "*") {
+    scan_opts.pattern = pattern;
+  }
+
   scan_opts.limit = 512;
   auto output_limit = absl::GetFlag(FLAGS_keys_output_limit);
 
@@ -1091,8 +1094,11 @@ OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::stri
   using namespace container_utils;
 
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
-  if (!IsValid(it) || !IsContainer(it->second)) {
+  if (!IsValid(it)) {
     return OpStatus::KEY_NOTFOUND;
+  }
+  if (!IsContainer(it->second)) {
+    return OpStatus::WRONG_TYPE;
   }
 
   auto result = MakeSortEntryList(alpha);
@@ -1106,7 +1112,7 @@ OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::stri
       result);
   auto res = OpResultTyped{std::move(result)};
   res.setType(it->second.ObjType());
-  return success ? res : OpStatus::WRONG_TYPE;
+  return success ? res : OpStatus::INVALID_NUMERIC_RESULT;
 }
 
 void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
@@ -1123,6 +1129,8 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       alpha = true;
     } else if (arg == "DESC") {
       reversed = true;
+    } else if (arg == "ASC") {
+      reversed = false;
     } else if (arg == "LIMIT") {
       int offset, limit;
       if (i + 2 >= args.size()) {
@@ -1134,6 +1142,9 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       }
       bounds = {offset, limit};
       i += 2;
+    } else {
+      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << arg;
+      return cntx->SendError(kSyntaxErr, kSyntaxErrType);
     }
   }
 
@@ -1142,7 +1153,10 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
         return OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
       });
 
-  if (fetch_result.status() == OpStatus::WRONG_TYPE)
+  if (fetch_result == OpStatus::WRONG_TYPE)
+    return cntx->SendError(fetch_result.status());
+
+  if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
     return cntx->SendError("One or more scores can't be converted into double");
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());

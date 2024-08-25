@@ -213,7 +213,7 @@ class DbSlice {
     static int64_t Cap(int64_t value, TimeUnit unit);
 
     // Calculate relative and absolue timepoints.
-    std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap = false) const;
+    std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap) const;
 
     // Return true if relative expiration is in the past
     bool IsExpired(uint64_t now_msec) const {
