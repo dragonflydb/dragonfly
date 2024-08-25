@@ -156,6 +156,9 @@ OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t
 
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  if (it_res == OpStatus::KEY_NOTFOUND) {
+    return StringValue(string{});
+  }
   RETURN_ON_BAD_STATUS(it_res);
 
   if (const CompactObj& co = it_res.value()->second; co.IsExternal()) {
