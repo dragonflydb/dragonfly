@@ -892,8 +892,9 @@ TEST_F(StringFamilyTest, MultiSetWithHashtagsLockHashtags) {
   fb.Join();
 }
 
-TEST_F(StringFamilyTest, StrLen) {
+TEST_F(StringFamilyTest, EmptyKeys) {
   EXPECT_EQ(0, CheckedInt({"strlen", "foo"}));
+  EXPECT_EQ(Run({"SUBSTR", "foo", "0", "-1"}), "");
 }
 
 }  // namespace dfly

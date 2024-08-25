@@ -17,5 +17,5 @@ _deps
 releases
 .DS_Store
 .idea/*
-
+.hypothesis
 .secrets

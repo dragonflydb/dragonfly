@@ -295,7 +295,7 @@ class Context : protected Cancellation {
 };
 
 struct ScanOpts {
-  std::string_view pattern;
+  std::optional<std::string_view> pattern;
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;

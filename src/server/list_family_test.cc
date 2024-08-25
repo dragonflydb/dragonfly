@@ -366,6 +366,10 @@ TEST_F(ListFamilyTest, LRem) {
   resp = Run({"lrange", kKey1, "0", "1"});
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec(), ElementsAre("b", "c"));
+
+  Run({"set", "foo", "bar"});
+  ASSERT_THAT(Run({"lrem", "foo", "0", "elem"}), ErrArg("WRONGTYPE"));
+  ASSERT_THAT(Run({"lrem", "nexists", "0", "elem"}), IntArg(0));
 }
 
 TEST_F(ListFamilyTest, LTrim) {
@@ -376,6 +380,9 @@ TEST_F(ListFamilyTest, LTrim) {
   ASSERT_THAT(resp.GetVec(), ElementsAre("c", "d"));
   ASSERT_EQ(Run({"ltrim", kKey1, "0", "0"}), "OK");
   ASSERT_EQ(Run({"lrange", kKey1, "0", "1"}), "c");
+  Run({"set", "foo", "bar"});
+  ASSERT_THAT(Run({"ltrim", "foo", "0", "1"}), ErrArg("WRONGTYPE"));
+  ASSERT_EQ(Run({"ltrim", "nexists", "0", "1"}), "OK");
 }
 
 TEST_F(ListFamilyTest, LRange) {
@@ -396,6 +403,14 @@ TEST_F(ListFamilyTest, Lset) {
   ASSERT_EQ(Run({"rpop", kKey1}), "foo");
   Run({"rpush", kKey2, "a"});
   ASSERT_THAT(Run({"lset", kKey2, "1", "foo"}), ErrArg("index out of range"));
+}
+
+TEST_F(ListFamilyTest, LPop) {
+  Run({"rpush", "foo", "bar"});
+  auto resp = Run({"lpop", "foo", "0"});
+  EXPECT_THAT(resp, RespArray(ElementsAre()));
+  resp = Run({"lpop", "bar", "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(ListFamilyTest, LPos) {
@@ -845,7 +860,7 @@ TEST_F(ListFamilyTest, RPushX) {
 
 TEST_F(ListFamilyTest, LInsert) {
   // List not found.
-  EXPECT_THAT(Run({"linsert", "notfound", "before", "foo", "bar"}), ErrArg("no such key"));
+  EXPECT_THAT(Run({"linsert", "notfound", "before", "foo", "bar"}), IntArg(0));
 
   // Key is not a list.
   Run({"set", "notalist", "x"});
