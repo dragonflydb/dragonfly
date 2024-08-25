@@ -127,6 +127,7 @@ def test_sort_wrong_type(r: redis.Redis):
         r.sort("string")
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_sort_with_store_option(r: redis.Redis):
     r.rpush("foo", "2")
     r.rpush("foo", "1")
@@ -137,6 +138,7 @@ def test_sort_with_store_option(r: redis.Redis):
     assert r.lrange("bar", 0, -1) == [b"1", b"2", b"3", b"4"]
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_sort_with_by_and_get_option(r: redis.Redis):
     r.rpush("foo", "2")
     r.rpush("foo", "1")
@@ -186,6 +188,7 @@ def test_sort_with_by_and_get_option(r: redis.Redis):
     ]
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_sort_with_hash(r: redis.Redis):
     r.rpush("foo", "middle")
     r.rpush("foo", "eldest")
@@ -665,7 +668,9 @@ def test_key_patterns(r: redis.Redis):
     assert sorted(r.keys()) == [b"four", b"one", b"three", b"two"]
 
 
+# seems like a rather peculiar behavior of Redis, maybe a bug? Disabling for Dragonfly for now.
 @pytest.mark.min_server("7")
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_watch_when_setbit_does_not_change_value(r: redis.Redis):
     r.set("foo", b"0")
 
