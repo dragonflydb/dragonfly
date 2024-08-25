@@ -82,6 +82,9 @@ template <typename T> T GetResult(TResult<T> v) {
 OpResult<TResult<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  if (it_res == OpStatus::KEY_NOTFOUND) {
+    return TResult<size_t>{0u};
+  }
   RETURN_ON_BAD_STATUS(it_res);
 
   // For external entries we have to enqueue reads because modify operations like append could be
@@ -776,11 +779,16 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
           .absolute = absl::EndsWith(opt, "AT"),
       };
 
+      int64_t now_ms = GetCurrentTimeMs();
+      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+      if (abs_ms < 0)
+        return cntx->SendError(InvalidExpireTime("set"));
+
       // Redis reports just OK in this case
-      if (expiry.IsExpired(GetCurrentTimeMs()))
+      if (rel_ms < 0)
         return builder->SendStored();
 
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(GetCurrentTimeMs(), true);
+      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
     } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {
       sparams.memcache_flags = parser.Next<uint32_t>();
     } else {
@@ -951,12 +959,16 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
-
+  bool defined = false;
   while (parser.ToUpper().HasNext()) {
     if (base::_in(parser.Peek(), {"EX", "PX", "EXAT", "PXAT"})) {
       auto [ex, int_arg] = parser.Next<string_view, int64_t>();
       if (auto err = parser.Error(); err) {
         return cntx->SendError(err->MakeReply());
+      }
+
+      if (defined) {
+        return cntx->SendError(kSyntaxErr, kSyntaxErrType);
       }
 
       if (int_arg <= 0) {
@@ -966,6 +978,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
       exp_params.absolute = base::_in(ex, {"EXAT", "PXAT"});
       exp_params.value = int_arg;
       exp_params.unit = ex[0] == 'P' ? TimeUnit::MSEC : TimeUnit::SEC;
+      defined = true;
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
     } else {
@@ -993,7 +1006,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
       } else {
-        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms);
+        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
         auto abs_time_str = absl::StrCat(abs_time);
         RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
       }
@@ -1105,17 +1118,27 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
   int64_t unit_vals;
 
   if (!absl::SimpleAtoi(ex, &unit_vals)) {
-    return cntx->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr, kSyntaxErrType);
   }
 
   if (unit_vals < 1) {
     return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
+  DbSlice::ExpireParams expiry{
+      .value = unit_vals,
+      .unit = seconds ? TimeUnit::SEC : TimeUnit::MSEC,
+      .absolute = false,
+  };
+
+  int64_t now_ms = GetCurrentTimeMs();
+  auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+  if (abs_ms < 0)
+    return cntx->SendError(InvalidExpireTime("set"));
+
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-  sparams.expire_after_ms =
-      DbSlice::ExpireParams::Cap(unit_vals * (seconds ? 1000 : 1), TimeUnit::MSEC);
+  sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
 
   cntx->SendError(SetGeneric(cntx, sparams, key, value));
 }

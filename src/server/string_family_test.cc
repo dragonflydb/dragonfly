@@ -175,6 +175,10 @@ TEST_F(StringFamilyTest, SetOptionsSyntaxError) {
 
   EXPECT_THAT(Run({"set", "key", "val", "NX", "XX"}), ErrArg("ERR syntax error"));
   EXPECT_THAT(Run({"set", "key", "val", "XX", "NX"}), ErrArg("ERR syntax error"));
+
+  EXPECT_THAT(Run({"set", "key", "val", "PX", "9223372036854775800"}),
+              ErrArg("invalid expire time"));
+  EXPECT_THAT(Run({"SET", "foo", "bar", "EX", "18446744073709561"}), ErrArg("invalid expire time"));
 }
 
 TEST_F(StringFamilyTest, Set) {
@@ -465,6 +469,7 @@ TEST_F(StringFamilyTest, SetEx) {
   ASSERT_EQ(Run({"setex", "key", StrCat(5 * 365 * 24 * 3600), "val"}), "OK");
   ASSERT_THAT(Run({"setex", "key", StrCat(1 << 30), "val"}), "OK");
   ASSERT_THAT(Run({"ttl", "key"}), IntArg(kMaxExpireDeadlineSec));
+  ASSERT_THAT(Run({"SETEX", "foo", "18446744073709561", "bar"}), ErrArg("invalid expire time"));
 }
 
 TEST_F(StringFamilyTest, Range) {
@@ -585,6 +590,9 @@ TEST_F(StringFamilyTest, GetEx) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"getex", "foo", "EX"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"getex", "foo", "EX", "1", "px", "1"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
 
   resp = Run({"getex", "foo", "bar", "EX"});
@@ -882,6 +890,10 @@ TEST_F(StringFamilyTest, MultiSetWithHashtagsLockHashtags) {
   EXPECT_EQ(Run({"eval", "return redis.call('set', KEYS[1], 'val3')", "1", "{key}3"}), "QUEUED");
   EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK", "OK", "OK")));
   fb.Join();
+}
+
+TEST_F(StringFamilyTest, StrLen) {
+  EXPECT_EQ(0, CheckedInt({"strlen", "foo"}));
 }
 
 }  // namespace dfly
