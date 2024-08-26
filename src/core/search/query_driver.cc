@@ -19,7 +19,7 @@ void QueryDriver::ResetScanner() {
 }
 
 void QueryDriver::Error(const Parser::location_type& loc, std::string_view msg) {
-  LOG(ERROR) << "Parse error " << loc << ": " << msg;
+  VLOG(1) << "Parse error " << loc << ": " << msg;
 }
 
 }  // namespace search
