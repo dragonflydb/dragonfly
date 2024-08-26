@@ -12,9 +12,10 @@ from .instance import RedisServer
 from random import randint as rand
 import string
 import random
+from pymemcache.client.base import Client as MCClient
 
 from . import dfly_args
-from .utility import wait_available_async, is_saving, tmp_file_name
+from .utility import close_clients, wait_available_async, is_saving, tmp_file_name
 
 from .seeder import StaticSeeder
 
@@ -27,6 +28,17 @@ LIGHTWEIGHT_SEEDER_ARGS = dict(key_target=100, data_size=100, variance=1, sample
 
 def find_main_file(path: Path, pattern):
     return next(iter(glob.glob(str(path) + "/" + pattern)), None)
+
+
+async def get_metric_value(inst, metric_name, sample_index=0):
+    return (await inst.metrics())[metric_name].samples[sample_index].value
+
+
+async def assert_metric_value(inst, metric_name, expected_value):
+    actual_value = await get_metric_value(inst, metric_name)
+    assert (
+        actual_value == expected_value
+    ), f"Expected {metric_name} to be {expected_value}, got ${actual_value}"
 
 
 @pytest.mark.opt_only
@@ -57,7 +69,7 @@ async def test_consistency(df_factory, format: str, seeder_opts: dict):
     await async_client.execute_command("SAVE", format)
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
@@ -85,7 +97,7 @@ async def test_multidb(df_factory, format: str):
     await async_client.execute_command("SAVE", format)
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         f"{dbfilename}.rdb" if format == "RDB" else f"{dbfilename}-summary.dfs",
     )
@@ -175,6 +187,45 @@ async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
             file = find_main_file(tmp_dir, "test-cron-summary.dfs")
 
     assert file is not None, os.listdir(tmp_dir)
+
+
+@pytest.mark.slow
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-failed-saving", "snapshot_cron": "* * * * *"})
+async def test_cron_snapshot_failed_saving(df_server, tmp_dir: Path, async_client: aioredis.Redis):
+    await StaticSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
+
+    backups_total = await get_metric_value(df_server, "dragonfly_backups")
+    failed_backups_total = await get_metric_value(df_server, "dragonfly_failed_backups")
+
+    file = None
+    async with timeout(65):
+        while file is None:
+            await asyncio.sleep(1)
+            file = find_main_file(tmp_dir, "test-failed-saving-summary.dfs")
+
+    assert file is not None, os.listdir(tmp_dir)
+
+    await assert_metric_value(df_server, "dragonfly_backups", backups_total + 1)
+    await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total)
+
+    # Remove all files from directory
+    for dir_file in tmp_dir.iterdir():
+        os.unlink(dir_file)
+
+    # Make directory read-only
+    os.chmod(tmp_dir, 0o555)
+
+    # Wait for the next SAVE command
+    await asyncio.sleep(65)
+    file = find_main_file(tmp_dir, "test-failed-saving-summary.dfs")
+
+    # Make directory writable again
+    os.chmod(tmp_dir, 0o777)
+
+    assert file is None, os.listdir(tmp_dir)
+
+    await assert_metric_value(df_server, "dragonfly_backups", backups_total + 2)
+    await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total + 1)
 
 
 @pytest.mark.slow
@@ -271,7 +322,7 @@ async def test_s3_snapshot(self, async_client):
         await async_client.execute_command("SAVE DF snapshot")
         assert await async_client.flushall()
         await async_client.execute_command(
-            "DEBUG LOAD "
+            "DFLY LOAD "
             + os.environ["DRAGONFLY_S3_BUCKET"]
             + str(self.tmp_dir)
             + "/snapshot-summary.dfs"
@@ -451,7 +502,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE", "DF")
     assert await async_client.flushall()
     await async_client.execute_command(
-        "DEBUG",
+        "DFLY",
         "LOAD",
         "tiered-entries-summary.dfs",
     )
@@ -488,7 +539,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
     load_task = asyncio.create_task(
         async_client.execute_command(
-            "DEBUG",
+            "DFLY",
             "LOAD",
             "tiered-entries-summary.dfs",
         )
@@ -554,3 +605,40 @@ async def test_big_value_serialization_memory_limit(df_factory, query):
     checker.cancel()
     await client.execute_command("FLUSHALL")
     await client.close()
+
+
+@dfly_args(
+    {
+        "dir": "{DRAGONFLY_TMP}/",
+        "memcached_port": 11211,
+        "proactor_threads": 4,
+        "dbfilename": "test-MC-flags",
+    }
+)
+async def test_mc_flags_saving(memcached_client: MCClient, async_client: aioredis.Redis):
+    async def check_flag(key, flag):
+        res = memcached_client.raw_command("get " + key, "END\r\n").split()
+        # workaround sometimes memcached_client.raw_command returns empty str
+        if len(res) > 2:
+            assert res[2].decode() == str(flag)
+
+    assert memcached_client.set("key1", "value1", noreply=True)
+    assert memcached_client.set("key2", "value1", noreply=True, expire=3600, flags=123456)
+    assert memcached_client.replace("key1", "value2", expire=4000, flags=2, noreply=True)
+
+    await check_flag("key1", 2)
+    await check_flag("key2", 123456)
+
+    await async_client.execute_command("SAVE", "DF")
+    assert await async_client.flushall()
+
+    await async_client.execute_command(
+        "DFLY",
+        "LOAD",
+        "test-MC-flags-summary.dfs",
+    )
+
+    await check_flag("key1", 2)
+    await check_flag("key2", 123456)
+
+    await close_clients(async_client)

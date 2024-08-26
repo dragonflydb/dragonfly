@@ -336,7 +336,14 @@ error_code RdbSerializer::SelectDb(uint32_t dbid) {
 
 // Called by snapshot
 io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValue& pv,
-                                             uint64_t expire_ms, DbIndex dbid) {
+                                             uint64_t expire_ms, uint32_t mc_flags, DbIndex dbid) {
+  if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+    string_view key = pk.GetSlice(&tmp_str_);
+    LOG(ERROR) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "
+               << pv.Tag();
+    return 0;
+  }
+
   DVLOG(3) << "Selecting " << dbid << " previous: " << last_entry_db_index_;
   SelectDb(dbid);
 
@@ -350,16 +357,22 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
 
   /* Save the key poperties */
   uint32_t df_mask_flags = pk.IsSticky() ? DF_MASK_FLAG_STICKY : 0;
+  df_mask_flags |= pv.HasFlag() ? DF_MASK_FLAG_MC_FLAGS : 0;
   if (df_mask_flags != 0) {
-    uint8_t buf[8] = {RDB_OPCODE_DF_MASK};
+    uint8_t buf[9] = {RDB_OPCODE_DF_MASK};
     absl::little_endian::Store32(buf + 1, df_mask_flags);
-    if (auto ec = WriteRaw(Bytes{buf, 5}); ec)
+    size_t buf_size = 5;
+    if (df_mask_flags & DF_MASK_FLAG_MC_FLAGS) {
+      absl::little_endian::Store32(buf + buf_size, mc_flags);
+      buf_size += 4;
+    }
+    if (auto ec = WriteRaw(Bytes{buf, buf_size}); ec)
       return make_unexpected(ec);
   }
 
-  string_view key = pk.GetSlice(&tmp_str_);
   uint8_t rdb_type = RdbObjectType(pv);
 
+  string_view key = pk.GetSlice(&tmp_str_);
   DVLOG(3) << ((void*)this) << ": Saving key/val start " << key << " in dbid=" << dbid;
 
   if (auto ec = WriteOpcode(rdb_type); ec)

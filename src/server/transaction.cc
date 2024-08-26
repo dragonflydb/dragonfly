@@ -506,8 +506,8 @@ void Transaction::MultiUpdateWithParent(const Transaction* parent) {
 
 void Transaction::MultiBecomeSquasher() {
   DCHECK(multi_->mode == GLOBAL || multi_->mode == LOCK_AHEAD);
-  DCHECK_GT(GetUniqueShardCnt(), 0u);    // initialized and determined active shards
-  DCHECK(cid_->IsMultiTransactional());  // proper base command set
+  DCHECK_GT(GetUniqueShardCnt(), 0u);                    // initialized and determined active shards
+  DCHECK(cid_->IsMultiTransactional()) << cid_->name();  // proper base command set
   multi_->role = SQUASHER;
 }
 

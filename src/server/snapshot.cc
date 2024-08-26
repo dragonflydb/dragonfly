@@ -22,10 +22,6 @@
 #include "util/fibers/synchronization.h"
 
 using facade::operator""_MB;
-ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
-          "Maximum size of a value that may be serialized at once during snapshotting or full "
-          "sync. Values bigger than this threshold will be serialized using streaming "
-          "serialization. 0 - to disable streaming mode");
 
 namespace dfly {
 
@@ -76,7 +72,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  const auto flush_threshold = absl::GetFlag(FLAGS_serialization_max_chunk_size);
+  const auto flush_threshold = serialization_max_chunk_size;
   std::function<void(size_t, RdbSerializer::FlushState)> flush_fun;
   if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
     flush_fun = [this, flush_threshold](size_t bytes_serialized,
@@ -311,16 +307,19 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     expire_time = db_slice_->ExpireTime(eit);
   }
 
+  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
+
   if (pv.IsExternal()) {
     // We can't block, so we just schedule a tiered read and append it to the delayed entries
     util::fb2::Future<PrimeValue> future;
     EngineShard::tlocal()->tiered_storage()->Read(
         db_indx, pk.ToString(), pv,
         [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
-    delayed_entries_.push_back({db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time});
+    delayed_entries_.push_back(
+        {db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time, mc_flags});
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
-    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
+    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
   }
@@ -356,7 +355,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
   // Because we can finally block in this function, we'll await and serialize them
   while (!delayed_entries_.empty()) {
     auto& entry = delayed_entries_.back();
-    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid);
+    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid, entry.mc_flags);
     delayed_entries_.pop_back();
   }
 

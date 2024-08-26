@@ -73,6 +73,14 @@ struct ReplicaReconnectionsInfo {
   uint32_t reconnect_count;
 };
 
+struct LoadingStats {
+  size_t restore_count = 0;
+  size_t failed_restore_count = 0;
+
+  size_t backup_count = 0;
+  size_t failed_backup_count = 0;
+};
+
 // Global peak stats recorded after aggregating metrics over all shards.
 // Note that those values are only updated during GetMetrics calls.
 struct PeakStats {
@@ -122,6 +130,8 @@ struct Metrics {
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
   std::vector<ReplicaRoleInfo> replication_metrics;
   std::optional<ReplicaReconnectionsInfo> replica_reconnections;
+
+  LoadingStats loading_stats;
 };
 
 struct LastSaveInfo {
@@ -196,9 +206,13 @@ class ServerFamily {
 
   LastSaveInfo GetLastSaveInfo() const ABSL_LOCKS_EXCLUDED(save_mu_);
 
+  void FlushAll(ConnectionContext* cntx);
+
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
-  std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name);
+  enum class LoadExistingKeys { kFail, kOverride };
+  std::optional<util::fb2::Future<GenericError>> Load(std::string_view file_name,
+                                                      LoadExistingKeys existing_keys);
 
   bool TEST_IsSaving() const;
 
@@ -287,7 +301,7 @@ class ServerFamily {
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Returns the number of loaded keys if successful.
-  io::Result<size_t> LoadRdb(const std::string& rdb_file);
+  io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys);
 
   void SnapshotScheduling();
 
@@ -348,6 +362,9 @@ class ServerFamily {
 
   mutable util::fb2::Mutex peak_stats_mu_;
   mutable PeakStats peak_stats_;
+
+  mutable util::fb2::Mutex loading_stats_mu_;
+  LoadingStats loading_stats_ ABSL_GUARDED_BY(loading_stats_mu_);
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress

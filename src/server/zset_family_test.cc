@@ -348,6 +348,12 @@ TEST_F(ZSetFamilyTest, ByLex) {
   resp = Run({"zrangebylex", "key", "[a", "+"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   ASSERT_THAT(resp.GetVec(), ElementsAre("alpha", "bar", "cool", "down", "elephant", "foo"));
+
+  resp = Run({"zrangebylex", "key", "-", "+", "LIMIT", "2", "3"});
+  ASSERT_THAT(resp.GetVec(), ElementsAre("cool", "down", "elephant"));
+
+  resp = Run({"zrangebylex", "key", "-", "+", "LIMIT", "5", "1"});
+  ASSERT_THAT(resp, "foo");
 }
 
 TEST_F(ZSetFamilyTest, ZRevRangeByLex) {
@@ -536,6 +542,11 @@ TEST_F(ZSetFamilyTest, ZUnion) {
   resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "d", "b", "c"));
 
+  // Cover union of sets and zsets
+  EXPECT_EQ(2, CheckedInt({"sadd", "s2", "b", "c"}));
+  resp = Run({"zunion", "2", "z1", "s2", "weights", "1", "2", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "c", "2", "b", "5"));
+
   resp = Run({"zunion", "3", "z1", "z2", "z3", "weights", "1", "1", "2", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "d", "2", "b", "5", "c", "5"));
 
@@ -642,6 +653,11 @@ TEST_F(ZSetFamilyTest, ZInterStore) {
   EXPECT_EQ(1, CheckedInt({"zinterstore", "b", "2", "z1", "s2"}));
   resp = Run({"zrange", "b", "0", "-1", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("b", "3"));
+
+  Run({"ZADD", "foo", "10", "a"});
+  EXPECT_EQ(1, CheckedInt({"ZINTERSTORE", "bar", "1", "foo", "weights", "2"}));
+  resp = Run({"zrange", "bar", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "20"));
 }
 
 TEST_F(ZSetFamilyTest, ZInter) {
@@ -659,6 +675,14 @@ TEST_F(ZSetFamilyTest, ZInter) {
 
   resp = Run({"zinter", "3", "z3", "z4", "z5"});
   EXPECT_THAT(resp, ArrLen(0));
+
+  // zinter output sorts keys with equal scores lexicographically
+  Run({"del", "z1", "z2", "z3", "z4", "z5"});
+  Run({"zadd", "z1", "1", "e", "1", "a", "1", "b", "1", "x"});
+  Run({"zadd", "z2", "1", "e", "1", "a", "1", "b", "1", "y"});
+  Run({"zadd", "z3", "1", "e", "1", "a", "1", "b", "1", "z"});
+  Run({"zadd", "z4", "1", "e", "1", "a", "1", "b", "1", "o"});
+  EXPECT_THAT(Run({"zinter", "4", "z1", "z2", "z3", "z4"}).GetVec(), ElementsAre("a", "b", "e"));
 }
 
 TEST_F(ZSetFamilyTest, ZInterCard) {

@@ -1,0 +1,149 @@
+---
+name: Test Dragonfly/Fakeredis
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: dragon-fly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        PYTHON_VERSION:
+          - "3.10"
+        DRAGONFLY_VERSION:
+          - "latest"
+        tests:
+          - "test_json"
+          - "test_mixins"
+          - "test_stack"
+          - "test_connection.py"
+          - "test_asyncredis.py"
+          - "test_general.py"
+          - "test_scan.py"
+          - "test_zadd.py"
+          - "test_translations.py"
+          - "test_sortedset_commands.py"
+    name: "Run tests: ${{ matrix.tests }}"
+    permissions:
+      pull-requests: write
+    services:
+      redis:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:${{ matrix.DRAGONFLY_VERSION }}
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          cache-dependency-path: tests/fakeredis/poetry.lock
+          python-version: ${{ matrix.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        env:
+          PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+        shell: bash
+        working-directory: tests/fakeredis
+        run: |
+          python -m pip --quiet install poetry
+          echo "$HOME/.poetry/bin" >> $GITHUB_PATH
+          poetry install
+
+      - name: Run tests
+        working-directory: tests/fakeredis
+        run: |
+          poetry run pytest test/${{ matrix.tests }} \
+            --junit-xml=results-${{ matrix.tests }}.xml \
+            --html=report-${{ matrix.tests }}.html \
+            -v
+
+      - name: Upload Tests Result xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-result-${{ matrix.tests }}.xml
+          path: tests/fakeredis/results-${{ matrix.tests }}.xml
+
+      - name: Upload Tests Result html
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.tests }}.html
+          path: tests/fakeredis/report-${{ matrix.tests }}.html
+
+  publish-html-results:
+    name: Publish HTML Test Results to GitHub Pages
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write      # to deploy to Pages
+      id-token: write   # to verify the deployment originates from an appropriate source
+    steps:
+      - name: Bundle Tests Result to one artifact
+        uses: actions/upload-artifact/merge@v4
+        with:
+          delete-merged: true
+          name: test-results-html
+          pattern: '*.html'
+
+      - name: Download html pages
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results-html
+          path: results/
+
+      - uses: actions/setup-python@v5
+        with:
+          cache-dependency-path: tests/fakeredis/poetry.lock
+          python-version: "3.12"
+
+      - name: Merge html results
+        run: |
+          pip install pytest-html-merger
+          pytest_html_merger -i results/ -o results/index.html
+
+      - name: Publish to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: results/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          token: '${{ secrets.GITHUB_TOKEN }}'
+
+  bundle-results-xml:
+    name: publish summary to workflow run
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bundle Tests Result to one artifact
+        uses: actions/upload-artifact/merge@v4
+        with:
+          delete-merged: true
+          name: tests-result-xml
+          pattern: '*.xml'
+
+      - name: Download Tests Result
+        uses: actions/download-artifact@v4
+        with:
+          name: tests-result-xml
+
+      - name: Publish Test Report
+        uses: mikepenz/action-junit-report@v4
+        with:
+          report_paths: '*.xml'

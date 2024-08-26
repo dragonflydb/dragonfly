@@ -88,6 +88,33 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_EQ(Run({"ft._list"}), "idx-3");
 }
 
+TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
+  // Create index on db 0
+  auto resp =
+      Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"select", "1"}), "OK");  // change database
+
+  // Creating an index on non zero database must fail
+  resp = Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"});
+  EXPECT_THAT(resp, ErrArg("ERR Cannot create index on db != 0"));
+
+  // Add some data to the index
+  Run({"hset", "doc-0", "name", "Name of 0"});
+
+  // ft.search must work on the another database
+  resp = Run({"ft.search", "idx-1", "*"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "doc-0", IsArray("name", "Name of 0")));
+
+  // ft.dropindex must work on the another database
+  EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
+
+  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
+  EXPECT_EQ(Run({"select", "0"}), "OK");
+  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
+}
+
 TEST_F(SearchFamilyTest, AlterIndex) {
   Run({"hset", "d:1", "color", "blue", "cost", "150"});
   Run({"hset", "d:2", "color", "green", "cost", "200"});
@@ -223,6 +250,20 @@ TEST_F(SearchFamilyTest, JsonAttributesPaths) {
   EXPECT_THAT(Run({"ft.search", "i1", "yes"}), AreDocIds("k2"));
 }
 
+TEST_F(SearchFamilyTest, JsonIdentifierWithBrackets) {
+  Run({"json.set", "k1", ".", R"({"name":"London","population":8.8,"continent":"Europe"})"});
+  Run({"json.set", "k2", ".", R"({"name":"Athens","population":3.1,"continent":"Europe"})"});
+  Run({"json.set", "k3", ".", R"({"name":"Tel-Aviv","population":1.3,"continent":"Asia"})"});
+  Run({"json.set", "k4", ".", R"({"name":"Hyderabad","population":9.8,"continent":"Asia"})"});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "$[\"name\"]", "as", "name", "tag",
+                 "$[\"population\"]", "as", "population", "numeric", "sortable", "$[\"continent\"]",
+                 "as", "continent", "tag"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "(@continent:{Europe})"}), AreDocIds("k1", "k2"));
+}
+
 // todo: fails on arm build
 #ifndef SANITIZERS
 TEST_F(SearchFamilyTest, JsonArrayValues) {
@@ -354,6 +395,22 @@ TEST_F(SearchFamilyTest, TagOptions) {
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), AreDocIds("d:2", "d:4"));
 }
 
+TEST_F(SearchFamilyTest, TagNumbers) {
+  Run({"hset", "d:1", "number", "1"});
+  Run({"hset", "d:2", "number", "2"});
+  Run({"hset", "d:3", "number", "3"});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "number", "tag"}), "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2}"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2|3}"}), AreDocIds("d:1", "d:2", "d:3"));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1.0|2|3.0}"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2|3.0}"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|hello|2}"}), AreDocIds("d:1", "d:2"));
+}
+
 TEST_F(SearchFamilyTest, Numbers) {
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {
@@ -392,15 +449,12 @@ TEST_F(SearchFamilyTest, Numbers) {
 
   // Test negation of ranges:
   EXPECT_THAT(Run({"ft.search", "i1", "@i:[9 9] -@j:[1 10]"}), AreDocIds("i9j0"));
+  EXPECT_THAT(Run({"ft.search", "i1", "-@i:[0 9] -@j:[1 10]"}), AreDocIds("i10j0"));
 
-  // TODO: Check on new algo
-  // EXPECT_THAT(Run({"ft.search", "i1", "-@i:[0 9] -@j:[1 10]"}), AreDocIds("i10j0"));
-
-  /*
-  TODO: Breaks the parser
-  EXPECT_THAT(Run({"ft.search", "i1", "(@i:[1 3] ! @i:[2 2]) @j:[7 7]"}),
-              DocIds(vector<string>{"i1j7", "i3j7"}));
-  */
+  // Test empty range
+  EXPECT_THAT(Run({"ft.search", "i1", "@i:[9 1]"}), AreDocIds());
+  EXPECT_THAT(Run({"ft.search", "i1", "@j:[5 0]"}), AreDocIds());
+  EXPECT_THAT(Run({"ft.search", "i1", "@i:[7 1] @j:[6 2]"}), AreDocIds());
 }
 
 TEST_F(SearchFamilyTest, TestLimit) {

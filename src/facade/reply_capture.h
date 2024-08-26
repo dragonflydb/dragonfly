@@ -42,7 +42,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendSimpleString(std::string_view str) override;
 
   void SendBulkString(std::string_view str) override;
-  void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                        bool with_scores) override;
 
   void StartCollection(unsigned len, CollectionType type) override;
@@ -87,7 +87,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   static void Apply(Payload&& pl, RedisReplyBuilder* builder);
 
   // If an error is stored inside payload, get a reference to it.
-  static std::optional<ErrorRef> GetError(const Payload& pl);
+  static std::optional<ErrorRef> TryExtractError(const Payload& pl);
 
   struct CollectionPayload {
     CollectionPayload(unsigned len, CollectionType type);

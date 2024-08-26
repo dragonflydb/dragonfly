@@ -59,7 +59,7 @@ class RdbLoaderBase {
 
   struct OpaqueObj {
     RdbVariant obj;
-    int rdb_type;
+    int rdb_type{0};
   };
 
   struct LoadBlob {
@@ -181,7 +181,16 @@ class RdbLoader : protected RdbLoaderBase {
 
   ~RdbLoader();
 
+  void SetOverrideExistingKeys(bool override) {
+    override_existing_keys_ = override;
+  }
+
+  void SetLoadUnownedSlots(bool load_unowned) {
+    load_unowned_slots_ = load_unowned;
+  }
+
   std::error_code Load(::io::Source* src);
+
   void set_source_limit(size_t n) {
     source_limit_ = n;
   }
@@ -238,6 +247,8 @@ class RdbLoader : protected RdbLoaderBase {
     uint64_t expire_ms;
     std::atomic<Item*> next;
     bool is_sticky = false;
+    bool has_mc_flags = false;
+    uint32_t mc_flags = 0;
 
     friend void MPSC_intrusive_store_next(Item* dest, Item* nxt) {
       dest->next.store(nxt, std::memory_order_release);
@@ -273,6 +284,8 @@ class RdbLoader : protected RdbLoaderBase {
 
  private:
   Service* service_;
+  bool override_existing_keys_ = false;
+  bool load_unowned_slots_ = false;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
 

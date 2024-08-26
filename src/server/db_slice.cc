@@ -426,14 +426,25 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   }
 }
 
-DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
+bool DbSlice::DelEmptyPrimeValue(const Context& cntx, Iterator it) {
+  auto& pv = it->second;
+  if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+    auto key = it.key();
+    LOG(ERROR) << "Found empty key: " << key << " with obj type " << pv.ObjType();
+    Del(cntx, it);
+    return true;
+  }
+  return false;
+}
+
+DbSlice::ItAndExpConst DbSlice::FindReadOnly(const Context& cntx, std::string_view key) {
   auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats);
   return {ConstIterator(res->it, StringOrView::FromView(key)),
           ExpConstIterator(res->exp_it, StringOrView::FromView(key))};
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
-                                                       unsigned req_obj_type) const {
+                                                       unsigned req_obj_type) {
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats);
   if (res.ok()) {
     return ConstIterator(res->it, StringOrView::FromView(key));
@@ -443,7 +454,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, stri
 
 OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std::string_view key,
                                                        std::optional<unsigned> req_obj_type,
-                                                       UpdateStatsMode stats_mode) const {
+                                                       UpdateStatsMode stats_mode) {
   if (!IsDbValid(cntx.db_index)) {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -537,6 +548,9 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   // We do not use TopKey feature, so disable it until we redesign it.
   // db.top_keys.Touch(key);
 
+  if (DelEmptyPrimeValue(cntx, Iterator(res.it, StringOrView::FromView(key)))) {
+    return OpStatus::KEY_NOTFOUND;
+  }
   return res;
 }
 
@@ -912,12 +926,17 @@ int64_t DbSlice::ExpireParams::Cap(int64_t value, TimeUnit unit) {
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool cap) const {
   if (persist)
     return {0, 0};
+
+  // return a negative absolute time if we overflow.
+  if (unit == TimeUnit::SEC && value > INT64_MAX / 1000) {
+    return {0, -1};
+  }
+
   int64_t msec = (unit == TimeUnit::SEC) ? value * 1000 : value;
-  int64_t now_msec = now_ms;
-  int64_t rel_msec = absolute ? msec - now_msec : msec;
+  int64_t rel_msec = absolute ? msec - now_ms : msec;
   if (cap)
     rel_msec = Cap(rel_msec, TimeUnit::MSEC);
-  return make_pair(rel_msec, now_msec + rel_msec);
+  return make_pair(rel_msec, now_ms + rel_msec);
 }
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
@@ -931,8 +950,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return kPersistValue;
   }
 
-  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms);
-  if (rel_msec > kMaxExpireDeadlineMs) {
+  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms, false);
+  if (abs_msec < 0 || rel_msec > kMaxExpireDeadlineMs) {
     return OpStatus::OUT_OF_RANGE;
   }
 

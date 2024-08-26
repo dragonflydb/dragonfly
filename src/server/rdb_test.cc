@@ -167,7 +167,7 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     ASSERT_EQ(resp, "OK");
 
     auto save_info = service_->server_family().GetLastSaveInfo();
-    resp = Run({"debug", "load", save_info.file_name});
+    resp = Run({"dfly", "load", save_info.file_name});
     ASSERT_EQ(resp, "OK");
     ASSERT_EQ(50000, CheckedInt({"dbsize"}));
   }
@@ -182,7 +182,7 @@ TEST_F(RdbTest, RdbLoaderOnReadCompressedDataShouldNotEnterEnsureReadFlow) {
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  resp = Run({"debug", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info.file_name});
   ASSERT_EQ(resp, "OK");
 }
 
@@ -265,7 +265,7 @@ TEST_F(RdbTest, ReloadExpired) {
   ASSERT_EQ(resp, "OK");
   auto save_info = service_->server_family().GetLastSaveInfo();
   AdvanceTime(2000);
-  resp = Run({"debug", "load", save_info.file_name});
+  resp = Run({"dfly", "load", save_info.file_name});
   ASSERT_EQ(resp, "OK");
   resp = Run({"get", "key"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
@@ -541,6 +541,28 @@ TEST_F(RdbTest, SBF) {
   Run({"debug", "reload"});
   EXPECT_EQ(Run({"type", "k"}), "MBbloom--");
   EXPECT_THAT(Run({"BF.EXISTS", "k", "1"}), IntArg(1));
+}
+
+TEST_F(RdbTest, DflyLoadAppend) {
+  // Create an RDB with (k1,1) value in it saved as `filename`
+  EXPECT_EQ(Run({"set", "k1", "1"}), "OK");
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+  string filename = service_->server_family().GetLastSaveInfo().file_name;
+
+  // Without APPEND option - db should be flushed
+  EXPECT_EQ(Run({"set", "k1", "TO-BE-FLUSHED"}), "OK");
+  EXPECT_EQ(Run({"set", "k2", "TO-BE-FLUSHED"}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", filename}), "OK");
+  EXPECT_THAT(Run({"dbsize"}), IntArg(1));
+  EXPECT_EQ(Run({"get", "k1"}), "1");
+
+  // With APPEND option - db shouldn't be flushed, but k1 should be overridden
+  EXPECT_EQ(Run({"set", "k1", "TO-BE-OVERRIDDEN"}), "OK");
+  EXPECT_EQ(Run({"set", "k2", "2"}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", filename, "append"}), "OK");
+  EXPECT_THAT(Run({"dbsize"}), IntArg(2));
+  EXPECT_EQ(Run({"get", "k1"}), "1");
+  EXPECT_EQ(Run({"get", "k2"}), "2");
 }
 
 }  // namespace dfly

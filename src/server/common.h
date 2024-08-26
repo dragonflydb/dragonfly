@@ -295,7 +295,7 @@ class Context : protected Cancellation {
 };
 
 struct ScanOpts {
-  std::string_view pattern;
+  std::optional<std::string_view> pattern;
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;
@@ -374,6 +374,9 @@ class ABSL_LOCKABLE ThreadLocalMutex {
   EngineShard* shard_;
   util::fb2::CondVarAny cond_var_;
   bool flag_ = false;
+  util::fb2::detail::FiberInterface* locked_fiber_{nullptr};
 };
+
+extern size_t serialization_max_chunk_size;
 
 }  // namespace dfly

@@ -99,19 +99,19 @@ class SinkReplyBuilder {
   // In order to reduce interrupt rate we allow coalescing responses together using
   // Batch mode. It is controlled by Connection state machine because it makes sense only
   // when pipelined requests are arriving.
-  void SetBatchMode(bool batch);
+  virtual void SetBatchMode(bool batch);
 
-  void FlushBatch();
+  virtual void FlushBatch();
 
   // Used for QUIT - > should move to conn_context?
-  void CloseConnection();
+  virtual void CloseConnection();
 
-  std::error_code GetError() const {
+  virtual std::error_code GetError() const {
     return ec_;
   }
 
   bool IsSendActive() const {
-    return send_active_;
+    return send_active_;  // BROKEN
   }
 
   struct ReplyAggregator {
@@ -137,7 +137,9 @@ class SinkReplyBuilder {
   };
 
   void ExpectReply();
-  bool HasReplied() const;
+  bool HasReplied() const {
+    return true;  // WE break it for now
+  }
 
   virtual size_t UsedMemory() const;
 
@@ -147,13 +149,13 @@ class SinkReplyBuilder {
 
   static void ResetThreadLocalStats();
 
+  virtual void StartAggregate();
+  virtual void StopAggregate();
+
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
 
   void Send(const iovec* v, uint32_t len);
-
-  void StartAggregate();
-  void StopAggregate();
 
   std::string batch_;
   ::io::Sink* sink_;
@@ -204,7 +206,7 @@ class SinkReplyBuilder2 {
     ~ReplyAggregator();
   };
 
-  void Flush();  // Send all accumulated data and reset to clear state
+  void Flush(size_t expected_buffer_cap = 0);  // Send all accumulated data and reset to clear state
 
   std::error_code GetError() const {
     return ec_;
@@ -248,27 +250,14 @@ class SinkReplyBuilder2 {
   virtual void SendProtocolError(std::string_view str) = 0;
 
  protected:
-  void WriteI(std::string_view str) {
-    str.size() > kMaxInlineSize ? WriteRef(str) : WritePiece(str);
-  }
-
-  // Constexpr arrays are assumed to be protocol control sequences, stash them as pieces
-  template <size_t S> void WriteI(const char (&arr)[S]) {
-    WritePiece(std::string_view{arr, S - 1});  // we assume null termination
-  }
-
-  template <typename... Args> void Write(Args&&... strs) {
-    (WriteI(strs), ...);
-  }
+  template <typename... Ts>
+  void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
+  void WriteRef(std::string_view str);  // Add iovec bypassing buffer
 
   void FinishScope();  // Called when scope ends
-
-  char* ReservePiece(size_t size);        // Reserve size bytes from buffer
-  void CommitPiece(size_t size);          // Mark size bytes from buffer as used
-  void WritePiece(std::string_view str);  // Reserve + memcpy + Commit
-
-  void WriteRef(std::string_view str);  // Add iovec bypassing buffer
   void NextVec(std::string_view str);
+
+  void Send();
 
  private:
   io::Sink* sink_;
@@ -344,8 +333,6 @@ class MCReplyBuilder2 : public SinkReplyBuilder2 {
   }
 
  private:
-  void SendSimplePiece(std::string&& str);  // Send simple string as piece (for short lived data)
-
   bool noreply_ = false;
 };
 
@@ -359,7 +346,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   RedisReplyBuilder(::io::Sink* stream);
 
-  void SetResp3(bool is_resp3);
+  virtual void SetResp3(bool is_resp3);
   bool IsResp3() const {
     return is_resp3_;
   }
@@ -385,7 +372,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 
   virtual void SendBulkString(std::string_view str);
   virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
-  virtual void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+  virtual void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                                bool with_scores);
 
   void StartArray(unsigned len);  // StartCollection(len, ARRAY)
@@ -402,45 +389,73 @@ class RedisReplyBuilder : public SinkReplyBuilder {
 };
 
 // Redis reply builder interface for sending RESP data.
-class RedisReplyBuilder2Base : public SinkReplyBuilder2 {
+class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilder {
  public:
-  enum CollectionType { ARRAY, SET, MAP, PUSH };
+  using CollectionType = RedisReplyBuilder::CollectionType;
+  using VerbatimFormat = RedisReplyBuilder::VerbatimFormat;
 
-  enum VerbatimFormat { TXT, MARKDOWN };
-
-  explicit RedisReplyBuilder2Base(io::Sink* sink) : SinkReplyBuilder2(sink) {
+  explicit RedisReplyBuilder2Base(io::Sink* sink)
+      : SinkReplyBuilder2(sink), RedisReplyBuilder(nullptr) {
   }
 
   ~RedisReplyBuilder2Base() override = default;
 
   virtual void SendNull();
+
   void SendSimpleString(std::string_view str) override;
-  virtual void SendBulkString(std::string_view str);  // RESP: Blob String
+  void SendBulkString(std::string_view str) override;  // RESP: Blob String
 
   void SendLong(long val) override;
-  virtual void SendDouble(double val);  // RESP: Number
+  void SendDouble(double val) override;  // RESP: Number
 
-  virtual void SendNullArray();
-  virtual void StartCollection(unsigned len, CollectionType ct);
+  void SendNullArray() override;
+  void StartCollection(unsigned len, CollectionType ct) override;
 
   using SinkReplyBuilder2::SendError;
   void SendError(std::string_view str, std::string_view type = {}) override;
   void SendProtocolError(std::string_view str) override;
 
   static char* FormatDouble(double d, char* dest, unsigned len);
-  virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
+  virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT) override;
 
   bool IsResp3() const {
     return resp3_;
   }
 
-  void SetResp3(bool resp3) {
+  // REMOVE THIS override
+  void SetResp3(bool resp3) override {
     resp3_ = resp3;
   }
 
- private:
-  void WriteIntWithPrefix(char prefix, int64_t val);  // FastIntToBuffer directly into ReservePiece
+  // REMOVE THIS
+  void SetBatchMode(bool mode) override {
+    SinkReplyBuilder2::SetBatchMode(mode);
+  }
 
+  void StartAggregate() override {
+    aggregators_.emplace_back(SinkReplyBuilder2::ReplyAggregator(this));
+  }
+
+  void StopAggregate() override {
+    aggregators_.pop_back();
+  }
+
+  void FlushBatch() override {
+    SinkReplyBuilder2::Flush();
+  }
+
+  // REMOVE THIS
+
+  void CloseConnection() override {
+    SinkReplyBuilder2::CloseConnection();
+  }
+
+  std::error_code GetError() const override {
+    return SinkReplyBuilder2::GetError();
+  }
+
+ private:
+  std::vector<SinkReplyBuilder2::ReplyAggregator> aggregators_;
   bool resp3_ = false;
 };
 
@@ -452,15 +467,27 @@ class RedisReplyBuilder2 : public RedisReplyBuilder2Base {
 
   ~RedisReplyBuilder2() override = default;
 
-  void SendSimpleStrArr(const facade::ArgRange& strs);
+  void SendSimpleStrArr2(const facade::ArgRange& strs);
+
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
-  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr, bool with_scores);
+  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
+                       bool with_scores) override;
+
+  void SendSimpleStrArr(RedisReplyBuilder::StrSpan arr) {
+    SendSimpleStrArr2(arr);
+  }
+  void SendStringArr(RedisReplyBuilder::StrSpan arr, CollectionType type = ARRAY) override {
+    SendBulkStrArr(arr, type);
+  }
 
   void SendStored() final;
   void SendSetSkipped() final;
 
   void StartArray(unsigned len);
-  void SendEmptyArray();
+  void SendEmptyArray() override;
+
+  // TODO: Remove
+  void SendMGetResponse(SinkReplyBuilder::MGetResponse resp) override;
 
   static std::string SerializeCommmand(std::string_view cmd);
 };

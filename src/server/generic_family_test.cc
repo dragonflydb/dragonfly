@@ -400,6 +400,15 @@ TEST_F(GenericFamilyTest, Scan) {
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_EQ(10, vec.size());
   EXPECT_THAT(vec, Each(StartsWith("zset")));
+
+  Run({"flushdb"});
+
+  Run({"set", "", "foo"});
+  Run({"set", "bar", "1"});
+  resp = Run({"keys", "*"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("bar", "")));
+  resp = Run({"keys", ""});
+  EXPECT_EQ(resp, "");
 }
 
 TEST_F(GenericFamilyTest, Sort) {
@@ -465,6 +474,10 @@ TEST_F(GenericFamilyTest, Sort) {
   // Test not convertible to double
   Run({"lpush", "list-2", "NOTADOUBLE"});
   ASSERT_THAT(Run({"sort", "list-2"}), ErrArg("One or more scores can't be converted into double"));
+
+  Run({"set", "foo", "bar"});
+  ASSERT_THAT(Run({"sort", "foo"}), ErrArg("WRONGTYPE "));
+  ;
 }
 
 TEST_F(GenericFamilyTest, TimeNoKeys) {

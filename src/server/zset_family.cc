@@ -737,6 +737,15 @@ ScoredMap FromObject(const CompactObj& co, double weight) {
   return res;
 }
 
+ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight) {
+  ScoredMap result;
+  container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {
+    result.emplace(ce.ToString(), weight);
+    return true;
+  });
+  return result;
+}
+
 double Aggregate(double v1, double v2, AggType atype) {
   switch (atype) {
     case AggType::SUM:
@@ -797,12 +806,18 @@ using KeyIterWeightVec = vector<pair<DbSlice::ConstIterator, double>>;
 
 ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, AggType agg_type) {
   ScoredMap result;
-  for (const auto& key_iter_weight : key_iter_weight_vec) {
-    if (key_iter_weight.first.is_done()) {
+  for (const auto& [it, weight] : key_iter_weight_vec) {
+    if (it.is_done()) {
       continue;
     }
 
-    ScoredMap sm = FromObject(key_iter_weight.first->second, key_iter_weight.second);
+    ScoredMap sm;
+    if (it->second.ObjType() == OBJ_ZSET)
+      sm = FromObject(it->second, weight);
+    else {
+      DCHECK_EQ(it->second.ObjType(), OBJ_SET);
+      sm = ScoreMapFromSet(it->second, weight);
+    }
     if (result.empty()) {
       result.swap(sm);
     } else {
@@ -812,23 +827,22 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
   return result;
 }
 
-double GetKeyWeight(Transaction* t, ShardId shard_id, const vector<double>& weights,
-                    unsigned key_index, unsigned cmdargs_keys_offset) {
+double GetKeyWeight(const vector<double>& weights, unsigned windex) {
   if (weights.empty()) {
     return 1;
   }
 
-  unsigned windex = key_index - cmdargs_keys_offset;
   DCHECK_LT(windex, weights.size());
   return weights[windex];
 }
 
-OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
-                            const vector<double>& weights, bool store) {
-  ShardArgs keys = t->GetShardArgs(shard->shard_id());
+OpResult<KeyIterWeightVec> PrepareWeightedSets(const Transaction& trans, bool store,
+                                               string_view dest, const vector<double>& weights,
+                                               EngineShard* shard) {
+  ShardArgs keys = trans.GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
-  unsigned cmdargs_keys_offset = 1;  // after {numkeys} for ZUNION
+  unsigned cmdargs_keys_offset = 1;  // after {numkeys} for ZUNION/ZINTER
   unsigned removed_keys = 0;
 
   ShardArgs::Iterator start = keys.begin(), end = keys.end();
@@ -848,92 +862,66 @@ OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest
     }
   }
 
-  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  auto& db_slice = trans.GetDbSlice(shard->shard_id());
   KeyIterWeightVec key_weight_vec(keys.Size() - removed_keys);
   unsigned index = 0;
+  DCHECK_GE(start.index(), cmdargs_keys_offset);
+
   for (; start != end; ++start) {
-    auto it_res = db_slice.FindReadOnly(t->GetDbContext(), *start, OBJ_ZSET);
-    if (it_res == OpStatus::WRONG_TYPE)  // TODO: support SET type with default score 1.
-      return it_res.status();
-    if (!it_res) {
+    auto it_res = db_slice.FindReadOnly(trans.GetDbContext(), *start);
+
+    if (!IsValid(it_res.it)) {
       ++index;
       continue;
     }
-    key_weight_vec[index] = {
-        *it_res, GetKeyWeight(t, shard->shard_id(), weights, start.index(), cmdargs_keys_offset)};
-    ++index;
-  }
 
-  return UnionShardKeysWithScore(key_weight_vec, agg_type);
-}
-
-ScoredMap ZSetFromSet(const PrimeValue& pv, double weight) {
-  ScoredMap result;
-  container_utils::IterateSet(pv, [&result, weight](container_utils::ContainerEntry ce) {
-    result.emplace(ce.ToString(), weight);
-    return true;
-  });
-  return result;
-}
-
-OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
-                            const vector<double>& weights, bool store) {
-  ShardArgs keys = t->GetShardArgs(shard->shard_id());
-  DCHECK(!keys.Empty());
-
-  unsigned removed_keys = 0;
-  unsigned cmdargs_keys_offset = 1;
-  ShardArgs::Iterator start = keys.begin(), end = keys.end();
-
-  if (store) {
-    // first global index is 2 after {destkey, numkeys}.
-    ++cmdargs_keys_offset;
-
-    if (*start == dest) {
-      ++start;
-      ++removed_keys;
-
-      // In case ONLY the destination key is hosted in this shard no work on this shard should be
-      // done in this step
-      if (start == end) {
-        return OpStatus::SKIPPED;
-      }
-    }
-  }
-
-  auto& db_slice = t->GetDbSlice(shard->shard_id());
-  vector<pair<DbSlice::ItAndUpdater, double>> it_arr(keys.Size() - removed_keys);
-
-  unsigned index = 0;
-  for (; start != end; ++start) {
-    auto it_res = db_slice.FindMutable(t->GetDbContext(), *start);
-    if (!IsValid(it_res.it)) {
-      ++index;
-      continue;  // we exit in the next loop
-    }
-
-    // sets are supported for ZINTER* commands:
     auto obj_type = it_res.it->second.ObjType();
     if (obj_type != OBJ_ZSET && obj_type != OBJ_SET)
       return OpStatus::WRONG_TYPE;
 
-    it_arr[index] = {std::move(it_res), GetKeyWeight(t, shard->shard_id(), weights,
-                                                     index + removed_keys, cmdargs_keys_offset)};
+    key_weight_vec[index] = {it_res.it, GetKeyWeight(weights, start.index() - cmdargs_keys_offset)};
     ++index;
   }
 
+  return key_weight_vec;
+}
+
+OpResult<ScoredMap> OpUnion(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
+                            const vector<double>& weights, bool store) {
+  OpResult<KeyIterWeightVec> key_vec_res = PrepareWeightedSets(*t, store, dest, weights, shard);
+  if (!key_vec_res)
+    return key_vec_res.status();
+
+  // Only dest is hosted on this shard.
+  if (key_vec_res->empty())
+    return OpStatus::OK;
+
+  return UnionShardKeysWithScore(*key_vec_res, agg_type);
+}
+
+OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest, AggType agg_type,
+                            const vector<double>& weights, bool store) {
+  OpResult<KeyIterWeightVec> key_vec_res = PrepareWeightedSets(*t, store, dest, weights, shard);
+  if (!key_vec_res)
+    return key_vec_res.status();
+
+  // Only dest is hosted on this shard.
+  if (key_vec_res->empty())
+    return OpStatus::SKIPPED;
+
   ScoredMap result;
-  for (auto it = it_arr.begin(); it != it_arr.end(); ++it) {
-    if (it->first.it.is_done()) {
+  for (const auto& [it, weight] : *key_vec_res) {
+    if (it.is_done()) {
       return ScoredMap{};
     }
 
     ScoredMap sm;
-    if (it->first.it->second.ObjType() == OBJ_ZSET)
-      sm = FromObject(it->first.it->second, it->second);
-    else
-      sm = ZSetFromSet(it->first.it->second, it->second);
-
+    if (it->second.ObjType() == OBJ_ZSET)
+      sm = FromObject(it->second, weight);
+    else {
+      DCHECK_EQ(it->second.ObjType(), OBJ_SET);
+      sm = ScoreMapFromSet(it->second, weight);
+    }
     if (result.empty())
       result.swap(sm);
     else
@@ -947,7 +935,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
 }
 
 using ScoredMemberView = std::pair<double, std::string_view>;
-using ScoredMemberSpan = absl::Span<ScoredMemberView>;
+using ScoredMemberSpan = absl::Span<const ScoredMemberView>;
 
 struct AddResult {
   double new_score = 0;
@@ -1195,77 +1183,6 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
     }
   }
   return op_args;
-}
-
-void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) {
-  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, store);
-  if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res.status());
-  }
-  const auto& op_args = *op_args_res;
-  if (op_args.num_keys == 0) {
-    return SendAtLeastOneKeyError(cntx);
-  }
-
-  vector<OpResult<ScoredMap>> maps(shard_set->size());
-
-  string_view dest_key = ArgS(args, 0);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpUnion(shard, t, dest_key, op_args.agg_type, op_args.weights, store);
-    return OpStatus::OK;
-  };
-
-  // For commands not storing computed result, this should be
-  // the last transaction hop (e.g. ZUNION)
-  cntx->transaction->Execute(std::move(cb), !store);
-
-  ScoredMap result;
-  for (auto& op_res : maps) {
-    if (!op_res)
-      return cntx->SendError(op_res.status());
-    UnionScoredMap(&result, &op_res.value(), op_args.agg_type);
-  }
-
-  vector<ScoredMemberView> smvec;
-  for (const auto& elem : result) {
-    smvec.emplace_back(elem.second, elem.first);
-  }
-
-  if (store) {
-    ShardId dest_shard = Shard(dest_key, maps.size());
-    AddResult add_result;
-    auto store_cb = [&](Transaction* t, EngineShard* shard) {
-      if (shard->shard_id() == dest_shard) {
-        ZParams zparams;
-        zparams.override = true;
-        add_result = OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
-      }
-      return OpStatus::OK;
-    };
-    cntx->transaction->Execute(std::move(store_cb), true);
-    cntx->SendLong(smvec.size());
-  } else {
-    std::sort(std::begin(smvec), std::end(smvec));
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->StartArray(smvec.size() * (op_args.with_scores ? 2 : 1));
-    for (const auto& elem : smvec) {
-      rb->SendBulkString(elem.second);
-      if (op_args.with_scores) {
-        rb->SendDouble(elem.first);
-      }
-    }
-  }
-}
-
-bool ParseLimit(string_view offset_str, string_view limit_str, ZSetFamily::RangeParams* params) {
-  int64_t limit_arg;
-  if (!SimpleAtoi(offset_str, &params->offset) || !SimpleAtoi(limit_str, &limit_arg) ||
-      limit_arg > UINT32_MAX) {
-    return false;
-  }
-  params->limit = limit_arg < 0 ? UINT32_MAX : static_cast<uint32_t>(limit_arg);
-  return true;
 }
 
 ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bool is_max) {
@@ -1816,6 +1733,76 @@ double ExtractUnit(std::string_view arg) {
   }
 }
 
+// Boolean operation: union or intersection, optionally storing output to destination key
+void ZBooleanOperation(CmdArgList args, ConnectionContext* cntx, bool is_union, bool store) {
+  auto shard_func = is_union ? OpUnion : OpInter;
+  auto merge_func = is_union ? UnionScoredMap : InterScoredMap;
+
+  string_view dest_key = ArgS(args, 0);
+  OpResult<SetOpArgs> op_args = ParseSetOpArgs(args, store);
+  if (!op_args)
+    return HandleOpStatus(cntx, op_args.status());
+
+  if (op_args->num_keys == 0)
+    return SendAtLeastOneKeyError(cntx);
+
+  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] =
+        shard_func(shard, t, dest_key, op_args->agg_type, op_args->weights, store);
+    return OpStatus::OK;
+  };
+  cntx->transaction->Execute(cb, !store /* if we don't store, conclude */);
+
+  // Merge results from all shards
+  ScoredMap result;
+  for (auto& op_res : maps) {
+    if (op_res.status() == OpStatus::SKIPPED)
+      continue;
+    if (!op_res)
+      return cntx->SendError(op_res.status());
+
+    if (result.empty())
+      result = std::move(op_res.value());
+    else
+      merge_func(&result, &op_res.value(), op_args->agg_type);
+
+    if (result.empty() && !is_union)  // intersection only shrinks
+      break;
+  }
+
+  // Copy to vector for sorting
+  vector<ScoredMemberView> smvec(result.size());
+  size_t i = 0;
+  for (const auto& [str, score] : result)
+    smvec[i++] = {score, str};
+
+  if (store) {
+    // TODO: Use variant collection to avoid smvec copy for store operation
+    auto store_cb = [&, dest_shard = Shard(dest_key, maps.size())](Transaction* t,
+                                                                   EngineShard* shard) {
+      if (shard->shard_id() == dest_shard)
+        OpAdd(t->GetOpArgs(shard), ZParams{.override = true}, dest_key, smvec);
+      return OpStatus::OK;
+    };
+    cntx->transaction->Execute(store_cb, true);
+    cntx->SendLong(smvec.size());
+  } else {
+    std::sort(std::begin(smvec), std::end(smvec));
+
+    // We can't use SendScoredArray because it expects strings, not string_views
+    // TOOD: Not longer relevant with new io, use scoping
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->StartArray(smvec.size() * (op_args->with_scores ? 2 : 1));
+    for (const auto& elem : smvec) {
+      rb->SendBulkString(elem.second);
+      if (op_args->with_scores) {
+        rb->SendDouble(elem.first);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 void ZSetFamily::BZPopMin(CmdArgList args, ConnectionContext* cntx) {
@@ -2067,89 +2054,12 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   rb->SendDouble(add_result->new_score);
 }
 
-void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
-  string_view dest_key = ArgS(args, 0);
-  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, true);
-
-  if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res.status());
-  }
-  const auto& op_args = *op_args_res;
-  if (op_args.num_keys == 0) {
-    return SendAtLeastOneKeyError(cntx);
-  }
-
-  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpInter(shard, t, dest_key, op_args.agg_type, op_args.weights, true);
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->Execute(std::move(cb), false);
-
-  OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
-  if (!result)
-    return cntx->SendError(result.status());
-
-  ShardId dest_shard = Shard(dest_key, maps.size());
-  AddResult add_result;
-  vector<ScoredMemberView> smvec;
-  for (const auto& elem : result.value()) {
-    smvec.emplace_back(elem.second, elem.first);
-  }
-
-  auto store_cb = [&](Transaction* t, EngineShard* shard) {
-    if (shard->shard_id() == dest_shard) {
-      ZParams zparams;
-      zparams.override = true;
-      add_result = OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
-    }
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->Execute(std::move(store_cb), true);
-
-  cntx->SendLong(smvec.size());
+void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
+  ZBooleanOperation(args, cntx, false, false);
 }
 
-void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
-  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, false);
-
-  if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res.status());
-  }
-  const auto& op_args = *op_args_res;
-  if (op_args.num_keys == 0) {
-    return SendAtLeastOneKeyError(cntx);
-  }
-
-  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpInter(shard, t, "", op_args.agg_type, op_args.weights, false);
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->ScheduleSingleHop(std::move(cb));
-
-  OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
-  if (!result)
-    return cntx->SendError(result.status());
-
-  std::vector<std::pair<std::string, double>> scored_array;
-  scored_array.reserve(result.value().size());
-  for (const auto& elem : result.value()) {
-    scored_array.emplace_back(elem.first, elem.second);
-  }
-
-  std::sort(scored_array.begin(), scored_array.end(),
-            [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) {
-              return a.second < b.second;
-            });
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendScoredArray(scored_array, op_args_res->with_scores);
+void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
+  ZBooleanOperation(args, cntx, false, true);
 }
 
 void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
@@ -2218,39 +2128,44 @@ void ZSetFamily::ZLexCount(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
-  RangeParams range_params;
+  ZRangeGeneric(args, cntx, RangeParams{});
+}
 
-  for (size_t i = 3; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
-    if (cur_arg == "BYSCORE") {
-      if (range_params.interval_type == RangeParams::IntervalType::LEX) {
+void ZSetFamily::ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, RangeParams range_params) {
+  facade::CmdArgParser parser{args.subspan(3)};
+  while (parser.ToUpper().HasNext()) {
+    if (parser.Check("BYSCORE")) {
+      if (exchange(range_params.interval_type, RangeParams::SCORE) == RangeParams::LEX)
         return cntx->SendError("BYSCORE and BYLEX options are not compatible");
-      }
-      range_params.interval_type = RangeParams::IntervalType::SCORE;
-    } else if (cur_arg == "BYLEX") {
-      if (range_params.interval_type == RangeParams::IntervalType::SCORE) {
-        return cntx->SendError("BYSCORE and BYLEX options are not compatible");
-      }
-      range_params.interval_type = RangeParams::IntervalType::LEX;
-    } else if (cur_arg == "REV") {
-      range_params.reverse = true;
-    } else if (cur_arg == "WITHSCORES") {
-      range_params.with_scores = true;
-    } else if (cur_arg == "LIMIT") {
-      if (i + 3 > args.size()) {
-        return cntx->SendError(kSyntaxErr);
-      }
-      if (!ParseLimit(ArgS(args, i + 1), ArgS(args, i + 2), &range_params)) {
-        return cntx->SendError(kInvalidIntErr);
-      }
-      i += 2;
-    } else {
-      return cntx->SendError(absl::StrCat("unsupported option ", cur_arg));
+      continue;
     }
+    if (parser.Check("BYLEX")) {
+      if (exchange(range_params.interval_type, RangeParams::LEX) == RangeParams::SCORE)
+        return cntx->SendError("BYSCORE and BYLEX options are not compatible");
+      continue;
+    }
+    if (parser.Check("REV")) {
+      range_params.reverse = true;
+      continue;
+    }
+    if (parser.Check("WITHSCORES")) {
+      range_params.with_scores = true;
+      continue;
+    }
+    if (parser.Check("LIMIT").ExpectTail(2)) {
+      int64_t limit;
+      tie(range_params.offset, limit) = parser.Next<uint32_t, int64_t>();
+      range_params.limit = limit < 0 ? UINT32_MAX : static_cast<uint32_t>(limit);
+      continue;
+    }
+
+    return cntx->SendError(absl::StrCat("unsupported option ", parser.Peek()));
   }
-  ZRangeGeneric(std::move(args), range_params, cntx);
+
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
+
+  ZRangeInternal(args.subspan(0, 3), range_params, cntx);
 }
 
 void ZSetFamily::ZRank(CmdArgList args, ConnectionContext* cntx) {
@@ -2258,25 +2173,15 @@ void ZSetFamily::ZRank(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRevRange(CmdArgList args, ConnectionContext* cntx) {
-  RangeParams range_params;
-  range_params.reverse = true;
+  ZRangeGeneric(args, cntx, RangeParams{.reverse = true});
+}
 
-  for (size_t i = 3; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
-    if (cur_arg == "WITHSCORES") {
-      range_params.with_scores = true;
-    } else {
-      return cntx->SendError(absl::StrCat("unsupported option ", cur_arg));
-    }
-  }
-
-  ZRangeGeneric(std::move(args), range_params, cntx);
+void ZSetFamily::ZRangeByScore(CmdArgList args, ConnectionContext* cntx) {
+  ZRangeGeneric(args, cntx, RangeParams{.interval_type = RangeParams::SCORE});
 }
 
 void ZSetFamily::ZRevRangeByScore(CmdArgList args, ConnectionContext* cntx) {
-  ZRangeByScoreInternal(std::move(args), true, cntx);
+  ZRangeGeneric(args, cntx, RangeParams{.reverse = true, .interval_type = RangeParams::SCORE});
 }
 
 void ZSetFamily::ZRevRank(CmdArgList args, ConnectionContext* cntx) {
@@ -2284,39 +2189,11 @@ void ZSetFamily::ZRevRank(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZRangeByLex(CmdArgList args, ConnectionContext* cntx) {
-  ZRangeByLexInternal(std::move(args), false, cntx);
+  ZRangeGeneric(args, cntx, RangeParams{.interval_type = RangeParams::LEX});
 }
+
 void ZSetFamily::ZRevRangeByLex(CmdArgList args, ConnectionContext* cntx) {
-  ZRangeByLexInternal(std::move(args), true, cntx);
-}
-
-void ZSetFamily::ZRangeByLexInternal(CmdArgList args, bool reverse, ConnectionContext* cntx) {
-  uint32_t offset = 0;
-  uint32_t count = kuint32max;
-
-  RangeParams range_params;
-  range_params.interval_type = RangeParams::IntervalType::LEX;
-  range_params.reverse = reverse;
-
-  if (args.size() > 3) {
-    if (args.size() != 6)
-      return cntx->SendError(kSyntaxErr);
-
-    ToUpper(&args[3]);
-    if (ArgS(args, 3) != "LIMIT")
-      return cntx->SendError(kSyntaxErr);
-
-    if (!ParseLimit(ArgS(args, 4), ArgS(args, 5), &range_params))
-      return cntx->SendError(kInvalidIntErr);
-  }
-  range_params.offset = offset;
-  range_params.limit = count;
-
-  ZRangeGeneric(args, range_params, cntx);
-}
-
-void ZSetFamily::ZRangeByScore(CmdArgList args, ConnectionContext* cntx) {
-  ZRangeByScoreInternal(std::move(args), false, cntx);
+  ZRangeGeneric(args, cntx, RangeParams{.reverse = true, .interval_type = RangeParams::LEX});
 }
 
 void ZSetFamily::ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx) {
@@ -2494,21 +2371,11 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZUnion(CmdArgList args, ConnectionContext* cntx) {
-  ZUnionFamilyInternal(args, false, cntx);
+  ZBooleanOperation(args, cntx, true, false);
 }
 
 void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
-  ZUnionFamilyInternal(args, true, cntx);
-}
-
-void ZSetFamily::ZRangeByScoreInternal(CmdArgList args, bool reverse, ConnectionContext* cntx) {
-  RangeParams range_params;
-  range_params.interval_type = RangeParams::IntervalType::SCORE;
-  range_params.reverse = reverse;
-  if (!ParseRangeByScoreParams(args.subspan(3), &range_params)) {
-    return cntx->SendError(kSyntaxErr);
-  }
-  ZRangeGeneric(args, range_params, cntx);
+  ZBooleanOperation(args, cntx, true, true);
 }
 
 void ZSetFamily::ZRemRangeGeneric(string_view key, const ZRangeSpec& range_spec,
@@ -2525,7 +2392,8 @@ void ZSetFamily::ZRemRangeGeneric(string_view key, const ZRangeSpec& range_spec,
   }
 }
 
-void ZSetFamily::ZRangeGeneric(CmdArgList args, RangeParams range_params, ConnectionContext* cntx) {
+void ZSetFamily::ZRangeInternal(CmdArgList args, RangeParams range_params,
+                                ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view min_s = ArgS(args, 1);
   string_view max_s = ArgS(args, 2);
@@ -2586,28 +2454,6 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
   } else {
     cntx->SendError(result.status());
   }
-}
-
-bool ZSetFamily::ParseRangeByScoreParams(CmdArgList args, RangeParams* params) {
-  for (size_t i = 0; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
-    if (cur_arg == "WITHSCORES") {
-      params->with_scores = true;
-    } else if (cur_arg == "LIMIT") {
-      if (i + 3 > args.size())
-        return false;
-      if (!ParseLimit(ArgS(args, i + 1), ArgS(args, i + 2), params))
-        return false;
-
-      i += 2;
-    } else {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx) {
