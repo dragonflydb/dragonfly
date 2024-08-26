@@ -464,9 +464,12 @@ int RedisReplicateCommands(lua_State* lua) {
 }
 
 int RedisLogCommand(lua_State* lua) {
-  // if the arguments passed to redis.log are incorrect
-  // we still do not log the error. Therefore, even if
-  // for the no-op case we don't need to parse the arguments
+  int argc = lua_gettop(lua);
+  if (argc < 2) {
+    PushError(lua, "redis.log() requires two arguments or more.");
+    return RaiseError(lua);
+  }
+
   return 0;
 }
 
