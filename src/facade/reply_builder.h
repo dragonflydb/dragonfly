@@ -400,7 +400,7 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
 
   ~RedisReplyBuilder2Base() override = default;
 
-  virtual void SendNull();
+  void SendNull() override;
 
   void SendSimpleString(std::string_view str) override;
   void SendBulkString(std::string_view str) override;  // RESP: Blob String
