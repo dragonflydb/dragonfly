@@ -935,7 +935,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
 }
 
 using ScoredMemberView = std::pair<double, std::string_view>;
-using ScoredMemberSpan = absl::Span<ScoredMemberView>;
+using ScoredMemberSpan = absl::Span<const ScoredMemberView>;
 
 struct AddResult {
   double new_score = 0;
@@ -1183,67 +1183,6 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
     }
   }
   return op_args;
-}
-
-void ZUnionFamilyInternal(CmdArgList args, bool store, ConnectionContext* cntx) {
-  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, store);
-  if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res.status());
-  }
-  const auto& op_args = *op_args_res;
-  if (op_args.num_keys == 0) {
-    return SendAtLeastOneKeyError(cntx);
-  }
-
-  vector<OpResult<ScoredMap>> maps(shard_set->size());
-
-  string_view dest_key = ArgS(args, 0);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpUnion(shard, t, dest_key, op_args.agg_type, op_args.weights, store);
-    return OpStatus::OK;
-  };
-
-  // For commands not storing computed result, this should be
-  // the last transaction hop (e.g. ZUNION)
-  cntx->transaction->Execute(std::move(cb), !store);
-
-  ScoredMap result;
-  for (auto& op_res : maps) {
-    if (!op_res)
-      return cntx->SendError(op_res.status());
-    UnionScoredMap(&result, &op_res.value(), op_args.agg_type);
-  }
-
-  vector<ScoredMemberView> smvec;
-  for (const auto& elem : result) {
-    smvec.emplace_back(elem.second, elem.first);
-  }
-
-  if (store) {
-    ShardId dest_shard = Shard(dest_key, maps.size());
-    AddResult add_result;
-    auto store_cb = [&](Transaction* t, EngineShard* shard) {
-      if (shard->shard_id() == dest_shard) {
-        ZParams zparams;
-        zparams.override = true;
-        add_result = OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
-      }
-      return OpStatus::OK;
-    };
-    cntx->transaction->Execute(std::move(store_cb), true);
-    cntx->SendLong(smvec.size());
-  } else {
-    std::sort(std::begin(smvec), std::end(smvec));
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->StartArray(smvec.size() * (op_args.with_scores ? 2 : 1));
-    for (const auto& elem : smvec) {
-      rb->SendBulkString(elem.second);
-      if (op_args.with_scores) {
-        rb->SendDouble(elem.first);
-      }
-    }
-  }
 }
 
 ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bool is_max) {
@@ -1794,6 +1733,76 @@ double ExtractUnit(std::string_view arg) {
   }
 }
 
+// Boolean operation: union or intersection, optionally storing output to destination key
+void ZBooleanOperation(CmdArgList args, ConnectionContext* cntx, bool is_union, bool store) {
+  auto shard_func = is_union ? OpUnion : OpInter;
+  auto merge_func = is_union ? UnionScoredMap : InterScoredMap;
+
+  string_view dest_key = ArgS(args, 0);
+  OpResult<SetOpArgs> op_args = ParseSetOpArgs(args, store);
+  if (!op_args)
+    return HandleOpStatus(cntx, op_args.status());
+
+  if (op_args->num_keys == 0)
+    return SendAtLeastOneKeyError(cntx);
+
+  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    maps[shard->shard_id()] =
+        shard_func(shard, t, dest_key, op_args->agg_type, op_args->weights, store);
+    return OpStatus::OK;
+  };
+  cntx->transaction->Execute(cb, !store /* if we don't store, conclude */);
+
+  // Merge results from all shards
+  ScoredMap result;
+  for (auto& op_res : maps) {
+    if (op_res.status() == OpStatus::SKIPPED)
+      continue;
+    if (!op_res)
+      return cntx->SendError(op_res.status());
+
+    if (result.empty())
+      result = std::move(op_res.value());
+    else
+      merge_func(&result, &op_res.value(), op_args->agg_type);
+
+    if (result.empty() && !is_union)  // intersection only shrinks
+      break;
+  }
+
+  // Copy to vector for sorting
+  vector<ScoredMemberView> smvec(result.size());
+  size_t i = 0;
+  for (const auto& [str, score] : result)
+    smvec[i++] = {score, str};
+
+  if (store) {
+    // TODO: Use variant collection to avoid smvec copy for store operation
+    auto store_cb = [&, dest_shard = Shard(dest_key, maps.size())](Transaction* t,
+                                                                   EngineShard* shard) {
+      if (shard->shard_id() == dest_shard)
+        OpAdd(t->GetOpArgs(shard), ZParams{.override = true}, dest_key, smvec);
+      return OpStatus::OK;
+    };
+    cntx->transaction->Execute(store_cb, true);
+    cntx->SendLong(smvec.size());
+  } else {
+    std::sort(std::begin(smvec), std::end(smvec));
+
+    // We can't use SendScoredArray because it expects strings, not string_views
+    // TOOD: Not longer relevant with new io, use scoping
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->StartArray(smvec.size() * (op_args->with_scores ? 2 : 1));
+    for (const auto& elem : smvec) {
+      rb->SendBulkString(elem.second);
+      if (op_args->with_scores) {
+        rb->SendDouble(elem.first);
+      }
+    }
+  }
+}
+
 }  // namespace
 
 void ZSetFamily::BZPopMin(CmdArgList args, ConnectionContext* cntx) {
@@ -2045,89 +2054,12 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
   rb->SendDouble(add_result->new_score);
 }
 
-void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
-  string_view dest_key = ArgS(args, 0);
-  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, true);
-
-  if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res.status());
-  }
-  const auto& op_args = *op_args_res;
-  if (op_args.num_keys == 0) {
-    return SendAtLeastOneKeyError(cntx);
-  }
-
-  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpInter(shard, t, dest_key, op_args.agg_type, op_args.weights, true);
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->Execute(std::move(cb), false);
-
-  OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
-  if (!result)
-    return cntx->SendError(result.status());
-
-  ShardId dest_shard = Shard(dest_key, maps.size());
-  AddResult add_result;
-  vector<ScoredMemberView> smvec;
-  for (const auto& elem : result.value()) {
-    smvec.emplace_back(elem.second, elem.first);
-  }
-
-  auto store_cb = [&](Transaction* t, EngineShard* shard) {
-    if (shard->shard_id() == dest_shard) {
-      ZParams zparams;
-      zparams.override = true;
-      add_result = OpAdd(t->GetOpArgs(shard), zparams, dest_key, ScoredMemberSpan{smvec}).value();
-    }
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->Execute(std::move(store_cb), true);
-
-  cntx->SendLong(smvec.size());
+void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
+  ZBooleanOperation(args, cntx, false, false);
 }
 
-void ZSetFamily::ZInter(CmdArgList args, ConnectionContext* cntx) {
-  OpResult<SetOpArgs> op_args_res = ParseSetOpArgs(args, false);
-
-  if (!op_args_res) {
-    return HandleOpStatus(cntx, op_args_res.status());
-  }
-  const auto& op_args = *op_args_res;
-  if (op_args.num_keys == 0) {
-    return SendAtLeastOneKeyError(cntx);
-  }
-
-  vector<OpResult<ScoredMap>> maps(shard_set->size(), OpStatus::SKIPPED);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    maps[shard->shard_id()] = OpInter(shard, t, "", op_args.agg_type, op_args.weights, false);
-    return OpStatus::OK;
-  };
-
-  cntx->transaction->ScheduleSingleHop(std::move(cb));
-
-  OpResult<ScoredMap> result = IntersectResults(maps, op_args.agg_type);
-  if (!result)
-    return cntx->SendError(result.status());
-
-  std::vector<std::pair<std::string, double>> scored_array;
-  scored_array.reserve(result.value().size());
-  for (const auto& elem : result.value()) {
-    scored_array.emplace_back(elem.first, elem.second);
-  }
-
-  std::sort(scored_array.begin(), scored_array.end(),
-            [](const std::pair<std::string, double>& a, const std::pair<std::string, double>& b) {
-              return tie(a.second, a.first) < tie(b.second, b.first);
-            });
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendScoredArray(scored_array, op_args_res->with_scores);
+void ZSetFamily::ZInterStore(CmdArgList args, ConnectionContext* cntx) {
+  ZBooleanOperation(args, cntx, false, true);
 }
 
 void ZSetFamily::ZInterCard(CmdArgList args, ConnectionContext* cntx) {
@@ -2439,11 +2371,11 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ZSetFamily::ZUnion(CmdArgList args, ConnectionContext* cntx) {
-  ZUnionFamilyInternal(args, false, cntx);
+  ZBooleanOperation(args, cntx, true, false);
 }
 
 void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
-  ZUnionFamilyInternal(args, true, cntx);
+  ZBooleanOperation(args, cntx, true, true);
 }
 
 void ZSetFamily::ZRemRangeGeneric(string_view key, const ZRangeSpec& range_spec,
