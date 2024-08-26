@@ -770,6 +770,7 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   string_view msg;
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
 
+  // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
   if (cntx->conn_state.subscribe_info && !rb->IsResp3()) {
     if (args.size() == 1) {
       msg = ArgS(args, 0);
