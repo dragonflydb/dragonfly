@@ -698,7 +698,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   CmdArgParser parser(args);
 
-  lock_guard lk(migration_mu_);
+  util::fb2::LockGuard lk(migration_mu_);
 
   string_view node_id;
   if (parser.HasNext()) {

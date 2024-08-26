@@ -18,6 +18,10 @@ if (HAS_USE_AFTER_FREE_WARN)
     set(CMAKE_CXX_FLAGS "-Wno-use-after-free ${CMAKE_CXX_FLAGS}")
 endif()
 
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(CMAKE_CXX_FLAGS "-Wthread-safety ${CMAKE_CXX_FLAGS}")
+endif()
+
 # We can not use here CHECK_CXX_COMPILER_FLAG because systems that do not support sanitizers
 # fail during linking time.
 set(CMAKE_REQUIRED_FLAGS "-fsanitize=address")

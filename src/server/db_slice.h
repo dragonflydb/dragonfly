@@ -507,7 +507,7 @@ class DbSlice {
   template <typename Cb, typename DashTable>
   PrimeTable::Cursor Traverse(DashTable* pt, PrimeTable::Cursor cursor, Cb&& cb)
       ABSL_LOCKS_EXCLUDED(local_mu_) {
-    std::unique_lock lk(local_mu_);
+    util::fb2::LockGuard lk(local_mu_);
     return pt->Traverse(cursor, std::forward<Cb>(cb));
   }
 

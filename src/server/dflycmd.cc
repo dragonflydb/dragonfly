@@ -30,6 +30,7 @@
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "util/fibers/synchronization.h"
 using namespace std;
 
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
@@ -648,7 +649,7 @@ void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
 }
 
 auto DflyCmd::CreateSyncSession(ConnectionContext* cntx) -> std::pair<uint32_t, unsigned> {
-  unique_lock lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   unsigned sync_id = next_sync_id_++;
 
   unsigned flow_count = shard_set->size();
@@ -679,7 +680,7 @@ auto DflyCmd::GetReplicaInfoFromConnection(ConnectionContext* cntx)
     return nullptr;
   }
 
-  unique_lock lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   auto it = replica_infos_.find(cntx->conn_state.replication_info.repl_session_id);
   if (it == replica_infos_.end()) {
     return nullptr;
@@ -705,12 +706,12 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   // This allows keeping resources alive during the cleanup phase.
   replica_ptr->Cancel();
 
-  lock_guard lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   replica_infos_.erase(sync_id);
 }
 
 void DflyCmd::BreakStalledFlowsInShard() {
-  unique_lock global_lock(mu_, try_to_lock);
+  std::unique_lock global_lock(mu_, try_to_lock);
 
   // give up on blocking because we run this function periodically in a background fiber,
   // so it will eventually grab the lock.
@@ -744,7 +745,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
 }
 
 shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
-  lock_guard lk(mu_);
+  util::fb2::LockGuard lk(mu_);
 
   auto it = replica_infos_.find(sync_id);
   if (it != replica_infos_.end())
@@ -754,7 +755,7 @@ shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
 
 std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   std::vector<ReplicaRoleInfo> vec;
-  lock_guard lk(mu_);
+  util::fb2::LockGuard lk(mu_);
 
   vec.reserve(replica_infos_.size());
   map replication_lags = ReplicationLagsLocked();
@@ -785,7 +786,7 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
   atomic<size_t> streamer_bytes{0}, full_sync_bytes{0};
 
   {
-    lock_guard lk{mu_};  // prevent state changes
+    util::fb2::LockGuard lk{mu_};  // prevent state changes
     auto cb = [&](EngineShard* shard) {
       for (const auto& [_, info] : replica_infos_) {
         shared_lock repl_lk = info->GetSharedLock();
@@ -816,7 +817,7 @@ pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
     return {0, nullptr};
   }
 
-  lock_guard lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   auto sync_it = replica_infos_.find(sync_id);
   if (sync_it == replica_infos_.end()) {
     rb->SendError(kIdNotFound);
@@ -887,7 +888,7 @@ bool DflyCmd::CheckReplicaStateOrReply(const ReplicaInfo& repl_info, SyncState e
 void DflyCmd::Shutdown() {
   ReplicaInfoMap pending;
   {
-    std::lock_guard lk(mu_);
+    util::fb2::LockGuard lk(mu_);
     pending = std::move(replica_infos_);
   }
 

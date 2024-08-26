@@ -362,13 +362,13 @@ class UniquePicksGenerator : public PicksGenerator {
 };
 
 // Helper class used to guarantee atomicity between serialization of buckets
-class ThreadLocalMutex {
+class ABSL_LOCKABLE ThreadLocalMutex {
  public:
   ThreadLocalMutex();
   ~ThreadLocalMutex();
 
-  void lock();
-  void unlock();
+  void lock() ABSL_EXCLUSIVE_LOCK_FUNCTION();
+  void unlock() ABSL_UNLOCK_FUNCTION();
 
  private:
   EngineShard* shard_;

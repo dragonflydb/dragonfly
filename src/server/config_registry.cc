@@ -1,12 +1,13 @@
 // Copyright 2023, Roman Gershman.  All rights reserved.
 // See LICENSE for licensing terms.
 //
-#include "src/server/config_registry.h"
+#include "server/config_registry.h"
 
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_replace.h>
 
 #include "base/logging.h"
+#include "server/common.h"
 
 extern "C" {
 #include "redis/util.h"
@@ -25,7 +26,7 @@ string NormalizeConfigName(string_view name) {
 auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResult {
   string name = NormalizeConfigName(config_name);
 
-  unique_lock lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   auto it = registry_.find(name);
   if (it == registry_.end())
     return SetResult::UNKNOWN;
@@ -48,10 +49,11 @@ auto ConfigRegistry::Set(string_view config_name, string_view value) -> SetResul
 optional<string> ConfigRegistry::Get(string_view config_name) {
   string name = NormalizeConfigName(config_name);
 
-  unique_lock lk(mu_);
-  if (!registry_.contains(name))
-    return nullopt;
-  lk.unlock();
+  {
+    util::fb2::LockGuard lk(mu_);
+    if (!registry_.contains(name))
+      return nullopt;
+  }
 
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag);
@@ -59,7 +61,7 @@ optional<string> ConfigRegistry::Get(string_view config_name) {
 }
 
 void ConfigRegistry::Reset() {
-  unique_lock lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   registry_.clear();
 }
 
@@ -67,7 +69,7 @@ vector<string> ConfigRegistry::List(string_view glob) const {
   string normalized_glob = NormalizeConfigName(glob);
 
   vector<string> res;
-  unique_lock lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   for (const auto& [name, _] : registry_) {
     if (stringmatchlen(normalized_glob.data(), normalized_glob.size(), name.data(), name.size(), 1))
       res.push_back(name);
@@ -81,7 +83,7 @@ void ConfigRegistry::RegisterInternal(string_view config_name, bool is_mutable, 
   absl::CommandLineFlag* flag = absl::FindCommandLineFlag(name);
   CHECK(flag) << "Unknown config name: " << name;
 
-  unique_lock lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   auto [it, inserted] = registry_.emplace(name, Entry{std::move(cb), is_mutable});
   CHECK(inserted) << "Duplicate config name: " << name;
 }

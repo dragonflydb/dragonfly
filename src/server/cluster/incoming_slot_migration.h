@@ -43,17 +43,17 @@ class IncomingSlotMigration {
     return slots_;
   }
 
-  const std::string GetSourceID() const {
+  const std::string& GetSourceID() const {
     return source_id_;
   }
 
-  void ReportError(dfly::GenericError err) {
-    std::lock_guard lk(error_mu_);
-    last_error_ = err;
+  void ReportError(dfly::GenericError err) ABSL_LOCKS_EXCLUDED(error_mu_) {
+    util::fb2::LockGuard lk(error_mu_);
+    last_error_ = std::move(err);
   }
 
-  std::string GetErrorStr() const {
-    std::lock_guard lk(error_mu_);
+  std::string GetErrorStr() const ABSL_LOCKS_EXCLUDED(error_mu_) {
+    util::fb2::LockGuard lk(error_mu_);
     return last_error_.Format();
   }
 

@@ -148,14 +148,14 @@ class DflyCmd {
   void Shutdown();
 
   // Create new sync session. Returns (session_id, number of flows)
-  std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionContext* cntx);
+  std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Master side acces method to replication info of that connection.
   std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionContext* cntx);
 
-  std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const;
+  std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
-  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const;
+  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_LOCKS_EXCLUDED(mu_);
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
@@ -214,11 +214,11 @@ class DflyCmd {
   void FullSyncFb(FlowInfo* flow, Context* cntx);
 
   // Get ReplicaInfo by sync_id.
-  std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id);
+  std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Find sync info by id or send error reply.
   std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> GetReplicaInfoOrReply(
-      std::string_view id, facade::RedisReplyBuilder* rb);
+      std::string_view id, facade::RedisReplyBuilder* rb) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Check replica is in expected state and flows are set-up correctly.
   bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
@@ -226,11 +226,11 @@ class DflyCmd {
 
  private:
   // Main entrypoint for stopping replication.
-  void StopReplication(uint32_t sync_id);
+  void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
-  std::map<uint32_t, LSN> ReplicationLagsLocked() const;
+  std::map<uint32_t, LSN> ReplicationLagsLocked() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   ServerFamily* sf_;  // Not owned
 

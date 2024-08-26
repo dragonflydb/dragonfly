@@ -71,18 +71,18 @@ class Service : public facade::ServiceInterface {
     return &registry_;
   }
 
-  facade::ErrorReply ReportUnknownCmd(std::string_view cmd_name);
+  facade::ErrorReply ReportUnknownCmd(std::string_view cmd_name) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Returns: the new state.
   // if from equals the old state then the switch is performed "to" is returned.
   // Otherwise, does not switch and returns the current state in the system.
   // Upon switch, updates cached global state in threadlocal ServerState struct.
-  GlobalState SwitchState(GlobalState from, GlobalState to);
+  GlobalState SwitchState(GlobalState from, GlobalState to) ABSL_LOCKS_EXCLUDED(mu_);
 
   void RequestLoadingState();
   void RemoveLoadingState();
 
-  GlobalState GetGlobalState() const;
+  GlobalState GetGlobalState() const ABSL_LOCKS_EXCLUDED(mu_);
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
   void OnConnectionClose(facade::ConnectionContext* cntx) final;
