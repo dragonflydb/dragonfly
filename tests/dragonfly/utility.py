@@ -662,7 +662,7 @@ def gen_ca_cert(ca_key_path, ca_cert_path):
     # Expires in one day and is not encrtypted (-nodes)
     # X.509 format for the key
     step = rf'openssl req -x509 -newkey rsa:4096 -days 1 -nodes -keyout {ca_key_path} -out {ca_cert_path} -subj "/C=GR/ST=SKG/L=Thessaloniki/O=KK/OU=AcmeStudios/CN=Gr/emailAddress=acme@gmail.com"'
-    result = subprocess.run(step, shell=True)
+    subprocess.run(step, shell=True)
 
 
 def gen_certificate(
@@ -675,11 +675,6 @@ def gen_certificate(
     # Use CA's private key to sign dragonfly's CSR and get back the signed certificate
     step2 = rf"openssl x509 -req -in {certificate_request_path} -days 1 -CA {ca_certificate_path} -CAkey {ca_key_path} -CAcreateserial -out {certificate_path}"
     subprocess.run(step2, shell=True)
-    logging.debug(f" ======================================= \n")
-    logging.debug(f" Private key path is {private_key_path} \n")
-    result = subprocess.run(["ls", "-l", f"{private_key_path}"], capture_output=True, text=True)
-    logging.debug(result.stdout)
-    logging.debug(f" ======================================= \n")
 
 
 class EnvironCntx:
