@@ -767,16 +767,27 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
 
-  // We synchronously block here until the engine sends us the payload and notifies that
-  // the I/O operation has been processed.
+  string_view msg;
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+
+  // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
+  if (cntx->conn_state.subscribe_info && !rb->IsResp3()) {
+    if (args.size() == 1) {
+      msg = ArgS(args, 0);
+    }
+
+    string_view resp[2] = {"pong", msg};
+    return rb->SendStringArr(resp);
+  }
+
   if (args.size() == 0) {
     return cntx->SendSimpleString("PONG");
   } else {
-    string_view arg = ArgS(args, 0);
-    DVLOG(2) << "Ping " << arg;
+    msg = ArgS(args, 0);
+    DVLOG(2) << "Ping " << msg;
 
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    return rb->SendBulkString(arg);
+    return rb->SendBulkString(msg);
   }
 }
 

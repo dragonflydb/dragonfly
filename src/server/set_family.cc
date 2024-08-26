@@ -227,14 +227,6 @@ int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view me
   }
 }
 
-void FindInSet(StringVec& memberships, const DbContext& db_context, const SetType& st,
-               facade::ArgRange members) {
-  for (string_view member : members) {
-    bool status = IsInSet(db_context, st, member);
-    memberships.emplace_back(to_string(status));
-  }
-}
-
 // Removes arg from result.
 void DiffStrSet(const DbContext& db_context, const SetType& st,
                 absl::flat_hash_set<string>* result) {
@@ -975,6 +967,8 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
   switch (result.status()) {
     case OpStatus::OK:
       return cntx->SendLong(1);
+    case OpStatus::WRONG_TYPE:
+      return cntx->SendError(OpStatus::WRONG_TYPE);
     default:
       return cntx->SendLong(0);
   }
@@ -982,16 +976,20 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
 
 void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  auto vals = args.subspan(1);
+  auto members = args.subspan(1);
 
-  StringVec memberships;
-  memberships.reserve(vals.size());
+  vector<bool> memberships(members.size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(t->GetDbContext(), key, OBJ_SET);
+    DbContext db_cntx = t->GetDbContext();
+    auto find_res = t->GetDbSlice(shard->shard_id()).FindReadOnly(db_cntx, key, OBJ_SET);
     if (find_res) {
-      SetType st{find_res.value()->second.RObjPtr(), find_res.value()->second.Encoding()};
-      FindInSet(memberships, t->GetDbContext(), st, vals);
+      SetType st{(*find_res)->second.RObjPtr(), find_res.value()->second.Encoding()};
+      for (size_t i = 0; i < members.size(); ++i) {
+        auto member = members[i];
+        bool status = IsInSet(db_cntx, st, ToSV(member));
+        memberships[i] = status;
+      }
       return OpStatus::OK;
     }
     return find_res.status();
@@ -999,11 +997,11 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
-  if (result == OpStatus::KEY_NOTFOUND) {
-    memberships.assign(vals.size(), "0");
-    return rb->SendStringArr(memberships);
-  } else if (result == OpStatus::OK) {
-    return rb->SendStringArr(memberships);
+  if (result || result == OpStatus::KEY_NOTFOUND) {
+    rb->StartArray(memberships.size());
+    for (bool b : memberships)
+      rb->SendLong(int(b));
+    return;
   }
   cntx->SendError(result.status());
 }
@@ -1225,17 +1223,17 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (result) {
-    rb->SendStringArr(*result, RedisReplyBuilder::SET);
-  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+  if (result || result == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
-      rb->SendStringArr(StringVec(), RedisReplyBuilder::SET);
+      rb->SendStringArr(*result, RedisReplyBuilder::SET);
+    } else if (result->size()) {
+      rb->SendBulkString(result->front());
     } else {
       rb->SendNull();
     }
-  } else {
-    cntx->SendError(result.status());
+    return;
   }
+  cntx->SendError(result.status());
 }
 
 void SInter(CmdArgList args, ConnectionContext* cntx) {
@@ -1322,7 +1320,10 @@ void SInterCard(CmdArgList args, ConnectionContext* cntx) {
   OpResult<SvArray> result =
       InterResultVec(result_set, cntx->transaction->GetUniqueShardCnt(), limit);
 
-  return cntx->SendLong(result->size());
+  if (result) {
+    return cntx->SendLong(result->size());
+  }
+  cntx->SendError(result.status());
 }
 
 void SUnion(CmdArgList args, ConnectionContext* cntx) {
