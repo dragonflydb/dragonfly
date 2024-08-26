@@ -292,9 +292,9 @@ class DbSlice {
     ExpConstIterator exp_it;
   };
 
-  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key);
+  ItAndExpConst FindReadOnly(const Context& cntx, std::string_view key) const;
   OpResult<ConstIterator> FindReadOnly(const Context& cntx, std::string_view key,
-                                       unsigned req_obj_type);
+                                       unsigned req_obj_type) const;
 
   struct AddOrFindResult {
     Iterator it;
@@ -557,7 +557,7 @@ class DbSlice {
 
   OpResult<PrimeItAndExp> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode);
+                                       UpdateStatsMode stats_mode) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type);
 

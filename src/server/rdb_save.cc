@@ -339,8 +339,8 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
                                              uint64_t expire_ms, uint32_t mc_flags, DbIndex dbid) {
   if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
     string_view key = pk.GetSlice(&tmp_str_);
-    LOG(ERROR) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "
-               << pv.Tag();
+    LOG(DFATAL) << "SaveEntry skipped empty PrimeValue with key: " << key << " with tag "
+                << pv.Tag();
     return 0;
   }
 

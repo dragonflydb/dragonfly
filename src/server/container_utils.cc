@@ -34,7 +34,7 @@ struct ShardFFResult {
 
 // Returns (iterator, args-index) if found, KEY_NOTFOUND otherwise.
 // If multiple keys are found, returns the first index in the ArgSlice.
-OpResult<std::pair<DbSlice::ConstIterator, unsigned>> FindFirstReadOnly(DbSlice& db_slice,
+OpResult<std::pair<DbSlice::ConstIterator, unsigned>> FindFirstReadOnly(const DbSlice& db_slice,
                                                                         const DbContext& cntx,
                                                                         const ShardArgs& args,
                                                                         int req_obj_type) {
