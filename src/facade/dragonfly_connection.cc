@@ -447,10 +447,10 @@ void Connection::DispatchOperations::operator()(const MonitorMessage& msg) {
 }
 
 void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
-  if (self->cntx()) {
-    if (msg.username == self->cntx()->authed_username) {
-      self->cntx()->acl_commands = msg.commands;
-      self->cntx()->keys = msg.keys;
+  if (self->Cntx()) {
+    if (msg.username == self->Cntx()->authed_username) {
+      self->Cntx()->acl_commands = msg.commands;
+      self->Cntx()->keys = msg.keys;
     }
   }
 }
@@ -508,7 +508,7 @@ void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) 
   }
 }
 
-Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
+Connection::Connection(enum Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize),
       http_listener_(http_listener),
@@ -783,9 +783,9 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
-    DCHECK(cc_->reply_builder());
+    DCHECK(cc_->ReplyBuilder());
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
-    if (cc_->reply_builder()->IsSendActive())
+    if (cc_->ReplyBuilder()->IsSendActive())
       phase_name = "send";
     absl::StrAppend(&after, " ", cc_info);
   }
@@ -887,7 +887,7 @@ void Connection::ConnectionFlow(FiberSocketBase* peer) {
   stats_->read_buf_capacity += io_buf_.Capacity();
 
   ParserStatus parse_status = OK;
-  SinkReplyBuilder* orig_builder = cc_->reply_builder();
+  SinkReplyBuilder* orig_builder = cc_->ReplyBuilder();
 
   // At the start we read from the socket to determine the HTTP/Memstore protocol.
   // Therefore we may already have some data in the buffer.
@@ -1085,7 +1085,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
     return {make_unique<MCPipelineMessage>(std::move(cmd), value)};
   };
 
-  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cc_->reply_builder());
+  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cc_->ReplyBuilder());
 
   do {
     string_view str = ToSV(io_buf_.InputBuffer());
@@ -1144,10 +1144,10 @@ void Connection::OnBreakCb(int32_t mask) {
     return;
   }
 
-  DCHECK(cc_->reply_builder());
+  DCHECK(cc_->ReplyBuilder());
 
   VLOG(1) << "[" << id_ << "] Got event " << mask << " " << phase_ << " "
-          << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();
+          << cc_->ReplyBuilder()->IsSendActive() << " " << cc_->ReplyBuilder()->GetError();
 
   cc_->conn_closing = true;
   BreakOnce(mask);
@@ -1341,7 +1341,7 @@ void Connection::SquashPipeline(facade::SinkReplyBuilder* builder) {
 }
 
 void Connection::ClearPipelinedMessages() {
-  DispatchOperations dispatch_op{cc_->reply_builder(), this};
+  DispatchOperations dispatch_op{cc_->ReplyBuilder(), this};
 
   // Recycle messages even from disconnecting client to keep properly track of memory stats
   // As well as to avoid pubsub backpressure leakege.
@@ -1388,7 +1388,7 @@ std::string Connection::DebugInfo() const {
 // DispatchFiber.
 void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
   ThisFiber::SetName("ExecutionFiber");
-  SinkReplyBuilder* builder = cc_->reply_builder();
+  SinkReplyBuilder* builder = cc_->ReplyBuilder();
   DispatchOperations dispatch_op{builder, this};
 
   size_t squashing_threshold = GetFlag(FLAGS_pipeline_squash);
@@ -1721,7 +1721,7 @@ std::string Connection::RemoteEndpointAddress() const {
   return re.address().to_string();
 }
 
-facade::ConnectionContext* Connection::cntx() {
+facade::ConnectionContext* Connection::Cntx() {
   return cc_.get();
 }
 

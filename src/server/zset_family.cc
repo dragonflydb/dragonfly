@@ -182,7 +182,7 @@ void OutputScoredArrayResult(const OpResult<ScoredArray>& result,
 
   LOG_IF(WARNING, !result && result.status() != OpStatus::KEY_NOTFOUND)
       << "Unexpected status " << result.status();
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendScoredArray(result.value(), params.with_scores);
 }
 
@@ -710,7 +710,7 @@ bool ParseLexBound(string_view src, ZSetFamily::LexBound* bound) {
 }
 
 void SendAtLeastOneKeyError(ConnectionContext* cntx) {
-  string name{cntx->cid->name()};
+  string name{cntx->cid->Name()};
   absl::AsciiStrToLower(&name);
   cntx->SendError(absl::StrCat("at least 1 input key is needed for ", name));
 }
@@ -1257,7 +1257,7 @@ void BZPopMinMax(CmdArgList args, ConnectionContext* cntx, bool is_max) {
       transaction, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused,
       &dinfo);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (popped_key) {
     if (!callback_ran_key) {
       LOG(ERROR) << "BUG: Callback didn't run! " << popped_key.value() << " " << dinfo;
@@ -1699,7 +1699,7 @@ void ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_
     return cntx->SendError(add_result.status());
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   // KEY_NOTFOUND may happen in case of XX flag.
   if (add_result.status() == OpStatus::KEY_NOTFOUND) {
     if (zparams.flags & ZADD_IN_INCR)
@@ -1792,7 +1792,7 @@ void ZBooleanOperation(CmdArgList args, ConnectionContext* cntx, bool is_union, 
 
     // We can't use SendScoredArray because it expects strings, not string_views
     // TOOD: Not longer relevant with new io, use scoping
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->StartArray(smvec.size() * (op_args->with_scores ? 2 : 1));
     for (const auto& elem : smvec) {
       rb->SendBulkString(elem.second);
@@ -1967,7 +1967,7 @@ void ZSetFamily::ZDiff(CmdArgList args, ConnectionContext* cntx) {
 
   const string_view key = ArgS(args, 1);
   const ShardId sid = Shard(key, maps.size());
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   // Extract the ScoredMap of the first key
   auto& sm = maps[sid];
   if (sm.empty()) {
@@ -2042,7 +2042,7 @@ void ZSetFamily::ZIncrBy(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kWrongTypeErr);
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (add_result.status() == OpStatus::SKIPPED) {
     return rb->SendNull();
   }
@@ -2284,7 +2284,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (result) {
     rb->SendScoredArray(result.value(), params.with_scores);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
@@ -2306,7 +2306,7 @@ void ZSetFamily::ZScore(CmdArgList args, ConnectionContext* cntx) {
     return OpScore(t->GetOpArgs(shard), key, member);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() == OpStatus::WRONG_TYPE) {
     cntx->SendError(kWrongTypeErr);
@@ -2323,7 +2323,7 @@ void ZSetFamily::ZMScore(CmdArgList args, ConnectionContext* cntx) {
   if (result.status() == OpStatus::WRONG_TYPE) {
     return cntx->SendError(kWrongTypeErr);
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(result->size());  // Array return type.
   const MScoreResponse& array = result.value();
   for (const auto& p : array) {
@@ -2356,7 +2356,7 @@ void ZSetFamily::ZScan(CmdArgList args, ConnectionContext* cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     rb->StartArray(2);
@@ -2445,7 +2445,7 @@ void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* 
     return OpRank(t->GetOpArgs(shard), key, member, reverse);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendLong(*result);
@@ -2560,7 +2560,7 @@ void ZSetFamily::GeoHash(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kWrongTypeErr);
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(result->size());  // Array return type.
   const MScoreResponse& arr = result.value();
 
@@ -2581,7 +2581,7 @@ void ZSetFamily::GeoPos(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(result.status());
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(result->size());  // Array return type.
   const MScoreResponse& arr = result.value();
 
@@ -2623,7 +2623,7 @@ void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kSyntaxErr);
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   double xyxy[4];  // 2 pairs of score holding 2 locations
   for (size_t i = 0; i < arr.size(); i++) {
     if (!ScoreToLongLat(arr[i], xyxy + (i * 2))) {
@@ -2707,7 +2707,7 @@ void SortIfNeeded(GeoArray* ga, Sorting sorting, uint64_t count) {
 void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, string_view key,
                            string_view member, const GeoSearchOpts& geo_ops) {
   GeoShape* shape = &(const_cast<GeoShape&>(shape_ref));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
 
   ShardId from_shard = Shard(key, shard_set->size());
 

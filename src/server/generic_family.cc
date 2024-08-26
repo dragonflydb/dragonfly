@@ -732,7 +732,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "Del " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
-  bool is_mc = cntx->protocol() == Protocol::MEMCACHE;
+  bool is_mc = cntx->Protocol() == Protocol::MEMCACHE;
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
@@ -750,7 +750,7 @@ void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   uint32_t del_cnt = result.load(memory_order_relaxed);
   if (is_mc) {
     using facade::MCReplyBuilder;
-    MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+    MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->ReplyBuilder());
 
     if (del_cnt == 0) {
       mc_builder->SendNotFound();
@@ -768,7 +768,7 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
   }
 
   string_view msg;
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
 
   // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
   if (cntx->conn_state.subscribe_info && !rb->IsResp3()) {
@@ -786,7 +786,7 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
     msg = ArgS(args, 0);
     DVLOG(2) << "Ping " << msg;
 
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     return rb->SendBulkString(msg);
   }
 }
@@ -929,7 +929,7 @@ void GenericFamily::Keys(CmdArgList args, ConnectionContext* cntx) {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cntx);
   } while (cursor != 0 && keys.size() < output_limit);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(keys.size());
   for (const auto& k : keys) {
     rb->SendBulkString(k);
@@ -1170,7 +1170,7 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
   if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
     return cntx->SendError("One or more scores can't be converted into double");
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (!fetch_result.ok())
     return rb->SendEmptyArray();
 
@@ -1196,7 +1196,7 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
     }
 
     bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->StartCollection(std::distance(start_it, end_it),
                         is_set ? RedisReplyBuilder::SET : RedisReplyBuilder::ARRAY);
 
@@ -1420,7 +1420,7 @@ void GenericFamily::Dump(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (result) {
     DVLOG(1) << "Dump " << trans->DebugId() << ": " << key << ", dump size "
              << result.value().size();
@@ -1458,7 +1458,7 @@ void GenericFamily::Time(CmdArgList args, ConnectionContext* cntx) {
     now_usec = absl::GetCurrentTimeNanos() / 1000;
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(2);
   rb->SendLong(now_usec / 1000000);
   rb->SendLong(now_usec % 1000000);
@@ -1486,7 +1486,7 @@ ErrorReply GenericFamily::RenameGeneric(CmdArgList args, bool destination_should
 
 void GenericFamily::Echo(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   return rb->SendBulkString(key);
 }
 
@@ -1510,7 +1510,7 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   StringVec keys;
   cursor = ScanGeneric(cursor, scan_op, &keys, cntx);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(2);
   rb->SendBulkString(absl::StrCat(cursor));
   rb->StartArray(keys.size());
@@ -1700,7 +1700,7 @@ void GenericFamily::RandomKey(CmdArgList args, ConnectionContext* cntx) {
   auto candidates_count = candidates_counter.load(memory_order_relaxed);
   std::optional<string> random_key = std::nullopt;
   auto random_idx = absl::Uniform<size_t>(bitgen, 0, candidates_count);
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   for (const auto& candidate : candidates_collection) {
     if (random_idx >= candidate.size()) {
       random_idx -= candidate.size();

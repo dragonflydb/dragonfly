@@ -675,7 +675,7 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
     result = MoveTwoShards(cntx->transaction, src, dest, src_dir, dest_dir, true);
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (result) {
     return rb->SendBulkString(*result);
   }
@@ -712,7 +712,7 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
   OpResult<string> op_res = bpop_pusher.Run(cntx, unsigned(timeout * 1000));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (op_res) {
     return rb->SendBulkString(*op_res);
   }
@@ -745,7 +745,7 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
   OpResult<string> op_res = bpop_pusher.Run(cntx, unsigned(timeout * 1000));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (op_res) {
     return rb->SendBulkString(*op_res);
   }
@@ -941,7 +941,7 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(result.status());
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (skip_count) {
     if (result->empty()) {
       rb->SendNull();
@@ -949,7 +949,7 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
       rb->SendLong((*result)[0]);
     }
   } else {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
+    SinkReplyBuilder::ReplyAggregator agg(cntx->ReplyBuilder());
     rb->StartArray(result->size());
     const auto& array = result.value();
     for (const auto& v : array) {
@@ -971,7 +971,7 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
     return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendBulkString(result.value());
@@ -1044,7 +1044,7 @@ void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(res.status());
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendStringArr(*res);
 }
 
@@ -1136,7 +1136,7 @@ void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cn
       transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
       &cntx->paused);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (popped_key) {
     DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
     std::string_view str_arr[2] = {*popped_key, popped_value};
@@ -1197,7 +1197,7 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
       return rb->SendNull();

@@ -15,7 +15,7 @@ namespace facade {
 
 ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : owner_(owner) {
   if (owner) {
-    protocol_ = owner->protocol();
+    protocol_ = owner->Protocol();
   }
 
   if (stream) {

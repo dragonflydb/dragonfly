@@ -119,7 +119,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
     DCHECK(etl.is_master);
     std::string cluster_announce_ip = absl::GetFlag(FLAGS_announce_ip);
     std::string preferred_endpoint =
-        cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
+        cluster_announce_ip.empty() ? cntx->Conn()->LocalBindAddress() : cluster_announce_ip;
     uint16_t cluster_announce_port = absl::GetFlag(FLAGS_announce_port);
     uint16_t preferred_port = cluster_announce_port == 0
                                   ? static_cast<uint16_t>(absl::GetFlag(FLAGS_port))
@@ -136,7 +136,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
     // TODO: We currently don't save the master's ID in the replica
     info.master = {.id = "", .ip = replication_info->host, .port = replication_info->port};
     info.replicas.push_back({.id = id_,
-                             .ip = cntx->conn()->LocalBindAddress(),
+                             .ip = cntx->Conn()->LocalBindAddress(),
                              .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))});
   }
 
@@ -157,7 +157,7 @@ void ClusterFamily::ClusterHelp(ConnectionContext* cntx) {
       "HELP",
       "    Prints this help.",
   };
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   return rb->SendSimpleStrArr(help_arr);
 }
 
@@ -165,7 +165,7 @@ namespace {
 void ClusterShardsImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-shards/
   constexpr unsigned int kEntrySize = 4;
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
 
   auto WriteNode = [&](const ClusterNodeInfo& node, string_view role) {
     constexpr unsigned int kNodeSize = 14;
@@ -220,7 +220,7 @@ void ClusterFamily::ClusterShards(ConnectionContext* cntx) {
 namespace {
 void ClusterSlotsImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   // For more details https://redis.io/commands/cluster-slots/
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   auto WriteNode = [&](const ClusterNodeInfo& node) {
     constexpr unsigned int kNodeSize = 3;
     rb->StartArray(kNodeSize);
@@ -301,7 +301,7 @@ void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id, Connec
     }
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   return rb->SendBulkString(result);
 }
 }  // namespace
@@ -365,7 +365,7 @@ void ClusterInfoImpl(const ClusterShardInfos& config, ConnectionContext* cntx) {
   append("cluster_stats_messages_pong_received", 1);
   append("cluster_stats_messages_meet_received", 0);
   append("cluster_stats_messages_received", 1);
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendBulkString(msg);
 }
 }  // namespace
@@ -444,8 +444,8 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
 
-  if (cntx->conn()) {
-    VLOG(2) << "Got DFLYCLUSTER command (" << cntx->conn()->GetClientId() << "): " << args;
+  if (cntx->Conn()) {
+    VLOG(2) << "Got DFLYCLUSTER command (" << cntx->Conn()->GetClientId() << "): " << args;
   } else {
     VLOG(2) << "Got DFLYCLUSTER command (NO_CLIENT_ID): " << args;
   }
@@ -571,7 +571,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
 
   // Ignore blocked commands because we filter them with CancelBlockingOnThread
-  DispatchTracker tracker{server_family_->GetNonPriviligedListeners(), cntx->conn(),
+  DispatchTracker tracker{server_family_->GetNonPriviligedListeners(), cntx->Conn(),
                           true /* ignore paused */, true /* ignore blocked */};
 
   auto blocking_filter = [&new_config](ArgSlice keys) {
@@ -608,7 +608,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
 void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser(args);
   parser.ExpectTag("SLOTS");
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
 
   vector<std::pair<SlotId, SlotStats>> slots_stats;
   do {
@@ -695,7 +695,7 @@ static string_view StateToStr(MigrationState state) {
 }
 
 void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   CmdArgParser parser(args);
 
   util::fb2::LockGuard lk(migration_mu_);
@@ -890,11 +890,11 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(err->MakeReply());
   }
 
-  auto host_ip = cntx->conn()->RemoteEndpointAddress();
+  auto host_ip = cntx->Conn()->RemoteEndpointAddress();
 
   VLOG(1) << "Create flow " << source_id << " shard_id: " << shard_id;
 
-  cntx->conn()->SetName(absl::StrCat("migration_flow_", source_id));
+  cntx->Conn()->SetName(absl::StrCat("migration_flow_", source_id));
 
   auto migration = GetIncomingMigration(source_id);
   if (!migration) {
@@ -908,7 +908,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->SendOk();
 
-  migration->StartFlow(shard_id, cntx->conn()->socket());
+  migration->StartFlow(shard_id, cntx->Conn()->socket());
 }
 
 void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,

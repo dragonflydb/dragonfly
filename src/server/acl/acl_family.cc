@@ -68,7 +68,7 @@ void AclFamily::Acl(CmdArgList args, ConnectionContext* cntx) {
 void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(registry.size());
 
   for (const auto& [username, user] : registry) {
@@ -96,8 +96,8 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
   auto update_cb = [&]([[maybe_unused]] size_t id, util::Connection* conn) {
     DCHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
-    if (connection->protocol() == facade::Protocol::REDIS && !connection->IsHttp() &&
-        connection->cntx()) {
+    if (connection->Protocol() == facade::Protocol::REDIS && !connection->IsHttp() &&
+        connection->Cntx()) {
       connection->SendAclUpdateAsync(
           facade::Connection::AclUpdateMessage{user, update_commands, update_keys});
     }
@@ -143,7 +143,7 @@ void AclFamily::EvictOpenConnectionsOnAllProactors(
   auto close_cb = [&users]([[maybe_unused]] size_t id, util::Connection* conn) {
     CHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
-    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
+    auto ctx = static_cast<ConnectionContext*>(connection->Cntx());
     if (ctx && users.contains(ctx->authed_username)) {
       connection->ShutdownSelf();
     }
@@ -159,7 +159,7 @@ void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
   auto close_cb = [&registry]([[maybe_unused]] size_t id, util::Connection* conn) {
     CHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
-    auto ctx = static_cast<ConnectionContext*>(connection->cntx());
+    auto ctx = static_cast<ConnectionContext*>(connection->Cntx());
     if (ctx && ctx->authed_username != "default" && registry.contains(ctx->authed_username)) {
       connection->ShutdownSelf();
     }
@@ -195,7 +195,7 @@ void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void AclFamily::WhoAmI(CmdArgList args, ConnectionContext* cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendBulkString(absl::StrCat("User is ", cntx->authed_username));
 }
 
@@ -375,7 +375,7 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
     total_entries += log.size();
   }
 
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (total_entries == 0) {
     rb->SendEmptyArray();
     return;
@@ -437,7 +437,7 @@ void AclFamily::Log(CmdArgList args, ConnectionContext* cntx) {
 void AclFamily::Users(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(registry.size());
   for (const auto& [username, _] : registry) {
     rb->SendSimpleString(username);
@@ -463,12 +463,12 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
     std::vector<std::string_view> results;
     // TODO replace this with indexer
     auto cb = [cid_mask, &results](auto name, auto& cid) {
-      if (cid_mask & cid.acl_categories()) {
+      if (cid_mask & cid.AclCategories()) {
         results.push_back(name);
       }
     };
 
-    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
     cmd_registry_->Traverse(cb);
     rb->StartArray(results.size());
     for (const auto& command : results) {
@@ -485,7 +485,7 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(total_categories);
   for (auto& elem : reverse_cat_table_) {
     if (elem != "_RESERVED") {
@@ -499,7 +499,7 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
   const auto registry_with_lock = registry_->GetRegistryWithLock();
   const auto& registry = registry_with_lock.registry;
   if (!registry.contains(username)) {
-    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->SendNull();
     return;
   }
@@ -510,7 +510,7 @@ void AclFamily::GetUser(CmdArgList args, ConnectionContext* cntx) {
     pass.pop_back();
   }
 
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(8);
 
   rb->SendSimpleString("flags");
@@ -599,7 +599,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
   }
 
   auto msg = absl::StrCat("This user has no permissions to run the '", command, "' command");
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendBulkString(msg);
 }
 
@@ -1053,7 +1053,7 @@ void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
   CommandsRevIndexer(std::move(families));
   CategoryToCommandsIndexStore index;
   cmd_registry_->Traverse([&](std::string_view name, auto& cid) {
-    auto cat = cid.acl_categories();
+    auto cat = cid.AclCategories();
     for (size_t i = 0; i < 32; ++i) {
       if (cat & (1 << i)) {
         std::string_view cat_name = reverse_cat_table_[i];

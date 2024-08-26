@@ -130,7 +130,7 @@ void MemoryCmd::Run(CmdArgList args) {
         "        Returns whether <address> is known to be allocated internally by any of the "
         "backing heaps",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
     return rb->SendSimpleStrArr(help_arr);
   };
 
@@ -199,7 +199,7 @@ ConnectionMemoryUsage GetConnectionMemoryUsage(ServerFamily* server) {
       }
 
       auto* dfly_conn = static_cast<facade::Connection*>(conn);
-      auto* cntx = static_cast<ConnectionContext*>(dfly_conn->cntx());
+      auto* cntx = static_cast<ConnectionContext*>(dfly_conn->Cntx());
 
       auto usage = dfly_conn->GetMemoryUsage();
       if (cntx == nullptr || cntx->replication_flow == nullptr) {
@@ -264,7 +264,7 @@ void MemoryCmd::Stats() {
                            connection_memory.replication_connection_size,
                        &stats);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   rb->StartCollection(stats.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : stats) {
     rb->SendBulkString(k);
@@ -296,7 +296,7 @@ void MemoryCmd::MallocStats() {
   mi_stats_print_out(MiStatsCallback, &report);
   absl::StrAppend(&report, "___ End mimalloc stats ___\n\n");
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   return rb->SendVerbatimString(report);
 }
 
@@ -326,7 +326,7 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
 
   if (show_arenas) {
     mi_debug_show_arenas(true, true, true);
-    return cntx_->reply_builder()->SendOk();
+    return cntx_->ReplyBuilder()->SendOk();
   }
 
   if (backing && tid >= shard_set->pool()->size()) {
@@ -341,7 +341,7 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
   string mi_malloc_info =
       shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStatsCb(backing, tid); });
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   return rb->SendVerbatimString(mi_malloc_info);
 }
 
@@ -358,7 +358,7 @@ void MemoryCmd::Usage(std::string_view key) {
     }
   });
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   if (memory_usage < 0)
     return rb->SendNull();
   rb->SendLong(memory_usage);
@@ -425,7 +425,7 @@ void MemoryCmd::Track(CmdArgList args) {
 
   if (sub_cmd == "GET") {
     auto ranges = AllocationTracker::Get().GetRanges();
-    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx_->reply_builder());
+    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx_->ReplyBuilder());
     rb->StartArray(ranges.size());
     for (const auto& range : ranges) {
       rb->SendSimpleString(

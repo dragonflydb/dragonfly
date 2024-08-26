@@ -53,7 +53,7 @@ bool CommandId::IsTransactional() const {
 }
 
 bool CommandId::IsMultiTransactional() const {
-  return CO::IsTransKind(name()) || CO::IsEvalKind(name());
+  return CO::IsTransKind(Name()) || CO::IsEvalKind(Name());
 }
 
 uint64_t CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
@@ -73,15 +73,15 @@ uint64_t CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
 }
 
 optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
-  if ((arity() > 0 && tail_args.size() + 1 != size_t(arity())) ||
-      (arity() < 0 && tail_args.size() + 1 < size_t(-arity()))) {
-    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  if ((Arity() > 0 && tail_args.size() + 1 != size_t(Arity())) ||
+      (Arity() < 0 && tail_args.size() + 1 < size_t(-Arity()))) {
+    return facade::ErrorReply{facade::WrongNumArgsError(Name()), kSyntaxErrType};
   }
 
-  if ((opt_mask() & CO::INTERLEAVED_KEYS)) {
-    if ((name() == "JSON.MSET" && tail_args.size() % 3 != 0) ||
-        (name() == "MSET" && tail_args.size() % 2 != 0))
-      return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+  if ((OptMask() & CO::INTERLEAVED_KEYS)) {
+    if ((Name() == "JSON.MSET" && tail_args.size() % 3 != 0) ||
+        (Name() == "MSET" && tail_args.size() % 2 != 0))
+      return facade::ErrorReply{facade::WrongNumArgsError(Name()), kSyntaxErrType};
   }
 
   if (validator_)
@@ -114,9 +114,9 @@ void CommandRegistry::Init(unsigned int thread_count) {
 }
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
-  string k = string(cmd.name());
+  string k = string(cmd.Name());
 
-  absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.name(), " ");
+  absl::InlinedVector<std::string_view, 2> maybe_subcommand = StrSplit(cmd.Name(), " ");
   const bool is_sub_command = maybe_subcommand.size() == 2;
   auto it = cmd_rename_map_.find(maybe_subcommand.front());
   if (it != cmd_rename_map_.end()) {
@@ -131,7 +131,7 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);
-  if (!is_sub_command || absl::StartsWith(cmd.name(), "ACL")) {
+  if (!is_sub_command || absl::StartsWith(cmd.Name(), "ACL")) {
     cmd.SetBitIndex(1ULL << bit_index_);
     family_of_commands_.back().push_back(std::string(k));
     ++bit_index_;

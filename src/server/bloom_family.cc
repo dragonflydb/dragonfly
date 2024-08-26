@@ -159,7 +159,7 @@ void BloomFamily::MAdd(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(res.status());
   }
   const AddResult& add_res = *res;
-  RedisReplyBuilder* rb = (RedisReplyBuilder*)cntx->reply_builder();
+  RedisReplyBuilder* rb = (RedisReplyBuilder*)cntx->ReplyBuilder();
   rb->StartArray(add_res.size());
   for (const OpResult<bool>& val : add_res) {
     if (val) {
@@ -180,7 +180,7 @@ void BloomFamily::MExists(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult res = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
-  RedisReplyBuilder* rb = (RedisReplyBuilder*)cntx->reply_builder();
+  RedisReplyBuilder* rb = (RedisReplyBuilder*)cntx->ReplyBuilder();
   rb->StartArray(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
     cntx->SendLong(res ? res->at(i) : 0);

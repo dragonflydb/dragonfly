@@ -93,7 +93,7 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Invokes garbage collection on all unused interpreter instances.",
         "HELP",
         "   Prints this help."};
-    auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     return rb->SendSimpleStrArr(kHelp);
   }
 
@@ -131,7 +131,7 @@ void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
     }
   }
 
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(res.size());
   for (uint8_t v : res) {
     rb->SendLong(v);
@@ -146,7 +146,7 @@ void ScriptMgr::FlushCmd(CmdArgList args, ConnectionContext* cntx) {
 
 void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
   string_view body = ArgS(args, 1);
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (body.empty()) {
     char sha[41];
     Interpreter::FuncSha1(body, sha);
@@ -187,7 +187,7 @@ void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
 
 void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
   vector<pair<string, ScriptData>> scripts = GetAll();
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(scripts.size());
   for (const auto& [sha, data] : scripts) {
     rb->StartArray(2);
@@ -209,7 +209,7 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
     mu.unlock();
   });
 
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(result.size());
   for (const auto& k_v : result) {
     rb->StartArray(2);

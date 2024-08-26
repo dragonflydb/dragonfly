@@ -1061,7 +1061,7 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
 }
 
 void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   const size_t total = results.size();
   if (total == 0) {
     rb->SendNullArray();
@@ -1081,7 +1081,7 @@ void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx
 
 void BitFieldGeneric(CmdArgList args, bool read_only, ConnectionContext* cntx) {
   if (args.size() == 1) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->SendNullArray();
     return;
   }

@@ -129,7 +129,7 @@ cv_status Transaction::BatonBarrier::Wait(time_point tp) {
 }
 
 Transaction::Guard::Guard(Transaction* tx) : tx(tx) {
-  DCHECK(tx->cid_->opt_mask() & CO::GLOBAL_TRANS);
+  DCHECK(tx->cid_->OptMask() & CO::GLOBAL_TRANS);
   tx->Execute([](auto*, auto*) { return OpStatus::OK; }, false);
 }
 
@@ -140,7 +140,7 @@ Transaction::Guard::~Guard() {
 
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   InitTxTime();
-  string_view cmd_name(cid_->name());
+  string_view cmd_name(cid_->Name());
   if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
     multi_.reset(new MultiData);
     multi_->mode = NOT_DETERMINED;
@@ -281,7 +281,7 @@ void Transaction::StoreKeysInArgs(const KeyIndex& key_index) {
 
 void Transaction::InitByKeys(const KeyIndex& key_index) {
   if (key_index.start == full_args_.size()) {  // eval with 0 keys.
-    CHECK(absl::StartsWith(cid_->name(), "EVAL")) << cid_->name();
+    CHECK(absl::StartsWith(cid_->Name(), "EVAL")) << cid_->Name();
     return;
   }
 
@@ -358,13 +358,13 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
 OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) {
   InitBase(ns, index, args);
 
-  if ((cid_->opt_mask() & CO::GLOBAL_TRANS) > 0) {
+  if ((cid_->OptMask() & CO::GLOBAL_TRANS) > 0) {
     InitGlobal();
     return OpStatus::OK;
   }
 
-  if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
-    if ((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
+  if ((cid_->OptMask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
+    if ((cid_->OptMask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
       EnableAllShards();
     else
       EnableShard(0);
@@ -507,7 +507,7 @@ void Transaction::MultiUpdateWithParent(const Transaction* parent) {
 void Transaction::MultiBecomeSquasher() {
   DCHECK(multi_->mode == GLOBAL || multi_->mode == LOCK_AHEAD);
   DCHECK_GT(GetUniqueShardCnt(), 0u);                    // initialized and determined active shards
-  DCHECK(cid_->IsMultiTransactional()) << cid_->name();  // proper base command set
+  DCHECK(cid_->IsMultiTransactional()) << cid_->Name();  // proper base command set
   multi_->role = SQUASHER;
 }
 
@@ -685,9 +685,9 @@ void Transaction::ScheduleInternal() {
   // - have a single shard, and thus never have to cancel scheduling due to reordering
   // - run as an idempotent command, meaning we can safely repeat the operation if scheduling fails
   bool can_run_immediately = !IsGlobal() && (coordinator_state_ & COORD_CONCLUDING) &&
-                             (unique_shard_cnt_ == 1 || (cid_->opt_mask() & CO::IDEMPOTENT));
+                             (unique_shard_cnt_ == 1 || (cid_->OptMask() & CO::IDEMPOTENT));
 
-  DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards "
+  DVLOG(1) << "ScheduleInternal " << cid_->Name() << " on " << unique_shard_cnt_ << " shards "
            << " immediate run: " << can_run_immediately;
 
   auto is_active = [this](uint32_t i) { return IsActive(i); };
@@ -907,7 +907,7 @@ const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps(
 
 string Transaction::DEBUG_PrintFailState(ShardId sid) const {
   auto res = StrCat(
-      "usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
+      "usc: ", unique_shard_cnt_, ", name:", GetCId()->Name(),
       ", usecnt:", use_count_.load(memory_order_relaxed), ", runcnt: ", run_barrier_.DEBUG_Count(),
       ", coordstate: ", coordinator_state_, ", coord native thread: ", stats_.coordinator_index,
       ", schedule attempts: ", stats_.schedule_attempts, ", report from sid: ", sid, "\n");
@@ -953,7 +953,7 @@ void Transaction::ExpireBlocking(WaitKeysProvider wcb) {
 }
 
 string_view Transaction::Name() const {
-  return cid_ ? cid_->name() : "null-command";
+  return cid_ ? cid_->Name() : "null-command";
 }
 
 ShardId Transaction::GetUniqueShard() const {
@@ -1345,7 +1345,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
     return;
 
   // Only write commands and/or no-key-transactional commands are logged
-  if (cid_->IsWriteOnly() == 0 && (cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) == 0)
+  if (cid_->IsWriteOnly() == 0 && (cid_->OptMask() & CO::NO_KEY_TRANSACTIONAL) == 0)
     return;
 
   auto journal = shard->journal();
@@ -1364,13 +1364,13 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   // We do not allow preemption in callbacks and therefor the call to RecordJournal from
   // from callbacks does not allow await.
   // To make sure we flush the changes to sync we call TriggerJournalWriteToSink here.
-  if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_) {
+  if ((cid_->OptMask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_) {
     TriggerJournalWriteToSink();
     return;
   }
 
   journal::Entry::Payload entry_payload;
-  string_view cmd{cid_->name()};
+  string_view cmd{cid_->Name()};
   if (unique_shard_cnt_ == 1 || args_slices_.empty()) {
     entry_payload = journal::Entry::Payload(cmd, full_args_);
   } else {
@@ -1391,7 +1391,7 @@ void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&
 }
 
 void Transaction::ReviveAutoJournal() {
-  DCHECK(cid_->opt_mask() & CO::NO_AUTOJOURNAL);
+  DCHECK(cid_->OptMask() & CO::NO_AUTOJOURNAL);
   DCHECK_EQ(run_barrier_.DEBUG_Count(), 0u);  // Can't be changed while dispatching
   re_enabled_auto_journal_ = true;
 }
@@ -1399,7 +1399,7 @@ void Transaction::ReviveAutoJournal() {
 void Transaction::CancelBlocking(std::function<OpStatus(ArgSlice)> status_cb) {
   // We're on the owning thread of this transaction, so we can safely access it's data below.
   // First, check if it makes sense to proceed.
-  if (blocking_barrier_.IsClaimed() || cid_ == nullptr || (cid_->opt_mask() & CO::BLOCKING) == 0)
+  if (blocking_barrier_.IsClaimed() || cid_ == nullptr || (cid_->OptMask() & CO::BLOCKING) == 0)
     return;
 
   OpStatus status = OpStatus::CANCELLED;
@@ -1437,7 +1437,7 @@ bool Transaction::CanRunInlined() const {
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
-  if (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
+  if (cid->OptMask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
     return KeyIndex{};
 
   int num_custom_keys = -1;
@@ -1445,14 +1445,14 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
   unsigned start = 0, end = 0, step = 0;
   std::optional<unsigned> bonus = std::nullopt;
 
-  if (cid->opt_mask() & CO::VARIADIC_KEYS) {  // number of keys is not trivially deducable
+  if (cid->OptMask() & CO::VARIADIC_KEYS) {  // number of keys is not trivially deducable
     // ZUNION/INTER <num_keys> <key1> [<key2> ...]
     // EVAL <script> <num_keys>
     // XREAD ... STREAMS ...
     if (args.size() < 2)
       return OpStatus::SYNTAX_ERR;
 
-    string_view name{cid->name()};
+    string_view name{cid->Name()};
 
     // Determine based on STREAMS argument position
     if (name == "XREAD" || name == "XREADGROUP") {
@@ -1492,17 +1492,17 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       return OpStatus::SYNTAX_ERR;
   }
 
-  if (cid->first_key_pos() > 0) {
-    start = cid->first_key_pos() - 1;
-    int last = cid->last_key_pos();
+  if (cid->FirstKeyPos() > 0) {
+    start = cid->FirstKeyPos() - 1;
+    int last = cid->LastKeyPos();
 
     if (num_custom_keys >= 0) {
       end = start + num_custom_keys;
     } else {
       end = last > 0 ? last : (int(args.size()) + last + 1);
     }
-    if (cid->opt_mask() & CO::INTERLEAVED_KEYS) {
-      if (cid->name() == "JSON.MSET") {
+    if (cid->OptMask() & CO::INTERLEAVED_KEYS) {
+      if (cid->Name() == "JSON.MSET") {
         step = 3;
       } else {
         step = 2;
@@ -1511,8 +1511,8 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
       step = 1;
     }
 
-    if (cid->opt_mask() & CO::STORE_LAST_KEY) {
-      string_view name{cid->name()};
+    if (cid->OptMask() & CO::STORE_LAST_KEY) {
+      string_view name{cid->Name()};
 
       if (name == "GEORADIUSBYMEMBER" && args.size() >= 5) {
         // key member radius .. STORE destkey
@@ -1526,7 +1526,7 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
     return KeyIndex{start, end, step, bonus};
   }
 
-  LOG(FATAL) << "TBD: Not supported " << cid->name();
+  LOG(FATAL) << "TBD: Not supported " << cid->Name();
   return {};
 }
 

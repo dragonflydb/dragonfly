@@ -123,10 +123,10 @@ void ConnectionContext::ChangeMonitor(bool start) {
   // then notify all other threads that there is a change in the number of monitors
   auto& my_monitors = ServerState::tlocal()->Monitors();
   if (start) {
-    my_monitors.Add(conn());
+    my_monitors.Add(Conn());
   } else {
-    VLOG(1) << "connection " << conn()->GetClientId() << " no longer needs to be monitored";
-    my_monitors.Remove(conn());
+    VLOG(1) << "connection " << Conn()->GetClientId() << " no longer needs to be monitored";
+    my_monitors.Remove(Conn());
   }
   // Tell other threads that about the change in the number of connection that we monitor
   shard_set->pool()->AwaitBrief(
@@ -188,7 +188,7 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
   if (to_reply) {
     for (size_t i = 0; i < result.size(); ++i) {
       const char* action[2] = {"unsubscribe", "subscribe"};
-      auto rb = static_cast<RedisReplyBuilder*>(reply_builder());
+      auto rb = static_cast<RedisReplyBuilder*>(ReplyBuilder());
       rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
       rb->SendBulkString(action[to_add]);
       rb->SendBulkString(ArgS(args, i));
@@ -236,7 +236,7 @@ void ConnectionContext::PUnsubscribeAll(bool to_reply) {
 void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
                                                         std::optional<string_view> topic,
                                                         unsigned count) {
-  auto rb = static_cast<RedisReplyBuilder*>(reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(ReplyBuilder());
   rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
   rb->SendBulkString(action);
   if (topic.has_value())
@@ -267,14 +267,14 @@ size_t ConnectionContext::UsedMemory() const {
 }
 
 void ConnectionContext::SendError(std::string_view str, std::string_view type) {
-  string_view name = cid ? cid->name() : string_view{};
+  string_view name = cid ? cid->Name() : string_view{};
 
   VLOG(1) << "Sending error " << str << " " << type << " during " << name;
   facade::ConnectionContext::SendError(str, type);
 }
 
 void ConnectionContext::SendError(facade::ErrorReply error) {
-  string_view name = cid ? cid->name() : string_view{};
+  string_view name = cid ? cid->Name() : string_view{};
 
   VLOG(1) << "Sending error " << error.ToSv() << " during " << name;
   facade::ConnectionContext::SendError(std::move(error));
@@ -282,7 +282,7 @@ void ConnectionContext::SendError(facade::ErrorReply error) {
 
 void ConnectionContext::SendError(facade::OpStatus status) {
   if (status != facade::OpStatus::OK) {
-    string_view name = cid ? cid->name() : string_view{};
+    string_view name = cid ? cid->Name() : string_view{};
     VLOG(1) << "Sending error " << status << " during " << name;
   }
 

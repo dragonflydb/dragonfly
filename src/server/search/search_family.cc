@@ -364,7 +364,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
 }
 
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendBulkString(doc.key);
   rb->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : doc.values) {
@@ -382,12 +382,12 @@ void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> resul
   size_t result_count =
       min(total_count - min(total_count, params.limit_offset), params.limit_total);
 
-  facade::SinkReplyBuilder::ReplyAggregator agg{cntx->reply_builder()};
+  facade::SinkReplyBuilder::ReplyAggregator agg{cntx->ReplyBuilder()};
 
   bool ids_only = params.IdsOnly();
   size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(reply_size);
   rb->SendLong(total_count);
 
@@ -442,8 +442,8 @@ void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
   if (!params.ShouldReturnField(agg.alias))
     agg.alias = "";
 
-  facade::SinkReplyBuilder::ReplyAggregator agg_reply{cntx->reply_builder()};
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  facade::SinkReplyBuilder::ReplyAggregator agg_reply{cntx->ReplyBuilder()};
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(reply_size);
   rb->SendLong(min(total, agg_limit));
   for (auto* doc : absl::MakeSpan(docs).subspan(start_idx, result_count)) {
@@ -630,7 +630,7 @@ void SearchFamily::FtInfo(CmdArgList args, ConnectionContext* cntx) {
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartCollection(4, RedisReplyBuilder::MAP);
 
   rb->SendSimpleString("index_name");
@@ -678,7 +678,7 @@ void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
       names = es->search_indices()->GetIndexNames();
     return OpStatus::OK;
   });
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendStringArr(names);
 }
 
@@ -760,7 +760,7 @@ void SearchFamily::FtProfile(CmdArgList args, ConnectionContext* cntx) {
   });
 
   auto took = absl::Now() - start;
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(results.size() + 1);
 
   // General stats
@@ -833,7 +833,7 @@ void SearchFamily::FtTagVals(CmdArgList args, ConnectionContext* cntx) {
   shard_results.clear();
   vector<string> vec(result_set.begin(), result_set.end());
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendStringArr(vec, RedisReplyBuilder::SET);
 }
 
@@ -868,7 +868,7 @@ void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
   if (!agg_results.has_value())
     return cntx->SendError(agg_results.error());
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   Overloaded replier{
       [rb](monostate) { rb->SendNull(); },
       [rb](double d) { rb->SendDouble(d); },

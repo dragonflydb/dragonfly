@@ -408,7 +408,7 @@ void DebugCmd::Run(CmdArgList args) {
         "HELP",
         "    Prints this help.",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
     return rb->SendSimpleStrArr(help_arr);
   }
 
@@ -515,7 +515,7 @@ void DebugCmd::Replica(CmdArgList args) {
   ToUpper(&args[0]);
   string_view opt = ArgS(args, 0);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   if (opt == "PAUSE" || opt == "RESUME") {
     sf_.PauseReplication(opt == "PAUSE");
     return rb->SendOk();
@@ -734,7 +734,7 @@ void DebugCmd::Exec() {
   for (const auto& k_v : freq_cnt) {
     StrAppend(&res, k_v.second, ":", k_v.first, "\n");
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   rb->SendVerbatimString(res);
 }
 
@@ -822,7 +822,7 @@ void DebugCmd::Watched() {
     }
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
@@ -851,7 +851,7 @@ void DebugCmd::TxAnalysis() {
     StrAppend(&result, "  max contention score: ", info.max_contention_score,
               ",lock_name:", info.max_contention_lock, "\n");
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   rb->SendVerbatimString(result);
 }
 
@@ -879,7 +879,7 @@ void DebugCmd::ObjHist() {
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   rb->SendVerbatimString(result);
 }
 
@@ -945,7 +945,7 @@ void DebugCmd::Shards() {
 
 #undef ADD_STAT
 #undef MAXMIN_STAT
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   rb->SendVerbatimString(out);
 }
 

@@ -25,7 +25,7 @@ void TEST_InvalidateLockTagOptions();
 
 class TestConnection : public facade::Connection {
  public:
-  TestConnection(Protocol protocol, io::StringSink* sink);
+  TestConnection(enum Protocol protocol, io::StringSink* sink);
   std::string RemoteEndpointStr() const override;
 
   void SendPubMessageAsync(PubMessage pmsg) final;

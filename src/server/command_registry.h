@@ -123,7 +123,7 @@ class CommandId : public facade::CommandId {
     return std::move(*this);
   }
 
-  bool is_multi_key() const {
+  bool IsMultiKey() const {
     return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
   }
 
@@ -179,7 +179,7 @@ class CommandRegistry {
       auto src = k_v.second.GetStats(thread_index);
       if (src.first == 0)
         continue;
-      cb(k_v.second.name(), src);
+      cb(k_v.second.Name(), src);
     }
   }
 

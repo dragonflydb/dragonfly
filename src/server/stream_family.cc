@@ -1914,7 +1914,7 @@ void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
       "SETID <key> <groupname> <id|$>",
       "    Set the current group ID.",
   };
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   return rb->SendSimpleStrArr(help_arr);
 }
 
@@ -2161,7 +2161,7 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(cb);
   if (add_result) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     return rb->SendBulkString(StreamIdRepr(*add_result));
   }
 
@@ -2272,7 +2272,7 @@ void StreamFamily::XClaim(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  StreamReplies{cntx->reply_builder()}.SendClaimInfo(result.value());
+  StreamReplies{cntx->ReplyBuilder()}.SendClaimInfo(result.value());
 }
 
 void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
@@ -2341,7 +2341,7 @@ void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
   if (sub_cmd == "HELP") {
@@ -2437,7 +2437,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
                          full, count);
       };
 
-      auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+      auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
       OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
       if (sinfo) {
         if (full) {
@@ -2681,7 +2681,7 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
   }
   PendingResult result = op_result.value();
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (std::holds_alternative<PendingReducedResult>(result)) {
     const auto& res = std::get<PendingReducedResult>(result);
     if (!res.count) {
@@ -2883,7 +2883,7 @@ OpResult<absl::flat_hash_map<string, streamID>> FetchLastStreamIDs(Transaction* 
 void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
   // If BLOCK is not set just return an empty array as there are no resolvable
   // entries.
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (opts->timeout == -1 || cntx->transaction->IsMulti()) {
     // Close the transaction and release locks.
     cntx->transaction->Conclude();
@@ -2952,9 +2952,9 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(range_cb), true);
 
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
+    SinkReplyBuilder::ReplyAggregator agg(cntx->ReplyBuilder());
     rb->StartArray(1);
-    StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, *result);
+    StreamReplies{cntx->ReplyBuilder()}.SendStreamRecords(key, *result);
   } else {
     return rb->SendNullArray();
   }
@@ -2963,7 +2963,7 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
 // Determine if entries are available and read them in a single hop. Returns nullopt in case of an
 // error and replies.
 std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, ReadOpts* opts) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   auto* tx = cntx->transaction;
 
   vector<RecordVec> prefetched_results;
@@ -3014,7 +3014,7 @@ std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, R
 
 // Read entries from given streams
 void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   auto* tx = cntx->transaction;
 
   vector<RecordVec> prefetched_results;
@@ -3092,13 +3092,13 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
   }
 
   // Send all results back
-  SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
+  SinkReplyBuilder::ReplyAggregator agg(cntx->ReplyBuilder());
   rb->StartArray(resolved_streams);
   for (size_t i = 0; i < results.size(); i++) {
     if (results[i].empty())
       continue;
     string_view key = ArgS(args, i + opts->streams_arg);
-    StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, results[i]);
+    StreamReplies{cntx->ReplyBuilder()}.SendStreamRecords(key, results[i]);
   }
 }
 
@@ -3209,10 +3209,10 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
   };
 
   OpResult<RecordVec> result = cntx->transaction->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-    StreamReplies{cntx->reply_builder()}.SendRecords(*result);
+    SinkReplyBuilder::ReplyAggregator agg(cntx->ReplyBuilder());
+    StreamReplies{cntx->ReplyBuilder()}.SendRecords(*result);
     return;
   }
 
@@ -3310,7 +3310,7 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
   }
 
   ClaimInfo cresult = result.value();
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(3);
   rb->SendBulkString(StreamIdRepr(cresult.end_id));
   StreamReplies{rb}.SendClaimInfo(cresult);

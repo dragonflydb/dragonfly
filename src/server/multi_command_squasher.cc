@@ -69,11 +69,11 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cmd) {
   DCHECK(cmd->Cid());
 
-  if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->opt_mask() & CO::BLOCKING) ||
-      (cmd->Cid()->opt_mask() & CO::GLOBAL_TRANS))
+  if (!cmd->Cid()->IsTransactional() || (cmd->Cid()->OptMask() & CO::BLOCKING) ||
+      (cmd->Cid()->OptMask() & CO::GLOBAL_TRANS))
     return SquashResult::NOT_SQUASHED;
 
-  if (cmd->Cid()->name() == "CLIENT" || cntx_->conn_state.tracking_info_.IsTrackingOn()) {
+  if (cmd->Cid()->Name() == "CLIENT" || cntx_->conn_state.tracking_info_.IsTrackingOn()) {
     return SquashResult::NOT_SQUASHED;
   }
 
@@ -143,8 +143,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx_, local_tx, &crb};
-  if (cntx_->conn()) {
-    local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
+  if (cntx_->Conn()) {
+    local_cntx.skip_acl_validation = cntx_->Conn()->IsPrivileged();
   }
   absl::InlinedVector<MutableSlice, 4> arg_vec;
 
@@ -234,7 +234,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
   uint64_t after_hop = proactor->GetMonotonicTimeNs();
   bool aborted = false;
 
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx_->ReplyBuilder());
   for (auto idx : order_) {
     auto& replies = sharded_[idx].replies;
     CHECK(!replies.empty());

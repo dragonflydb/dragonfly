@@ -34,27 +34,27 @@ class CommandId {
   CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key, int8_t last_key,
             uint32_t acl_categories);
 
-  std::string_view name() const {
+  std::string_view Name() const {
     return name_;
   }
 
-  int arity() const {
+  int Arity() const {
     return arity_;
   }
 
-  uint32_t opt_mask() const {
+  uint32_t OptMask() const {
     return opt_mask_;
   }
 
-  int8_t first_key_pos() const {
+  int8_t FirstKeyPos() const {
     return first_key_;
   }
 
-  int8_t last_key_pos() const {
+  int8_t LastKeyPos() const {
     return last_key_;
   }
 
-  uint32_t acl_categories() const {
+  uint32_t AclCategories() const {
     return acl_categories_;
   }
 

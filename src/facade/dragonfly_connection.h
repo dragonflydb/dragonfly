@@ -57,7 +57,7 @@ class Connection : public util::Connection {
   struct QueueBackpressure;
 
  public:
-  Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
+  Connection(enum Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
              ServiceInterface* service);
   ~Connection();
 
@@ -268,7 +268,7 @@ class Connection : public util::Connection {
 
   bool IsMain() const;
 
-  Protocol protocol() const {
+  enum facade::Protocol Protocol() const {
     return protocol_;
   }
 
@@ -284,7 +284,7 @@ class Connection : public util::Connection {
   };
   MemoryUsage GetMemoryUsage() const;
 
-  ConnectionContext* cntx();
+  ConnectionContext* Cntx();
 
   // Requests that at some point, this connection will be migrated to `dest` thread.
   // Connections will migrate at most once, and only when the flag --migrate_connections is true.
@@ -388,7 +388,7 @@ class Connection : public util::Connection {
   std::unique_ptr<MemcacheParser> memcache_parser_;
 
   uint32_t id_;
-  Protocol protocol_;
+  enum Protocol protocol_;
   ConnectionStats* stats_ = nullptr;
 
   util::HttpListenerBase* http_listener_;

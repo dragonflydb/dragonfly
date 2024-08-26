@@ -177,7 +177,7 @@ void ChannelStore::Fill(const SubscribeMap& src, const string& pattern, vector<S
     // `cntx` is expected to be valid as it unregisters itself from the channel_store before
     // closing.
     CHECK(cntx->conn_state.subscribe_info);
-    Subscriber sub{cntx->conn()->Borrow(), pattern};
+    Subscriber sub{cntx->Conn()->Borrow(), pattern};
     out->push_back(std::move(sub));
   }
 }

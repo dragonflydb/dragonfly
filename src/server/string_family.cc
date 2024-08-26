@@ -740,7 +740,7 @@ OpStatus SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams, s
                     string_view value) {
   DCHECK(cntx->transaction);
 
-  bool manual_journal = cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  bool manual_journal = cntx->cid->OptMask() & CO::NO_AUTOJOURNAL;
   return cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
     return SetCmd(t->GetOpArgs(shard), manual_journal).Set(sparams, key, value);
   });
@@ -754,7 +754,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   SetCmd::SetParams sparams;
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
 
-  facade::SinkReplyBuilder* builder = cntx->reply_builder();
+  facade::SinkReplyBuilder* builder = cntx->ReplyBuilder();
 
   while (parser.HasNext()) {
     parser.ToUpper();
@@ -824,7 +824,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return GetReplies{cntx->reply_builder()}.Send(std::move(prev));
+    return GetReplies{cntx->ReplyBuilder()}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OK) {
@@ -862,7 +862,7 @@ void StringFamily::SetNx(CmdArgList args, ConnectionContext* cntx) {
   sparams.memcache_flags = cntx->conn_state.memcache_flag;
   const auto results{SetGeneric(cntx, sparams, key, value)};
 
-  SinkReplyBuilder* builder = cntx->reply_builder();
+  SinkReplyBuilder* builder = cntx->ReplyBuilder();
   if (results == OpStatus::OK) {
     return builder->SendLong(1);  // this means that we successfully set the value
   }
@@ -882,7 +882,7 @@ void StringFamily::Get(CmdArgList args, ConnectionContext* cntx) {
     return StringValue::Read(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->ReplyBuilder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
@@ -898,7 +898,7 @@ void StringFamily::GetDel(CmdArgList args, ConnectionContext* cntx) {
     return value;
   };
 
-  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->ReplyBuilder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
@@ -913,7 +913,7 @@ void StringFamily::GetSet(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(status);
   }
 
-  GetReplies{cntx->reply_builder()}.Send(std::move(prev));
+  GetReplies{cntx->ReplyBuilder()}.Send(std::move(prev));
 }
 
 void StringFamily::Append(CmdArgList args, ConnectionContext* cntx) {
@@ -929,7 +929,7 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
   string_view value = ArgS(args, 1);
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
-  if (cntx->protocol() == Protocol::REDIS) {
+  if (cntx->Protocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
@@ -940,14 +940,14 @@ void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContex
     cntx->SendLong(GetResult(std::move(res.value())));
   } else {
     // Memcached skips if key is missing
-    DCHECK(cntx->protocol() == Protocol::MEMCACHE);
+    DCHECK(cntx->Protocol() == Protocol::MEMCACHE);
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
     };
 
     OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-    SinkReplyBuilder* builder = cntx->reply_builder();
+    SinkReplyBuilder* builder = cntx->ReplyBuilder();
 
     if (result.value_or(false)) {
       return builder->SendStored();
@@ -1018,7 +1018,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
     return value;
   };
 
-  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->ReplyBuilder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::Incr(CmdArgList args, ConnectionContext* cntx) {
@@ -1051,7 +1051,7 @@ void StringFamily::IncrByFloat(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<double> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* builder = (RedisReplyBuilder*)cntx->reply_builder();
+  auto* builder = (RedisReplyBuilder*)cntx->ReplyBuilder();
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   if (!result) {
@@ -1082,7 +1082,7 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext* cntx) {
-  bool skip_on_missing = cntx->protocol() == Protocol::MEMCACHE;
+  bool skip_on_missing = cntx->Protocol() == Protocol::MEMCACHE;
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
@@ -1090,7 +1090,7 @@ void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext
   };
 
   OpResult<int64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* builder = cntx->reply_builder();
+  auto* builder = cntx->ReplyBuilder();
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
 
@@ -1125,7 +1125,7 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
   }
 
   if (unit_vals < 1) {
-    return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
+    return cntx->SendError(InvalidExpireTime(cntx->cid->Name()));
   }
 
   DbSlice::ExpireParams expiry{
@@ -1153,7 +1153,7 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   uint8_t fetch_mask = 0;
-  if (cntx->protocol() == Protocol::MEMCACHE) {
+  if (cntx->Protocol() == Protocol::MEMCACHE) {
     fetch_mask |= FETCH_MCFLAG;
     if (dfly_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
       fetch_mask |= FETCH_MCVER;
@@ -1193,13 +1193,13 @@ void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
       uint32_t indx = it.index();
 
       res.resp_arr[indx] = std::move(src.resp_arr[src_indx]);
-      if (cntx->protocol() == Protocol::MEMCACHE) {
+      if (cntx->Protocol() == Protocol::MEMCACHE) {
         res.resp_arr[indx]->key = *it;
       }
     }
   }
 
-  return cntx->reply_builder()->SendMGetResponse(std::move(res));
+  return cntx->ReplyBuilder()->SendMGetResponse(std::move(res));
 }
 
 void StringFamily::MSet(CmdArgList args, ConnectionContext* cntx) {
@@ -1273,7 +1273,7 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->ReplyBuilder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
@@ -1290,7 +1290,7 @@ void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cntx->reply_builder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
+  GetReplies{cntx->ReplyBuilder()}.Send(cntx->transaction->ScheduleSingleHopT(cb));
 }
 
 void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
@@ -1316,7 +1316,7 @@ void StringFamily::SetRange(CmdArgList args, ConnectionContext* cntx) {
   };
   auto res = cntx->transaction->ScheduleSingleHopT(cb);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (res.ok())
     rb->SendLong(GetResult(std::move(*res)));
   else
@@ -1392,7 +1392,7 @@ void StringFamily::ClThrottle(CmdArgList args, ConnectionContext* cntx) {
   OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->StartArray(result->size());
     auto& array = result.value();
 

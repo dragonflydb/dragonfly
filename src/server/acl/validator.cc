@@ -28,7 +28,7 @@ namespace dfly::acl {
 
   if (!is_authed) {
     auto& log = ServerState::tlocal()->acl_log;
-    log.Add(cntx, std::string(id.name()), reason);
+    log.Add(cntx, std::string(id.Name()), reason);
   }
 
   return is_authed;
@@ -75,7 +75,7 @@ namespace dfly::acl {
   };
 
   bool keys_allowed = true;
-  if (!keys.all_keys && id.first_key_pos() != 0 && (is_read_command || is_write_command)) {
+  if (!keys.all_keys && id.FirstKeyPos() != 0 && (is_read_command || is_write_command)) {
     auto keys_index = DetermineKeys(&id, tail_args);
     DCHECK(keys_index);
 

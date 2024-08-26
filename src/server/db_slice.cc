@@ -1465,7 +1465,7 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
         continue;
       }
       auto* conn = client.Get();
-      auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
+      auto* cntx = static_cast<ConnectionContext*>(conn->Cntx());
       if (cntx && cntx->conn_state.tracking_info_.IsTrackingOn()) {
         conn->SendInvalidationMessageAsync({key});
       }

@@ -649,7 +649,7 @@ auto ExecuteToggle(string_view key, const WrappedJsonPath& json_path, Connection
   };
 
   auto result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1317,7 +1317,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
   OpResult<bool> result = trans->ScheduleSingleHopT(std::move(cb));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (result) {
     if (*result) {
       rb->SendOk();
@@ -1385,7 +1385,7 @@ void JsonFamily::Resp(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1396,7 +1396,7 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
   // The 'MEMORY' sub-command is not supported yet, calling to operation function should be added
   // here.
   if (absl::EqualsIgnoreCase(command, "help")) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->StartArray(2);
     rb->SendBulkString(
         "JSON.DEBUG FIELDS <key> <path> - report number of fields in the JSON element.");
@@ -1420,7 +1420,7 @@ void JsonFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1460,7 +1460,7 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(results, rb);
 }
 
@@ -1505,7 +1505,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1539,7 +1539,7 @@ void JsonFamily::ArrInsert(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1568,7 +1568,7 @@ void JsonFamily::ArrAppend(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1603,7 +1603,7 @@ void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1621,7 +1621,7 @@ void JsonFamily::ArrPop(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1638,7 +1638,7 @@ void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<long> result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1655,7 +1655,7 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1672,7 +1672,7 @@ void JsonFamily::ObjKeys(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1689,7 +1689,7 @@ void JsonFamily::Del(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<long> result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1711,7 +1711,7 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1733,7 +1733,7 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1764,7 +1764,7 @@ void JsonFamily::Type(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1781,7 +1781,7 @@ void JsonFamily::ArrLen(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1798,7 +1798,7 @@ void JsonFamily::ObjLen(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1815,7 +1815,7 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   reply_generic::Send(result, rb);
 }
 
@@ -1860,7 +1860,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (result) {
     rb->SendBulkString(*result);
   } else {

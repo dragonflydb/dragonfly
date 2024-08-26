@@ -343,7 +343,7 @@ void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Serv
 
   requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
 
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(requested_slow_log_length);
   for (size_t i = 0; i < requested_slow_log_length; ++i) {
     const auto& entry = merged_slow_log[i].first;
@@ -383,7 +383,7 @@ void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Serv
 
 void ClientSetName(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 1) {
-    cntx->conn()->SetName(string{ArgS(args, 0)});
+    cntx->Conn()->SetName(string{ArgS(args, 0)});
     return cntx->SendOk();
   } else {
     return cntx->SendError(facade::kSyntaxErr);
@@ -394,8 +394,8 @@ void ClientGetName(CmdArgList args, ConnectionContext* cntx) {
   if (!args.empty()) {
     return cntx->SendError(facade::kSyntaxErr);
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (auto name = cntx->conn()->GetName(); !name.empty()) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
+  if (auto name = cntx->Conn()->GetName(); !name.empty()) {
     return rb->SendBulkString(name);
   } else {
     return rb->SendNull();
@@ -425,7 +425,7 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, Connec
 
   string result = absl::StrJoin(client_info, "\n");
   result.append("\n");
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   return rb->SendVerbatimString(result);
 }
 
@@ -448,7 +448,7 @@ void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, Connec
   };
 
   if (auto pause_fb_opt =
-          Pause(listeners, cntx->ns, cntx->conn(), pause_state, std::move(is_pause_in_progress));
+          Pause(listeners, cntx->ns, cntx->Conn(), pause_state, std::move(is_pause_in_progress));
       pause_fb_opt) {
     pause_fb_opt->Detach();
     cntx->SendOk();
@@ -458,7 +458,7 @@ void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, Connec
 }
 
 void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (!rb->IsResp3())
     return cntx->SendError(
         "Client tracking is currently not supported for RESP2. Please use RESP3.");
@@ -509,7 +509,7 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (!rb->IsResp3())
     return cntx->SendError(
         "Client caching is currently not supported for RESP2. Please use RESP3.");
@@ -576,7 +576,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, Connec
     return cntx->SendError(kSyntaxErr);
   }
 
-  const bool is_admin_request = cntx->conn()->IsPrivileged();
+  const bool is_admin_request = cntx->Conn()->IsPrivileged();
 
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
@@ -1516,7 +1516,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
 
   absl::StrAppend(&info, "END\r\n");
 
-  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cntx->ReplyBuilder());
   builder->SendRaw(info);
 
 #undef ADD_LINE
@@ -1633,7 +1633,7 @@ void ServerFamily::DbSize(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> status_cb) {
   auto cb = [status_cb](unsigned thread_index, util::Connection* conn) {
-    if (auto fcntx = static_cast<facade::Connection*>(conn)->cntx(); fcntx) {
+    if (auto fcntx = static_cast<facade::Connection*>(conn)->Cntx(); fcntx) {
       auto* cntx = static_cast<ConnectionContext*>(fcntx);
       if (cntx->transaction) {
         cntx->transaction->CancelBlocking(status_cb);
@@ -1663,13 +1663,13 @@ void ServerFamily::SendInvalidationMessages() const {
   // send invalidation message (caused by flushdb) to all the clients which
   // turned on client tracking
   auto cb = [](unsigned thread_index, util::Connection* conn) {
-    facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->cntx();
+    facade::ConnectionContext* fc = static_cast<facade::Connection*>(conn)->Cntx();
     if (fc) {
       ConnectionContext* cntx = static_cast<ConnectionContext*>(fc);
       if (cntx->conn_state.tracking_info_.IsTrackingOn()) {
         facade::Connection::InvalidationMessage x;
         x.invalidate_due_to_flush = true;
-        cntx->conn()->SendInvalidationMessageAsync(x);
+        cntx->Conn()->SendInvalidationMessageAsync(x);
       }
     }
   };
@@ -1682,7 +1682,7 @@ void ServerFamily::FlushDb(CmdArgList args, ConnectionContext* cntx) {
   DCHECK(cntx->transaction);
   Drakarys(cntx->transaction, cntx->transaction->GetDbIndex());
   SendInvalidationMessages();
-  cntx->reply_builder()->SendOk();
+  cntx->ReplyBuilder()->SendOk();
 }
 
 void ServerFamily::FlushAll(CmdArgList args, ConnectionContext* cntx) {
@@ -1719,7 +1719,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
   }
 
   // non admin port auth
-  if (!cntx->conn()->IsPrivileged()) {
+  if (!cntx->Conn()->IsPrivileged()) {
     const bool one_arg = args.size() == 1;
     std::string_view username = one_arg ? "default" : facade::ToSV(args[0]);
     const size_t index = one_arg ? 0 : 1;
@@ -1794,7 +1794,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
         "    Prints this help.",
     };
 
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     return rb->SendSimpleStrArr(help_arr);
   }
 
@@ -1848,7 +1848,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
         }
       }
     }
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     return rb->SendStringArr(res, RedisReplyBuilder::MAP);
   }
 
@@ -2466,7 +2466,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", cluster::IsClusterEnabledOrEmulated());
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendVerbatimString(info);
 }
 
@@ -2521,10 +2521,10 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (has_setname) {
-    cntx->conn()->SetName(string{clientname});
+    cntx->Conn()->SetName(string{clientname});
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   int proto_version = 2;
   if (is_resp3) {
     proto_version = 3;
@@ -2545,7 +2545,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
   rb->SendBulkString("proto");
   rb->SendLong(proto_version);
   rb->SendBulkString("id");
-  rb->SendLong(cntx->conn()->GetClientId());
+  rb->SendLong(cntx->Conn()->GetClientId());
   rb->SendBulkString("mode");
   rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
@@ -2754,7 +2754,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
         auto [sid, flow_count] = dfly_cmd_->CreateSyncSession(cntx);
-        cntx->conn()->SetName(absl::StrCat("repl_ctrl_", sid));
+        cntx->Conn()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
         cntx->conn_state.replication_info.repl_session_id = sid;
@@ -2765,7 +2765,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
         cntx->replica_conn = true;
 
         // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads> <version>
-        auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+        auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
         rb->StartArray(4);
         rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
@@ -2783,7 +2783,7 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       // We set a default value of ip_address here, because LISTENING-PORT is a mandatory field
       // but IP-ADDRESS is optional
       if (cntx->conn_state.replication_info.repl_ip_address.empty()) {
-        cntx->conn_state.replication_info.repl_ip_address = cntx->conn()->RemoteEndpointAddress();
+        cntx->conn_state.replication_info.repl_ip_address = cntx->Conn()->RemoteEndpointAddress();
       }
     } else if (cmd == "IP-ADDRESS") {
       cntx->conn_state.replication_info.repl_ip_address = arg;
@@ -2835,7 +2835,7 @@ err:
 }
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
   // ensuring eventual consistency of is_master. When determining if the server is a replica and
@@ -2894,7 +2894,7 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   ToUpper(&args[0]);
   string_view sub_cmd = ArgS(args, 0);
 
@@ -2953,7 +2953,7 @@ void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
         "HELP",
         "    Prints this help.",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->SendSimpleStrArr(help);
     return;
   }
@@ -2984,7 +2984,7 @@ void ServerFamily::Module(CmdArgList args, ConnectionContext* cntx) {
   if (ArgS(args, 0) != "LIST")
     return cntx->SendError(kSyntaxErr);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->StartArray(2);
 
   // Json

@@ -56,7 +56,7 @@ static vector<string> SplitLines(const std::string& src) {
   return res;
 }
 
-TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
+TestConnection::TestConnection(enum Protocol protocol, io::StringSink* sink)
     : facade::Connection(protocol, nullptr, nullptr, nullptr), sink_(sink) {
   cc_.reset(new dfly::ConnectionContext(sink_, this, {}));
   cc_->skip_acl_validation = true;
@@ -106,8 +106,8 @@ class BaseFamilyTest::TestConnWrapper {
 
   const facade::Connection::InvalidationMessage& GetInvalidationMessage(size_t index) const;
 
-  ConnectionContext* cmd_cntx() {
-    auto cntx = static_cast<ConnectionContext*>(dummy_conn_->cntx());
+  ConnectionContext* CmdCntx() {
+    auto cntx = static_cast<ConnectionContext*>(dummy_conn_->Cntx());
     cntx->ns = &namespaces.GetDefaultNamespace();
     return cntx;
   }
@@ -120,7 +120,7 @@ class BaseFamilyTest::TestConnWrapper {
     sink_.Clear();
   }
 
-  TestConnection* conn() {
+  TestConnection* Conn() {
     return dummy_conn_.get();
   }
 
@@ -357,12 +357,12 @@ RespExpr BaseFamilyTest::RunPrivileged(std::initializer_list<const std::string_v
   string id = GetId();
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
   // Before running the command set the connection as admin connection
-  conn_wrapper->conn()->SetPrivileged(true);
+  conn_wrapper->Conn()->SetPrivileged(true);
   auto res = Run(id, ArgSlice{list.begin(), list.size()});
   // After running the command set the connection as non admin connection
   // because the connction is returned to the poll. This way the next call to Run from the same
   // thread will not have the connection set as admin.
-  conn_wrapper->conn()->SetPrivileged(false);
+  conn_wrapper->Conn()->SetPrivileged(false);
   return res;
 }
 
@@ -383,7 +383,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   CmdArgVec args = conn_wrapper->Args(slice);
 
-  auto* context = conn_wrapper->cmd_cntx();
+  auto* context = conn_wrapper->CmdCntx();
   context->ns = &namespaces.GetDefaultNamespace();
 
   DCHECK(context->transaction == nullptr) << id;
@@ -427,7 +427,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
-  auto* context = conn->cmd_cntx();
+  auto* context = conn->CmdCntx();
 
   DCHECK(context->transaction == nullptr);
 
@@ -448,7 +448,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResp
   cmd.key = key;
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
-  auto* context = conn->cmd_cntx();
+  auto* context = conn->CmdCntx();
 
   service_->DispatchMC(cmd, string_view{}, context);
 
@@ -474,7 +474,7 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
 
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
-  auto* context = conn->cmd_cntx();
+  auto* context = conn->CmdCntx();
 
   service_->DispatchMC(cmd, string_view{}, context);
 
@@ -575,7 +575,7 @@ size_t BaseFamilyTest::SubscriberMessagesLen(string_view conn_id) const {
   if (it == connections_.end())
     return 0;
 
-  return it->second->conn()->messages.size();
+  return it->second->Conn()->messages.size();
 }
 
 size_t BaseFamilyTest::InvalidationMessagesLen(string_view conn_id) const {
@@ -583,7 +583,7 @@ size_t BaseFamilyTest::InvalidationMessagesLen(string_view conn_id) const {
   if (it == connections_.end())
     return 0;
 
-  return it->second->conn()->invalidate_messages.size();
+  return it->second->Conn()->invalidate_messages.size();
 }
 
 const facade::Connection::PubMessage& BaseFamilyTest::GetPublishedMessage(string_view conn_id,
@@ -605,7 +605,7 @@ ConnectionContext::DebugInfo BaseFamilyTest::GetDebugInfo(const std::string& id)
   auto it = connections_.find(id);
   CHECK(it != connections_.end());
 
-  return it->second->cmd_cntx()->last_command_debug;
+  return it->second->CmdCntx()->last_command_debug;
 }
 
 auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestConnWrapper* {

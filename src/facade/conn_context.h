@@ -24,19 +24,19 @@ class ConnectionContext {
   virtual ~ConnectionContext() {
   }
 
-  Connection* conn() {
+  Connection* Conn() {
     return owner_;
   }
 
-  const Connection* conn() const {
+  const Connection* Conn() const {
     return owner_;
   }
 
-  Protocol protocol() const {
+  enum Protocol Protocol() const {
     return protocol_;
   }
 
-  SinkReplyBuilder* reply_builder() {
+  SinkReplyBuilder* ReplyBuilder() {
     return rbuilder_.get();
   }
 
@@ -110,7 +110,7 @@ class ConnectionContext {
 
  private:
   Connection* owner_;
-  Protocol protocol_ = Protocol::REDIS;
+  enum Protocol protocol_ = Protocol::REDIS;
   std::unique_ptr<SinkReplyBuilder> rbuilder_;
 };
 

@@ -995,7 +995,7 @@ void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
     return find_res.status();
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
     rb->StartArray(memberships.size());
@@ -1081,7 +1081,7 @@ void SPop(CmdArgList args, ConnectionContext* cntx) {
     return OpPop(t->GetOpArgs(shard), key, count);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1) {  // SPOP key
@@ -1128,7 +1128,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
   if (cntx->conn_state.script_info) {  // sort under script
     sort(arr.begin(), arr.end());
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   rb->SendStringArr(arr, RedisReplyBuilder::SET);
 }
 
@@ -1197,7 +1197,7 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(svec.begin(), svec.end());
     }
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->SendStringArr(*result, RedisReplyBuilder::SET);
   } else {
     cntx->SendError(result.status());
@@ -1222,7 +1222,7 @@ void SRandMember(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   if (result || result == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
       rb->SendStringArr(*result, RedisReplyBuilder::SET);
@@ -1252,7 +1252,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->SendStringArr(arr, RedisReplyBuilder::SET);
   } else {
     cntx->SendError(result.status());
@@ -1343,7 +1343,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
     if (cntx->conn_state.script_info) {  // sort under script
       sort(arr.begin(), arr.end());
     }
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
     rb->SendStringArr(arr, RedisReplyBuilder::SET);
   } else {
     cntx->SendError(unionset.status());
@@ -1418,7 +1418,7 @@ void SScan(CmdArgList args, ConnectionContext* cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->ReplyBuilder());
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     rb->StartArray(2);

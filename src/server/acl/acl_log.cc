@@ -39,7 +39,7 @@ void AclLog::Add(const ConnectionContext& cntx, std::string object, Reason reaso
     username = std::move(tried_to_auth);
   }
 
-  std::string client_info = cntx.conn()->GetClientInfo();
+  std::string client_info = cntx.Conn()->GetClientInfo();
   using clock = std::chrono::system_clock;
   LogEntry entry = {std::move(username), std::move(client_info), std::move(object), reason,
                     clock::now()};

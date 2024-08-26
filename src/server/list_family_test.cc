@@ -824,7 +824,6 @@ TEST_F(ListFamilyTest, BLMoveRings) {
       }));
     }
   }
-#pragma GCC diagnostic pop
 
   ThisFiber::SleepFor(5ms);
 
@@ -851,6 +850,7 @@ TEST_F(ListFamilyTest, BLMoveWaves) {
       fibers.emplace_back(pp_->at(i % 3)->LaunchFiber([=]() {
         Run("c" + to_string(i * kFlow + j), {"blmove", src, dest, "LEFT", "RIGHT", "0"});
       }));
+#pragma GCC diagnostic pop
     }
   }
 
