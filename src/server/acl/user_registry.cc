@@ -35,8 +35,8 @@ UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
   if (it == registry_.end()) {
     return {};
   }
-  return {it->second.AclCategory(), it->second.AclCommands(), it->second.Keys(),
-          it->second.Namespace()};
+  auto& user = it->second;
+  return {user.AclCategory(), user.AclCommands(), user.Keys(), user.PubSub(), user.Namespace()};
 }
 
 bool UserRegistry::IsUserActive(std::string_view username) const {
@@ -80,6 +80,7 @@ User::UpdateRequest UserRegistry::DefaultUserUpdateRequest() const {
   req.is_active = true;
   req.updates = {std::pair<User::Sign, uint32_t>{User::Sign::PLUS, acl::ALL}};
   req.keys = {User::UpdateKey{"~*", KeyOp::READ_WRITE, true, false}};
+  req.pub_sub = {User::UpdatePubSub{"", false, true, false}};
   return req;
 }
 

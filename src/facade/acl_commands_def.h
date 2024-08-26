@@ -24,10 +24,20 @@ struct AclKeys {
   bool all_keys = false;
 };
 
+// The second bool denotes if the pattern contains an asterisk and it's
+// used to pattern match PSUBSCRIBE that requires exact literalls
+using GlobTypePubSub = std::pair<std::string, bool>;
+
+struct AclPubSub {
+  std::vector<GlobTypePubSub> globs;
+  bool all_channels = false;
+};
+
 struct UserCredentials {
   uint32_t acl_categories{0};
   std::vector<uint64_t> acl_commands;
   AclKeys keys;
+  AclPubSub pub_sub;
   std::string ns;
 };
 

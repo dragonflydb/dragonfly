@@ -18,7 +18,7 @@ class AclLog {
  public:
   explicit AclLog();
 
-  enum class Reason { COMMAND, AUTH, KEY };
+  enum class Reason { COMMAND, AUTH, KEY, PUB_SUB };
 
   struct LogEntry {
     std::string username;
