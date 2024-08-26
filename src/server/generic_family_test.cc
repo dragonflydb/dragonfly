@@ -775,4 +775,19 @@ TEST_F(GenericFamilyTest, JsonType) {
   ASSERT_THAT(vec, ElementsAre("json"));
 }
 
+TEST_F(GenericFamilyTest, ExpireTime) {
+  EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
+  EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));
+  Run({"set", "foo", "bar"});
+  EXPECT_EQ(-1, CheckedInt({"EXPIRETIME", "foo"}));
+  EXPECT_EQ(-1, CheckedInt({"PEXPIRETIME", "foo"}));
+
+  // set expiry
+  uint64_t expire_time_in_ms = TEST_current_time_ms + 5000;
+  uint64_t expire_time_in_seconds = (expire_time_in_ms + 500) / 1000;
+  Run({"pexpireat", "foo", absl::StrCat(expire_time_in_ms)});
+  EXPECT_EQ(expire_time_in_seconds, CheckedInt({"EXPIRETIME", "foo"}));
+  EXPECT_EQ(expire_time_in_ms, CheckedInt({"PEXPIRETIME", "foo"}));
+}
+
 }  // namespace dfly

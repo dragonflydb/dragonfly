@@ -1325,6 +1325,38 @@ void GenericFamily::RenameNx(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void GenericFamily::ExpireTime(CmdArgList args, ConnectionContext* cntx) {
+  ExpireTimeGeneric(args, cntx, TimeUnit::SEC);
+}
+
+void GenericFamily::PExpireTime(CmdArgList args, ConnectionContext* cntx) {
+  ExpireTimeGeneric(args, cntx, TimeUnit::MSEC);
+}
+
+void GenericFamily::ExpireTimeGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit) {
+  string_view key = ArgS(args, 0);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpExpireTime(t, shard, key); };
+  OpResult<uint64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result) {
+    long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
+    cntx->SendLong(ttl);
+    return;
+  }
+
+  switch (result.status()) {
+    case OpStatus::KEY_NOTFOUND:
+      cntx->SendLong(-2);
+      break;
+    default:
+      LOG_IF(ERROR, result.status() != OpStatus::SKIPPED)
+          << "Unexpected status " << result.status();
+      cntx->SendLong(-1);
+      break;
+  }
+}
+
 void GenericFamily::Ttl(CmdArgList args, ConnectionContext* cntx) {
   TtlGeneric(args, cntx, TimeUnit::SEC);
 }
@@ -1487,7 +1519,8 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
+OpResult<uint64_t> GenericFamily::OpExpireTime(Transaction* t, EngineShard* shard,
+                                               string_view key) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto [it, expire_it] = db_slice.FindReadOnly(t->GetDbContext(), key);
   if (!IsValid(it))
@@ -1496,9 +1529,21 @@ OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, stri
   if (!IsValid(expire_it))
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = db_slice.ExpireTime(expire_it) - t->GetDbContext().time_now_ms;
+  int64_t ttl_ms = db_slice.ExpireTime(expire_it);
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
   return ttl_ms;
+}
+
+OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
+  auto opExpireTimeResult = OpExpireTime(t, shard, key);
+
+  if (opExpireTimeResult) {
+    int64_t ttl_ms = opExpireTimeResult.value() - t->GetDbContext().time_now_ms;
+    DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
+    return ttl_ms;
+  } else {
+    return opExpireTimeResult;
+  }
 }
 
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
@@ -1697,6 +1742,8 @@ constexpr uint32_t kStick = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSort = WRITE | SET | SORTEDSET | LIST | SLOW | DANGEROUS;
 constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
+constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
+constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
@@ -1738,7 +1785,9 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(
              Move)
       << CI{"RESTORE", CO::WRITE, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
-      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey);
+      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey)
+      << CI{"EXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kExpireTime}.HFUNC(ExpireTime)
+      << CI{"PEXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPExpireTime}.HFUNC(PExpireTime);
 }
 
 }  // namespace dfly
