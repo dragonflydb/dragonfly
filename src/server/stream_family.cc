@@ -2035,7 +2035,7 @@ void FetchGroupInfo(Transaction* tx, ReadOpts* opts) {
 // Returns true if the last-ids list has relevant entries according to read options,
 // false if blocking is required to fetch entries.
 io::Result<bool, facade::ErrorReply> HasEntries(
-    ReadOpts* opts, const absl::flat_hash_map<string, streamID>& last_ids) {
+    const absl::flat_hash_map<string, streamID>& last_ids, ReadOpts* opts) {
   bool has_entries = false;
   for (auto& [stream, requested_sitem] : opts->stream_ids) {
     if (auto last_id_it = last_ids.find(stream); last_id_it != last_ids.end()) {
@@ -2116,7 +2116,6 @@ struct StreamReplies {
   }
 
   void SendStreamRecords(string_view key, absl::Span<const Record> records) const {
-    rb->StartArray(2);
     rb->SendBulkString(key);
     SendRecords(records);
   }
@@ -2160,9 +2159,14 @@ void StreamFamily::XAdd(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<streamID> add_result = cntx->transaction->ScheduleSingleHopT(cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+
   if (add_result) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     return rb->SendBulkString(StreamIdRepr(*add_result));
+  }
+
+  if (add_result == OpStatus::KEY_NOTFOUND) {
+    return rb->SendNull();
   }
 
   if (add_result.status() == OpStatus::STREAM_ID_SMALL) {
@@ -2952,12 +2956,16 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(range_cb), true);
 
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-    rb->StartArray(1);
-    StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, *result);
-  } else {
-    return rb->SendNullArray();
+    SinkReplyBuilder::ReplyAggregator agg(rb);
+    if (opts->read_group && rb->IsResp3()) {
+      rb->StartCollection(1, RedisReplyBuilder::CollectionType::MAP);
+    } else {
+      rb->StartArray(1);
+      rb->StartArray(2);
+    }
+    return StreamReplies{rb}.SendStreamRecords(key, *result);
   }
+  return rb->SendNullArray();
 }
 
 // Determine if entries are available and read them in a single hop. Returns nullopt in case of an
@@ -2976,7 +2984,7 @@ std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, R
       return last_ids.status();
 
     absl::flat_hash_map<string, streamID> last_ids_map(last_ids->begin(), last_ids->end());
-    auto has_entries = HasEntries(opts, last_ids_map);
+    auto has_entries = HasEntries(last_ids_map, opts);
     if (!has_entries.has_value()) {
       detailed_err = has_entries.error();
       return OpStatus::INVALID_VALUE;
@@ -3008,8 +3016,7 @@ std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, R
 
   if (requires_blocking)
     return vector<RecordVec>{};
-  else
-    return {std::move(prefetched_results)};
+  return {std::move(prefetched_results)};
 }
 
 // Read entries from given streams
@@ -3038,7 +3045,7 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
       return rb->SendNullArray();
     }
 
-    auto has_entries = HasEntries(opts, *last_ids);
+    auto has_entries = HasEntries(*last_ids, opts);
     if (!has_entries.has_value()) {
       cntx->transaction->Conclude();
       cntx->SendError(has_entries.error());
@@ -3093,12 +3100,30 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
 
   // Send all results back
   SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-  rb->StartArray(resolved_streams);
-  for (size_t i = 0; i < results.size(); i++) {
-    if (results[i].empty())
-      continue;
-    string_view key = ArgS(args, i + opts->streams_arg);
-    StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, results[i]);
+  if (opts->read_group) {
+    if (rb->IsResp3()) {
+      rb->StartCollection(opts->stream_ids.size(), RedisReplyBuilder::CollectionType::MAP);
+      for (size_t i = 0; i < opts->stream_ids.size(); i++) {
+        string_view key = ArgS(args, i + opts->streams_arg);
+        StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, results[i]);
+      }
+    } else {
+      rb->StartArray(opts->stream_ids.size());
+      for (size_t i = 0; i < opts->stream_ids.size(); i++) {
+        string_view key = ArgS(args, i + opts->streams_arg);
+        rb->StartArray(2);
+        StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, results[i]);
+      }
+    }
+  } else {
+    rb->StartArray(resolved_streams);
+    for (size_t i = 0; i < results.size(); i++) {
+      if (results[i].empty())
+        continue;
+      string_view key = ArgS(args, i + opts->streams_arg);
+      rb->StartArray(2);
+      StreamReplies{cntx->reply_builder()}.SendStreamRecords(key, results[i]);
+    }
   }
 }
 
@@ -3112,7 +3137,7 @@ void XReadGeneric(CmdArgList args, bool read_group, ConnectionContext* cntx) {
     FetchGroupInfo(cntx->transaction, &*opts);
   }
 
-  return XReadImpl(args, &*opts, cntx);
+  return XReadImpl(args, &opts.value(), cntx);
 }
 
 void StreamFamily::XRead(CmdArgList args, ConnectionContext* cntx) {

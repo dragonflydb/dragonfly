@@ -44,7 +44,7 @@ TEST_F(StreamFamilyTest, Add) {
   ASSERT_THAT(resp, ArgType(RespExpr::STRING));
 
   resp = Run({"xadd", "noexist", "nomkstream", "*", "field", "value"});
-  EXPECT_THAT(resp, ErrArg("no such key"));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(StreamFamilyTest, AddExtended) {
@@ -135,20 +135,23 @@ TEST_F(StreamFamilyTest, XRead) {
 
   // Receive all records from both streams.
   resp = Run({"xread", "streams", "foo", "bar", "0", "0"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(3)));
-  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
+
+  // 2 results
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
+  ASSERT_THAT(resp.GetVec()[0], RespArray(ElementsAre("foo", ArrLen(3))));
+  ASSERT_THAT(resp.GetVec()[1], RespArray(ElementsAre("bar", ArrLen(1))));
 
   // Order of the requested streams is maintained.
   resp = Run({"xread", "streams", "bar", "foo", "0", "0"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("bar", ArrLen(1)));
-  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("foo", ArrLen(3)));
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
+  ASSERT_THAT(resp.GetVec()[0], RespArray(ElementsAre("bar", ArrLen(1))));
+  ASSERT_THAT(resp.GetVec()[1], RespArray(ElementsAre("foo", ArrLen(3))));
 
   // Limit count.
   resp = Run({"xread", "count", "1", "streams", "foo", "bar", "0", "0"});
-  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(1)));
-  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
+  ASSERT_THAT(resp.GetVec()[0], RespArray(ElementsAre("foo", ArrLen(1))));
+  ASSERT_THAT(resp.GetVec()[1], RespArray(ElementsAre("bar", ArrLen(1))));
 
   // Read from ID.
   resp = Run({"xread", "count", "10", "streams", "foo", "bar", "1-1", "2-0"});
@@ -181,21 +184,19 @@ TEST_F(StreamFamilyTest, XReadGroup) {
 
   // consumer PEL is empty, so resp should have empty list
   auto resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(resp, RespArray(ElementsAre("foo", ArrLen(0))));
 
   // should return unread entries with key "foo"
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", ">"});
   // only "foo" key entries are read
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[1], ArrLen(3));
+  EXPECT_THAT(resp, RespArray(ElementsAre("foo", ArrLen(3))));
 
   Run({"xadd", "foo", "1-*", "k5", "v5"});
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "bar", "foo", ">", ">"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("bar", ArrLen(1)));
-  EXPECT_THAT(resp.GetVec()[0].GetVec()[1].GetVec()[0].GetVec(), ElementsAre("1-0", ArrLen(2)));
-  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("foo", ArrLen(1)));
-  EXPECT_THAT(resp.GetVec()[1].GetVec()[1].GetVec()[0].GetVec(), ElementsAre("1-3", ArrLen(2)));
+  EXPECT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
+
+  EXPECT_THAT(resp.GetVec()[0].GetVec()[1].GetVec()[0], RespArray(ElementsAre("1-0", ArrLen(2))));
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[1].GetVec()[0], RespArray(ElementsAre("1-3", ArrLen(2))));
 
   // now we can specify id for "foo" and it fetches from alice's consumer PEL
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "foo", "0"});
@@ -208,12 +209,13 @@ TEST_F(StreamFamilyTest, XReadGroup) {
   // count limits the fetched entries
   resp = Run(
       {"xreadgroup", "group", "group", "alice", "count", "2", "streams", "foo", "bar", "0", "0"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(2)));
   EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
 
   // bob will not get entries of alice
   resp = Run({"xreadgroup", "group", "group", "bob", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(resp, RespArray(ElementsAre("foo", ArrLen(0))));
 
   resp = Run({"xinfo", "groups", "foo"});
   // 2 consumers created
@@ -229,7 +231,7 @@ TEST_F(StreamFamilyTest, XReadGroup) {
   EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(1)));
   // Entry is not inserted in Bob's consumer PEL.
   resp = Run({"xreadgroup", "group", "group", "bob", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(resp, RespArray(ElementsAre("foo", ArrLen(0))));
 
   // No Group
   resp = Run({"xreadgroup", "group", "nogroup", "alice", "streams", "foo", "0"});
@@ -321,7 +323,7 @@ TEST_F(StreamFamilyTest, XReadGroupBlockwithoutBlock) {
   // Receive all records from both streams.
   auto resp = Run(
       {"xreadgroup", "group", "group", "alice", "block", "100", "streams", "foo", "bar", ">", ">"});
-  EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(3)));
   EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("bar", ArrLen(1)));
 }
@@ -428,6 +430,13 @@ TEST_F(StreamFamilyTest, XReadGroupInvalidArgs) {
   // Unbalanced list of streams.
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "s1", "s2", "s3", "0", "0"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(StreamFamilyTest, XReadGroupEmpty) {
+  Run({"XADD", "stream", "*", "foo", "bar"});
+  Run({"XGROUP", "CREATE", "stream", "group", "0"});
+  auto resp = Run({"XREADGROUP", "GROUP", "group", "consumer1", "STREAMS", "stream", "0"});
+  EXPECT_THAT(resp, ArrLen(2));
 }
 
 // todo: ASAN fails heres on arm
@@ -759,7 +768,7 @@ TEST_F(StreamFamilyTest, XAck) {
 
   // Verifies that PEL is empty.
   resp = Run({"xreadgroup", "group", "cgroup", "consumer", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ArrLen(0));
+  EXPECT_THAT(resp, RespArray(ElementsAre("foo", ArrLen(0))));
 }
 
 TEST_F(StreamFamilyTest, XInfoGroups) {
