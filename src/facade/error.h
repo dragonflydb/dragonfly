@@ -35,6 +35,7 @@ extern const char kClusterNotConfigured[];
 extern const char kLoadingErr[];
 extern const char kUndeclaredKeyErr[];
 extern const char kInvalidDumpValueErr[];
+extern const char kInvalidJsonPathErr[];
 
 extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
