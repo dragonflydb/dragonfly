@@ -16,6 +16,8 @@ using namespace util;
 
 namespace dfly {
 
+const auto kMatchNil = ArgType(RespExpr::NIL);
+
 class StreamFamilyTest : public BaseFamilyTest {
  protected:
 };
@@ -44,7 +46,7 @@ TEST_F(StreamFamilyTest, Add) {
   ASSERT_THAT(resp, ArgType(RespExpr::STRING));
 
   resp = Run({"xadd", "noexist", "nomkstream", "*", "field", "value"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, kMatchNil);
 }
 
 TEST_F(StreamFamilyTest, AddExtended) {
@@ -707,6 +709,14 @@ TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
   EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 }
 
+TEST_F(StreamFamilyTest, XPendingEmpty) {
+  Run({"XADD", "stream", "*", "foo", "bar"});
+  Run({"XADD", "stream", "*", "foo", "bar"});
+  Run({"XGROUP", "CREATE", "stream", "group", "0"});
+  auto resp = Run({"XPENDING", "stream", "group"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), kMatchNil, kMatchNil, kMatchNil)));
+}
+
 TEST_F(StreamFamilyTest, XAck) {
   Run({"xadd", "foo", "1-0", "k0", "v0"});
   Run({"xadd", "foo", "1-1", "k1", "v1"});
@@ -782,9 +792,9 @@ TEST_F(StreamFamilyTest, XInfoGroups) {
   // group with no consumers
   resp = Run({"xinfo", "groups", "mystream"});
   EXPECT_THAT(resp, ArrLen(12));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending",
-                                         IntArg(0), "last-delivered-id", "0-0", "entries-read",
-                                         ArgType(RespExpr::NIL), "lag", IntArg(0)));
+  EXPECT_THAT(resp.GetVec(),
+              ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending", IntArg(0),
+                          "last-delivered-id", "0-0", "entries-read", kMatchNil, "lag", IntArg(0)));
 
   // group with multiple consumers
   Run({"xgroup", "createconsumer", "mystream", "mygroup", "consumer1"});
@@ -990,9 +1000,9 @@ TEST_F(StreamFamilyTest, XInfoStream) {
                           "entries-added", IntArg(11), "recorded-first-entry-id", "1-1", "entries",
                           ArrLen(10), "groups", ArrLen(1)));
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec(),
-              ElementsAre("name", "mygroup", "last-delivered-id", "0-0", "entries-read",
-                          ArgType(RespExpr::NIL), "lag", IntArg(11), "pel-count", IntArg(0),
-                          "pending", ArrLen(0), "consumers", ArrLen(1)));
+              ElementsAre("name", "mygroup", "last-delivered-id", "0-0", "entries-read", kMatchNil,
+                          "lag", IntArg(11), "pel-count", IntArg(0), "pending", ArrLen(0),
+                          "consumers", ArrLen(1)));
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec(),
               ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64),
                           "pel-count", IntArg(0), "pending", ArrLen(0)));

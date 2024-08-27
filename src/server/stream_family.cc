@@ -12,6 +12,7 @@ extern "C" {
 }
 
 #include "base/logging.h"
+#include "facade/cmd_arg_parser.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -1882,8 +1883,17 @@ void DelConsumer(string_view key, string_view gname, string_view consumer,
 }
 
 void SetId(string_view key, string_view gname, CmdArgList args, ConnectionContext* cntx) {
-  string_view id = ArgS(args, 0);
+  facade::CmdArgParser parser{args};
 
+  string_view id = parser.Next();
+  while (parser.ToUpper().HasNext()) {
+    if (parser.Check("ENTRIESREAD").ExpectTail(1)) {
+      // TODO: to support ENTRIESREAD.
+      return cntx->SendError(kSyntaxErr);
+    } else {
+      return cntx->SendError(kSyntaxErr);
+    }
+  }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
   };
@@ -2307,38 +2317,59 @@ void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  facade::CmdArgParser parser{args};
 
-  if (args.size() >= 2) {
-    string_view key = ArgS(args, 1);
-    if (sub_cmd == "CREATE") {
-      args.remove_prefix(2);
-      return CreateGroup(std::move(args), key, cntx);
-    }
+  string_view sub_cmd = parser.ToUpper().Next();
+  if (sub_cmd == "HELP") {
+    string_view help[] = {"XGROUP <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+                          "CREATE <key> <groupname> <id|$> [option]",
+                          "    Create a new consumer group. Options are:",
+                          "    * MKSTREAM",
+                          "      Create the empty stream if it does not exist.",
+                          "    * ENTRIESREAD entries_read",
+                          "      Set the group's entries_read counter (internal use).",
+                          "CREATECONSUMER <key> <groupname> <consumer>",
+                          "    Create a new consumer in the specified group.",
+                          "DELCONSUMER <key> <groupname> <consumer>",
+                          "    Remove the specified consumer.",
+                          "DESTROY <key> <groupname>",
+                          "    Remove the specified group.",
+                          "SETID <key> <groupname> <id|$> [ENTRIESREAD entries_read]",
+                          "    Set the current group ID and entries_read counter.",
+                          "HELP",
+                          "    Print this help."};
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendStringArr(help);
+  }
 
-    if (sub_cmd == "DESTROY" && args.size() == 3) {
-      string_view gname = ArgS(args, 2);
-      return DestroyGroup(key, gname, cntx);
-    }
+  if (!parser.HasAtLeast(2))
+    return cntx->SendError(kSyntaxErr, kScriptErrType);
 
-    if (sub_cmd == "CREATECONSUMER" && args.size() == 4) {
-      string_view gname = ArgS(args, 2);
-      string_view cname = ArgS(args, 3);
-      return CreateConsumer(key, gname, cname, cntx);
-    }
+  string_view key = parser.Next();
 
-    if (sub_cmd == "DELCONSUMER" && args.size() == 4) {
-      string_view gname = ArgS(args, 2);
-      string_view cname = ArgS(args, 3);
-      return DelConsumer(key, gname, cname, cntx);
-    }
+  if (sub_cmd == "CREATE") {
+    args.remove_prefix(2);
+    return CreateGroup(std::move(args), key, cntx);
+  }
 
-    if (sub_cmd == "SETID" && args.size() >= 4) {
-      string_view gname = ArgS(args, 2);
-      args.remove_prefix(3);
-      return SetId(key, gname, std::move(args), cntx);
-    }
+  string_view gname = parser.Next();
+  if (sub_cmd == "DESTROY" && args.size() == 3) {
+    return DestroyGroup(key, gname, cntx);
+  }
+
+  if (sub_cmd == "CREATECONSUMER" && args.size() == 4) {
+    string_view cname = parser.Next();
+    return CreateConsumer(key, gname, cname, cntx);
+  }
+
+  if (sub_cmd == "DELCONSUMER" && args.size() == 4) {
+    string_view cname = parser.Next();
+    return DelConsumer(key, gname, cname, cntx);
+  }
+
+  if (sub_cmd == "SETID" && args.size() >= 4) {
+    args.remove_prefix(3);
+    return SetId(key, gname, std::move(args), cntx);
   }
 
   return cntx->SendError(UnknownSubCmd(sub_cmd, "XGROUP"));
@@ -2683,24 +2714,26 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
       return cntx->SendError(NoGroupError(key, opts.group_name));
     return cntx->SendError(op_result.status());
   }
-  PendingResult result = op_result.value();
+  const PendingResult& result = op_result.value();
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (std::holds_alternative<PendingReducedResult>(result)) {
     const auto& res = std::get<PendingReducedResult>(result);
-    if (!res.count) {
-      return rb->SendEmptyArray();
-    }
     rb->StartArray(4);
     rb->SendLong(res.count);
-    rb->SendBulkString(StreamIdRepr(res.start));
-    rb->SendBulkString(StreamIdRepr(res.end));
-    rb->StartArray(res.consumer_list.size());
+    if (res.count) {
+      rb->SendBulkString(StreamIdRepr(res.start));
+      rb->SendBulkString(StreamIdRepr(res.end));
+      rb->StartArray(res.consumer_list.size());
 
-    for (auto& [consumer_name, count] : res.consumer_list) {
-      rb->StartArray(2);
-      rb->SendBulkString(consumer_name);
-      rb->SendLong(count);
+      for (auto& [consumer_name, count] : res.consumer_list) {
+        rb->StartArray(2);
+        rb->SendBulkString(consumer_name);
+        rb->SendLong(count);
+      }
+    } else {
+      for (unsigned j = 0; j < 3; ++j)
+        rb->SendNull();
     }
   } else {
     const auto& res = std::get<PendingExtendedResultList>(result);
