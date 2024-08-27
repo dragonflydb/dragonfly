@@ -29,7 +29,7 @@
   Parser::symbol_type make_DOUBLE(string_view, const Parser::location_type& loc);
   Parser::symbol_type make_UINT32(string_view, const Parser::location_type& loc);
   Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
-  Parser::symbol_type make_UnquotedStrToTerm(string_view src, const Parser::location_type& loc);
+  Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& loc);
 %}
 
 blank [ \t\r]
@@ -38,7 +38,7 @@ sq    \'
 esc_chars ['"\?\\abfnrtv]
 esc_seq \\{esc_chars}
 term_char [_]|\w
-term_char_ext {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
+tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 
 
 %{
@@ -77,7 +77,8 @@ term_char_ext {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 "$"{term_char}+ return ParseParam(str(), loc());
 "@"{term_char}+ return Parser::make_FIELD(str(), loc());
 
-{term_char_ext}+   return make_UnquotedStrToTerm(str(), loc());
+{term_char}+ return Parser::make_TERM(str(), loc());
+{tag_val_char}+   return make_TagVal(str(), loc());
 
 <<EOF>>    return Parser::make_YYEOF(loc());
 %%
@@ -106,14 +107,21 @@ Parser::symbol_type make_StringLit(string_view src, const Parser::location_type&
   return Parser::make_TERM(res, loc);
 }
 
-Parser::symbol_type make_UnquotedStrToTerm(string_view src, const Parser::location_type& loc) {
+Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& loc) {
   string res;
   res.reserve(src.size());
 
+  bool escaped = false;
   for (size_t i = 0; i < src.size(); ++i) {
-    i += src[i] == '\\';
+    if (escaped) {
+      escaped = false;
+    } else if (src[i] == '\\') {
+      escaped = true;
+      continue;
+    }
     res.push_back(src[i]);
+
   }
 
-  return Parser::make_TERM(res, loc);
+  return Parser::make_TAG_VAL(res, loc);
 }
