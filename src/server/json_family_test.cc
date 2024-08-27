@@ -141,6 +141,25 @@ TEST_F(JsonFamilyTest, GetLegacy) {
 
   resp = Run({"JSON.GET", "json", "$.name", "$.lastSeen"});  // V2 Response
   ASSERT_THAT(resp, "{\"$.lastSeen\":[1478476800],\"$.name\":[\"Leonard Cohen\"]}");
+
+  json = R"(
+    {"a":"first","b":{"field":"second"},"c":{"field":"third"}}
+  )";
+
+  resp = Run({"JSON.SET", "json", "$", json});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.GET", "json", "bar"});  // V1 Response
+  ASSERT_THAT(resp, ErrArg("ERR invalid JSON path"));
+
+  resp = Run({"JSON.GET", "json", "$.bar"});  // V2 Response
+  ASSERT_THAT(resp, "[]");
+
+  resp = Run({"JSON.GET", "json", "bar", "$.a"});  // V2 Response
+  ASSERT_THAT(resp, R"({"$.a":["first"],"bar":[]})");
+
+  resp = Run({"JSON.GET", "json", "$.bar"});  // V2 Response
+  ASSERT_THAT(resp, "[]");
 }
 
 static const string PhonebookJson = R"(
