@@ -572,7 +572,9 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
   } else {
     for (const auto& [path_str, path] : paths) {
       auto eval_result = eval_wrapped(path);
-      DCHECK(eval_result);
+      if (legacy_mode_is_enabled && !eval_result) {
+        return OpStatus::INVALID_JSON_PATH;
+      }
       out[path_str] = std::move(eval_result).value();  // TODO(Print not existing path to the user)
     }
   }

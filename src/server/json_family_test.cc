@@ -152,6 +152,12 @@ TEST_F(JsonFamilyTest, GetLegacy) {
   resp = Run({"JSON.GET", "json", "bar"});  // V1 Response
   ASSERT_THAT(resp, ErrArg("ERR invalid JSON path"));
 
+  resp = Run({"JSON.GET", "json", ".", "bar"});  // V1 Response
+  ASSERT_THAT(resp, ErrArg("ERR invalid JSON path"));
+
+  resp = Run({"JSON.GET", "json", ".a", "bar", "foo", "third", "."});  // V1 Response
+  ASSERT_THAT(resp, ErrArg("ERR invalid JSON path"));
+
   resp = Run({"JSON.GET", "json", "$.bar"});  // V2 Response
   ASSERT_THAT(resp, "[]");
 
