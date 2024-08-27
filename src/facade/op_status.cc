@@ -34,6 +34,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return "at least 1 input key is needed for this command";
     case OpStatus::MEMBER_NOTFOUND:
       return kKeyNotFoundErr;
+    case OpStatus::INVALID_JSON_PATH:
+      return kInvalidJsonPathErr;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";

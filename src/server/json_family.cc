@@ -565,10 +565,14 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
       jsoncons::json_object_arg};  // see https://github.com/danielaparker/jsoncons/issues/482
   if (paths.size() == 1) {
     auto eval_result = eval_wrapped(paths[0].second);
+    if (!eval_result) {
+      return OpStatus::INVALID_JSON_PATH;
+    }
     out = std::move(eval_result).value();  // TODO(Print not existing path to the user)
   } else {
     for (const auto& [path_str, path] : paths) {
       auto eval_result = eval_wrapped(path);
+      DCHECK(eval_result);
       out[path_str] = std::move(eval_result).value();  // TODO(Print not existing path to the user)
     }
   }

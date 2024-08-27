@@ -30,7 +30,8 @@ enum class OpStatus : uint16_t {
   INVALID_NUMERIC_RESULT,
   CANCELLED,
   AT_LEAST_ONE_KEY,
-  MEMBER_NOTFOUND
+  MEMBER_NOTFOUND,
+  INVALID_JSON_PATH
 };
 
 class OpResultBase {
