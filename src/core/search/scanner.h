@@ -39,8 +39,7 @@ class Scanner : public Lexer {
   }
 
   Parser::symbol_type ParseParam(std::string_view name, const Parser::location_type& loc) {
-    if (!name.empty())
-      name.remove_prefix(1);
+    name.remove_prefix(1);  // drop $ symbol
 
     std::string_view str = (*params_)[name];
     if (str.empty())
@@ -50,7 +49,7 @@ class Scanner : public Lexer {
     if (!absl::SimpleAtoi(str, &val))
       return Parser::make_TERM(std::string{str}, loc);
 
-    return Parser::make_UINT32(val, loc);
+    return Parser::make_UINT32(std::string{str}, loc);
   }
 
  private:
