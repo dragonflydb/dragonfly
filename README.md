@@ -59,7 +59,7 @@ However, if we take a bit stronger instance (m5.xlarge), the gap between DF and 
 
 |  Redis                                  |      DF                                |
 | ----------------------------------------|----------------------------------------|
-| QPS: 190K, P99.9: 2.45ms, P99: 0.97ms   |  QPS: 279K , P99.9: 1.95ms, P99: 1.48  |
+| QPS: 190K, P99.9: 2.45ms, P99: 0.97ms   |  QPS: 279K , P99.9: 1.95ms, P99: 1.48ms|
 
 2. GETs (`--ratio 0:1`):
 
