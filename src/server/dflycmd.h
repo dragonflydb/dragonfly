@@ -43,7 +43,7 @@ struct FlowInfo {
   std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
 
-  DflyVersion version = DflyVersion::VER0;
+  DflyVersion version = DflyVersion::VER1;
 
   std::optional<LSN> start_partial_sync_at;
   uint64_t last_acked_lsn = 0;
@@ -128,7 +128,7 @@ class DflyCmd {
     std::string id;
     std::string address;
     uint32_t listening_port;
-    DflyVersion version = DflyVersion::VER0;
+    DflyVersion version = DflyVersion::VER1;
 
     // Flows describe the state of shard-local flow.
     // They are always indexed by the shard index on the master.
@@ -153,6 +153,7 @@ class DflyCmd {
   // Master side acces method to replication info of that connection.
   std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionContext* cntx);
 
+  // Master-side command. Provides Replica info.
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
   void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_LOCKS_EXCLUDED(mu_);
