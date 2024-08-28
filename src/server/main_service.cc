@@ -866,17 +866,15 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     return true;
   });
 
+  config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
+  config_registry.RegisterMutable("enable_heartbeat_eviction");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("masteruser");
-  config_registry.RegisterMutable("tcp_keepalive");
-  config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
-  config_registry.RegisterMutable("enable_heartbeat_eviction");
-  config_registry.RegisterMutable("dbfilename");
-  config_registry.RegisterMutable("table_growth_margin");
+  config_registry.RegisterMutable("oom_deny_ratio");
   config_registry.RegisterMutable("pipeline_squash");
   config_registry.RegisterMutable("pipeline_queue_limit",
                                   [pool = &pp_](const absl::CommandLineFlag& flag) {
@@ -888,6 +886,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
                                     }
                                     return res.has_value();
                                   });
+  config_registry.RegisterMutable("replica_partial_sync");
+  config_registry.RegisterMutable("table_growth_margin");
+  config_registry.RegisterMutable("tcp_keepalive");
 
   serialization_max_chunk_size = GetFlag(FLAGS_serialization_max_chunk_size);
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
