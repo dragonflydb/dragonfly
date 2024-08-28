@@ -484,6 +484,8 @@ TEST_F(InterpreterTest, Log) {
   EXPECT_EQ("nil", ser_.res);
   EXPECT_TRUE(Execute(R"(redis.log(redis.LOG_WARNING, 'warn'))"));
   EXPECT_EQ("nil", ser_.res);
+  EXPECT_FALSE(Execute(R"(redis.log(redis.LOG_WARNING))"));
+  EXPECT_THAT(error_, testing::HasSubstr("requires two arguments or more"));
 }
 
 TEST_F(InterpreterTest, Robust) {

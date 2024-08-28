@@ -57,6 +57,7 @@ def test_script_exists_redis6(r: redis.Redis):
 
 
 @pytest.mark.parametrize("args", [("a",), tuple("abcdefghijklmn")])
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_script_flush_errors_with_args(r, args):
     with pytest.raises(redis.ResponseError):
         raw_command(r, "SCRIPT FLUSH %s" % " ".join(args))
