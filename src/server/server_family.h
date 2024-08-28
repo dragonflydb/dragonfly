@@ -258,7 +258,7 @@ class ServerFamily {
 
  private:
   void JoinSnapshotSchedule();
-  void LoadFromSnapshot();
+  void LoadFromSnapshot() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
   uint32_t shard_count() const {
     return shard_set->size();
@@ -303,7 +303,7 @@ class ServerFamily {
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys);
 
-  void SnapshotScheduling();
+  void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
   void SendInvalidationMessages() const;
 

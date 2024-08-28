@@ -14,6 +14,7 @@
 #include "server/journal/executor.h"
 #include "server/journal/tx_executor.h"
 #include "server/main_service.h"
+#include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(int, slot_migration_connection_timeout_ms);
 
@@ -34,14 +35,15 @@ class ClusterShardMigration {
         in_migration_(in_migration) {
   }
 
-  void Start(Context* cntx, util::FiberSocketBase* source, util::fb2::BlockingCounter bc) {
+  void Start(Context* cntx, util::FiberSocketBase* source, util::fb2::BlockingCounter bc)
+      ABSL_LOCKS_EXCLUDED(mu_) {
     {
-      std::lock_guard lk(mu_);
+      util::fb2::LockGuard lk(mu_);
       socket_ = source;
     }
 
-    absl::Cleanup cleanup([this]() {
-      std::lock_guard lk(mu_);
+    absl::Cleanup cleanup([this]() ABSL_LOCKS_EXCLUDED(mu_) {
+      util::fb2::LockGuard lk(mu_);
       socket_ = nullptr;
     });
     JournalReader reader{source, 0};
@@ -78,10 +80,10 @@ class ClusterShardMigration {
     bc->Dec();  // we should provide ability to join the flow
   }
 
-  std::error_code Cancel() {
-    std::lock_guard lk(mu_);
+  std::error_code Cancel() ABSL_LOCKS_EXCLUDED(mu_) {
+    util::fb2::LockGuard lk(mu_);
     if (socket_ != nullptr) {
-      return socket_->proactor()->Await([s = socket_]() {
+      return socket_->proactor()->Await([s = socket_]() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
         if (s->IsOpen()) {
           return s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
         }
@@ -114,7 +116,6 @@ class ClusterShardMigration {
     }
   }
 
- private:
   uint32_t source_shard_id_;
   util::fb2::Mutex mu_;
   util::FiberSocketBase* socket_ ABSL_GUARDED_BY(mu_);

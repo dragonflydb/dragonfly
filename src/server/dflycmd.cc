@@ -102,7 +102,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 }  // namespace
 
 void DflyCmd::ReplicaInfo::Cancel() {
-  lock_guard lk = GetExclusiveLock();
+  auto lk = GetExclusiveLock();
   if (replica_state == SyncState::CANCELLED) {
     return;
   }
@@ -261,7 +261,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   string eof_token;
   {
-    lock_guard lk = replica_ptr->GetExclusiveLock();
+    auto lk = replica_ptr->GetExclusiveLock();
 
     if (replica_ptr->replica_state != SyncState::PREPARATION)
       return cntx->SendError(kInvalidState);
@@ -325,7 +325,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
   if (!sync_id)
     return;
 
-  lock_guard lk = replica_ptr->GetExclusiveLock();
+  auto lk = replica_ptr->GetExclusiveLock();
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::PREPARATION, rb))
     return;
 
@@ -364,7 +364,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
   if (!sync_id)
     return;
 
-  lock_guard lk = replica_ptr->GetExclusiveLock();
+  auto lk = replica_ptr->GetExclusiveLock();
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::FULL_SYNC, rb))
     return;
 
@@ -418,7 +418,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   {
-    shared_lock lk = replica_ptr->GetSharedLock();
+    auto lk = replica_ptr->GetSharedLock();
     if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, rb))
       return;
 
@@ -467,7 +467,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
-    shared_lock lk = replica_ptr->GetSharedLock();
+    auto lk = replica_ptr->GetSharedLock();
     auto cb = [replica_ptr = std::move(replica_ptr), end_time,
                &catchup_success](EngineShard* shard) {
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
@@ -710,6 +710,11 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   replica_infos_.erase(sync_id);
 }
 
+// Because we need to annotate unique_lock
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wthread-safety-analysis"
+#endif
 void DflyCmd::BreakStalledFlowsInShard() {
   std::unique_lock global_lock(mu_, try_to_lock);
 
@@ -722,7 +727,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
   vector<uint32_t> deleted;
 
   for (auto [sync_id, replica_ptr] : replica_infos_) {
-    shared_lock replica_lock = replica_ptr->GetSharedLock();
+    auto replica_lock = replica_ptr->GetSharedLock();
 
     if (!replica_ptr->flows[sid].saver)
       continue;
@@ -743,6 +748,9 @@ void DflyCmd::BreakStalledFlowsInShard() {
   for (auto sync_id : deleted)
     replica_infos_.erase(sync_id);
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
   util::fb2::LockGuard lk(mu_);
@@ -782,14 +790,20 @@ std::vector<ReplicaRoleInfo> DflyCmd::GetReplicasRoleInfo() const {
   return vec;
 }
 
+// We need this because of RunBlockingInParallel below
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wthread-safety-analysis"
+#endif
 void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
   atomic<size_t> streamer_bytes{0}, full_sync_bytes{0};
 
   {
     util::fb2::LockGuard lk{mu_};  // prevent state changes
-    auto cb = [&](EngineShard* shard) {
+    auto cb = [&](EngineShard* shard) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) ABSL_LOCKS_EXCLUDED(
+                  ReplicaInfo::shared_mu) {
       for (const auto& [_, info] : replica_infos_) {
-        shared_lock repl_lk = info->GetSharedLock();
+        auto repl_lk = info->GetSharedLock();
 
         // flows should not be empty.
         DCHECK(!info->flows.empty());
@@ -827,6 +841,10 @@ pair<uint32_t, shared_ptr<DflyCmd::ReplicaInfo>> DflyCmd::GetReplicaInfoOrReply(
   return {sync_id, sync_it->second};
 }
 
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wthread-safety-analysis"
+#endif
 std::map<uint32_t, LSN> DflyCmd::ReplicationLagsLocked() const {
   DCHECK(!mu_.try_lock());  // expects to be under global lock
   if (replica_infos_.empty())
@@ -854,6 +872,9 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLagsLocked() const {
   }
   return rv;
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 void DflyCmd::SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version) {
   auto replica_ptr = GetReplicaInfo(cntx->conn_state.replication_info.repl_session_id);

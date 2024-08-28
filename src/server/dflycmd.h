@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "server/conn_context.h"
+#include "util/fibers/synchronization.h"
 
 namespace facade {
 class RedisReplyBuilder;
@@ -101,7 +102,7 @@ class DflyCmd {
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
 
   // Stores information related to a single replica.
-  struct ReplicaInfo {
+  struct ABSL_LOCKABLE ReplicaInfo {
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
                 Context::ErrHandler err_handler)
         : replica_state{SyncState::PREPARATION},
@@ -111,12 +112,12 @@ class DflyCmd {
           flows{flow_count} {
     }
 
-    [[nodiscard]] auto GetExclusiveLock() {
-      return std::lock_guard{shared_mu};
+    [[nodiscard]] auto GetExclusiveLock() ABSL_EXCLUSIVE_LOCK_FUNCTION() {
+      return util::fb2::LockGuard{shared_mu};
     }
 
-    [[nodiscard]] auto GetSharedLock() {
-      return std::shared_lock{shared_mu};
+    [[nodiscard]] auto GetSharedLock() ABSL_EXCLUSIVE_LOCK_FUNCTION() {
+      return dfly::SharedLock{shared_mu};
     }
 
     // Transition into cancelled state, run cleanup.
@@ -230,7 +231,7 @@ class DflyCmd {
 
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
-  std::map<uint32_t, LSN> ReplicationLagsLocked() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  std::map<uint32_t, LSN> ReplicationLagsLocked() const;
 
   ServerFamily* sf_;  // Not owned
 
