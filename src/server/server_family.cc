@@ -1002,8 +1002,6 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
     return {};
   }
 
-  RdbLoader::PerformPreLoad(&service_);
-
   auto& pool = service_.proactor_pool();
 
   vector<fb2::Fiber> load_fibers;
@@ -1606,9 +1604,6 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
   transaction->Execute(
       [db_ind](Transaction* t, EngineShard* shard) {
         t->GetDbSlice(shard->shard_id()).FlushDb(db_ind);
-        if (!db_ind || db_ind == DbSlice::kDbAll) {
-          shard->search_indices()->DropAllIndices();
-        }
         return OpStatus::OK;
       },
       true);

@@ -546,7 +546,6 @@ error_code Replica::InitiateDflySync() {
       } else {
         JournalExecutor{&service_}.FlushAll();
       }
-      RdbLoader::PerformPreLoad(&service_);
     } else if (num_full_flows == 0) {
       sync_type = "partial";
     } else {

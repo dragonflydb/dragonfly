@@ -2641,15 +2641,6 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   }
 }
 
-void RdbLoader::PerformPreLoad(Service* service) {
-  const CommandId* cmd = service->FindCmd("FT.DROPINDEX");
-  if (cmd == nullptr)
-    return;  // MacOS
-
-  shard_set->AwaitRunningOnShardQueue(
-      [](EngineShard* es) { es->search_indices()->DropAllIndices(); });
-}
-
 void RdbLoader::PerformPostLoad(Service* service) {
   const CommandId* cmd = service->FindCmd("FT.CREATE");
   if (cmd == nullptr)  // On MacOS we don't include search so FT.CREATE won't exist.
