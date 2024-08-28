@@ -95,6 +95,62 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_TERM, string, "tag");
   NEXT_TOK(TOK_RCURLBR);
 
+  SetInput("@color:{blue\\,1\\\\\\$\\+}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, R"(blue,1\$+)");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\.1\\\"\\%\\=}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue.1\"%=");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\<1\\'\\^\\~}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue<1'^~");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\>1\\:\\&\\/}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue>1:&/");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\{1\\;\\*\\ }");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue{1;* ");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\}1\\!\\(}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue}1!(");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\[1\\@\\)}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue[1@)");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\]1\\#\\-}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue]1#-");
+  NEXT_TOK(TOK_RCURLBR);
+
   SetInput("почтальон Печкин");
   NEXT_EQ(TOK_TERM, string, "почтальон");
   NEXT_EQ(TOK_TERM, string, "Печкин");

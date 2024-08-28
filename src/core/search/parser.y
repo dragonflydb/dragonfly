@@ -66,9 +66,9 @@ using namespace std;
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
-%token <std::string> TERM "term" PARAM "param" FIELD "field"
+%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field"
 
-%precedence TERM
+%precedence TERM TAG_VAL
 %left OR_OP
 %left AND_OP
 %right NOT_OP
@@ -178,6 +178,7 @@ tag_list_element:
   TERM { $$ = std::move($1); }
   | UINT32 { $$ = to_string($1); }
   | DOUBLE { $$ = to_string($1); }
+  | TAG_VAL { $$ = std::move($1); }
 
 
 %%

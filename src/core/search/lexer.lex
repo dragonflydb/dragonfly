@@ -29,6 +29,7 @@
   Parser::symbol_type make_DOUBLE(string_view, const Parser::location_type& loc);
   Parser::symbol_type make_UINT32(string_view, const Parser::location_type& loc);
   Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
+  Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& loc);
 %}
 
 blank [ \t\r]
@@ -37,6 +38,7 @@ sq    \'
 esc_chars ['"\?\\abfnrtv]
 esc_seq \\{esc_chars}
 term_char [_]|\w
+tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 
 
 %{
@@ -75,7 +77,8 @@ term_char [_]|\w
 "$"{term_char}+ return ParseParam(str(), loc());
 "@"{term_char}+ return Parser::make_FIELD(str(), loc());
 
-{term_char}+   return Parser::make_TERM(str(), loc());
+{term_char}+ return Parser::make_TERM(str(), loc());
+{tag_val_char}+   return make_TagVal(str(), loc());
 
 <<EOF>>    return Parser::make_YYEOF(loc());
 %%
@@ -102,4 +105,23 @@ Parser::symbol_type make_StringLit(string_view src, const Parser::location_type&
     throw Parser::syntax_error (loc, "bad escaped string: " + string(src));
 
   return Parser::make_TERM(res, loc);
+}
+
+Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& loc) {
+  string res;
+  res.reserve(src.size());
+
+  bool escaped = false;
+  for (size_t i = 0; i < src.size(); ++i) {
+    if (escaped) {
+      escaped = false;
+    } else if (src[i] == '\\') {
+      escaped = true;
+      continue;
+    }
+    res.push_back(src[i]);
+
+  }
+
+  return Parser::make_TAG_VAL(res, loc);
 }

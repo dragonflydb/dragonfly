@@ -757,4 +757,42 @@ TEST_F(SearchFamilyTest, Vector) {
   EXPECT_EQ(resp, "OK");
 }
 
+TEST_F(SearchFamilyTest, EscapedSymbols) {
+  Run({"ft.create", "i1", "ON", "HASH", "SCHEMA", "color", "tag"});
+
+  // TODO ',' is separator, we need to check should next request work or not
+  // In redis it works for JSON but not for HASH
+  // Run({"hset", "i1", "color", R"(blue,1\$+)"});
+  // EXPECT_THAT(Run({"ft.search", "i1", R"(@color:{blue\,1\\\$\+})"}), AreDocIds("i1"));
+  // EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue.1\"%="});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\.1\\\"\\%\\=}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue<1'^~"});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\<1\\'\\^\\~}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue>1:&/"});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\>1\\:\\&\\/}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue{1;* "});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\{1\\;\\*\\ }"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue}1!("});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\}1\\!\\(}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue[1@)"});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\[1\\@\\)}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue]1#-"});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\]1\\#\\-}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+}
+
 }  // namespace dfly
