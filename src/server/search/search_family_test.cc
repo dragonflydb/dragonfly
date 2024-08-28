@@ -795,4 +795,33 @@ TEST_F(SearchFamilyTest, EscapedSymbols) {
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
 }
 
+TEST_F(SearchFamilyTest, FlushSearchIndices) {
+  auto resp =
+      Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.nested.value", "AS", "value", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  // Test that the index was removed
+  resp = Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.another.nested.value", "AS", "value",
+              "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"FLUSHDB"}), "OK");
+
+  // Test that the index was removed
+  resp = Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.another.nested.value", "AS", "value",
+              "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"select", "1"}), "OK");
+  EXPECT_EQ(Run({"FLUSHDB"}), "OK");
+  EXPECT_EQ(Run({"select", "0"}), "OK");
+
+  // Test that index was not removed
+  resp = Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.another.nested.value", "AS", "value",
+              "TEXT"});
+  EXPECT_THAT(resp, ErrArg("ERR Index already exists"));
+}
+
 }  // namespace dfly
