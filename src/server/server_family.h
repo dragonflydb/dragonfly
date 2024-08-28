@@ -67,12 +67,6 @@ struct ReplicationMemoryStats {
   size_t full_sync_buf_bytes = 0;          // total bytes used for full sync buffers
 };
 
-struct ReplicaReconnectionsInfo {
-  std::string host;
-  uint16_t port;
-  uint32_t reconnect_count;
-};
-
 struct LoadingStats {
   size_t restore_count = 0;
   size_t failed_restore_count = 0;
@@ -128,8 +122,16 @@ struct Metrics {
 
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
-  std::vector<ReplicaRoleInfo> replication_metrics;
-  std::optional<ReplicaReconnectionsInfo> replica_reconnections;
+
+  // Replica info on the master side.
+  std::vector<ReplicaRoleInfo> master_side_replicas_info;
+
+  struct ReplicaInfo {
+    uint32_t reconnect_count;
+  };
+
+  // Replica reconnect stats on the replica side. Undefined for master
+  std::optional<ReplicaInfo> replica_side_info;
 
   LoadingStats loading_stats;
 };

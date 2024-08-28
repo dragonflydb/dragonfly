@@ -36,7 +36,8 @@ class DflyShardReplica;
 struct MasterContext {
   std::string master_repl_id;
   std::string dfly_session_id;  // Sync session id for dfly sync.
-  DflyVersion version = DflyVersion::VER0;
+  unsigned num_flows = 0;
+  DflyVersion version = DflyVersion::VER1;
 };
 
 // This class manages replication from both Dragonfly and Redis masters.
@@ -122,7 +123,7 @@ class Replica : ProtocolClient {
     uint32_t reconnect_count;
   };
 
-  Summary GetSummary() const;  // thread-safe, blocks fiber
+  Summary GetSummary() const;  // thread-safe, blocks fiber, makes a hop.
 
   bool HasDflyMaster() const {
     return !master_context_.dfly_session_id.empty();
@@ -142,6 +143,8 @@ class Replica : ProtocolClient {
   util::fb2::EventCount replica_waker_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
+  std::vector<std::vector<unsigned>> thread_flow_map_;  // a map from proactor id to flow list.
+
   // A vector of the last executer LSNs when a replication is interrupted.
   // Allows partial sync on reconnects.
   std::optional<std::vector<LSN>> last_journal_LSNs_;
@@ -154,7 +157,6 @@ class Replica : ProtocolClient {
   // ack_offs_ last acknowledged offset.
   size_t repl_offs_ = 0, ack_offs_ = 0;
   std::atomic<unsigned> state_mask_ = 0;
-  unsigned num_df_flows_ = 0;
 
   bool is_paused_ = false;
   std::string id_;
@@ -196,8 +198,11 @@ class DflyShardReplica : public ProtocolClient {
 
   uint32_t FlowId() const;
 
-  uint64_t JournalExecutedCount() const;
+  uint64_t JournalExecutedCount() const {
+    return journal_rec_executed_.load(std::memory_order_relaxed);
+  }
 
+  // Can be called from any thread.
   void Pause(bool pause);
 
  private:
@@ -218,13 +223,12 @@ class DflyShardReplica : public ProtocolClient {
   // Note: This is not 1-to-1 the LSN in the master, because this counts
   // **executed** records, which might be received interleaved when commands
   // run out-of-order on the master instance.
+  // Atomic, because JournalExecutedCount() can be called from any thread.
   std::atomic_uint64_t journal_rec_executed_ = 0;
 
-  util::fb2::Fiber sync_fb_;
-
-  util::fb2::Fiber acks_fb_;
+  util::fb2::Fiber sync_fb_, acks_fb_;
   size_t ack_offs_ = 0;
-
+  int proactor_index_ = -1;
   bool force_ping_ = false;
 
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;

@@ -1261,7 +1261,7 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     if (added)
       absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
-  if (!m.replication_metrics.empty()) {
+  if (!m.master_side_replicas_info.empty()) {
     ReplicationMemoryStats repl_mem;
     dfly_cmd->GetReplicationMemoryStats(&repl_mem);
     AppendMetricWithoutLabels(
@@ -1342,11 +1342,11 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     absl::StrAppend(&resp->body(), command_metrics);
   }
 
-  if (!m.replication_metrics.empty()) {
+  if (!m.master_side_replicas_info.empty()) {
     string replication_lag_metrics;
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
-    for (const auto& replica : m.replication_metrics) {
+    for (const auto& replica : m.master_side_replicas_info) {
       AppendMetricValue("connected_replica_lag_records", replica.lsn_lag,
                         {"replica_ip", "replica_port", "replica_state"},
                         {replica.address, absl::StrCat(replica.listening_port), replica.state},
@@ -1355,14 +1355,10 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     absl::StrAppend(&resp->body(), replication_lag_metrics);
   }
 
-  if (m.replica_reconnections) {
-    auto& replica_reconnections = m.replica_reconnections.value();
-    AppendMetricHeader("replica_reconnect_count", "Number of replica reconnects",
-                       MetricType::COUNTER, &resp->body());
-    AppendMetricValue("replica_reconnect_count", replica_reconnections.reconnect_count,
-                      {"replica_host", "replica_port"},
-                      {replica_reconnections.host, absl::StrCat(replica_reconnections.port)},
-                      &resp->body());
+  if (m.replica_side_info) {
+    auto& replica_info = *m.replica_side_info;
+    AppendMetricWithoutLabels("replica_reconnect_count", "Number of replica reconnects",
+                              replica_info.reconnect_count, MetricType::COUNTER, &resp->body());
   }
 
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
@@ -2037,7 +2033,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
       if (result.tx_queue_len < shard->txq()->size())
         result.tx_queue_len = shard->txq()->size();
-    }
+    }  // if (shard)
 
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
     result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
@@ -2045,7 +2041,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     result.lua_stats += InterpreterManager::tl_stats();
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
-  };
+  };  // cb
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
 
@@ -2056,11 +2052,13 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
   if (is_master) {
-    result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
+    result.master_side_replicas_info = dfly_cmd_->GetReplicasRoleInfo();
   } else {
     auto info = GetReplicaSummary();
     if (info) {
-      result.replica_reconnections = {std::move(info->host), info->port, info->reconnect_count};
+      result.replica_side_info = {
+          .reconnect_count = info->reconnect_count,
+      };
     }
   }
 
@@ -2197,7 +2195,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("maxmemory_policy", "noeviction");
     }
 
-    if (!m.replication_metrics.empty()) {
+    if (!m.master_side_replicas_info.empty()) {
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes);
@@ -2361,7 +2359,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     if (!replica_) {
       append("role", "master");
       append("connected_slaves", m.facade_stats.conn_stats.num_replicas);
-      const auto& replicas = m.replication_metrics;
+      const auto& replicas = m.master_side_replicas_info;
       for (size_t i = 0; i < replicas.size(); i++) {
         auto& r = replicas[i];
         // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
@@ -2372,7 +2370,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     } else {
       append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
-      auto replication_info_cb = [&](Replica::Summary rinfo) {
+      auto replication_info_cb = [&](const Replica::Summary& rinfo) {
         append("master_host", rinfo.host);
         append("master_port", rinfo.port);
 
@@ -2385,6 +2383,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append("slave_read_only", 1);
       };
       replication_info_cb(replica_->GetSummary());
+
+      // Special case, when multiple masters replicate to a single replica.
       for (const auto& replica : cluster_replicas_) {
         replication_info_cb(replica->GetSummary());
       }
@@ -2700,8 +2700,6 @@ void ServerFamily::Replicate(string_view host, string_view port) {
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "ReplTakeOver start";
 
-  util::fb2::LockGuard lk(replicaof_mu_);
-
   CmdArgParser parser{args};
 
   int timeout_sec = parser.Next<int>();
@@ -2722,6 +2720,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (ServerState::tlocal()->is_master)
     return cntx->SendOk();
 
+  util::fb2::LockGuard lk(replicaof_mu_);
+
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
@@ -2735,8 +2735,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
-  service_.proactor_pool().AwaitFiberOnAll(
-      [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+  SetMasterFlagOnAllThreads(true);
   replica_->Stop();
   replica_.reset();
   return cntx->SendOk();
