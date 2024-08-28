@@ -824,7 +824,6 @@ TEST_F(ListFamilyTest, BLMoveRings) {
       }));
     }
   }
-#pragma GCC diagnostic pop
 
   ThisFiber::SleepFor(5ms);
 
@@ -1057,4 +1056,5 @@ TEST_F(ListFamilyTest, ContendExpire) {
   }
 }
 
+#pragma GCC diagnostic pop
 }  // namespace dfly
