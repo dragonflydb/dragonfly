@@ -130,13 +130,10 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
       first_key_(first_key),
       last_key_(last_key),
       acl_categories_(acl_categories) {
-  const std::vector<std::string> pub = {"PUBLISH", "SUBSCRIBE", "UNSUBSCRIBE"};
-  const std::vector<std::string> p_pub = {"PSUBSCRIBE", "PUNSUBSCRIBE"};
-  auto matcher = [this](auto& a) { return a == name_; };
-  if (std::any_of(pub.begin(), pub.end(), matcher)) {
+  if (name_ == "PUBLISH" || name_ == "SUBSCRIBE" || name_ == "UNSUBSCRIBE") {
     is_pub_sub_ = true;
-  } else if (std::any_of(p_pub.begin(), p_pub.end(), matcher)) {
-    is_p_pub_sub_ = true;
+  } else if (name_ == "PSUBSCRIBE" || name_ == "PUNSUBSCRIBE") {
+    is_p_sub_ = true;
   }
 }
 

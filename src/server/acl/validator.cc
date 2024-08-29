@@ -28,7 +28,7 @@ namespace dfly::acl {
   if (id.IsPubSub()) {
     auth_res =
         IsUserAllowedToInvokePubSubCommand(false, cntx.acl_commands, cntx.pub_sub, tail_args, id);
-  } else if (id.IsPPubSub()) {
+  } else if (id.IsPSub()) {
     auth_res =
         IsUserAllowedToInvokePubSubCommand(true, cntx.acl_commands, cntx.pub_sub, tail_args, id);
   } else {
