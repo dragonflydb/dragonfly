@@ -1475,7 +1475,8 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
+  optional<JsonType> search_value =
+      dfly::JsonFromString(ArgS(args, 2), PMR_NS::get_default_resource());
   if (!search_value) {
     cntx->SendError(kSyntaxErr);
     return;
