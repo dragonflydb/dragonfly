@@ -317,8 +317,8 @@ class ServerFamily {
   GenericError DoSaveCheckAndStart(bool new_version, string_view basename, Transaction* trans,
                                    bool ignore_state = false) ABSL_LOCKS_EXCLUDED(save_mu_);
 
-  GenericError WaitUntilSaveFinished(Transaction* trans, bool ignore_state = false)
-      ABSL_LOCKS_EXCLUDED(save_mu_);
+  GenericError WaitUntilSaveFinished(Transaction* trans,
+                                     bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;
   void StopAllClusterReplicas() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
 
   bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password) const;

@@ -722,7 +722,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
   ShardId sid = EngineShard::tlocal()->shard_id();
   vector<uint32_t> deleted;
 
-  for (auto [sync_id, replica_ptr] : ABSL_TS_UNCHECKED_READ(replica_infos_)) {
+  for (auto [sync_id, replica_ptr] : replica_infos_) {
     auto replica_lock = replica_ptr->GetSharedLock();
 
     if (!replica_ptr->flows[sid].saver)
@@ -742,7 +742,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
   }
 
   for (auto sync_id : deleted)
-    ABSL_TS_UNCHECKED(replica_infos_.erase(sync_id));
+    replica_infos_.erase(sync_id);
 }
 
 shared_ptr<DflyCmd::ReplicaInfo> DflyCmd::GetReplicaInfo(uint32_t sync_id) {
@@ -789,7 +789,7 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
   {
     util::fb2::LockGuard lk{mu_};  // prevent state changes
     auto cb = [&](EngineShard* shard) {
-      for (const auto& [_, info] : ABSL_TS_UNCHECKED_READ(replica_infos_)) {
+      for (const auto& [_, info] : replica_infos_) {
         auto repl_lk = info->GetSharedLock();
 
         // flows should not be empty.

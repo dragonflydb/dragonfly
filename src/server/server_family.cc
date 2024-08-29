@@ -1561,7 +1561,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
 }
 
 GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore_state) {
-  ABSL_TS_UNCHECKED(save_controller_->WaitAllSnapshots());
+  save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
   {

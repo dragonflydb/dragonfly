@@ -156,13 +156,13 @@ class DflyCmd {
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
-  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const;
+  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
 
   // Tries to break those flows that stuck on socket write for too long time.
-  void BreakStalledFlowsInShard();
+  void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
  private:
   // JOURNAL [START/STOP]
