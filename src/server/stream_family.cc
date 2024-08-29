@@ -1886,7 +1886,7 @@ void SetId(string_view key, string_view gname, CmdArgList args, ConnectionContex
   facade::CmdArgParser parser{args};
 
   string_view id = parser.Next();
-  while (parser.ToUpper().HasNext()) {
+  while (parser.HasNext()) {
     if (parser.Check("ENTRIESREAD").ExpectTail(1)) {
       // TODO: to support ENTRIESREAD.
       return cntx->SendError(kSyntaxErr);
