@@ -321,8 +321,9 @@ def test_jsonstrlen(r: redis.Redis):
     assert r.json().strlen("doc1", "$.nested2.a") == [None]
 
     # Test missing key
-    with pytest.raises(redis.ResponseError):
-        r.json().strlen("non_existing_doc", "$..a")
+    # Note: Dragonfly returns NIL in the accordance to the official docs
+    # with pytest.raises(redis.ResponseError):
+    #    r.json().strlen("non_existing_doc", "$..a")
 
 
 def test_toggle(r: redis.Redis):

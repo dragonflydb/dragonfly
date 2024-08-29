@@ -822,24 +822,23 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
   return JsonEvaluateOperation<StringVec>(op_args, key, json_path, std::move(cb), {true, true});
 }
 
-auto OpStrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
-                 facade::ArgRange strs) {
+using StrAppendResult = std::optional<std::size_t>;
+
+OpResult<JsonCallbackResult<StrAppendResult>> OpStrAppend(const OpArgs& op_args, string_view key,
+                                                          const WrappedJsonPath& path,
+                                                          string_view value) {
   auto cb = [&](std::optional<std::string_view>,
-                JsonType* val) -> MutateCallbackResult<std::optional<std::size_t>> {
-    if (val->is_string()) {
-      string new_val = val->as_string();
-      for (string_view str : strs) {
-        new_val += str;
-      }
+                JsonType* val) -> MutateCallbackResult<StrAppendResult> {
+    if (!val->is_string())
+      return {false, std::nullopt};
 
-      *val = new_val;
-      return {false, new_val.size()};
-    }
-
-    return {false, std::nullopt};
+    string new_val = absl::StrCat(val->as_string_view(), value);
+    size_t len = new_val.size();
+    *val = std::move(new_val);
+    return {false, len};  // do not delete, new value len
   };
 
-  return UpdateEntry<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
+  return UpdateEntry<StrAppendResult>(op_args, key, path, std::move(cb));
 }
 
 // Returns the numbers of values cleared.
@@ -1476,7 +1475,8 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
+  optional<JsonType> search_value =
+      dfly::JsonFromString(ArgS(args, 2), PMR_NS::get_default_resource());
   if (!search_value) {
     cntx->SendError(kSyntaxErr);
     return;
@@ -1651,12 +1651,19 @@ void JsonFamily::Clear(CmdArgList args, ConnectionContext* cntx) {
 void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   string_view path = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
-  auto strs = args.subspan(2);
 
+  // We try parsing the value into json string object first.
+  optional<JsonType> parsed_json = dfly::JsonFromString(value, PMR_NS::get_default_resource());
+  if (!parsed_json || !parsed_json->is_string()) {
+    return cntx->SendError("expected string value", kSyntaxErrType);
+  };
+
+  string_view json_string = parsed_json->as_string_view();
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpStrAppend(t->GetOpArgs(shard), key, json_path, facade::ArgRange{strs});
+    return OpStrAppend(t->GetOpArgs(shard), key, json_path, json_string);
   };
 
   Transaction* trans = cntx->transaction;
@@ -1903,7 +1910,7 @@ void JsonFamily::Register(CommandRegistry* registry) {
   *registry << CI{"JSON.FORGET", CO::WRITE, -2, 1, 1, acl::JSON}.HFUNC(
       Del);  // An alias of JSON.DEL.
   *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ObjKeys);
-  *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(
+  *registry << CI{"JSON.STRAPPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(
       StrAppend);
   *registry << CI{"JSON.CLEAR", CO::WRITE | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Clear);
   *registry << CI{"JSON.ARRPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrPop);
