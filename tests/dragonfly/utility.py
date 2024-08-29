@@ -92,7 +92,9 @@ async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
         yield x
 
 
-# wait for replica to reach stable sync state
+# wait for a process becomes "responsive":
+# for a master - waits that it finishes loading a snapshot if it's budy doing so,
+# and for replica it waits until it finishes its full sync stage and reaches the stable sync state.
 async def wait_available_async(
     clients: Union[aioredis.Redis, Iterable[aioredis.Redis]], timeout=120
 ):
