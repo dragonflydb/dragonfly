@@ -2133,7 +2133,7 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, RangeParams range_params) {
   facade::CmdArgParser parser{args.subspan(3)};
-  while (parser.ToUpper().HasNext()) {
+  while (parser.HasNext()) {
     if (parser.Check("BYSCORE")) {
       if (exchange(range_params.interval_type, RangeParams::SCORE) == RangeParams::LEX)
         return cntx->SendError("BYSCORE and BYLEX options are not compatible");
@@ -2271,7 +2271,7 @@ void ZSetFamily::ZRandMember(CmdArgList args, ConnectionContext* cntx) {
   int count = is_count ? parser.Next<int>() : 1;
 
   ZSetFamily::RangeParams params;
-  params.with_scores = static_cast<bool>(parser.Check("WITHSCORES").IgnoreCase());
+  params.with_scores = static_cast<bool>(parser.Check("WITHSCORES"));
 
   if (parser.HasNext())
     return cntx->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));

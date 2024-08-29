@@ -47,20 +47,18 @@ bool IsValidJsonPath(string_view path) {
 search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   search::SchemaField::VectorParams params{};
 
-  params.use_hnsw = parser->ToUpper().Switch("HNSW", true, "FLAT", false);
+  params.use_hnsw = parser->Switch("HNSW", true, "FLAT", false);
   size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
-    parser->ToUpper();
-
     if (parser->Check("DIM").ExpectTail(1)) {
       params.dim = parser->Next<size_t>();
       continue;
     }
 
     if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
-      params.sim = parser->ToUpper().Switch("L2", search::VectorSimilarity::L2, "COSINE",
-                                            search::VectorSimilarity::COSINE);
+      params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
+                                  search::VectorSimilarity::COSINE);
       continue;
     }
 
@@ -100,13 +98,13 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
 search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
   search::SchemaField::TagParams params{};
   while (parser->HasNext()) {
-    if (parser->Check("SEPARATOR").IgnoreCase().ExpectTail(1)) {
+    if (parser->Check("SEPARATOR").ExpectTail(1)) {
       string_view separator = parser->Next();
       params.separator = separator.front();
       continue;
     }
 
-    if (parser->Check("CASESENSITIVE").IgnoreCase()) {
+    if (parser->Check("CASESENSITIVE")) {
       params.case_sensitive = true;
       continue;
     }
@@ -175,12 +173,12 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     // Flags: check for SORTABLE and NOINDEX
     uint8_t flags = 0;
     while (parser.HasNext()) {
-      if (parser.Check("NOINDEX").IgnoreCase()) {
+      if (parser.Check("NOINDEX")) {
         flags |= search::SchemaField::NOINDEX;
         continue;
       }
 
-      if (parser.Check("SORTABLE").IgnoreCase()) {
+      if (parser.Check("SORTABLE")) {
         flags |= search::SchemaField::SORTABLE;
         continue;
       }
@@ -224,7 +222,7 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionContext* cntx) {
   SearchParams params;
 
-  while (parser.ToUpper().HasNext()) {
+  while (parser.HasNext()) {
     // [LIMIT offset total]
     if (parser.Check("LIMIT").ExpectTail(2)) {
       params.limit_offset = parser.Next<size_t>();
@@ -238,7 +236,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
       params.return_fields = SearchParams::FieldReturnList{};
       while (params.return_fields->size() < num_fields) {
         string_view ident = parser.Next();
-        string_view alias = parser.Check("AS").IgnoreCase().ExpectTail(1) ? parser.Next() : ident;
+        string_view alias = parser.Check("AS").ExpectTail(1) ? parser.Next() : ident;
         params.return_fields->emplace_back(ident, alias);
       }
       continue;
@@ -257,8 +255,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     }
 
     if (parser.Check("SORTBY").ExpectTail(1)) {
-      params.sort_option =
-          search::SortOption{string{parser.Next()}, bool(parser.Check("DESC").IgnoreCase())};
+      params.sort_option = search::SortOption{string{parser.Next()}, bool(parser.Check("DESC"))};
       continue;
     }
 
@@ -287,7 +284,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   AggregateParams params;
   tie(params.index, params.query) = parser.Next<string_view, string_view>();
 
-  while (parser.ToUpper().HasNext()) {
+  while (parser.HasNext()) {
     // LOAD count field [field ...]
     if (parser.Check("LOAD").ExpectTail(1)) {
       params.load_fields.resize(parser.Next<size_t>());
@@ -303,7 +300,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
         field = parser.Next();
 
       vector<aggregate::Reducer> reducers;
-      while (parser.ToUpper().Check("REDUCE").ExpectTail(2)) {
+      while (parser.Check("REDUCE").ExpectTail(2)) {
         parser.ToUpper();  // uppercase for func_name
         auto [func_name, nargs] = parser.Next<string_view, size_t>();
         auto func = aggregate::FindReducerFunc(func_name);
@@ -332,7 +329,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     if (parser.Check("SORTBY").ExpectTail(1)) {
       parser.ExpectTag("1");
       string_view field = parser.Next();
-      bool desc = bool(parser.Check("DESC").IgnoreCase());
+      bool desc = bool(parser.Check("DESC"));
 
       params.steps.push_back(aggregate::MakeSortStep(field, desc));
       continue;
@@ -471,10 +468,10 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
 
-  while (parser.ToUpper().HasNext()) {
+  while (parser.HasNext()) {
     // ON HASH | JSON
     if (parser.Check("ON").ExpectTail(1)) {
-      index.type = parser.ToUpper().Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
+      index.type = parser.Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 
