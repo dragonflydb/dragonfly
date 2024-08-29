@@ -1156,9 +1156,8 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     if ((result->size() == 1) && (args.size() == 1))
       rb->SendBulkString(result->front());
-    else {
-      rb->SendStringArr(*result, facade::RedisReplyBuilder::MAP);
-    }
+    else
+      rb->SendStringArr(*result, facade::RedisReplyBuilder::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1)
       rb->SendNull();
