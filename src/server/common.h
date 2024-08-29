@@ -387,12 +387,12 @@ template <typename Mutex> class ABSL_SCOPED_LOCKABLE SharedLock {
 
   ~SharedLock() ABSL_UNLOCK_FUNCTION() {
     if (is_locked_) {
-      m_.unlock();
+      m_.unlock_shared();
     }
   }
 
   void unlock() ABSL_UNLOCK_FUNCTION() {
-    m_.unlock();
+    m_.unlock_shared();
     is_locked_ = false;
   }
 
