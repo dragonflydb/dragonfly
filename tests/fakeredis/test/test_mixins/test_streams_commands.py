@@ -377,6 +377,7 @@ def test_xgroup_create_redis7(r: redis.Redis):
 
 
 @pytest.mark.min_server("7")
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_xgroup_setid_redis7(r: redis.Redis):
     stream, group = "stream", "group"
     message_id = r.xadd(stream, {"foo": "bar"})
