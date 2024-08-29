@@ -120,17 +120,15 @@ TEST_F(CmdArgParserTest, Cases) {
   EXPECT_EQ(err->index, 1);
 }
 
-TEST_F(CmdArgParserTest, NextUpper) {
+TEST_F(CmdArgParserTest, IgnoreCase) {
   auto parser = Make({"hello", "marker", "taail", "world"});
 
-  parser.ToUpper();
-  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "HELLO"sv);
+  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "hello"sv);
 
-  parser.ToUpper();
-  EXPECT_TRUE(parser.Check("MARKER"sv).ExpectTail(1).NextUpper());
+  EXPECT_TRUE(parser.Check("MARKER"sv).ExpectTail(1));
   parser.Skip(1);
 
-  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "WORLD"sv);
+  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "world"sv);
 }
 
 }  // namespace facade

@@ -26,9 +26,6 @@ CmdArgParser::CheckProxy::operator bool() const {
 
   parser_->cur_i_++;
 
-  if (size_t uidx = idx_ + expect_tail_ + 1; next_upper_ && uidx < parser_->args_.size())
-    parser_->ToUpper(uidx);
-
   return true;
 }
 

@@ -49,12 +49,6 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   } while (cursor);
 }
 
-const absl::flat_hash_map<string_view, search::SchemaField::FieldType> kSchemaTypes = {
-    {"TAG"sv, search::SchemaField::TAG},
-    {"TEXT"sv, search::SchemaField::TEXT},
-    {"NUMERIC"sv, search::SchemaField::NUMERIC},
-    {"VECTOR"sv, search::SchemaField::VECTOR}};
-
 }  // namespace
 
 bool SerializedSearchDoc::operator<(const SerializedSearchDoc& other) const {
@@ -70,15 +64,17 @@ bool SearchParams::ShouldReturnField(std::string_view field) const {
   return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
-optional<search::SchemaField::FieldType> ParseSearchFieldType(string_view name) {
-  auto it = kSchemaTypes.find(name);
-  return it != kSchemaTypes.end() ? make_optional(it->second) : nullopt;
-}
-
 string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
-  for (auto [it_name, it_type] : kSchemaTypes)
-    if (it_type == type)
-      return it_name;
+  switch (type) {
+    case search::SchemaField::TAG:
+      return "TAG";
+    case search::SchemaField::TEXT:
+      return "TEXT";
+    case search::SchemaField::NUMERIC:
+      return "NUMERIC";
+    case search::SchemaField::VECTOR:
+      return "VECTOR";
+  }
   ABSL_UNREACHABLE();
   return "";
 }

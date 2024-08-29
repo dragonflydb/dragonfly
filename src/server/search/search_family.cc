@@ -135,26 +135,25 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
       return nullopt;
     }
 
-    parser.ToUpper();
-
     // AS [alias]
-    if (parser.Check("AS").ExpectTail(1).NextUpper())
+    if (parser.Check("AS").ExpectTail(1))
       field_alias = parser.Next();
 
     // Determine type
-    string_view type_str = parser.Next();
-    auto type = ParseSearchFieldType(type_str);
-    if (!type) {
-      cntx->SendError("Invalid field type: " + string{type_str});
+    using search::SchemaField;
+    auto type = parser.Switch("TAG", SchemaField::TAG, "TEXT", SchemaField::TEXT, "NUMERIC",
+                              SchemaField::NUMERIC, "VECTOR", SchemaField::VECTOR);
+    if (auto err = parser.Error(); err) {
+      cntx->SendError(err->MakeReply());
       return nullopt;
     }
 
     // Tag fields include: [separator char] [casesensitive]
     // Vector fields include: {algorithm} num_args args...
     search::SchemaField::ParamsVariant params(monostate{});
-    if (*type == search::SchemaField::TAG) {
+    if (type == search::SchemaField::TAG) {
       params = ParseTagParams(&parser);
-    } else if (*type == search::SchemaField::VECTOR) {
+    } else if (type == search::SchemaField::VECTOR) {
       auto vector_params = ParseVectorParams(&parser);
       if (parser.HasError()) {
         auto err = *parser.Error();
@@ -190,7 +189,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     while (kIgnoredOptions.count(parser.Peek()) > 0)
       parser.Skip(2);
 
-    schema.fields[field] = {*type, flags, string{field_alias}, std::move(params)};
+    schema.fields[field] = {type, flags, string{field_alias}, std::move(params)};
   }
 
   // Build field name mapping table

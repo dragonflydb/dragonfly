@@ -29,12 +29,6 @@ struct CmdArgParser {
       return *this;
     }
 
-    // Call ToUpper on the next value after the flag and its expected tail.
-    CheckProxy& NextUpper() {
-      next_upper_ = true;
-      return *this;
-    }
-
    private:
     friend struct CmdArgParser;
 
@@ -46,7 +40,6 @@ struct CmdArgParser {
     std::string_view tag_;
     size_t idx_;
     size_t expect_tail_ = 0;
-    bool next_upper_ = false;
   };
 
   struct ErrorInfo {
