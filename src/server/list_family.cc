@@ -100,7 +100,6 @@ string ListPop(ListDir dir, quicklist* ql) {
 }
 
 ListDir ParseDir(facade::CmdArgParser* parser) {
-  parser->ToUpper();
   return parser->Switch("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 }
 
@@ -902,7 +901,7 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
   uint32_t max_len = 0;
   bool skip_count = true;
 
-  while (parser.ToUpper().HasNext()) {
+  while (parser.HasNext()) {
     if (parser.Check("RANK").ExpectTail(1)) {
       rank = parser.Next<int>();
       continue;
@@ -986,7 +985,7 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
 void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
-  InsertParam where = parser.ToUpper().Switch("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
+  InsertParam where = parser.Switch("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
 
   if (auto err = parser.Error(); err)

@@ -435,7 +435,7 @@ void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, Connec
   auto timeout = parser.Next<uint64_t>();
   ClientPause pause_state = ClientPause::ALL;
   if (parser.HasNext()) {
-    pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
+    pause_state = parser.Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
   if (auto err = parser.Error(); err) {
     return cntx->SendError(err->MakeReply());
@@ -470,20 +470,20 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
   bool is_on = false;
   using Tracking = ConnectionState::ClientTracking;
   Tracking::Options option = Tracking::NONE;
-  if (parser.Check("ON").IgnoreCase()) {
+  if (parser.Check("ON")) {
     is_on = true;
-  } else if (!parser.Check("OFF").IgnoreCase()) {
+  } else if (!parser.Check("OFF")) {
     return cntx->SendError(kSyntaxErr);
   }
 
   bool noloop = false;
 
   if (parser.HasNext()) {
-    if (parser.Check("OPTIN").IgnoreCase()) {
+    if (parser.Check("OPTIN")) {
       option = Tracking::OPTIN;
-    } else if (parser.Check("OPTOUT").IgnoreCase()) {
+    } else if (parser.Check("OPTOUT")) {
       option = Tracking::OPTOUT;
-    } else if (parser.Check("NOLOOP").IgnoreCase()) {
+    } else if (parser.Check("NOLOOP")) {
       noloop = true;
     } else {
       return cntx->SendError(kSyntaxErr);
@@ -491,7 +491,7 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (parser.HasNext()) {
-    if (!noloop && parser.Check("NOLOOP").IgnoreCase()) {
+    if (!noloop && parser.Check("NOLOOP")) {
       noloop = true;
     } else {
       return cntx->SendError(kSyntaxErr);
@@ -520,12 +520,12 @@ void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
 
   using Tracking = ConnectionState::ClientTracking;
   CmdArgParser parser{args};
-  if (parser.Check("YES").IgnoreCase()) {
+  if (parser.Check("YES")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
       return cntx->SendError(
           "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
     }
-  } else if (parser.Check("NO").IgnoreCase()) {
+  } else if (parser.Check("NO")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTOUT)) {
       return cntx->SendError(
           "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
@@ -645,7 +645,7 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionCo
   ReplicaOfArgs replicaof_args;
   CmdArgParser parser(args);
 
-  if (parser.Check("NO").IgnoreCase().ExpectTail(1)) {
+  if (parser.Check("NO").ExpectTail(1)) {
     parser.ExpectTag("ONE");
     replicaof_args.port = 0;
   } else {
@@ -2703,7 +2703,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
 
   int timeout_sec = parser.Next<int>();
-  bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
+  bool save_flag = static_cast<bool>(parser.Check("SAVE"));
 
   if (parser.HasNext())
     return cntx->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));

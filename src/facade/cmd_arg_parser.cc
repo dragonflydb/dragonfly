@@ -5,7 +5,6 @@
 #include "facade/cmd_arg_parser.h"
 
 #include <absl/strings/ascii.h>
-#include <absl/strings/match.h>
 
 #include "base/logging.h"
 #include "facade/error.h"
@@ -17,7 +16,7 @@ CmdArgParser::CheckProxy::operator bool() const {
     return false;
 
   std::string_view arg = parser_->SafeSV(idx_);
-  if ((!ignore_case_ && arg != tag_) || (ignore_case_ && !absl::EqualsIgnoreCase(arg, tag_)))
+  if (!absl::EqualsIgnoreCase(arg, tag_))
     return false;
 
   if (idx_ + expect_tail_ >= parser_->args_.size()) {
@@ -26,9 +25,6 @@ CmdArgParser::CheckProxy::operator bool() const {
   }
 
   parser_->cur_i_++;
-
-  if (size_t uidx = idx_ + expect_tail_ + 1; next_upper_ && uidx < parser_->args_.size())
-    parser_->ToUpper(uidx);
 
   return true;
 }

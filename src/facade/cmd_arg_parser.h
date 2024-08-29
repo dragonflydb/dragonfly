@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
 #include <optional>
@@ -28,17 +29,6 @@ struct CmdArgParser {
       return *this;
     }
 
-    // Call ToUpper on the next value after the flag and its expected tail.
-    CheckProxy& NextUpper() {
-      next_upper_ = true;
-      return *this;
-    }
-
-    CheckProxy& IgnoreCase() {
-      ignore_case_ = true;
-      return *this;
-    }
-
    private:
     friend struct CmdArgParser;
 
@@ -50,8 +40,6 @@ struct CmdArgParser {
     std::string_view tag_;
     size_t idx_;
     size_t expect_tail_ = 0;
-    bool next_upper_ = false;
-    bool ignore_case_ = false;
   };
 
   struct ErrorInfo {
@@ -157,7 +145,7 @@ struct CmdArgParser {
   template <class T, class... Cases>
   std::optional<std::decay_t<T>> SwitchImpl(std::string_view arg, std::string_view tag, T&& value,
                                             Cases&&... cases) {
-    if (arg == tag)
+    if (absl::EqualsIgnoreCase(arg, tag))
       return std::forward<T>(value);
 
     if constexpr (sizeof...(cases) > 0)

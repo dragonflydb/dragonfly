@@ -404,7 +404,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("timeout is negative");
   }
 
-  bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
+  bool save_flag = static_cast<bool>(parser.Check("SAVE"));
 
   string_view sync_id_str = parser.Next<std::string_view>();
 

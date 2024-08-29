@@ -731,7 +731,7 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
 
   string_view key = parser.Next();
 
-  bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv).IgnoreCase());
+  bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv));
   string_view ttl_str = parser.Next();
 
   uint32_t ttl_sec;

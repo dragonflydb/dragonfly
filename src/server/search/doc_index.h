@@ -22,7 +22,6 @@ namespace dfly {
 
 using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*value*/>;
 
-std::optional<search::SchemaField::FieldType> ParseSearchFieldType(std::string_view name);
 std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
 struct SerializedSearchDoc {

@@ -1838,15 +1838,15 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   vector<pair<string_view, WrappedJsonPath>> paths;
 
   while (parser.HasNext()) {
-    if (parser.Check("SPACE").IgnoreCase().ExpectTail(1)) {
+    if (parser.Check("SPACE").ExpectTail(1)) {
       space = parser.Next();
       continue;
     }
-    if (parser.Check("NEWLINE").IgnoreCase().ExpectTail(1)) {
+    if (parser.Check("NEWLINE").ExpectTail(1)) {
       new_line = parser.Next();
       continue;
     }
-    if (parser.Check("INDENT").IgnoreCase().ExpectTail(1)) {
+    if (parser.Check("INDENT").ExpectTail(1)) {
       indent = parser.Next();
       continue;
     }
