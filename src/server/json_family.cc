@@ -603,7 +603,7 @@ OpResult<JsonCallbackResult<std::optional<size_t>>> OpStrLen(const OpArgs& op_ar
   };
 
   return JsonEvaluateOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb),
-                                                           {true, false});
+                                                           {true, true});
 }
 
 OpResult<JsonCallbackResult<std::optional<size_t>>> OpObjLen(const OpArgs& op_args, string_view key,
@@ -1828,11 +1828,6 @@ void JsonFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
   Transaction* trans = cntx->transaction;
   auto result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (result == OpStatus::KEY_NOTFOUND) {
-    if (path.empty())
-      return rb->SendNull();
-    return cntx->SendError(OpStatus::KEY_NOTFOUND);
-  }
   reply_generic::Send(result, rb);
 }
 
