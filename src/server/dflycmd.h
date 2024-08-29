@@ -156,7 +156,7 @@ class DflyCmd {
 
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
-  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_LOCKS_EXCLUDED(mu_);
+  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const;
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
@@ -231,7 +231,7 @@ class DflyCmd {
 
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
-  std::map<uint32_t, LSN> ReplicationLagsLocked() const;
+  std::map<uint32_t, LSN> ReplicationLagsLocked() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   ServerFamily* sf_;  // Not owned
 

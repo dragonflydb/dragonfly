@@ -482,7 +482,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     if (!change_cb_.empty()) {
       FetchedItemsRestorer fetched_restorer(&fetched_items_);
       util::fb2::LockGuard lk(local_mu_);
-      auto bump_cb = [&](PrimeTable::bucket_iterator bit) ABSL_EXCLUSIVE_LOCKS_REQUIRED(local_mu_) {
+      auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);

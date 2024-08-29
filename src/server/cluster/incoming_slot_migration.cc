@@ -80,10 +80,10 @@ class ClusterShardMigration {
     bc->Dec();  // we should provide ability to join the flow
   }
 
-  std::error_code Cancel() ABSL_LOCKS_EXCLUDED(mu_) {
+  std::error_code Cancel() {
     util::fb2::LockGuard lk(mu_);
     if (socket_ != nullptr) {
-      return socket_->proactor()->Await([s = socket_]() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+      return socket_->proactor()->Await([s = socket_]() {
         if (s->IsOpen()) {
           return s->Shutdown(SHUT_RDWR);  // Does not Close(), only forbids further I/O.
         }

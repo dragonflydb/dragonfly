@@ -1560,12 +1560,8 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
   return {};
 }
 
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wthread-safety-analysis"
-#endif
 GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore_state) {
-  save_controller_->WaitAllSnapshots();
+  ABSL_TS_UNCHECKED(save_controller_->WaitAllSnapshots());
   detail::SaveInfo save_info;
 
   {
@@ -1585,9 +1581,6 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
   return save_info.error;
 }
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#endif
 
 GenericError ServerFamily::DoSave(bool new_version, string_view basename, Transaction* trans,
                                   bool ignore_state) {

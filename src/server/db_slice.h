@@ -565,8 +565,7 @@ class DbSlice {
     return version_++;
   }
 
-  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const
-      ABSL_EXCLUSIVE_LOCKS_REQUIRED(local_mu_);
+  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
 
   // Used to provide exclusive access while Traversing segments
   mutable ThreadLocalMutex local_mu_;

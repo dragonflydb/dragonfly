@@ -69,9 +69,9 @@ void Namespaces::Clear() {
     return;
   }
 
-  shard_set->RunBriefInParallel([&](EngineShard* es) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+  shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
-    for (auto& ns : namespaces_) {
+    for (auto& ns : ABSL_TS_UNCHECKED_READ(namespaces_)) {
       ns.second.shard_db_slices_[es->shard_id()].reset();
     }
   });

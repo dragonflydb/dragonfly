@@ -96,7 +96,6 @@ ClusterConfig* ClusterFamily::cluster_config() {
 void ClusterFamily::Shutdown() {
   shard_set->pool()->at(0)->Await([this]() ABSL_LOCKS_EXCLUDED(set_config_mu) {
     util::fb2::LockGuard lk(set_config_mu);
-    util::fb2::LockGuard lk_m(migration_mu_);
     if (!tl_cluster_config)
       return;
 
@@ -104,6 +103,7 @@ void ClusterFamily::Shutdown() {
     RemoveOutgoingMigrations(empty_config, tl_cluster_config);
     RemoveIncomingMigrations(empty_config->GetFinishedIncomingMigrations(tl_cluster_config));
 
+    util::fb2::LockGuard migration_lk(migration_mu_);
     DCHECK(outgoing_migration_jobs_.empty());
     DCHECK(incoming_migrations_jobs_.empty());
   });
