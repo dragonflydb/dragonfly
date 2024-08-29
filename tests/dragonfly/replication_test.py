@@ -1556,7 +1556,6 @@ async def test_replicaof_flag(df_factory):
 
     await wait_available_async(c_replica)  # give it time to startup
     # wait until we have a connection
-    await wait_for_replica_status(c_replica, status="up")
     await check_all_replicas_finished([c_replica], c_master)
 
     dbsize = await c_replica.dbsize()
@@ -1636,7 +1635,6 @@ async def test_replicaof_flag_disconnect(df_factory):
 
     c_replica = replica.client()
     await wait_available_async(c_replica)
-    await wait_for_replica_status(c_replica, status="up")
     await check_all_replicas_finished([c_replica], c_master)
 
     dbsize = await c_replica.dbsize()
@@ -1672,7 +1670,6 @@ async def test_df_crash_on_memcached_error(df_factory):
     c_replica = replica.client()
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
-    await wait_for_replica_status(c_replica, status="up")
     await c_replica.close()
 
     memcached_client = pymemcache.Client(f"127.0.0.1:{replica.mc_port}")
@@ -1731,7 +1728,6 @@ async def test_network_disconnect(df_factory, df_seeder_factory):
 
             # Give time to detect dropped connection and reconnect
             await asyncio.sleep(1.0)
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             capture = await seeder.capture()
@@ -1770,7 +1766,6 @@ async def test_network_disconnect_active_stream(df_factory, df_seeder_factory):
 
             # Give time to detect dropped connection and reconnect
             await asyncio.sleep(1.0)
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             logging.debug(await c_replica.execute_command("INFO REPLICATION"))
@@ -1817,7 +1812,6 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
 
             # Give time to detect dropped connection and reconnect
             await asyncio.sleep(1.0)
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             # logging.debug(await c_replica.execute_command("INFO REPLICATION"))
@@ -1852,7 +1846,6 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
             # Wait replica to be up and synchronized with master
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             initial_reconnects_count = await get_replica_reconnects_count(replica)
@@ -1869,7 +1862,6 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
             task = asyncio.create_task(proxy.serve())
 
             # Wait replica to be reconnected and synchronized with master
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             capture = await seeder.capture()
