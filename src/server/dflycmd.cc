@@ -788,7 +788,7 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
 
   {
     util::fb2::LockGuard lk{mu_};  // prevent state changes
-    auto cb = [&](EngineShard* shard) {
+    auto cb = [&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
       for (const auto& [_, info] : replica_infos_) {
         auto repl_lk = info->GetSharedLock();
 
