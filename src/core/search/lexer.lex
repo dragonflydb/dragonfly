@@ -26,8 +26,6 @@
   using dfly::search::Parser;
   using namespace std;
 
-  Parser::symbol_type make_DOUBLE(string_view, const Parser::location_type& loc);
-  Parser::symbol_type make_UINT32(string_view, const Parser::location_type& loc);
   Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc);
   Parser::symbol_type make_TagVal(string_view src, const Parser::location_type& loc);
 %}
@@ -68,8 +66,8 @@ tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 "AS"           return Parser::make_AS (loc());
 "EF_RUNTIME"   return Parser::make_EF_RUNTIME (loc());
 
-[0-9]{1,9}                     return make_UINT32(matched_view(), loc());
-[+-]?(([0-9]*[.])?[0-9]+|inf)  return make_DOUBLE(matched_view(), loc());
+[0-9]{1,9}                     return Parser::make_UINT32(str(), loc());
+[+-]?(([0-9]*[.])?[0-9]+|inf)  return Parser::make_DOUBLE(str(), loc());
 
 {dq}([^"]|{esc_seq})*{dq}  return make_StringLit(matched_view(1, 1), loc());
 {sq}([^']|{esc_seq})*{sq}  return make_StringLit(matched_view(1, 1), loc());
@@ -82,22 +80,6 @@ tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 
 <<EOF>>    return Parser::make_YYEOF(loc());
 %%
-
-Parser::symbol_type make_UINT32 (string_view str, const Parser::location_type& loc) {
-  uint32_t val = 0;
-  if (!absl::SimpleAtoi(str, &val))
-    throw Parser::syntax_error (loc, "not an unsigned integer or out of range: " + string(str));
-
-  return Parser::make_UINT32(val, loc);
-}
-
-Parser::symbol_type make_DOUBLE (string_view str, const Parser::location_type& loc) {
-  double val = 0;
-  if (!absl::SimpleAtod(str, &val))
-    throw Parser::syntax_error (loc, "not a double or out of range: " + string(str));
-
-  return Parser::make_DOUBLE(val, loc);
-}
 
 Parser::symbol_type make_StringLit(string_view src, const Parser::location_type& loc) {
   string res;
