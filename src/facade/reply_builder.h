@@ -347,7 +347,7 @@ class RedisReplyBuilder : public SinkReplyBuilder {
   RedisReplyBuilder(::io::Sink* stream);
 
   virtual void SetResp3(bool is_resp3);
-  bool IsResp3() const {
+  virtual bool IsResp3() const {
     return is_resp3_;
   }
 
@@ -418,7 +418,7 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
   static char* FormatDouble(double d, char* dest, unsigned len);
   virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT) override;
 
-  bool IsResp3() const {
+  bool IsResp3() const override {
     return resp3_;
   }
 

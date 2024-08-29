@@ -983,7 +983,7 @@ void RedisReplyBuilder2::SendStored() {
 }
 
 void RedisReplyBuilder2::SendSetSkipped() {
-  SendSimpleString("SKIPPED");
+  SendNull();
 }
 
 void RedisReplyBuilder2::StartArray(unsigned len) {
