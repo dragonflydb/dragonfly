@@ -881,7 +881,7 @@ void RedisReplyBuilder2Base::SendLong(long val) {
 }
 
 void RedisReplyBuilder2Base::SendDouble(double val) {
-  char buf[DoubleToStringConverter::kBase10MaximalLength + 1];
+  char buf[DoubleToStringConverter::kBase10MaximalLength + 8];  // +8 to be on the safe side.
   static_assert(ABSL_ARRAYSIZE(buf) < kMaxInlineSize, "Write temporary string from buf inline");
   string_view val_str = FormatDouble(val, buf, ABSL_ARRAYSIZE(buf));
 
@@ -983,7 +983,7 @@ void RedisReplyBuilder2::SendStored() {
 }
 
 void RedisReplyBuilder2::SendSetSkipped() {
-  SendSimpleString("SKIPPED");
+  SendNull();
 }
 
 void RedisReplyBuilder2::StartArray(unsigned len) {

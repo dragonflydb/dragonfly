@@ -9,7 +9,9 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 
-ABSL_FLAG(bool, use_new_io, false, "Use new IO by default");
+ABSL_FLAG(bool, experimental_new_io, true,
+          "Use new replying code - should "
+          "reduce latencies for pipelining");
 
 namespace facade {
 
@@ -21,8 +23,9 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   if (stream) {
     switch (protocol_) {
       case Protocol::REDIS: {
-        RedisReplyBuilder* rb = absl::GetFlag(FLAGS_use_new_io) ? new RedisReplyBuilder2(stream)
-                                                                : new RedisReplyBuilder(stream);
+        RedisReplyBuilder* rb = absl::GetFlag(FLAGS_experimental_new_io)
+                                    ? new RedisReplyBuilder2(stream)
+                                    : new RedisReplyBuilder(stream);
         rbuilder_.reset(rb);
         break;
       }
