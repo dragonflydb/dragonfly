@@ -787,9 +787,19 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       if (abs_ms < 0)
         return cntx->SendError(InvalidExpireTime("set"));
 
-      // Redis reports just OK in this case
-      if (rel_ms < 0)
+      // Remove existed key if the key is expired already
+      if (rel_ms < 0) {
+        cntx->transaction->ScheduleSingleHop([key](const Transaction* tx, EngineShard* es) {
+          auto& db_slice = tx->GetDbSlice(es->shard_id());
+
+          if (auto find_res = db_slice.FindMutable(tx->GetDbContext(), key); IsValid(find_res.it)) {
+            find_res.post_updater.Run();
+            db_slice.Del(tx->GetDbContext(), find_res.it);
+          }
+          return OpStatus::OK;
+        });
         return builder->SendStored();
+      }
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
     } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {

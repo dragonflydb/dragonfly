@@ -38,6 +38,15 @@ MP::CmdType From(string_view token) {
 
 using TokensView = absl::Span<std::string_view>;
 
+bool TokenToExpireTs(std::string_view token, std::uint32_t* expire_ts) {
+  static constexpr uint32_t month = 60 * 60 * 24 * 30;
+  auto res = absl::SimpleAtoi(token, expire_ts);
+  if (res && (*expire_ts <= month)) {
+    *expire_ts += time(nullptr);
+  }
+  return res;
+}
+
 MP::Result ParseStore(TokensView tokens, MP::Command* res) {
   const size_t num_tokens = tokens.size();
   unsigned opt_pos = 3;
@@ -48,7 +57,7 @@ MP::Result ParseStore(TokensView tokens, MP::Command* res) {
   }
 
   uint32_t flags;
-  if (!absl::SimpleAtoi(tokens[0], &flags) || !absl::SimpleAtoi(tokens[1], &res->expire_ts) ||
+  if (!absl::SimpleAtoi(tokens[0], &flags) || !TokenToExpireTs(tokens[1], &res->expire_ts) ||
       !absl::SimpleAtoi(tokens[2], &res->bytes_len))
     return MP::BAD_INT;
 
@@ -74,7 +83,7 @@ MP::Result ParseValueless(TokensView tokens, MP::Command* res) {
   const size_t num_tokens = tokens.size();
   size_t key_pos = 0;
   if (res->type == MP::GAT || res->type == MP::GATS) {
-    if (!absl::SimpleAtoi(tokens[0], &res->expire_ts)) {
+    if (!TokenToExpireTs(tokens[0], &res->expire_ts)) {
       return MP::BAD_INT;
     }
     ++key_pos;

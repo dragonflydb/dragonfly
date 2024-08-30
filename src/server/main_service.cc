@@ -1495,7 +1495,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   char cmd_name[16];
   char ttl[16];
   char store_opt[32] = {0};
-  char ttl_op[] = "EX";
+  char ttl_op[] = "EXAT";
 
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
   mc_builder->SetNoreply(cmd.no_reply);
@@ -1568,7 +1568,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
 
     if (cmd.expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
       char* next = absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, ttl);
-      args.emplace_back(ttl_op, 2);
+      args.emplace_back(ttl_op, 4);
       args.emplace_back(ttl, next - ttl);
     }
     dfly_cntx->conn_state.memcache_flag = cmd.flags;

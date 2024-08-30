@@ -3,6 +3,7 @@ from pymemcache.client.base import Client as MCClient
 from redis import Redis
 import socket
 import random
+import time
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -141,3 +142,24 @@ def test_flags(memcached_client: MCClient):
         # workaround sometimes memcached_client.raw_command returns empty str
         if len(res) > 0:
             assert res[2].decode() == str(flags)
+
+
+@dfly_args(DEFAULT_ARGS)
+def test_expiration(memcached_client: MCClient):
+    assert not memcached_client.default_noreply
+
+    assert memcached_client.set("key1", "value1", 2)
+    assert memcached_client.set("key2", "value2", int(time.time()) + 2)
+    assert memcached_client.set("key3", "value3", int(time.time()) + 200)
+    assert memcached_client.get("key1") == b"value1"
+    assert memcached_client.get("key2") == b"value2"
+    assert memcached_client.get("key3") == b"value3"
+    time.sleep(1)
+    assert memcached_client.set("key3", "value3", int(time.time()) - 200)
+    assert memcached_client.get("key1") == b"value1"
+    assert memcached_client.get("key2") == b"value2"
+    assert memcached_client.get("key3") == None
+    time.sleep(1)
+    assert memcached_client.get("key1") == None
+    assert memcached_client.get("key2") == None
+    assert memcached_client.get("key3") == None
