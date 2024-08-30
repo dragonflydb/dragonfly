@@ -165,6 +165,9 @@ class ShardDocIndices {
   // Drop index, return true if it existed and was dropped
   bool DropIndex(std::string_view name);
 
+  // Drop all indices
+  void DropAllIndices();
+
   // Rebuild all indices
   void RebuildAllIndices(const OpArgs& op_args);
 
@@ -175,6 +178,9 @@ class ShardDocIndices {
 
   size_t GetUsedMemory() const;
   SearchStats GetStats() const;  // combines stats for all indices
+ private:
+  // Clean caches that might have data from this index
+  void DropIndexCache(const dfly::ShardDocIndex& shard_doc_index);
 
  private:
   MiMemoryResource local_mr_;

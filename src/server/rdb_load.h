@@ -233,9 +233,6 @@ class RdbLoader : protected RdbLoaderBase {
     full_sync_cut_cb = std::move(cb);
   }
 
-  // Perform pre load procedures after transitioning into the global LOADING state.
-  static void PerformPreLoad(Service* service);
-
   // Performs post load procedures while still remaining in global LOADING state.
   // Called once immediately after loading the snapshot / full sync succeeded from the coordinator.
   static void PerformPostLoad(Service* service);

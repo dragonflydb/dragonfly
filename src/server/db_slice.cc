@@ -8,6 +8,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
@@ -789,6 +790,10 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   DbTableArray flush_db_arr(db_arr_.size());
 
   for (DbIndex index : indexes) {
+    if (!index) {
+      owner_->search_indices()->DropAllIndices();
+    }
+
     table_memory_ -= db_arr_[index]->table_memory();
     entries_count_ -= db_arr_[index]->prime.size();
 

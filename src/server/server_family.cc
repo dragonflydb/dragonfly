@@ -1002,8 +1002,6 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
     return {};
   }
 
-  RdbLoader::PerformPreLoad(&service_);
-
   auto& pool = service_.proactor_pool();
 
   vector<fb2::Fiber> load_fibers;

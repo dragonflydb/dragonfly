@@ -318,13 +318,23 @@ bool ShardDocIndices::DropIndex(string_view name) {
   if (it == indices_.end())
     return false;
 
-  // Clean caches that might have data from this index
-  auto info = it->second->GetInfo();
+  DropIndexCache(*it->second);
+  indices_.erase(it);
+
+  return true;
+}
+
+void ShardDocIndices::DropAllIndices() {
+  for (auto it = indices_.begin(); it != indices_.end(); it++) {
+    DropIndexCache(*it->second);
+  }
+  indices_.clear();
+}
+
+void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index) {
+  auto info = shard_doc_index.GetInfo();
   for (const auto& [fident, field] : info.base_index.schema.fields)
     JsonAccessor::RemoveFieldFromCache(fident);
-
-  indices_.erase(it);
-  return true;
 }
 
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
