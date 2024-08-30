@@ -89,6 +89,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* own
   }
 
   keys = std::move(cred.keys);
+  pub_sub = std::move(cred.pub_sub);
   if (cred.acl_commands.empty()) {
     acl_commands = std::vector<uint64_t>(acl::NumberOfFamilies(), acl::NONE_COMMANDS);
   } else {
@@ -102,6 +103,7 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
   if (owner) {
     acl_commands = owner->acl_commands;
     keys = owner->keys;
+    pub_sub = owner->pub_sub;
     skip_acl_validation = owner->skip_acl_validation;
     ns = owner->ns;
   } else {

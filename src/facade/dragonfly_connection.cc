@@ -451,6 +451,7 @@ void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
     if (msg.username == self->cntx()->authed_username) {
       self->cntx()->acl_commands = msg.commands;
       self->cntx()->keys = msg.keys;
+      self->cntx()->pub_sub = msg.pub_sub;
     }
   }
 }

@@ -52,7 +52,8 @@ class AclFamily final {
   using Commands = std::vector<uint64_t>;
   void StreamUpdatesToAllProactorConnections(const std::string& user,
                                              const Commands& update_commands,
-                                             const AclKeys& update_keys);
+                                             const AclKeys& update_keys,
+                                             const AclPubSub& update_pub_sub);
 
   // Helper function that closes all open connection from the deleted user
   void EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<std::string_view>& user);
@@ -83,7 +84,8 @@ class AclFamily final {
   std::optional<std::string> MaybeParseNamespace(std::string_view command) const;
 
   std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
-      const facade::ArgRange& args, bool hashed = false, bool has_all_keys = false) const;
+      const facade::ArgRange& args, bool hashed = false, bool has_all_keys = false,
+      bool has_all_channels = false) const;
 
   void BuildIndexers(RevCommandsIndexStore families);
 

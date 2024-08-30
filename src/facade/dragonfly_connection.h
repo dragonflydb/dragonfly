@@ -113,6 +113,7 @@ class Connection : public util::Connection {
     std::string username;
     std::vector<uint64_t> commands;
     dfly::acl::AclKeys keys;
+    dfly::acl::AclPubSub pub_sub;
   };
 
   // Migration request message, the dispatch fiber stops to give way for thread migration.

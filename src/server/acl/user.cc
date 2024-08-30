@@ -76,6 +76,10 @@ void User::Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
     SetKeyGlobs(std::move(req.keys));
   }
 
+  if (!req.pub_sub.empty()) {
+    SetPubSub(std::move(req.pub_sub));
+  }
+
   if (req.is_active) {
     SetIsActive(*req.is_active);
   }
@@ -214,6 +218,10 @@ const AclKeys& User::Keys() const {
   return keys_;
 }
 
+const AclPubSub& User::PubSub() const {
+  return pub_sub_;
+}
+
 const User::CategoryChanges& User::CatChanges() const {
   return cat_changes_;
 }
@@ -232,6 +240,20 @@ void User::SetKeyGlobs(std::vector<UpdateKey> keys) {
       keys_.all_keys = false;
     } else {
       keys_.key_globs.push_back({std::move(key.key), key.op});
+    }
+  }
+}
+
+void User::SetPubSub(std::vector<UpdatePubSub> pub_sub) {
+  for (auto& pattern : pub_sub) {
+    if (pattern.all_channels) {
+      pub_sub_.globs.clear();
+      pub_sub_.all_channels = true;
+    } else if (pattern.reset_channels) {
+      pub_sub_.globs.clear();
+      pub_sub_.all_channels = false;
+    } else {
+      pub_sub_.globs.push_back({std::move(pattern.pattern), pattern.has_asterisk});
     }
   }
 }

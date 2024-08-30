@@ -1701,6 +1701,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     auto cred = registry->GetCredentials(username);
     cntx->acl_commands = cred.acl_commands;
     cntx->keys = std::move(cred.keys);
+    cntx->pub_sub = std::move(cred.pub_sub);
     cntx->ns = &namespaces.GetOrInsert(cred.ns);
     cntx->authenticated = true;
   }

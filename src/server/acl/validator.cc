@@ -23,8 +23,17 @@ namespace dfly::acl {
     return true;
   }
 
-  const auto [is_authed, reason] =
-      IsUserAllowedToInvokeCommandGeneric(cntx.acl_commands, cntx.keys, tail_args, id);
+  std::pair<bool, AclLog::Reason> auth_res;
+
+  if (id.IsPubSub()) {
+    auth_res = IsPubSubCommandAuthorized(false, cntx.acl_commands, cntx.pub_sub, tail_args, id);
+  } else if (id.IsPSub()) {
+    auth_res = IsPubSubCommandAuthorized(true, cntx.acl_commands, cntx.pub_sub, tail_args, id);
+  } else {
+    auth_res = IsUserAllowedToInvokeCommandGeneric(cntx.acl_commands, cntx.keys, tail_args, id);
+  }
+
+  const auto [is_authed, reason] = auth_res;
 
   if (!is_authed) {
     auto& log = ServerState::tlocal()->acl_log;
@@ -40,16 +49,18 @@ namespace dfly::acl {
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 
-[[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    const std::vector<uint64_t>& acl_commands, const AclKeys& keys, CmdArgList tail_args,
-    const CommandId& id) {
+static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id) {
   const size_t index = id.GetFamily();
   const uint64_t command_mask = id.GetBitIndex();
   DCHECK_LT(index, acl_commands.size());
 
-  const bool command = (acl_commands[index] & command_mask) != 0;
+  return (acl_commands[index] & command_mask) != 0;
+}
 
-  if (!command) {
+[[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
+    const std::vector<uint64_t>& acl_commands, const AclKeys& keys, CmdArgList tail_args,
+    const CommandId& id) {
+  if (!ValidateCommand(acl_commands, id)) {
     return {false, AclLog::Reason::COMMAND};
   }
 
@@ -84,6 +95,39 @@ namespace dfly::acl {
   }
 
   return {keys_allowed, AclLog::Reason::KEY};
+}
+
+[[nodiscard]] std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(
+    bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
+    CmdArgList tail_args, const CommandId& id) {
+  if (!ValidateCommand(acl_commands, id)) {
+    return {false, AclLog::Reason::COMMAND};
+  }
+
+  auto match = [](std::string_view pattern, std::string_view target) {
+    return stringmatchlen(pattern.data(), pattern.size(), target.data(), target.size(), 0);
+  };
+
+  auto iterate_globs = [&](std::string_view target) {
+    for (auto& [glob, has_asterisk] : pub_sub.globs) {
+      if (literal_match && (glob == target)) {
+        return true;
+      }
+      if (!literal_match && match(glob, target)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  bool allowed = true;
+  if (!pub_sub.all_channels) {
+    for (auto channel : tail_args) {
+      allowed &= iterate_globs(facade::ToSV(channel));
+    }
+  }
+
+  return {allowed, AclLog::Reason::PUB_SUB};
 }
 
 #pragma GCC diagnostic pop
