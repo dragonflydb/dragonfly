@@ -22,8 +22,10 @@ std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
 bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
                                   facade::CmdArgList tail_args);
 
-std::pair<bool, AclLog::Reason> IsUserAllowedToInvokePubSubCommand(
-    bool literal_match, const std::vector<uint64_t>& acl_commands, const AclPubSub& pub_sub,
-    facade::CmdArgList tail_args, const CommandId& id);
+std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
+                                                          const std::vector<uint64_t>& acl_commands,
+                                                          const AclPubSub& pub_sub,
+                                                          facade::CmdArgList tail_args,
+                                                          const CommandId& id);
 
 }  // namespace dfly::acl

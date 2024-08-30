@@ -7,6 +7,7 @@ import tempfile
 import asyncio
 import os
 from . import dfly_args
+import async_timeout
 
 
 @pytest.mark.asyncio
@@ -647,7 +648,7 @@ async def test_auth_resp3_bug(df_factory):
 
 
 @pytest.mark.asyncio
-async def test_acl_pub_sub(df_factory):
+async def test_acl_pub_sub_auth(df_factory):
     df = df_factory.create()
     df.start()
     client = df.client()
@@ -673,3 +674,54 @@ async def test_acl_pub_sub(df_factory):
 
     res = await client.execute_command("PSUBSCRIBE bar")
     assert res == ["psubscribe", "bar", 3]
+
+
+@pytest.mark.asyncio
+async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
+    df = df_factory.create()
+    df.start()
+    publisher = df.client()
+
+    async def publish_worker(client):
+        for i in range(0, 10):
+            await client.publish("channel", "message")
+
+    async def subscribe_worker(channel: aioredis.client.PubSub):
+        total_msgs = 1
+        async with async_timeout.timeout(10):
+            while total_msgs != 10:
+                res = await channel.get_message(ignore_subscribe_messages=True, timeout=5)
+                if total_msgs is not None:
+                    total_msgs = total_msgs + 1
+
+    await publisher.execute_command("ACL SETUSER kostas >tmp ON +@slow +SUBSCRIBE allchannels")
+
+    subscriber = aioredis.Redis(
+        username="kostas", password="tmp", port=df.port, decode_responses=True
+    )
+    subscriber_obj = subscriber.pubsub()
+    await subscriber_obj.subscribe("channel")
+
+    subscribe_task = asyncio.create_task(subscribe_worker(subscriber_obj))
+    await publish_worker(publisher)
+    await subscribe_task
+
+    subscribe_task = asyncio.create_task(subscribe_worker(subscriber_obj))
+    # Already subscribed, we should still be able to receive messages on channel
+    # We should not be able to unsubscribe
+    await publisher.execute_command("ACL SETUSER kostas -SUBSCRIBE -UNSUBSCRIBE")
+    await publish_worker(publisher)
+    await subscribe_task
+    # unsubscribe is not marked async and it's such a mess that it throws the error
+    # once we try to resubscribe. Instead I use the raw execute command to check that
+    # permission changes work
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await subscriber.execute_command("UNSUBSCRIBE channel")
+
+    await publisher.execute_command("ACL SETUSER kostas +SUBSCRIBE +UNSUBSCRIBE")
+
+    subscribe_task = asyncio.create_task(subscribe_worker(subscriber_obj))
+    await publisher.execute_command("ACL SETUSER kostas resetchannels")
+    await publish_worker(publisher)
+    with pytest.raises(redis.exceptions.ConnectionError):
+        await subscribe_task

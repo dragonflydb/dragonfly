@@ -134,12 +134,20 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
       user.Update(std::move(default_req), CategoryToIdx(), reverse_cat_table_,
                   CategoryToCommandsIndex());
     }
+    const bool reset_channels = req.reset_channels;
     user.Update(std::move(req), CategoryToIdx(), reverse_cat_table_, CategoryToCommandsIndex());
-    if (exists) {
-      StreamUpdatesToAllProactorConnections(std::string(username), user.AclCommands(), user.Keys(),
-                                            user.PubSub());
-    }
+    // Send ok first because the connection might get evicted
     cntx->SendOk();
+    if (exists) {
+      if (!reset_channels) {
+        StreamUpdatesToAllProactorConnections(std::string(username), user.AclCommands(),
+                                              user.Keys(), user.PubSub());
+      }
+      // We evict connections that had their channels reseted
+      else {
+        EvictOpenConnectionsOnAllProactors({username});
+      }
+    }
   };
 
   std::visit(Overloaded{error_case, update_case}, std::move(req));
