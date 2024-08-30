@@ -549,10 +549,13 @@ def test_type(r: redis.Redis):
     }
     data = {k: {"a": meta_data[k]} for k in meta_data}
     r.json().set("doc1", "$", data)
-    # Test multi
-    assert r.json().type("doc1", "$..a") == [
-        k.encode() for k in meta_data.keys()
-    ]  # noqa: E721
+
+    # Dragonfly does not guarantee the traversal order for multi field traversal
+    # json.type api assumes a predefined order and is not designed very well.
+    # Test multi by comparing unordered sets
+    assert set(r.json().type("doc1", "$..a")) == set(
+        [k.encode() for k in meta_data.keys()]
+    )  # noqa: E721
 
     # Test single
     assert r.json().type("doc1", "$.integer.a") == [b"integer"]  # noqa: E721
@@ -614,7 +617,9 @@ def test_objkeys(r: redis.Redis):
     assert exp == keys
 
     r.json().set("obj", Path.root_path(), obj)
-    assert r.json().objkeys("obj") == list(obj.keys())
+
+    # Dragonfly does not guarantee the order (implementation detail)
+    assert set(r.json().objkeys("obj")) == obj.keys()
 
     assert r.json().objkeys("fakekey") is None
 
@@ -629,10 +634,10 @@ def test_objkeys(r: redis.Redis):
     )
 
     # Test single
-    assert r.json().objkeys("doc1", "$.nested1.a") == [[b"foo", b"bar"]]
+    assert set(r.json().objkeys("doc1", "$.nested1.a")[0]) == {b"foo", b"bar"}
 
     # Test legacy
-    assert r.json().objkeys("doc1", ".*.a") == ["foo", "bar"]
+    assert set(r.json().objkeys("doc1", ".*.a")) == {"foo", "bar"}
     # Test single
     assert r.json().objkeys("doc1", ".nested2.a") == ["baz"]
 

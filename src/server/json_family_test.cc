@@ -326,7 +326,7 @@ TEST_F(JsonFamilyTest, Type) {
                                           "object", "array")));
 
   resp = Run({"JSON.TYPE", "json", "$[10]"});
-  EXPECT_THAT(resp.GetVec(), IsEmpty());
+  EXPECT_THAT(resp, ArrLen(0));
 
   resp = Run({"JSON.TYPE", "not_exist_key", "$[10]"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
@@ -484,7 +484,7 @@ TEST_F(JsonFamilyTest, ObjLen) {
   EXPECT_THAT(resp, IntArg(3));
 
   resp = Run({"JSON.OBJLEN", "non_existent_key", "$.a"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ErrArg("no such key"));
 
   /*
   Test response from several possible values
@@ -515,7 +515,6 @@ TEST_F(JsonFamilyTest, ObjLenLegacy) {
   ASSERT_THAT(resp, "OK");
 
   /* Test simple response from only one value */
-
   resp = Run({"JSON.STRLEN", "json"});
   EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
 
@@ -523,7 +522,7 @@ TEST_F(JsonFamilyTest, ObjLenLegacy) {
   EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"JSON.OBJLEN", "json", ".a.*"});
-  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"JSON.OBJLEN", "json", ".b"});
   EXPECT_THAT(resp, IntArg(1));
@@ -538,6 +537,9 @@ TEST_F(JsonFamilyTest, ObjLenLegacy) {
   EXPECT_THAT(resp, IntArg(3));
 
   resp = Run({"JSON.OBJLEN", "non_existent_key", ".a"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.OBJLEN", "json", ".none"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   /*
@@ -580,7 +582,7 @@ TEST_F(JsonFamilyTest, ArrLen) {
                                          ArgType(RespExpr::NIL)));
 
   resp = Run({"JSON.OBJLEN", "non_existent_key", "$[*]"});
-  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_THAT(resp, ErrArg("no such key"));
 }
 
 TEST_F(JsonFamilyTest, ArrLenLegacy) {
@@ -656,7 +658,7 @@ TEST_F(JsonFamilyTest, ToggleLegacy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.TOGGLE", "json"});
-  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
 
   resp = Run({"JSON.TOGGLE", "json", ".*"});
   EXPECT_EQ(resp, "true");
@@ -1520,7 +1522,6 @@ TEST_F(JsonFamilyTest, StrAppendLegacyMode) {
   */
 
   resp = Run({"JSON.STRAPPEND", "json", ".b.*", kVal});
-  ASSERT_THAT(resp, ArgType(RespExpr::INT64));
   EXPECT_THAT(resp, IntArg(2));
 
   resp = Run({"JSON.GET", "json"});
