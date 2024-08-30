@@ -364,6 +364,7 @@ bool OutgoingMigration::CheckFlowsForErrors() {
 }
 
 size_t OutgoingMigration::GetKeyCount() const {
+  util::fb2::LockGuard lk(state_mu_);
   if (state_ == MigrationState::C_FINISHED) {
     return keys_number_;
   }

@@ -377,6 +377,30 @@ class ABSL_LOCKABLE ThreadLocalMutex {
   util::fb2::detail::FiberInterface* locked_fiber_{nullptr};
 };
 
+// Replacement of std::SharedLock that allows -Wthread-safety
+template <typename Mutex> class ABSL_SCOPED_LOCKABLE SharedLock {
+ public:
+  explicit SharedLock(Mutex& m) ABSL_EXCLUSIVE_LOCK_FUNCTION(m) : m_(m) {
+    m_.lock_shared();
+    is_locked_ = true;
+  }
+
+  ~SharedLock() ABSL_UNLOCK_FUNCTION() {
+    if (is_locked_) {
+      m_.unlock_shared();
+    }
+  }
+
+  void unlock() ABSL_UNLOCK_FUNCTION() {
+    m_.unlock_shared();
+    is_locked_ = false;
+  }
+
+ private:
+  Mutex& m_;
+  bool is_locked_;
+};
+
 extern size_t serialization_max_chunk_size;
 
 }  // namespace dfly

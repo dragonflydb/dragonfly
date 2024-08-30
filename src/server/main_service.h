@@ -79,8 +79,8 @@ class Service : public facade::ServiceInterface {
   // Upon switch, updates cached global state in threadlocal ServerState struct.
   GlobalState SwitchState(GlobalState from, GlobalState to) ABSL_LOCKS_EXCLUDED(mu_);
 
-  void RequestLoadingState();
-  void RemoveLoadingState();
+  void RequestLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
+  void RemoveLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
 
   GlobalState GetGlobalState() const ABSL_LOCKS_EXCLUDED(mu_);
 

@@ -2,6 +2,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "server/common.h"
 #include "server/engine_shard_set.h"
 
 ABSL_DECLARE_FLAG(bool, cache_mode);
@@ -62,7 +63,7 @@ bool Namespaces::IsInitialized() const {
 void Namespaces::Clear() {
   util::fb2::LockGuard guard(mu_);
 
-  namespaces.default_namespace_ = nullptr;
+  default_namespace_ = nullptr;
 
   if (namespaces_.empty()) {
     return;
@@ -70,12 +71,12 @@ void Namespaces::Clear() {
 
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
-    for (auto& ns : namespaces_) {
+    for (auto& ns : ABSL_TS_UNCHECKED_READ(namespaces_)) {
       ns.second.shard_db_slices_[es->shard_id()].reset();
     }
   });
 
-  namespaces.namespaces_.clear();
+  namespaces_.clear();
 }
 
 Namespace& Namespaces::GetDefaultNamespace() const {
@@ -86,7 +87,7 @@ Namespace& Namespaces::GetDefaultNamespace() const {
 Namespace& Namespaces::GetOrInsert(std::string_view ns) {
   {
     // Try to look up under a shared lock
-    std::shared_lock guard(mu_);
+    dfly::SharedLock guard(mu_);
     auto it = namespaces_.find(ns);
     if (it != namespaces_.end()) {
       return it->second;

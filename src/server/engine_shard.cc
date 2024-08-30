@@ -109,17 +109,17 @@ class RoundRobinSharder {
       std::fill(round_robin_shards_tl_cache_.begin(), round_robin_shards_tl_cache_.end(),
                 kInvalidSid);
 
-      std::lock_guard guard(mutex_);
+      util::fb2::LockGuard guard(mutex_);
       if (round_robin_shards_.empty()) {
         round_robin_shards_ = round_robin_shards_tl_cache_;
       }
     }
   }
 
-  static void Destroy() {
+  static void Destroy() ABSL_LOCKS_EXCLUDED(mutex_) {
     round_robin_shards_tl_cache_.clear();
 
-    std::lock_guard guard(mutex_);
+    util::fb2::LockGuard guard(mutex_);
     round_robin_shards_.clear();
   }
 
@@ -138,7 +138,7 @@ class RoundRobinSharder {
     ShardId sid = round_robin_shards_tl_cache_[index];
 
     if (sid == kInvalidSid) {
-      std::lock_guard guard(mutex_);
+      util::fb2::LockGuard guard(mutex_);
       sid = round_robin_shards_[index];
       if (sid == kInvalidSid) {
         sid = next_shard_;

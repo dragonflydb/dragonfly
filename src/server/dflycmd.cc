@@ -102,7 +102,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 }  // namespace
 
 void DflyCmd::ReplicaInfo::Cancel() {
-  lock_guard lk = GetExclusiveLock();
+  auto lk = GetExclusiveLock();
   if (replica_state == SyncState::CANCELLED) {
     return;
   }
@@ -261,7 +261,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
 
   string eof_token;
   {
-    lock_guard lk = replica_ptr->GetExclusiveLock();
+    auto lk = replica_ptr->GetExclusiveLock();
 
     if (replica_ptr->replica_state != SyncState::PREPARATION)
       return cntx->SendError(kInvalidState);
@@ -325,7 +325,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
   if (!sync_id)
     return;
 
-  lock_guard lk = replica_ptr->GetExclusiveLock();
+  auto lk = replica_ptr->GetExclusiveLock();
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::PREPARATION, rb))
     return;
 
@@ -364,7 +364,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
   if (!sync_id)
     return;
 
-  lock_guard lk = replica_ptr->GetExclusiveLock();
+  auto lk = replica_ptr->GetExclusiveLock();
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::FULL_SYNC, rb))
     return;
 
@@ -418,7 +418,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     return;
 
   {
-    shared_lock lk = replica_ptr->GetSharedLock();
+    auto lk = replica_ptr->GetSharedLock();
     if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, rb))
       return;
 
@@ -467,7 +467,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
-    shared_lock lk = replica_ptr->GetSharedLock();
+    auto lk = replica_ptr->GetSharedLock();
     auto cb = [replica_ptr = std::move(replica_ptr), end_time,
                &catchup_success](EngineShard* shard) {
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
@@ -710,6 +710,7 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   replica_infos_.erase(sync_id);
 }
 
+// Because we need to annotate unique_lock
 void DflyCmd::BreakStalledFlowsInShard() {
   std::unique_lock global_lock(mu_, try_to_lock);
 
@@ -722,7 +723,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
   vector<uint32_t> deleted;
 
   for (auto [sync_id, replica_ptr] : replica_infos_) {
-    shared_lock replica_lock = replica_ptr->GetSharedLock();
+    auto replica_lock = replica_ptr->GetSharedLock();
 
     if (!replica_ptr->flows[sid].saver)
       continue;
@@ -787,9 +788,9 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
 
   {
     util::fb2::LockGuard lk{mu_};  // prevent state changes
-    auto cb = [&](EngineShard* shard) {
+    auto cb = [&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
       for (const auto& [_, info] : replica_infos_) {
-        shared_lock repl_lk = info->GetSharedLock();
+        auto repl_lk = info->GetSharedLock();
 
         // flows should not be empty.
         DCHECK(!info->flows.empty());
@@ -836,7 +837,7 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLagsLocked() const {
   std::vector<std::map<uint32_t, LSN>> shard_lags(shard_set->size());
   shard_set->RunBriefInParallel([&shard_lags, this](EngineShard* shard) {
     auto& lags = shard_lags[shard->shard_id()];
-    for (const auto& info : replica_infos_) {
+    for (const auto& info : ABSL_TS_UNCHECKED_READ(replica_infos_)) {
       const ReplicaInfo* replica = info.second.get();
       if (shard->journal()) {
         int64_t lag = shard->journal()->GetLsn() - replica->flows[shard->shard_id()].last_acked_lsn;

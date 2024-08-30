@@ -2496,22 +2496,30 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
 }
 
 void Service::RequestLoadingState() {
-  std::unique_lock lk(mu_);
-  ++loading_state_counter_;
-  if (global_state_ != GlobalState::LOADING) {
-    DCHECK_EQ(global_state_, GlobalState::ACTIVE);
-    lk.unlock();
+  bool switch_state = false;
+  {
+    util::fb2::LockGuard lk(mu_);
+    ++loading_state_counter_;
+    if (global_state_ != GlobalState::LOADING) {
+      DCHECK_EQ(global_state_, GlobalState::ACTIVE);
+      switch_state = true;
+    }
+  }
+  if (switch_state) {
     SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   }
 }
 
 void Service::RemoveLoadingState() {
-  unique_lock lk(mu_);
-  DCHECK_EQ(global_state_, GlobalState::LOADING);
-  DCHECK_GT(loading_state_counter_, 0u);
-  --loading_state_counter_;
-  if (loading_state_counter_ == 0) {
-    lk.unlock();
+  bool switch_state = false;
+  {
+    util::fb2::LockGuard lk(mu_);
+    DCHECK_EQ(global_state_, GlobalState::LOADING);
+    DCHECK_GT(loading_state_counter_, 0u);
+    --loading_state_counter_;
+    switch_state = loading_state_counter_ == 0;
+  }
+  if (switch_state) {
     SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
   }
 }

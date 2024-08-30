@@ -871,7 +871,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 
 void ServerFamily::LoadFromSnapshot() {
   {
-    std::lock_guard lk{loading_stats_mu_};
+    util::fb2::LockGuard lk{loading_stats_mu_};
     loading_stats_.restore_count++;
   }
 
@@ -887,7 +887,7 @@ void ServerFamily::LoadFromSnapshot() {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
       LOG(WARNING) << "Load snapshot: No snapshot found";
     } else {
-      std::lock_guard lk{loading_stats_mu_};
+      util::fb2::LockGuard lk{loading_stats_mu_};
       loading_stats_.failed_restore_count++;
       LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
     }
@@ -900,7 +900,7 @@ void ServerFamily::JoinSnapshotSchedule() {
   schedule_done_.Reset();
 }
 
-void ServerFamily::Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_) {
+void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
   if (load_result_) {
@@ -912,10 +912,10 @@ void ServerFamily::Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_) {
   bg_save_fb_.JoinIfNeeded();
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
-    shard_set->pool()->GetNextProactor()->Await([this] {
+    shard_set->pool()->GetNextProactor()->Await([this]() ABSL_LOCKS_EXCLUDED(loading_stats_mu_) {
       GenericError ec = DoSave();
 
-      std::lock_guard lk{loading_stats_mu_};
+      util::fb2::LockGuard lk{loading_stats_mu_};
       loading_stats_.backup_count++;
 
       if (ec) {
@@ -1075,7 +1075,7 @@ void ServerFamily::SnapshotScheduling() {
 
     GenericError ec = DoSave();
 
-    std::lock_guard lk{loading_stats_mu_};
+    util::fb2::LockGuard lk{loading_stats_mu_};
     loading_stats_.backup_count++;
 
     if (ec) {
@@ -1559,7 +1559,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   detail::SaveInfo save_info;
 
   {
-    std::lock_guard lk(save_mu_);
+    util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
 
     if (save_info.error) {
@@ -2062,13 +2062,13 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   }
 
   {
-    std::lock_guard lk{loading_stats_mu_};
+    util::fb2::LockGuard lk{loading_stats_mu_};
     result.loading_stats = loading_stats_;
   }
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
-  lock_guard lk{peak_stats_mu_};
+  util::fb2::LockGuard lk{peak_stats_mu_};
   UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
             result.facade_stats.conn_stats.dispatch_queue_bytes);
   UpdateMax(&peak_stats_.conn_read_buf_capacity, result.facade_stats.conn_stats.read_buf_capacity);

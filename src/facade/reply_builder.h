@@ -473,7 +473,7 @@ class RedisReplyBuilder2 : public RedisReplyBuilder2Base {
   void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                        bool with_scores) override;
 
-  void SendSimpleStrArr(RedisReplyBuilder::StrSpan arr) {
+  void SendSimpleStrArr(RedisReplyBuilder::StrSpan arr) override {
     SendSimpleStrArr2(arr);
   }
   void SendStringArr(RedisReplyBuilder::StrSpan arr, CollectionType type = ARRAY) override {
