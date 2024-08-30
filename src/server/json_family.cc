@@ -250,7 +250,13 @@ string JsonTypeToName(const JsonType& val) {
   return std::string{};
 }
 
-inline std::optional<JsonType> JsonFromString(std::string_view input) {
+// Use this method on the coordinator thread
+std::optional<JsonType> JsonFromString(std::string_view input) {
+  return dfly::JsonFromString(input, PMR_NS::get_default_resource());
+}
+
+// Use this method on the shard thread
+std::optional<JsonType> ShardJsonFromString(std::string_view input) {
   return dfly::JsonFromString(input, CompactObj::memory_resource());
 }
 
@@ -1142,7 +1148,7 @@ auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path, std::string_view json_str,
                      bool is_nx_condition, bool is_xx_condition) {
-  std::optional<JsonType> parsed_json = JsonFromString(json_str);
+  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
     return OpStatus::SYNTAX_ERR;
@@ -1268,7 +1274,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
   // DCHECK(!json_path.HoldsJsonPath());
 
-  std::optional<JsonType> parsed_json = JsonFromString(json_str);
+  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
     return OpStatus::SYNTAX_ERR;
@@ -1475,8 +1481,7 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  optional<JsonType> search_value =
-      dfly::JsonFromString(ArgS(args, 2), PMR_NS::get_default_resource());
+  optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
   if (!search_value) {
     cntx->SendError(kSyntaxErr);
     return;
@@ -1656,7 +1661,7 @@ void JsonFamily::StrAppend(CmdArgList args, ConnectionContext* cntx) {
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
-  optional<JsonType> parsed_json = dfly::JsonFromString(value, PMR_NS::get_default_resource());
+  optional<JsonType> parsed_json = JsonFromString(value);
   if (!parsed_json || !parsed_json->is_string()) {
     return cntx->SendError("expected string value", kSyntaxErrType);
   };
