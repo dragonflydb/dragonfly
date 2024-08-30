@@ -75,7 +75,10 @@ uint64_t CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
 optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
   if ((arity() > 0 && tail_args.size() + 1 != size_t(arity())) ||
       (arity() < 0 && tail_args.size() + 1 < size_t(-arity()))) {
-    return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
+    string prefix;
+    if (name() == "EXEC")
+      prefix = "-EXECABORT Transaction discarded because of: ";
+    return facade::ErrorReply{prefix + facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
   if ((opt_mask() & CO::INTERLEAVED_KEYS)) {

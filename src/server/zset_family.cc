@@ -2133,12 +2133,19 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, RangeParams range_params) {
   facade::CmdArgParser parser{args.subspan(3)};
-  while (parser.HasNext()) {
+  while (true) {
+    if (auto err = parser.Error(); err)
+      return cntx->SendError(err->MakeReply());
+
+    if (!parser.HasNext())
+      break;
+
     if (parser.Check("BYSCORE")) {
       if (exchange(range_params.interval_type, RangeParams::SCORE) == RangeParams::LEX)
         return cntx->SendError("BYSCORE and BYLEX options are not compatible");
       continue;
     }
+
     if (parser.Check("BYLEX")) {
       if (exchange(range_params.interval_type, RangeParams::LEX) == RangeParams::SCORE)
         return cntx->SendError("BYSCORE and BYLEX options are not compatible");
@@ -2152,7 +2159,8 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, RangePa
       range_params.with_scores = true;
       continue;
     }
-    if (parser.Check("LIMIT").ExpectTail(2)) {
+
+    if (parser.Check("LIMIT")) {
       int64_t limit;
       tie(range_params.offset, limit) = parser.Next<uint32_t, int64_t>();
       range_params.limit = limit < 0 ? UINT32_MAX : static_cast<uint32_t>(limit);
@@ -2161,9 +2169,6 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, RangePa
 
     return cntx->SendError(absl::StrCat("unsupported option ", parser.Peek()));
   }
-
-  if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
 
   ZRangeInternal(args.subspan(0, 3), range_params, cntx);
 }
