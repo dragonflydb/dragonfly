@@ -121,6 +121,9 @@ class Replica : ProtocolClient {
     time_t master_last_io_sec;  // monotonic clock.
     std::string master_id;
     uint32_t reconnect_count;
+
+    // sum of the offsets on all the flows.
+    uint64_t repl_offset_sum;
   };
 
   Summary GetSummary() const;  // thread-safe, blocks fiber, makes a hop.

@@ -2378,6 +2378,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
         append("master_sync_in_progress", rinfo.full_sync_in_progress);
         append("master_replid", rinfo.master_id);
+        if (rinfo.full_sync_done)
+          append("slave_repl_offset", rinfo.repl_offset_sum);
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
       };

@@ -1095,6 +1095,10 @@ auto Replica::GetSummary() const -> Summary {
     res.master_last_io_sec = (ProactorBase::GetMonotonicTimeNs() - last_io_time) / 1000000000UL;
     res.master_id = master_context_.master_repl_id;
     res.reconnect_count = reconnect_count_;
+    res.repl_offset_sum = 0;
+    for (uint64_t offs : GetReplicaOffset()) {
+      res.repl_offset_sum += offs;
+    }
     return res;
   };
 
