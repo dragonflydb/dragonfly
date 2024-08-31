@@ -1135,4 +1135,14 @@ TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
                            "WITHHASH and WITHCOORDS options"));
 }
 
+TEST_F(ZSetFamilyTest, RangeLimit) {
+  auto resp = Run({"ZRANGEBYSCORE", "", "0.0", "0.0", "limit", "0"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"ZRANGEBYSCORE", "", "0.0", "0.0", "limit", "0", "0"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  resp = Run({"ZRANGEBYSCORE", "", "0.0", "0.0", "foo"});
+  EXPECT_THAT(resp, ErrArg("unsupported option"));
+}
+
 }  // namespace dfly
