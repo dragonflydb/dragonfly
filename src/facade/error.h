@@ -41,5 +41,6 @@ extern const char kSyntaxErrType[];
 extern const char kScriptErrType[];
 extern const char kConfigErrType[];
 extern const char kSearchErrType[];
+extern const char kWrongTypeErrType[];
 
 }  // namespace facade

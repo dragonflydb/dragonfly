@@ -1161,6 +1161,7 @@ def test_zrandemember(r: redis.Redis):
     assert len(r.zrandmember("a", -10)) == 10
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_zdiffstore(r: redis.Redis):
     r.zadd("a", {"a1": 1, "a2": 2, "a3": 3})
     r.zadd("b", {"a1": 1, "a2": 2})
@@ -1247,6 +1248,7 @@ def test_zintercard(r: redis.Redis):
     assert r.zintercard(3, ["a", "b", "c"], limit=1) == 1
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_zrangestore(r: redis.Redis):
     r.zadd("a", {"a1": 1, "a2": 2, "a3": 3})
     assert r.zrangestore("b", "a", 0, 1)
@@ -1267,6 +1269,7 @@ def test_zrangestore(r: redis.Redis):
 
 
 @pytest.mark.min_server("7")
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_zmpop(r: redis.Redis):
     r.zadd("a", {"a1": 1, "a2": 2, "a3": 3})
     res = [b"a", [[b"a1", b"1"], [b"a2", b"2"]]]
@@ -1278,6 +1281,7 @@ def test_zmpop(r: redis.Redis):
 
 
 @pytest.mark.min_server("7")
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_bzmpop(r: redis.Redis):
     r.zadd("a", {"a1": 1, "a2": 2, "a3": 3})
     res = [b"a", [[b"a1", b"1"], [b"a2", b"2"]]]

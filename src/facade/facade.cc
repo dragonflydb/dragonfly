@@ -102,6 +102,7 @@ const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";
 const char kConfigErrType[] = "config_error";
 const char kSearchErrType[] = "search_error";
+const char kWrongTypeErrType[] = "wrong_type";
 
 const char* RespExpr::TypeName(Type t) {
   switch (t) {
