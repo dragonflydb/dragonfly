@@ -30,7 +30,7 @@ TEST_F(MCParserTest, Basic) {
   EXPECT_EQ(MemcacheParser::OK, st);
   EXPECT_EQ("a", cmd_.key);
   EXPECT_EQ(1, cmd_.flags);
-  EXPECT_GE(cmd_.expire_ts, time(nullptr) + 19);
+  EXPECT_EQ(20, cmd_.expire_ts);
   EXPECT_EQ(3, cmd_.bytes_len);
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
 
@@ -84,7 +84,7 @@ TEST_F(MCParserTest, NoreplyBasic) {
   EXPECT_EQ(MemcacheParser::OK, st);
   EXPECT_EQ("mykey", cmd_.key);
   EXPECT_EQ(1, cmd_.flags);
-  EXPECT_GE(cmd_.expire_ts, time(nullptr) + 1);
+  EXPECT_EQ(2, cmd_.expire_ts);
   EXPECT_EQ(3, cmd_.bytes_len);
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
   EXPECT_TRUE(cmd_.no_reply);
@@ -95,7 +95,7 @@ TEST_F(MCParserTest, NoreplyBasic) {
   EXPECT_EQ(MemcacheParser::OK, st);
   EXPECT_EQ("mykey2", cmd_.key);
   EXPECT_EQ(4, cmd_.flags);
-  EXPECT_GE(cmd_.expire_ts, time(nullptr) + 4);
+  EXPECT_EQ(5, cmd_.expire_ts);
   EXPECT_EQ(6, cmd_.bytes_len);
   EXPECT_EQ(MemcacheParser::SET, cmd_.type);
   EXPECT_FALSE(cmd_.no_reply);

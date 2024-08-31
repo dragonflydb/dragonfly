@@ -56,6 +56,8 @@ class MemcacheParser {
     uint32_t bytes_len = 0;
     uint32_t flags = 0;
     bool no_reply = false;
+
+    uint32_t ExpireTsToUnixTime() const;
   };
 
   enum Result {

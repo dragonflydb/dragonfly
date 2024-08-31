@@ -1566,8 +1566,9 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       args.emplace_back(store_opt, strlen(store_opt));
     }
 
-    if (cmd.expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
-      char* next = absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, ttl);
+    const uint32_t expire_ts = cmd.ExpireTsToUnixTime();
+    if (expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
+      char* next = absl::numbers_internal::FastIntToBuffer(expire_ts, ttl);
       args.emplace_back(ttl_op, 4);
       args.emplace_back(ttl, next - ttl);
     }
