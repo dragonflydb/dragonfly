@@ -118,13 +118,6 @@ MP::Result ParseValueless(TokensView tokens, MP::Command* res) {
 
 }  // namespace
 
-uint32_t MemcacheParser::Command::ExpireTsToUnixTime() const {
-  // if expire_ts is greater than month it's a unix timestamp
-  // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
-  constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
-  return expire_ts && expire_ts <= kExpireLimit ? expire_ts + time(nullptr) : expire_ts;
-}
-
 auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   cmd->no_reply = false;  // re-initialize
   auto pos = str.find("\r\n");

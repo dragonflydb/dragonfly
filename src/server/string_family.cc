@@ -28,6 +28,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/generic_family.h"
 #include "server/journal/journal.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -790,12 +791,8 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       // Remove existed key if the key is expired already
       if (rel_ms < 0) {
         cntx->transaction->ScheduleSingleHop([key](const Transaction* tx, EngineShard* es) {
-          auto& db_slice = tx->GetDbSlice(es->shard_id());
-
-          if (auto find_res = db_slice.FindMutable(tx->GetDbContext(), key); IsValid(find_res.it)) {
-            find_res.post_updater.Run();
-            db_slice.Del(tx->GetDbContext(), find_res.it);
-          }
+          ShardArgs args = tx->GetShardArgs(es->shard_id());
+          GenericFamily::OpDel(tx->GetOpArgs(es), args);
           return OpStatus::OK;
         });
         return builder->SendStored();

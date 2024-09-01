@@ -1566,7 +1566,12 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       args.emplace_back(store_opt, strlen(store_opt));
     }
 
-    const uint32_t expire_ts = cmd.ExpireTsToUnixTime();
+    // if expire_ts is greater than month it's a unix timestamp
+    // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
+    constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
+    const uint64_t expire_ts = cmd.expire_ts && cmd.expire_ts <= kExpireLimit
+                                   ? cmd.expire_ts + time(nullptr)
+                                   : cmd.expire_ts;
     if (expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
       char* next = absl::numbers_internal::FastIntToBuffer(expire_ts, ttl);
       args.emplace_back(ttl_op, 4);
