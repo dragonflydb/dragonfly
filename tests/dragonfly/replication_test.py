@@ -2321,7 +2321,7 @@ async def test_replica_reconnect(df_factory, break_conn):
 @pytest.mark.asyncio
 async def test_announce_ip_port(df_factory):
     master = df_factory.create()
-    replica = df_factory.create(announce_ip="overrode-host", announce_port="1337")
+    replica = df_factory.create(replica_announce_ip="overrode-host", announce_port="1337")
 
     master.start()
     replica.start()
@@ -2418,7 +2418,7 @@ async def test_replicate_old_master(
     released_dfly_path = download_dragonfly_release(dfly_version)
     master = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode=cluster_mode)
     replica = df_factory.create(
-        cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
+        cluster_mode=cluster_mode, cluster_announce_ip=announce_ip, announce_port=announce_port
     )
 
     df_factory.start_all([master, replica])

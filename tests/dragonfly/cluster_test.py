@@ -213,7 +213,7 @@ class TestEmulated:
 
 # Unfortunately we can't test --announce_port here because that causes the Python Cluster client to
 # throw if it can't access the port in `CLUSTER SLOTS` :|
-@dfly_args({"cluster_mode": "emulated", "announce_ip": "127.0.0.2"})
+@dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 class TestEmulatedWithAnnounceIp:
     def test_cluster_slots_command(self, df_server, cluster_client: redis.RedisCluster):
         expected = {(0, 16383): {"primary": ("127.0.0.2", df_server.port), "replicas": []}}
@@ -361,7 +361,7 @@ async def test_cluster_info(async_client):
     }
 
 
-@dfly_args({"cluster_mode": "emulated", "announce_ip": "127.0.0.2"})
+@dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
 @pytest.mark.asyncio
 async def test_cluster_nodes(df_server, async_client):
     res = await async_client.execute_command("CLUSTER NODES")

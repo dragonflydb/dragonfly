@@ -135,7 +135,7 @@ Dragonfly 支持 Redis 的常见参数。
 
 * `cluster_mode`：支持集群模式。目前仅支持 `emulated`。默认为空 `""`。
 
-* `announce_ip`：集群模式下向客户端公开的 IP。
+* `cluster_announce_ip`：集群模式下向客户端公开的 IP。
 
 ### 启动脚本示例，包含常用选项：
 

@@ -68,8 +68,6 @@ using facade::ErrorReply;
 ABSL_FLAG(int32_t, port, 6379,
           "Redis port. 0 disables the port, -1 will bind on a random available port.");
 
-ABSL_FLAG(std::string, announce_ip, "",
-          "IP address that Dragonfly announces to cluster clients and replication master");
 ABSL_FLAG(uint16_t, announce_port, 0,
           "Port that Dragonfly announces to cluster clients and replication master");
 

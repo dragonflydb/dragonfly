@@ -41,9 +41,10 @@ ABSL_FLAG(bool, replica_partial_sync, true,
 ABSL_FLAG(bool, break_replication_on_master_restart, false,
           "When in replica mode, and master restarts, break replication from master to avoid "
           "flushing the replica's data.");
+ABSL_FLAG(std::string, replica_announce_ip, "",
+          "IP address that Dragonfly announces to replication master");
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
-ABSL_DECLARE_FLAG(std::string, announce_ip);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
@@ -287,7 +288,7 @@ error_code Replica::Greet() {
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port)));
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
-  auto announce_ip = absl::GetFlag(FLAGS_announce_ip);
+  auto announce_ip = absl::GetFlag(FLAGS_replica_announce_ip);
   if (!announce_ip.empty()) {
     RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF ip-address ", announce_ip)));
     LOG_IF(WARNING, !CheckRespIsSimpleReply("OK"))

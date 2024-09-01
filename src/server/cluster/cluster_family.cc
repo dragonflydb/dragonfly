@@ -26,14 +26,14 @@
 #include "server/server_state.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(std::string, cluster_announce_ip, "", "DEPRECATED: use --announce_ip");
+ABSL_FLAG(std::string, cluster_announce_ip, "",
+          "IP address that Dragonfly announces to cluster clients");
 
 ABSL_FLAG(std::string, cluster_node_id, "",
           "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
           "replication ID (random string)");
 
 ABSL_DECLARE_FLAG(int32_t, port);
-ABSL_DECLARE_FLAG(std::string, announce_ip);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
 
 namespace dfly {
@@ -69,16 +69,6 @@ ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(serve
   CHECK_NOTNULL(server_family_);
 
   InitializeCluster();
-
-  // TODO: Remove flag cluster_announce_ip in v1.23+
-  if (!absl::GetFlag(FLAGS_cluster_announce_ip).empty()) {
-    CHECK(absl::GetFlag(FLAGS_announce_ip).empty())
-        << "Can't use both --cluster_announce_ip and --announce_ip";
-
-    LOG(WARNING) << "WARNING: Flag --cluster_announce_ip is deprecated in favor of --announce_ip. "
-                    "Use the latter, as the former will be removed in a future release.";
-    absl::SetFlag(&FLAGS_announce_ip, absl::GetFlag(FLAGS_cluster_announce_ip));
-  }
 
   id_ = absl::GetFlag(FLAGS_cluster_node_id);
   if (id_.empty()) {
@@ -119,7 +109,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
   ServerState& etl = *ServerState::tlocal();
   if (!replication_info.has_value()) {
     DCHECK(etl.is_master);
-    std::string cluster_announce_ip = absl::GetFlag(FLAGS_announce_ip);
+    std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
     std::string preferred_endpoint =
         cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
     uint16_t cluster_announce_port = absl::GetFlag(FLAGS_announce_port);
