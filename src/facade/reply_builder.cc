@@ -481,6 +481,10 @@ void RedisReplyBuilder::SendError(string_view str, string_view err_type) {
     err_type = str;
     if (err_type == kSyntaxErr)
       err_type = kSyntaxErrType;
+    else if (err_type == kWrongTypeErr)
+      err_type = kWrongTypeErrType;
+    else if (err_type == kScriptNotFound)
+      err_type = kScriptErrType;
   }
 
   tl_facade_stats->reply_stats.err_count[err_type]++;
