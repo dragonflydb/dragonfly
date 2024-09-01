@@ -696,7 +696,7 @@ class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {
     SetTestFlag("cluster_mode", "emulated");
-    SetTestFlag("announce_ip", "fake-host");
+    SetTestFlag("cluster_announce_ip", "fake-host");
   }
 };
 

@@ -166,7 +166,7 @@ There are also some Dragonfly-specific arguments:
  * `admin_bind`: To bind the admin console TCP connection to a given address (`default: any`). Supports both HTTP and RESP protocols.
  * `admin_nopass`: To enable open admin access to console on the assigned port, without auth token needed (`default: false`). Supports both HTTP and RESP protocols.
  * `cluster_mode`: Cluster mode supported (`default: ""`). Currently supports only `emulated`.
- * `announce_ip`: The IP that cluster commands announce to the client, and to replication master.
+ * `cluster_announce_ip`: The IP that cluster commands announce to the client.
  * `announce_port`: The port that cluster commands announce to the client, and to replication master.
 
 ### Example start script with popular options:
