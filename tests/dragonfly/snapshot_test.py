@@ -83,7 +83,7 @@ async def test_multidb(df_factory, format: str):
     """
     Test serialization of multiple logical databases
     """
-    dbfilename = f"test-multidb{rand(0, 5000)}"
+    dbfilename = f"dump_{tmp_file_name()}"
     instance = df_factory.create(dbfilename=dbfilename)
     instance.start()
     async_client = instance.client()
