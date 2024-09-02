@@ -51,39 +51,39 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
-    if (parser->Check("DIM").ExpectTail(1)) {
+    if (parser->Check("DIM")) {
       params.dim = parser->Next<size_t>();
       continue;
     }
 
-    if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
+    if (parser->Check("DISTANCE_METRIC")) {
       params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
                                   search::VectorSimilarity::COSINE);
       continue;
     }
 
-    if (parser->Check("INITIAL_CAP").ExpectTail(1)) {
+    if (parser->Check("INITIAL_CAP")) {
       params.capacity = parser->Next<size_t>();
       continue;
     }
 
-    if (parser->Check("M").ExpectTail(1)) {
+    if (parser->Check("M")) {
       params.hnsw_m = parser->Next<size_t>();
       continue;
     }
 
-    if (parser->Check("EF_CONSTRUCTION").ExpectTail(1)) {
+    if (parser->Check("EF_CONSTRUCTION")) {
       params.hnsw_ef_construction = parser->Next<size_t>();
       continue;
     }
 
-    if (parser->Check("EF_RUNTIME").ExpectTail(1)) {
+    if (parser->Check("EF_RUNTIME")) {
       parser->Next<size_t>();
       LOG(WARNING) << "EF_RUNTIME not supported";
       continue;
     }
 
-    if (parser->Check("EPSILON").ExpectTail(1)) {
+    if (parser->Check("EPSILON")) {
       parser->Next<double>();
       LOG(WARNING) << "EPSILON not supported";
       continue;
@@ -98,7 +98,7 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
 search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
   search::SchemaField::TagParams params{};
   while (parser->HasNext()) {
-    if (parser->Check("SEPARATOR").ExpectTail(1)) {
+    if (parser->Check("SEPARATOR")) {
       string_view separator = parser->Next();
       params.separator = separator.front();
       continue;
@@ -136,7 +136,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     }
 
     // AS [alias]
-    if (parser.Check("AS").ExpectTail(1))
+    if (parser.Check("AS"))
       field_alias = parser.Next();
 
     // Determine type
@@ -223,19 +223,19 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
 
   while (parser.HasNext()) {
     // [LIMIT offset total]
-    if (parser.Check("LIMIT").ExpectTail(2)) {
+    if (parser.Check("LIMIT")) {
       params.limit_offset = parser.Next<size_t>();
       params.limit_total = parser.Next<size_t>();
       continue;
     }
 
     // RETURN {num} [{ident} AS {name}...]
-    if (parser.Check("RETURN").ExpectTail(1)) {
+    if (parser.Check("RETURN")) {
       size_t num_fields = parser.Next<size_t>();
       params.return_fields = SearchParams::FieldReturnList{};
       while (params.return_fields->size() < num_fields) {
         string_view ident = parser.Next();
-        string_view alias = parser.Check("AS").ExpectTail(1) ? parser.Next() : ident;
+        string_view alias = parser.Check("AS") ? parser.Next() : ident;
         params.return_fields->emplace_back(ident, alias);
       }
       continue;
@@ -248,12 +248,12 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     }
 
     // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (parser.Check("PARAMS").ExpectTail(1)) {
+    if (parser.Check("PARAMS")) {
       params.query_params = ParseQueryParams(&parser);
       continue;
     }
 
-    if (parser.Check("SORTBY").ExpectTail(1)) {
+    if (parser.Check("SORTBY")) {
       params.sort_option = search::SortOption{string{parser.Next()}, bool(parser.Check("DESC"))};
       continue;
     }
@@ -285,7 +285,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
 
   while (parser.HasNext()) {
     // LOAD count field [field ...]
-    if (parser.Check("LOAD").ExpectTail(1)) {
+    if (parser.Check("LOAD")) {
       params.load_fields.resize(parser.Next<size_t>());
       for (string_view& field : params.load_fields)
         field = parser.Next();
@@ -293,13 +293,13 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     }
 
     // GROUPBY nargs property [property ...]
-    if (parser.Check("GROUPBY").ExpectTail(1)) {
+    if (parser.Check("GROUPBY")) {
       vector<string_view> fields(parser.Next<size_t>());
       for (string_view& field : fields)
         field = parser.Next();
 
       vector<aggregate::Reducer> reducers;
-      while (parser.Check("REDUCE").ExpectTail(2)) {
+      while (parser.Check("REDUCE")) {
         parser.ToUpper();  // uppercase for func_name
         auto [func_name, nargs] = parser.Next<string_view, size_t>();
         auto func = aggregate::FindReducerFunc(func_name);
@@ -325,7 +325,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     }
 
     // SORTBY nargs
-    if (parser.Check("SORTBY").ExpectTail(1)) {
+    if (parser.Check("SORTBY")) {
       parser.ExpectTag("1");
       string_view field = parser.Next();
       bool desc = bool(parser.Check("DESC"));
@@ -335,14 +335,14 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     }
 
     // LIMIT
-    if (parser.Check("LIMIT").ExpectTail(2)) {
+    if (parser.Check("LIMIT")) {
       auto [offset, num] = parser.Next<size_t, size_t>();
       params.steps.push_back(aggregate::MakeLimitStep(offset, num));
       continue;
     }
 
     // PARAMS
-    if (parser.Check("PARAMS").ExpectTail(1)) {
+    if (parser.Check("PARAMS")) {
       params.params = ParseQueryParams(&parser);
       continue;
     }
@@ -469,13 +469,13 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
 
   while (parser.HasNext()) {
     // ON HASH | JSON
-    if (parser.Check("ON").ExpectTail(1)) {
+    if (parser.Check("ON")) {
       index.type = parser.Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 
     // PREFIX count prefix [prefix ...]
-    if (parser.Check("PREFIX").ExpectTail(2)) {
+    if (parser.Check("PREFIX")) {
       if (size_t num = parser.Next<size_t>(); num != 1)
         return cntx->SendError("Multiple prefixes are not supported");
       index.prefix = string(parser.Next());

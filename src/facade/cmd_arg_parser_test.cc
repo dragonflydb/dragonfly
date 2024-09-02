@@ -78,7 +78,7 @@ TEST_F(CmdArgParserTest, Check) {
   EXPECT_TRUE(parser.Check("TAG"));
 
   EXPECT_FALSE(parser.Check("NOT_TAG_2"));
-  EXPECT_TRUE(parser.Check("TAG_2").ExpectTail(1));
+  EXPECT_TRUE(parser.Check("TAG_2"));
 }
 
 TEST_F(CmdArgParserTest, NextStatement) {
@@ -97,15 +97,15 @@ TEST_F(CmdArgParserTest, NextStatement) {
 TEST_F(CmdArgParserTest, CheckTailFail) {
   auto parser = Make({"TAG", "11", "22", "TAG", "33"});
 
-  EXPECT_TRUE(parser.Check("TAG").ExpectTail(2));
+  EXPECT_TRUE(parser.Check("TAG"));
   parser.Skip(2);
 
-  EXPECT_FALSE(parser.Check("TAG").ExpectTail(2));
+  EXPECT_TRUE(parser.Check("TAG"));
+  parser.Next<int, int>();
 
   auto err = parser.Error();
   EXPECT_TRUE(err);
-  EXPECT_EQ(err->type, CmdArgParser::SHORT_OPT_TAIL);
-  EXPECT_EQ(err->index, 3);
+  EXPECT_EQ(err->index, 4);
 }
 
 TEST_F(CmdArgParserTest, Cases) {
@@ -125,7 +125,7 @@ TEST_F(CmdArgParserTest, IgnoreCase) {
 
   EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "hello"sv);
 
-  EXPECT_TRUE(parser.Check("MARKER"sv).ExpectTail(1));
+  EXPECT_TRUE(parser.Check("MARKER"sv));
   parser.Skip(1);
 
   EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "world"sv);

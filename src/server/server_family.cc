@@ -645,7 +645,7 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionCo
   ReplicaOfArgs replicaof_args;
   CmdArgParser parser(args);
 
-  if (parser.Check("NO").ExpectTail(1)) {
+  if (parser.Check("NO")) {
     parser.ExpectTag("ONE");
     replicaof_args.port = 0;
   } else {

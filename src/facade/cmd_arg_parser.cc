@@ -11,24 +11,6 @@
 
 namespace facade {
 
-CmdArgParser::CheckProxy::operator bool() const {
-  if (idx_ >= parser_->args_.size())
-    return false;
-
-  std::string_view arg = parser_->SafeSV(idx_);
-  if (!absl::EqualsIgnoreCase(arg, tag_))
-    return false;
-
-  if (idx_ + expect_tail_ >= parser_->args_.size()) {
-    parser_->Report(SHORT_OPT_TAIL, idx_);
-    return false;
-  }
-
-  parser_->cur_i_++;
-
-  return true;
-}
-
 void CmdArgParser::ExpectTag(std::string_view tag) {
   if (cur_i_ >= args_.size()) {
     Report(OUT_OF_BOUNDS, cur_i_);
