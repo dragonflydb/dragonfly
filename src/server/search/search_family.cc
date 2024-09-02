@@ -48,48 +48,30 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   search::SchemaField::VectorParams params{};
 
   params.use_hnsw = parser->Switch("HNSW", true, "FLAT", false);
-  size_t num_args = parser->Next<size_t>();
+  const size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
-    if (parser->Check("DIM")) {
+    if (parser->Check("DIM", 1)) {
       params.dim = parser->Next<size_t>();
-      continue;
-    }
-
-    if (parser->Check("DISTANCE_METRIC")) {
+    } else if (parser->Check("DISTANCE_METRIC", 1)) {
       params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
                                   search::VectorSimilarity::COSINE);
-      continue;
-    }
-
-    if (parser->Check("INITIAL_CAP")) {
-      params.capacity = parser->Next<size_t>();
-      continue;
-    }
-
-    if (parser->Check("M")) {
+    } else if (parser->Check("INITIAL_CAP", 1)) {
+      parser->Next<size_t>();
+      // params.capacity = parser->Next<size_t>();
+    } else if (parser->Check("M", 1)) {
       params.hnsw_m = parser->Next<size_t>();
-      continue;
-    }
-
-    if (parser->Check("EF_CONSTRUCTION")) {
+    } else if (parser->Check("EF_CONSTRUCTION", 1)) {
       params.hnsw_ef_construction = parser->Next<size_t>();
-      continue;
-    }
-
-    if (parser->Check("EF_RUNTIME")) {
+    } else if (parser->Check("EF_RUNTIME", 1)) {
       parser->Next<size_t>();
       LOG(WARNING) << "EF_RUNTIME not supported";
-      continue;
-    }
-
-    if (parser->Check("EPSILON")) {
+    } else if (parser->Check("EPSILON", 1)) {
       parser->Next<double>();
       LOG(WARNING) << "EPSILON not supported";
-      continue;
+    } else {
+      parser->Skip(2);
     }
-
-    parser->Skip(2);
   }
 
   return params;
@@ -111,7 +93,6 @@ search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
 
     break;
   }
-
   return params;
 }
 
@@ -226,11 +207,8 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     if (parser.Check("LIMIT")) {
       params.limit_offset = parser.Next<size_t>();
       params.limit_total = parser.Next<size_t>();
-      continue;
-    }
-
-    // RETURN {num} [{ident} AS {name}...]
-    if (parser.Check("RETURN")) {
+    } else if (parser.Check("RETURN")) {
+      // RETURN {num} [{ident} AS {name}...]
       size_t num_fields = parser.Next<size_t>();
       params.return_fields = SearchParams::FieldReturnList{};
       while (params.return_fields->size() < num_fields) {
@@ -238,28 +216,25 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
         string_view alias = parser.Check("AS") ? parser.Next() : ident;
         params.return_fields->emplace_back(ident, alias);
       }
-      continue;
-    }
+    } else
 
-    // NOCONTENT
-    if (parser.Check("NOCONTENT")) {
-      params.return_fields = SearchParams::FieldReturnList{};
-      continue;
-    }
+      // NOCONTENT
+      if (parser.Check("NOCONTENT")) {
+        params.return_fields = SearchParams::FieldReturnList{};
+      } else
 
-    // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (parser.Check("PARAMS")) {
-      params.query_params = ParseQueryParams(&parser);
-      continue;
-    }
+        // [PARAMS num(ignored) name(ignored) knn_vector]
+        if (parser.Check("PARAMS")) {
+          params.query_params = ParseQueryParams(&parser);
+        } else
 
-    if (parser.Check("SORTBY")) {
-      params.sort_option = search::SortOption{string{parser.Next()}, bool(parser.Check("DESC"))};
-      continue;
-    }
-
-    // Unsupported parameters are ignored for now
-    parser.Skip(1);
+            if (parser.Check("SORTBY")) {
+          params.sort_option =
+              search::SortOption{string{parser.Next()}, bool(parser.Check("DESC"))};
+        } else {
+          // Unsupported parameters are ignored for now
+          parser.Skip(1);
+        }
   }
 
   if (auto err = parser.Error(); err) {
@@ -469,13 +444,13 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
 
   while (parser.HasNext()) {
     // ON HASH | JSON
-    if (parser.Check("ON")) {
+    if (parser.Check("ON", 1)) {
       index.type = parser.Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 
     // PREFIX count prefix [prefix ...]
-    if (parser.Check("PREFIX")) {
+    if (parser.Check("PREFIX", 2)) {
       if (size_t num = parser.Next<size_t>(); num != 1)
         return cntx->SendError("Multiple prefixes are not supported");
       index.prefix = string(parser.Next());

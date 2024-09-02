@@ -17,7 +17,7 @@ namespace facade {
 
 // Utility class for easily parsing command options from argument lists.
 struct CmdArgParser {
-  enum ErrorType { OUT_OF_BOUNDS, INVALID_INT, INVALID_CASES, INVALID_NEXT };
+  enum ErrorType { OUT_OF_BOUNDS, SHORT_OPT_TAIL, INVALID_INT, INVALID_CASES, INVALID_NEXT };
 
   struct ErrorInfo {
     ErrorType type;
@@ -82,13 +82,18 @@ struct CmdArgParser {
   }
 
   // Check if the next value if equal to a specific tag. If equal, its consumed.
-  bool Check(std::string_view tag) {
+  bool Check(std::string_view tag, size_t expect_tail = 0) {
     if (cur_i_ >= args_.size())
       return false;
 
     std::string_view arg = SafeSV(cur_i_);
     if (!absl::EqualsIgnoreCase(arg, tag))
       return false;
+
+    if (cur_i_ + expect_tail >= args_.size()) {
+      Report(SHORT_OPT_TAIL, cur_i_);
+      return false;
+    }
 
     cur_i_++;
 
@@ -97,7 +102,7 @@ struct CmdArgParser {
 
   // Skip specified number of arguments
   CmdArgParser& Skip(size_t n) {
-    if (cur_i_ + n >= args_.size()) {
+    if (cur_i_ + n > args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
     } else {
       cur_i_ += n;

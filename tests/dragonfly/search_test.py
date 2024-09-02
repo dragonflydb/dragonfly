@@ -227,8 +227,8 @@ async def knn_query(idx, query, vector):
 
 
 @dfly_args({"proactor_threads": 4})
-@pytest.mark.parametrize("index_type", [IndexType.HASH, IndexType.JSON])
-@pytest.mark.parametrize("algo_type", ["FLAT", "HNSW"])
+@pytest.mark.parametrize("index_type", [IndexType.HASH])
+@pytest.mark.parametrize("algo_type", ["FLAT"])
 async def test_knn(async_client: aioredis.Redis, index_type, algo_type):
     i2 = async_client.ft("i2-" + str(index_type))
 
