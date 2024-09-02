@@ -82,18 +82,13 @@ struct CmdArgParser {
   }
 
   // Check if the next value if equal to a specific tag. If equal, its consumed.
-  bool Check(std::string_view tag, size_t expect_tail = 0) {
+  bool Check(std::string_view tag) {
     if (cur_i_ >= args_.size())
       return false;
 
     std::string_view arg = SafeSV(cur_i_);
     if (!absl::EqualsIgnoreCase(arg, tag))
       return false;
-
-    if (cur_i_ + expect_tail >= args_.size()) {
-      Report(SHORT_OPT_TAIL, cur_i_);
-      return false;
-    }
 
     cur_i_++;
 

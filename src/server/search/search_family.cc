@@ -51,22 +51,22 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   const size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
-    if (parser->Check("DIM", 1)) {
+    if (parser->Check("DIM")) {
       params.dim = parser->Next<size_t>();
-    } else if (parser->Check("DISTANCE_METRIC", 1)) {
+    } else if (parser->Check("DISTANCE_METRIC")) {
       params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
                                   search::VectorSimilarity::COSINE);
-    } else if (parser->Check("INITIAL_CAP", 1)) {
+    } else if (parser->Check("INITIAL_CAP")) {
       parser->Next<size_t>();
       // params.capacity = parser->Next<size_t>();
-    } else if (parser->Check("M", 1)) {
+    } else if (parser->Check("M")) {
       params.hnsw_m = parser->Next<size_t>();
-    } else if (parser->Check("EF_CONSTRUCTION", 1)) {
+    } else if (parser->Check("EF_CONSTRUCTION")) {
       params.hnsw_ef_construction = parser->Next<size_t>();
-    } else if (parser->Check("EF_RUNTIME", 1)) {
+    } else if (parser->Check("EF_RUNTIME")) {
       parser->Next<size_t>();
       LOG(WARNING) << "EF_RUNTIME not supported";
-    } else if (parser->Check("EPSILON", 1)) {
+    } else if (parser->Check("EPSILON")) {
       parser->Next<double>();
       LOG(WARNING) << "EPSILON not supported";
     } else {
@@ -444,13 +444,13 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
 
   while (parser.HasNext()) {
     // ON HASH | JSON
-    if (parser.Check("ON", 1)) {
+    if (parser.Check("ON")) {
       index.type = parser.Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 
     // PREFIX count prefix [prefix ...]
-    if (parser.Check("PREFIX", 2)) {
+    if (parser.Check("PREFIX")) {
       if (size_t num = parser.Next<size_t>(); num != 1)
         return cntx->SendError("Multiple prefixes are not supported");
       index.prefix = string(parser.Next());
