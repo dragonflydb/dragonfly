@@ -476,6 +476,7 @@ class RedisReplyBuilder2 : public RedisReplyBuilder2Base {
   void SendSimpleStrArr(RedisReplyBuilder::StrSpan arr) override {
     SendSimpleStrArr2(arr);
   }
+
   void SendStringArr(RedisReplyBuilder::StrSpan arr, CollectionType type = ARRAY) override {
     SendBulkStrArr(arr, type);
   }
