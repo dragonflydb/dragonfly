@@ -67,14 +67,14 @@ jobs:
           echo "-----------------------------"
 
           # The order of redirect is important
-          ./dragonfly --proactor_threads=4 --dbfilename=   --noversion_check --port=6380  \
+          ./dragonfly --proactor_threads=4  --noversion_check --port=6380  \
            --lua_resp2_legacy_float 1> /tmp/dragonfly.log 2>&1 &
 
       - name: Run tests
         working-directory: tests/fakeredis
         run: |
           poetry run pytest test/ --ignore test/test_hypothesis.py  --ignore test/test_json/ \
-            --ignore test_bitmap_commands.py --ignore test/test_mixins/  \
+            --ignore test_bitmap_commands.py \
             --junit-xml=results-tests.xml  --html=report-tests.html -v
         continue-on-error: true  # For now to mark the flow as successful
 
