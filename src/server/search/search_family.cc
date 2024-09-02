@@ -57,8 +57,7 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
       params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
                                   search::VectorSimilarity::COSINE);
     } else if (parser->Check("INITIAL_CAP")) {
-      parser->Next<size_t>();
-      // params.capacity = parser->Next<size_t>();
+      params.capacity = parser->Next<size_t>();
     } else if (parser->Check("M")) {
       params.hnsw_m = parser->Next<size_t>();
     } else if (parser->Check("EF_CONSTRUCTION")) {
@@ -216,25 +215,16 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
         string_view alias = parser.Check("AS") ? parser.Next() : ident;
         params.return_fields->emplace_back(ident, alias);
       }
-    } else
-
-      // NOCONTENT
-      if (parser.Check("NOCONTENT")) {
-        params.return_fields = SearchParams::FieldReturnList{};
-      } else
-
-        // [PARAMS num(ignored) name(ignored) knn_vector]
-        if (parser.Check("PARAMS")) {
-          params.query_params = ParseQueryParams(&parser);
-        } else
-
-            if (parser.Check("SORTBY")) {
-          params.sort_option =
-              search::SortOption{string{parser.Next()}, bool(parser.Check("DESC"))};
-        } else {
-          // Unsupported parameters are ignored for now
-          parser.Skip(1);
-        }
+    } else if (parser.Check("NOCONTENT")) {  // NOCONTENT
+      params.return_fields = SearchParams::FieldReturnList{};
+    } else if (parser.Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
+      params.query_params = ParseQueryParams(&parser);
+    } else if (parser.Check("SORTBY")) {
+      params.sort_option = search::SortOption{string{parser.Next()}, bool(parser.Check("DESC"))};
+    } else {
+      // Unsupported parameters are ignored for now
+      parser.Skip(1);
+    }
   }
 
   if (auto err = parser.Error(); err) {
