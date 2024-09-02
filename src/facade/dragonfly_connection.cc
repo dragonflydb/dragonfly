@@ -584,7 +584,7 @@ void Connection::OnPreMigrateThread() {
 }
 
 void Connection::OnPostMigrateThread() {
-  DVLOG(1) << "OnPostMigrateThread " << GetClientId();
+  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread";
 
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
@@ -1145,7 +1145,7 @@ void Connection::OnBreakCb(int32_t mask) {
     return;
   }
 
-  DCHECK(cc_->reply_builder());
+  DCHECK(cc_->reply_builder()) << "[" << id_ << "] " << phase_ << " " << migration_in_process_;
 
   VLOG(1) << "[" << id_ << "] Got event " << mask << " " << phase_ << " "
           << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();
