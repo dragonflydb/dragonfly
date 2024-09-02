@@ -691,23 +691,6 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
 
-OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys) {
-  DVLOG(1) << "Del: " << keys.Front();
-  auto& db_slice = op_args.GetDbSlice();
-
-  uint32_t res = 0;
-
-  for (string_view key : keys) {
-    auto fres = db_slice.FindMutable(op_args.db_cntx, key);
-    if (!IsValid(fres.it))
-      continue;
-    fres.post_updater.Run();
-    res += int(db_slice.Del(op_args.db_cntx, fres.it));
-  }
-
-  return res;
-}
-
 OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Stick: " << keys.Front();
 
@@ -726,6 +709,23 @@ OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
 }
 
 }  // namespace
+
+OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
+  DVLOG(1) << "Del: " << keys.Front();
+  auto& db_slice = op_args.GetDbSlice();
+
+  uint32_t res = 0;
+
+  for (string_view key : keys) {
+    auto fres = db_slice.FindMutable(op_args.db_cntx, key);
+    if (!IsValid(fres.it))
+      continue;
+    fres.post_updater.Run();
+    res += int(db_slice.Del(op_args.db_cntx, fres.it));
+  }
+
+  return res;
+}
 
 void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;

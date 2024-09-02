@@ -39,6 +39,7 @@ class GenericFamily {
 
   // Accessed by Service::Exec and Service::Watch as an utility.
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, const ShardArgs& keys);
+  static OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys);
 
  private:
   static void Del(CmdArgList args, ConnectionContext* cntx);

@@ -52,7 +52,8 @@ class MemcacheParser {
       uint64_t delta;           // for DECR/INCR commands.
     };
 
-    uint32_t expire_ts = 0;  // relative time in seconds.
+    uint32_t expire_ts =
+        0;  // relative (expire_ts <= month) or unix time (expire_ts > month) in seconds
     uint32_t bytes_len = 0;
     uint32_t flags = 0;
     bool no_reply = false;

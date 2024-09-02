@@ -28,6 +28,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/generic_family.h"
 #include "server/journal/journal.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -787,9 +788,15 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       if (abs_ms < 0)
         return cntx->SendError(InvalidExpireTime("set"));
 
-      // Redis reports just OK in this case
-      if (rel_ms < 0)
+      // Remove existed key if the key is expired already
+      if (rel_ms < 0) {
+        cntx->transaction->ScheduleSingleHop([key](const Transaction* tx, EngineShard* es) {
+          ShardArgs args = tx->GetShardArgs(es->shard_id());
+          GenericFamily::OpDel(tx->GetOpArgs(es), args);
+          return OpStatus::OK;
+        });
         return builder->SendStored();
+      }
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
     } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {
