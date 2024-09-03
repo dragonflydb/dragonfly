@@ -271,6 +271,7 @@ TEST_F(GenericFamilyTest, RenameNx) {
   ASSERT_THAT(Run({"renamenx", "x", "b"}), IntArg(0));  // b already exists
   ASSERT_THAT(Run({"renamenx", "x", "y"}), IntArg(1));
   ASSERT_EQ(Run({"get", "y"}), x_val);
+  ASSERT_THAT(Run({"renamenx", "y", "y"}), IntArg(0));
 }
 
 TEST_F(GenericFamilyTest, RenameSameName) {

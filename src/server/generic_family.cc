@@ -1183,9 +1183,11 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
                           return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
                         });
     } else {
-      std::sort(entries.begin(), entries.end(), [reversed](const auto& lhs, const auto& rhs) {
-        return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
-      });
+      std::sort(entries.begin(), entries.end(),
+                [reversed, &entries](const auto& lhs, const auto& rhs) {
+                  DCHECK(&rhs < &(*entries.end()) && &rhs >= &(*entries.begin()));
+                  return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
+                });
     }
 
     auto start_it = entries.begin();
@@ -1204,6 +1206,7 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(it->key);
     }
   };
+
   std::visit(std::move(sort_call), fetch_result.value());
 }
 
@@ -1567,7 +1570,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     return OpStatus::KEY_NOTFOUND;
 
   if (from_key == to_key)
-    return OpStatus::OK;
+    return destination_should_not_exist ? OpStatus::KEY_EXISTS : OpStatus::OK;
 
   bool is_prior_list = false;
   auto to_res = db_slice.FindMutable(op_args.db_cntx, to_key);
