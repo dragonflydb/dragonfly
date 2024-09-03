@@ -165,9 +165,10 @@ struct CmdArgParser {
   }
 
   std::string_view SafeSV(size_t i) const {
+    using namespace std::literals::string_view_literals;
     if (i >= args_.size())
-      return "";
-    return ToSV(args_[i]);
+      return ""sv;
+    return args_[i].empty() ? ""sv : ToSV(args_[i]);
   }
 
   void Report(ErrorType type, size_t idx) {

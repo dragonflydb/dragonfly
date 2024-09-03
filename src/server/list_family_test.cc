@@ -967,6 +967,12 @@ TEST_F(ListFamilyTest, LInsert) {
 
   // Insert after, pivot not found.
   EXPECT_THAT(Run({"linsert", "mylist", "after", "notfound", "x"}), IntArg(-1));
+
+  // insert empty
+  Run({"rpush", "k", "a"});
+  Run({"linsert", "k", "before", "a", ""});
+  resp = Run({"lpop", "k"});
+  EXPECT_EQ(resp, "");
 }
 
 TEST_F(ListFamilyTest, BLPopUnwakesInScript) {
