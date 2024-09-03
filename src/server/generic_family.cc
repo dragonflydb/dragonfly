@@ -1184,9 +1184,10 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
                         });
     } else {
       std::sort(entries.begin(), entries.end(),
-                [reversed, &entries](const auto& lhs, const auto& rhs) {
-                  DCHECK(&rhs < &(*entries.end()) && &rhs >= &(*entries.begin()));
-                  return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
+                [reversed, &entries](const auto& lhs, const auto& rhs) -> bool {
+                  DCHECK((&rhs - entries.data()) >= 0);
+                  DCHECK((&rhs - entries.data()) < int64_t(entries.size()));
+                  return reversed ? rhs.Cmp() < lhs.Cmp() : lhs.Cmp() < rhs.Cmp();
                 });
     }
 
