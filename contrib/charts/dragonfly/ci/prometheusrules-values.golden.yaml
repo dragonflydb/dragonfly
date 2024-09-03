@@ -8,7 +8,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.21.4"
+    app.kubernetes.io/version: "v1.22.0"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: dragonfly/templates/metrics-service.yaml
@@ -20,7 +20,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.21.4"
+    app.kubernetes.io/version: "v1.22.0"
     app.kubernetes.io/managed-by: Helm
     type: metrics
 spec:
@@ -43,7 +43,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.21.4"
+    app.kubernetes.io/version: "v1.22.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -65,7 +65,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.21.4"
+    app.kubernetes.io/version: "v1.22.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
@@ -83,7 +83,7 @@ spec:
       serviceAccountName: test-dragonfly
       containers:
         - name: dragonfly
-          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.21.4"
+          image: "docker.dragonflydb.io/dragonflydb/dragonfly:v1.22.0"
           imagePullPolicy: IfNotPresent
           ports:
             - name: dragonfly
@@ -124,7 +124,7 @@ metadata:
   labels:
     app.kubernetes.io/name: dragonfly
     app.kubernetes.io/instance: test
-    app.kubernetes.io/version: "v1.21.4"
+    app.kubernetes.io/version: "v1.22.0"
     app.kubernetes.io/managed-by: Helm
 spec:
   endpoints:
