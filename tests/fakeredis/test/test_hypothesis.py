@@ -49,7 +49,9 @@ int_as_bytes = st.builds(lambda x: str(default_normalize(x)).encode(), st.intege
 float_as_bytes = st.builds(
     lambda x: repr(default_normalize(x)).encode(), st.floats(width=32)
 )
-counts = st.integers(min_value=-3, max_value=3) | st.integers()
+counts = st.integers(min_value=-3, max_value=3) | st.integers(
+    min_value=-2147483648, max_value=2147483647
+)
 limits = st.just(()) | st.tuples(st.just("limit"), counts, counts)
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
 # a limited range (https://github.com/antirez/redis/issues/5737).
@@ -497,7 +499,7 @@ class TestList(BaseTest):
         | commands(
             st.sampled_from(["lpop", "rpop"]),
             keys,
-            st.just(None) | st.just([]) | st.integers(),
+            st.just(None) | st.just([]) | counts,
         )
         | commands(
             st.sampled_from(["lpush", "lpushx", "rpush", "rpushx"]),

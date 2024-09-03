@@ -446,8 +446,10 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   return str;
 }
 
-OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
-                                 std::string_view element, int rank, int count, int max_len) {
+OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_view element,
+                                 int rank, int count, int max_len) {
+  DCHECK(key.data() && element.data());
+
   auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res.ok())
     return it_res.status();
@@ -491,6 +493,8 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
 
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
                        InsertParam insert_param) {
+  DCHECK(key.data() && pivot.data() && elem.data());
+
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
@@ -987,6 +991,7 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   string_view key = parser.Next();
   InsertParam where = parser.Switch("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
+  DCHECK(pivot.data() && elem.data());
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
