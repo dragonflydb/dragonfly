@@ -708,9 +708,7 @@ OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
   return res;
 }
 
-}  // namespace
-
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
+OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Del: " << keys.Front();
   auto& db_slice = op_args.GetDbSlice();
 
@@ -726,6 +724,8 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
 
   return res;
 }
+
+}  // namespace
 
 void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;

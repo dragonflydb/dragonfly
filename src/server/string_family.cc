@@ -629,6 +629,11 @@ OpStatus SetCmd::SetExisting(const SetParams& params, DbSlice::Iterator it,
   uint64_t at_ms =
       params.expire_after_ms ? params.expire_after_ms + op_args_.db_cntx.time_now_ms : 0;
 
+  if (params.expire_now) {
+    // past time
+    at_ms = op_args_.db_cntx.time_now_ms - 1;
+  }
+
   if (!(params.flags & SET_KEEP_EXPIRE)) {
     if (at_ms) {  // Command has an expiry paramater.
       if (IsValid(e_it)) {
@@ -788,17 +793,11 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       if (abs_ms < 0)
         return cntx->SendError(InvalidExpireTime("set"));
 
-      // Remove existed key if the key is expired already
       if (rel_ms < 0) {
-        cntx->transaction->ScheduleSingleHop([key](const Transaction* tx, EngineShard* es) {
-          ShardArgs args = tx->GetShardArgs(es->shard_id());
-          GenericFamily::OpDel(tx->GetOpArgs(es), args);
-          return OpStatus::OK;
-        });
-        return builder->SendStored();
+        sparams.expire_now = true;
+      } else {
+        tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
       }
-
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
     } else if (parser.Check("_MCFLAGS")) {
       sparams.memcache_flags = parser.Next<uint32_t>();
     } else {

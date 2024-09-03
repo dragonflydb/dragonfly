@@ -65,6 +65,7 @@ class SetCmd {
     uint16_t flags = SET_ALWAYS;
     uint32_t memcache_flags = 0;
     uint64_t expire_after_ms = 0;     // Relative value based on now. 0 means no expiration.
+    bool expire_now = false;          // Item will be added but as expired
     StringValue* prev_val = nullptr;  // If set, previous value is stored at pointer
 
     constexpr bool IsConditionalSet() const {
