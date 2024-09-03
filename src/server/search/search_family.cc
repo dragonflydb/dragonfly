@@ -47,14 +47,14 @@ bool IsValidJsonPath(string_view path) {
 search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   search::SchemaField::VectorParams params{};
 
-  params.use_hnsw = parser->Switch("HNSW", true, "FLAT", false);
+  params.use_hnsw = parser->Map("HNSW", true, "FLAT", false);
   const size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
     if (parser->Check("DIM", &params.dim)) {
     } else if (parser->Check("DISTANCE_METRIC")) {
-      params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
-                                  search::VectorSimilarity::COSINE);
+      params.sim = parser->Map("L2", search::VectorSimilarity::L2, "COSINE",
+                               search::VectorSimilarity::COSINE);
     } else if (parser->Check("INITIAL_CAP", &params.capacity)) {
     } else if (parser->Check("M", &params.hnsw_m)) {
     } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
@@ -112,12 +112,12 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     }
 
     // AS [alias]
-    parser.Check("AS", &field_alias)
+    parser.Check("AS", &field_alias);
 
-        // Determine type
-        using search::SchemaField;
-    auto type = parser.Switch("TAG", SchemaField::TAG, "TEXT", SchemaField::TEXT, "NUMERIC",
-                              SchemaField::NUMERIC, "VECTOR", SchemaField::VECTOR);
+    // Determine type
+    using search::SchemaField;
+    auto type = parser.Map("TAG", SchemaField::TAG, "TEXT", SchemaField::TEXT, "NUMERIC",
+                           SchemaField::NUMERIC, "VECTOR", SchemaField::VECTOR);
     if (auto err = parser.Error(); err) {
       cntx->SendError(err->MakeReply());
       return nullopt;
@@ -430,7 +430,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   while (parser.HasNext()) {
     // ON HASH | JSON
     if (parser.Check("ON")) {
-      index.type = parser.Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
+      index.type = parser.Map("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 

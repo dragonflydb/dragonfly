@@ -802,7 +802,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     } else if (parser.Check("_MCFLAGS")) {
       sparams.memcache_flags = parser.Next<uint32_t>();
     } else {
-      uint16_t flag = parser.Switch(  //
+      uint16_t flag = parser.Map(  //
           "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
           "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
       sparams.flags |= flag;

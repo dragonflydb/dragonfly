@@ -109,9 +109,9 @@ TEST_F(CmdArgParserTest, CheckTailFail) {
 TEST_F(CmdArgParserTest, Cases) {
   auto parser = Make({"TWO", "NONE"});
 
-  EXPECT_EQ(int(parser.Switch("ONE", 1, "TWO", 2)), 2);
+  EXPECT_EQ(int(parser.Map("ONE", 1, "TWO", 2)), 2);
 
-  EXPECT_EQ(int(parser.Switch("ONE", 1, "TWO", 2)), 0);
+  EXPECT_EQ(int(parser.Map("ONE", 1, "TWO", 2)), 0);
   auto err = parser.Error();
   EXPECT_TRUE(err);
   EXPECT_EQ(err->type, CmdArgParser::INVALID_CASES);
