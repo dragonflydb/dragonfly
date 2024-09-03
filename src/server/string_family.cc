@@ -799,7 +799,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
       }
 
       tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
-    } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {
+    } else if (parser.Check("_MCFLAGS")) {
       sparams.memcache_flags = parser.Next<uint32_t>();
     } else {
       uint16_t flag = parser.Switch(  //

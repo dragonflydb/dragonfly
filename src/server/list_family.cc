@@ -902,18 +902,18 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
   bool skip_count = true;
 
   while (parser.HasNext()) {
-    if (parser.Check("RANK").ExpectTail(1)) {
+    if (parser.Check("RANK")) {
       rank = parser.Next<int>();
       continue;
     }
 
-    if (parser.Check("COUNT").ExpectTail(1)) {
+    if (parser.Check("COUNT")) {
       count = parser.Next<uint32_t>();
       skip_count = false;
       continue;
     }
 
-    if (parser.Check("MAXLEN").ExpectTail(1)) {
+    if (parser.Check("MAXLEN")) {
       max_len = parser.Next<uint32_t>();
       continue;
     }
