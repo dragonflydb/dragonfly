@@ -973,6 +973,8 @@ TEST_F(ListFamilyTest, LInsert) {
   Run({"linsert", "k", "before", "a", ""});
   resp = Run({"lpop", "k"});
   EXPECT_EQ(resp, "");
+  resp = Run({"linsert", "k", "before", "", ""});
+  EXPECT_THAT(resp, IntArg(-1));
 }
 
 TEST_F(ListFamilyTest, BLPopUnwakesInScript) {
