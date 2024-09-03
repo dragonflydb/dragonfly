@@ -347,7 +347,7 @@ class DflyInstanceFactory:
 
         if version >= 1.21:
             # Add 1 byte limit for big values
-            args.setdefault("serialization_max_chunk_size", 1)
+            args.setdefault("serialization_max_chunk_size", 0)
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
