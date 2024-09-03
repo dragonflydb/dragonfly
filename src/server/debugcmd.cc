@@ -402,7 +402,7 @@ void DebugCmd::Run(CmdArgList args) {
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
         "TX",
         "    Performs transaction analysis per shard.",
-        "TRAFFIC <path> | [STOP]"
+        "TRAFFIC <path> | [STOP]",
         "    Starts traffic logging to the specified path. If path is not specified,"
         "    traffic logging is stopped.",
         "HELP",
