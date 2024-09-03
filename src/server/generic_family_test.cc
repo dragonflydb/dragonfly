@@ -481,6 +481,15 @@ TEST_F(GenericFamilyTest, Sort) {
   ;
 }
 
+TEST_F(GenericFamilyTest, SortBug3636) {
+  Run({"RPUSH", "foo", "1.100000023841858", "1.100000023841858", "1.100000023841858", "-15710",
+       "1.100000023841858", "1.100000023841858", "1.100000023841858", "-15710", "-15710",
+       "1.100000023841858", "-15710", "-15710", "-15710", "-15710", "1.100000023841858", "-15710",
+       "-15710"});
+  auto resp = Run({"SORT", "foo", "desc", "alpha"});
+  ASSERT_THAT(resp, ArrLen(17));
+}
+
 TEST_F(GenericFamilyTest, TimeNoKeys) {
   auto resp = Run({"time"});
   EXPECT_THAT(resp, ArrLen(2));
