@@ -82,9 +82,10 @@ struct CmdArgParser {
   }
 
   // Consume next value if can map it and return mapped result or return nullopt
-  template <class... Cases> auto CheckMap(Cases&&... cases) {
+  template <class... Cases>
+  auto CheckMap(Cases&&... cases) -> std::optional<std::tuple_element_t<1, std::tuple<Cases...>>> {
     if (cur_i_ >= args_.size()) {
-      return std::decay_t<decltype(MapImpl(std::string_view(), std::forward<Cases>(cases)...))>();
+      return std::nullopt;
     }
 
     auto res = MapImpl(SafeSV(cur_i_), std::forward<Cases>(cases)...);

@@ -991,10 +991,11 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   string_view key = parser.Next();
   InsertParam where = parser.Map("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
-  DCHECK(pivot.data() && elem.data());
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
+
+  DCHECK(pivot.data() && elem.data());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);

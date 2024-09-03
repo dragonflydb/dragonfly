@@ -260,24 +260,26 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
 
       vector<aggregate::Reducer> reducers;
       while (parser.Check("REDUCE")) {
-        parser.ToUpper();  // uppercase for func_name
-        auto [func_name, nargs] = parser.Next<string_view, size_t>();
-        auto func = aggregate::FindReducerFunc(func_name);
+        using RF = aggregate::ReducerFunc;
+        auto func_name =
+            parser.CheckMap("COUNT", RF::COUNT, "COUNT_DISTINCT", RF::COUNT_DISTINCT, "SUM",
+                            RF::SUM, "AVG", RF::AVG, "MAX", RF::MAX, "MIN", RF::MIN);
 
-        if (!parser.HasError() && !func) {
-          cntx->SendError(absl::StrCat("reducer function ", func_name, " not found"));
+        if (!func_name) {
+          cntx->SendError(absl::StrCat("reducer function ", parser.Next(), " not found"));
           return nullopt;
         }
 
-        string source_field = "";
-        if (nargs > 0) {
-          source_field = parser.Next<string>();
-        }
+        auto func = aggregate::FindReducerFunc(*func_name);
+        auto nargs = parser.Next<size_t>();
+
+        string source_field = nargs > 0 ? parser.Next<string>() : "";
 
         parser.ExpectTag("AS");
         string result_field = parser.Next<string>();
 
-        reducers.push_back(aggregate::Reducer{source_field, result_field, std::move(func)});
+        reducers.push_back(
+            aggregate::Reducer{std::move(source_field), std::move(result_field), std::move(func)});
       }
 
       params.steps.push_back(aggregate::MakeGroupStep(fields, std::move(reducers)));
