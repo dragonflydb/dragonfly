@@ -97,15 +97,13 @@ TEST_F(CmdArgParserTest, NextStatement) {
 TEST_F(CmdArgParserTest, CheckTailFail) {
   auto parser = Make({"TAG", "11", "22", "TAG", "33"});
 
-  EXPECT_TRUE(parser.Check("TAG"));
-  parser.Skip(2);
+  int first;
+  string_view second;
+  EXPECT_TRUE(parser.Check("TAG", &first, &second));
+  EXPECT_EQ(first, 11);
+  EXPECT_EQ(second, "22");
 
-  EXPECT_TRUE(parser.Check("TAG"));
-  parser.Next<int, int>();
-
-  auto err = parser.Error();
-  EXPECT_TRUE(err);
-  EXPECT_EQ(err->index, 4);
+  EXPECT_FALSE(parser.Check("TAG", &first, &second));
 }
 
 TEST_F(CmdArgParserTest, Cases) {

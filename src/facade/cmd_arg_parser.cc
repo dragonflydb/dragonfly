@@ -36,6 +36,7 @@ ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
 
 CmdArgParser::~CmdArgParser() {
   DCHECK(!error_.has_value()) << "Parsing error occured but not checked";
+  DCHECK(HasError() || !HasNext()) << "Not All arguments processed";
 }
 
 void CmdArgParser::ToUpper(size_t i) {
