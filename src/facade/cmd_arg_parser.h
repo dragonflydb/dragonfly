@@ -84,7 +84,7 @@ struct CmdArgParser {
   // Consume next value if can map it and return mapped result or return nullopt
   template <class... Cases> auto CheckMap(Cases&&... cases) {
     if (cur_i_ >= args_.size()) {
-      return decltype(MapImpl(std::string_view(), std::forward<Cases>(cases)...))();
+      return std::decay_t<decltype(MapImpl(std::string_view(), std::forward<Cases>(cases)...))>();
     }
 
     auto res = MapImpl(SafeSV(cur_i_), std::forward<Cases>(cases)...);
@@ -185,8 +185,10 @@ struct CmdArgParser {
   }
 
   void Report(ErrorType type, size_t idx) {
-    if (!error_)
+    if (!error_) {
       error_ = {type, idx};
+      cur_i_ = args_.size();
+    }
   }
 
   template <typename T> T Num(size_t idx) {

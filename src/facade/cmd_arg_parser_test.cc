@@ -79,6 +79,7 @@ TEST_F(CmdArgParserTest, Check) {
 
   EXPECT_FALSE(parser.Check("NOT_TAG_2"));
   EXPECT_TRUE(parser.Check("TAG_2"));
+  EXPECT_EQ(parser.Next<int>(), 22);
 }
 
 TEST_F(CmdArgParserTest, NextStatement) {
@@ -95,7 +96,7 @@ TEST_F(CmdArgParserTest, NextStatement) {
 }
 
 TEST_F(CmdArgParserTest, CheckTailFail) {
-  auto parser = Make({"TAG", "11", "22", "TAG", "33"});
+  auto parser = Make({"TAG", "11", "22", "TAG", "text"});
 
   int first;
   string_view second;
@@ -104,6 +105,8 @@ TEST_F(CmdArgParserTest, CheckTailFail) {
   EXPECT_EQ(second, "22");
 
   EXPECT_FALSE(parser.Check("TAG", &first, &second));
+  EXPECT_TRUE(parser.Check("TAG", &first));
+  EXPECT_TRUE(parser.Error());
 }
 
 TEST_F(CmdArgParserTest, Map) {
