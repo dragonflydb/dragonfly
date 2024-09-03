@@ -637,6 +637,19 @@ TEST_F(ZSetFamilyTest, ZUnionStoreOpts) {
   ASSERT_THAT(resp, IntArg(3));
   resp = Run({"zrange", "max", "0", "-1", "withscores"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("c", "0", "a", "2", "b", "4"));
+
+  // Check that infinity is handled correctly.
+  Run({"ZADD", "src1", "inf", "x"});
+  Run({"ZADD", "src2", "inf", "x"});
+  Run({"ZUNIONSTORE", "dest", "2", "src1", "src2", "WEIGHTS", "1.0", "0.0"});
+  resp = Run({"ZSCORE", "dest", "x"});
+  EXPECT_THAT(resp, DoubleArg(numeric_limits<double>::infinity()));
+
+  Run({"ZADD", "foo", "inf", "e1"});
+  Run({"ZADD", "bar", "-inf", "e1", "0.0", "e2"});
+  Run({"ZUNIONSTORE", "dest", "3", "foo", "bar", "foo"});
+  resp = Run({"ZSCORE", "dest", "e1"});
+  EXPECT_THAT(resp, DoubleArg(0));
 }
 
 TEST_F(ZSetFamilyTest, ZInterStore) {
@@ -1143,6 +1156,9 @@ TEST_F(ZSetFamilyTest, RangeLimit) {
 
   resp = Run({"ZRANGEBYSCORE", "", "0.0", "0.0", "foo"});
   EXPECT_THAT(resp, ErrArg("unsupported option"));
+
+  resp = Run({"ZRANGEBYLEX", "foo", "-", "+", "LIMIT", "-1", "3"});
+  EXPECT_THAT(resp, ArrLen(0));
 }
 
 }  // namespace dfly

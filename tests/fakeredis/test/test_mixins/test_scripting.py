@@ -591,6 +591,7 @@ def test_lua_log_different_types(r, caplog):
     ]
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_lua_log_wrong_level(r: redis.Redis):
     script = "redis.log(10, 'string')"
     script = r.register_script(script)

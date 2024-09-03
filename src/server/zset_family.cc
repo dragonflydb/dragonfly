@@ -731,6 +731,8 @@ ScoredMap FromObject(const CompactObj& co, double weight) {
 
   for (auto& elem : arr) {
     elem.second *= weight;
+    if (isnan(elem.second))
+      elem.second = 0;
     res.emplace(std::move(elem));
   }
 
@@ -749,7 +751,8 @@ ScoredMap ScoreMapFromSet(const PrimeValue& pv, double weight) {
 double Aggregate(double v1, double v2, AggType atype) {
   switch (atype) {
     case AggType::SUM:
-      return v1 + v2;
+      v1 += v2;
+      return isnan(v1) ? 0 : v1;
     case AggType::MAX:
       return max(v1, v2);
     case AggType::MIN:
@@ -2161,13 +2164,19 @@ void ZSetFamily::ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, RangePa
     }
 
     if (parser.Check("LIMIT")) {
-      int64_t limit;
-      tie(range_params.offset, limit) = parser.Next<uint32_t, int64_t>();
+      auto [offset, limit] = parser.Next<int32_t, int32_t>();
+
       range_params.limit = limit < 0 ? UINT32_MAX : static_cast<uint32_t>(limit);
+      range_params.offset = offset < 0 ? UINT32_MAX : static_cast<uint32_t>(offset);
       continue;
     }
 
     return cntx->SendError(absl::StrCat("unsupported option ", parser.Peek()));
+  }
+
+  if (range_params.offset == UINT32_MAX) {
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendEmptyArray();
   }
 
   ZRangeInternal(args.subspan(0, 3), range_params, cntx);
