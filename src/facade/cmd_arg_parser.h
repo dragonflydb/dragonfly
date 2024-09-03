@@ -81,6 +81,17 @@ struct CmdArgParser {
     return *res;
   }
 
+  // Consume next value if can map it and return mapped result or return nullopt
+  template <class... Cases> auto CheckMap(Cases&&... cases) {
+    if (cur_i_ >= args_.size()) {
+      return decltype(MapImpl(std::string_view(), std::forward<Cases>(cases)...))();
+    }
+
+    auto res = MapImpl(SafeSV(cur_i_), std::forward<Cases>(cases)...);
+    cur_i_ = res ? cur_i_ + 1 : cur_i_;
+    return res;
+  }
+
   // Check if the next value is equal to a specific tag. If equal, its consumed.
   template <class... Args> bool Check(std::string_view tag, Args*... args) {
     if (cur_i_ + sizeof...(Args) >= args_.size())
