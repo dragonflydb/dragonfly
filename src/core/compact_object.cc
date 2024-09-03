@@ -19,6 +19,7 @@ extern "C" {
 }
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
+#include <mimalloc.h>
 
 #include <jsoncons/json.hpp>
 
@@ -696,6 +697,8 @@ void CompactObj::SetJson(JsonType&& j) {
     SetMeta(JSON_TAG);
     u_.json_obj.json_len = j.size();
     u_.json_obj.json_ptr = AllocateMR<JsonType>(std::move(j));
+    DCHECK(std::pmr::polymorphic_allocator<char>{memory_resource()} ==
+           u_.json_obj.json_ptr->get_allocator());
     u_.json_obj.encoding = kEncodingJsonCons;
   }
 }
@@ -1037,7 +1040,8 @@ size_t CompactObj::MallocUsed() const {
 
   if (taglen_ == JSON_TAG) {
     DCHECK(u_.json_obj.json_ptr != nullptr);
-    return zmalloc_size(u_.json_obj.json_ptr);
+    auto* ptr = u_.json_obj.json_ptr;
+    return zmalloc_usable_size(ptr) + ptr->capacity();
   }
 
   if (taglen_ == SMALL_TAG) {
