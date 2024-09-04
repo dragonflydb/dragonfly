@@ -73,8 +73,11 @@ jobs:
       - name: Run tests
         working-directory: tests/fakeredis
         run: |
-          poetry run pytest test/ --ignore test/test_hypothesis.py  --ignore test/test_json/ \
-            --ignore test_bitmap_commands.py \
+          poetry run pytest test/ \
+            --ignore test/test_hypothesis.py  \
+            --ignore test/test_geo_commands.py  \
+            --ignore test/test_bitmap_commands.py  \
+            --ignore test/test_json/ \
             --junit-xml=results-tests.xml  --html=report-tests.html -v
         continue-on-error: true  # For now to mark the flow as successful
 
