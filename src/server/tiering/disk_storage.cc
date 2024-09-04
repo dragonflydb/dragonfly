@@ -86,9 +86,11 @@ error_code DiskStorage::Open(string_view path) {
   alloc_.AddStorage(0, kInitialSize);
 
   auto* up = static_cast<UringProactor*>(ProactorBase::me());
-  if (int io_res = up->RegisterBuffers(absl::GetFlag(FLAGS_registered_buffer_size)); io_res < 0)
-    return error_code{-io_res, system_category()};
-
+  auto registered_buffer_size = absl::GetFlag(FLAGS_registered_buffer_size);
+  if (registered_buffer_size > 0) {
+    if (int io_res = up->RegisterBuffers(registered_buffer_size); io_res < 0)
+      return error_code{-io_res, system_category()};
+  }
   return {};
 }
 
