@@ -601,6 +601,7 @@ void EngineShard::RemoveContTx(Transaction* tx) {
 }
 
 void EngineShard::Heartbeat() {
+  DVLOG(2) << " Hearbeat";
   DCHECK(namespaces.IsInitialized());
 
   CacheStats();

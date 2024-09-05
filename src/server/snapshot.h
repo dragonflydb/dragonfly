@@ -79,21 +79,29 @@ class SliceSnapshot {
   // called.
   void StartIncremental(Context* cntx, LSN start_lsn);
 
-  // Stop snapshot. Only needs to be called for journal streaming mode.
-  void Stop();
+  // Finalizes the snapshot. Should only be called for journal streaming mode.
+  // Blocking. Must be called from the Snapshot thread.
+  void Finalize();
 
-  // Wait for iteration fiber to stop.
-  void Join();
-
-  // Force stop. Needs to be called together with cancelling the context.
+  // Stops channel. Needs to be called together with cancelling the context.
   // Snapshot can't always react to cancellation in streaming mode because the
   // iteration fiber might have finished running by then.
-  void Cancel();
+  // Blocking. Must be called from the Snapshot thread.
+  void StopChannel();
+
+  // Waits for a regular, non journal snapshot to finish.
+  // Used in RdbSaver, and can be called from any thread.
+  void Join() {
+    snapshot_fb_.JoinIfNeeded();
+  }
 
  private:
-  // Main fiber that iterates over all buckets in the db slice
+  // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
   void IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut);
+
+  // A fiber function that switches to the incremental mode
+  void SwitchIncrementalFb(Context* cntx, LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
   bool BucketSaveCb(PrimeIterator it);
@@ -117,10 +125,11 @@ class SliceSnapshot {
 
   // Push serializer's internal buffer to channel.
   // Push regardless of buffer size if force is true.
-  // Return if pushed.
+  // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerializedToChannel(bool force);
 
-  // Helper function that flushes the serialized items into the RecordStream
+  // Helper function that flushes the serialized items into the RecordStream.
+  // Can block on the channel.
   using FlushState = SerializerBase::FlushState;
   size_t Serialize(FlushState flush_state = FlushState::kFlushMidEntry);
 
