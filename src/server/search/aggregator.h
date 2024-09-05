@@ -75,7 +75,7 @@ Reducer::Func FindReducerFunc(ReducerFunc name);
 PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
                            std::vector<Reducer> reducers);
 
-// Make `SORYBY field [DESC]` step
+// Make `SORTBY field [DESC]` step
 PipelineStep MakeSortStep(std::string_view field, bool descending = false);
 
 // Make `LIMIT offset num` step
