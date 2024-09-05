@@ -760,8 +760,8 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   facade::SinkReplyBuilder* builder = cntx->reply_builder();
 
   while (parser.HasNext()) {
-    if (auto exp_type =
-            parser.CheckMap("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT, "PXAT", ExpT::PXAT);
+    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
+                                          "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
 
@@ -805,7 +805,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     } else if (parser.Check("_MCFLAGS")) {
       sparams.memcache_flags = parser.Next<uint32_t>();
     } else {
-      uint16_t flag = parser.Map(  //
+      uint16_t flag = parser.MapNext(  //
           "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
           "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
       sparams.flags |= flag;
@@ -974,8 +974,8 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   DbSlice::ExpireParams exp_params;
   bool defined = false;
   while (parser.HasNext()) {
-    if (auto exp_type =
-            parser.CheckMap("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT, "PXAT", ExpT::PXAT);
+    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
+                                          "PXAT", ExpT::PXAT);
         exp_type) {
       auto int_arg = parser.Next<int64_t>();
       if (auto err = parser.Error(); err) {

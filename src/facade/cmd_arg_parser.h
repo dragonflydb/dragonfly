@@ -65,7 +65,7 @@ struct CmdArgParser {
   void ExpectTag(std::string_view tag);
 
   // Consume next value
-  template <class... Cases> auto Map(Cases&&... cases) {
+  template <class... Cases> auto MapNext(Cases&&... cases) {
     if (cur_i_ >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
       return typename decltype(MapImpl(std::string_view(),
@@ -83,7 +83,8 @@ struct CmdArgParser {
 
   // Consume next value if can map it and return mapped result or return nullopt
   template <class... Cases>
-  auto CheckMap(Cases&&... cases) -> std::optional<std::tuple_element_t<1, std::tuple<Cases...>>> {
+  auto TryMapNext(Cases&&... cases)
+      -> std::optional<std::tuple_element_t<1, std::tuple<Cases...>>> {
     if (cur_i_ >= args_.size()) {
       return std::nullopt;
     }

@@ -1304,7 +1304,7 @@ void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  auto res = parser.CheckMap("NX", 1, "XX", 2);
+  auto res = parser.TryMapNext("NX", 1, "XX", 2);
   bool is_xx_condition = (res == 2), is_nx_condition = (res == 1);
 
   if (parser.Error() || parser.HasNext())  // also clear the parser error dcheck

@@ -100,7 +100,7 @@ string ListPop(ListDir dir, quicklist* ql) {
 }
 
 ListDir ParseDir(facade::CmdArgParser* parser) {
-  return parser->Map("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
+  return parser->MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 }
 
 string_view DirToSv(ListDir dir) {
@@ -989,7 +989,7 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
 void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
-  InsertParam where = parser.Map("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
+  InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
 
   if (auto err = parser.Error(); err)

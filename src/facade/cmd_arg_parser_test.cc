@@ -112,23 +112,23 @@ TEST_F(CmdArgParserTest, CheckTailFail) {
 TEST_F(CmdArgParserTest, Map) {
   auto parser = Make({"TWO", "NONE"});
 
-  EXPECT_EQ(parser.Map("ONE", 1, "TWO", 2), 2);
+  EXPECT_EQ(parser.MapNext("ONE", 1, "TWO", 2), 2);
 
-  EXPECT_EQ(parser.Map("ONE", 1, "TWO", 2), 0);
+  EXPECT_EQ(parser.MapNext("ONE", 1, "TWO", 2), 0);
   auto err = parser.Error();
   EXPECT_TRUE(err);
   EXPECT_EQ(err->type, CmdArgParser::INVALID_CASES);
   EXPECT_EQ(err->index, 1);
 }
 
-TEST_F(CmdArgParserTest, CheckMap) {
+TEST_F(CmdArgParserTest, TryMapNext) {
   auto parser = Make({"TWO", "GREEN"});
 
-  EXPECT_EQ(parser.CheckMap("ONE", 1, "TWO", 2), std::make_optional(2));
+  EXPECT_EQ(parser.TryMapNext("ONE", 1, "TWO", 2), std::make_optional(2));
 
-  EXPECT_EQ(parser.CheckMap("ONE", 1, "TWO", 2), std::nullopt);
+  EXPECT_EQ(parser.TryMapNext("ONE", 1, "TWO", 2), std::nullopt);
   EXPECT_FALSE(parser.HasError());
-  EXPECT_EQ(parser.CheckMap("green", 1, "yellow", 2), std::make_optional(1));
+  EXPECT_EQ(parser.TryMapNext("green", 1, "yellow", 2), std::make_optional(1));
   EXPECT_FALSE(parser.HasError());
 }
 
