@@ -1300,13 +1300,11 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
 
 void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
-  string_view key = parser.Next();
-  string_view path = parser.Next();
-  string_view json_str = parser.Next();
+  auto [key, path, json_str] = parser.Next<string_view, string_view, string_view>();
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  int res = parser.HasNext() ? parser.Switch("NX", 1, "XX", 2) : 0;
+  auto res = parser.TryMapNext("NX", 1, "XX", 2);
   bool is_xx_condition = (res == 2), is_nx_condition = (res == 1);
 
   if (parser.Error() || parser.HasNext())  // also clear the parser error dcheck

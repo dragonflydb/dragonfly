@@ -435,7 +435,7 @@ void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, Connec
   auto timeout = parser.Next<uint64_t>();
   ClientPause pause_state = ClientPause::ALL;
   if (parser.HasNext()) {
-    pause_state = parser.Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
+    pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
   if (auto err = parser.Error(); err) {
     return cntx->SendError(err->MakeReply());

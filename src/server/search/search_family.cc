@@ -47,21 +47,17 @@ bool IsValidJsonPath(string_view path) {
 search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   search::SchemaField::VectorParams params{};
 
-  params.use_hnsw = parser->Switch("HNSW", true, "FLAT", false);
+  params.use_hnsw = parser->MapNext("HNSW", true, "FLAT", false);
   const size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
-    if (parser->Check("DIM")) {
-      params.dim = parser->Next<size_t>();
+    if (parser->Check("DIM", &params.dim)) {
     } else if (parser->Check("DISTANCE_METRIC")) {
-      params.sim = parser->Switch("L2", search::VectorSimilarity::L2, "COSINE",
-                                  search::VectorSimilarity::COSINE);
-    } else if (parser->Check("INITIAL_CAP")) {
-      params.capacity = parser->Next<size_t>();
-    } else if (parser->Check("M")) {
-      params.hnsw_m = parser->Next<size_t>();
-    } else if (parser->Check("EF_CONSTRUCTION")) {
-      params.hnsw_ef_construction = parser->Next<size_t>();
+      params.sim = parser->MapNext("L2", search::VectorSimilarity::L2, "COSINE",
+                                   search::VectorSimilarity::COSINE);
+    } else if (parser->Check("INITIAL_CAP", &params.capacity)) {
+    } else if (parser->Check("M", &params.hnsw_m)) {
+    } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
     } else if (parser->Check("EF_RUNTIME")) {
       parser->Next<size_t>();
       LOG(WARNING) << "EF_RUNTIME not supported";
@@ -116,13 +112,12 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     }
 
     // AS [alias]
-    if (parser.Check("AS"))
-      field_alias = parser.Next();
+    parser.Check("AS", &field_alias);
 
     // Determine type
     using search::SchemaField;
-    auto type = parser.Switch("TAG", SchemaField::TAG, "TEXT", SchemaField::TEXT, "NUMERIC",
-                              SchemaField::NUMERIC, "VECTOR", SchemaField::VECTOR);
+    auto type = parser.MapNext("TAG", SchemaField::TAG, "TEXT", SchemaField::TEXT, "NUMERIC",
+                               SchemaField::NUMERIC, "VECTOR", SchemaField::VECTOR);
     if (auto err = parser.Error(); err) {
       cntx->SendError(err->MakeReply());
       return nullopt;
@@ -265,24 +260,26 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
 
       vector<aggregate::Reducer> reducers;
       while (parser.Check("REDUCE")) {
-        parser.ToUpper();  // uppercase for func_name
-        auto [func_name, nargs] = parser.Next<string_view, size_t>();
-        auto func = aggregate::FindReducerFunc(func_name);
+        using RF = aggregate::ReducerFunc;
+        auto func_name =
+            parser.TryMapNext("COUNT", RF::COUNT, "COUNT_DISTINCT", RF::COUNT_DISTINCT, "SUM",
+                              RF::SUM, "AVG", RF::AVG, "MAX", RF::MAX, "MIN", RF::MIN);
 
-        if (!parser.HasError() && !func) {
-          cntx->SendError(absl::StrCat("reducer function ", func_name, " not found"));
+        if (!func_name) {
+          cntx->SendError(absl::StrCat("reducer function ", parser.Next(), " not found"));
           return nullopt;
         }
 
-        string source_field = "";
-        if (nargs > 0) {
-          source_field = parser.Next<string>();
-        }
+        auto func = aggregate::FindReducerFunc(*func_name);
+        auto nargs = parser.Next<size_t>();
+
+        string source_field = nargs > 0 ? parser.Next<string>() : "";
 
         parser.ExpectTag("AS");
         string result_field = parser.Next<string>();
 
-        reducers.push_back(aggregate::Reducer{source_field, result_field, std::move(func)});
+        reducers.push_back(
+            aggregate::Reducer{std::move(source_field), std::move(result_field), std::move(func)});
       }
 
       params.steps.push_back(aggregate::MakeGroupStep(fields, std::move(reducers)));
@@ -435,7 +432,7 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
   while (parser.HasNext()) {
     // ON HASH | JSON
     if (parser.Check("ON")) {
-      index.type = parser.Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
+      index.type = parser.MapNext("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 

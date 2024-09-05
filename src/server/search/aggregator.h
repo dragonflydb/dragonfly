@@ -61,13 +61,15 @@ struct ValueIterator {
 };
 
 struct Reducer {
-  using Func = std::function<Value(ValueIterator)>;
+  using Func = Value (*)(ValueIterator);
   std::string source_field, result_field;
   Func func;
 };
 
+enum class ReducerFunc { COUNT, COUNT_DISTINCT, SUM, AVG, MAX, MIN };
+
 // Find reducer function by uppercase name (COUNT, MAX, etc...), empty functor if not found
-Reducer::Func FindReducerFunc(std::string_view name);
+Reducer::Func FindReducerFunc(ReducerFunc name);
 
 // Make `GROUPBY [fields...]`  with REDUCE step
 PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
