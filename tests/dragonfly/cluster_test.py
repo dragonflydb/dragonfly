@@ -1088,7 +1088,7 @@ async def test_cluster_flushall_during_migration(
         df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
-            vmodule="cluster_family=9,cluster_slot_migration=9,outgoing_slot_migration=9,incoming_slot_migration=9",
+            vmodule="cluster_family=9,outgoing_slot_migration=9,incoming_slot_migration=9",
             logtostdout=True,
         )
         for i in range(2)
@@ -1142,7 +1142,12 @@ async def test_cluster_flushall_during_migration(
 async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt: bool):
     # Check data migration from one node to another
     instances = [
-        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
+        df_factory.create(
+            port=BASE_PORT + i,
+            admin_port=BASE_PORT + i + 1000,
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+        )
+        for i in range(2)
     ]
 
     df_factory.start_all(instances)
