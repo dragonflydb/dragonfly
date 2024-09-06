@@ -72,10 +72,11 @@ TEST_F(MultiTest, MultiAndFlush) {
 }
 
 TEST_F(MultiTest, MultiWithError) {
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
   EXPECT_THAT(Run({"multi"}), "OK");
   EXPECT_THAT(Run({"set", "x", "y"}), "QUEUED");
   EXPECT_THAT(Run({"set", "x"}), ErrArg("wrong number of arguments for 'set' command"));
-  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT Transaction discarded because of previous errors"));
 
   EXPECT_THAT(Run({"multi"}), "OK");
   EXPECT_THAT(Run({"set", "z", "y"}), "QUEUED");
