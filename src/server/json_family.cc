@@ -14,12 +14,17 @@
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 #include <jsoncons_ext/mergepatch/mergepatch.hpp>
+#include <memory>
+#include <memory_resource>
+#include <type_traits>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
+#include "core/mi_memory_resource.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
@@ -264,7 +269,15 @@ std::optional<JsonType> JsonFromString(std::string_view input) {
 
 // Use this method on the shard thread
 std::optional<JsonType> ShardJsonFromString(std::string_view input) {
-  return dfly::JsonFromString(input, CompactObj::memory_resource());
+  auto* mi_mr = static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  void* ptr = mi_mr->allocate(sizeof(MiMemoryResource), alignof(MiMemoryResource));
+  new (ptr) MiMemoryResource(mi_mr->heap());
+  return dfly::JsonFromString(input, (MiMemoryResource*)ptr);
+}
+
+// With allocator
+std::optional<JsonType> ShardJsonFromString(PMR_NS::memory_resource* mr, std::string_view input) {
+  return dfly::JsonFromString(input, mr);
 }
 
 OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
@@ -1134,15 +1147,22 @@ auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
   return JsonEvaluateOperation<JsonType>(op_args, key, json_path, std::move(cb));
 }
 
+MiMemoryResource* MiMemoryResourceFromJson(JsonType& json) {
+  return static_cast<MiMemoryResource*>(json.get_allocator().resource());
+}
+
 // Returns boolean that represents the result of the operation.
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path, std::string_view json_str,
                      bool is_nx_condition, bool is_xx_condition) {
+  std::unique_ptr<MiMemoryResource> mr;
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
     return OpStatus::SYNTAX_ERR;
   }
+
+  mr.reset(MiMemoryResourceFromJson(parsed_json.value()));
 
   // The whole key should be replaced.
   // NOTE: unlike in Redis, we are overriding the value when the path is "$"
@@ -1165,6 +1185,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     if (st != OpStatus::OK) {
       return st;
     }
+    // Ownership moved to internal CompactObj
+    std::ignore = mr.release();
     return true;
   }
 
@@ -1180,6 +1202,9 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     path_exists = true;
     if (!is_nx_condition) {
       operation_result = true;
+      static_assert(
+          std::is_same_v<std::allocator_traits<JsonType>::propagate_on_container_copy_assignment,
+                         std::false_type>);
       *val = new_json;
     }
     return {};
@@ -1196,7 +1221,11 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
 
       error_code ec;
-      jsoncons::jsonpointer::add(json, pointer, new_json, ec);
+      // We need to create another json here because add will merge them and we need
+      // to use the same allocator. Otherwise we will leak it on clean up because a Json object
+      // is a composite of multiple Json objects with different memory resources.
+      auto same_mr_json = ShardJsonFromString(json.get_allocator().resource(), json_str);
+      jsoncons::jsonpointer::add(json, pointer, std::move(same_mr_json.value()), ec);
       if (ec) {
         VLOG(1) << "Failed to add a JSON value to the following path: " << path
                 << " with the error: " << ec.message();
@@ -1211,6 +1240,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
 
   auto res = UpdateEntry<Nothing>(op_args, key, json_path, std::move(cb), inserter);
   RETURN_ON_BAD_STATUS(res);
+
   return operation_result;
 }
 
@@ -1269,6 +1299,10 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
     return OpStatus::SYNTAX_ERR;
   }
+
+  // This is safe, parsed_json is only merged and then released at the end of the scope of this
+  // function
+  std::unique_ptr<MiMemoryResource> mr(MiMemoryResourceFromJson(parsed_json.value()));
 
   auto cb = [&](std::optional<std::string_view> cur_path, JsonType* val) -> MutateCallbackResult<> {
     string_view strpath = cur_path ? *cur_path : string_view{};

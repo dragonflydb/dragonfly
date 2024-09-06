@@ -7,6 +7,8 @@
 // #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include <memory>
+
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
@@ -28,11 +30,14 @@ extern "C" {
 #include "base/pod_array.h"
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
+#include "core/mi_memory_resource.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
 
 ABSL_RETIRED_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
+
+ABSL_DECLARE_FLAG(bool, experimental_flat_json);
 
 namespace dfly {
 using namespace std;
@@ -49,6 +54,11 @@ constexpr size_t kAlignSize = 8u;
 size_t QlMAllocSize(quicklist* ql) {
   size_t res = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
   return res + ql->count * 16;  // we account for each member 16 bytes.
+}
+
+uint32_t JsonEnconding() {
+  static bool is_experimental = absl::GetFlag(FLAGS_experimental_flat_json);
+  return is_experimental ? kEncodingJsonFlat : kEncodingJsonCons;
 }
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
@@ -576,7 +586,11 @@ size_t CompactObj::Size() const {
         raw_size = u_.r_obj.Size();
         break;
       case JSON_TAG:
-        raw_size = u_.json_obj.json_len;
+        if (JsonEnconding() == kEncodingJsonFlat) {
+          raw_size = u_.json_obj.flat.json_len;
+        } else {
+          raw_size = u_.json_obj.cons.json_ptr->size();
+        }
         break;
       case SBF_TAG:
         raw_size = u_.sbf->current_size();
@@ -681,34 +695,44 @@ std::optional<int64_t> CompactObj::TryGetInt() const {
 
 auto CompactObj::GetJson() const -> JsonType* {
   if (ObjType() == OBJ_JSON) {
-    DCHECK_EQ(u_.json_obj.encoding, kEncodingJsonCons);
-    return u_.json_obj.json_ptr;
+    DCHECK_EQ(JsonEnconding(), kEncodingJsonCons);
+    return u_.json_obj.cons.json_ptr;
   }
   return nullptr;
 }
 
-void CompactObj::SetJson(JsonType&& j) {
-  if (taglen_ == JSON_TAG && u_.json_obj.encoding == kEncodingJsonCons) {
+// We need to return std::unique_ptr because the memory resource must be deallocated
+// after the JsonType j gets deallocated and this can only be done after we return
+// since the order of destructors is the opposite of the order of constructors.
+std::unique_ptr<MiMemoryResource> CompactObj::SetJson(JsonType&& j) {
+  auto* mr = static_cast<MiMemoryResource*>(j.get_allocator().resource());
+  if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     // already json
-    DCHECK(u_.json_obj.json_ptr != nullptr);  // must be allocated
-    u_.json_obj.json_len = j.size();
-    u_.json_obj.json_ptr->swap(j);
-  } else {
-    SetMeta(JSON_TAG);
-    u_.json_obj.json_len = j.size();
-    u_.json_obj.json_ptr = AllocateMR<JsonType>(std::move(j));
-    DCHECK(std::pmr::polymorphic_allocator<char>{memory_resource()} ==
-           u_.json_obj.json_ptr->get_allocator());
-    u_.json_obj.encoding = kEncodingJsonCons;
+    DCHECK(u_.json_obj.cons.json_ptr != nullptr);  // must be allocated
+    DCHECK(u_.json_obj.cons.mr != nullptr);        // must be allocated
+    u_.json_obj.cons.json_ptr->swap(j);
+    auto* ret_value = u_.json_obj.cons.mr;
+    u_.json_obj.cons.mr = mr;
+    // TODO
+    // Use std::exchange with local Json such that we don't need to return
+    // std::unique_ptr
+    // Also adjust memory_resource() total memory used
+    // otherwise size_t EngineShard::UsedMemory() const will report the wrong mem
+    return std::unique_ptr<MiMemoryResource>(ret_value);
   }
+
+  SetMeta(JSON_TAG);
+  u_.json_obj.cons.json_ptr = AllocateMR<JsonType>(std::move(j));
+  u_.json_obj.cons.mr = mr;
+  DCHECK(mr == u_.json_obj.cons.json_ptr->get_allocator().resource());
+  return {};
 }
 
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
   SetMeta(JSON_TAG);
-  u_.json_obj.flat_ptr = (uint8_t*)tl.local_mr->allocate(len, kAlignSize);
-  memcpy(u_.json_obj.flat_ptr, buf, len);
-  u_.json_obj.encoding = kEncodingJsonFlat;
-  u_.json_obj.json_len = len;
+  u_.json_obj.flat.flat_ptr = (uint8_t*)tl.local_mr->allocate(len, kAlignSize);
+  memcpy(u_.json_obj.flat.flat_ptr, buf, len);
+  u_.json_obj.flat.json_len = len;
 }
 
 void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor) {
@@ -1016,10 +1040,14 @@ void CompactObj::Free() {
     u_.small_str.Free();
   } else if (taglen_ == JSON_TAG) {
     DVLOG(1) << "Freeing JSON object";
-    if (u_.json_obj.encoding == kEncodingJsonCons) {
-      DeleteMR<JsonType>(u_.json_obj.json_ptr);
+    if (JsonEnconding() == kEncodingJsonCons) {
+      DeleteMR<JsonType>(u_.json_obj.cons.json_ptr);
+      // Also adjust memory_resource() total memory used
+      // otherwise size_t EngineShard::UsedMemory() const will report the wrong mem
+      MiMemoryResource* mr = u_.json_obj.cons.mr;
+      memory_resource()->deallocate(mr, sizeof(MiMemoryResource), alignof(MiMemoryResource));
     } else {
-      tl.local_mr->deallocate(u_.json_obj.flat_ptr, u_.json_obj.json_len, kAlignSize);
+      tl.local_mr->deallocate(u_.json_obj.flat.flat_ptr, u_.json_obj.flat.json_len, kAlignSize);
     }
   } else if (taglen_ == SBF_TAG) {
     DeleteMR<SBF>(u_.sbf);
@@ -1039,9 +1067,16 @@ size_t CompactObj::MallocUsed() const {
   }
 
   if (taglen_ == JSON_TAG) {
-    DCHECK(u_.json_obj.json_ptr != nullptr);
-    auto* ptr = u_.json_obj.json_ptr;
-    return zmalloc_usable_size(ptr) + ptr->capacity();
+    // TODO fix this once we fully support flat json
+    // This is here because accessing a union field that is not active
+    // is UB.
+    if (JsonEnconding() == kEncodingJsonFlat) {
+      return 0;
+    }
+    CHECK(u_.json_obj.cons.json_ptr != nullptr);
+    const auto* ptr = u_.json_obj.cons.json_ptr;
+    const auto* mr = u_.json_obj.cons.mr;
+    return zmalloc_size(ptr) + static_cast<const MiMemoryResource*>(mr)->used();
   }
 
   if (taglen_ == SMALL_TAG) {

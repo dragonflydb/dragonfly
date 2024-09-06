@@ -12,6 +12,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/json/json_object.h"
+#include "core/mi_memory_resource.h"
 #include "core/small_string.h"
 #include "core/string_or_view.h"
 
@@ -307,7 +308,7 @@ class CompactObj {
   // NOTE: in order to avid copy which can be expensive in this case,
   // you need to move an object that created with the function JsonFromString
   // into here, no copying is allowed!
-  void SetJson(JsonType&& j);
+  std::unique_ptr<MiMemoryResource> SetJson(JsonType&& j);
   void SetJson(const uint8_t* buf, size_t len);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
@@ -445,13 +446,22 @@ class CompactObj {
     };
   } __attribute__((packed));
 
+  struct JsonConsT {
+    JsonType* json_ptr;
+    // Owning and must be explicitly deallocated
+    MiMemoryResource* mr;
+  };
+
+  struct FlatJsonT {
+    uint32_t json_len;
+    uint8_t* flat_ptr;
+  };
+
   struct JsonWrapper {
     union {
-      JsonType* json_ptr;
-      uint8_t* flat_ptr;
+      JsonConsT cons;
+      FlatJsonT flat;
     };
-    uint32_t json_len = 0;
-    uint8_t encoding = 0;
   };
 
   // My main data structure. Union of representations.
@@ -475,7 +485,7 @@ class CompactObj {
   } u_;
 
   //
-  static_assert(sizeof(u_) == 16, "");
+  static_assert(sizeof(u_) == 16);
 
   uint8_t mask_ = 0;
 

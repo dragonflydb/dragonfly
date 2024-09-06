@@ -25,7 +25,10 @@ optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr
   parser.finish_parse(decoder, ec);
 
   if (decoder.is_valid()) {
-    return decoder.get_result();
+    auto res = decoder.get_result();
+    // This should not trigger once pmr is fixed in jsoncons
+    DCHECK(res.get_allocator().resource() == mr);
+    return res;
   }
   return nullopt;
 }
