@@ -599,10 +599,8 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
 }
 
 void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
-  // Shard can be null for io thread.
-  if (shard != nullptr) {
-    flow->saver->StopSnapshotInShard(shard);
-  }
+  DCHECK(shard);
+  flow->saver->StopFullSyncInShard(shard);
 
   // Wait for full sync to finish.
   flow->full_sync_fb.JoinIfNeeded();

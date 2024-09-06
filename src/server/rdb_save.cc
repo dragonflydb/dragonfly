@@ -1479,7 +1479,7 @@ void RdbSaver::StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard
   impl_->StartIncrementalSnapshotting(cntx, shard, start_lsn);
 }
 
-void RdbSaver::StopSnapshotInShard(EngineShard* shard) {
+void RdbSaver::StopFullSyncInShard(EngineShard* shard) {
   impl_->StopSnapshotting(shard);
 }
 

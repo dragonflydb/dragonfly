@@ -92,8 +92,8 @@ class RdbSaver {
   // Send only the incremental snapshot since start_lsn.
   void StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn);
 
-  // Stops serialization in journal streaming mode in the shard's thread.
-  void StopSnapshotInShard(EngineShard* shard);
+  // Stops full-sync serialization for replication in the shard's thread.
+  void StopFullSyncInShard(EngineShard* shard);
 
   // Stores auxiliary (meta) values and header_info
   std::error_code SaveHeader(const GlobalData& header_info);

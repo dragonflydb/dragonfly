@@ -106,9 +106,10 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
   });
 }
 
+// Called only for replication use-case.
 void SliceSnapshot::Finalize() {
   DCHECK(db_slice_->shard_owner()->IsMyThread());
-  DCHECK(journal_cb_id_);  // Called only for streaming use-case.
+  DCHECK(journal_cb_id_);
 
   // Wait for serialization to finish in any case.
   snapshot_fb_.JoinIfNeeded();
@@ -287,7 +288,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   while (!it.is_done()) {
     ++result;
-    // might preempt due to bid value serialization.
+    // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
     ++it;
   }

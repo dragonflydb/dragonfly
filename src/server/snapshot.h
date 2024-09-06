@@ -79,7 +79,7 @@ class SliceSnapshot {
   // called.
   void StartIncremental(Context* cntx, LSN start_lsn);
 
-  // Finalizes the snapshot. Should only be called for journal streaming mode.
+  // Finalizes the snapshot. Only called for replication.
   // Blocking. Must be called from the Snapshot thread.
   void Finalize();
 
@@ -90,7 +90,7 @@ class SliceSnapshot {
   void StopChannel();
 
   // Waits for a regular, non journal snapshot to finish.
-  // Used in RdbSaver, and can be called from any thread.
+  // Called only for non-replication, backups usecases.
   void Join() {
     snapshot_fb_.JoinIfNeeded();
   }
