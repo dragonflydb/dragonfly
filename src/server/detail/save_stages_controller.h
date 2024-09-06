@@ -122,7 +122,7 @@ struct SaveStagesController : public SaveStagesInputs {
   void RunStage(void (SaveStagesController::*cb)(unsigned));
 
  private:
-  absl::Time start_time_;
+  time_t start_time_;
   std::filesystem::path full_path_;
   bool is_cloud_;
 
