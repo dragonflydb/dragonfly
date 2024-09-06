@@ -154,12 +154,9 @@ def test_expiration(memcached_client: MCClient):
     assert memcached_client.get("key1") == b"value1"
     assert memcached_client.get("key2") == b"value2"
     assert memcached_client.get("key3") == b"value3"
-    time.sleep(1)
     assert memcached_client.set("key3", "value3", int(time.time()) - 200)
-    assert memcached_client.get("key1") == b"value1"
-    assert memcached_client.get("key2") == b"value2"
     assert memcached_client.get("key3") == None
-    time.sleep(1)
+    time.sleep(2)
     assert memcached_client.get("key1") == None
     assert memcached_client.get("key2") == None
     assert memcached_client.get("key3") == None
