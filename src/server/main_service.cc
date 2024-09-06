@@ -2187,6 +2187,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   // Clean the context no matter the outcome
   absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
 
+  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
+    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
+  }
+
   // Check basic invariants
   if (!exec_info.IsCollecting()) {
     return cntx->SendError("EXEC without MULTI");
@@ -2194,10 +2198,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return cntx->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
-  }
-
-  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
-    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
