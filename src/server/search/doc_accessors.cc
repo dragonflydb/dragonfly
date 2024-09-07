@@ -42,7 +42,7 @@ search::SortableValue FieldToSortableValue(search::SchemaField::FieldType type, 
   if (type == search::SchemaField::NUMERIC) {
     double value_as_double = 0;
     if (!absl::SimpleAtod(value, &value_as_double)) {  // temporary convert to double
-      VLOG(2) << "Failed to convert " << value << " to double";
+      LOG(DFATAL) << "Failed to convert " << value << " to double";
     }
     return value_as_double;
   }
@@ -53,6 +53,14 @@ search::SortableValue FieldToSortableValue(search::SchemaField::FieldType type, 
   return string{value};
 }
 
+search::SortableValue JsonToSortableValue(const search::SchemaField::FieldType type,
+                                          const JsonType& json) {
+  if (type == search::SchemaField::NUMERIC) {
+    return json.as_double();
+  }
+  return json.to_string();
+}
+
 search::SortableValue ExtractSortableValue(const search::Schema& schema, string_view key,
                                            string_view value) {
   auto it = schema.fields.find(key);
@@ -61,15 +69,15 @@ search::SortableValue ExtractSortableValue(const search::Schema& schema, string_
   return FieldToSortableValue(it->second.type, value);
 }
 
-}  // namespace
-
-SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
-                                      const SelectedFields& fields) const {
-  if (fields.ShouldReturnAllFields()) {
-    return Serialize(schema);
-  }
-  return Serialize(schema, fields.GetFields());
+search::SortableValue ExtractSortableValueFromJson(const search::Schema& schema, string_view key,
+                                                   const JsonType& json) {
+  auto it = schema.fields.find(key);
+  if (it == schema.fields.end())
+    return JsonToSortableValue(search::SchemaField::TEXT, json);
+  return JsonToSortableValue(it->second.type, json);
 }
+
+}  // namespace
 
 SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
                                       const FieldsList& fields) const {
@@ -78,6 +86,10 @@ SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
     out[fname] = ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident), ","));
   }
   return out;
+}
+
+SearchDocData BaseAccessor::SerializeDocument(const search::Schema& schema) const {
+  return Serialize(schema);
 }
 
 BaseAccessor::StringList ListPackAccessor::GetStrings(string_view active_field) const {
@@ -236,7 +248,10 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
 }
 
 SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
-  return {{"$", json_.to_string()}};  // todo: doubles
+  FieldsList fields{};
+  for (const auto& [fname, fident] : schema.field_names)
+    fields.emplace_back(fident, fname);
+  return Serialize(schema, fields);
 }
 
 SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
@@ -245,10 +260,14 @@ SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
   for (const auto& [ident, name] : fields) {
     if (auto* path = GetPath(ident); path) {
       if (auto res = path->Evaluate(json_); !res.empty())
-        out[name] = res[0].to_string();  // todo: doubles
+        out[name] = ExtractSortableValueFromJson(schema, ident, res[0]);
     }
   }
   return out;
+}
+
+SearchDocData JsonAccessor::SerializeDocument(const search::Schema& schema) const {
+  return {{"$", json_.to_string()}};
 }
 
 void JsonAccessor::RemoveFieldFromCache(string_view field) {

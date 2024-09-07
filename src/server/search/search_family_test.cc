@@ -824,6 +824,25 @@ TEST_F(SearchFamilyTest, AggregateGroupBy) {
   */
 }
 
+TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
+  Run({"JSON.SET", "product:1", "$", R"({"name": "Product A", "price": 10, "quantity": 2})"});
+  Run({"JSON.SET", "product:2", "$", R"({"name": "Product B", "price": 20, "quantity": 3})"});
+  Run({"JSON.SET", "product:3", "$", R"({"name": "Product C", "price": 30, "quantity": 5})"});
+
+  auto resp =
+      Run({"FT.CREATE", "json_index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
+           "$.price", "AS", "price", "NUMERIC", "$.quantity", "AS", "quantity", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.AGGREGATE", "json_index", "*", "GROUPBY", "0", "REDUCE", "SUM", "1", "price",
+              "AS", "total_price"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("total_price", "60")));
+
+  resp = Run({"FT.AGGREGATE", "json_index", "*", "GROUPBY", "0", "REDUCE", "AVG", "1", "price",
+              "AS", "avg_price"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("avg_price", "20")));
+}
+
 TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
   for (size_t i = 0; i < 101; i++) {  // 51 even, 50 odd
     Run({"hset", absl::StrCat("k", i), "even", (i % 2 == 0) ? "true" : "false", "value",

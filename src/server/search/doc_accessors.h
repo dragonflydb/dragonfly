@@ -24,14 +24,18 @@ class StringMap;
 // behind a document interface for quering fields and serializing.
 // Field string_view's are only valid until the next is requested.
 struct BaseAccessor : public search::DocumentAccessor {
-  SearchDocData Serialize(const search::Schema& schema, const SelectedFields& fields) const;
-
- private:
-  // Convert the full underlying type to a map<string, string> to be sent as a reply
+  // Serialize all fields
   virtual SearchDocData Serialize(const search::Schema& schema) const = 0;
 
   // Serialize selected fields
   virtual SearchDocData Serialize(const search::Schema& schema, const FieldsList& fields) const;
+
+  /*
+  Serialize the whole type, the default implementation is to serialize all fields.
+  For JSON in FT.SEARCH we need to get answer as {"$", <the whole document>}, but it is not an
+  indexed field
+  */
+  virtual SearchDocData SerializeDocument(const search::Schema& schema) const;
 };
 
 // Accessor for hashes stored with listpack
@@ -43,10 +47,9 @@ struct ListPackAccessor : public BaseAccessor {
 
   StringList GetStrings(std::string_view field) const override;
   VectorInfo GetVector(std::string_view field) const override;
-
- private:
   SearchDocData Serialize(const search::Schema& schema) const override;
 
+ private:
   mutable std::array<uint8_t, 33> intbuf_[2];
   LpPtr lp_;
 };
@@ -58,10 +61,9 @@ struct StringMapAccessor : public BaseAccessor {
 
   StringList GetStrings(std::string_view field) const override;
   VectorInfo GetVector(std::string_view field) const override;
-
- private:
   SearchDocData Serialize(const search::Schema& schema) const override;
 
+ private:
   StringMap* hset_;
 };
 
@@ -74,14 +76,15 @@ struct JsonAccessor : public BaseAccessor {
 
   StringList GetStrings(std::string_view field) const override;
   VectorInfo GetVector(std::string_view field) const override;
+
+  // The JsonAccessor works with structured types and not plain strings, so an overload is needed
+  SearchDocData Serialize(const search::Schema& schema, const FieldsList& fields) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
+  SearchDocData SerializeDocument(const search::Schema& schema) const override;
 
   static void RemoveFieldFromCache(std::string_view field);
 
  private:
-  // The JsonAccessor works with structured types and not plain strings, so an overload is needed
-  SearchDocData Serialize(const search::Schema& schema, const FieldsList& fields) const override;
-
   /// Parses `field` into a JSON path. Caches the results internally.
   JsonPathContainer* GetPath(std::string_view field) const;
 

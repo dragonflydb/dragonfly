@@ -228,7 +228,18 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     }
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
-    auto doc_data = accessor->Serialize(base_->schema, params.return_fields);
+
+    SearchDocData doc_data;
+    if (params.return_fields.ShouldReturnAllFields()) {
+      /*
+      In this case we need to load the whole document.
+      For JSON indexes it would be {"$", <the whole document as string>}
+      */
+      doc_data = accessor->SerializeDocument(base_->schema);
+    } else {
+      /* Load only selected fields */
+      doc_data = accessor->Serialize(base_->schema, params.return_fields.GetFields());
+    }
 
     auto score = search_results.scores.empty() ? monostate{} : std::move(search_results.scores[i]);
     out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), std::move(score)});
@@ -257,7 +268,15 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
     auto extracted = indices_.ExtractStoredValues(doc);
-    auto loaded = accessor->Serialize(base_->schema, params.load_fields);
+
+    SearchDocData loaded;
+    if (params.load_fields.ShouldReturnAllFields()) {
+      // Load all fields
+      loaded = accessor->Serialize(base_->schema);
+    } else {
+      // Load only selected fields
+      loaded = accessor->Serialize(base_->schema, params.load_fields.GetFields());
+    }
 
     out.emplace_back(make_move_iterator(extracted.begin()), make_move_iterator(extracted.end()));
     out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
