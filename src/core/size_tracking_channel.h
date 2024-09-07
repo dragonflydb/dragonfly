@@ -22,9 +22,11 @@ template <typename T, typename Queue = folly::ProducerConsumerQueue<T>> class Si
 
   // Here and below, we must accept a T instead of building it from variadic args, as we need to
   // know its size in case it is added.
-  void Push(T t) noexcept {
-    size_.fetch_add(t.size(), std::memory_order_relaxed);
+  size_t Push(T t) noexcept {
+    size_t tsize = t.size();
+    size_t res = size_.fetch_add(tsize, std::memory_order_relaxed);
     queue_.Push(std::move(t));
+    return res + tsize;
   }
 
   bool TryPush(T t) noexcept {
