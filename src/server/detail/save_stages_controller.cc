@@ -153,7 +153,7 @@ void RdbSnapshot::StartInShard(EngineShard* shard) {
 
 SaveStagesController::SaveStagesController(SaveStagesInputs&& inputs)
     : SaveStagesInputs{std::move(inputs)} {
-  start_time_ = absl::Now();
+  start_time_ = time(NULL);
 }
 
 SaveStagesController::~SaveStagesController() {
@@ -302,12 +302,12 @@ void SaveStagesController::SaveRdb() {
 }
 
 uint32_t SaveStagesController::GetCurrentSaveDuration() {
-  return (absl::Now() - start_time_) / absl::Seconds(1);
+  return time(nullptr) - start_time_;
 }
 
 SaveInfo SaveStagesController::GetSaveInfo() {
   SaveInfo info;
-  info.save_time = absl::ToUnixSeconds(start_time_);
+  info.save_time = start_time_;
   info.duration_sec = GetCurrentSaveDuration();
 
   if (shared_err_) {
@@ -378,8 +378,17 @@ GenericError SaveStagesController::BuildFullPath() {
 
   SubstituteFilenamePlaceholders(
       &filename, {.ts = "%Y-%m-%dT%H:%M:%S", .year = "%Y", .month = "%m", .day = "%d"});
-  filename = absl::FormatTime(filename.string(), start_time_, absl::LocalTimeZone());
-  full_path_ = dir_path / filename;
+
+  tm time_tm;
+  localtime_r(&start_time_, &time_tm);
+  string src_format = filename.string();
+  string dest_buf(src_format.size() + 128, '\0');
+  size_t len = strftime(dest_buf.data(), dest_buf.size(), src_format.c_str(), &time_tm);
+  if (len == 0)
+    return {"invalid dbfilename format"};
+  dest_buf.resize(len);
+
+  full_path_ = dir_path / dest_buf;
   is_cloud_ = IsCloudPath(full_path_.string());
   return {};
 }
