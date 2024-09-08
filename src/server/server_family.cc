@@ -541,6 +541,31 @@ void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+void ClientSetInfo(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 2) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  auto* conn = cntx->conn();
+  if (conn == nullptr) {
+    return cntx->SendError("No connection");
+  }
+
+  ToUpper(&args[0]);
+  string_view type = ArgS(args, 0);
+  string_view val = ArgS(args, 1);
+
+  if (type == "LIB-NAME") {
+    conn->SetLibName(string(val));
+  } else if (type == "LIB-VER") {
+    conn->SetLibVersion(string(val));
+  } else {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  cntx->SendOk();
+}
+
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, ConnectionContext* cntx) {
   std::function<bool(facade::Connection * conn)> evaluator;
 
@@ -1762,10 +1787,8 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), cntx);
   } else if (sub_cmd == "CACHING") {
     return ClientCaching(sub_args, cntx);
-  }
-
-  if (sub_cmd == "SETINFO") {
-    return cntx->SendOk();
+  } else if (sub_cmd == "SETINFO") {
+    return ClientSetInfo(sub_args, cntx);
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";

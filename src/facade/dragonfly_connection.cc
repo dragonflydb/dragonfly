@@ -798,6 +798,7 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   auto [before, after] = GetClientInfoBeforeAfterTid();
   absl::StrAppend(&before, " tid=", thread_id);
   absl::StrAppend(&before, after);
+  absl::StrAppend(&before, " lib-name=", lib_name_, " lib-ver=", lib_ver_);
   return before;
 }
 
@@ -836,6 +837,14 @@ bool Connection::IsMain() const {
 void Connection::SetName(std::string name) {
   util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
   name_ = std::move(name);
+}
+
+void Connection::SetLibName(std::string name) {
+  lib_name_ = std::move(name);
+}
+
+void Connection::SetLibVersion(std::string version) {
+  lib_ver_ = std::move(version);
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {

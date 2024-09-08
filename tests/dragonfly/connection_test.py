@@ -854,3 +854,13 @@ async def test_tls_when_read_write_is_interleaved(
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     await client.execute_command("GET foo")
     await client.close()
+
+
+async def test_lib_name_ver(async_client: aioredis.Redis):
+    await async_client.execute_command("client setinfo lib-name dragonfly")
+    await async_client.execute_command("client setinfo lib-ver 1.2.3.4")
+
+    list = await async_client.execute_command("client list")
+    assert len(list) == 1
+    assert list[0]["lib-name"] == "dragonfly"
+    assert list[0]["lib-ver"] == "1.2.3.4"

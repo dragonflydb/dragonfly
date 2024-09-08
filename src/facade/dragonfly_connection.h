@@ -275,6 +275,9 @@ class Connection : public util::Connection {
 
   void SetName(std::string name);
 
+  void SetLibName(std::string name);
+  void SetLibVersion(std::string version);
+
   std::string_view GetName() const {
     return name_;
   }
@@ -400,6 +403,9 @@ class Connection : public util::Connection {
   time_t creation_time_, last_interaction_;
   Phase phase_ = SETUP;
   std::string name_;
+
+  std::string lib_name_;
+  std::string lib_ver_;
 
   unsigned parser_error_ = 0;
 
