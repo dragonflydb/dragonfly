@@ -310,7 +310,7 @@ void ScriptMgr::OnScriptError(std::string_view sha, std::string_view error) {
   ++tl_facade_stats->reply_stats.script_error_count;
 
   // Log script errors at most 5 times a second.
-  LOG_EVERY_T(ERROR, 0.2) << "Error running script (call to " << sha << "): " << error;
+  LOG_EVERY_T(WARNING, 0.2) << "Error running script (call to " << sha << "): " << error;
 
   // If script has undeclared_keys and was not flaged to run in this mode we will change the
   // script flag - this will make script next run to not fail but run as global.
