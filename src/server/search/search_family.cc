@@ -230,7 +230,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
   return params;
 }
 
-std::optional<std::string_view> ParseField(CmdArgParser* parser) {
+std::string_view ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
   if (field.front() == '@') {
     field.remove_prefix(1);  // remove leading @ if exists
@@ -258,7 +258,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
       size_t num_fields = parser.Next<size_t>();
       params.load_fields.fields.emplace();
       while (params.load_fields->size() < num_fields) {
-        string_view field = ParseField(&parser).value();
+        string_view field = ParseField(&parser);
         string_view alias = parser.Check("AS") ? parser.Next() : field;
         params.load_fields->emplace_back(field, alias);
       }
@@ -295,7 +295,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
 
         string source_field;
         if (nargs > 0) {
-          source_field = ParseField(&parser).value();
+          source_field = ParseField(&parser);
         }
 
         parser.ExpectTag("AS");
