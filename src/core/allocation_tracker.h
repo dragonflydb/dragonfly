@@ -47,6 +47,7 @@ class AllocationTracker {
 
  private:
   absl::InlinedVector<TrackingInfo, 4> tracking_;
+  bool inside_tracker_ = false;
 };
 
 }  // namespace dfly

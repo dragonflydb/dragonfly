@@ -53,13 +53,12 @@ void AllocationTracker::ProcessNew(void* ptr, size_t size) {
     return;
   }
 
-  thread_local bool inside_process_new = false;
-  if (inside_process_new) {
+  if (inside_tracker_) {
     return;
   }
 
   // Prevent endless recursion, in case logging allocates memory
-  inside_process_new = true;
+  inside_tracker_ = true;
   double random = absl::Uniform(g_bitgen, 0.0, 1.0);
   for (const auto& band : tracking_) {
     if (random >= band.sample_odds || size > band.upper_bound || size < band.lower_bound) {
@@ -72,10 +71,15 @@ void AllocationTracker::ProcessNew(void* ptr, size_t size) {
               << "). Stack: " << util::fb2::GetStacktrace();
     break;
   }
-  inside_process_new = false;
+  inside_tracker_ = false;
 }
 
 void AllocationTracker::ProcessDelete(void* ptr) {
+  if (inside_tracker_) {
+    return;
+  }
+
+  inside_tracker_ = true;
   // we partially handle deletes, specifically when specifying a single range with
   // 100% sampling rate.
   if (tracking_.size() == 1 && tracking_.front().sample_odds == 1) {
@@ -84,6 +88,7 @@ void AllocationTracker::ProcessDelete(void* ptr) {
       LOG(INFO) << "Deallocating " << usable << " bytes (" << ptr << ")";
     }
   }
+  inside_tracker_ = false;
 }
 
 }  // namespace dfly
