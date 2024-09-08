@@ -230,13 +230,20 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
   return params;
 }
 
-std::optional<std::string_view> ParseField(CmdArgParser* parser, bool expect_at_sign = false) {
+std::optional<std::string_view> ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
   if (field.front() == '@') {
-    field.remove_prefix(1);  // remove leading @
-  } else if (expect_at_sign) {
+    field.remove_prefix(1);  // remove leading @ if exists
+  }
+  return field;
+}
+
+std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
+  std::string_view field = parser->Next();
+  if (field.front() != '@') {
     return std::nullopt;  // if we expect @, but it's not there, return nullopt
   }
+  field.remove_prefix(1);  // remove leading @
   return field;
 }
 
@@ -262,7 +269,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     if (parser.Check("GROUPBY")) {
       vector<string_view> fields(parser.Next<size_t>());
       for (string_view& field : fields) {
-        auto parsed_field = ParseField(&parser, true);
+        auto parsed_field = ParseFieldWithAtSign(&parser);
         if (!parsed_field) {
           cntx->SendError(absl::StrCat("bad arguments for GROUPBY: Unknown property '", field,
                                        "'. Did you mean '@", field, "`?"));
