@@ -56,6 +56,10 @@ class EngineShard {
     return shard_;
   }
 
+  bool IsMyThread() const {
+    return this == shard_;
+  }
+
   ShardId shard_id() const {
     return shard_id_;
   }

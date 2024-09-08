@@ -1324,7 +1324,7 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* sh
 }
 
 void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
-  GetSnapshot(shard)->Stop();
+  GetSnapshot(shard)->Finalize();
 }
 
 void RdbSaver::Impl::Cancel() {
@@ -1334,7 +1334,7 @@ void RdbSaver::Impl::Cancel() {
 
   auto& snapshot = GetSnapshot(shard);
   if (snapshot)
-    snapshot->Cancel();
+    snapshot->StopChannel();
 
   dfly::SliceSnapshot::DbRecord rec;
   while (channel_.Pop(rec)) {
@@ -1479,7 +1479,7 @@ void RdbSaver::StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard
   impl_->StartIncrementalSnapshotting(cntx, shard, start_lsn);
 }
 
-void RdbSaver::StopSnapshotInShard(EngineShard* shard) {
+void RdbSaver::StopFullSyncInShard(EngineShard* shard) {
   impl_->StopSnapshotting(shard);
 }
 

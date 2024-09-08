@@ -112,20 +112,21 @@ void DflyCmd::ReplicaInfo::Cancel() {
   // Update state and cancel context.
   replica_state = SyncState::CANCELLED;
   cntx.Cancel();
-
   // Wait for tasks to finish.
   shard_set->RunBlockingInParallel([this](EngineShard* shard) {
+    VLOG(2) << "Disconnecting flow " << shard->shard_id();
+
     FlowInfo* flow = &flows[shard->shard_id()];
     if (flow->cleanup) {
       flow->cleanup();
     }
-
+    VLOG(2) << "After flow cleanup " << shard->shard_id();
     flow->full_sync_fb.JoinIfNeeded();
     flow->conn = nullptr;
   });
-
   // Wait for error handler to quit.
   cntx.JoinErrorHandler();
+  VLOG(1) << "Disconnecting replica " << address << ":" << listening_port;
 }
 
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
@@ -598,10 +599,8 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
 }
 
 void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
-  // Shard can be null for io thread.
-  if (shard != nullptr) {
-    flow->saver->StopSnapshotInShard(shard);
-  }
+  DCHECK(shard);
+  flow->saver->StopFullSyncInShard(shard);
 
   // Wait for full sync to finish.
   flow->full_sync_fb.JoinIfNeeded();

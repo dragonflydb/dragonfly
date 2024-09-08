@@ -90,79 +90,41 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
   snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
     IterateBucketsFb(cll, stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
-    if (cll->IsCancelled()) {
-      Cancel();
-    } else if (!stream_journal) {
-      CloseRecordChannel();
+    // We stop the channel if we are performing backups (non-streaming) or full sync failed.
+    // For a successful full-sync we keep the channel in order to switch to streaming mode.
+    if (cll->IsCancelled() || !stream_journal) {
+      StopChannel();
     }
   });
 }
 
 void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
-  auto* journal = db_slice_->shard_owner()->journal();
-  DCHECK(journal);
-
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
 
-  snapshot_fb_ =
-      fb2::Fiber("incremental_snapshot", [this, journal, cntx, lsn = start_lsn]() mutable {
-        DCHECK(lsn <= journal->GetLsn()) << "The replica tried to sync from the future.";
-
-        VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
-
-        // The replica sends the LSN of the next entry is wants to receive.
-        while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
-          serializer_->WriteJournalEntry(journal->GetEntry(lsn));
-          PushSerializedToChannel(false);
-          lsn++;
-        }
-
-        VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1);
-
-        // This check is safe, but it is not trivially safe.
-        // We rely here on the fact that JournalSlice::AddLogRecord can
-        // only preempt while holding the callback lock.
-        // That guarantees that if we have processed the last LSN the callback
-        // will only be added after JournalSlice::AddLogRecord has finished
-        // iterating its callbacks and we won't process the record twice.
-        // We have to make sure we don't preempt ourselves before registering the callback!
-
-        // GetLsn() is always the next lsn that we expect to create.
-        if (journal->GetLsn() == lsn) {
-          {
-            FiberAtomicGuard fg;
-            serializer_->SendFullSyncCut();
-          }
-          auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
-          journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
-          PushSerializedToChannel(true);
-        } else {
-          // We stopped but we didn't manage to send the whole stream.
-          cntx->ReportError(
-              std::make_error_code(errc::state_not_recoverable),
-              absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
-                           " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-          Cancel();
-        }
-      });
+  snapshot_fb_ = fb2::Fiber("incremental_snapshot", [cntx, start_lsn, this] {
+    this->SwitchIncrementalFb(cntx, start_lsn);
+  });
 }
 
-void SliceSnapshot::Stop() {
+// Called only for replication use-case.
+void SliceSnapshot::Finalize() {
+  DCHECK(db_slice_->shard_owner()->IsMyThread());
+  DCHECK(journal_cb_id_);
+
   // Wait for serialization to finish in any case.
-  Join();
+  snapshot_fb_.JoinIfNeeded();
 
-  if (journal_cb_id_) {
-    auto* journal = db_slice_->shard_owner()->journal();
-    serializer_->SendJournalOffset(journal->GetLsn());
-    journal->UnregisterOnChange(journal_cb_id_);
-  }
-
+  auto* journal = db_slice_->shard_owner()->journal();
+  serializer_->SendJournalOffset(journal->GetLsn());
+  journal->UnregisterOnChange(journal_cb_id_);
+  journal_cb_id_ = 0;
   PushSerializedToChannel(true);
   CloseRecordChannel();
 }
 
-void SliceSnapshot::Cancel() {
-  VLOG(1) << "SliceSnapshot::Cancel";
+void SliceSnapshot::StopChannel() {
+  VLOG(1) << "SliceSnapshot::StopChannel";
+  DCHECK(db_slice_->shard_owner()->IsMyThread());
 
   // Cancel() might be called multiple times from different fibers of the same thread, but we
   // should unregister the callback only once.
@@ -173,11 +135,6 @@ void SliceSnapshot::Cancel() {
   }
 
   CloseRecordChannel();
-}
-
-void SliceSnapshot::Join() {
-  // Fiber could have already been joined by Stop.
-  snapshot_fb_.JoinIfNeeded();
 }
 
 // The algorithm is to go over all the buckets and serialize those with
@@ -251,6 +208,49 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
           << stats_.loop_serialized << "/" << stats_.side_saved << "/" << stats_.savecb_calls;
 }
 
+void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
+  auto* journal = db_slice_->shard_owner()->journal();
+  DCHECK(journal);
+  DCHECK_LE(lsn, journal->GetLsn()) << "The replica tried to sync from the future.";
+
+  VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
+
+  // The replica sends the LSN of the next entry is wants to receive.
+  while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+    serializer_->WriteJournalEntry(journal->GetEntry(lsn));
+    PushSerializedToChannel(false);
+    lsn++;
+  }
+
+  VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1);
+
+  // This check is safe, but it is not trivially safe.
+  // We rely here on the fact that JournalSlice::AddLogRecord can
+  // only preempt while holding the callback lock.
+  // That guarantees that if we have processed the last LSN the callback
+  // will only be added after JournalSlice::AddLogRecord has finished
+  // iterating its callbacks and we won't process the record twice.
+  // We have to make sure we don't preempt ourselves before registering the callback!
+
+  // GetLsn() is always the next lsn that we expect to create.
+  if (journal->GetLsn() == lsn) {
+    {
+      FiberAtomicGuard fg;
+      serializer_->SendFullSyncCut();
+    }
+    auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
+    journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+    PushSerializedToChannel(true);
+  } else {
+    // We stopped but we didn't manage to send the whole stream.
+    cntx->ReportError(
+        std::make_error_code(errc::state_not_recoverable),
+        absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
+                     " was dropped from the buffer. Current lsn=", journal->GetLsn()));
+    StopChannel();
+  }
+}
+
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
   ++stats_.savecb_calls;
 
@@ -288,7 +288,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   while (!it.is_done()) {
     ++result;
-    // might preempt
+    // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
     ++it;
   }
@@ -349,7 +349,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
     return false;
 
   // Flush any of the leftovers to avoid interleavings
-  const auto serialized = Serialize();
+  size_t serialized = Serialize();
 
   // Bucket serialization might have accumulated some delayed values.
   // Because we can finally block in this function, we'll await and serialize them
@@ -359,7 +359,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
     delayed_entries_.pop_back();
   }
 
-  const auto total_serialized = Serialize() + serialized;
+  size_t total_serialized = Serialize() + serialized;
   return total_serialized > 0;
 }
 
@@ -401,6 +401,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
 }
 
 void SliceSnapshot::CloseRecordChannel() {
+  DCHECK(db_slice_->shard_owner()->IsMyThread());
   std::unique_lock lk(db_slice_->GetSerializationMutex());
 
   CHECK(!serialize_bucket_running_);
