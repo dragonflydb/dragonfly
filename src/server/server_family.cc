@@ -541,6 +541,31 @@ void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+void ClientSetInfo(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 2) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  auto* conn = cntx->conn();
+  if (conn == nullptr) {
+    return cntx->SendError("No connection");
+  }
+
+  ToUpper(&args[0]);
+  string_view type = ArgS(args, 0);
+  string_view val = ArgS(args, 1);
+
+  if (type == "LIB-NAME") {
+    conn->SetLibName(string(val));
+  } else if (type == "LIB-VER") {
+    conn->SetLibVersion(string(val));
+  } else {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  cntx->SendOk();
+}
+
 void ClientId(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() != 0) {
     return cntx->SendError(kSyntaxErr);
@@ -1207,6 +1232,13 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  string connections_libs;
+  AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
+                     MetricType::GAUGE, &connections_libs);
+  for (const auto& [lib, count] : m.connections_lib_name_ver_map) {
+    AppendMetricValue("connections_libs", count, {"lib"}, {lib}, &connections_libs);
+  }
+  absl::StrAppend(&resp->body(), connections_libs);
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
@@ -1770,12 +1802,10 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), cntx);
   } else if (sub_cmd == "CACHING") {
     return ClientCaching(sub_args, cntx);
+  } else if (sub_cmd == "SETINFO") {
+    return ClientSetInfo(sub_args, cntx);
   } else if (sub_cmd == "ID") {
     return ClientId(sub_args, cntx);
-  }
-
-  if (sub_cmd == "SETINFO") {
-    return cntx->SendOk();
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
@@ -2048,6 +2078,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
 
     result.lua_stats += InterpreterManager::tl_stats();
+
+    auto connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
+    for (auto& [k, v] : connections_lib_name_ver_map) {
+      result.connections_lib_name_ver_map[k] += v;
+    }
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };  // cb
