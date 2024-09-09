@@ -252,11 +252,8 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   AggregateParams params;
   tie(params.index, params.query) = parser.Next<string_view, string_view>();
 
-  /*
-  Parse LOAD count field [field ...]
-
-  LOAD options are at the beginning of the query, so we need to parse them first
-  */
+  // Parse LOAD count field [field ...]
+  // LOAD options are at the beginning of the query, so we need to parse them first
   while (parser.HasNext() && parser.Check("LOAD")) {
     size_t num_fields = parser.Next<size_t>();
     if (!params.load_fields.fields) {
