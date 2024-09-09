@@ -884,6 +884,26 @@ TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("even", "false"), IsMap("even", "true")));
 }
 
+TEST_F(SearchFamilyTest, AggregateLoad) {
+  Run({"hset", "key:1", "word", "item1", "foo", "10"});
+  Run({"hset", "key:2", "word", "item2", "foo", "20"});
+  Run({"hset", "key:3", "word", "item1", "foo", "30"});
+
+  auto resp = Run({"ft.create", "index", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  // ft.aggregate index "*" LOAD 1 @word LOAD 1 @foo
+  resp = Run({"ft.aggregate", "index", "*", "LOAD", "1", "@word", "LOAD", "1", "@foo"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("word", "item1", "foo", "30"),
+                                         IsMap("word", "item2", "foo", "20"),
+                                         IsMap("word", "item1", "foo", "10")));
+
+  // ft.aggregate index "*" GROUPBY 1 @word REDUCE SUM 1 @foo AS foo_total LOAD 1 foo_total
+  resp = Run({"ft.aggregate", "index", "*", "GROUPBY", "1", "@word", "REDUCE", "SUM", "1", "@foo",
+              "AS", "foo_total", "LOAD", "1", "foo_total"});
+  EXPECT_THAT(resp, ErrArg("LOAD cannot be applied after projectors or reducers"));
+}
+
 TEST_F(SearchFamilyTest, Vector) {
   auto resp = Run({"ft.create", "ann", "ON", "HASH", "SCHEMA", "vector", "VECTOR", "HNSW", "8",
                    "TYPE", "FLOAT32", "DIM", "100", "distance_metric", "cosine", "M", "64"});

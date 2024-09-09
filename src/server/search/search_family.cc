@@ -252,19 +252,22 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   AggregateParams params;
   tie(params.index, params.query) = parser.Next<string_view, string_view>();
 
-  while (parser.HasNext()) {
-    // LOAD count field [field ...]
-    if (parser.Check("LOAD")) {
-      size_t num_fields = parser.Next<size_t>();
+  // Parse LOAD count field [field ...]
+  // LOAD options are at the beginning of the query, so we need to parse them first
+  while (parser.HasNext() && parser.Check("LOAD")) {
+    size_t num_fields = parser.Next<size_t>();
+    if (!params.load_fields.fields) {
       params.load_fields.fields.emplace();
-      while (params.load_fields->size() < num_fields) {
-        string_view field = ParseField(&parser);
-        string_view alias = parser.Check("AS") ? parser.Next() : field;
-        params.load_fields->emplace_back(field, alias);
-      }
-      continue;
     }
 
+    while (num_fields--) {
+      string_view field = ParseField(&parser);
+      string_view alias = parser.Check("AS") ? parser.Next() : field;
+      params.load_fields->emplace_back(field, alias);
+    }
+  }
+
+  while (parser.HasNext()) {
     // GROUPBY nargs property [property ...]
     if (parser.Check("GROUPBY")) {
       vector<string_view> fields(parser.Next<size_t>());
@@ -330,6 +333,11 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     if (parser.Check("PARAMS")) {
       params.params = ParseQueryParams(&parser);
       continue;
+    }
+
+    if (parser.Check("LOAD")) {
+      cntx->SendError("LOAD cannot be applied after projectors or reducers");
+      return nullopt;
     }
 
     cntx->SendError(absl::StrCat("Unknown clause: ", parser.Peek()));
