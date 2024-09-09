@@ -204,14 +204,14 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     } else if (parser.Check("RETURN")) {
       // RETURN {num} [{ident} AS {name}...]
       size_t num_fields = parser.Next<size_t>();
-      params.return_fields = SearchParams::FieldReturnList{};
+      params.return_fields.fields.emplace();
       while (params.return_fields->size() < num_fields) {
         string_view ident = parser.Next();
         string_view alias = parser.Check("AS") ? parser.Next() : ident;
         params.return_fields->emplace_back(ident, alias);
       }
     } else if (parser.Check("NOCONTENT")) {  // NOCONTENT
-      params.return_fields = SearchParams::FieldReturnList{};
+      params.return_fields.fields.emplace();
     } else if (parser.Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(&parser);
     } else if (parser.Check("SORTBY")) {
@@ -230,13 +230,22 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
   return params;
 }
 
-struct AggregateParams {
-  string_view index, query;
-  search::QueryParams params;
+std::string_view ParseField(CmdArgParser* parser) {
+  std::string_view field = parser->Next();
+  if (field.front() == '@') {
+    field.remove_prefix(1);  // remove leading @ if exists
+  }
+  return field;
+}
 
-  vector<string_view> load_fields;
-  vector<aggregate::PipelineStep> steps;
-};
+std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
+  std::string_view field = parser->Next();
+  if (field.front() != '@') {
+    return std::nullopt;  // if we expect @, but it's not there, return nullopt
+  }
+  field.remove_prefix(1);  // remove leading @
+  return field;
+}
 
 optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
                                                        ConnectionContext* cntx) {
@@ -246,17 +255,28 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   while (parser.HasNext()) {
     // LOAD count field [field ...]
     if (parser.Check("LOAD")) {
-      params.load_fields.resize(parser.Next<size_t>());
-      for (string_view& field : params.load_fields)
-        field = parser.Next();
+      size_t num_fields = parser.Next<size_t>();
+      params.load_fields.fields.emplace();
+      while (params.load_fields->size() < num_fields) {
+        string_view field = ParseField(&parser);
+        string_view alias = parser.Check("AS") ? parser.Next() : field;
+        params.load_fields->emplace_back(field, alias);
+      }
       continue;
     }
 
     // GROUPBY nargs property [property ...]
     if (parser.Check("GROUPBY")) {
       vector<string_view> fields(parser.Next<size_t>());
-      for (string_view& field : fields)
-        field = parser.Next();
+      for (string_view& field : fields) {
+        auto parsed_field = ParseFieldWithAtSign(&parser);
+        if (!parsed_field) {
+          cntx->SendError(absl::StrCat("bad arguments for GROUPBY: Unknown property '", field,
+                                       "'. Did you mean '@", field, "`?"));
+          return nullopt;
+        }
+        field = parsed_field.value();
+      }
 
       vector<aggregate::Reducer> reducers;
       while (parser.Check("REDUCE")) {
@@ -273,7 +293,10 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
         auto func = aggregate::FindReducerFunc(*func_name);
         auto nargs = parser.Next<size_t>();
 
-        string source_field = nargs > 0 ? parser.Next<string>() : "";
+        string source_field;
+        if (nargs > 0) {
+          source_field = ParseField(&parser);
+        }
 
         parser.ExpectTag("AS");
         string result_field = parser.Next<string>();
@@ -321,13 +344,23 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   return params;
 }
 
+auto SortableValueSender(RedisReplyBuilder* rb) {
+  return Overloaded{
+      [rb](monostate) { rb->SendNull(); },
+      [rb](double d) { rb->SendDouble(d); },
+      [rb](const string& s) { rb->SendBulkString(s); },
+  };
+}
+
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto sortable_value_sender = SortableValueSender(rb);
+
   rb->SendBulkString(doc.key);
   rb->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : doc.values) {
     rb->SendBulkString(k);
-    rb->SendBulkString(v);
+    visit(sortable_value_sender, v);
   }
 }
 
@@ -804,14 +837,14 @@ void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
   if (!search_algo.Init(params->query, &params->params, nullptr))
     return cntx->SendError("Query syntax error");
 
-  using ResultContainer =
-      decltype(declval<ShardDocIndex>().SearchForAggregator(declval<OpArgs>(), {}, &search_algo));
+  using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
+      declval<OpArgs>(), params.value(), &search_algo));
 
   vector<ResultContainer> query_results(shard_set->size());
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(params->index); index) {
       query_results[es->shard_id()] =
-          index->SearchForAggregator(t->GetOpArgs(es), params->load_fields, &search_algo);
+          index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
     }
     return OpStatus::OK;
   });
@@ -826,20 +859,18 @@ void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
   if (!agg_results.has_value())
     return cntx->SendError(agg_results.error());
 
+  size_t result_size = agg_results->size();
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  Overloaded replier{
-      [rb](monostate) { rb->SendNull(); },
-      [rb](double d) { rb->SendDouble(d); },
-      [rb](const string& s) { rb->SendBulkString(s); },
-  };
+  auto sortable_value_sender = SortableValueSender(rb);
 
-  rb->StartArray(agg_results->size());
+  rb->StartArray(result_size + 1);
+  rb->SendLong(result_size);
+
   for (const auto& result : agg_results.value()) {
-    rb->StartArray(result.size());
+    rb->StartArray(result.size() * 2);
     for (const auto& [k, v] : result) {
-      rb->StartArray(2);
       rb->SendBulkString(k);
-      visit(replier, v);
+      std::visit(sortable_value_sender, v);
     }
   }
 }

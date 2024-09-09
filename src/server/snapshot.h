@@ -131,7 +131,7 @@ class SliceSnapshot {
   // Helper function that flushes the serialized items into the RecordStream.
   // Can block on the channel.
   using FlushState = SerializerBase::FlushState;
-  size_t Serialize(FlushState flush_state = FlushState::kFlushMidEntry);
+  size_t FlushChannelRecord(FlushState flush_state);
 
  public:
   uint64_t snapshot_version() const {
@@ -173,14 +173,15 @@ class SliceSnapshot {
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
   util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
-
+  util::fb2::CondVarAny seq_cond_;
   CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   uint32_t journal_cb_id_ = 0;
-  uint64_t rec_id_ = 0;
+
+  uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
   struct Stats {
     size_t loop_serialized = 0;

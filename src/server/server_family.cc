@@ -566,6 +566,14 @@ void ClientSetInfo(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendOk();
 }
 
+void ClientId(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 0) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  return cntx->SendLong(cntx->conn()->GetClientId());
+}
+
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, ConnectionContext* cntx) {
   std::function<bool(facade::Connection * conn)> evaluator;
 
@@ -1796,6 +1804,8 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientCaching(sub_args, cntx);
   } else if (sub_cmd == "SETINFO") {
     return ClientSetInfo(sub_args, cntx);
+  } else if (sub_cmd == "ID") {
+    return ClientId(sub_args, cntx);
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";

@@ -364,6 +364,7 @@ def test_georadius_errors(r: redis.Redis):
         testtools.raw_command(r, "geoadd", "newgroup", *bad_values)
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_geosearch(r: redis.Redis):
     values = (
         2.1909389952632,

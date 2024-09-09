@@ -21,14 +21,14 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
-using facade::operator""_MB;
-
 namespace dfly {
 
 using namespace std;
 using namespace util;
 using namespace chrono_literals;
 
+using facade::operator""_MB;
+using facade::operator""_KB;
 namespace {
 thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 }  // namespace
@@ -78,7 +78,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
     flush_fun = [this, flush_threshold](size_t bytes_serialized,
                                         RdbSerializer::FlushState flush_state) {
       if (bytes_serialized > flush_threshold) {
-        auto serialized = Serialize(flush_state);
+        size_t serialized = FlushChannelRecord(flush_state);
         VLOG(2) << "FlushedToChannel " << serialized << " bytes";
       }
     };
@@ -325,7 +325,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   }
 }
 
-size_t SliceSnapshot::Serialize(SerializerBase::FlushState flush_state) {
+size_t SliceSnapshot::FlushChannelRecord(SerializerBase::FlushState flush_state) {
   io::StringFile sfile;
   serializer_->FlushToSink(&sfile, flush_state);
 
@@ -333,34 +333,51 @@ size_t SliceSnapshot::Serialize(SerializerBase::FlushState flush_state) {
   if (serialized == 0)
     return 0;
 
-  auto id = rec_id_++;
-  DVLOG(2) << "Pushed " << id;
+  uint64_t id = rec_id_++;
+  DVLOG(2) << "Pushing " << id;
   DbRecord db_rec{.id = id, .value = std::move(sfile.val)};
+  fb2::NoOpLock lk;
 
-  dest_->Push(std::move(db_rec));
-  if (serialized != 0) {
-    VLOG(2) << "Pushed with Serialize() " << serialized << " bytes";
-  }
+  // We create a critical section here that ensures that records are pushed in sequential order.
+  // As a result, it is not possible for two fiber producers to push into channel concurrently.
+  // If A.id = 5, and then B.id = 6, and both are blocked here, it means that last_pushed_id_ < 4.
+  // Once last_pushed_id_ = 4, A will be unblocked, while B will wait until A finishes pushing and
+  // update last_pushed_id_ to 5.
+  seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
+
+  // Blocking point.
+  size_t channel_usage = dest_->Push(std::move(db_rec));
+  DCHECK_EQ(last_pushed_id_ + 1, id);
+  last_pushed_id_ = id;
+  seq_cond_.notify_all();
+
+  VLOG(2) << "Pushed with Serialize() " << serialized
+          << " bytes, channel total usage: " << channel_usage;
+
   return serialized;
 }
 
 bool SliceSnapshot::PushSerializedToChannel(bool force) {
-  if (!force && serializer_->SerializedLen() < 4096)
+  if (!force && serializer_->SerializedLen() < 4_KB)
     return false;
 
   // Flush any of the leftovers to avoid interleavings
-  size_t serialized = Serialize();
+  size_t serialized = FlushChannelRecord(FlushState::kFlushMidEntry);
 
-  // Bucket serialization might have accumulated some delayed values.
-  // Because we can finally block in this function, we'll await and serialize them
-  while (!delayed_entries_.empty()) {
-    auto& entry = delayed_entries_.back();
-    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid, entry.mc_flags);
-    delayed_entries_.pop_back();
+  if (!delayed_entries_.empty()) {
+    // Async bucket serialization might have accumulated some delayed values.
+    // Because we can finally block in this function, we'll await and serialize them
+    do {
+      auto& entry = delayed_entries_.back();
+      serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid,
+                             entry.mc_flags);
+      delayed_entries_.pop_back();
+    } while (!delayed_entries_.empty());
+
+    // blocking point.
+    serialized += FlushChannelRecord(FlushState::kFlushMidEntry);
   }
-
-  size_t total_serialized = Serialize() + serialized;
-  return total_serialized > 0;
+  return serialized > 0;
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {

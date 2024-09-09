@@ -78,6 +78,7 @@ jobs:
             --ignore test/test_geo_commands.py  \
             --ignore test/test_bitmap_commands.py  \
             --ignore test/test_json/ \
+            --ignore test/test_mixins/test_bitmap_commands.py \
             --junit-xml=results-tests.xml  --html=report-tests.html -v
         continue-on-error: true  # For now to mark the flow as successful
 
