@@ -31,6 +31,9 @@ using facade::operator""_MB;
 using facade::operator""_KB;
 namespace {
 thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
+
+constexpr size_t kMinChannelBlobSize = 32_KB;
+
 }  // namespace
 
 size_t SliceSnapshot::DbRecord::size() const {
@@ -358,7 +361,7 @@ size_t SliceSnapshot::FlushChannelRecord(SerializerBase::FlushState flush_state)
 }
 
 bool SliceSnapshot::PushSerializedToChannel(bool force) {
-  if (!force && serializer_->SerializedLen() < 4_KB)
+  if (!force && serializer_->SerializedLen() < kMinChannelBlobSize)
     return false;
 
   // Flush any of the leftovers to avoid interleavings
