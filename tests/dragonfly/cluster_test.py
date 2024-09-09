@@ -1078,7 +1078,6 @@ async def test_config_consistency(df_factory: DflyInstanceFactory):
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
-@pytest.mark.skip("Deadlocks")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_flushall_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory
@@ -1321,7 +1320,6 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
     await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
-@pytest.mark.skip("Unstable")
 @pytest.mark.parametrize(
     "node_count, segments, keys",
     [
@@ -1633,7 +1631,9 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
 
     @assert_eventually
     async def node1size0():
-        assert await nodes[1].client.dbsize() == 0
+        if await nodes[1].client.dbsize() != 0:
+            logging.debug(await nodes[1].client.execute_command("keys *"))
+            assert False
 
     await node1size0()
 
