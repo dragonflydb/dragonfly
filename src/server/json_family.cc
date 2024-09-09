@@ -515,11 +515,17 @@ OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std
   return json_path.Evaluate<T>(*result, cb, options.save_first_result);
 }
 
+struct MutateOperationOptions {
+  JsonReplaceVerify verify_op;
+  bool empty_is_nil = false;
+};
+
 template <typename T>
-OpResult<JsonCallbackResult<optional<T>>> UpdateEntry(const OpArgs& op_args, std::string_view key,
-                                                      const WrappedJsonPath& json_path,
-                                                      JsonPathMutateCallback<T> cb,
-                                                      JsonReplaceVerify verify_op = {}) {
+OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_args,
+                                                              std::string_view key,
+                                                              const WrappedJsonPath& json_path,
+                                                              JsonPathMutateCallback<T> cb,
+                                                              MutateOperationOptions options = {}) {
   auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
 
@@ -531,11 +537,11 @@ OpResult<JsonCallbackResult<optional<T>>> UpdateEntry(const OpArgs& op_args, std
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
-  auto mutate_res = json_path.Mutate(json_val, cb);
+  auto mutate_res = json_path.Mutate(json_val, cb, options.empty_is_nil);
 
   // Make sure that we don't have other internal issue with the operation
-  if (mutate_res && verify_op) {
-    verify_op(*json_val);
+  if (mutate_res && options.verify_op) {
+    options.verify_op(*json_val);
   }
 
   it_res->post_updater.Run();
@@ -685,7 +691,7 @@ auto OpToggle(const OpArgs& op_args, string_view key,
     }
     return {};
   };
-  return UpdateEntry<std::optional<T>>(op_args, key, json_path, std::move(cb));
+  return JsonMutateOperation<std::optional<T>>(op_args, key, json_path, std::move(cb));
 }
 
 template <typename T>
@@ -777,7 +783,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
     return {};
   };
 
-  auto res = UpdateEntry<Nothing>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
 
   if (is_result_overflow)
     return OpStatus::INVALID_NUMERIC_RESULT;
@@ -816,7 +822,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = json_path.Mutate<Nothing>(result.value(), std::move(cb));
+  auto res = json_path.Mutate<Nothing>(result.value(), std::move(cb), false);
   RETURN_ON_BAD_STATUS(res);
 
   if (deletion_items.empty()) {
@@ -876,7 +882,7 @@ OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_
     return {false, len};  // do not delete, new value len
   };
 
-  return UpdateEntry<size_t>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<size_t>(op_args, key, path, std::move(cb));
 }
 
 // Returns the numbers of values cleared.
@@ -902,7 +908,7 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, const WrappedJson
     return {};
   };
 
-  auto res = UpdateEntry<Nothing>(op_args, key, path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, path, std::move(cb));
   RETURN_ON_BAD_STATUS(res);
   return clear_items;
 }
@@ -939,7 +945,8 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     val->erase(it);
     return {false, std::move(str)};
   };
-  return UpdateEntry<std::string>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<std::string>(op_args, key, path, std::move(cb),
+                                          {.verify_op = {}, .empty_is_nil = true});
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -981,7 +988,7 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
     *val = jsoncons::json_array<JsonType>(trim_start_it, trim_end_it);
     return {false, val->size()};
   };
-  return UpdateEntry<size_t>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<size_t>(op_args, key, path, std::move(cb));
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -1033,7 +1040,7 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
     return {false, val->size()};
   };
 
-  auto res = UpdateEntry<size_t>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<size_t>(op_args, key, json_path, std::move(cb));
   if (out_of_boundaries_encountered) {
     return OpStatus::OUT_OF_RANGE;
   }
@@ -1052,7 +1059,7 @@ auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& 
     }
     return {false, val->size()};
   };
-  return UpdateEntry<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
 }
 
 // Returns a numeric vector representing each JSON value first index of the JSON scalar.
@@ -1249,7 +1256,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     return OpStatus::OK;
   };
 
-  auto res = UpdateEntry<Nothing>(op_args, key, json_path, std::move(cb), inserter);
+  auto res =
+      JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb), {.verify_op = inserter});
   RETURN_ON_BAD_STATUS(res);
   return operation_result;
 }
@@ -1325,7 +1333,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = UpdateEntry<Nothing>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
 
   if (res.status() != OpStatus::KEY_NOTFOUND)
     return res.status();

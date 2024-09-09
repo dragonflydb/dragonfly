@@ -172,8 +172,9 @@ class WrappedJsonPath {
 
   template <typename T>
   OpResult<JsonCallbackResult<std::optional<T>>> Mutate(JsonType* json_entry,
-                                                        JsonPathMutateCallback<T> cb) const {
-    JsonCallbackResult<std::optional<T>> mutate_result{IsLegacyModePath(), false, false};
+                                                        JsonPathMutateCallback<T> cb,
+                                                        bool empty_is_nil) const {
+    JsonCallbackResult<std::optional<T>> mutate_result{IsLegacyModePath(), false, empty_is_nil};
 
     auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
                                                  JsonType* val) -> bool {
