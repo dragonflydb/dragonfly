@@ -83,11 +83,9 @@ class SliceSnapshot {
   // Blocking. Must be called from the Snapshot thread.
   void Finalize();
 
-  // Stops channel. Needs to be called together with cancelling the context.
-  // Snapshot can't always react to cancellation in streaming mode because the
-  // iteration fiber might have finished running by then.
-  // Blocking. Must be called from the Snapshot thread.
-  void StopChannel();
+  // Called together with cntx cancel only for replication.
+  // Stops journal streaming.
+  void Cancel();
 
   // Waits for a regular, non journal snapshot to finish.
   // Called only for non-replication, backups usecases.
@@ -180,6 +178,7 @@ class SliceSnapshot {
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   uint32_t journal_cb_id_ = 0;
+  bool unregister_journal_ = false;  // true if unregister journal was already called
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 

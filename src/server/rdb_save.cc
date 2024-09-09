@@ -1216,7 +1216,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   for (auto& ptr : shard_snapshots_) {
     ptr->Join();
   }
-
+  DVLOG(1) << "Finish ConsumeChannel";
   DCHECK(!channel_.TryPop(record));
 
   return io_error;
@@ -1251,15 +1251,7 @@ void RdbSaver::Impl::Cancel() {
   if (!shard)
     return;
 
-  auto& snapshot = GetSnapshot(shard);
-  if (snapshot)
-    snapshot->StopChannel();
-
-  dfly::SliceSnapshot::DbRecord rec;
-  while (channel_.Pop(rec)) {
-  }
-
-  snapshot->Join();
+  GetSnapshot(shard)->Cancel();
 }
 
 // This function is called from connection thread when info command is invoked.
