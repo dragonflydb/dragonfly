@@ -313,6 +313,20 @@ TEST_F(JsonFamilyTest, GetBrackets) {
   ASSERT_THAT(resp, "[\"third\"]");
 }
 
+TEST_F(JsonFamilyTest, GetWithNoEscape) {
+  string json = R"({"key": "value with special characters: \n \t \" \""})";
+  auto resp = Run({"JSON.SET", "json", ".", json});
+  ASSERT_THAT(resp, "OK");
+
+  // Test without NOESCAPE option
+  resp = Run({"JSON.GET", "json", "."});
+  EXPECT_EQ(resp, "{\"key\":\"value with special characters: \\n \\t \\\" \\\"\"}");
+
+  // Test with NOESCAPE option
+  resp = Run({"JSON.GET", "json", ".", "NOESCAPE"});
+  EXPECT_EQ(resp, "{\"key\":\"value with special characters: \\n \\t \\\" \\\"\"}");  // No changes
+}
+
 TEST_F(JsonFamilyTest, Type) {
   string json = R"(
     [1, 2.3, "foo", true, null, {}, []]
