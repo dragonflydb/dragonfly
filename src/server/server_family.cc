@@ -1224,6 +1224,13 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  string connections_libs;
+  AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
+                     MetricType::GAUGE, &connections_libs);
+  for (const auto& [lib, count] : m.connections_lib_name_ver_map) {
+    AppendMetricValue("connections_libs", count, {"lib"}, {lib}, &connections_libs);
+  }
+  absl::StrAppend(&resp->body(), connections_libs);
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
@@ -2061,6 +2068,11 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
 
     result.lua_stats += InterpreterManager::tl_stats();
+
+    auto connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
+    for (auto& [k, v] : connections_lib_name_ver_map) {
+      result.connections_lib_name_ver_map[k] += v;
+    }
 
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };  // cb

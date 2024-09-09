@@ -509,6 +509,19 @@ void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) 
   }
 }
 
+namespace {
+thread_local absl::flat_hash_map<string, uint64_t> g_libname_ver_map;
+
+void UpdateLibNameVerMap(const string& name, const string& ver, int delta) {
+  string key = absl::StrCat(name, ":", ver);
+  uint64_t& val = g_libname_ver_map[key];
+  val += delta;
+  if (val == 0) {
+    g_libname_ver_map.erase(key);
+  }
+}
+}  // namespace
+
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize),
@@ -553,12 +566,16 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
     SSL_CTX_up_ref(ctx);
   }
 #endif
+
+  UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
 }
 
 Connection::~Connection() {
 #ifdef DFLY_USE_SSL
   SSL_CTX_free(ssl_ctx_);
 #endif
+
+  UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
 }
 
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
@@ -840,11 +857,19 @@ void Connection::SetName(std::string name) {
 }
 
 void Connection::SetLibName(std::string name) {
+  UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
   lib_name_ = std::move(name);
+  UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
 }
 
 void Connection::SetLibVersion(std::string version) {
+  UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
   lib_ver_ = std::move(version);
+  UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
+}
+
+const absl::flat_hash_map<string, uint64_t>& Connection::GetLibStatsTL() {
+  return g_libname_ver_map;
 }
 
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {

@@ -123,6 +123,8 @@ struct Metrics {
   // command call frequencies (count, aggregated latency in usec).
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
 
+  absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
+
   // Replica info on the master side.
   std::vector<ReplicaRoleInfo> master_side_replicas_info;
 

@@ -278,6 +278,9 @@ class Connection : public util::Connection {
   void SetLibName(std::string name);
   void SetLibVersion(std::string version);
 
+  // Returns a map of 'libname:libver'->count, thread local data
+  static const absl::flat_hash_map<std::string, uint64_t>& GetLibStatsTL();
+
   std::string_view GetName() const {
     return name_;
   }
