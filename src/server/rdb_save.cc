@@ -112,6 +112,7 @@ unsigned TryIntegerEncoding(string_view input, uint8_t* dest) {
 
 constexpr size_t kBufLen = 64_KB;
 constexpr size_t kAmask = 4_KB - 1;
+constexpr uint32_t kChannelLen = 2;
 
 }  // namespace
 
@@ -1142,7 +1143,7 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
       shard_snapshots_(producers_len),
       meta_serializer_(CompressionMode::NONE),  // Note: I think there is not need for compression
                                                 // at all in meta serializer
-      channel_{128, producers_len},
+      channel_{kChannelLen, producers_len},
       compression_mode_(compression_mode) {
   if (align_writes) {
     aligned_buf_.emplace(kBufLen, sink);
