@@ -93,10 +93,10 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
   snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
     IterateBucketsFb(cll, stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
-    // We stop the channel if we are performing backups (non-streaming) or full sync failed.
-    // For a successful full-sync we keep the channel in order to switch to streaming mode.
-    if (cll->IsCancelled() || !stream_journal) {
-      StopChannel();
+    // We stop the channel if we are performing backups (non-streaming).
+    // We keep the channel for replication in order to send jounal changes until we finalize.
+    if (!stream_journal) {
+      CloseRecordChannel();
     }
   });
 }
@@ -110,31 +110,24 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
 }
 
 // Called only for replication use-case.
-void SliceSnapshot::Finalize() {
+void SliceSnapshot::FinalizeJournalStream(bool cancel) {
+  DVLOG(1) << "Finalize Snapshot";
   DCHECK(db_slice_->shard_owner()->IsMyThread());
-  DCHECK(journal_cb_id_);
+  if (!journal_cb_id_) {  // Finalize only once.
+    return;
+  }
+  uint32_t cb_id = journal_cb_id_;
+  journal_cb_id_ = 0;
 
   // Wait for serialization to finish in any case.
   snapshot_fb_.JoinIfNeeded();
 
   auto* journal = db_slice_->shard_owner()->journal();
-  serializer_->SendJournalOffset(journal->GetLsn());
-  journal->UnregisterOnChange(journal_cb_id_);
-  journal_cb_id_ = 0;
-  PushSerializedToChannel(true);
-  CloseRecordChannel();
-}
 
-void SliceSnapshot::StopChannel() {
-  VLOG(1) << "SliceSnapshot::StopChannel";
-  DCHECK(db_slice_->shard_owner()->IsMyThread());
-
-  // Cancel() might be called multiple times from different fibers of the same thread, but we
-  // should unregister the callback only once.
-  uint32_t cb_id = journal_cb_id_;
-  if (cb_id) {
-    journal_cb_id_ = 0;
-    db_slice_->shard_owner()->journal()->UnregisterOnChange(cb_id);
+  journal->UnregisterOnChange(cb_id);
+  if (!cancel) {
+    serializer_->SendJournalOffset(journal->GetLsn());
+    PushSerializedToChannel(true);
   }
 
   CloseRecordChannel();
@@ -250,7 +243,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
         std::make_error_code(errc::state_not_recoverable),
         absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
                      " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-    StopChannel();
+    FinalizeJournalStream(true);
   }
 }
 

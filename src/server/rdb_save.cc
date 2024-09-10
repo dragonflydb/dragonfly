@@ -1093,7 +1093,7 @@ class RdbSaver::Impl {
 
   error_code SaveAuxFieldStrStr(string_view key, string_view val);
 
-  void Cancel();
+  void CancelInShard(EngineShard* shard);
 
   size_t GetTotalBuffersSize() const;
 
@@ -1217,7 +1217,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   for (auto& ptr : shard_snapshots_) {
     ptr->Join();
   }
-
+  DVLOG(1) << "Finish ConsumeChannel";
   DCHECK(!channel_.TryPop(record));
 
   return io_error;
@@ -1244,23 +1244,11 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* sh
 }
 
 void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
-  GetSnapshot(shard)->Finalize();
+  GetSnapshot(shard)->FinalizeJournalStream(false);
 }
 
-void RdbSaver::Impl::Cancel() {
-  auto* shard = EngineShard::tlocal();
-  if (!shard)
-    return;
-
-  auto& snapshot = GetSnapshot(shard);
-  if (snapshot)
-    snapshot->StopChannel();
-
-  dfly::SliceSnapshot::DbRecord rec;
-  while (channel_.Pop(rec)) {
-  }
-
-  snapshot->Join();
+void RdbSaver::Impl::CancelInShard(EngineShard* shard) {
+  GetSnapshot(shard)->FinalizeJournalStream(true);
 }
 
 // This function is called from connection thread when info command is invoked.
@@ -1502,8 +1490,8 @@ error_code RdbSaver::SaveAuxFieldStrInt(string_view key, int64_t val) {
   return impl_->SaveAuxFieldStrStr(key, string_view(buf, vlen));
 }
 
-void RdbSaver::Cancel() {
-  impl_->Cancel();
+void RdbSaver::CancelInShard(EngineShard* shard) {
+  impl_->CancelInShard(shard);
 }
 
 size_t RdbSaver::GetTotalBuffersSize() const {

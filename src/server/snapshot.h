@@ -79,15 +79,9 @@ class SliceSnapshot {
   // called.
   void StartIncremental(Context* cntx, LSN start_lsn);
 
-  // Finalizes the snapshot. Only called for replication.
+  // Finalizes journal streaming writes. Only called for replication.
   // Blocking. Must be called from the Snapshot thread.
-  void Finalize();
-
-  // Stops channel. Needs to be called together with cancelling the context.
-  // Snapshot can't always react to cancellation in streaming mode because the
-  // iteration fiber might have finished running by then.
-  // Blocking. Must be called from the Snapshot thread.
-  void StopChannel();
+  void FinalizeJournalStream(bool cancel);
 
   // Waits for a regular, non journal snapshot to finish.
   // Called only for non-replication, backups usecases.
