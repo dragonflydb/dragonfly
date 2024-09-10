@@ -2336,6 +2336,31 @@ async def test_announce_ip_port(df_factory):
     assert port == "1337"
 
 
+@pytest.mark.asyncio
+async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory):
+    # setting replication_timeout to a very small value to force the replica to timeout
+    master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2")
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # runing dubeg populate with lots of itmes ensures that replication timeout will occure on full sync stage
+    async def debug_populate_master():
+        await c_master.execute_command("debug", "populate", "1000000", "foo", "500")
+
+    populate_task = asyncio.create_task(debug_populate_master())
+    await asyncio.sleep(0.2)  # wait for debug popultae start running
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await populate_task
+    await asyncio.sleep(1)
+
+    await assert_replica_reconnections(replica, 0)
+    df_factory.stop_all()
+
+
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked
     master = df_factory.create(replication_timeout=1000)
