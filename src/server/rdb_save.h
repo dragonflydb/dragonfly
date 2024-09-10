@@ -103,7 +103,7 @@ class RdbSaver {
   // freq_map can optionally be null.
   std::error_code SaveBody(Context* cntx, RdbTypeFreqMap* freq_map);
 
-  void Cancel();
+  void CancelInShard(EngineShard* shard);
 
   SaveMode Mode() const {
     return save_mode_;

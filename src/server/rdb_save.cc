@@ -1092,7 +1092,7 @@ class RdbSaver::Impl {
 
   error_code SaveAuxFieldStrStr(string_view key, string_view val);
 
-  void Cancel();
+  void CancelInShard(EngineShard* shard);
 
   size_t GetTotalBuffersSize() const;
 
@@ -1243,15 +1243,11 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* sh
 }
 
 void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
-  GetSnapshot(shard)->Finalize();
+  GetSnapshot(shard)->FinalizeJournalStream(false);
 }
 
-void RdbSaver::Impl::Cancel() {
-  auto* shard = EngineShard::tlocal();
-  if (!shard)
-    return;
-
-  GetSnapshot(shard)->Cancel();
+void RdbSaver::Impl::CancelInShard(EngineShard* shard) {
+  GetSnapshot(shard)->FinalizeJournalStream(true);
 }
 
 // This function is called from connection thread when info command is invoked.
@@ -1493,8 +1489,8 @@ error_code RdbSaver::SaveAuxFieldStrInt(string_view key, int64_t val) {
   return impl_->SaveAuxFieldStrStr(key, string_view(buf, vlen));
 }
 
-void RdbSaver::Cancel() {
-  impl_->Cancel();
+void RdbSaver::CancelInShard(EngineShard* shard) {
+  impl_->CancelInShard(shard);
 }
 
 size_t RdbSaver::GetTotalBuffersSize() const {

@@ -570,14 +570,14 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false);
 
-  flow->cleanup = [flow]() {
+  flow->cleanup = [flow, shard]() {
     // socket shutdown is needed before calling saver->Cancel(). Because
     // we might cancel while the write to socket is blocking and
     // therefore if we wont cancel the socket the full sync fiber might
     // not get to pop entries from channel, which can cause dead lock if channel is full and some
     // callbacks are blocked on trying to insert to channel.
     flow->TryShutdownSocket();
-    flow->saver->Cancel();              // stops writing to channel
+    flow->saver->CancelInShard(shard);  // stops writing to journal stream to channel
     flow->full_sync_fb.JoinIfNeeded();  // finishes poping data from channel
     flow->saver.reset();
   };

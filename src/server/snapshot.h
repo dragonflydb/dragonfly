@@ -79,13 +79,9 @@ class SliceSnapshot {
   // called.
   void StartIncremental(Context* cntx, LSN start_lsn);
 
-  // Finalizes the snapshot. Only called for replication.
+  // Finalizes journal streaming writes. Only called for replication.
   // Blocking. Must be called from the Snapshot thread.
-  void Finalize();
-
-  // Called together with cntx cancel only for replication.
-  // Stops journal streaming.
-  void Cancel();
+  void FinalizeJournalStream(bool cancel);
 
   // Waits for a regular, non journal snapshot to finish.
   // Called only for non-replication, backups usecases.
@@ -178,7 +174,6 @@ class SliceSnapshot {
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   uint32_t journal_cb_id_ = 0;
-  bool unregister_journal_ = false;  // true if unregister journal was already called
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 

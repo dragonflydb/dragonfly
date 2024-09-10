@@ -107,40 +107,26 @@ void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
 }
 
 // Called only for replication use-case.
-void SliceSnapshot::Finalize() {
+void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   DVLOG(1) << "Finalize Snapshot";
   DCHECK(db_slice_->shard_owner()->IsMyThread());
-  DCHECK(journal_cb_id_);
+  if (!journal_cb_id_) {  // Finalize only once.
+    return;
+  }
+  uint32_t cb_id = journal_cb_id_;
+  journal_cb_id_ = 0;
 
   // Wait for serialization to finish in any case.
   snapshot_fb_.JoinIfNeeded();
 
-  if (unregister_journal_) {
-    return;
-  }
   auto* journal = db_slice_->shard_owner()->journal();
-  serializer_->SendJournalOffset(journal->GetLsn());
-  unregister_journal_ = true;
-  journal->UnregisterOnChange(journal_cb_id_);
 
-  PushSerializedToChannel(true);
-  CloseRecordChannel();
-}
-
-// Called only for replication use-case.
-// Might be called multiple times from different fibers.
-void SliceSnapshot::Cancel() {
-  DVLOG(1) << "Cancel Snapshot";
-  DCHECK(db_slice_->shard_owner()->IsMyThread());
-  DCHECK(journal_cb_id_);
-
-  snapshot_fb_.JoinIfNeeded();
-
-  if (unregister_journal_) {
-    return;
+  journal->UnregisterOnChange(cb_id);
+  if (!cancel) {
+    serializer_->SendJournalOffset(journal->GetLsn());
+    PushSerializedToChannel(true);
   }
-  unregister_journal_ = true;
-  db_slice_->shard_owner()->journal()->UnregisterOnChange(journal_cb_id_);
+
   CloseRecordChannel();
 }
 
@@ -254,7 +240,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
         std::make_error_code(errc::state_not_recoverable),
         absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
                      " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-    Cancel();
+    FinalizeJournalStream(true);
   }
 }
 
