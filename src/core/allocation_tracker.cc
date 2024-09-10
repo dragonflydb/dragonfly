@@ -85,7 +85,8 @@ void AllocationTracker::ProcessDelete(void* ptr) {
   if (tracking_.size() == 1 && tracking_.front().sample_odds == 1) {
     size_t usable = mi_usable_size(ptr);
     if (usable <= tracking_.front().upper_bound && usable >= tracking_.front().lower_bound) {
-      LOG(INFO) << "Deallocating " << usable << " bytes (" << ptr << ")";
+      LOG(INFO) << "Deallocating " << usable << " bytes (" << ptr << ")\n"
+                << util::fb2::GetStacktrace();
     }
   }
   inside_tracker_ = false;
