@@ -2019,8 +2019,7 @@ void ServerFamily::ResetStat(Namespace* ns) {
         tl_facade_stats->reply_stats.send_stats = {};
         tl_facade_stats->reply_stats.script_error_count = 0;
         tl_facade_stats->reply_stats.err_count.clear();
-
-        service_.mutable_registry()->ResetCallStats(index);
+        ServerState::tlocal()->exec_freq_count.clear();
       });
 }
 
