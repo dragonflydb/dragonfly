@@ -41,6 +41,7 @@ extern "C" {
 #include "server/cluster/cluster_utility.h"
 #include "server/conn_context.h"
 #include "server/error.h"
+#include "server/error_response_log.h"
 #include "server/generic_family.h"
 #include "server/hll_family.h"
 #include "server/hset_family.h"
@@ -1260,6 +1261,10 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   if (!InvokeCmd(cid, args_no_cmd, dfly_cntx)) {
     dfly_cntx->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
+  }
+  auto [reason, kind] = dfly_cntx->reply_builder()->ConsumeLastError();
+  if (!reason.empty()) {
+    ServerState::tlocal()->error_response_log.Add(cid->name(), args_no_cmd, reason, kind);
   }
 
   if (!dispatching_in_multi) {
