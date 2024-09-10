@@ -32,7 +32,7 @@ class IncomingSlotMigration {
   // After Join we still can get data due to error situation
   [[nodiscard]] bool Join(long attempt);
 
-  // Stop migrations, can be called even after migration is finished
+  // Stop and join the migration, can be called even after migration is finished
   void Stop();
 
   MigrationState GetState() const {

@@ -818,7 +818,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
   SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
   migration->Stop();
-  // all fibers has migration shared_ptr so we don't need to join it and can erase
+  // all migration fibers has migration shared_ptr so the object can be removed later
   jobs.erase(it);
 
   // TODO make it outside in one run with other slots that should be flushed
