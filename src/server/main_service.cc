@@ -753,11 +753,9 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
 
 string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned num_uniq_shards) {
   string result;
-  result.reserve(stored_cmds.size() * 10);
-  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "\n");
-  for (const auto& scmd : stored_cmds) {
-    absl::StrAppend(&result, "  ", scmd.Cid()->name(), " ", scmd.NumArgs(), "\n");
-  }
+  size_t max_len = std::min<size_t>(20u, stored_cmds.size());
+  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "/", max_len);
+
   return result;
 }
 
