@@ -1876,7 +1876,7 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
 
   auto params = ParseJsonGetParams(&parser, cntx);
   if (!params) {
-    return;  // ParseJsonGetParams schould have already sent an error
+    return;  // ParseJsonGetParams should have already sent an error
   }
 
   if (auto err = parser.Error(); err)
