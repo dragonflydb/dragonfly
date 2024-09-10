@@ -2402,23 +2402,48 @@ TEST_F(JsonFamilyTest, SetLegacy) {
     {"a": 2}
   )";
 
-  resp = Run({"JSON.SET", "json3", "$", json});
+  resp = Run({"JSON.SET", "json3", ".", json});
   EXPECT_THAT(resp, "OK");
 
-  resp = Run({"JSON.SET", "json3", "$.b", "8"});
+  resp = Run({"JSON.SET", "json3", ".b", "8"});
   EXPECT_THAT(resp, "OK");
 
-  resp = Run({"JSON.SET", "json3", "$.c", "[1,2,3]"});
+  resp = Run({"JSON.SET", "json3", ".c", "[1,2,3]"});
   EXPECT_THAT(resp, "OK");
 
-  resp = Run({"JSON.SET", "json3", "$.z", "3", "XX"});
+  resp = Run({"JSON.SET", "json3", ".z", "3", "XX"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
-  resp = Run({"JSON.SET", "json3", "$.b", "4", "NX"});
+  resp = Run({"JSON.SET", "json3", ".z", "3"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", ".z", "4", "XX"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", ".b", "4", "NX"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.SET", "json3", ".b", "5"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json3", ".", "[]", "NX"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 
   resp = Run({"JSON.GET", "json3"});
-  EXPECT_EQ(resp, R"({"a":2,"b":8,"c":[1,2,3]})");
+  EXPECT_EQ(resp, R"({"a":2,"b":5,"c":[1,2,3],"z":4})");
+
+  json = R"(
+    {"foo": "bar"}
+  )";
+
+  resp = Run({"JSON.SET", "json4", ".", json});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json4", "foo", "\"baz\"", "XX"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"JSON.SET", "json4", "foo2", "\"qaz\"", "NX"});
+  EXPECT_THAT(resp, "OK");
 }
 
 TEST_F(JsonFamilyTest, MSet) {
