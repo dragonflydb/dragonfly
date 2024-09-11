@@ -308,8 +308,10 @@ class CompactObj {
   // NOTE: in order to avid copy which can be expensive in this case,
   // you need to move an object that created with the function JsonFromString
   // into here, no copying is allowed!
-  std::unique_ptr<MiMemoryResource> SetJson(JsonType&& j);
+  void SetJson(JsonType&& j);
   void SetJson(const uint8_t* buf, size_t len);
+  // Adjusts the size used by json
+  void SetJsonSize(bool net_positive, bool zero_diff, size_t size);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
@@ -405,6 +407,10 @@ class CompactObj {
     return taglen_;
   }
 
+  bool IsJson() const {
+    return taglen_ == JSON_TAG;
+  }
+
  private:
   void EncodeString(std::string_view str);
   size_t DecodedLen(size_t sz) const;
@@ -448,8 +454,7 @@ class CompactObj {
 
   struct JsonConsT {
     JsonType* json_ptr;
-    // Owning and must be explicitly deallocated
-    MiMemoryResource* mr;
+    size_t bytes_used;
   };
 
   struct FlatJsonT {

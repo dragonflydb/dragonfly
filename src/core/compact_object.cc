@@ -7,8 +7,6 @@
 // #define XXH_INLINE_ALL
 #include <xxhash.h>
 
-#include <memory>
-
 extern "C" {
 #include "redis/intset.h"
 #include "redis/listpack.h"
@@ -21,7 +19,6 @@ extern "C" {
 }
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
-#include <mimalloc.h>
 
 #include <jsoncons/json.hpp>
 
@@ -701,31 +698,36 @@ auto CompactObj::GetJson() const -> JsonType* {
   return nullptr;
 }
 
-// We need to return std::unique_ptr because the memory resource must be deallocated
-// after the JsonType j gets deallocated and this can only be done after we return
-// since the order of destructors is the opposite of the order of constructors.
-std::unique_ptr<MiMemoryResource> CompactObj::SetJson(JsonType&& j) {
-  auto* mr = static_cast<MiMemoryResource*>(j.get_allocator().resource());
+void CompactObj::SetJson(JsonType&& j) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
-    // already json
     DCHECK(u_.json_obj.cons.json_ptr != nullptr);  // must be allocated
-    DCHECK(u_.json_obj.cons.mr != nullptr);        // must be allocated
     u_.json_obj.cons.json_ptr->swap(j);
-    auto* ret_value = u_.json_obj.cons.mr;
-    u_.json_obj.cons.mr = mr;
-    // TODO
-    // Use std::exchange with local Json such that we don't need to return
-    // std::unique_ptr
-    // Also adjust memory_resource() total memory used
-    // otherwise size_t EngineShard::UsedMemory() const will report the wrong mem
-    return std::unique_ptr<MiMemoryResource>(ret_value);
+    // We do not set bytes_used as this is needed. Consider the two following cases:
+    // 1. old json contains 50 bytes. The delta for new one is 50, so the total bytes
+    // the new json occupies is 100.
+    // 2. old json contains 100 bytes. The delta for new one is -50, so the total bytes
+    // the new json occupies is 50.
+    // Both of the cases are covered in SetJsonSize and JsonMemTracker. See below.
+    return;
   }
 
   SetMeta(JSON_TAG);
   u_.json_obj.cons.json_ptr = AllocateMR<JsonType>(std::move(j));
-  u_.json_obj.cons.mr = mr;
-  DCHECK(mr == u_.json_obj.cons.json_ptr->get_allocator().resource());
-  return {};
+  u_.json_obj.cons.bytes_used = 0;
+}
+
+void CompactObj::SetJsonSize(bool net_positive, bool zero_diff, size_t size) {
+  if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
+    // JSON.SET or if mem hasn't changed from a JSON op then we just update.
+    if (u_.json_obj.cons.bytes_used == 0 || zero_diff) {
+      u_.json_obj.cons.bytes_used = size;
+    } else if (net_positive) {
+      u_.json_obj.cons.bytes_used += size;
+    } else {
+      DCHECK(u_.json_obj.cons.bytes_used >= size);
+      u_.json_obj.cons.bytes_used -= size;
+    }
+  }
 }
 
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
@@ -1042,10 +1044,6 @@ void CompactObj::Free() {
     DVLOG(1) << "Freeing JSON object";
     if (JsonEnconding() == kEncodingJsonCons) {
       DeleteMR<JsonType>(u_.json_obj.cons.json_ptr);
-      // Also adjust memory_resource() total memory used
-      // otherwise size_t EngineShard::UsedMemory() const will report the wrong mem
-      MiMemoryResource* mr = u_.json_obj.cons.mr;
-      memory_resource()->deallocate(mr, sizeof(MiMemoryResource), alignof(MiMemoryResource));
     } else {
       tl.local_mr->deallocate(u_.json_obj.flat.flat_ptr, u_.json_obj.flat.json_len, kAlignSize);
     }
@@ -1073,10 +1071,7 @@ size_t CompactObj::MallocUsed() const {
     if (JsonEnconding() == kEncodingJsonFlat) {
       return 0;
     }
-    CHECK(u_.json_obj.cons.json_ptr != nullptr);
-    const auto* ptr = u_.json_obj.cons.json_ptr;
-    const auto* mr = u_.json_obj.cons.mr;
-    return zmalloc_size(ptr) + static_cast<const MiMemoryResource*>(mr)->used();
+    return u_.json_obj.cons.bytes_used;
   }
 
   if (taglen_ == SMALL_TAG) {
