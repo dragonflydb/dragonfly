@@ -82,24 +82,21 @@ class JsonMemTracker {
       return;
     }
 
-    size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
-    bool net_positive = current >= start_size_;
+    const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    const bool net_positive = current >= start_size_;
     size_t diff = net_positive ? (current - start_size_) : (start_size_ - current);
     PrimeValue& pv = it_->it->second;
-    // If the diff is 0 it means the object uses the same memory as before. We just set
-    // it to what it was.
-    bool zero_diff = false;
+    // If the diff is 0 it means the object uses the same memory as before. No actio needed.
     if (diff == 0) {
-      diff = already_existing_value_size_;
-      zero_diff = true;
+      return;
     }
     // If op_set_ it means we JSON.SET or JSON.MSET was called. This is a blind update,
     // and because the operation sets the size to 0 we also need to include the size of
     // the pointer.
-    else if (op_set_) {
+    if (op_set_) {
       diff += mi_usable_size(pv.GetJson());
     }
-    pv.SetJsonSize(net_positive, zero_diff, diff);
+    pv.SetJsonSize(net_positive, diff);
     // Under any flow we must not end up with this special value.
     DCHECK(pv.MallocUsed() != 0);
   }

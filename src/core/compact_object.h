@@ -311,7 +311,7 @@ class CompactObj {
   void SetJson(JsonType&& j);
   void SetJson(const uint8_t* buf, size_t len);
   // Adjusts the size used by json
-  void SetJsonSize(bool net_positive, bool zero_diff, size_t size);
+  void SetJsonSize(bool net_positive, size_t size);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;

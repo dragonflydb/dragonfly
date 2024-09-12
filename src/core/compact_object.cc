@@ -27,7 +27,6 @@ extern "C" {
 #include "base/pod_array.h"
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
-#include "core/mi_memory_resource.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -716,10 +715,10 @@ void CompactObj::SetJson(JsonType&& j) {
   u_.json_obj.cons.bytes_used = 0;
 }
 
-void CompactObj::SetJsonSize(bool net_positive, bool zero_diff, size_t size) {
+void CompactObj::SetJsonSize(bool net_positive, size_t size) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    if (u_.json_obj.cons.bytes_used == 0 || zero_diff) {
+    if (u_.json_obj.cons.bytes_used == 0) {
       u_.json_obj.cons.bytes_used = size;
     } else if (net_positive) {
       u_.json_obj.cons.bytes_used += size;
