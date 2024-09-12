@@ -7,7 +7,6 @@
 
 #include <optional>
 #include <string_view>
-#include <utility>
 
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
@@ -153,8 +152,8 @@ class SinkReplyBuilder {
   virtual void StartAggregate();
   virtual void StopAggregate();
 
-  std::pair<std::string, std::string> ConsumeLastError() {
-    return std::exchange(last_error_, std::pair<std::string, std::string>{});
+  std::string ConsumeLastError() {
+    return std::exchange(last_error_, std::string{});
   }
 
  protected:
@@ -167,7 +166,7 @@ class SinkReplyBuilder {
   std::error_code ec_;
 
   // msg and kind/type
-  std::pair<std::string, std::string> last_error_;
+  std::string last_error_;
 
   bool should_batch_ : 1;
 

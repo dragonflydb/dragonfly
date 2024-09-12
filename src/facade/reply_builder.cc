@@ -923,7 +923,7 @@ void RedisReplyBuilder2Base::SendError(std::string_view str, std::string_view ty
       type = kSyntaxErrType;
   }
   tl_facade_stats->reply_stats.err_count[type]++;
-  last_error_ = std::make_pair(str, type);
+  last_error_ = str;
 
   if (str[0] != '-')
     WritePieces("-ERR ", str, kCRLF);

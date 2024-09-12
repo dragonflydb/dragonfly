@@ -41,7 +41,6 @@ extern "C" {
 #include "server/cluster/cluster_utility.h"
 #include "server/conn_context.h"
 #include "server/error.h"
-#include "server/error_response_log.h"
 #include "server/generic_family.h"
 #include "server/hll_family.h"
 #include "server/hset_family.h"
@@ -811,6 +810,20 @@ string ConnectionLogContext(const facade::Connection* conn) {
   return absl::StrCat("(", conn->RemoteEndpointStr(), ")");
 }
 
+string FailedCommandToString(std::string_view command, facade::CmdArgList args,
+                             std::string_view reason) {
+  string result;
+  absl::StrAppend(&result, " ", command);
+
+  for (auto arg : args) {
+    absl::StrAppend(&result, " ", facade::ToSV(arg));
+  }
+
+  absl::StrAppend(&result, " failed with reason: ", reason);
+
+  return result;
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1262,10 +1275,6 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
     dfly_cntx->SendError("Internal Error");
     dfly_cntx->reply_builder()->CloseConnection();
   }
-  auto [reason, kind] = dfly_cntx->reply_builder()->ConsumeLastError();
-  if (!reason.empty()) {
-    ServerState::tlocal()->error_response_log.Add(cid->name(), args_no_cmd, reason, kind);
-  }
 
   if (!dispatching_in_multi) {
     dfly_cntx->transaction = nullptr;
@@ -1370,6 +1379,11 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
+  }
+
+  auto reason = cntx->reply_builder()->ConsumeLastError();
+  if (!reason.empty()) {
+    LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
 
   auto cid_name = cid->name();

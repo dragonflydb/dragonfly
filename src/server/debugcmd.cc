@@ -9,7 +9,6 @@ extern "C" {
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
-#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <zstd.h>
 
@@ -357,40 +356,6 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
   return info;
 };
 
-void ErrorLogs(ConnectionContext* cntx, CmdArgList args) {
-  if (args.size() > 1) {
-    cntx->SendError("Too many arguments");
-  }
-
-  auto* pool = shard_set->pool();
-  if (args.size() == 1) {  // received arguments
-    auto arg = ArgS(args, 0);
-    if (absl::EqualsIgnoreCase(arg, "FLUSH")) {
-      pool->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->error_response_log.Clear(); });
-      return cntx->SendOk();
-    }
-    return cntx->SendError("Unrecognized argument");
-  }
-
-  std::vector<std::deque<string>> per_shard_result(pool->size());
-  pool->AwaitFiberOnAll([&](unsigned id, auto*) mutable {
-    per_shard_result[id] = ServerState::tlocal()->error_response_log.GetLogs();
-  });
-
-  size_t total_size = 0;
-  for (const auto& elem : per_shard_result) {
-    total_size += elem.size();
-  }
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(total_size);
-  for (const auto& per_shard : per_shard_result) {
-    for (const auto& error : per_shard) {
-      rb->SendSimpleString(error);
-    }
-  }
-}
-
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
@@ -431,10 +396,6 @@ void DebugCmd::Run(CmdArgList args) {
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
         "OBJHIST",
         "    Prints histogram of object sizes.",
-        "ERRORS [FLUSH]",
-        "    Returns the last K errors recorded in Dragonfly. By default, k = 32.",
-        "    It is possible to clear the buffer by using [FLUSH].",
-        "must be a power of 2.",
         "STACKTRACE",
         "    Prints the stacktraces of all current fibers to the logs.",
         "SHARDS",
@@ -473,10 +434,6 @@ void DebugCmd::Run(CmdArgList args) {
     string_view key = ArgS(args, 1);
     args.remove_prefix(2);
     return Inspect(key, args);
-  }
-
-  if (subcmd == "ERRORS") {
-    return ErrorLogs(cntx_, args.subspan(1));
   }
 
   if (subcmd == "TX") {

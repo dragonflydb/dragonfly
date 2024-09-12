@@ -13,7 +13,6 @@
 #include "server/acl/acl_log.h"
 #include "server/acl/user_registry.h"
 #include "server/common.h"
-#include "server/error_response_log.h"
 #include "server/script_mgr.h"
 #include "server/slowlog.h"
 #include "util/sliding_counter.h"
@@ -284,8 +283,6 @@ class ServerState {  // public struct - to allow initialization.
 
   // Exec descriptor frequency count for this thread.
   absl::flat_hash_map<std::string, unsigned> exec_freq_count;
-
-  ErrorResponseLog error_response_log;
 
  private:
   int64_t live_transactions_ = 0;
