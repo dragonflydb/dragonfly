@@ -103,6 +103,11 @@ ABSL_FLAG(double, oom_deny_ratio, 1.1,
           "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
           "memory is above this value");
 
+ABSL_FLAG(double, rss_oom_deny_ratio, 1.1,
+          "commands with flag denyoom will return OOM when the ratio between maxmemory and rss "
+          "memory is above this value, new connections from non admin port will be rejected. To "
+          "disable set to negative value");
+
 ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
@@ -885,6 +890,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
   config_registry.RegisterMutable("oom_deny_ratio");
+  config_registry.RegisterMutable("rss_oom_deny_ratio");
   config_registry.RegisterMutable("pipeline_squash");
   config_registry.RegisterMutable("pipeline_queue_limit",
                                   [pool = &pp_](const absl::CommandLineFlag& flag) {
@@ -925,7 +931,10 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   }
 
   // Initialize shard_set with a global callback running once in a while in the shard threads.
-  shard_set->Init(shard_num, [this] { server_family_.GetDflyCmd()->BreakStalledFlowsInShard(); });
+  shard_set->Init(shard_num, [this] {
+    server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
+    server_family_.UpdateMemoryGlobalStats();
+  });
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1054,10 +1063,14 @@ optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
   if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
     uint64_t start_ns = absl::GetCurrentTimeNanos();
 
-    uint64_t used_memory = etl.GetUsedMemory(start_ns);
+    auto memory_stats = etl.GetMemoryUsage(start_ns);
     double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
-    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
-      DLOG(WARNING) << "Out of memory, used " << used_memory << " vs limit " << max_memory_limit;
+    double rss_oom_deny_ratio = GetFlag(FLAGS_rss_oom_deny_ratio);
+    if (memory_stats.used_mem > (max_memory_limit * oom_deny_ratio) ||
+        (rss_oom_deny_ratio > 0 &&
+         memory_stats.rss_mem > (max_memory_limit * rss_oom_deny_ratio))) {
+      DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
+                    << memory_stats.rss_mem << " ,limit " << max_memory_limit;
       etl.stats.oom_error_cmd_cnt++;
       return facade::ErrorReply{kOutOfMemory};
     }
