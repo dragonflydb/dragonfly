@@ -78,7 +78,8 @@ TEST_F(CmdArgParserTest, Check) {
   EXPECT_TRUE(parser.Check("TAG"));
 
   EXPECT_FALSE(parser.Check("NOT_TAG_2"));
-  EXPECT_TRUE(parser.Check("TAG_2").ExpectTail(1));
+  EXPECT_TRUE(parser.Check("TAG_2"));
+  EXPECT_EQ(parser.Next<int>(), 22);
 }
 
 TEST_F(CmdArgParserTest, NextStatement) {
@@ -95,42 +96,51 @@ TEST_F(CmdArgParserTest, NextStatement) {
 }
 
 TEST_F(CmdArgParserTest, CheckTailFail) {
-  auto parser = Make({"TAG", "11", "22", "TAG", "33"});
+  auto parser = Make({"TAG", "11", "22", "TAG", "text"});
 
-  EXPECT_TRUE(parser.Check("TAG").ExpectTail(2));
-  parser.Skip(2);
+  int first;
+  string_view second;
+  EXPECT_TRUE(parser.Check("TAG", &first, &second));
+  EXPECT_EQ(first, 11);
+  EXPECT_EQ(second, "22");
 
-  EXPECT_FALSE(parser.Check("TAG").ExpectTail(2));
-
-  auto err = parser.Error();
-  EXPECT_TRUE(err);
-  EXPECT_EQ(err->type, CmdArgParser::SHORT_OPT_TAIL);
-  EXPECT_EQ(err->index, 3);
+  EXPECT_FALSE(parser.Check("TAG", &first, &second));
+  EXPECT_TRUE(parser.Check("TAG", &first));
+  EXPECT_TRUE(parser.Error());
 }
 
-TEST_F(CmdArgParserTest, Cases) {
+TEST_F(CmdArgParserTest, Map) {
   auto parser = Make({"TWO", "NONE"});
 
-  EXPECT_EQ(int(parser.Switch("ONE", 1, "TWO", 2)), 2);
+  EXPECT_EQ(parser.MapNext("ONE", 1, "TWO", 2), 2);
 
-  EXPECT_EQ(int(parser.Switch("ONE", 1, "TWO", 2)), 0);
+  EXPECT_EQ(parser.MapNext("ONE", 1, "TWO", 2), 0);
   auto err = parser.Error();
   EXPECT_TRUE(err);
   EXPECT_EQ(err->type, CmdArgParser::INVALID_CASES);
   EXPECT_EQ(err->index, 1);
 }
 
-TEST_F(CmdArgParserTest, NextUpper) {
+TEST_F(CmdArgParserTest, TryMapNext) {
+  auto parser = Make({"TWO", "GREEN"});
+
+  EXPECT_EQ(parser.TryMapNext("ONE", 1, "TWO", 2), std::make_optional(2));
+
+  EXPECT_EQ(parser.TryMapNext("ONE", 1, "TWO", 2), std::nullopt);
+  EXPECT_FALSE(parser.HasError());
+  EXPECT_EQ(parser.TryMapNext("green", 1, "yellow", 2), std::make_optional(1));
+  EXPECT_FALSE(parser.HasError());
+}
+
+TEST_F(CmdArgParserTest, IgnoreCase) {
   auto parser = Make({"hello", "marker", "taail", "world"});
 
-  parser.ToUpper();
-  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "HELLO"sv);
+  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "hello"sv);
 
-  parser.ToUpper();
-  EXPECT_TRUE(parser.Check("MARKER"sv).ExpectTail(1).NextUpper());
+  EXPECT_TRUE(parser.Check("MARKER"sv));
   parser.Skip(1);
 
-  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "WORLD"sv);
+  EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "world"sv);
 }
 
 }  // namespace facade

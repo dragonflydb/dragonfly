@@ -190,11 +190,9 @@ void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
   auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(scripts.size());
   for (const auto& [sha, data] : scripts) {
-    rb->StartArray(data.orig_body.empty() ? 2 : 3);
+    rb->StartArray(2);
     rb->SendBulkString(sha);
     rb->SendBulkString(data.body);
-    if (!data.orig_body.empty())
-      rb->SendBulkString(data.orig_body);
   }
 }
 
@@ -230,20 +228,18 @@ void ScriptMgr::GCCmd(ConnectionContext* cntx) const {
   return cntx->SendOk();
 }
 
-// Check if script starts with shebang (#!lua). If present, look for flags parameter and truncate
-// it.
-io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_view* body) {
-  static const regex kRegex{"^\\s*?#!lua.*?flags=([^\\s\\n\\r]*).*[\\s\\r\\n]"};
+// Check if script starts with lua flags instructions (--df flags=...).
+io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_view body) {
+  static const regex kRegex{R"(^\s*?--!df flags=([^\s\n\r]*)[\s\n\r])"};
   cmatch matches;
 
-  if (!regex_search(body->data(), matches, kRegex))
+  if (!regex_search(body.data(), matches, kRegex))
     return nullopt;
 
   ScriptMgr::ScriptParams params;
   if (auto err = ScriptMgr::ScriptParams::ApplyFlags(matches.str(1), &params); err)
     return nonstd::make_unexpected(err);
 
-  *body = body->substr(matches[0].length());
   return params;
 }
 
@@ -255,7 +251,6 @@ unique_ptr<char[]> CharBufFromSV(string_view sv) {
 }
 
 io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter* interpreter) {
-  // Calculate hash before removing shebang (#!lua).
   char sha_buf[64];
   Interpreter::FuncSha1(body, sha_buf);
   string_view sha{sha_buf, std::strlen(sha_buf)};
@@ -264,9 +259,7 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
     return string{sha};
   }
 
-  string_view orig_body = body;
-
-  auto params_opt = DeduceParams(&body);
+  auto params_opt = DeduceParams(body);
   if (!params_opt)
     return params_opt.get_unexpected();
   auto params = params_opt->value_or(default_params_);
@@ -295,8 +288,6 @@ io::Result<string, GenericError> ScriptMgr::Insert(string_view body, Interpreter
 
   if (!it->second.body) {
     it->second.body = CharBufFromSV(body);
-    if (body != orig_body)
-      it->second.orig_body = CharBufFromSV(orig_body);
   }
 
   UpdateScriptCaches(sha, it->second);
@@ -310,7 +301,7 @@ optional<ScriptMgr::ScriptData> ScriptMgr::Find(std::string_view sha) const {
 
   lock_guard lk{mu_};
   if (auto it = db_.find(sha); it != db_.end() && it->second.body)
-    return ScriptData{it->second, it->second.body.get(), {}};
+    return ScriptData{it->second, it->second.body.get()};
 
   return std::nullopt;
 }
@@ -319,7 +310,7 @@ void ScriptMgr::OnScriptError(std::string_view sha, std::string_view error) {
   ++tl_facade_stats->reply_stats.script_error_count;
 
   // Log script errors at most 5 times a second.
-  LOG_EVERY_T(ERROR, 0.2) << "Error running script (call to " << sha << "): " << error;
+  LOG_EVERY_T(WARNING, 0.2) << "Error running script (call to " << sha << "): " << error;
 
   // If script has undeclared_keys and was not flaged to run in this mode we will change the
   // script flag - this will make script next run to not fail but run as global.
@@ -356,9 +347,7 @@ vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {
   res.reserve(db_.size());
   for (const auto& [sha, data] : db_) {
     string body = data.body ? string{data.body.get()} : string{};
-    string orig_body = data.orig_body ? string{data.orig_body.get()} : string{};
-    res.emplace_back(string{sha.data(), sha.size()},
-                     ScriptData{data, std::move(body), std::move(orig_body)});
+    res.emplace_back(string{sha.data(), sha.size()}, ScriptData{data, std::move(body)});
   }
 
   return res;

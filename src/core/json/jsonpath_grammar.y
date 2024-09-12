@@ -54,6 +54,8 @@ using namespace std;
   DOT  "."
   WILDCARD "*"
   DESCENT ".."
+  SINGLE_QUOTE "'"
+  DOUBLE_QUOTE "\""
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
@@ -62,6 +64,8 @@ using namespace std;
 
 %nterm <std::string> identifier
 %nterm <PathSegment> bracket_index
+%nterm <std::string> single_quoted_string
+%nterm <std::string> double_quoted_string
 
 
 %%
@@ -76,20 +80,27 @@ opt_relative_location:
 
 relative_location: DOT relative_path
         | DESCENT { driver->AddSegment(PathSegment{SegmentType::DESCENT}); } relative_path
-        | LBRACKET bracket_index RBRACKET { driver->AddSegment($2); } opt_relative_location
+        | bracket_expr
 
 relative_path: identifier { driver->AddIdentifier($1); } opt_relative_location
         | WILDCARD { driver->AddWildcard(); } opt_relative_location
-
+        | bracket_expr
 
 identifier: UNQ_STR
-         // | single_quoted_string | double_quoted_string
 
-bracket_index: WILDCARD { $$ = PathSegment{SegmentType::INDEX, IndexExpr::All()}; }
+bracket_expr: LBRACKET bracket_index RBRACKET { driver->AddSegment($2); } opt_relative_location
+
+bracket_index: single_quoted_string { $$ = PathSegment(SegmentType::IDENTIFIER, $1); }
+              | double_quoted_string { $$ = PathSegment(SegmentType::IDENTIFIER, $1); }
+              | WILDCARD { $$ = PathSegment{SegmentType::INDEX, IndexExpr::All()}; }
               | INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr($1, $1)); }
               | INT COLON INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr::HalfOpen($1, $3)); }
               | INT COLON { $$ = PathSegment(SegmentType::INDEX, IndexExpr($1, INT_MAX)); }
               | COLON INT { $$ = PathSegment(SegmentType::INDEX, IndexExpr::HalfOpen(0, $2)); }
+
+single_quoted_string: SINGLE_QUOTE UNQ_STR SINGLE_QUOTE { $$ = $2; }
+
+double_quoted_string: DOUBLE_QUOTE UNQ_STR DOUBLE_QUOTE { $$ = $2; }
 
 function_expr: UNQ_STR { driver->AddFunction($1); } LPARENT ROOT relative_location RPARENT
 %%

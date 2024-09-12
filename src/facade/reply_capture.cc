@@ -3,6 +3,7 @@
 //
 #include "facade/reply_capture.h"
 
+#include "absl/types/span.h"
 #include "base/logging.h"
 #include "reply_capture.h"
 
@@ -81,10 +82,11 @@ void CapturingReplyBuilder::SendBulkString(std::string_view str) {
   Capture(BulkString{string{str}});
 }
 
-void CapturingReplyBuilder::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+void CapturingReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                                             bool with_scores) {
   SKIP_LESS(ReplyMode::FULL);
-  Capture(ScoredArray{arr, with_scores});
+  std::vector<std::pair<std::string, double>> values(arr.begin(), arr.end());
+  Capture(ScoredArray{std::move(values), with_scores});
 }
 
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
@@ -219,7 +221,8 @@ void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {
   current_ = monostate{};
 }
 
-optional<CapturingReplyBuilder::ErrorRef> CapturingReplyBuilder::GetError(const Payload& pl) {
+optional<CapturingReplyBuilder::ErrorRef> CapturingReplyBuilder::TryExtractError(
+    const Payload& pl) {
   if (auto* err = get_if<Error>(&pl); err != nullptr) {
     return ErrorRef{err->first, err->second};
   }

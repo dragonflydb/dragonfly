@@ -8,6 +8,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
@@ -206,7 +207,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiry(cntx_.db_index, key);
     }
-    // Safe we already acquired std::unique_lock lk(db_slice_->GetSerializationMutex());
+    // Safe we already acquired util::fb2::LockGuard lk(db_slice_->GetSerializationMutex());
     // on the flows that call this function
     db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
 
@@ -481,7 +482,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   if (caching_mode_ && IsValid(res.it)) {
     if (!change_cb_.empty()) {
       FetchedItemsRestorer fetched_restorer(&fetched_items_);
-      std::unique_lock lk(local_mu_);
+      util::fb2::LockGuard lk(local_mu_);
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
@@ -574,7 +575,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
 
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
@@ -690,7 +691,7 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 }
 
 bool DbSlice::Del(Context cntx, Iterator it) {
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
 
   if (!IsValid(it)) {
     return false;
@@ -789,6 +790,10 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
   DbTableArray flush_db_arr(db_arr_.size());
 
   for (DbIndex index : indexes) {
+    if (!index) {
+      owner_->search_indices()->DropAllIndices();
+    }
+
     table_memory_ -= db_arr_[index]->table_memory();
     entries_count_ -= db_arr_[index]->prime.size();
 
@@ -814,7 +819,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
   // We should not flush if serialization of a big value is in progress because this
   // could lead to UB or assertion failures (while DashTable::Traverse is iterating over
   // a logical bucket).
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
   // clear client tracking map.
   client_tracking_map_.clear();
 
@@ -836,7 +841,7 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
   uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
   auto& db = *db_arr_[db_ind];
   size_t table_before = db.expire.mem_usage();
@@ -846,7 +851,7 @@ void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
   if (main_it->second.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
@@ -912,12 +917,17 @@ int64_t DbSlice::ExpireParams::Cap(int64_t value, TimeUnit unit) {
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool cap) const {
   if (persist)
     return {0, 0};
+
+  // return a negative absolute time if we overflow.
+  if (unit == TimeUnit::SEC && value > INT64_MAX / 1000) {
+    return {0, -1};
+  }
+
   int64_t msec = (unit == TimeUnit::SEC) ? value * 1000 : value;
-  int64_t now_msec = now_ms;
-  int64_t rel_msec = absolute ? msec - now_msec : msec;
+  int64_t rel_msec = absolute ? msec - now_ms : msec;
   if (cap)
     rel_msec = Cap(rel_msec, TimeUnit::MSEC);
-  return make_pair(rel_msec, now_msec + rel_msec);
+  return make_pair(rel_msec, now_ms + rel_msec);
 }
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
@@ -931,8 +941,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return kPersistValue;
   }
 
-  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms);
-  if (rel_msec > kMaxExpireDeadlineMs) {
+  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms, false);
+  if (abs_msec < 0 || rel_msec > kMaxExpireDeadlineMs) {
     return OpStatus::OUT_OF_RANGE;
   }
 
@@ -1069,7 +1079,7 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
   CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
@@ -1205,7 +1215,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
   auto it = find_if(change_cb_.begin(), change_cb_.end(),
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
@@ -1363,13 +1373,13 @@ void DbSlice::CreateDb(DbIndex db_ind) {
 void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
                                  ConnectionState::ExecInfo* exec_info) {
   // Because we might insert while another fiber is preempted
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
   db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
 }
 
 void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
   // Because we might remove while another fiber is preempted and miss a notification
-  std::unique_lock lk(local_mu_);
+  util::fb2::LockGuard lk(local_mu_);
   for (const auto& [db_indx, key] : exec_info->watched_keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {

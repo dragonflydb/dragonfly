@@ -107,7 +107,7 @@ async def test_management(async_client: aioredis.Redis):
         VectorField(
             "f5",
             algorithm="HNSW",
-            attributes={"TYPE": "FLOAT32", "DIM": 1, "DISTANCE_METRIC": "L2", "INITICAL_CAP": 100},
+            attributes={"TYPE": "FLOAT32", "DIM": 1, "DISTANCE_METRIC": "L2", "INITIAL_CAP": 100},
         ),
     ]
 
@@ -239,7 +239,7 @@ async def test_knn(async_client: aioredis.Redis, index_type, algo_type):
             "TYPE": "FLOAT32",
             "DIM": 1,
             "DISTANCE_METRIC": "L2",
-            "INITICAL_CAP": 100,
+            "INITIAL_CAP": 100,
         },
     )
 
@@ -339,7 +339,7 @@ async def test_knn_score_return(async_client: aioredis.Redis):
         attributes={
             "DIM": 1,
             "DISTANCE_METRIC": "L2",
-            "INITICAL_CAP": 100,
+            "INITIAL_CAP": 100,
         },
     )
 
@@ -381,7 +381,7 @@ async def test_index_persistence(df_server):
         VectorField(
             "pos",
             algorithm="HNSW",
-            attributes={"TYPE": "FLOAT32", "DIM": 1, "DISTANCE_METRIC": "L2", "INITICAL_CAP": 100},
+            attributes={"TYPE": "FLOAT32", "DIM": 1, "DISTANCE_METRIC": "L2", "INITIAL_CAP": 100},
         ),
     ]
 

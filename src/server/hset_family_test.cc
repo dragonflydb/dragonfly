@@ -401,4 +401,15 @@ TEST_F(HSetFamilyTest, RandomField1NotExpired) {
   EXPECT_THAT(Run({"HRANDFIELD", "key"}), "keep");
 }
 
+TEST_F(HSetFamilyTest, EmptyHashBug) {
+  EXPECT_THAT(Run({"HSET", "foo", "a_field", "a_value"}), IntArg(1));
+  EXPECT_THAT(Run({"HSETEX", "foo", "1", "b_field", "b_value"}), IntArg(1));
+  EXPECT_THAT(Run({"HDEL", "foo", "a_field"}), IntArg(1));
+
+  AdvanceTime(4000);
+
+  EXPECT_THAT(Run({"HGETALL", "foo"}), RespArray(ElementsAre()));
+  EXPECT_THAT(Run({"EXISTS", "foo"}), IntArg(0));
+}
+
 }  // namespace dfly

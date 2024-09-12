@@ -35,6 +35,8 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
+#include "server/cluster/cluster_defs.h"
+#include "server/cluster/cluster_family.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
@@ -1898,20 +1900,28 @@ io::Result<uint8_t> RdbLoaderBase::FetchType() {
 struct RdbLoader::ObjSettings {
   long long now;           // current epoch time in ms.
   int64_t expiretime = 0;  // expire epoch time in ms
+  uint32_t mc_flags = 0;
 
   bool has_expired = false;
 
   bool is_sticky = false;
+  bool has_mc_flags;
 
   void Reset() {
     expiretime = 0;
     has_expired = false;
     is_sticky = false;
+    has_mc_flags = false;
   }
 
   void SetExpire(int64_t val) {
     expiretime = val;
     has_expired = (val <= now);
+  }
+
+  void SetMCFlags(uint32_t flags) {
+    has_mc_flags = true;
+    mc_flags = flags;
   }
 
   ObjSettings() = default;
@@ -2010,6 +2020,10 @@ error_code RdbLoader::Load(io::Source* src) {
       uint32_t mask;
       SET_OR_RETURN(FetchInt<uint32_t>(), mask);
       settings.is_sticky = mask & DF_MASK_FLAG_STICKY;
+      settings.has_mc_flags = mask & DF_MASK_FLAG_MC_FLAGS;
+      if (settings.has_mc_flags) {
+        SET_OR_RETURN(FetchInt<uint32_t>(), settings.mc_flags);
+      }
       continue; /* Read next opcode. */
     }
 
@@ -2463,9 +2477,20 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   for (const auto* item : ib) {
     PrimeValue pv;
     if (ec_ = FromOpaque(item->val, &pv); ec_) {
+      if ((*ec_).value() == errc::empty_key) {
+        LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
+                   << item->val.rdb_type;
+        continue;
+      }
       LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
       stop_early_ = true;
       break;
+    }
+    // We need this extra check because we don't return empty_key
+    if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+      LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
+                 << item->val.rdb_type;
+      continue;
     }
 
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
@@ -2481,7 +2506,12 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
     auto& res = *op_res;
     res.it->first.SetSticky(item->is_sticky);
-    if (!res.is_new) {
+    if (item->has_mc_flags) {
+      res.it->second.SetFlag(true);
+      db_slice.SetMCFlag(db_cntx.db_index, res.it->first.AsRef(), item->mc_flags);
+    }
+
+    if (!override_existing_keys_ && !res.is_new) {
       LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
     }
 
@@ -2520,6 +2550,13 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     return ec;
   }
 
+  if (!load_unowned_slots_ && cluster::IsClusterEnabled()) {
+    const cluster::ClusterConfig* cluster_config = cluster::ClusterFamily::cluster_config();
+    if (cluster_config != nullptr && !cluster_config->IsMySlot(item->key)) {
+      return kOk;  // Ignoring item
+    }
+  }
+
   /* Check if the key already expired. This function is used when loading
    * an RDB file from disk, either at startup, or when an RDB was
    * received from the master. In the latter case, the master is
@@ -2535,6 +2572,8 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   }
 
   item->is_sticky = settings->is_sticky;
+  item->has_mc_flags = settings->has_mc_flags;
+  item->mc_flags = settings->mc_flags;
 
   ShardId sid = Shard(item->key, shard_set->size());
   item->expire_ms = settings->expiretime;
@@ -2597,20 +2636,9 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   service_->DispatchCommand(absl::MakeSpan(arg_vec), &cntx);
 
   auto response = crb.Take();
-  if (auto err = facade::CapturingReplyBuilder::GetError(response); err) {
+  if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
     LOG(ERROR) << "Bad index definition: " << def << " " << err->first;
   }
-}
-
-void RdbLoader::PerformPreLoad(Service* service) {
-  const CommandId* cmd = service->FindCmd("FT.DROPINDEX");
-  if (cmd == nullptr)
-    return;  // MacOS
-
-  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-    for (const auto& name : es->search_indices()->GetIndexNames())
-      es->search_indices()->DropIndex(name);
-  });
 }
 
 void RdbLoader::PerformPostLoad(Service* service) {

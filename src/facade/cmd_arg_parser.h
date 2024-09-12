@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
 #include <optional>
@@ -17,42 +18,6 @@ namespace facade {
 // Utility class for easily parsing command options from argument lists.
 struct CmdArgParser {
   enum ErrorType { OUT_OF_BOUNDS, SHORT_OPT_TAIL, INVALID_INT, INVALID_CASES, INVALID_NEXT };
-
-  struct CheckProxy {
-    explicit operator bool() const;
-
-    // Expect the tag to be followed by a number of arguments.
-    // Reports an error if the tag is matched but the condition is not met.
-    CheckProxy& ExpectTail(size_t tail) {
-      expect_tail_ = tail;
-      return *this;
-    }
-
-    // Call ToUpper on the next value after the flag and its expected tail.
-    CheckProxy& NextUpper() {
-      next_upper_ = true;
-      return *this;
-    }
-
-    CheckProxy& IgnoreCase() {
-      ignore_case_ = true;
-      return *this;
-    }
-
-   private:
-    friend struct CmdArgParser;
-
-    CheckProxy(CmdArgParser* parser, std::string_view tag, size_t idx)
-        : parser_{parser}, tag_{tag}, idx_{idx} {
-    }
-
-    CmdArgParser* parser_;
-    std::string_view tag_;
-    size_t idx_;
-    size_t expect_tail_ = 0;
-    bool next_upper_ = false;
-    bool ignore_case_ = false;
-  };
 
   struct ErrorInfo {
     ErrorType type;
@@ -77,6 +42,7 @@ struct CmdArgParser {
   template <class T = std::string_view, class... Ts> auto Next() {
     if (cur_i_ + sizeof...(Ts) >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
+      return std::conditional_t<sizeof...(Ts) == 0, T, std::tuple<T, Ts...>>();
     }
 
     if constexpr (sizeof...(Ts) == 0) {
@@ -99,12 +65,15 @@ struct CmdArgParser {
   void ExpectTag(std::string_view tag);
 
   // Consume next value
-  template <class... Cases> auto Switch(Cases&&... cases) {
-    if (cur_i_ >= args_.size())
+  template <class... Cases> auto MapNext(Cases&&... cases) {
+    if (cur_i_ >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
+      return typename decltype(MapImpl(std::string_view(),
+                                       std::forward<Cases>(cases)...))::value_type{};
+    }
 
     auto idx = cur_i_++;
-    auto res = SwitchImpl(SafeSV(idx), std::forward<Cases>(cases)...);
+    auto res = MapImpl(SafeSV(idx), std::forward<Cases>(cases)...);
     if (!res) {
       Report(INVALID_CASES, idx);
       return typename decltype(res)::value_type{};
@@ -112,14 +81,42 @@ struct CmdArgParser {
     return *res;
   }
 
-  // Check if the next value if equal to a specific tag. If equal, its consumed.
-  CheckProxy Check(std::string_view tag) {
-    return CheckProxy(this, tag, cur_i_);
+  // Consume next value if can map it and return mapped result or return nullopt
+  template <class... Cases>
+  auto TryMapNext(Cases&&... cases)
+      -> std::optional<std::tuple_element_t<1, std::tuple<Cases...>>> {
+    if (cur_i_ >= args_.size()) {
+      return std::nullopt;
+    }
+
+    auto res = MapImpl(SafeSV(cur_i_), std::forward<Cases>(cases)...);
+    cur_i_ = res ? cur_i_ + 1 : cur_i_;
+    return res;
+  }
+
+  // Check if the next value is equal to a specific tag. If equal, its consumed.
+  template <class... Args> bool Check(std::string_view tag, Args*... args) {
+    if (cur_i_ + sizeof...(Args) >= args_.size())
+      return false;
+
+    std::string_view arg = SafeSV(cur_i_);
+    if (!absl::EqualsIgnoreCase(arg, tag))
+      return false;
+
+    ((*args = Convert<Args>(++cur_i_)), ...);
+
+    ++cur_i_;
+
+    return true;
   }
 
   // Skip specified number of arguments
   CmdArgParser& Skip(size_t n) {
-    cur_i_ += n;
+    if (cur_i_ + n > args_.size()) {
+      Report(OUT_OF_BOUNDS, cur_i_);
+    } else {
+      cur_i_ += n;
+    }
     return *this;
   }
 
@@ -155,13 +152,13 @@ struct CmdArgParser {
 
  private:
   template <class T, class... Cases>
-  std::optional<std::decay_t<T>> SwitchImpl(std::string_view arg, std::string_view tag, T&& value,
-                                            Cases&&... cases) {
-    if (arg == tag)
+  std::optional<std::decay_t<T>> MapImpl(std::string_view arg, std::string_view tag, T&& value,
+                                         Cases&&... cases) {
+    if (absl::EqualsIgnoreCase(arg, tag))
       return std::forward<T>(value);
 
     if constexpr (sizeof...(cases) > 0)
-      return SwitchImpl(arg, cases...);
+      return MapImpl(arg, cases...);
 
     return std::nullopt;
   }
@@ -183,14 +180,17 @@ struct CmdArgParser {
   }
 
   std::string_view SafeSV(size_t i) const {
+    using namespace std::literals::string_view_literals;
     if (i >= args_.size())
-      return "";
-    return ToSV(args_[i]);
+      return ""sv;
+    return args_[i].empty() ? ""sv : ToSV(args_[i]);
   }
 
   void Report(ErrorType type, size_t idx) {
-    if (!error_)
+    if (!error_) {
       error_ = {type, idx};
+      cur_i_ = args_.size();
+    }
   }
 
   template <typename T> T Num(size_t idx) {

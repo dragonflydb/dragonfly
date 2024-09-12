@@ -5,6 +5,7 @@
 #include "server/main_service.h"
 
 #include "facade/resp_expr.h"
+#include "util/fibers/synchronization.h"
 
 #ifdef __FreeBSD__
 #include <pthread_np.h>
@@ -67,8 +68,6 @@ using facade::ErrorReply;
 ABSL_FLAG(int32_t, port, 6379,
           "Redis port. 0 disables the port, -1 will bind on a random available port.");
 
-ABSL_FLAG(std::string, announce_ip, "",
-          "IP address that Dragonfly announces to cluster clients and replication master");
 ABSL_FLAG(uint16_t, announce_port, 0,
           "Port that Dragonfly announces to cluster clients and replication master");
 
@@ -99,9 +98,15 @@ ABSL_FLAG(dfly::MemoryBytesFlag, maxmemory, dfly::MemoryBytesFlag{},
           "Limit on maximum-memory that is used by the database. "
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
+
 ABSL_FLAG(double, oom_deny_ratio, 1.1,
           "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
           "memory is above this value");
+
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
+          "Maximum size of a value that may be serialized at once during snapshotting or full "
+          "sync. Values bigger than this threshold will be serialized using streaming "
+          "serialization. 0 - to disable streaming mode");
 
 namespace dfly {
 
@@ -291,7 +296,7 @@ class InterpreterReplier : public RedisReplyBuilder {
   void SendBulkString(std::string_view str) final;
 
   void StartCollection(unsigned len, CollectionType type) final;
-  void SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                        bool with_scores) final;
 
  private:
@@ -324,7 +329,7 @@ class EvalSerializer : public ObjectExplorer {
     if (rb_->IsResp3() || !absl::GetFlag(FLAGS_lua_resp2_legacy_float)) {
       rb_->SendDouble(d);
     } else {
-      long val = static_cast<long>(floor(d));
+      long val = d >= 0 ? static_cast<long>(floor(d)) : static_cast<long>(ceil(d));
       rb_->SendLong(val);
     }
   }
@@ -466,7 +471,7 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
   }
 }
 
-void InterpreterReplier::SendScoredArray(const std::vector<std::pair<std::string, double>>& arr,
+void InterpreterReplier::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
                                          bool with_scores) {
   if (with_scores) {
     if (IsResp3()) {
@@ -748,11 +753,9 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
 
 string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned num_uniq_shards) {
   string result;
-  result.reserve(stored_cmds.size() * 10);
-  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "\n");
-  for (const auto& scmd : stored_cmds) {
-    absl::StrAppend(&result, "  ", scmd.Cid()->name(), " ", scmd.NumArgs(), "\n");
-  }
+  size_t max_len = std::min<size_t>(20u, stored_cmds.size());
+  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "/", max_len);
+
   return result;
 }
 
@@ -823,7 +826,7 @@ Service::Service(ProactorPool* pp)
     LOG(INFO) << "Received " << strsignal(signal);
     util::fb2::Mutex m;
     pp_.AwaitFiberOnAll([&m](unsigned index, util::ProactorBase* base) {
-      std::unique_lock lk(m);
+      util::fb2::LockGuard lk(m);
       util::fb2::detail::FiberInterface::PrintAllFiberStackTraces();
     });
   });
@@ -859,18 +862,31 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     return true;
   });
 
+  config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
   config_registry.Register("dir");
+  config_registry.RegisterMutable("enable_heartbeat_eviction");
   config_registry.RegisterMutable("masterauth");
   config_registry.RegisterMutable("masteruser");
-  config_registry.RegisterMutable("tcp_keepalive");
-  config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
-  config_registry.RegisterMutable("enable_heartbeat_eviction");
-  config_registry.RegisterMutable("dbfilename");
+  config_registry.RegisterMutable("oom_deny_ratio");
+  config_registry.RegisterMutable("pipeline_squash");
+  config_registry.RegisterMutable("pipeline_queue_limit",
+                                  [pool = &pp_](const absl::CommandLineFlag& flag) {
+                                    auto res = flag.TryGet<uint32_t>();
+                                    if (res.has_value()) {
+                                      pool->AwaitBrief([val = *res](unsigned, auto*) {
+                                        facade::Connection::SetMaxQueueLenThreadLocal(val);
+                                      });
+                                    }
+                                    return res.has_value();
+                                  });
+  config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("table_growth_margin");
+  config_registry.RegisterMutable("tcp_keepalive");
 
+  serialization_max_chunk_size = GetFlag(FLAGS_serialization_max_chunk_size);
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
     LOG_IF(WARNING, shard_num > pp_.size())
@@ -1475,7 +1491,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   char cmd_name[16];
   char ttl[16];
   char store_opt[32] = {0};
-  char ttl_op[] = "EX";
+  char ttl_op[] = "EXAT";
 
   MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
   mc_builder->SetNoreply(cmd.no_reply);
@@ -1546,9 +1562,15 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       args.emplace_back(store_opt, strlen(store_opt));
     }
 
-    if (cmd.expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
-      char* next = absl::numbers_internal::FastIntToBuffer(cmd.expire_ts, ttl);
-      args.emplace_back(ttl_op, 2);
+    // if expire_ts is greater than month it's a unix timestamp
+    // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
+    constexpr uint32_t kExpireLimit = 60 * 60 * 24 * 30;
+    const uint64_t expire_ts = cmd.expire_ts && cmd.expire_ts <= kExpireLimit
+                                   ? cmd.expire_ts + time(nullptr)
+                                   : cmd.expire_ts;
+    if (expire_ts && memcmp(cmd_name, "SET", 3) == 0) {
+      char* next = absl::numbers_internal::FastIntToBuffer(expire_ts, ttl);
+      args.emplace_back(ttl_op, 4);
       args.emplace_back(ttl, next - ttl);
     }
     dfly_cntx->conn_state.memcache_flag = cmd.flags;
@@ -1720,7 +1742,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   info->async_cmds.clear();
 
   auto reply = crb.Take();
-  return CapturingReplyBuilder::GetError(reply) ? make_optional(std::move(reply)) : nullopt;
+  return CapturingReplyBuilder::TryExtractError(reply) ? make_optional(std::move(reply)) : nullopt;
 }
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
@@ -2023,7 +2045,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     result = interpreter->RunFunction(eval_args.sha, &error);
 
     if (auto err = FlushEvalAsyncCmds(cntx, true); err) {
-      auto err_ref = CapturingReplyBuilder::GetError(*err);
+      auto err_ref = CapturingReplyBuilder::TryExtractError(*err);
       result = Interpreter::RUN_ERR;
       error = absl::StrCat(err_ref->first);
     }
@@ -2062,8 +2084,8 @@ void Service::Discard(CmdArgList args, ConnectionContext* cntx) {
 }
 
 // Return true if non of the connections watched keys expired.
-bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& registry) {
-  static char EXISTS[] = "EXISTS";
+bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandId* exists_cid,
+                           const CommandId* exec_cid) {
   auto& exec_info = cntx->conn_state.exec_info;
 
   CmdArgVec str_list(exec_info.watched_keys.size());
@@ -2081,10 +2103,13 @@ bool CheckWatchedKeyExpiry(ConnectionContext* cntx, const CommandRegistry& regis
     return OpStatus::OK;
   };
 
-  cntx->transaction->MultiSwitchCmd(registry.Find(EXISTS));
+  cntx->transaction->MultiSwitchCmd(exists_cid);
   cntx->transaction->InitByArgs(cntx->ns, cntx->conn_state.db_index, CmdArgList{str_list});
   OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, status);
+
+  // Reset cid to EXEC as it was before
+  cntx->transaction->MultiSwitchCmd(exec_cid);
 
   // The comparison can still be true even if a key expired due to another one being created.
   // So we have to check the watched_dirty flag, which is set if a key expired.
@@ -2160,6 +2185,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   // Clean the context no matter the outcome
   absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
 
+  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
+    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
+  }
+
   // Check basic invariants
   if (!exec_info.IsCollecting()) {
     return cntx->SendError("EXEC without MULTI");
@@ -2167,10 +2196,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return cntx->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
-  }
-
-  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
-    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
@@ -2198,7 +2223,8 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   // EXEC should not run if any of the watched keys expired.
-  if (!exec_info.watched_keys.empty() && !CheckWatchedKeyExpiry(cntx, registry_)) {
+  if (!exec_info.watched_keys.empty() &&
+      !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
     cntx->transaction->UnlockMulti();
     return rb->SendNull();
   }
@@ -2459,7 +2485,7 @@ VarzValue::Map Service::GetVarzStats() {
 }
 
 GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
-  lock_guard lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   if (global_state_ != from) {
     return global_state_;
   }
@@ -2472,28 +2498,36 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
 }
 
 void Service::RequestLoadingState() {
-  unique_lock lk(mu_);
-  ++loading_state_counter_;
-  if (global_state_ != GlobalState::LOADING) {
-    DCHECK_EQ(global_state_, GlobalState::ACTIVE);
-    lk.unlock();
+  bool switch_state = false;
+  {
+    util::fb2::LockGuard lk(mu_);
+    ++loading_state_counter_;
+    if (global_state_ != GlobalState::LOADING) {
+      DCHECK_EQ(global_state_, GlobalState::ACTIVE);
+      switch_state = true;
+    }
+  }
+  if (switch_state) {
     SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   }
 }
 
 void Service::RemoveLoadingState() {
-  unique_lock lk(mu_);
-  DCHECK_EQ(global_state_, GlobalState::LOADING);
-  DCHECK_GT(loading_state_counter_, 0u);
-  --loading_state_counter_;
-  if (loading_state_counter_ == 0) {
-    lk.unlock();
+  bool switch_state = false;
+  {
+    util::fb2::LockGuard lk(mu_);
+    DCHECK_EQ(global_state_, GlobalState::LOADING);
+    DCHECK_GT(loading_state_counter_, 0u);
+    --loading_state_counter_;
+    switch_state = loading_state_counter_ == 0;
+  }
+  if (switch_state) {
     SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
   }
 }
 
 GlobalState Service::GetGlobalState() const {
-  lock_guard lk(mu_);
+  util::fb2::LockGuard lk(mu_);
   return global_state_;
 }
 

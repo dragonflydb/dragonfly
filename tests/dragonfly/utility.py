@@ -14,6 +14,7 @@ import json
 import subprocess
 import pytest
 import os
+from typing import Iterable, Union
 from enum import Enum
 
 
@@ -91,22 +92,33 @@ async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
         yield x
 
 
-async def wait_available_async(client: aioredis.Redis, timeout=120):
+# wait for a process becomes "responsive":
+# for a master - waits that it finishes loading a snapshot if it's budy doing so,
+# and for replica it waits until it finishes its full sync stage and reaches the stable sync state.
+async def wait_available_async(
+    clients: Union[aioredis.Redis, Iterable[aioredis.Redis]], timeout=120
+):
+    if not isinstance(clients, aioredis.Redis):
+        # Syntactic sugar to seamlessly handle an array of clients.
+        return await asyncio.gather(*(wait_available_async(c) for c in clients))
+
     """Block until instance exits loading phase"""
-    its = 0
+    # First we make sure that ping passes
     start = time.time()
     while (time.time() - start) < timeout:
         try:
-            await client.ping()
-            return
+            await clients.ping()
+            break
         except aioredis.BusyLoadingError as e:
             assert "Dragonfly is loading the dataset in memory" in str(e)
+    timeout -= time.time() - start
+    if timeout <= 0:
+        raise RuntimeError("Timed out!")
 
-        # Print W to indicate test is waiting for replica
-        print("W", end="", flush=True)
-        await asyncio.sleep(0.01)
-        its += 1
-    raise RuntimeError("Client did not become available in time!")
+    # Secondly for replicas, we make sure they reached stable state replicaton
+    async for info, breaker in info_tick_timer(clients, "REPLICATION", timeout=timeout):
+        with breaker:
+            assert info["role"] == "master" or "slave_repl_offset" in info, info
 
 
 class SizeChange(Enum):

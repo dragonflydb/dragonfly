@@ -28,6 +28,7 @@
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/generic_family.h"
 #include "server/journal/journal.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -42,6 +43,8 @@ using namespace std;
 using namespace facade;
 
 using CI = CommandId;
+
+enum class ExpT { EX, PX, EXAT, PXAT };
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
 
@@ -82,6 +85,9 @@ template <typename T> T GetResult(TResult<T> v) {
 OpResult<TResult<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  if (it_res == OpStatus::KEY_NOTFOUND) {
+    return TResult<size_t>{0u};
+  }
   RETURN_ON_BAD_STATUS(it_res);
 
   // For external entries we have to enqueue reads because modify operations like append could be
@@ -153,6 +159,9 @@ OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t
 
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
+  if (it_res == OpStatus::KEY_NOTFOUND) {
+    return StringValue(string{});
+  }
   RETURN_ON_BAD_STATUS(it_res);
 
   if (const CompactObj& co = it_res.value()->second; co.IsExternal()) {
@@ -712,7 +721,7 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
     cmds.push_back(absl::StrCat(params.memcache_flags));
   }
 
-  // Skip NX/XX because SET operation was exectued.
+  // Skip NX/XX because SET operation was executed.
   // Skip GET, because its not important on replica.
 
   dfly::RecordJournal(op_args_, "SET", ArgSlice{cmds});
@@ -751,9 +760,10 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   facade::SinkReplyBuilder* builder = cntx->reply_builder();
 
   while (parser.HasNext()) {
-    parser.ToUpper();
-    if (base::_in(parser.Peek(), {"EX", "PX", "EXAT", "PXAT"})) {
-      auto [opt, int_arg] = parser.Next<string_view, int64_t>();
+    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
+                                          "PXAT", ExpT::PXAT);
+        exp_type) {
+      auto int_arg = parser.Next<int64_t>();
 
       if (auto err = parser.Error(); err) {
         return cntx->SendError(err->MakeReply());
@@ -772,19 +782,30 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
       DbSlice::ExpireParams expiry{
           .value = int_arg,
-          .unit = (opt[0] == 'P') ? TimeUnit::MSEC : TimeUnit::SEC,
-          .absolute = absl::EndsWith(opt, "AT"),
+          .unit = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC,
+          .absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT,
       };
 
-      // Redis reports just OK in this case
-      if (expiry.IsExpired(GetCurrentTimeMs()))
-        return builder->SendStored();
+      int64_t now_ms = GetCurrentTimeMs();
+      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+      if (abs_ms < 0)
+        return cntx->SendError(InvalidExpireTime("set"));
 
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(GetCurrentTimeMs(), true);
-    } else if (parser.Check("_MCFLAGS").ExpectTail(1)) {
-      sparams.memcache_flags = parser.Next<uint16_t>();
+      // Remove existed key if the key is expired already
+      if (rel_ms < 0) {
+        cntx->transaction->ScheduleSingleHop([key](const Transaction* tx, EngineShard* es) {
+          ShardArgs args = tx->GetShardArgs(es->shard_id());
+          GenericFamily::OpDel(tx->GetOpArgs(es), args);
+          return OpStatus::OK;
+        });
+        return builder->SendStored();
+      }
+
+      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
+    } else if (parser.Check("_MCFLAGS")) {
+      sparams.memcache_flags = parser.Next<uint32_t>();
     } else {
-      uint16_t flag = parser.Switch(  //
+      uint16_t flag = parser.MapNext(  //
           "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
           "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
       sparams.flags |= flag;
@@ -951,21 +972,29 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
-
-  while (parser.ToUpper().HasNext()) {
-    if (base::_in(parser.Peek(), {"EX", "PX", "EXAT", "PXAT"})) {
-      auto [ex, int_arg] = parser.Next<string_view, int64_t>();
+  bool defined = false;
+  while (parser.HasNext()) {
+    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
+                                          "PXAT", ExpT::PXAT);
+        exp_type) {
+      auto int_arg = parser.Next<int64_t>();
       if (auto err = parser.Error(); err) {
         return cntx->SendError(err->MakeReply());
+      }
+
+      if (defined) {
+        return cntx->SendError(kSyntaxErr, kSyntaxErrType);
       }
 
       if (int_arg <= 0) {
         return cntx->SendError(InvalidExpireTime("getex"));
       }
 
-      exp_params.absolute = base::_in(ex, {"EXAT", "PXAT"});
+      exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
       exp_params.value = int_arg;
-      exp_params.unit = ex[0] == 'P' ? TimeUnit::MSEC : TimeUnit::SEC;
+      exp_params.unit =
+          *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC;
+      defined = true;
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;
     } else {
@@ -993,7 +1022,7 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
       } else {
-        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms);
+        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
         auto abs_time_str = absl::StrCat(abs_time);
         RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
       }
@@ -1105,17 +1134,27 @@ void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext
   int64_t unit_vals;
 
   if (!absl::SimpleAtoi(ex, &unit_vals)) {
-    return cntx->SendError(kInvalidIntErr);
+    return cntx->SendError(kInvalidIntErr, kSyntaxErrType);
   }
 
   if (unit_vals < 1) {
     return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
   }
 
+  DbSlice::ExpireParams expiry{
+      .value = unit_vals,
+      .unit = seconds ? TimeUnit::SEC : TimeUnit::MSEC,
+      .absolute = false,
+  };
+
+  int64_t now_ms = GetCurrentTimeMs();
+  auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+  if (abs_ms < 0)
+    return cntx->SendError(InvalidExpireTime("set"));
+
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-  sparams.expire_after_ms =
-      DbSlice::ExpireParams::Cap(unit_vals * (seconds ? 1000 : 1), TimeUnit::MSEC);
+  sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
 
   cntx->SendError(SetGeneric(cntx, sparams, key, value));
 }

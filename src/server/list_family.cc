@@ -100,8 +100,7 @@ string ListPop(ListDir dir, quicklist* ql) {
 }
 
 ListDir ParseDir(facade::CmdArgParser* parser) {
-  parser->ToUpper();
-  return parser->Switch("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
+  return parser->MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 }
 
 string_view DirToSv(ListDir dir) {
@@ -256,8 +255,9 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
 
   if (skip_notexist) {
     auto tmp_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_LIST);
-    if (!tmp_res)
+    if (tmp_res == OpStatus::KEY_NOTFOUND)
       return 0;  // Redis returns 0 for nonexisting keys for the *PUSHX actions.
+    RETURN_ON_BAD_STATUS(tmp_res);
     res = std::move(*tmp_res);
   } else {
     auto op_res = op_args.GetDbSlice().AddOrFind(op_args.db_cntx, key);
@@ -314,6 +314,9 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
     return it_res.status();
+
+  if (count == 0)
+    return StringVec{};
 
   auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
@@ -443,8 +446,10 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   return str;
 }
 
-OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
-                                 std::string_view element, int rank, int count, int max_len) {
+OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_view element,
+                                 int rank, int count, int max_len) {
+  DCHECK(key.data() && element.data());
+
   auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res.ok())
     return it_res.status();
@@ -488,6 +493,8 @@ OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, std::string_view key,
 
 OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot, string_view elem,
                        InsertParam insert_param) {
+  DCHECK(key.data() && pivot.data() && elem.data());
+
   auto& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res)
@@ -898,19 +905,19 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
   uint32_t max_len = 0;
   bool skip_count = true;
 
-  while (parser.ToUpper().HasNext()) {
-    if (parser.Check("RANK").ExpectTail(1)) {
+  while (parser.HasNext()) {
+    if (parser.Check("RANK")) {
       rank = parser.Next<int>();
       continue;
     }
 
-    if (parser.Check("COUNT").ExpectTail(1)) {
+    if (parser.Check("COUNT")) {
       count = parser.Next<uint32_t>();
       skip_count = false;
       continue;
     }
 
-    if (parser.Check("MAXLEN").ExpectTail(1)) {
+    if (parser.Check("MAXLEN")) {
       max_len = parser.Next<uint32_t>();
       continue;
     }
@@ -982,19 +989,21 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
 void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
-  InsertParam where = parser.ToUpper().Switch("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
+  InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
+
+  DCHECK(pivot.data() && elem.data());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
   };
 
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    return cntx->SendLong(result.value());
+  if (result || result == OpStatus::KEY_NOTFOUND) {
+    return cntx->SendLong(result.value_or(0));
   }
 
   cntx->SendError(result.status());
@@ -1014,8 +1023,10 @@ void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
-  cntx->transaction->ScheduleSingleHop(std::move(cb));
-  cntx->SendOk();
+  OpStatus st = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  if (st == OpStatus::KEY_NOTFOUND)
+    st = OpStatus::OK;
+  cntx->SendError(st);
 }
 
 void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
@@ -1058,11 +1069,10 @@ void ListFamily::LRem(CmdArgList args, ConnectionContext* cntx) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    cntx->SendLong(result.value());
-  } else {
-    cntx->SendLong(0);
+  if (result || result == OpStatus::KEY_NOTFOUND) {
+    return cntx->SendLong(result.value_or(0));
   }
+  cntx->SendError(result.status());
 }
 
 void ListFamily::LSet(CmdArgList args, ConnectionContext* cntx) {
@@ -1202,13 +1212,9 @@ void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cnt
   }
 
   if (return_arr) {
-    if (result->empty()) {
-      rb->SendNullArray();
-    } else {
-      rb->StartArray(result->size());
-      for (const auto& k : *result) {
-        rb->SendBulkString(k);
-      }
+    rb->StartArray(result->size());
+    for (const auto& k : *result) {
+      rb->SendBulkString(k);
     }
   } else {
     DCHECK_EQ(1u, result->size());

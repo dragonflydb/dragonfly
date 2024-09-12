@@ -7,6 +7,8 @@
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
+> Before moving on, please consider giving us a GitHub star ⭐️. Thank you!
+
 Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md)
 
 [Website](https://www.dragonflydb.io/) • [Docs](https://dragonflydb.io/docs) • [Quick Start](https://www.dragonflydb.io/docs/getting-started) • [Community Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly Forum](https://dragonfly.discourse.group/) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
@@ -59,7 +61,7 @@ However, if we take a bit stronger instance (m5.xlarge), the gap between DF and 
 
 |  Redis                                  |      DF                                |
 | ----------------------------------------|----------------------------------------|
-| QPS: 190K, P99.9: 2.45ms, P99: 0.97ms   |  QPS: 279K , P99.9: 1.95ms, P99: 1.48  |
+| QPS: 190K, P99.9: 2.45ms, P99: 0.97ms   |  QPS: 279K , P99.9: 1.95ms, P99: 1.48ms|
 
 2. GETs (`--ratio 0:1`):
 
@@ -166,7 +168,7 @@ There are also some Dragonfly-specific arguments:
  * `admin_bind`: To bind the admin console TCP connection to a given address (`default: any`). Supports both HTTP and RESP protocols.
  * `admin_nopass`: To enable open admin access to console on the assigned port, without auth token needed (`default: false`). Supports both HTTP and RESP protocols.
  * `cluster_mode`: Cluster mode supported (`default: ""`). Currently supports only `emulated`.
- * `announce_ip`: The IP that cluster commands announce to the client, and to replication master.
+ * `cluster_announce_ip`: The IP that cluster commands announce to the client.
  * `announce_port`: The port that cluster commands announce to the client, and to replication master.
 
 ### Example start script with popular options:

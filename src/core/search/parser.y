@@ -35,6 +35,9 @@
 
 using namespace std;
 
+uint32_t toUint32(string_view src);
+double toDouble(string_view src);
+
 }
 
 %parse-param { QueryDriver *driver  }
@@ -66,20 +69,21 @@ using namespace std;
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
-%token <std::string> TERM "term" PARAM "param" FIELD "field"
+%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field"
 
-%precedence TERM
+%precedence TERM TAG_VAL
 %left OR_OP
 %left AND_OP
 %right NOT_OP
 %precedence LPAREN RPAREN
 
-%token <double> DOUBLE "double"
-%token <uint32_t> UINT32 "uint32"
+%token <std::string> DOUBLE "double"
+%token <std::string> UINT32 "uint32"
 %nterm <double> generic_number
 %nterm <bool> opt_lparen
 %nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr numeric_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
+%nterm <std::string> tag_list_element
 
 %nterm <AstKnnNode> knn_query
 %nterm <std::string> opt_knn_alias
@@ -97,7 +101,7 @@ final_query:
 
 knn_query:
   LBRACKET KNN UINT32 FIELD TERM opt_knn_alias opt_ef_runtime RBRACKET
-    { $$ = AstKnnNode($3, $4, BytesToFtVector($5), $6, $7); }
+    { $$ = AstKnnNode(toUint32($3), $4, BytesToFtVector($5), $6, $7); }
 
 opt_knn_alias:
   AS TERM { $$ = std::move($2); }
@@ -105,7 +109,7 @@ opt_knn_alias:
 
 opt_ef_runtime:
   /* empty */ { $$ = std::nullopt; }
-  | EF_RUNTIME UINT32 { $$ = $2; }
+  | EF_RUNTIME UINT32 { $$ = toUint32($2); }
 
 filter:
   search_expr               { $$ = std::move($1); }
@@ -128,12 +132,12 @@ search_unary_expr:
   LPAREN search_expr RPAREN           { $$ = std::move($2); }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2)); }
   | TERM                              { $$ = AstTermNode(std::move($1)); }
-  | UINT32                            { $$ = AstTermNode(to_string($1)); }
+  | UINT32                            { $$ = AstTermNode(std::move($1)); }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
   TERM                                                  { $$ = AstTermNode(std::move($1)); }
-  | UINT32                                              { $$ = AstTermNode(to_string($1)); }
+  | UINT32                                              { $$ = AstTermNode(std::move($1)); }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET numeric_filter_expr RBRACKET               { $$ = std::move($2); }
@@ -143,8 +147,8 @@ numeric_filter_expr:
 opt_lparen generic_number opt_lparen generic_number { $$ = AstRangeNode($2, $1, $4, $3); }
 
 generic_number:
-  DOUBLE { $$ = $1; }
-  | UINT32 { $$ = $1; }
+  DOUBLE { $$ = toDouble($1); }
+  | UINT32 { $$ = toUint32($1); }
 
 opt_lparen:
   /* empty */ { $$ = false; }
@@ -167,13 +171,17 @@ field_unary_expr:
   LPAREN field_cond_expr RPAREN                  { $$ = std::move($2); }
   | NOT_OP field_unary_expr                      { $$ = AstNegateNode(std::move($2)); };
   | TERM                                         { $$ = AstTermNode(std::move($1)); }
-  | UINT32                                       { $$ = AstTermNode(to_string($1)); }
+  | UINT32                                       { $$ = AstTermNode(std::move($1)); }
 
 tag_list:
-  TERM                       { $$ = AstTagsNode(std::move($1)); }
-  | UINT32                   { $$ = AstTagsNode(to_string($1)); }
-  | tag_list OR_OP TERM      { $$ = AstTagsNode(std::move($1), std::move($3)); }
-  | tag_list OR_OP DOUBLE    { $$ = AstTagsNode(std::move($1), to_string($3)); }
+  tag_list_element                       { $$ = AstTagsNode(std::move($1)); }
+  | tag_list OR_OP tag_list_element      { $$ = AstTagsNode(std::move($1), std::move($3)); }
+
+tag_list_element:
+  TERM { $$ = std::move($1); }
+  | UINT32 { $$ = std::move($1); }
+  | DOUBLE { $$ = std::move($1); }
+  | TAG_VAL { $$ = std::move($1); }
 
 
 %%
@@ -182,4 +190,16 @@ void
 dfly::search::Parser::error(const location_type& l, const string& m)
 {
   driver->Error(l, m);
+}
+
+std::uint32_t toUint32(string_view str) {
+  uint32_t val = 0;
+  absl::SimpleAtoi(str, &val); // no need to check the result because str is parsed by regex
+  return val;
+}
+
+double toDouble(string_view str) {
+  double val = 0;
+  absl::SimpleAtod(str, &val); // no need to check the result because str is parsed by regex
+  return val;
 }

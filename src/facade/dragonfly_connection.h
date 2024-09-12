@@ -113,6 +113,7 @@ class Connection : public util::Connection {
     std::string username;
     std::vector<uint64_t> commands;
     dfly::acl::AclKeys keys;
+    dfly::acl::AclPubSub pub_sub;
   };
 
   // Migration request message, the dispatch fiber stops to give way for thread migration.
@@ -274,6 +275,12 @@ class Connection : public util::Connection {
 
   void SetName(std::string name);
 
+  void SetLibName(std::string name);
+  void SetLibVersion(std::string version);
+
+  // Returns a map of 'libname:libver'->count, thread local data
+  static const absl::flat_hash_map<std::string, uint64_t>& GetLibStatsTL();
+
   std::string_view GetName() const {
     return name_;
   }
@@ -303,10 +310,15 @@ class Connection : public util::Connection {
 
   bool IsHttp() const;
 
+  // Sets max queue length locally in the calling thread.
+  static void SetMaxQueueLenThreadLocal(uint32_t val);
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;
   void OnPostMigrateThread() override;
+
+  std::unique_ptr<ConnectionContext> cc_;  // Null for http connections
 
  private:
   enum ParserStatus { OK, NEED_MORE, ERROR };
@@ -315,31 +327,6 @@ class Connection : public util::Connection {
   struct DispatchCleanup;
   struct Shutdown;
 
-  // Keeps track of total per-thread sizes of dispatch queues to limit memory taken up by messages
-  // in these queues.
-  struct QueueBackpressure {
-    // Block until subscriber memory usage is below limit, can be called from any thread.
-    void EnsureBelowLimit();
-
-    bool IsPipelineBufferOverLimit(size_t size) const {
-      return size >= pipeline_buffer_limit;
-    }
-
-    // Used by publisher/subscriber actors to make sure we do not publish too many messages
-    // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
-    util::fb2::EventCount ec;
-    std::atomic_size_t subscriber_bytes = 0;
-
-    // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
-    // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
-    util::fb2::CondVarAny pipeline_cnd;
-
-    size_t publish_buffer_limit = 0;   // cached flag publish_buffer_limit
-    size_t pipeline_cache_limit = 0;   // cached flag pipeline_cache_limit
-    size_t pipeline_buffer_limit = 0;  // cached flag for buffer size in bytes
-  };
-
- private:
   // Check protocol and handle connection.
   void HandleRequests() final;
 
@@ -394,10 +381,6 @@ class Connection : public util::Connection {
 
   std::pair<std::string, std::string> GetClientInfoBeforeAfterTid() const;
 
- protected:
-  std::unique_ptr<ConnectionContext> cc_;  // Null for http connections
-
- private:
   void DecreaseStatsOnClose();
   void BreakOnce(uint32_t ev_mask);
 
@@ -423,6 +406,9 @@ class Connection : public util::Connection {
   time_t creation_time_, last_interaction_;
   Phase phase_ = SETUP;
   std::string name_;
+
+  std::string lib_name_;
+  std::string lib_ver_;
 
   unsigned parser_error_ = 0;
 

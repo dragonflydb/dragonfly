@@ -117,6 +117,7 @@ atomic_uint64_t rss_mem_peak(0);
 
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
+size_t serialization_max_chunk_size = 0;
 
 const char* GlobalStateName(GlobalState s) {
   switch (s) {
@@ -290,9 +291,9 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
       else if (scan_opts.limit > 4096)
         scan_opts.limit = 4096;
     } else if (opt == "MATCH") {
-      scan_opts.pattern = ArgS(args, i + 1);
-      if (scan_opts.pattern == "*")
-        scan_opts.pattern = string_view{};
+      string_view pattern = ArgS(args, i + 1);
+      if (pattern != "*")
+        scan_opts.pattern = pattern;
     } else if (opt == "TYPE") {
       auto obj_type = ObjTypeFromString(ArgS(args, i + 1));
       if (!obj_type) {
@@ -311,9 +312,9 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
 }
 
 bool ScanOpts::Matches(std::string_view val_name) const {
-  if (pattern.empty())
+  if (!pattern)
     return true;
-  return stringmatchlen(pattern.data(), pattern.size(), val_name.data(), val_name.size(), 0) == 1;
+  return stringmatchlen(pattern->data(), pattern->size(), val_name.data(), val_name.size(), 0) == 1;
 }
 
 GenericError::operator std::error_code() const {
@@ -462,16 +463,26 @@ ThreadLocalMutex::~ThreadLocalMutex() {
 }
 
 void ThreadLocalMutex::lock() {
-  DCHECK_EQ(EngineShard::tlocal(), shard_);
-  util::fb2::NoOpLock noop_lk_;
-  cond_var_.wait(noop_lk_, [this]() { return !flag_; });
-  flag_ = true;
+  if (serialization_max_chunk_size != 0) {
+    DCHECK_EQ(EngineShard::tlocal(), shard_);
+    util::fb2::NoOpLock noop_lk_;
+    if (locked_fiber_ != nullptr) {
+      DCHECK(util::fb2::detail::FiberActive() != locked_fiber_);
+    }
+    cond_var_.wait(noop_lk_, [this]() { return !flag_; });
+    flag_ = true;
+    DCHECK_EQ(locked_fiber_, nullptr);
+    locked_fiber_ = util::fb2::detail::FiberActive();
+  }
 }
 
 void ThreadLocalMutex::unlock() {
-  DCHECK_EQ(EngineShard::tlocal(), shard_);
-  flag_ = false;
-  cond_var_.notify_one();
+  if (serialization_max_chunk_size != 0) {
+    DCHECK_EQ(EngineShard::tlocal(), shard_);
+    flag_ = false;
+    cond_var_.notify_one();
+    locked_fiber_ = nullptr;
+  }
 }
 
 }  // namespace dfly

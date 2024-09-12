@@ -213,7 +213,7 @@ class DbSlice {
     static int64_t Cap(int64_t value, TimeUnit unit);
 
     // Calculate relative and absolue timepoints.
-    std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap = false) const;
+    std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap) const;
 
     // Return true if relative expiration is in the past
     bool IsExpired(uint64_t now_msec) const {
@@ -507,13 +507,15 @@ class DbSlice {
   template <typename Cb, typename DashTable>
   PrimeTable::Cursor Traverse(DashTable* pt, PrimeTable::Cursor cursor, Cb&& cb)
       ABSL_LOCKS_EXCLUDED(local_mu_) {
-    std::unique_lock lk(local_mu_);
+    util::fb2::LockGuard lk(local_mu_);
     return pt->Traverse(cursor, std::forward<Cb>(cb));
   }
 
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
+
+  bool DelEmptyPrimeValue(const Context& cntx, Iterator it);
 
   OpResult<AddOrFindResult> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                                 PrimeValue obj, uint64_t expire_at_ms,
@@ -563,8 +565,7 @@ class DbSlice {
     return version_++;
   }
 
-  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const
-      ABSL_EXCLUSIVE_LOCKS_REQUIRED(local_mu_);
+  void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
 
   // Used to provide exclusive access while Traversing segments
   mutable ThreadLocalMutex local_mu_;

@@ -24,15 +24,16 @@
 #include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
+#include "util/fibers/synchronization.h"
 
-ABSL_FLAG(std::string, cluster_announce_ip, "", "DEPRECATED: use --announce_ip");
+ABSL_FLAG(std::string, cluster_announce_ip, "",
+          "IP address that Dragonfly announces to cluster clients");
 
 ABSL_FLAG(std::string, cluster_node_id, "",
           "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
           "replication ID (random string)");
 
 ABSL_DECLARE_FLAG(int32_t, port);
-ABSL_DECLARE_FLAG(std::string, announce_ip);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
 
 namespace dfly {
@@ -69,16 +70,6 @@ ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(serve
 
   InitializeCluster();
 
-  // TODO: Remove flag cluster_announce_ip in v1.23+
-  if (!absl::GetFlag(FLAGS_cluster_announce_ip).empty()) {
-    CHECK(absl::GetFlag(FLAGS_announce_ip).empty())
-        << "Can't use both --cluster_announce_ip and --announce_ip";
-
-    LOG(WARNING) << "WARNING: Flag --cluster_announce_ip is deprecated in favor of --announce_ip. "
-                    "Use the latter, as the former will be removed in a future release.";
-    absl::SetFlag(&FLAGS_announce_ip, absl::GetFlag(FLAGS_cluster_announce_ip));
-  }
-
   id_ = absl::GetFlag(FLAGS_cluster_node_id);
   if (id_.empty()) {
     id_ = server_family_->master_replid();
@@ -93,17 +84,21 @@ ClusterConfig* ClusterFamily::cluster_config() {
 }
 
 void ClusterFamily::Shutdown() {
-  shard_set->pool()->at(0)->Await([this] {
-    lock_guard lk(set_config_mu);
-    if (!tl_cluster_config)
-      return;
+  shard_set->pool()->at(0)->Await([this]() ABSL_LOCKS_EXCLUDED(set_config_mu) {
+    PreparedToRemoveOutgoingMigrations outgoing_migrations;  // should be removed without mutex lock
+    {
+      util::fb2::LockGuard lk(set_config_mu);
+      if (!tl_cluster_config)
+        return;
 
-    auto empty_config = tl_cluster_config->CloneWithoutMigrations();
-    RemoveOutgoingMigrations(empty_config, tl_cluster_config);
-    RemoveIncomingMigrations(empty_config->GetFinishedIncomingMigrations(tl_cluster_config));
+      auto empty_config = tl_cluster_config->CloneWithoutMigrations();
+      outgoing_migrations = TakeOutOutgoingMigrations(empty_config, tl_cluster_config);
+      RemoveIncomingMigrations(empty_config->GetFinishedIncomingMigrations(tl_cluster_config));
 
-    DCHECK(outgoing_migration_jobs_.empty());
-    DCHECK(incoming_migrations_jobs_.empty());
+      util::fb2::LockGuard migration_lk(migration_mu_);
+      DCHECK(outgoing_migration_jobs_.empty());
+      DCHECK(incoming_migrations_jobs_.empty());
+    }
   });
 }
 
@@ -117,7 +112,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
   ServerState& etl = *ServerState::tlocal();
   if (!replication_info.has_value()) {
     DCHECK(etl.is_master);
-    std::string cluster_announce_ip = absl::GetFlag(FLAGS_announce_ip);
+    std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
     std::string preferred_endpoint =
         cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
     uint16_t cluster_announce_port = absl::GetFlag(FLAGS_announce_port);
@@ -540,66 +535,71 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
     return cntx->SendError("Invalid cluster configuration.");
   }
 
-  lock_guard gu(set_config_mu);
-
-  VLOG(1) << "Setting new cluster config: " << json_str;
-  auto out_migrations_slots = RemoveOutgoingMigrations(new_config, tl_cluster_config);
-  RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
-
-  SlotRanges enable_slots, disable_slots;
+  PreparedToRemoveOutgoingMigrations outgoing_migrations;  // should be removed without mutex lock
 
   {
-    std::lock_guard lk(migration_mu_);
-    // If migration state is changed simultaneously, the changes to config will be applied after
-    // set_config_mu is unlocked and even if we apply the same changes 2 times it's not a problem
-    for (const auto& m : incoming_migrations_jobs_) {
-      if (m->GetState() == MigrationState::C_FINISHED) {
-        enable_slots.Merge(m->GetSlots());
+    VLOG(1) << "Setting new cluster config: " << json_str;
+    util::fb2::LockGuard gu(set_config_mu);
+
+    outgoing_migrations = TakeOutOutgoingMigrations(new_config, tl_cluster_config);
+    RemoveIncomingMigrations(new_config->GetFinishedIncomingMigrations(tl_cluster_config));
+
+    SlotRanges enable_slots, disable_slots;
+
+    {
+      util::fb2::LockGuard lk(migration_mu_);
+      // If migration state is changed simultaneously, the changes to config will be applied after
+      // set_config_mu is unlocked and even if we apply the same changes 2 times it's not a problem
+      for (const auto& m : incoming_migrations_jobs_) {
+        if (m->GetState() == MigrationState::C_FINISHED) {
+          enable_slots.Merge(m->GetSlots());
+        }
+      }
+      for (const auto& m : outgoing_migration_jobs_) {
+        if (m->GetState() == MigrationState::C_FINISHED) {
+          disable_slots.Merge(m->GetSlots());
+        }
       }
     }
-    for (const auto& m : outgoing_migration_jobs_) {
-      if (m->GetState() == MigrationState::C_FINISHED) {
-        disable_slots.Merge(m->GetSlots());
-      }
+
+    new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
+
+    StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config));
+
+    SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
+
+    // Ignore blocked commands because we filter them with CancelBlockingOnThread
+    DispatchTracker tracker{server_family_->GetNonPriviligedListeners(), cntx->conn(),
+                            true /* ignore paused */, true /* ignore blocked */};
+
+    auto blocking_filter = [&new_config](ArgSlice keys) {
+      bool moved =
+          any_of(keys.begin(), keys.end(), [&](auto k) { return !new_config->IsMySlot(k); });
+      return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
+    };
+
+    auto cb = [this, &tracker, &new_config, blocking_filter](util::ProactorBase*) {
+      server_family_->CancelBlockingOnThread(blocking_filter);
+      tl_cluster_config = new_config;
+      tracker.TrackOnThread();
+    };
+
+    server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
+    DCHECK(tl_cluster_config != nullptr);
+
+    if (!tracker.Wait(absl::Seconds(1))) {
+      LOG(WARNING) << "Cluster config change timed for: " << MyID();
     }
-  }
 
-  new_config = new_config->CloneWithChanges(enable_slots, disable_slots);
-
-  StartSlotMigrations(new_config->GetNewOutgoingMigrations(tl_cluster_config));
-
-  SlotSet before = tl_cluster_config ? tl_cluster_config->GetOwnedSlots() : SlotSet(true);
-
-  // Ignore blocked commands because we filter them with CancelBlockingOnThread
-  DispatchTracker tracker{server_family_->GetNonPriviligedListeners(), cntx->conn(),
-                          true /* ignore paused */, true /* ignore blocked */};
-
-  auto blocking_filter = [&new_config](ArgSlice keys) {
-    bool moved = any_of(keys.begin(), keys.end(), [&](auto k) { return !new_config->IsMySlot(k); });
-    return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
-  };
-
-  auto cb = [this, &tracker, &new_config, blocking_filter](util::ProactorBase*) {
-    server_family_->CancelBlockingOnThread(blocking_filter);
-    tl_cluster_config = new_config;
-    tracker.TrackOnThread();
-  };
-
-  server_family_->service().proactor_pool().AwaitFiberOnAll(std::move(cb));
-  DCHECK(tl_cluster_config != nullptr);
-
-  if (!tracker.Wait(absl::Seconds(1))) {
-    LOG(WARNING) << "Cluster config change timed for: " << MyID();
-  }
-
-  SlotSet after = tl_cluster_config->GetOwnedSlots();
-  if (ServerState::tlocal()->is_master) {
-    auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
-    deleted_slots.Merge(out_migrations_slots);
-    DeleteSlots(deleted_slots);
-    LOG_IF(INFO, !deleted_slots.Empty())
-        << "Flushing newly unowned slots: " << deleted_slots.ToString();
-    WriteFlushSlotsToJournal(deleted_slots);
+    SlotSet after = tl_cluster_config->GetOwnedSlots();
+    if (ServerState::tlocal()->is_master) {
+      auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
+      deleted_slots.Merge(outgoing_migrations.slot_ranges);
+      DeleteSlots(deleted_slots);
+      LOG_IF(INFO, !deleted_slots.Empty())
+          << "Flushing newly unowned slots: " << deleted_slots.ToString();
+      WriteFlushSlotsToJournal(deleted_slots);
+    }
   }
 
   return cntx->SendOk();
@@ -623,12 +623,12 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* c
 
   fb2::Mutex mu;
 
-  auto cb = [&](auto*) {
+  auto cb = [&](auto*) ABSL_LOCKS_EXCLUDED(mu) {
     EngineShard* shard = EngineShard::tlocal();
     if (shard == nullptr)
       return;
 
-    lock_guard lk(mu);
+    util::fb2::LockGuard lk(mu);
     for (auto& [slot, data] : slots_stats) {
       data += namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
     }
@@ -698,7 +698,7 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   CmdArgParser parser(args);
 
-  lock_guard lk(migration_mu_);
+  util::fb2::LockGuard lk(migration_mu_);
 
   string_view node_id;
   if (parser.HasNext()) {
@@ -754,7 +754,7 @@ void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
 
 std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
     std::string_view source_id) {
-  lock_guard lk(migration_mu_);
+  util::fb2::LockGuard lk(migration_mu_);
   for (const auto& mj : incoming_migrations_jobs_) {
     if (mj->GetSourceID() == source_id) {
       return mj;
@@ -763,11 +763,15 @@ std::shared_ptr<IncomingSlotMigration> ClusterFamily::GetIncomingMigration(
   return nullptr;
 }
 
-SlotRanges ClusterFamily::RemoveOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
-                                                   shared_ptr<ClusterConfig> old_config) {
+ClusterFamily::PreparedToRemoveOutgoingMigrations::~PreparedToRemoveOutgoingMigrations() = default;
+
+[[nodiscard]] ClusterFamily::PreparedToRemoveOutgoingMigrations
+ClusterFamily::TakeOutOutgoingMigrations(shared_ptr<ClusterConfig> new_config,
+                                         shared_ptr<ClusterConfig> old_config) {
   auto migrations = new_config->GetFinishedOutgoingMigrations(old_config);
-  lock_guard lk(migration_mu_);
+  util::fb2::LockGuard lk(migration_mu_);
   SlotRanges removed_slots;
+  PreparedToRemoveOutgoingMigrations res;
   for (const auto& m : migrations) {
     auto it = std::find_if(outgoing_migration_jobs_.begin(), outgoing_migration_jobs_.end(),
                            [&m](const auto& om) {
@@ -782,15 +786,16 @@ SlotRanges ClusterFamily::RemoveOutgoingMigrations(shared_ptr<ClusterConfig> new
     LOG(INFO) << "Outgoing migration cancelled: slots " << slots.ToString() << " to "
               << migration.GetHostIp() << ":" << migration.GetPort();
     migration.Finish();
+    res.migrations.push_back(std::move(*it));
     outgoing_migration_jobs_.erase(it);
   }
 
   // Flush non-owned migrations
   SlotSet migration_slots(removed_slots);
-  SlotSet removed = migration_slots.GetRemovedSlots(new_config->GetOwnedSlots());
+  res.slot_ranges = migration_slots.GetRemovedSlots(new_config->GetOwnedSlots()).ToSlotRanges();
 
   // Flushing of removed slots is done outside this function.
-  return removed.ToSlotRanges();
+  return res;
 }
 
 namespace {
@@ -813,7 +818,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
   SlotSet removed = migration_slots.GetRemovedSlots(tl_cluster_config->GetOwnedSlots());
 
   migration->Stop();
-  // all fibers has migration shared_ptr so we don't need to join it and can erase
+  // all migration fibers has migration shared_ptr so the object can be removed later
   jobs.erase(it);
 
   // TODO make it outside in one run with other slots that should be flushed
@@ -830,7 +835,7 @@ bool RemoveIncomingMigrationImpl(std::vector<std::shared_ptr<IncomingSlotMigrati
 }  // namespace
 
 void ClusterFamily::RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations) {
-  lock_guard lk(migration_mu_);
+  util::fb2::LockGuard lk(migration_mu_);
   for (const auto& m : migrations) {
     RemoveIncomingMigrationImpl(incoming_migrations_jobs_, m.node_info.id);
     VLOG(1) << "Migration was canceled from: " << m.node_info.id;
@@ -865,7 +870,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 
   VLOG(1) << "Init migration " << source_id;
 
-  lock_guard lk(migration_mu_);
+  util::fb2::LockGuard lk(migration_mu_);
   auto was_removed = RemoveIncomingMigrationImpl(incoming_migrations_jobs_, source_id);
   LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
 
@@ -876,7 +881,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
 }
 
 std::shared_ptr<OutgoingMigration> ClusterFamily::CreateOutgoingMigration(MigrationInfo info) {
-  std::lock_guard lk(migration_mu_);
+  util::fb2::LockGuard lk(migration_mu_);
   auto migration = make_shared<OutgoingMigration>(std::move(info), this, server_family_);
   outgoing_migration_jobs_.emplace_back(migration);
   return migration;
@@ -915,8 +920,8 @@ void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
                                                     const SlotRanges& slots, bool is_incoming) {
   VLOG(1) << "Update config for slots ranges: " << slots.ToString() << " for " << MyID() << " : "
           << node_id;
-  lock_guard gu(set_config_mu);
-  lock_guard lk(migration_mu_);
+  util::fb2::LockGuard gu(set_config_mu);
+  util::fb2::LockGuard lk(migration_mu_);
 
   bool is_migration_valid = false;
   if (is_incoming) {

@@ -271,6 +271,7 @@ TEST_F(GenericFamilyTest, RenameNx) {
   ASSERT_THAT(Run({"renamenx", "x", "b"}), IntArg(0));  // b already exists
   ASSERT_THAT(Run({"renamenx", "x", "y"}), IntArg(1));
   ASSERT_EQ(Run({"get", "y"}), x_val);
+  ASSERT_THAT(Run({"renamenx", "y", "y"}), IntArg(0));
 }
 
 TEST_F(GenericFamilyTest, RenameSameName) {
@@ -400,6 +401,15 @@ TEST_F(GenericFamilyTest, Scan) {
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_EQ(10, vec.size());
   EXPECT_THAT(vec, Each(StartsWith("zset")));
+
+  Run({"flushdb"});
+
+  Run({"set", "", "foo"});
+  Run({"set", "bar", "1"});
+  resp = Run({"keys", "*"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("bar", "")));
+  resp = Run({"keys", ""});
+  EXPECT_EQ(resp, "");
 }
 
 TEST_F(GenericFamilyTest, Sort) {
@@ -465,6 +475,19 @@ TEST_F(GenericFamilyTest, Sort) {
   // Test not convertible to double
   Run({"lpush", "list-2", "NOTADOUBLE"});
   ASSERT_THAT(Run({"sort", "list-2"}), ErrArg("One or more scores can't be converted into double"));
+
+  Run({"set", "foo", "bar"});
+  ASSERT_THAT(Run({"sort", "foo"}), ErrArg("WRONGTYPE "));
+  ;
+}
+
+TEST_F(GenericFamilyTest, SortBug3636) {
+  Run({"RPUSH", "foo", "1.100000023841858", "1.100000023841858", "1.100000023841858", "-15710",
+       "1.100000023841858", "1.100000023841858", "1.100000023841858", "-15710", "-15710",
+       "1.100000023841858", "-15710", "-15710", "-15710", "-15710", "1.100000023841858", "-15710",
+       "-15710"});
+  auto resp = Run({"SORT", "foo", "desc", "alpha"});
+  ASSERT_THAT(resp, ArrLen(17));
 }
 
 TEST_F(GenericFamilyTest, TimeNoKeys) {
@@ -760,6 +783,21 @@ TEST_F(GenericFamilyTest, JsonType) {
   EXPECT_THAT(resp, ArrLen(2));
   auto vec = StrArray(resp.GetVec()[1]);
   ASSERT_THAT(vec, ElementsAre("json"));
+}
+
+TEST_F(GenericFamilyTest, ExpireTime) {
+  EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
+  EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));
+  Run({"set", "foo", "bar"});
+  EXPECT_EQ(-1, CheckedInt({"EXPIRETIME", "foo"}));
+  EXPECT_EQ(-1, CheckedInt({"PEXPIRETIME", "foo"}));
+
+  // set expiry
+  uint64_t expire_time_in_ms = TEST_current_time_ms + 5000;
+  uint64_t expire_time_in_seconds = (expire_time_in_ms + 500) / 1000;
+  Run({"pexpireat", "foo", absl::StrCat(expire_time_in_ms)});
+  EXPECT_EQ(expire_time_in_seconds, CheckedInt({"EXPIRETIME", "foo"}));
+  EXPECT_EQ(expire_time_in_ms, CheckedInt({"PEXPIRETIME", "foo"}));
 }
 
 }  // namespace dfly

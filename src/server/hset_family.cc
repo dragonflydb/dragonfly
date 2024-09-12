@@ -579,6 +579,16 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
     }
   }
 
+  // Empty hashmaps must be deleted, this case only triggers for expired values
+  // and the enconding is guaranteed to be a DenseSet since we only support expiring
+  // value with that enconding.
+  if (res.empty()) {
+    auto mutable_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
+    // Run postupdater, it means that we deleted the keys
+    mutable_res->post_updater.Run();
+    db_slice.Del(op_args.db_cntx, mutable_res->it);
+  }
+
   return res;
 }
 
@@ -721,7 +731,7 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
 
   string_view key = parser.Next();
 
-  bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv).IgnoreCase());
+  bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv));
   string_view ttl_str = parser.Next();
 
   uint32_t ttl_sec;
@@ -1146,9 +1156,8 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   if (result) {
     if ((result->size() == 1) && (args.size() == 1))
       rb->SendBulkString(result->front());
-    else {
-      rb->SendStringArr(*result, facade::RedisReplyBuilder::MAP);
-    }
+    else
+      rb->SendStringArr(*result, facade::RedisReplyBuilder::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1)
       rb->SendNull();

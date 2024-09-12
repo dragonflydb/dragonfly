@@ -70,6 +70,73 @@ template <typename... Args> auto IsUnordArray(Args... args) {
   return RespArray(UnorderedElementsAre(std::forward<Args>(args)...));
 }
 
+MATCHER_P(IsMapMatcher, expected, "") {
+  if (arg.type != RespExpr::ARRAY) {
+    *result_listener << "Wrong response type: " << arg.type;
+    return false;
+  }
+
+  auto result = arg.GetVec();
+  if (result.size() != expected.size()) {
+    *result_listener << "Wrong resp array size: " << result.size();
+    return false;
+  }
+
+  using KeyValueArray = std::vector<std::pair<std::string, std::string>>;
+
+  KeyValueArray received_pairs;
+  for (size_t i = 0; i < result.size(); i += 2) {
+    received_pairs.emplace_back(result[i].GetString(), result[i + 1].GetString());
+  }
+
+  KeyValueArray expected_pairs;
+  for (size_t i = 0; i < expected.size(); i += 2) {
+    expected_pairs.emplace_back(expected[i], expected[i + 1]);
+  }
+
+  // Custom unordered comparison
+  std::sort(received_pairs.begin(), received_pairs.end());
+  std::sort(expected_pairs.begin(), expected_pairs.end());
+
+  return received_pairs == expected_pairs;
+}
+
+template <typename... Matchers> auto IsMap(Matchers... matchers) {
+  return IsMapMatcher(std::vector<std::string>{std::forward<Matchers>(matchers)...});
+}
+
+MATCHER_P(IsUnordArrayWithSizeMatcher, expected, "") {
+  if (arg.type != RespExpr::ARRAY) {
+    *result_listener << "Wrong response type: " << arg.type;
+    return false;
+  }
+
+  auto result = arg.GetVec();
+  size_t expected_size = std::tuple_size<decltype(expected)>::value;
+  if (result.size() != expected_size + 1) {
+    *result_listener << "Wrong resp array size: " << result.size();
+    return false;
+  }
+
+  if (result[0].GetInt() != expected_size) {
+    *result_listener << "Wrong elements count: " << result[0].GetInt().value_or(-1);
+    return false;
+  }
+
+  std::vector<RespExpr> received_elements(result.begin() + 1, result.end());
+
+  // Create a vector of matchers from the tuple
+  std::vector<Matcher<RespExpr>> matchers;
+  std::apply([&matchers](auto&&... args) { ((matchers.push_back(args)), ...); }, expected);
+
+  return ExplainMatchResult(UnorderedElementsAreArray(matchers), received_elements,
+                            result_listener);
+}
+
+template <typename... Matchers> auto IsUnordArrayWithSize(Matchers... matchers) {
+  return IsUnordArrayWithSizeMatcher(std::make_tuple(matchers...));
+}
+
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_EQ(Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "prefix-1"}), "OK");
   EXPECT_EQ(Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"}), "OK");
@@ -86,6 +153,33 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
   EXPECT_EQ(Run({"ft._list"}), "idx-3");
+}
+
+TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
+  // Create index on db 0
+  auto resp =
+      Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "doc-", "SCHEMA", "name", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"select", "1"}), "OK");  // change database
+
+  // Creating an index on non zero database must fail
+  resp = Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"});
+  EXPECT_THAT(resp, ErrArg("ERR Cannot create index on db != 0"));
+
+  // Add some data to the index
+  Run({"hset", "doc-0", "name", "Name of 0"});
+
+  // ft.search must work on the another database
+  resp = Run({"ft.search", "idx-1", "*"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "doc-0", IsArray("name", "Name of 0")));
+
+  // ft.dropindex must work on the another database
+  EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
+
+  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
+  EXPECT_EQ(Run({"select", "0"}), "OK");
+  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("ERR Unknown Index name"));
 }
 
 TEST_F(SearchFamilyTest, AlterIndex) {
@@ -223,6 +317,20 @@ TEST_F(SearchFamilyTest, JsonAttributesPaths) {
   EXPECT_THAT(Run({"ft.search", "i1", "yes"}), AreDocIds("k2"));
 }
 
+TEST_F(SearchFamilyTest, JsonIdentifierWithBrackets) {
+  Run({"json.set", "k1", ".", R"({"name":"London","population":8.8,"continent":"Europe"})"});
+  Run({"json.set", "k2", ".", R"({"name":"Athens","population":3.1,"continent":"Europe"})"});
+  Run({"json.set", "k3", ".", R"({"name":"Tel-Aviv","population":1.3,"continent":"Asia"})"});
+  Run({"json.set", "k4", ".", R"({"name":"Hyderabad","population":9.8,"continent":"Asia"})"});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "json", "schema", "$[\"name\"]", "as", "name", "tag",
+                 "$[\"population\"]", "as", "population", "numeric", "sortable", "$[\"continent\"]",
+                 "as", "continent", "tag"}),
+            "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "(@continent:{Europe})"}), AreDocIds("k1", "k2"));
+}
+
 // todo: fails on arm build
 #ifndef SANITIZERS
 TEST_F(SearchFamilyTest, JsonArrayValues) {
@@ -354,6 +462,22 @@ TEST_F(SearchFamilyTest, TagOptions) {
   EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), AreDocIds("d:2", "d:4"));
 }
 
+TEST_F(SearchFamilyTest, TagNumbers) {
+  Run({"hset", "d:1", "number", "1"});
+  Run({"hset", "d:2", "number", "2"});
+  Run({"hset", "d:3", "number", "3"});
+
+  EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "number", "tag"}), "OK");
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2}"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2|3}"}), AreDocIds("d:1", "d:2", "d:3"));
+
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1.0|2|3.0}"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|2|3.0}"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@number:{1|hello|2}"}), AreDocIds("d:1", "d:2"));
+}
+
 TEST_F(SearchFamilyTest, Numbers) {
   for (unsigned i = 0; i <= 10; i++) {
     for (unsigned j = 0; j <= 10; j++) {
@@ -392,15 +516,12 @@ TEST_F(SearchFamilyTest, Numbers) {
 
   // Test negation of ranges:
   EXPECT_THAT(Run({"ft.search", "i1", "@i:[9 9] -@j:[1 10]"}), AreDocIds("i9j0"));
+  EXPECT_THAT(Run({"ft.search", "i1", "-@i:[0 9] -@j:[1 10]"}), AreDocIds("i10j0"));
 
-  // TODO: Check on new algo
-  // EXPECT_THAT(Run({"ft.search", "i1", "-@i:[0 9] -@j:[1 10]"}), AreDocIds("i10j0"));
-
-  /*
-  TODO: Breaks the parser
-  EXPECT_THAT(Run({"ft.search", "i1", "(@i:[1 3] ! @i:[2 2]) @j:[7 7]"}),
-              DocIds(vector<string>{"i1j7", "i3j7"}));
-  */
+  // Test empty range
+  EXPECT_THAT(Run({"ft.search", "i1", "@i:[9 1]"}), AreDocIds());
+  EXPECT_THAT(Run({"ft.search", "i1", "@j:[5 0]"}), AreDocIds());
+  EXPECT_THAT(Run({"ft.search", "i1", "@i:[7 1] @j:[6 2]"}), AreDocIds());
 }
 
 TEST_F(SearchFamilyTest, TestLimit) {
@@ -653,6 +774,75 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
   Run({"flushall"});
 }
 
+TEST_F(SearchFamilyTest, AggregateGroupBy) {
+  Run({"hset", "key:1", "word", "item1", "foo", "10", "text", "\"first key\"", "non_indexed_value",
+       "1"});
+  Run({"hset", "key:2", "word", "item2", "foo", "20", "text", "\"second key\"", "non_indexed_value",
+       "2"});
+  Run({"hset", "key:3", "word", "item1", "foo", "40", "text", "\"third key\"", "non_indexed_value",
+       "3"});
+
+  auto resp = Run(
+      {"ft.create", "i1", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC", "text", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run(
+      {"ft.aggregate", "i1", "*", "GROUPBY", "1", "@word", "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("count", "2", "word", "item1"),
+                                         IsMap("word", "item2", "count", "1")));
+
+  resp = Run({"ft.aggregate", "i1", "*", "GROUPBY", "1", "@word", "REDUCE", "SUM", "1", "@foo",
+              "AS", "foo_total"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "50", "word", "item1"),
+                                         IsMap("foo_total", "20", "word", "item2")));
+
+  resp = Run({"ft.aggregate", "i1", "*", "GROUPBY", "1", "@word", "REDUCE", "AVG", "1", "@foo",
+              "AS", "foo_average"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_average", "20", "word", "item2"),
+                                         IsMap("foo_average", "25", "word", "item1")));
+
+  resp = Run({"ft.aggregate", "i1", "*", "GROUPBY", "2", "@word", "@text", "REDUCE", "SUM", "1",
+              "@foo", "AS", "foo_total"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("foo_total", "10", "word", "item1", "text", "\"first key\""),
+                        IsMap("foo_total", "40", "word", "item1", "text", "\"third key\""),
+                        IsMap("foo_total", "20", "word", "item2", "text", "\"second key\"")));
+
+  resp = Run({"ft.aggregate", "i1", "*", "LOAD", "2", "foo", "word", "GROUPBY", "1", "@word",
+              "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "item2"),
+                                         IsMap("foo_total", "50", "word", "item1")));
+
+  /*
+  Temporary not supported
+
+  resp = Run({"ft.aggregate", "i1", "*", "LOAD", "2", "foo", "text", "GROUPBY", "2", "@word",
+  "@text", "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"}); EXPECT_THAT(resp,
+  IsUnordArrayWithSize(IsMap("foo_total", "20", "word", ArgType(RespExpr::NIL), "text", "\"second
+  key\""), IsMap("foo_total", "40", "word", ArgType(RespExpr::NIL), "text", "\"third key\""),
+  IsMap({"foo_total", "10", "word", ArgType(RespExpr::NIL), "text", "\"first key"})));
+  */
+}
+
+TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
+  Run({"JSON.SET", "product:1", "$", R"({"name": "Product A", "price": 10, "quantity": 2})"});
+  Run({"JSON.SET", "product:2", "$", R"({"name": "Product B", "price": 20, "quantity": 3})"});
+  Run({"JSON.SET", "product:3", "$", R"({"name": "Product C", "price": 30, "quantity": 5})"});
+
+  auto resp =
+      Run({"FT.CREATE", "json_index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT",
+           "$.price", "AS", "price", "NUMERIC", "$.quantity", "AS", "quantity", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.AGGREGATE", "json_index", "*", "GROUPBY", "0", "REDUCE", "SUM", "1", "price",
+              "AS", "total_price"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("total_price", "60")));
+
+  resp = Run({"FT.AGGREGATE", "json_index", "*", "GROUPBY", "0", "REDUCE", "AVG", "1", "price",
+              "AS", "avg_price"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("avg_price", "20")));
+}
+
 TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
   for (size_t i = 0; i < 101; i++) {  // 51 even, 50 odd
     Run({"hset", absl::StrCat("k", i), "even", (i % 2 == 0) ? "true" : "false", "value",
@@ -662,7 +852,7 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
 
   // clang-format off
   auto resp = Run({"ft.aggregate", "i1", "*",
-                  "GROUPBY", "1", "even",
+                  "GROUPBY", "1", "@even",
                       "REDUCE", "count", "0", "as", "count",
                       "REDUCE", "count_distinct", "1", "even", "as", "distinct_tags",
                       "REDUCE", "count_distinct", "1", "value", "as", "distinct_vals",
@@ -672,12 +862,10 @@ TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
   // clang-format on
 
   EXPECT_THAT(resp,
-              IsArray(IsUnordArray(IsArray("even", "false"), IsArray("count", "50"),
-                                   IsArray("distinct_tags", "1"), IsArray("distinct_vals", "50"),
-                                   IsArray("max_val", "99"), IsArray("min_val", "1")),
-                      IsUnordArray(IsArray("even", "true"), IsArray("count", "51"),
-                                   IsArray("distinct_tags", "1"), IsArray("distinct_vals", "51"),
-                                   IsArray("max_val", "100"), IsArray("min_val", "0"))));
+              IsUnordArrayWithSize(IsMap("even", "false", "count", "50", "distinct_tags", "1",
+                                         "distinct_vals", "50", "max_val", "99", "min_val", "1"),
+                                   IsMap("even", "true", "count", "51", "distinct_tags", "1",
+                                         "distinct_vals", "51", "max_val", "100", "min_val", "0")));
 }
 
 TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
@@ -690,17 +878,103 @@ TEST_F(SearchFamilyTest, AggregateLoadGroupBy) {
   // clang-format off
   auto resp = Run({"ft.aggregate", "i1", "*",
                   "LOAD", "1", "even",
-                  "GROUPBY", "1", "even"});
+                  "GROUPBY", "1", "@even"});
   // clang-format on
 
-  EXPECT_THAT(resp, IsUnordArray(IsUnordArray(IsArray("even", "false")),
-                                 IsUnordArray(IsArray("even", "true"))));
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("even", "false"), IsMap("even", "true")));
+}
+
+TEST_F(SearchFamilyTest, AggregateLoad) {
+  Run({"hset", "key:1", "word", "item1", "foo", "10"});
+  Run({"hset", "key:2", "word", "item2", "foo", "20"});
+  Run({"hset", "key:3", "word", "item1", "foo", "30"});
+
+  auto resp = Run({"ft.create", "index", "ON", "HASH", "SCHEMA", "word", "TAG", "foo", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  // ft.aggregate index "*" LOAD 1 @word LOAD 1 @foo
+  resp = Run({"ft.aggregate", "index", "*", "LOAD", "1", "@word", "LOAD", "1", "@foo"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("word", "item1", "foo", "30"),
+                                         IsMap("word", "item2", "foo", "20"),
+                                         IsMap("word", "item1", "foo", "10")));
+
+  // ft.aggregate index "*" GROUPBY 1 @word REDUCE SUM 1 @foo AS foo_total LOAD 1 foo_total
+  resp = Run({"ft.aggregate", "index", "*", "GROUPBY", "1", "@word", "REDUCE", "SUM", "1", "@foo",
+              "AS", "foo_total", "LOAD", "1", "foo_total"});
+  EXPECT_THAT(resp, ErrArg("LOAD cannot be applied after projectors or reducers"));
 }
 
 TEST_F(SearchFamilyTest, Vector) {
   auto resp = Run({"ft.create", "ann", "ON", "HASH", "SCHEMA", "vector", "VECTOR", "HNSW", "8",
                    "TYPE", "FLOAT32", "DIM", "100", "distance_metric", "cosine", "M", "64"});
   EXPECT_EQ(resp, "OK");
+}
+
+TEST_F(SearchFamilyTest, EscapedSymbols) {
+  Run({"ft.create", "i1", "ON", "HASH", "SCHEMA", "color", "tag"});
+
+  // TODO ',' is separator, we need to check should next request work or not
+  // In redis it works for JSON but not for HASH
+  // Run({"hset", "i1", "color", R"(blue,1\$+)"});
+  // EXPECT_THAT(Run({"ft.search", "i1", R"(@color:{blue\,1\\\$\+})"}), AreDocIds("i1"));
+  // EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue.1\"%="});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\.1\\\"\\%\\=}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue<1'^~"});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\<1\\'\\^\\~}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue>1:&/"});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\>1\\:\\&\\/}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue{1;* "});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\{1\\;\\*\\ }"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue}1!("});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\}1\\!\\(}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue[1@)"});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\[1\\@\\)}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+
+  Run({"hset", "i1", "color", "blue]1#-"});
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue\\]1\\#\\-}"}), AreDocIds("i1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@color:{blue}"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, FlushSearchIndices) {
+  auto resp =
+      Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.nested.value", "AS", "value", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+
+  // Test that the index was removed
+  resp = Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.another.nested.value", "AS", "value",
+              "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"FLUSHDB"}), "OK");
+
+  // Test that the index was removed
+  resp = Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.another.nested.value", "AS", "value",
+              "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  EXPECT_EQ(Run({"select", "1"}), "OK");
+  EXPECT_EQ(Run({"FLUSHDB"}), "OK");
+  EXPECT_EQ(Run({"select", "0"}), "OK");
+
+  // Test that index was not removed
+  resp = Run({"FT.CREATE", "json", "ON", "JSON", "SCHEMA", "$.another.nested.value", "AS", "value",
+              "TEXT"});
+  EXPECT_THAT(resp, ErrArg("ERR Index already exists"));
 }
 
 }  // namespace dfly

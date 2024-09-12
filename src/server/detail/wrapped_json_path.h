@@ -4,15 +4,17 @@
 
 #pragma once
 
+#include <absl/container/inlined_vector.h>
+
 #include <string_view>
 #include <utility>
 #include <variant>
 
+#include "base/logging.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "core/string_or_view.h"
 #include "facade/op_status.h"
-#include "glog/logging.h"
 
 namespace dfly {
 
@@ -25,7 +27,8 @@ template <typename T>
 using JsonPathEvaluateCallback = absl::FunctionRef<T(std::string_view, const JsonType&)>;
 
 template <typename T = Nothing> struct MutateCallbackResult {
-  MutateCallbackResult() = default;
+  MutateCallbackResult() {
+  }
 
   MutateCallbackResult(bool should_be_deleted_, T value_)
       : should_be_deleted(should_be_deleted_), value(std::move(value_)) {
@@ -41,74 +44,83 @@ using JsonPathMutateCallback =
 
 namespace details {
 
-template <typename T> void OptionalEmplace(T value, std::optional<T>* optional) {
-  optional->emplace(std::move(value));
+template <typename T>
+void OptionalEmplace(bool keep_defined, std::optional<T> src, std::optional<T>* dest) {
+  if (!keep_defined || !dest->has_value()) {
+    dest->swap(src);
+  }
 }
 
-template <typename T>
-void OptionalEmplace(std::optional<T> value, std::optional<std::optional<T>>* optional) {
-  if (value.has_value()) {
-    optional->emplace(std::move(value));
+template <typename T> void OptionalEmplace(bool keep_defined, T src, T* dest) {
+  if (!keep_defined) {
+    *dest = std::move(src);
   }
 }
 
 }  // namespace details
 
 template <typename T> class JsonCallbackResult {
+  template <typename V> struct is_optional : std::false_type {};
+
+  template <typename V> struct is_optional<std::optional<V>> : std::true_type {};
+
  public:
-  /* In the case of a restricted path (legacy mode), the result consists of a single value */
-  using JsonV1Result = std::optional<T>;
+  JsonCallbackResult() {
+  }
 
-  /* In the case of an enhanced path (starts with $), the result is an array of multiple values */
-  using JsonV2Result = std::vector<T>;
-
-  JsonCallbackResult() = default;
-
-  explicit JsonCallbackResult(bool legacy_mode_is_enabled, bool save_first_result = false)
-      : save_first_result_(save_first_result) {
-    if (!legacy_mode_is_enabled) {
-      result_ = JsonV2Result{};
-    }
+  JsonCallbackResult(bool legacy_mode_is_enabled, bool save_first_result, bool empty_is_nil)
+      : only_save_first_(save_first_result),
+        is_legacy_(legacy_mode_is_enabled),
+        empty_is_nil_(empty_is_nil) {
   }
 
   void AddValue(T value) {
-    if (IsV1()) {
-      if (!save_first_result_) {
-        details::OptionalEmplace(std::move(value), &AsV1());
-      } else {
-        auto& as_v1 = AsV1();
-        if (!as_v1.has_value()) {
-          details::OptionalEmplace(std::move(value), &as_v1);
-        }
-      }
-    } else {
-      AsV2().emplace_back(std::move(value));
+    if (result_.empty() || !IsV1()) {
+      result_.push_back(std::move(value));
+      return;
     }
+
+    details::OptionalEmplace(only_save_first_, std::move(value), &result_.front());
   }
 
   bool IsV1() const {
-    return std::holds_alternative<JsonV1Result>(result_);
+    return is_legacy_;
   }
 
-  JsonV1Result& AsV1() {
-    return std::get<JsonV1Result>(result_);
+  const T& AsV1() const {
+    return result_.front();
   }
 
-  JsonV2Result& AsV2() {
-    return std::get<JsonV2Result>(result_);
+  const absl::InlinedVector<T, 2>& AsV2() const {
+    return std::move(result_);
   }
 
-  const JsonV1Result& AsV1() const {
-    return std::get<JsonV1Result>(result_);
+  bool Empty() const {
+    return result_.empty();
   }
 
-  const JsonV2Result& AsV2() const {
-    return std::get<JsonV2Result>(result_);
+  bool ShouldSendNil() const {
+    return is_legacy_ && empty_is_nil_ && result_.empty();
+  }
+
+  bool ShouldSendWrongType() const {
+    if (is_legacy_) {
+      if (result_.empty() && !empty_is_nil_)
+        return true;
+
+      if constexpr (is_optional<T>::value) {
+        return !result_.front().has_value();
+      }
+    }
+    return false;
   }
 
  private:
-  std::variant<JsonV1Result, JsonV2Result> result_;
-  bool save_first_result_ = false;
+  absl::InlinedVector<T, 2> result_;
+
+  bool only_save_first_ = false;
+  bool is_legacy_ = false;
+  bool empty_is_nil_ = false;
 };
 
 class WrappedJsonPath {
@@ -137,7 +149,7 @@ class WrappedJsonPath {
   template <typename T>
   JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb,
                                  bool save_first_result, bool legacy_mode_is_enabled) const {
-    JsonCallbackResult<T> eval_result{legacy_mode_is_enabled, save_first_result};
+    JsonCallbackResult<T> eval_result{legacy_mode_is_enabled, save_first_result, true};
 
     auto eval_callback = [&cb, &eval_result](std::string_view path, const JsonType& val) {
       eval_result.AddValue(cb(path, val));
@@ -159,14 +171,17 @@ class WrappedJsonPath {
   }
 
   template <typename T>
-  OpResult<JsonCallbackResult<T>> Mutate(JsonType* json_entry, JsonPathMutateCallback<T> cb) const {
-    JsonCallbackResult<T> mutate_result{IsLegacyModePath()};
+  OpResult<JsonCallbackResult<std::optional<T>>> Mutate(JsonType* json_entry,
+                                                        JsonPathMutateCallback<T> cb) const {
+    JsonCallbackResult<std::optional<T>> mutate_result{IsLegacyModePath(), false, false};
 
     auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
                                                  JsonType* val) -> bool {
       auto res = cb(path, val);
       if (res.value.has_value()) {
         mutate_result.AddValue(std::move(res.value).value());
+      } else if (!mutate_result.IsV1()) {
+        mutate_result.AddValue(std::nullopt);
       }
       return res.should_be_deleted;
     };

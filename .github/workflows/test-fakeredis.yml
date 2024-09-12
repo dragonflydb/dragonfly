@@ -1,0 +1,155 @@
+---
+name: Test Dragonfly/Fakeredis
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+concurrency:
+  group: dragonfly-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/romange/ubuntu-dev:22
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+    strategy:
+      fail-fast: false
+      matrix:
+        PYTHON_VERSION:
+          - "3.10"
+    name: "Run tests: "
+    permissions:
+      pull-requests: write
+      checks: write
+    # services:
+    #   redis:
+    #     image: docker.dragonflydb.io/dragonflydb/dragonfly:${{ matrix.DRAGONFLY_VERSION }}
+    #     ports:
+    #       - 6380:6379
+    #     options: >-
+    #       --health-cmd "redis-cli ping"
+    #       --health-interval 10s
+    #       --health-timeout 5s
+    #       --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          cache-dependency-path: tests/fakeredis/poetry.lock
+          python-version: ${{ matrix.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        env:
+          PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+        shell: bash
+        working-directory: tests/fakeredis
+        run: |
+          python -m pip --quiet install poetry
+          echo "$HOME/.poetry/bin" >> $GITHUB_PATH
+          poetry install
+      - name: Configure CMake
+        run: |
+          cmake -B ${GITHUB_WORKSPACE}/build \
+            -DCMAKE_BUILD_TYPE=Debug -DWITH_AWS:BOOL=OFF \
+            -GNinja -L
+          cd ${GITHUB_WORKSPACE}/build && pwd
+
+      - name: Build
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          ninja dragonfly
+          echo "-----------------------------"
+
+          # The order of redirect is important
+          ./dragonfly --proactor_threads=4  --noversion_check --port=6380  \
+           --lua_resp2_legacy_float 1> /tmp/dragonfly.log 2>&1 &
+
+      - name: Run tests
+        working-directory: tests/fakeredis
+        run: |
+          poetry run pytest test/ \
+            --ignore test/test_hypothesis.py  \
+            --ignore test/test_geo_commands.py  \
+            --ignore test/test_bitmap_commands.py  \
+            --ignore test/test_json/ \
+            --ignore test/test_mixins/test_bitmap_commands.py \
+            --junit-xml=results-tests.xml  --html=report-tests.html -v
+        continue-on-error: true  # For now to mark the flow as successful
+
+      - name: Show Dragonfly stats
+        if: always()
+        run: |
+          redis-cli -p 6380 INFO ALL
+      - name: Upload Tests Result xml
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tests-result-logs
+          path: |
+            /tmp/dragonfly.*
+
+      - name: Upload Tests Result html
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-tests.html
+          path: tests/fakeredis/report-tests.html
+
+      - name: Publish Test Report
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: mikepenz/action-junit-report@v4
+        with:
+          report_paths: tests/fakeredis/results-tests.xml
+          # Do not create a check run
+          annotate_only: true
+
+  publish-html-results:
+    name: Publish HTML Test Results to GitHub Pages
+    needs: test
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write      # to deploy to Pages
+      id-token: write   # to verify the deployment originates from an appropriate source
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Bundle Tests Result to one artifact
+        uses: actions/upload-artifact/merge@v4
+        with:
+          delete-merged: true
+          name: test-results-html
+          pattern: '*.html'
+
+      - name: Download html pages
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results-html
+          path: results/
+
+      - uses: actions/setup-python@v5
+        with:
+          cache-dependency-path: tests/fakeredis/poetry.lock
+          python-version: "3.12"
+
+      - name: Merge html results
+        run: |
+          pip install pytest-html-merger && mkdir merged
+          pytest_html_merger -i results/ -o merged/index.html
+
+      - name: Publish to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: merged/
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        with:
+          token: '${{ secrets.GITHUB_TOKEN }}'

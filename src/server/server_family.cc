@@ -22,6 +22,7 @@
 #include "absl/strings/ascii.h"
 #include "facade/error.h"
 #include "slowlog.h"
+#include "util/fibers/synchronization.h"
 
 extern "C" {
 #include "redis/redis_aux.h"
@@ -434,7 +435,7 @@ void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, Connec
   auto timeout = parser.Next<uint64_t>();
   ClientPause pause_state = ClientPause::ALL;
   if (parser.HasNext()) {
-    pause_state = parser.ToUpper().Switch("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
+    pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
   }
   if (auto err = parser.Error(); err) {
     return cntx->SendError(err->MakeReply());
@@ -469,20 +470,20 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
   bool is_on = false;
   using Tracking = ConnectionState::ClientTracking;
   Tracking::Options option = Tracking::NONE;
-  if (parser.Check("ON").IgnoreCase()) {
+  if (parser.Check("ON")) {
     is_on = true;
-  } else if (!parser.Check("OFF").IgnoreCase()) {
+  } else if (!parser.Check("OFF")) {
     return cntx->SendError(kSyntaxErr);
   }
 
   bool noloop = false;
 
   if (parser.HasNext()) {
-    if (parser.Check("OPTIN").IgnoreCase()) {
+    if (parser.Check("OPTIN")) {
       option = Tracking::OPTIN;
-    } else if (parser.Check("OPTOUT").IgnoreCase()) {
+    } else if (parser.Check("OPTOUT")) {
       option = Tracking::OPTOUT;
-    } else if (parser.Check("NOLOOP").IgnoreCase()) {
+    } else if (parser.Check("NOLOOP")) {
       noloop = true;
     } else {
       return cntx->SendError(kSyntaxErr);
@@ -490,7 +491,7 @@ void ClientTracking(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (parser.HasNext()) {
-    if (!noloop && parser.Check("NOLOOP").IgnoreCase()) {
+    if (!noloop && parser.Check("NOLOOP")) {
       noloop = true;
     } else {
       return cntx->SendError(kSyntaxErr);
@@ -519,12 +520,12 @@ void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
 
   using Tracking = ConnectionState::ClientTracking;
   CmdArgParser parser{args};
-  if (parser.Check("YES").IgnoreCase()) {
+  if (parser.Check("YES")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTIN)) {
       return cntx->SendError(
           "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode");
     }
-  } else if (parser.Check("NO").IgnoreCase()) {
+  } else if (parser.Check("NO")) {
     if (!cntx->conn_state.tracking_info_.HasOption(Tracking::OPTOUT)) {
       return cntx->SendError(
           "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode");
@@ -538,6 +539,39 @@ void ClientCaching(CmdArgList args, ConnectionContext* cntx) {
   cntx->conn_state.tracking_info_.SetCachingSequenceNumber(is_multi);
 
   cntx->SendOk();
+}
+
+void ClientSetInfo(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 2) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  auto* conn = cntx->conn();
+  if (conn == nullptr) {
+    return cntx->SendError("No connection");
+  }
+
+  ToUpper(&args[0]);
+  string_view type = ArgS(args, 0);
+  string_view val = ArgS(args, 1);
+
+  if (type == "LIB-NAME") {
+    conn->SetLibName(string(val));
+  } else if (type == "LIB-VER") {
+    conn->SetLibVersion(string(val));
+  } else {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  cntx->SendOk();
+}
+
+void ClientId(CmdArgList args, ConnectionContext* cntx) {
+  if (args.size() != 0) {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  return cntx->SendLong(cntx->conn()->GetClientId());
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, ConnectionContext* cntx) {
@@ -644,7 +678,7 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionCo
   ReplicaOfArgs replicaof_args;
   CmdArgParser parser(args);
 
-  if (parser.Check("NO").IgnoreCase().ExpectTail(1)) {
+  if (parser.Check("NO")) {
     parser.ExpectTag("ONE");
     replicaof_args.port = 0;
   } else {
@@ -869,17 +903,25 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 }
 
 void ServerFamily::LoadFromSnapshot() {
+  {
+    util::fb2::LockGuard lk{loading_stats_mu_};
+    loading_stats_.restore_count++;
+  }
+
   const auto load_path_result =
       snapshot_storage_->LoadPath(GetFlag(FLAGS_dir), GetFlag(FLAGS_dbfilename));
+
   if (load_path_result) {
     const std::string load_path = *load_path_result;
     if (!load_path.empty()) {
-      load_result_ = Load(load_path);
+      load_result_ = Load(load_path, LoadExistingKeys::kFail);
     }
   } else {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
       LOG(WARNING) << "Load snapshot: No snapshot found";
     } else {
+      util::fb2::LockGuard lk{loading_stats_mu_};
+      loading_stats_.failed_restore_count++;
       LOG(ERROR) << "Failed to load snapshot: " << load_path_result.error().Format();
     }
   }
@@ -903,8 +945,14 @@ void ServerFamily::Shutdown() {
   bg_save_fb_.JoinIfNeeded();
 
   if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
-    shard_set->pool()->GetNextProactor()->Await([this] {
-      if (GenericError ec = DoSave(); ec) {
+    shard_set->pool()->GetNextProactor()->Await([this]() ABSL_LOCKS_EXCLUDED(loading_stats_mu_) {
+      GenericError ec = DoSave();
+
+      util::fb2::LockGuard lk{loading_stats_mu_};
+      loading_stats_.backup_count++;
+
+      if (ec) {
+        loading_stats_.failed_backup_count++;
         LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
       }
     });
@@ -919,7 +967,7 @@ void ServerFamily::Shutdown() {
     auto ec = journal_->Close();
     LOG_IF(ERROR, ec) << "Error closing journal " << ec;
 
-    unique_lock lk(replicaof_mu_);
+    util::fb2::LockGuard lk(replicaof_mu_);
     if (replica_) {
       replica_->Stop();
     }
@@ -935,13 +983,40 @@ struct AggregateLoadResult {
   std::atomic<size_t> keys_read;
 };
 
+void ServerFamily::FlushAll(ConnectionContext* cntx) {
+  const CommandId* cid = service_.FindCmd("FLUSHALL");
+  boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
+  flush_trans->InitByArgs(cntx->ns, 0, {});
+  VLOG(1) << "Performing flush";
+  error_code ec = Drakarys(flush_trans.get(), DbSlice::kDbAll);
+  if (ec) {
+    LOG(ERROR) << "Error flushing db " << ec.message();
+  }
+}
+
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occured) with a future.
-std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& load_path) {
+std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_path,
+                                                            LoadExistingKeys existing_keys) {
+  fs::path path(load_path);
+
+  if (load_path.empty()) {
+    fs::path dir_path(GetFlag(FLAGS_dir));
+    string filename = GetFlag(FLAGS_dbfilename);
+    dir_path.append(filename);
+    path = dir_path;
+  }
+
   DCHECK_GT(shard_count(), 0u);
 
-  auto paths_result = snapshot_storage_->LoadPaths(load_path);
+  if (ServerState::tlocal() && !ServerState::tlocal()->is_master) {
+    fb2::Future<GenericError> future;
+    future.Resolve(string("Replica cannot load data"));
+    return future;
+  }
+
+  auto paths_result = snapshot_storage_->LoadPaths(path.generic_string());
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
@@ -952,15 +1027,13 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& l
 
   std::vector<std::string> paths = *paths_result;
 
-  LOG(INFO) << "Loading " << load_path;
+  LOG(INFO) << "Loading " << path.generic_string();
 
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
     LOG(WARNING) << new_state << " in progress, ignored";
     return {};
   }
-
-  RdbLoader::PerformPreLoad(&service_);
 
   auto& pool = service_.proactor_pool();
 
@@ -979,8 +1052,8 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& l
       proactor = pool.GetNextProactor();
     }
 
-    auto load_fiber = [this, aggregated_result, path = std::move(path)]() {
-      auto load_result = LoadRdb(path);
+    auto load_fiber = [this, aggregated_result, existing_keys, path = std::move(path)]() {
+      auto load_result = LoadRdb(path, existing_keys);
       if (load_result.has_value())
         aggregated_result->keys_read.fetch_add(*load_result);
       else
@@ -1034,19 +1107,29 @@ void ServerFamily::SnapshotScheduling() {
     };
 
     GenericError ec = DoSave();
+
+    util::fb2::LockGuard lk{loading_stats_mu_};
+    loading_stats_.backup_count++;
+
     if (ec) {
+      loading_stats_.failed_backup_count++;
       LOG(WARNING) << "Failed to perform snapshot " << ec.Format();
     }
   }
 }
 
-io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file) {
+io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
+                                         LoadExistingKeys existing_keys) {
   error_code ec;
   io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
   if (res) {
     io::FileSource fs(*res);
 
     RdbLoader loader{&service_};
+    if (existing_keys == LoadExistingKeys::kOverride) {
+      loader.SetOverrideExistingKeys(true);
+    }
+
     ec = loader.Load(&fs);
     if (!ec) {
       VLOG(1) << "Done loading RDB from " << rdb_file << ", keys loaded: " << loader.keys_loaded();
@@ -1149,6 +1232,13 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
                             &resp->body());
+  string connections_libs;
+  AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
+                     MetricType::GAUGE, &connections_libs);
+  for (const auto& [lib, count] : m.connections_lib_name_ver_map) {
+    AppendMetricValue("connections_libs", count, {"lib"}, {lib}, &connections_libs);
+  }
+  absl::StrAppend(&resp->body(), connections_libs);
 
   // Memory metrics
   auto sdata_res = io::ReadStatusInfo();
@@ -1209,7 +1299,7 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     if (added)
       absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
-  if (!m.replication_metrics.empty()) {
+  if (!m.master_side_replicas_info.empty()) {
     ReplicationMemoryStats repl_mem;
     dfly_cmd->GetReplicationMemoryStats(&repl_mem);
     AppendMetricWithoutLabels(
@@ -1237,6 +1327,15 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             &resp->body());
   AppendMetricWithoutLabels("lua_blocked_total", "", m.lua_stats.blocked_cnt, MetricType::COUNTER,
                             &resp->body());
+
+  AppendMetricWithoutLabels("backups_total", "", m.loading_stats.backup_count, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("failed_backups_total", "", m.loading_stats.failed_backup_count,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("restores_total", "", m.loading_stats.restore_count,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("failed_restores_total", "", m.loading_stats.failed_restore_count,
+                            MetricType::COUNTER, &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
@@ -1281,11 +1380,11 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     absl::StrAppend(&resp->body(), command_metrics);
   }
 
-  if (!m.replication_metrics.empty()) {
+  if (!m.master_side_replicas_info.empty()) {
     string replication_lag_metrics;
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
-    for (const auto& replica : m.replication_metrics) {
+    for (const auto& replica : m.master_side_replicas_info) {
       AppendMetricValue("connected_replica_lag_records", replica.lsn_lag,
                         {"replica_ip", "replica_port", "replica_state"},
                         {replica.address, absl::StrCat(replica.listening_port), replica.state},
@@ -1294,14 +1393,10 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     absl::StrAppend(&resp->body(), replication_lag_metrics);
   }
 
-  if (m.replica_reconnections) {
-    auto& replica_reconnections = m.replica_reconnections.value();
-    AppendMetricHeader("replica_reconnect_count", "Number of replica reconnects",
-                       MetricType::COUNTER, &resp->body());
-    AppendMetricValue("replica_reconnect_count", replica_reconnections.reconnect_count,
-                      {"replica_host", "replica_port"},
-                      {replica_reconnections.host, absl::StrCat(replica_reconnections.port)},
-                      &resp->body());
+  if (m.replica_side_info) {
+    auto& replica_info = *m.replica_side_info;
+    AppendMetricWithoutLabels("replica_reconnect_count", "Number of replica reconnects",
+                              replica_info.reconnect_count, MetricType::COUNTER, &resp->body());
   }
 
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
@@ -1370,7 +1465,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 }
 
 void ServerFamily::PauseReplication(bool pause) {
-  unique_lock lk(replicaof_mu_);
+  util::fb2::LockGuard lk(replicaof_mu_);
 
   // Switch to primary mode.
   if (!ServerState::tlocal()->is_master) {
@@ -1381,7 +1476,7 @@ void ServerFamily::PauseReplication(bool pause) {
 }
 
 std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
-  unique_lock lk(replicaof_mu_);
+  util::fb2::LockGuard lk(replicaof_mu_);
 
   // Switch to primary mode.
   if (!ServerState::tlocal()->is_master) {
@@ -1404,7 +1499,7 @@ vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
 }
 
 optional<Replica::Summary> ServerFamily::GetReplicaSummary() const {
-  unique_lock lk(replicaof_mu_);
+  util::fb2::LockGuard lk(replicaof_mu_);
   if (replica_ == nullptr) {
     return nullopt;
   } else {
@@ -1478,7 +1573,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
   {
-    std::lock_guard lk(save_mu_);
+    util::fb2::LockGuard lk(save_mu_);
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
@@ -1504,7 +1599,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   detail::SaveInfo save_info;
 
   {
-    std::lock_guard lk(save_mu_);
+    util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
 
     if (save_info.error) {
@@ -1553,7 +1648,7 @@ error_code ServerFamily::Drakarys(Transaction* transaction, DbIndex db_ind) {
 }
 
 LastSaveInfo ServerFamily::GetLastSaveInfo() const {
-  lock_guard lk(save_mu_);
+  util::fb2::LockGuard lk(save_mu_);
   return last_save_info_;
 }
 
@@ -1646,6 +1741,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     auto cred = registry->GetCredentials(username);
     cntx->acl_commands = cred.acl_commands;
     cntx->keys = std::move(cred.keys);
+    cntx->pub_sub = std::move(cred.pub_sub);
     cntx->ns = &namespaces.GetOrInsert(cred.ns);
     cntx->authenticated = true;
   }
@@ -1706,10 +1802,10 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), cntx);
   } else if (sub_cmd == "CACHING") {
     return ClientCaching(sub_args, cntx);
-  }
-
-  if (sub_cmd == "SETINFO") {
-    return cntx->SendOk();
+  } else if (sub_cmd == "SETINFO") {
+    return ClientSetInfo(sub_args, cntx);
+  } else if (sub_cmd == "ID") {
+    return ClientId(sub_args, cntx);
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
@@ -1923,8 +2019,7 @@ void ServerFamily::ResetStat(Namespace* ns) {
         tl_facade_stats->reply_stats.send_stats = {};
         tl_facade_stats->reply_stats.script_error_count = 0;
         tl_facade_stats->reply_stats.err_count.clear();
-
-        service_.mutable_registry()->ResetCallStats(index);
+        ServerState::tlocal()->exec_freq_count.clear();
       });
 }
 
@@ -1976,15 +2071,20 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
       result.delete_ttl_per_sec += shard->GetMovingSum6(EngineShard::TTL_DELETE);
       if (result.tx_queue_len < shard->txq()->size())
         result.tx_queue_len = shard->txq()->size();
-    }
+    }  // if (shard)
 
     result.tls_bytes += Listener::TLSUsedMemoryThreadLocal();
     result.refused_conn_max_clients_reached_count += Listener::RefusedConnectionMaxClientsCount();
 
     result.lua_stats += InterpreterManager::tl_stats();
 
+    auto connections_lib_name_ver_map = facade::Connection::GetLibStatsTL();
+    for (auto& [k, v] : connections_lib_name_ver_map) {
+      result.connections_lib_name_ver_map[k] += v;
+    }
+
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
-  };
+  };  // cb
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
 
@@ -1995,17 +2095,24 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
   if (is_master) {
-    result.replication_metrics = dfly_cmd_->GetReplicasRoleInfo();
+    result.master_side_replicas_info = dfly_cmd_->GetReplicasRoleInfo();
   } else {
     auto info = GetReplicaSummary();
     if (info) {
-      result.replica_reconnections = {std::move(info->host), info->port, info->reconnect_count};
+      result.replica_side_info = {
+          .reconnect_count = info->reconnect_count,
+      };
     }
+  }
+
+  {
+    util::fb2::LockGuard lk{loading_stats_mu_};
+    result.loading_stats = loading_stats_;
   }
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
-  lock_guard lk{peak_stats_mu_};
+  util::fb2::LockGuard lk{peak_stats_mu_};
   UpdateMax(&peak_stats_.conn_dispatch_queue_bytes,
             result.facade_stats.conn_stats.dispatch_queue_bytes);
   UpdateMax(&peak_stats_.conn_read_buf_capacity, result.facade_stats.conn_stats.read_buf_capacity);
@@ -2131,7 +2238,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
       append("maxmemory_policy", "noeviction");
     }
 
-    if (!m.replication_metrics.empty()) {
+    if (!m.master_side_replicas_info.empty()) {
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes);
@@ -2139,7 +2246,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     }
 
     {
-      lock_guard lk{save_mu_};
+      util::fb2::LockGuard lk{save_mu_};
       if (save_controller_) {
         append("save_buffer_bytes", save_controller_->GetSaveBuffersSize());
       }
@@ -2226,7 +2333,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     bool is_saving = false;
     uint32_t curent_durration_sec = 0;
     {
-      lock_guard lk{save_mu_};
+      util::fb2::LockGuard lk{save_mu_};
       if (save_controller_) {
         is_saving = true;
         curent_durration_sec = save_controller_->GetCurrentSaveDuration();
@@ -2287,7 +2394,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (should_enter("REPLICATION")) {
-    unique_lock lk(replicaof_mu_);
+    util::fb2::LockGuard lk(replicaof_mu_);
     // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
     // ensuring eventual consistency of is_master. When determining if the server is a replica and
     // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
@@ -2295,7 +2402,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     if (!replica_) {
       append("role", "master");
       append("connected_slaves", m.facade_stats.conn_stats.num_replicas);
-      const auto& replicas = m.replication_metrics;
+      const auto& replicas = m.master_side_replicas_info;
       for (size_t i = 0; i < replicas.size(); i++) {
         auto& r = replicas[i];
         // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
@@ -2306,7 +2413,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     } else {
       append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
-      auto replication_info_cb = [&](Replica::Summary rinfo) {
+      auto replication_info_cb = [&](const Replica::Summary& rinfo) {
         append("master_host", rinfo.host);
         append("master_port", rinfo.port);
 
@@ -2315,10 +2422,14 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
         append("master_last_io_seconds_ago", rinfo.master_last_io_sec);
         append("master_sync_in_progress", rinfo.full_sync_in_progress);
         append("master_replid", rinfo.master_id);
+        if (rinfo.full_sync_done)
+          append("slave_repl_offset", rinfo.repl_offset_sum);
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
       };
       replication_info_cb(replica_->GetSummary());
+
+      // Special case, when multiple masters replicate to a single replica.
       for (const auto& replica : cluster_replicas_) {
         replication_info_cb(replica->GetSummary());
       }
@@ -2487,7 +2598,7 @@ void ServerFamily::Hello(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::AddReplicaOf(CmdArgList args, ConnectionContext* cntx) {
-  unique_lock lk(replicaof_mu_);
+  util::fb2::LockGuard lk(replicaof_mu_);
   if (ServerState::tlocal()->is_master) {
     cntx->SendError("Calling ADDREPLICAOFF allowed only after server is already a replica");
     return;
@@ -2513,70 +2624,72 @@ void ServerFamily::AddReplicaOf(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
                                      ActionOnConnectionFail on_err) {
-  unique_lock lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
+  std::shared_ptr<Replica> new_replica;
+  {
+    util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
-  // We should not execute replica of command while loading from snapshot.
-  if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
-    cntx->SendError(kLoadingErr);
-    return;
-  }
-
-  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, cntx);
-  if (!replicaof_args.has_value()) {
-    return;
-  }
-
-  LOG(INFO) << "Replicating " << *replicaof_args;
-
-  // If NO ONE was supplied, just stop the current replica (if it exists)
-  if (replicaof_args->IsReplicaOfNoOne()) {
-    if (!ServerState::tlocal()->is_master) {
-      CHECK(replica_);
-
-      SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
-      replica_->Stop();
-      replica_.reset();
-
-      StopAllClusterReplicas();
+    // We should not execute replica of command while loading from snapshot.
+    if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
+      cntx->SendError(kLoadingErr);
+      return;
     }
 
-    CHECK_EQ(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::ACTIVE)
-        << "Server is set to replica no one, yet state is not active!";
+    auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args, cntx);
+    if (!replicaof_args.has_value()) {
+      return;
+    }
 
-    return cntx->SendOk();
-  }
+    LOG(INFO) << "Replicating " << *replicaof_args;
 
-  // If any replication is in progress, stop it, cancellation should kick in immediately
-  if (replica_)
-    replica_->Stop();
-  StopAllClusterReplicas();
+    // If NO ONE was supplied, just stop the current replica (if it exists)
+    if (replicaof_args->IsReplicaOfNoOne()) {
+      if (!ServerState::tlocal()->is_master) {
+        CHECK(replica_);
 
-  // First, switch into the loading state
-  if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-      new_state != GlobalState::LOADING) {
-    LOG(WARNING) << new_state << " in progress, ignored";
-    cntx->SendError("Invalid state");
-    return;
-  }
+        SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
+        replica_->Stop();
+        replica_.reset();
 
-  // If we are called by "Replicate", cntx->transaction will be null but we do not need
-  // to flush anything.
-  if (cntx->transaction) {
-    Drakarys(cntx->transaction, DbSlice::kDbAll);
-  }
+        StopAllClusterReplicas();
+      }
 
-  // Create a new replica and assing it
-  auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                          master_replid(), replicaof_args->slot_range);
+      CHECK_EQ(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::ACTIVE)
+          << "Server is set to replica no one, yet state is not active!";
 
-  replica_ = new_replica;
+      return cntx->SendOk();
+    }
 
-  // TODO: disconnect pending blocked clients (pubsub, blocking commands)
-  SetMasterFlagOnAllThreads(false);  // Flip flag after assiging replica
+    // If any replication is in progress, stop it, cancellation should kick in immediately
+    if (replica_)
+      replica_->Stop();
+    StopAllClusterReplicas();
 
+    // First, switch into the loading state
+    if (auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+        new_state != GlobalState::LOADING) {
+      LOG(WARNING) << new_state << " in progress, ignored";
+      cntx->SendError("Invalid state");
+      return;
+    }
+
+    // If we are called by "Replicate", cntx->transaction will be null but we do not need
+    // to flush anything.
+    if (cntx->transaction) {
+      Drakarys(cntx->transaction, DbSlice::kDbAll);
+    }
+
+    // Create a new replica and assing it
+    new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
+                                       master_replid(), replicaof_args->slot_range);
+
+    replica_ = new_replica;
+
+    // TODO: disconnect pending blocked clients (pubsub, blocking commands)
+    SetMasterFlagOnAllThreads(false);  // Flip flag after assiging replica
+
+  }  // release the lock, lk.unlock()
   // We proceed connecting below without the lock to allow interrupting the replica immediately.
   // From this point and onward, it should be highly responsive.
-  lk.unlock();
 
   error_code ec{};
   switch (on_err) {
@@ -2590,7 +2703,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx,
 
   // If the replication attempt failed, clean up global state. The replica should have stopped
   // internally.
-  lk.lock();
+  util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
   if (ec && replica_ == new_replica) {
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     SetMasterFlagOnAllThreads(true);
@@ -2632,12 +2745,10 @@ void ServerFamily::Replicate(string_view host, string_view port) {
 void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   VLOG(1) << "ReplTakeOver start";
 
-  unique_lock lk(replicaof_mu_);
-
   CmdArgParser parser{args};
 
   int timeout_sec = parser.Next<int>();
-  bool save_flag = static_cast<bool>(parser.Check("SAVE").IgnoreCase());
+  bool save_flag = static_cast<bool>(parser.Check("SAVE"));
 
   if (parser.HasNext())
     return cntx->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
@@ -2654,6 +2765,8 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
   if (ServerState::tlocal()->is_master)
     return cntx->SendOk();
 
+  util::fb2::LockGuard lk(replicaof_mu_);
+
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
@@ -2667,8 +2780,7 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("Couldn't execute takeover");
 
   LOG(INFO) << "Takeover successful, promoting this instance to master.";
-  service_.proactor_pool().AwaitFiberOnAll(
-      [&](util::ProactorBase* pb) { ServerState::tlocal()->is_master = true; });
+  SetMasterFlagOnAllThreads(true);
   replica_->Stop();
   replica_.reset();
   return cntx->SendOk();
@@ -2768,7 +2880,7 @@ err:
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  unique_lock lk(replicaof_mu_);
+  util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
   // ensuring eventual consistency of is_master. When determining if the server is a replica and
   // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
@@ -2819,7 +2931,7 @@ void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
   time_t save_time;
   {
-    lock_guard lk(save_mu_);
+    util::fb2::LockGuard lk(save_mu_);
     save_time = last_save_info_.save_time;
   }
   cntx->SendLong(save_time);

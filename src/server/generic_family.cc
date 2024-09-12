@@ -691,23 +691,6 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
 
-OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys) {
-  DVLOG(1) << "Del: " << keys.Front();
-  auto& db_slice = op_args.GetDbSlice();
-
-  uint32_t res = 0;
-
-  for (string_view key : keys) {
-    auto fres = db_slice.FindMutable(op_args.db_cntx, key);
-    if (!IsValid(fres.it))
-      continue;
-    fres.post_updater.Run();
-    res += int(db_slice.Del(op_args.db_cntx, fres.it));
-  }
-
-  return res;
-}
-
 OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
   DVLOG(1) << "Stick: " << keys.Front();
 
@@ -726,6 +709,23 @@ OpResult<uint32_t> OpStick(const OpArgs& op_args, const ShardArgs& keys) {
 }
 
 }  // namespace
+
+OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
+  DVLOG(1) << "Del: " << keys.Front();
+  auto& db_slice = op_args.GetDbSlice();
+
+  uint32_t res = 0;
+
+  for (string_view key : keys) {
+    auto fres = db_slice.FindMutable(op_args.db_cntx, key);
+    if (!IsValid(fres.it))
+      continue;
+    fres.post_updater.Run();
+    res += int(db_slice.Del(op_args.db_cntx, fres.it));
+  }
+
+  return res;
+}
 
 void GenericFamily::Del(CmdArgList args, ConnectionContext* cntx) {
   Transaction* transaction = cntx->transaction;
@@ -767,16 +767,27 @@ void GenericFamily::Ping(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
   }
 
-  // We synchronously block here until the engine sends us the payload and notifies that
-  // the I/O operation has been processed.
+  string_view msg;
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+
+  // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
+  if (cntx->conn_state.subscribe_info && !rb->IsResp3()) {
+    if (args.size() == 1) {
+      msg = ArgS(args, 0);
+    }
+
+    string_view resp[2] = {"pong", msg};
+    return rb->SendStringArr(resp);
+  }
+
   if (args.size() == 0) {
     return cntx->SendSimpleString("PONG");
   } else {
-    string_view arg = ArgS(args, 0);
-    DVLOG(2) << "Ping " << arg;
+    msg = ArgS(args, 0);
+    DVLOG(2) << "Ping " << msg;
 
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    return rb->SendBulkString(arg);
+    return rb->SendBulkString(msg);
   }
 }
 
@@ -907,7 +918,10 @@ void GenericFamily::Keys(CmdArgList args, ConnectionContext* cntx) {
   StringVec keys;
 
   ScanOpts scan_opts;
-  scan_opts.pattern = pattern;
+  if (pattern != "*") {
+    scan_opts.pattern = pattern;
+  }
+
   scan_opts.limit = 512;
   auto output_limit = absl::GetFlag(FLAGS_keys_output_limit);
 
@@ -1091,8 +1105,11 @@ OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::stri
   using namespace container_utils;
 
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
-  if (!IsValid(it) || !IsContainer(it->second)) {
+  if (!IsValid(it)) {
     return OpStatus::KEY_NOTFOUND;
+  }
+  if (!IsContainer(it->second)) {
+    return OpStatus::WRONG_TYPE;
   }
 
   auto result = MakeSortEntryList(alpha);
@@ -1106,7 +1123,7 @@ OpResultTyped<SortEntryList> OpFetchSortEntries(const OpArgs& op_args, std::stri
       result);
   auto res = OpResultTyped{std::move(result)};
   res.setType(it->second.ObjType());
-  return success ? res : OpStatus::WRONG_TYPE;
+  return success ? res : OpStatus::INVALID_NUMERIC_RESULT;
 }
 
 void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
@@ -1123,6 +1140,8 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       alpha = true;
     } else if (arg == "DESC") {
       reversed = true;
+    } else if (arg == "ASC") {
+      reversed = false;
     } else if (arg == "LIMIT") {
       int offset, limit;
       if (i + 2 >= args.size()) {
@@ -1134,6 +1153,9 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       }
       bounds = {offset, limit};
       i += 2;
+    } else {
+      LOG_EVERY_T(ERROR, 1) << "Unsupported option " << arg;
+      return cntx->SendError(kSyntaxErr, kSyntaxErrType);
     }
   }
 
@@ -1142,7 +1164,10 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
         return OpFetchSortEntries(t->GetOpArgs(shard), key, alpha);
       });
 
-  if (fetch_result.status() == OpStatus::WRONG_TYPE)
+  if (fetch_result == OpStatus::WRONG_TYPE)
+    return cntx->SendError(fetch_result.status());
+
+  if (fetch_result.status() == OpStatus::INVALID_NUMERIC_RESULT)
     return cntx->SendError("One or more scores can't be converted into double");
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -1158,9 +1183,12 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
                           return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
                         });
     } else {
-      std::sort(entries.begin(), entries.end(), [reversed](const auto& lhs, const auto& rhs) {
-        return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
-      });
+      std::sort(entries.begin(), entries.end(),
+                [reversed, &entries](const auto& lhs, const auto& rhs) -> bool {
+                  DCHECK((&rhs - entries.data()) >= 0);
+                  DCHECK((&rhs - entries.data()) < int64_t(entries.size()));
+                  return reversed ? rhs.Cmp() < lhs.Cmp() : lhs.Cmp() < rhs.Cmp();
+                });
     }
 
     auto start_it = entries.begin();
@@ -1179,6 +1207,7 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(it->key);
     }
   };
+
   std::visit(std::move(sort_call), fetch_result.value());
 }
 
@@ -1297,6 +1326,38 @@ void GenericFamily::RenameNx(CmdArgList args, ConnectionContext* cntx) {
     cntx->SendLong(0);
   } else {
     cntx->SendError(reply);
+  }
+}
+
+void GenericFamily::ExpireTime(CmdArgList args, ConnectionContext* cntx) {
+  ExpireTimeGeneric(args, cntx, TimeUnit::SEC);
+}
+
+void GenericFamily::PExpireTime(CmdArgList args, ConnectionContext* cntx) {
+  ExpireTimeGeneric(args, cntx, TimeUnit::MSEC);
+}
+
+void GenericFamily::ExpireTimeGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit) {
+  string_view key = ArgS(args, 0);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) { return OpExpireTime(t, shard, key); };
+  OpResult<uint64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  if (result) {
+    long ttl = (unit == TimeUnit::SEC) ? (result.value() + 500) / 1000 : result.value();
+    cntx->SendLong(ttl);
+    return;
+  }
+
+  switch (result.status()) {
+    case OpStatus::KEY_NOTFOUND:
+      cntx->SendLong(-2);
+      break;
+    default:
+      LOG_IF(ERROR, result.status() != OpStatus::SKIPPED)
+          << "Unexpected status " << result.status();
+      cntx->SendLong(-1);
+      break;
   }
 }
 
@@ -1462,7 +1523,8 @@ void GenericFamily::Scan(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
+OpResult<uint64_t> GenericFamily::OpExpireTime(Transaction* t, EngineShard* shard,
+                                               string_view key) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   auto [it, expire_it] = db_slice.FindReadOnly(t->GetDbContext(), key);
   if (!IsValid(it))
@@ -1471,9 +1533,21 @@ OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, stri
   if (!IsValid(expire_it))
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = db_slice.ExpireTime(expire_it) - t->GetDbContext().time_now_ms;
+  int64_t ttl_ms = db_slice.ExpireTime(expire_it);
   DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
   return ttl_ms;
+}
+
+OpResult<uint64_t> GenericFamily::OpTtl(Transaction* t, EngineShard* shard, string_view key) {
+  auto opExpireTimeResult = OpExpireTime(t, shard, key);
+
+  if (opExpireTimeResult) {
+    int64_t ttl_ms = opExpireTimeResult.value() - t->GetDbContext().time_now_ms;
+    DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
+    return ttl_ms;
+  } else {
+    return opExpireTimeResult;
+  }
 }
 
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
@@ -1497,7 +1571,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     return OpStatus::KEY_NOTFOUND;
 
   if (from_key == to_key)
-    return OpStatus::OK;
+    return destination_should_not_exist ? OpStatus::KEY_EXISTS : OpStatus::OK;
 
   bool is_prior_list = false;
   auto to_res = db_slice.FindMutable(op_args.db_cntx, to_key);
@@ -1672,6 +1746,8 @@ constexpr uint32_t kStick = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kSort = WRITE | SET | SORTEDSET | LIST | SLOW | DANGEROUS;
 constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
+constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
+constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
@@ -1713,7 +1789,9 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(
              Move)
       << CI{"RESTORE", CO::WRITE, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
-      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey);
+      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey)
+      << CI{"EXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kExpireTime}.HFUNC(ExpireTime)
+      << CI{"PEXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPExpireTime}.HFUNC(PExpireTime);
 }
 
 }  // namespace dfly

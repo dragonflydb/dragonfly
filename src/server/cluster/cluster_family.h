@@ -28,7 +28,7 @@ class ClusterFamily {
 
   void Register(CommandRegistry* registry);
 
-  void Shutdown();
+  void Shutdown() ABSL_LOCKS_EXCLUDED(set_config_mu);
 
   // Returns a thread-local pointer.
   static ClusterConfig* cluster_config();
@@ -57,18 +57,21 @@ class ClusterFamily {
 
   // Custom Dragonfly commands for cluster management
   void DflyCluster(CmdArgList args, ConnectionContext* cntx);
-  void DflyClusterConfig(CmdArgList args, ConnectionContext* cntx);
-  void DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx);
+  void DflyClusterConfig(CmdArgList args, ConnectionContext* cntx)
+      ABSL_LOCKS_EXCLUDED(set_config_mu, migration_mu_);
+  void DflyClusterGetSlotInfo(CmdArgList args, ConnectionContext* cntx)
+      ABSL_LOCKS_EXCLUDED(migration_mu_);
   void DflyClusterFlushSlots(CmdArgList args, ConnectionContext* cntx);
 
  private:  // Slots migration section
-  void DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx);
+  void DflySlotMigrationStatus(CmdArgList args, ConnectionContext* cntx)
+      ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
   void DflyMigrate(CmdArgList args, ConnectionContext* cntx);
 
   // DFLYMIGRATE INIT is internal command to create incoming migration object
-  void InitMigration(CmdArgList args, ConnectionContext* cntx);
+  void InitMigration(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // DFLYMIGRATE FLOW initiate second step in slots migration procedure
   // this request should be done for every shard on the target node
@@ -78,15 +81,27 @@ class ClusterFamily {
 
   void DflyMigrateAck(CmdArgList args, ConnectionContext* cntx);
 
-  std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id);
+  std::shared_ptr<IncomingSlotMigration> GetIncomingMigration(std::string_view source_id)
+      ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   void StartSlotMigrations(std::vector<MigrationInfo> migrations);
-  SlotRanges RemoveOutgoingMigrations(std::shared_ptr<ClusterConfig> new_config,
-                                      std::shared_ptr<ClusterConfig> old_config);
-  void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations);
+
+  // must be destroyed excluded set_config_mu and migration_mu_ locks
+  struct PreparedToRemoveOutgoingMigrations {
+    std::vector<std::shared_ptr<OutgoingMigration>> migrations;
+    SlotRanges slot_ranges;
+    ~PreparedToRemoveOutgoingMigrations() ABSL_LOCKS_EXCLUDED(migration_mu_, set_config_mu);
+  };
+
+  [[nodiscard]] PreparedToRemoveOutgoingMigrations TakeOutOutgoingMigrations(
+      std::shared_ptr<ClusterConfig> new_config, std::shared_ptr<ClusterConfig> old_config)
+      ABSL_LOCKS_EXCLUDED(migration_mu_);
+  void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations)
+      ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // store info about migration and create unique session id
-  std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(MigrationInfo info);
+  std::shared_ptr<OutgoingMigration> CreateOutgoingMigration(MigrationInfo info)
+      ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   mutable util::fb2::Mutex migration_mu_;  // guard migrations operations
   // holds all incoming slots migrations that are currently in progress.

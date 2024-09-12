@@ -56,8 +56,12 @@ ABSL_FLAG(uint64_t, publish_buffer_limit, 128_MB,
 
 ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin port");
 
-ABSL_FLAG(uint64_t, pipeline_squash, 10,
+ABSL_FLAG(uint32_t, pipeline_squash, 10,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
+
+ABSL_FLAG(uint32_t, pipeline_queue_limit, 1000,
+          "Pipeline queue max length, the server will stop reading from the client socket"
+          " once the pipeline reaches this limit");
 
 // When changing this constant, also update `test_large_cmd` test in connection_test.py.
 ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
@@ -73,6 +77,7 @@ ABSL_FLAG(bool, migrate_connections, true,
           "happen at most once per connection.");
 
 using namespace util;
+using absl::GetFlag;
 using nonstd::make_unexpected;
 
 namespace facade {
@@ -254,11 +259,37 @@ const char* kPhaseName[Connection::NUM_PHASES] = {"SETUP", "READ", "PROCESS", "S
 
 }  // namespace
 
+// Keeps track of total per-thread sizes of dispatch queues to limit memory taken up by messages
+// in these queues.
+struct Connection::QueueBackpressure {
+  // Block until subscriber memory usage is below limit, can be called from any thread.
+  void EnsureBelowLimit();
+
+  bool IsPipelineBufferOverLimit(size_t size, uint32_t q_len) const {
+    return size >= pipeline_buffer_limit || q_len > pipeline_queue_max_len;
+  }
+
+  // Used by publisher/subscriber actors to make sure we do not publish too many messages
+  // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
+  util::fb2::EventCount pubsub_ec;
+  std::atomic_size_t subscriber_bytes = 0;
+
+  // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
+  // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
+  util::fb2::CondVarAny pipeline_cnd;
+
+  size_t publish_buffer_limit = 0;        // cached flag publish_buffer_limit
+  size_t pipeline_cache_limit = 0;        // cached flag pipeline_cache_limit
+  size_t pipeline_buffer_limit = 0;       // cached flag for buffer size in bytes
+  uint32_t pipeline_queue_max_len = 256;  // cached flag for pipeline queue max length.
+};
+
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
 thread_local Connection::QueueBackpressure Connection::tl_queue_backpressure_;
 
 void Connection::QueueBackpressure::EnsureBelowLimit() {
-  ec.await([this] { return subscriber_bytes.load(memory_order_relaxed) <= publish_buffer_limit; });
+  pubsub_ec.await(
+      [this] { return subscriber_bytes.load(memory_order_relaxed) <= publish_buffer_limit; });
 }
 
 struct Connection::Shutdown {
@@ -420,6 +451,7 @@ void Connection::DispatchOperations::operator()(const AclUpdateMessage& msg) {
     if (msg.username == self->cntx()->authed_username) {
       self->cntx()->acl_commands = msg.commands;
       self->cntx()->keys = msg.keys;
+      self->cntx()->pub_sub = msg.pub_sub;
     }
   }
 }
@@ -477,6 +509,19 @@ void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) 
   }
 }
 
+namespace {
+thread_local absl::flat_hash_map<string, uint64_t> g_libname_ver_map;
+
+void UpdateLibNameVerMap(const string& name, const string& ver, int delta) {
+  string key = absl::StrCat(name, ":", ver);
+  uint64_t& val = g_libname_ver_map[key];
+  val += delta;
+  if (val == 0) {
+    g_libname_ver_map.erase(key);
+  }
+}
+}  // namespace
+
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize),
@@ -497,7 +542,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   switch (protocol) {
     case Protocol::REDIS:
-      redis_parser_.reset(new RedisParser(absl::GetFlag(FLAGS_max_multi_bulk_len)));
+      redis_parser_.reset(new RedisParser(GetFlag(FLAGS_max_multi_bulk_len)));
       break;
     case Protocol::MEMCACHE:
       memcache_parser_.reset(new MemcacheParser);
@@ -508,7 +553,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
   last_interaction_ = creation_time_;
   id_ = next_id.fetch_add(1, memory_order_relaxed);
 
-  migration_enabled_ = absl::GetFlag(FLAGS_migrate_connections);
+  migration_enabled_ = GetFlag(FLAGS_migrate_connections);
 
   // Create shared_ptr with empty value and associate it with `this` pointer (aliasing constructor).
   // We use it for reference counting and accessing `this` (without managing it).
@@ -521,12 +566,16 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
     SSL_CTX_up_ref(ctx);
   }
 #endif
+
+  UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
 }
 
 Connection::~Connection() {
 #ifdef DFLY_USE_SSL
   SSL_CTX_free(ssl_ctx_);
 #endif
+
+  UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
 }
 
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
@@ -552,7 +601,7 @@ void Connection::OnPreMigrateThread() {
 }
 
 void Connection::OnPostMigrateThread() {
-  DVLOG(1) << "OnPostMigrateThread " << GetClientId();
+  DVLOG(1) << "[" << id_ << "] OnPostMigrateThread";
 
   // Once we migrated, we should rearm OnBreakCb callback.
   if (breaker_cb_ && socket()->IsOpen()) {
@@ -585,13 +634,16 @@ void Connection::OnConnectionStart() {
   // We must initialize tl_queue_backpressure_ here and not in the c'tor because a connection object
   // may be created in a differrent thread from where it runs.
   if (tl_queue_backpressure_.publish_buffer_limit == 0) {
-    tl_queue_backpressure_.publish_buffer_limit = absl::GetFlag(FLAGS_publish_buffer_limit);
-    tl_queue_backpressure_.pipeline_cache_limit = absl::GetFlag(FLAGS_request_cache_limit);
-    tl_queue_backpressure_.pipeline_buffer_limit = absl::GetFlag(FLAGS_pipeline_buffer_limit);
+    tl_queue_backpressure_.publish_buffer_limit = GetFlag(FLAGS_publish_buffer_limit);
+    tl_queue_backpressure_.pipeline_cache_limit = GetFlag(FLAGS_request_cache_limit);
+    tl_queue_backpressure_.pipeline_buffer_limit = GetFlag(FLAGS_pipeline_buffer_limit);
+    tl_queue_backpressure_.pipeline_queue_max_len = GetFlag(FLAGS_pipeline_queue_limit);
+
     if (tl_queue_backpressure_.publish_buffer_limit == 0 ||
         tl_queue_backpressure_.pipeline_cache_limit == 0 ||
-        tl_queue_backpressure_.pipeline_buffer_limit == 0) {
-      LOG(ERROR) << "Buffer limit settings are 0";
+        tl_queue_backpressure_.pipeline_buffer_limit == 0 ||
+        tl_queue_backpressure_.pipeline_queue_max_len == 0) {
+      LOG(ERROR) << "pipeline flag limit is 0";
       exit(-1);
     }
   }
@@ -603,7 +655,7 @@ void Connection::OnConnectionStart() {
 void Connection::HandleRequests() {
   VLOG(1) << "[" << id_ << "] HandleRequests";
 
-  if (absl::GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
+  if (GetFlag(FLAGS_tcp_nodelay) && !socket_->IsUDS()) {
     int val = 1;
     int res = setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &val, sizeof(val));
     DCHECK_EQ(res, 0);
@@ -614,7 +666,7 @@ void Connection::HandleRequests() {
   FiberSocketBase* peer = socket_.get();
 #ifdef DFLY_USE_SSL
   if (ssl_ctx_) {
-    const bool no_tls_on_admin_port = absl::GetFlag(FLAGS_no_tls_on_admin_port);
+    const bool no_tls_on_admin_port = GetFlag(FLAGS_no_tls_on_admin_port);
     if (!(IsPrivileged() && no_tls_on_admin_port)) {
       // Must be done atomically before the premption point in Accept so that at any
       // point in time, the socket_ is defined.
@@ -763,6 +815,7 @@ string Connection::GetClientInfo(unsigned thread_id) const {
   auto [before, after] = GetClientInfoBeforeAfterTid();
   absl::StrAppend(&before, " tid=", thread_id);
   absl::StrAppend(&before, after);
+  absl::StrAppend(&before, " lib-name=", lib_name_, " lib-ver=", lib_ver_);
   return before;
 }
 
@@ -803,12 +856,28 @@ void Connection::SetName(std::string name) {
   name_ = std::move(name);
 }
 
+void Connection::SetLibName(std::string name) {
+  UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
+  lib_name_ = std::move(name);
+  UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
+}
+
+void Connection::SetLibVersion(std::string version) {
+  UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
+  lib_ver_ = std::move(version);
+  UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
+}
+
+const absl::flat_hash_map<string, uint64_t>& Connection::GetLibStatsTL() {
+  return g_libname_ver_map;
+}
+
 io::Result<bool> Connection::CheckForHttpProto(FiberSocketBase* peer) {
   if (!IsPrivileged() && !IsMain()) {
     return false;
   }
 
-  const bool primary_port_enabled = absl::GetFlag(FLAGS_primary_port_http_enabled);
+  const bool primary_port_enabled = GetFlag(FLAGS_primary_port_http_enabled);
   if (!primary_port_enabled && !IsPrivileged()) {
     return false;
   }
@@ -946,12 +1015,13 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
   DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
   bool optimize_for_async = has_more;
 
-  if (optimize_for_async &&
-      queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes)) {
+  if (optimize_for_async && queue_backpressure_->IsPipelineBufferOverLimit(
+                                stats_->dispatch_queue_bytes, dispatch_q_.size())) {
     fb2::NoOpLock noop;
     queue_backpressure_->pipeline_cnd.wait(noop, [this] {
-      return !queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes) ||
-             (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
+      bool over_limits = queue_backpressure_->IsPipelineBufferOverLimit(
+          stats_->dispatch_queue_bytes, dispatch_q_.size());
+      return !over_limits || (dispatch_q_.empty() && !cc_->async_dispatch) || cc_->conn_closing;
     });
     if (cc_->conn_closing)
       return;
@@ -1109,7 +1179,7 @@ void Connection::OnBreakCb(int32_t mask) {
     return;
   }
 
-  DCHECK(cc_->reply_builder());
+  DCHECK(cc_->reply_builder()) << "[" << id_ << "] " << phase_ << " " << migration_in_process_;
 
   VLOG(1) << "[" << id_ << "] Got event " << mask << " " << phase_ << " "
           << cc_->reply_builder()->IsSendActive() << " " << cc_->reply_builder()->GetError();
@@ -1159,7 +1229,7 @@ auto Connection::IoLoop(util::FiberSocketBase* peer, SinkReplyBuilder* orig_buil
   error_code ec;
   ParserStatus parse_status = OK;
 
-  size_t max_iobfuf_len = absl::GetFlag(FLAGS_max_client_iobuf_len);
+  size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
 
   do {
     HandleMigrateRequest();
@@ -1319,7 +1389,7 @@ void Connection::ClearPipelinedMessages() {
 
   dispatch_q_.clear();
   queue_backpressure_->pipeline_cnd.notify_all();
-  queue_backpressure_->ec.notifyAll();
+  queue_backpressure_->pubsub_ec.notifyAll();
 }
 
 std::string Connection::DebugInfo() const {
@@ -1356,7 +1426,7 @@ void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
   SinkReplyBuilder* builder = cc_->reply_builder();
   DispatchOperations dispatch_op{builder, this};
 
-  size_t squashing_threshold = absl::GetFlag(FLAGS_pipeline_squash);
+  size_t squashing_threshold = GetFlag(FLAGS_pipeline_squash);
 
   uint64_t prev_epoch = fb2::FiberSwitchEpoch();
   fb2::NoOpLock noop_lk;
@@ -1424,14 +1494,15 @@ void Connection::ExecutionFiber(util::FiberSocketBase* peer) {
     }
 
     DCHECK(queue_backpressure_ == &tl_queue_backpressure_);
-    if (!queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes) ||
+    if (!queue_backpressure_->IsPipelineBufferOverLimit(stats_->dispatch_queue_bytes,
+                                                        dispatch_q_.size()) ||
         dispatch_q_.empty()) {
       queue_backpressure_->pipeline_cnd.notify_all();  // very cheap if noone is waiting on it.
     }
 
     if (subscriber_over_limit &&
         stats_->dispatch_queue_subscriber_bytes < queue_backpressure_->publish_buffer_limit)
-      queue_backpressure_->ec.notify();
+      queue_backpressure_->pubsub_ec.notify();
   }
 
   DCHECK(cc_->conn_closing || builder->GetError());
@@ -1746,6 +1817,10 @@ void Connection::BreakOnce(uint32_t ev_mask) {
     DCHECK(!breaker_cb_);
     fun(ev_mask);
   }
+}
+
+void Connection::SetMaxQueueLenThreadLocal(uint32_t val) {
+  tl_queue_backpressure_.pipeline_queue_max_len = val;
 }
 
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,

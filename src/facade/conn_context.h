@@ -107,6 +107,8 @@ class ConnectionContext {
   std::vector<uint64_t> acl_commands;
   // keys
   dfly::acl::AclKeys keys{{}, true};
+  // pub/sub
+  dfly::acl::AclPubSub pub_sub{{}, true};
 
  private:
   Connection* owner_;

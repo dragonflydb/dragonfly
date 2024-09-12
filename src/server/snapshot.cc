@@ -21,20 +21,19 @@
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
-using facade::operator""_MB;
-ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
-          "Maximum size of a value that may be serialized at once during snapshotting or full "
-          "sync. Values bigger than this threshold will be serialized using streaming "
-          "serialization. 0 - to disable streaming mode");
-
 namespace dfly {
 
 using namespace std;
 using namespace util;
 using namespace chrono_literals;
 
+using facade::operator""_MB;
+using facade::operator""_KB;
 namespace {
 thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
+
+constexpr size_t kMinChannelBlobSize = 32_KB;
+
 }  // namespace
 
 size_t SliceSnapshot::DbRecord::size() const {
@@ -76,13 +75,13 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  const auto flush_threshold = absl::GetFlag(FLAGS_serialization_max_chunk_size);
+  const auto flush_threshold = serialization_max_chunk_size;
   std::function<void(size_t, RdbSerializer::FlushState)> flush_fun;
   if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
     flush_fun = [this, flush_threshold](size_t bytes_serialized,
                                         RdbSerializer::FlushState flush_state) {
       if (bytes_serialized > flush_threshold) {
-        auto serialized = Serialize(flush_state);
+        size_t serialized = FlushChannelRecord(flush_state);
         VLOG(2) << "FlushedToChannel " << serialized << " bytes";
       }
     };
@@ -94,94 +93,44 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
   snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
     IterateBucketsFb(cll, stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
-    if (cll->IsCancelled()) {
-      Cancel();
-    } else if (!stream_journal) {
+    // We stop the channel if we are performing backups (non-streaming).
+    // We keep the channel for replication in order to send jounal changes until we finalize.
+    if (!stream_journal) {
       CloseRecordChannel();
     }
   });
 }
 
 void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
-  auto* journal = db_slice_->shard_owner()->journal();
-  DCHECK(journal);
-
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
 
-  snapshot_fb_ =
-      fb2::Fiber("incremental_snapshot", [this, journal, cntx, lsn = start_lsn]() mutable {
-        DCHECK(lsn <= journal->GetLsn()) << "The replica tried to sync from the future.";
-
-        VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
-
-        // The replica sends the LSN of the next entry is wants to receive.
-        while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
-          serializer_->WriteJournalEntry(journal->GetEntry(lsn));
-          PushSerializedToChannel(false);
-          lsn++;
-        }
-
-        VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1);
-
-        // This check is safe, but it is not trivially safe.
-        // We rely here on the fact that JournalSlice::AddLogRecord can
-        // only preempt while holding the callback lock.
-        // That guarantees that if we have processed the last LSN the callback
-        // will only be added after JournalSlice::AddLogRecord has finished
-        // iterating its callbacks and we won't process the record twice.
-        // We have to make sure we don't preempt ourselves before registering the callback!
-
-        // GetLsn() is always the next lsn that we expect to create.
-        if (journal->GetLsn() == lsn) {
-          {
-            FiberAtomicGuard fg;
-            serializer_->SendFullSyncCut();
-          }
-          auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
-          journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
-          PushSerializedToChannel(true);
-        } else {
-          // We stopped but we didn't manage to send the whole stream.
-          cntx->ReportError(
-              std::make_error_code(errc::state_not_recoverable),
-              absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
-                           " was dropped from the buffer. Current lsn=", journal->GetLsn()));
-          Cancel();
-        }
-      });
+  snapshot_fb_ = fb2::Fiber("incremental_snapshot", [cntx, start_lsn, this] {
+    this->SwitchIncrementalFb(cntx, start_lsn);
+  });
 }
 
-void SliceSnapshot::Stop() {
-  // Wait for serialization to finish in any case.
-  Join();
-
-  if (journal_cb_id_) {
-    auto* journal = db_slice_->shard_owner()->journal();
-    serializer_->SendJournalOffset(journal->GetLsn());
-    journal->UnregisterOnChange(journal_cb_id_);
+// Called only for replication use-case.
+void SliceSnapshot::FinalizeJournalStream(bool cancel) {
+  DVLOG(1) << "Finalize Snapshot";
+  DCHECK(db_slice_->shard_owner()->IsMyThread());
+  if (!journal_cb_id_) {  // Finalize only once.
+    return;
   }
-
-  PushSerializedToChannel(true);
-  CloseRecordChannel();
-}
-
-void SliceSnapshot::Cancel() {
-  VLOG(1) << "SliceSnapshot::Cancel";
-
-  // Cancel() might be called multiple times from different fibers of the same thread, but we
-  // should unregister the callback only once.
   uint32_t cb_id = journal_cb_id_;
-  if (cb_id) {
-    journal_cb_id_ = 0;
-    db_slice_->shard_owner()->journal()->UnregisterOnChange(cb_id);
+  journal_cb_id_ = 0;
+
+  // Wait for serialization to finish in any case.
+  snapshot_fb_.JoinIfNeeded();
+
+  auto* journal = db_slice_->shard_owner()->journal();
+
+  journal->UnregisterOnChange(cb_id);
+  if (!cancel) {
+    serializer_->SendJournalOffset(journal->GetLsn());
+    PushSerializedToChannel(true);
   }
 
   CloseRecordChannel();
-}
-
-void SliceSnapshot::Join() {
-  // Fiber could have already been joined by Stop.
-  snapshot_fb_.JoinIfNeeded();
 }
 
 // The algorithm is to go over all the buckets and serialize those with
@@ -255,6 +204,49 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
           << stats_.loop_serialized << "/" << stats_.side_saved << "/" << stats_.savecb_calls;
 }
 
+void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
+  auto* journal = db_slice_->shard_owner()->journal();
+  DCHECK(journal);
+  DCHECK_LE(lsn, journal->GetLsn()) << "The replica tried to sync from the future.";
+
+  VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
+
+  // The replica sends the LSN of the next entry is wants to receive.
+  while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+    serializer_->WriteJournalEntry(journal->GetEntry(lsn));
+    PushSerializedToChannel(false);
+    lsn++;
+  }
+
+  VLOG(1) << "Last LSN sent in incremental snapshot was " << (lsn - 1);
+
+  // This check is safe, but it is not trivially safe.
+  // We rely here on the fact that JournalSlice::AddLogRecord can
+  // only preempt while holding the callback lock.
+  // That guarantees that if we have processed the last LSN the callback
+  // will only be added after JournalSlice::AddLogRecord has finished
+  // iterating its callbacks and we won't process the record twice.
+  // We have to make sure we don't preempt ourselves before registering the callback!
+
+  // GetLsn() is always the next lsn that we expect to create.
+  if (journal->GetLsn() == lsn) {
+    {
+      FiberAtomicGuard fg;
+      serializer_->SendFullSyncCut();
+    }
+    auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
+    journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
+    PushSerializedToChannel(true);
+  } else {
+    // We stopped but we didn't manage to send the whole stream.
+    cntx->ReportError(
+        std::make_error_code(errc::state_not_recoverable),
+        absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
+                     " was dropped from the buffer. Current lsn=", journal->GetLsn()));
+    FinalizeJournalStream(true);
+  }
+}
+
 bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
   ++stats_.savecb_calls;
 
@@ -292,7 +284,7 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
 
   while (!it.is_done()) {
     ++result;
-    // might preempt
+    // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
     ++it;
   }
@@ -311,22 +303,25 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     expire_time = db_slice_->ExpireTime(eit);
   }
 
+  uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
+
   if (pv.IsExternal()) {
     // We can't block, so we just schedule a tiered read and append it to the delayed entries
     util::fb2::Future<PrimeValue> future;
     EngineShard::tlocal()->tiered_storage()->Read(
         db_indx, pk.ToString(), pv,
         [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
-    delayed_entries_.push_back({db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time});
+    delayed_entries_.push_back(
+        {db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time, mc_flags});
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
-    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, db_indx);
+    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
   }
 }
 
-size_t SliceSnapshot::Serialize(SerializerBase::FlushState flush_state) {
+size_t SliceSnapshot::FlushChannelRecord(SerializerBase::FlushState flush_state) {
   io::StringFile sfile;
   serializer_->FlushToSink(&sfile, flush_state);
 
@@ -334,34 +329,51 @@ size_t SliceSnapshot::Serialize(SerializerBase::FlushState flush_state) {
   if (serialized == 0)
     return 0;
 
-  auto id = rec_id_++;
-  DVLOG(2) << "Pushed " << id;
+  uint64_t id = rec_id_++;
+  DVLOG(2) << "Pushing " << id;
   DbRecord db_rec{.id = id, .value = std::move(sfile.val)};
+  fb2::NoOpLock lk;
 
-  dest_->Push(std::move(db_rec));
-  if (serialized != 0) {
-    VLOG(2) << "Pushed with Serialize() " << serialized << " bytes";
-  }
+  // We create a critical section here that ensures that records are pushed in sequential order.
+  // As a result, it is not possible for two fiber producers to push into channel concurrently.
+  // If A.id = 5, and then B.id = 6, and both are blocked here, it means that last_pushed_id_ < 4.
+  // Once last_pushed_id_ = 4, A will be unblocked, while B will wait until A finishes pushing and
+  // update last_pushed_id_ to 5.
+  seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
+
+  // Blocking point.
+  size_t channel_usage = dest_->Push(std::move(db_rec));
+  DCHECK_EQ(last_pushed_id_ + 1, id);
+  last_pushed_id_ = id;
+  seq_cond_.notify_all();
+
+  VLOG(2) << "Pushed with Serialize() " << serialized
+          << " bytes, channel total usage: " << channel_usage;
+
   return serialized;
 }
 
 bool SliceSnapshot::PushSerializedToChannel(bool force) {
-  if (!force && serializer_->SerializedLen() < 4096)
+  if (!force && serializer_->SerializedLen() < kMinChannelBlobSize)
     return false;
 
   // Flush any of the leftovers to avoid interleavings
-  const auto serialized = Serialize();
+  size_t serialized = FlushChannelRecord(FlushState::kFlushMidEntry);
 
-  // Bucket serialization might have accumulated some delayed values.
-  // Because we can finally block in this function, we'll await and serialize them
-  while (!delayed_entries_.empty()) {
-    auto& entry = delayed_entries_.back();
-    serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid);
-    delayed_entries_.pop_back();
+  if (!delayed_entries_.empty()) {
+    // Async bucket serialization might have accumulated some delayed values.
+    // Because we can finally block in this function, we'll await and serialize them
+    do {
+      auto& entry = delayed_entries_.back();
+      serializer_->SaveEntry(entry.key, entry.value.Get(), entry.expire, entry.dbid,
+                             entry.mc_flags);
+      delayed_entries_.pop_back();
+    } while (!delayed_entries_.empty());
+
+    // blocking point.
+    serialized += FlushChannelRecord(FlushState::kFlushMidEntry);
   }
-
-  const auto total_serialized = Serialize() + serialized;
-  return total_serialized > 0;
+  return serialized > 0;
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -402,6 +414,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
 }
 
 void SliceSnapshot::CloseRecordChannel() {
+  DCHECK(db_slice_->shard_owner()->IsMyThread());
   std::unique_lock lk(db_slice_->GetSerializationMutex());
 
   CHECK(!serialize_bucket_running_);

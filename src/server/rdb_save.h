@@ -92,8 +92,8 @@ class RdbSaver {
   // Send only the incremental snapshot since start_lsn.
   void StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn);
 
-  // Stops serialization in journal streaming mode in the shard's thread.
-  void StopSnapshotInShard(EngineShard* shard);
+  // Stops full-sync serialization for replication in the shard's thread.
+  void StopFullSyncInShard(EngineShard* shard);
 
   // Stores auxiliary (meta) values and header_info
   std::error_code SaveHeader(const GlobalData& header_info);
@@ -103,7 +103,7 @@ class RdbSaver {
   // freq_map can optionally be null.
   std::error_code SaveBody(Context* cntx, RdbTypeFreqMap* freq_map);
 
-  void Cancel();
+  void CancelInShard(EngineShard* shard);
 
   SaveMode Mode() const {
     return save_mode_;
@@ -218,7 +218,7 @@ class RdbSerializer : public SerializerBase {
   // Returns the serialized rdb_type or the error.
   // expire_ms = 0 means no expiry.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
-                                DbIndex dbid);
+                                uint32_t mc_flags, DbIndex dbid);
 
   // This would work for either string or an object.
   // The arg pv is taken from it->second if accessing

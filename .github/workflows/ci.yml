@@ -106,7 +106,7 @@ jobs:
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
-            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
+            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" -DWITH_AWS:BOOL=OFF \
             -L
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/

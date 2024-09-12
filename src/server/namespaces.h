@@ -54,10 +54,10 @@ class Namespaces {
 
   void Init();
   bool IsInitialized() const;
-  void Clear();  // Thread unsafe, use in tear-down or tests
+  void Clear() ABSL_LOCKS_EXCLUDED(mu_);  // Thread unsafe, use in tear-down or tests
 
   Namespace& GetDefaultNamespace() const;  // No locks
-  Namespace& GetOrInsert(std::string_view ns);
+  Namespace& GetOrInsert(std::string_view ns) ABSL_LOCKS_EXCLUDED(mu_);
 
  private:
   util::fb2::SharedMutex mu_{};

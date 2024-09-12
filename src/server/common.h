@@ -295,7 +295,7 @@ class Context : protected Cancellation {
 };
 
 struct ScanOpts {
-  std::string_view pattern;
+  std::optional<std::string_view> pattern;
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;
@@ -362,18 +362,45 @@ class UniquePicksGenerator : public PicksGenerator {
 };
 
 // Helper class used to guarantee atomicity between serialization of buckets
-class ThreadLocalMutex {
+class ABSL_LOCKABLE ThreadLocalMutex {
  public:
   ThreadLocalMutex();
   ~ThreadLocalMutex();
 
-  void lock();
-  void unlock();
+  void lock() ABSL_EXCLUSIVE_LOCK_FUNCTION();
+  void unlock() ABSL_UNLOCK_FUNCTION();
 
  private:
   EngineShard* shard_;
   util::fb2::CondVarAny cond_var_;
   bool flag_ = false;
+  util::fb2::detail::FiberInterface* locked_fiber_{nullptr};
 };
+
+// Replacement of std::SharedLock that allows -Wthread-safety
+template <typename Mutex> class ABSL_SCOPED_LOCKABLE SharedLock {
+ public:
+  explicit SharedLock(Mutex& m) ABSL_EXCLUSIVE_LOCK_FUNCTION(m) : m_(m) {
+    m_.lock_shared();
+    is_locked_ = true;
+  }
+
+  ~SharedLock() ABSL_UNLOCK_FUNCTION() {
+    if (is_locked_) {
+      m_.unlock_shared();
+    }
+  }
+
+  void unlock() ABSL_UNLOCK_FUNCTION() {
+    m_.unlock_shared();
+    is_locked_ = false;
+  }
+
+ private:
+  Mutex& m_;
+  bool is_locked_;
+};
+
+extern size_t serialization_max_chunk_size;
 
 }  // namespace dfly

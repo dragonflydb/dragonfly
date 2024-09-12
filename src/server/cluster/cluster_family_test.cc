@@ -597,7 +597,7 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   EXPECT_EQ(Run({"save", "df"}), "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
-  EXPECT_EQ(Run({"debug", "load", save_info.file_name}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
   EXPECT_EQ(CheckedInt({"dbsize"}), 50000);
 
   ConfigSingleNodeCluster("abcd1234");
@@ -696,7 +696,7 @@ class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
  public:
   ClusterFamilyEmulatedTest() {
     SetTestFlag("cluster_mode", "emulated");
-    SetTestFlag("announce_ip", "fake-host");
+    SetTestFlag("cluster_announce_ip", "fake-host");
   }
 };
 

@@ -66,7 +66,7 @@ ValueIterator& ValueIterator::operator++() {
   return *this;
 }
 
-Reducer::Func FindReducerFunc(std::string_view name) {
+Reducer::Func FindReducerFunc(ReducerFunc name) {
   const static auto kCountReducer = [](ValueIterator it) -> double {
     return std::distance(it, it.end());
   };
@@ -78,17 +78,24 @@ Reducer::Func FindReducerFunc(std::string_view name) {
     return sum;
   };
 
-  static const std::unordered_map<std::string_view, std::function<Value(ValueIterator)>> kReducers =
-      {{"COUNT", [](auto it) { return kCountReducer(it); }},
-       {"COUNT_DISTINCT",
-        [](auto it) { return double(std::unordered_set<Value>(it, it.end()).size()); }},
-       {"SUM", [](auto it) { return kSumReducer(it); }},
-       {"AVG", [](auto it) { return kSumReducer(it) / kCountReducer(it); }},
-       {"MAX", [](auto it) { return *std::max_element(it, it.end()); }},
-       {"MIN", [](auto it) { return *std::min_element(it, it.end()); }}};
+  switch (name) {
+    case ReducerFunc::COUNT:
+      return [](ValueIterator it) -> Value { return kCountReducer(it); };
+    case ReducerFunc::COUNT_DISTINCT:
+      return [](ValueIterator it) -> Value {
+        return double(std::unordered_set<Value>(it, it.end()).size());
+      };
+    case ReducerFunc::SUM:
+      return [](ValueIterator it) -> Value { return kSumReducer(it); };
+    case ReducerFunc::AVG:
+      return [](ValueIterator it) -> Value { return kSumReducer(it) / kCountReducer(it); };
+    case ReducerFunc::MAX:
+      return [](ValueIterator it) -> Value { return *std::max_element(it, it.end()); };
+    case ReducerFunc::MIN:
+      return [](ValueIterator it) -> Value { return *std::min_element(it, it.end()); };
+  }
 
-  auto it = kReducers.find(name);
-  return it != kReducers.end() ? it->second : Reducer::Func{};
+  return nullptr;
 }
 
 PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,

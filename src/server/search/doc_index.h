@@ -16,13 +16,13 @@
 #include "core/mi_memory_resource.h"
 #include "core/search/search.h"
 #include "server/common.h"
+#include "server/search/aggregator.h"
 #include "server/table.h"
 
 namespace dfly {
 
-using SearchDocData = absl::flat_hash_map<std::string /*field*/, std::string /*value*/>;
+using SearchDocData = absl::flat_hash_map<std::string /*field*/, search::SortableValue /*value*/>;
 
-std::optional<search::SchemaField::FieldType> ParseSearchFieldType(std::string_view name);
 std::string_view SearchFieldTypeToString(search::SchemaField::FieldType);
 
 struct SerializedSearchDoc {
@@ -52,25 +52,61 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
-struct SearchParams {
-  using FieldReturnList =
-      std::vector<std::pair<std::string /*identifier*/, std::string /*short name*/>>;
+using FieldsList = std::vector<std::pair<std::string /*identifier*/, std::string /*short name*/>>;
 
+struct SelectedFields {
+  /*
+  1. If not set -> return all fields
+  2. If set but empty -> no fields should be returned
+  3. If set and not empty -> return only these fields
+  */
+  std::optional<FieldsList> fields;
+
+  bool ShouldReturnAllFields() const {
+    return !fields.has_value();
+  }
+
+  bool ShouldReturnNoFields() const {
+    return fields && fields->empty();
+  }
+
+  FieldsList* operator->() {
+    return &fields.value();
+  }
+
+  const FieldsList* operator->() const {
+    return &fields.value();
+  }
+
+  const FieldsList& GetFields() const {
+    return fields.value();
+  }
+};
+
+struct SearchParams {
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
   // the whole result set
   size_t limit_offset = 0;
   size_t limit_total = 10;
 
   // Set but empty means no fields should be returned
-  std::optional<FieldReturnList> return_fields;
+  SelectedFields return_fields;
   std::optional<search::SortOption> sort_option;
   search::QueryParams query_params;
 
   bool IdsOnly() const {
-    return return_fields && return_fields->empty();
+    return return_fields.ShouldReturnNoFields();
   }
 
   bool ShouldReturnField(std::string_view field) const;
+};
+
+struct AggregateParams {
+  std::string_view index, query;
+  search::QueryParams params;
+
+  SelectedFields load_fields;
+  std::vector<aggregate::PipelineStep> steps;
 };
 
 // Stores basic info about a document index.
@@ -127,8 +163,9 @@ class ShardDocIndex {
                       search::SearchAlgorithm* search_algo) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
-  std::vector<absl::flat_hash_map<std::string, search::SortableValue>> SearchForAggregator(
-      const OpArgs& op_args, ArgSlice load_fields, search::SearchAlgorithm* search_algo) const;
+  std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,
+                                                 const AggregateParams& params,
+                                                 search::SearchAlgorithm* search_algo) const;
 
   // Return whether base index matches
   bool Matches(std::string_view key, unsigned obj_code) const;
@@ -145,6 +182,7 @@ class ShardDocIndex {
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
  private:
+  bool was_built_ = false;
   std::shared_ptr<const DocIndex> base_;
   search::FieldIndices indices_;
   DocKeyIndex key_index_;
@@ -165,6 +203,9 @@ class ShardDocIndices {
   // Drop index, return true if it existed and was dropped
   bool DropIndex(std::string_view name);
 
+  // Drop all indices
+  void DropAllIndices();
+
   // Rebuild all indices
   void RebuildAllIndices(const OpArgs& op_args);
 
@@ -175,6 +216,9 @@ class ShardDocIndices {
 
   size_t GetUsedMemory() const;
   SearchStats GetStats() const;  // combines stats for all indices
+ private:
+  // Clean caches that might have data from this index
+  void DropIndexCache(const dfly::ShardDocIndex& shard_doc_index);
 
  private:
   MiMemoryResource local_mr_;

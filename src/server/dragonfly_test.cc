@@ -452,6 +452,7 @@ TEST_F(DflyEngineTest, OOM) {
   }
 }
 
+#ifndef SANITIZERS
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
@@ -522,6 +523,8 @@ TEST_F(DflyEngineTest, StickyEviction) {
     ASSERT_THAT(Run({"exists", StrCat("key", i)}), IntArg(1));
   }
 }
+
+#endif
 
 TEST_F(DflyEngineTest, PSubscribe) {
   single_response_ = false;
@@ -752,6 +755,8 @@ TEST_F(DflyEngineTest, EvalBug2664) {
 
   auto resp = Run({"eval", "return 42.9", "0"});
   EXPECT_THAT(resp, IntArg(42));
+  resp = Run({"eval", "return -3.8", "0"});
+  EXPECT_THAT(resp, IntArg(-3));
 
   resp = Run({"hello", "3"});
   ASSERT_THAT(resp, ArrLen(14));

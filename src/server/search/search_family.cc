@@ -47,51 +47,26 @@ bool IsValidJsonPath(string_view path) {
 search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   search::SchemaField::VectorParams params{};
 
-  params.use_hnsw = parser->ToUpper().Switch("HNSW", true, "FLAT", false);
-  size_t num_args = parser->Next<size_t>();
+  params.use_hnsw = parser->MapNext("HNSW", true, "FLAT", false);
+  const size_t num_args = parser->Next<size_t>();
 
   for (size_t i = 0; i * 2 < num_args; i++) {
-    parser->ToUpper();
-
-    if (parser->Check("DIM").ExpectTail(1)) {
-      params.dim = parser->Next<size_t>();
-      continue;
-    }
-
-    if (parser->Check("DISTANCE_METRIC").ExpectTail(1)) {
-      params.sim = parser->ToUpper().Switch("L2", search::VectorSimilarity::L2, "COSINE",
-                                            search::VectorSimilarity::COSINE);
-      continue;
-    }
-
-    if (parser->Check("INITIAL_CAP").ExpectTail(1)) {
-      params.capacity = parser->Next<size_t>();
-      continue;
-    }
-
-    if (parser->Check("M").ExpectTail(1)) {
-      params.hnsw_m = parser->Next<size_t>();
-      continue;
-    }
-
-    if (parser->Check("EF_CONSTRUCTION").ExpectTail(1)) {
-      params.hnsw_ef_construction = parser->Next<size_t>();
-      continue;
-    }
-
-    if (parser->Check("EF_RUNTIME").ExpectTail(1)) {
+    if (parser->Check("DIM", &params.dim)) {
+    } else if (parser->Check("DISTANCE_METRIC")) {
+      params.sim = parser->MapNext("L2", search::VectorSimilarity::L2, "COSINE",
+                                   search::VectorSimilarity::COSINE);
+    } else if (parser->Check("INITIAL_CAP", &params.capacity)) {
+    } else if (parser->Check("M", &params.hnsw_m)) {
+    } else if (parser->Check("EF_CONSTRUCTION", &params.hnsw_ef_construction)) {
+    } else if (parser->Check("EF_RUNTIME")) {
       parser->Next<size_t>();
       LOG(WARNING) << "EF_RUNTIME not supported";
-      continue;
-    }
-
-    if (parser->Check("EPSILON").ExpectTail(1)) {
+    } else if (parser->Check("EPSILON")) {
       parser->Next<double>();
       LOG(WARNING) << "EPSILON not supported";
-      continue;
+    } else {
+      parser->Skip(2);
     }
-
-    parser->Skip(2);
   }
 
   return params;
@@ -100,20 +75,19 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
 search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
   search::SchemaField::TagParams params{};
   while (parser->HasNext()) {
-    if (parser->Check("SEPARATOR").IgnoreCase().ExpectTail(1)) {
+    if (parser->Check("SEPARATOR")) {
       string_view separator = parser->Next();
       params.separator = separator.front();
       continue;
     }
 
-    if (parser->Check("CASESENSITIVE").IgnoreCase()) {
+    if (parser->Check("CASESENSITIVE")) {
       params.case_sensitive = true;
       continue;
     }
 
     break;
   }
-
   return params;
 }
 
@@ -137,26 +111,24 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
       return nullopt;
     }
 
-    parser.ToUpper();
-
     // AS [alias]
-    if (parser.Check("AS").ExpectTail(1).NextUpper())
-      field_alias = parser.Next();
+    parser.Check("AS", &field_alias);
 
     // Determine type
-    string_view type_str = parser.Next();
-    auto type = ParseSearchFieldType(type_str);
-    if (!type) {
-      cntx->SendError("Invalid field type: " + string{type_str});
+    using search::SchemaField;
+    auto type = parser.MapNext("TAG", SchemaField::TAG, "TEXT", SchemaField::TEXT, "NUMERIC",
+                               SchemaField::NUMERIC, "VECTOR", SchemaField::VECTOR);
+    if (auto err = parser.Error(); err) {
+      cntx->SendError(err->MakeReply());
       return nullopt;
     }
 
     // Tag fields include: [separator char] [casesensitive]
     // Vector fields include: {algorithm} num_args args...
     search::SchemaField::ParamsVariant params(monostate{});
-    if (*type == search::SchemaField::TAG) {
+    if (type == search::SchemaField::TAG) {
       params = ParseTagParams(&parser);
-    } else if (*type == search::SchemaField::VECTOR) {
+    } else if (type == search::SchemaField::VECTOR) {
       auto vector_params = ParseVectorParams(&parser);
       if (parser.HasError()) {
         auto err = *parser.Error();
@@ -175,12 +147,12 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     // Flags: check for SORTABLE and NOINDEX
     uint8_t flags = 0;
     while (parser.HasNext()) {
-      if (parser.Check("NOINDEX").IgnoreCase()) {
+      if (parser.Check("NOINDEX")) {
         flags |= search::SchemaField::NOINDEX;
         continue;
       }
 
-      if (parser.Check("SORTABLE").IgnoreCase()) {
+      if (parser.Check("SORTABLE")) {
         flags |= search::SchemaField::SORTABLE;
         continue;
       }
@@ -192,7 +164,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     while (kIgnoredOptions.count(parser.Peek()) > 0)
       parser.Skip(2);
 
-    schema.fields[field] = {*type, flags, string{field_alias}, std::move(params)};
+    schema.fields[field] = {type, flags, string{field_alias}, std::move(params)};
   }
 
   // Build field name mapping table
@@ -224,46 +196,30 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
 optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionContext* cntx) {
   SearchParams params;
 
-  while (parser.ToUpper().HasNext()) {
+  while (parser.HasNext()) {
     // [LIMIT offset total]
-    if (parser.Check("LIMIT").ExpectTail(2)) {
+    if (parser.Check("LIMIT")) {
       params.limit_offset = parser.Next<size_t>();
       params.limit_total = parser.Next<size_t>();
-      continue;
-    }
-
-    // RETURN {num} [{ident} AS {name}...]
-    if (parser.Check("RETURN").ExpectTail(1)) {
+    } else if (parser.Check("RETURN")) {
+      // RETURN {num} [{ident} AS {name}...]
       size_t num_fields = parser.Next<size_t>();
-      params.return_fields = SearchParams::FieldReturnList{};
+      params.return_fields.fields.emplace();
       while (params.return_fields->size() < num_fields) {
         string_view ident = parser.Next();
-        string_view alias = parser.Check("AS").IgnoreCase().ExpectTail(1) ? parser.Next() : ident;
+        string_view alias = parser.Check("AS") ? parser.Next() : ident;
         params.return_fields->emplace_back(ident, alias);
       }
-      continue;
-    }
-
-    // NOCONTENT
-    if (parser.Check("NOCONTENT")) {
-      params.return_fields = SearchParams::FieldReturnList{};
-      continue;
-    }
-
-    // [PARAMS num(ignored) name(ignored) knn_vector]
-    if (parser.Check("PARAMS").ExpectTail(1)) {
+    } else if (parser.Check("NOCONTENT")) {  // NOCONTENT
+      params.return_fields.fields.emplace();
+    } else if (parser.Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(&parser);
-      continue;
+    } else if (parser.Check("SORTBY")) {
+      params.sort_option = search::SortOption{string{parser.Next()}, bool(parser.Check("DESC"))};
+    } else {
+      // Unsupported parameters are ignored for now
+      parser.Skip(1);
     }
-
-    if (parser.Check("SORTBY").ExpectTail(1)) {
-      params.sort_option =
-          search::SortOption{string{parser.Next()}, bool(parser.Check("DESC").IgnoreCase())};
-      continue;
-    }
-
-    // Unsupported parameters are ignored for now
-    parser.Skip(1);
   }
 
   if (auto err = parser.Error(); err) {
@@ -274,54 +230,82 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
   return params;
 }
 
-struct AggregateParams {
-  string_view index, query;
-  search::QueryParams params;
+std::string_view ParseField(CmdArgParser* parser) {
+  std::string_view field = parser->Next();
+  if (field.front() == '@') {
+    field.remove_prefix(1);  // remove leading @ if exists
+  }
+  return field;
+}
 
-  vector<string_view> load_fields;
-  vector<aggregate::PipelineStep> steps;
-};
+std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
+  std::string_view field = parser->Next();
+  if (field.front() != '@') {
+    return std::nullopt;  // if we expect @, but it's not there, return nullopt
+  }
+  field.remove_prefix(1);  // remove leading @
+  return field;
+}
 
 optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
                                                        ConnectionContext* cntx) {
   AggregateParams params;
   tie(params.index, params.query) = parser.Next<string_view, string_view>();
 
-  while (parser.ToUpper().HasNext()) {
-    // LOAD count field [field ...]
-    if (parser.Check("LOAD").ExpectTail(1)) {
-      params.load_fields.resize(parser.Next<size_t>());
-      for (string_view& field : params.load_fields)
-        field = parser.Next();
-      continue;
+  // Parse LOAD count field [field ...]
+  // LOAD options are at the beginning of the query, so we need to parse them first
+  while (parser.HasNext() && parser.Check("LOAD")) {
+    size_t num_fields = parser.Next<size_t>();
+    if (!params.load_fields.fields) {
+      params.load_fields.fields.emplace();
     }
 
+    while (num_fields--) {
+      string_view field = ParseField(&parser);
+      string_view alias = parser.Check("AS") ? parser.Next() : field;
+      params.load_fields->emplace_back(field, alias);
+    }
+  }
+
+  while (parser.HasNext()) {
     // GROUPBY nargs property [property ...]
-    if (parser.Check("GROUPBY").ExpectTail(1)) {
+    if (parser.Check("GROUPBY")) {
       vector<string_view> fields(parser.Next<size_t>());
-      for (string_view& field : fields)
-        field = parser.Next();
+      for (string_view& field : fields) {
+        auto parsed_field = ParseFieldWithAtSign(&parser);
+        if (!parsed_field) {
+          cntx->SendError(absl::StrCat("bad arguments for GROUPBY: Unknown property '", field,
+                                       "'. Did you mean '@", field, "`?"));
+          return nullopt;
+        }
+        field = parsed_field.value();
+      }
 
       vector<aggregate::Reducer> reducers;
-      while (parser.ToUpper().Check("REDUCE").ExpectTail(2)) {
-        parser.ToUpper();  // uppercase for func_name
-        auto [func_name, nargs] = parser.Next<string_view, size_t>();
-        auto func = aggregate::FindReducerFunc(func_name);
+      while (parser.Check("REDUCE")) {
+        using RF = aggregate::ReducerFunc;
+        auto func_name =
+            parser.TryMapNext("COUNT", RF::COUNT, "COUNT_DISTINCT", RF::COUNT_DISTINCT, "SUM",
+                              RF::SUM, "AVG", RF::AVG, "MAX", RF::MAX, "MIN", RF::MIN);
 
-        if (!parser.HasError() && !func) {
-          cntx->SendError(absl::StrCat("reducer function ", func_name, " not found"));
+        if (!func_name) {
+          cntx->SendError(absl::StrCat("reducer function ", parser.Next(), " not found"));
           return nullopt;
         }
 
-        string source_field = "";
+        auto func = aggregate::FindReducerFunc(*func_name);
+        auto nargs = parser.Next<size_t>();
+
+        string source_field;
         if (nargs > 0) {
-          source_field = parser.Next<string>();
+          source_field = ParseField(&parser);
         }
 
         parser.ExpectTag("AS");
         string result_field = parser.Next<string>();
 
-        reducers.push_back(aggregate::Reducer{source_field, result_field, std::move(func)});
+        reducers.push_back(
+            aggregate::Reducer{std::move(source_field), std::move(result_field), std::move(func)});
       }
 
       params.steps.push_back(aggregate::MakeGroupStep(fields, std::move(reducers)));
@@ -329,26 +313,31 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     }
 
     // SORTBY nargs
-    if (parser.Check("SORTBY").ExpectTail(1)) {
+    if (parser.Check("SORTBY")) {
       parser.ExpectTag("1");
       string_view field = parser.Next();
-      bool desc = bool(parser.Check("DESC").IgnoreCase());
+      bool desc = bool(parser.Check("DESC"));
 
       params.steps.push_back(aggregate::MakeSortStep(field, desc));
       continue;
     }
 
     // LIMIT
-    if (parser.Check("LIMIT").ExpectTail(2)) {
+    if (parser.Check("LIMIT")) {
       auto [offset, num] = parser.Next<size_t, size_t>();
       params.steps.push_back(aggregate::MakeLimitStep(offset, num));
       continue;
     }
 
     // PARAMS
-    if (parser.Check("PARAMS").ExpectTail(1)) {
+    if (parser.Check("PARAMS")) {
       params.params = ParseQueryParams(&parser);
       continue;
+    }
+
+    if (parser.Check("LOAD")) {
+      cntx->SendError("LOAD cannot be applied after projectors or reducers");
+      return nullopt;
     }
 
     cntx->SendError(absl::StrCat("Unknown clause: ", parser.Peek()));
@@ -363,13 +352,23 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   return params;
 }
 
+auto SortableValueSender(RedisReplyBuilder* rb) {
+  return Overloaded{
+      [rb](monostate) { rb->SendNull(); },
+      [rb](double d) { rb->SendDouble(d); },
+      [rb](const string& s) { rb->SendBulkString(s); },
+  };
+}
+
 void SendSerializedDoc(const SerializedSearchDoc& doc, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto sortable_value_sender = SortableValueSender(rb);
+
   rb->SendBulkString(doc.key);
   rb->StartCollection(doc.values.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : doc.values) {
     rb->SendBulkString(k);
-    rb->SendBulkString(v);
+    visit(sortable_value_sender, v);
   }
 }
 
@@ -462,20 +461,24 @@ void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
 }  // namespace
 
 void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
+  if (cntx->conn_state.db_index != 0) {
+    return cntx->SendError("Cannot create index on db != 0"sv);
+  }
+
   DocIndex index{};
 
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
 
-  while (parser.ToUpper().HasNext()) {
+  while (parser.HasNext()) {
     // ON HASH | JSON
-    if (parser.Check("ON").ExpectTail(1)) {
-      index.type = parser.ToUpper().Switch("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
+    if (parser.Check("ON")) {
+      index.type = parser.MapNext("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
       continue;
     }
 
     // PREFIX count prefix [prefix ...]
-    if (parser.Check("PREFIX").ExpectTail(2)) {
+    if (parser.Check("PREFIX")) {
       if (size_t num = parser.Next<size_t>(); num != 1)
         return cntx->SendError("Multiple prefixes are not supported");
       index.prefix = string(parser.Next());
@@ -842,14 +845,14 @@ void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
   if (!search_algo.Init(params->query, &params->params, nullptr))
     return cntx->SendError("Query syntax error");
 
-  using ResultContainer =
-      decltype(declval<ShardDocIndex>().SearchForAggregator(declval<OpArgs>(), {}, &search_algo));
+  using ResultContainer = decltype(declval<ShardDocIndex>().SearchForAggregator(
+      declval<OpArgs>(), params.value(), &search_algo));
 
   vector<ResultContainer> query_results(shard_set->size());
   cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(params->index); index) {
       query_results[es->shard_id()] =
-          index->SearchForAggregator(t->GetOpArgs(es), params->load_fields, &search_algo);
+          index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
     }
     return OpStatus::OK;
   });
@@ -864,20 +867,18 @@ void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {
   if (!agg_results.has_value())
     return cntx->SendError(agg_results.error());
 
+  size_t result_size = agg_results->size();
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  Overloaded replier{
-      [rb](monostate) { rb->SendNull(); },
-      [rb](double d) { rb->SendDouble(d); },
-      [rb](const string& s) { rb->SendBulkString(s); },
-  };
+  auto sortable_value_sender = SortableValueSender(rb);
 
-  rb->StartArray(agg_results->size());
+  rb->StartArray(result_size + 1);
+  rb->SendLong(result_size);
+
   for (const auto& result : agg_results.value()) {
-    rb->StartArray(result.size());
+    rb->StartArray(result.size() * 2);
     for (const auto& [k, v] : result) {
-      rb->StartArray(2);
       rb->SendBulkString(k);
-      visit(replier, v);
+      std::visit(sortable_value_sender, v);
     }
   }
 }

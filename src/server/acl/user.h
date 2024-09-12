@@ -40,6 +40,13 @@ class User final {
     bool is_hashed{false};
   };
 
+  struct UpdatePubSub {
+    std::string pattern;
+    bool has_asterisk{false};
+    bool all_channels{false};
+    bool reset_channels{false};
+  };
+
   struct UpdateRequest {
     std::vector<UpdatePass> passwords;
 
@@ -58,6 +65,11 @@ class User final {
     std::vector<UpdateKey> keys;
     bool reset_all_keys{false};
     bool allow_all_keys{false};
+
+    // pub/sub
+    std::vector<UpdatePubSub> pub_sub;
+    bool reset_channels{false};
+    bool all_channels{false};
 
     // TODO allow reset all
     // bool reset_all{false};
@@ -107,6 +119,8 @@ class User final {
 
   const AclKeys& Keys() const;
 
+  const AclPubSub& PubSub() const;
+
   const std::string& Namespace() const;
 
   using CategoryChanges = absl::flat_hash_map<CategoryChange, ChangeMetadata>;
@@ -140,6 +154,10 @@ class User final {
 
   // For ACL key globs
   void SetKeyGlobs(std::vector<UpdateKey> keys);
+
+  // For ACL pub/sub
+  void SetPubSub(std::vector<UpdatePubSub> pub_sub);
+
   void SetNamespace(const std::string& ns);
 
   // Set NOPASS and remove all passwords
@@ -169,6 +187,9 @@ class User final {
 
   // Glob patterns for the keys that a user is allowed to read/write
   AclKeys keys_;
+
+  // Glob patterns for pub/sub channels
+  AclPubSub pub_sub_;
 
   // if the user is on/off
   bool is_active_{false};

@@ -79,21 +79,23 @@ class SliceSnapshot {
   // called.
   void StartIncremental(Context* cntx, LSN start_lsn);
 
-  // Stop snapshot. Only needs to be called for journal streaming mode.
-  void Stop();
+  // Finalizes journal streaming writes. Only called for replication.
+  // Blocking. Must be called from the Snapshot thread.
+  void FinalizeJournalStream(bool cancel);
 
-  // Wait for iteration fiber to stop.
-  void Join();
-
-  // Force stop. Needs to be called together with cancelling the context.
-  // Snapshot can't always react to cancellation in streaming mode because the
-  // iteration fiber might have finished running by then.
-  void Cancel();
+  // Waits for a regular, non journal snapshot to finish.
+  // Called only for non-replication, backups usecases.
+  void Join() {
+    snapshot_fb_.JoinIfNeeded();
+  }
 
  private:
-  // Main fiber that iterates over all buckets in the db slice
+  // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
   void IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut);
+
+  // A fiber function that switches to the incremental mode
+  void SwitchIncrementalFb(Context* cntx, LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
   bool BucketSaveCb(PrimeIterator it);
@@ -117,12 +119,13 @@ class SliceSnapshot {
 
   // Push serializer's internal buffer to channel.
   // Push regardless of buffer size if force is true.
-  // Return if pushed.
+  // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerializedToChannel(bool force);
 
-  // Helper function that flushes the serialized items into the RecordStream
+  // Helper function that flushes the serialized items into the RecordStream.
+  // Can block on the channel.
   using FlushState = SerializerBase::FlushState;
-  size_t Serialize(FlushState flush_state = FlushState::kFlushMidEntry);
+  size_t FlushChannelRecord(FlushState flush_state);
 
  public:
   uint64_t snapshot_version() const {
@@ -147,6 +150,7 @@ class SliceSnapshot {
     CompactObj key;
     util::fb2::Future<PrimeValue> value;
     time_t expire;
+    uint32_t mc_flags;
   };
 
   DbSlice* db_slice_;
@@ -163,14 +167,15 @@ class SliceSnapshot {
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
   util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
-
+  util::fb2::CondVarAny seq_cond_;
   CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   uint32_t journal_cb_id_ = 0;
-  uint64_t rec_id_ = 0;
+
+  uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
   struct Stats {
     size_t loop_serialized = 0;

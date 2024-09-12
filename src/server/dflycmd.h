@@ -10,6 +10,7 @@
 #include <memory>
 
 #include "server/conn_context.h"
+#include "util/fibers/synchronization.h"
 
 namespace facade {
 class RedisReplyBuilder;
@@ -43,7 +44,7 @@ struct FlowInfo {
   std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
 
-  DflyVersion version = DflyVersion::VER0;
+  DflyVersion version = DflyVersion::VER1;
 
   std::optional<LSN> start_partial_sync_at;
   uint64_t last_acked_lsn = 0;
@@ -101,7 +102,7 @@ class DflyCmd {
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
 
   // Stores information related to a single replica.
-  struct ReplicaInfo {
+  struct ABSL_LOCKABLE ReplicaInfo {
     ReplicaInfo(unsigned flow_count, std::string address, uint32_t listening_port,
                 Context::ErrHandler err_handler)
         : replica_state{SyncState::PREPARATION},
@@ -111,12 +112,12 @@ class DflyCmd {
           flows{flow_count} {
     }
 
-    [[nodiscard]] auto GetExclusiveLock() {
-      return std::lock_guard{shared_mu};
+    [[nodiscard]] auto GetExclusiveLock() ABSL_EXCLUSIVE_LOCK_FUNCTION() {
+      return util::fb2::LockGuard{shared_mu};
     }
 
-    [[nodiscard]] auto GetSharedLock() {
-      return std::shared_lock{shared_mu};
+    [[nodiscard]] auto GetSharedLock() ABSL_EXCLUSIVE_LOCK_FUNCTION() {
+      return dfly::SharedLock{shared_mu};
     }
 
     // Transition into cancelled state, run cleanup.
@@ -128,7 +129,7 @@ class DflyCmd {
     std::string id;
     std::string address;
     uint32_t listening_port;
-    DflyVersion version = DflyVersion::VER0;
+    DflyVersion version = DflyVersion::VER1;
 
     // Flows describe the state of shard-local flow.
     // They are always indexed by the shard index on the master.
@@ -148,20 +149,21 @@ class DflyCmd {
   void Shutdown();
 
   // Create new sync session. Returns (session_id, number of flows)
-  std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionContext* cntx);
+  std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Master side acces method to replication info of that connection.
   std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionContext* cntx);
 
-  std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const;
+  // Master-side command. Provides Replica info.
+  std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
-  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const;
+  void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
   // Sets metadata.
   void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
 
   // Tries to break those flows that stuck on socket write for too long time.
-  void BreakStalledFlowsInShard();
+  void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
  private:
   // JOURNAL [START/STOP]
@@ -199,6 +201,8 @@ class DflyCmd {
   // Return journal records num sent for each flow of replication.
   void ReplicaOffset(CmdArgList args, ConnectionContext* cntx);
 
+  void Load(CmdArgList args, ConnectionContext* cntx);
+
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
@@ -212,11 +216,11 @@ class DflyCmd {
   void FullSyncFb(FlowInfo* flow, Context* cntx);
 
   // Get ReplicaInfo by sync_id.
-  std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id);
+  std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Find sync info by id or send error reply.
   std::pair<uint32_t, std::shared_ptr<ReplicaInfo>> GetReplicaInfoOrReply(
-      std::string_view id, facade::RedisReplyBuilder* rb);
+      std::string_view id, facade::RedisReplyBuilder* rb) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Check replica is in expected state and flows are set-up correctly.
   bool CheckReplicaStateOrReply(const ReplicaInfo& ri, SyncState expected,
@@ -224,11 +228,11 @@ class DflyCmd {
 
  private:
   // Main entrypoint for stopping replication.
-  void StopReplication(uint32_t sync_id);
+  void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Return a map between replication ID to lag. lag is defined as the maximum of difference
   // between the master's LSN and the last acknowledged LSN in over all shards.
-  std::map<uint32_t, LSN> ReplicationLagsLocked() const;
+  std::map<uint32_t, LSN> ReplicationLagsLocked() const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   ServerFamily* sf_;  // Not owned
 

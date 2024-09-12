@@ -48,15 +48,16 @@ TEST_F(AclFamilyTest, AclSetUser) {
   EXPECT_THAT(resp, "OK");
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
-  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* +@all", "user vlad off -@all"));
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                        "user vlad off resetchannels -@all"));
 
   resp = Run({"ACL", "SETUSER", "vlad", "+ACL"});
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "LIST"});
   vec = resp.GetVec();
-  EXPECT_THAT(vec,
-              UnorderedElementsAre("user default on nopass ~* +@all", "user vlad off -@all +acl"));
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                        "user vlad off resetchannels -@all +acl"));
 
   resp = Run({"ACL", "SETUSER", "vlad", "on", ">pass", ">temp"});
   EXPECT_THAT(resp, "OK");
@@ -65,9 +66,11 @@ TEST_F(AclFamilyTest, AclSetUser) {
   vec = resp.GetVec();
   EXPECT_THAT(vec.size(), 2);
   auto contains_vlad = [](const auto& vec) {
-    const std::string default_user = "user default on nopass ~* +@all";
-    const std::string a_permutation = "user vlad on #a6864eb339b0e1f #d74ff0ee8da3b98 -@all +acl";
-    const std::string b_permutation = "user vlad on #d74ff0ee8da3b98 #a6864eb339b0e1f -@all +acl";
+    const std::string default_user = "user default on nopass ~* &* +@all";
+    const std::string a_permutation =
+        "user vlad on #a6864eb339b0e1f #d74ff0ee8da3b98 resetchannels -@all +acl";
+    const std::string b_permutation =
+        "user vlad on #d74ff0ee8da3b98 #a6864eb339b0e1f resetchannels -@all +acl";
     std::string_view other;
     if (vec[0] == default_user) {
       other = vec[1].GetView();
@@ -107,8 +110,8 @@ TEST_F(AclFamilyTest, AclSetUser) {
 
   resp = Run({"ACL", "LIST"});
   vec = resp.GetVec();
-  EXPECT_THAT(vec,
-              UnorderedElementsAre("user default on nopass ~* +@all", "user vlad on -@all +acl"));
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                        "user vlad on resetchannels -@all +acl"));
 
   // +@NONE should not exist anymore. It's not in the spec.
   resp = Run({"ACL", "SETUSER", "rand", "+@NONE"});
@@ -139,7 +142,7 @@ TEST_F(AclFamilyTest, AclDelUser) {
   EXPECT_THAT(resp, IntArg(0));
 
   resp = Run({"ACL", "LIST"});
-  EXPECT_THAT(resp.GetString(), "user default on nopass ~* +@all");
+  EXPECT_THAT(resp.GetString(), "user default on nopass ~* &* +@all");
 
   Run({"ACL", "SETUSER", "michael", "ON"});
   Run({"ACL", "SETUSER", "kobe", "ON"});
@@ -160,9 +163,10 @@ TEST_F(AclFamilyTest, AclList) {
 
   resp = Run({"ACL", "LIST"});
   auto vec = resp.GetVec();
-  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* +@all",
-                                        "user kostas off #d74ff0ee8da3b98 -@all +@admin",
-                                        "user adi off #d74ff0ee8da3b98 -@all +@fast"));
+  EXPECT_THAT(vec,
+              UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                   "user kostas off #d74ff0ee8da3b98 resetchannels -@all +@admin",
+                                   "user adi off #d74ff0ee8da3b98 resetchannels -@all +@fast"));
 }
 
 TEST_F(AclFamilyTest, AclAuth) {
@@ -210,17 +214,19 @@ TEST_F(AclFamilyTest, TestAllCategories) {
       EXPECT_THAT(resp, "OK");
 
       resp = Run({"ACL", "LIST"});
-      EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass ~* +@all",
-                                                      absl::StrCat("user kostas off -@all ", "+@",
-                                                                   absl::AsciiStrToLower(cat))));
+      EXPECT_THAT(resp.GetVec(),
+                  UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                       absl::StrCat("user kostas off resetchannels -@all ", "+@",
+                                                    absl::AsciiStrToLower(cat))));
 
       resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-@", cat)});
       EXPECT_THAT(resp, "OK");
 
       resp = Run({"ACL", "LIST"});
-      EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("user default on nopass ~* +@all",
-                                                      absl::StrCat("user kostas off -@all ", "-@",
-                                                                   absl::AsciiStrToLower(cat))));
+      EXPECT_THAT(resp.GetVec(),
+                  UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                       absl::StrCat("user kostas off resetchannels -@all ", "-@",
+                                                    absl::AsciiStrToLower(cat))));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
       EXPECT_THAT(resp, IntArg(1));
@@ -259,16 +265,16 @@ TEST_F(AclFamilyTest, TestAllCommands) {
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass ~* +@all",
-                                       absl::StrCat("user kostas off -@all ", "+",
+                  UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                       absl::StrCat("user kostas off resetchannels -@all ", "+",
                                                     absl::AsciiStrToLower(command_name))));
 
       resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-", command_name)});
 
       resp = Run({"ACL", "LIST"});
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass ~* +@all",
-                                       absl::StrCat("user kostas off ", "-@all ", "-",
+                  UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                       absl::StrCat("user kostas off resetchannels -@all ", "-",
                                                     absl::AsciiStrToLower(command_name))));
 
       resp = Run({"ACL", "DELUSER", "kostas"});
@@ -321,6 +327,8 @@ TEST_F(AclFamilyTest, TestGetUser) {
   EXPECT_THAT(vec[5], "+@all");
   EXPECT_THAT(vec[6], "keys");
   EXPECT_THAT(vec[7], "~*");
+  EXPECT_THAT(vec[8], "channels");
+  EXPECT_THAT(vec[9], "&*");
 
   resp = Run({"ACL", "SETUSER", "kostas", "+@STRING", "+HSET"});
   resp = Run({"ACL", "GETUSER", "kostas"});
@@ -331,6 +339,10 @@ TEST_F(AclFamilyTest, TestGetUser) {
   EXPECT_TRUE(kvec[3].GetVec().empty());
   EXPECT_THAT(kvec[4], "commands");
   EXPECT_THAT(kvec[5], "-@all +@string +hset");
+  EXPECT_THAT(kvec[6], "keys");
+  EXPECT_THAT(kvec[7], RespArray(ElementsAre()));
+  EXPECT_THAT(kvec[8], "channels");
+  EXPECT_THAT(kvec[9], "resetchannels");
 }
 
 TEST_F(AclFamilyTest, TestDryRun) {
@@ -431,7 +443,7 @@ TEST_F(AclFamilyTest, TestKeys) {
   EXPECT_THAT(vec[7], "~foo ~bar*");
 
   resp = Run({"ACL", "SETUSER", "temp", "~*", "~foo"});
-  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '~tmp': Adding a pattern after the * "
+  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '~foo': Adding a pattern after the * "
                            "pattern (or the 'allkeys' flag) is not valid and does not have any "
                            "effect. Try 'resetkeys' to start with an empty list of patterns"));
 
@@ -439,7 +451,7 @@ TEST_F(AclFamilyTest, TestKeys) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run({"ACL", "SETUSER", "temp", "~foo"});
-  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '~tmp': Adding a pattern after the * "
+  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '~foo': Adding a pattern after the * "
                            "pattern (or the 'allkeys' flag) is not valid and does not have any "
                            "effect. Try 'resetkeys' to start with an empty list of patterns"));
 
@@ -474,4 +486,37 @@ TEST_F(AclFamilyTest, TestKeys) {
   EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter %RFOO"));
 }
 
+TEST_F(AclFamilyTest, TestPubSub) {
+  TestInitAclFam();
+
+  auto resp = Run({"ACL", "SETUSER", "temp", "&foo", "&b*r"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "GETUSER", "temp"});
+  auto vec = resp.GetVec();
+  EXPECT_THAT(vec[8], "channels");
+  EXPECT_THAT(vec[9], "resetchannels &foo &b*r");
+
+  resp = Run({"ACL", "SETUSER", "temp", "allchannels", "&bar"});
+  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '&bar': Adding a pattern after the * "
+                           "pattern (or the 'allchannels' flag) is "
+                           "not valid and does not have any effect. Try 'resetchannels' to start "
+                           "with an empty list of channels"));
+
+  resp = Run({"ACL", "SETUSER", "temp", "allchannels"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "GETUSER", "temp"});
+  vec = resp.GetVec();
+  EXPECT_THAT(vec[8], "channels");
+  EXPECT_THAT(vec[9], "&*");
+
+  resp = Run({"ACL", "SETUSER", "temp", "resetchannels", "&foo"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "GETUSER", "temp"});
+  vec = resp.GetVec();
+  EXPECT_THAT(vec[8], "channels");
+  EXPECT_THAT(vec[9], "resetchannels &foo");
+}
 }  // namespace dfly

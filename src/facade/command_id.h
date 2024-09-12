@@ -86,6 +86,16 @@ class CommandId {
 
   static uint32_t OptCount(uint32_t mask);
 
+  // PUBLISH/SUBSCRIBE/UNSUBSCRIBE variant
+  bool IsPubSub() const {
+    return is_pub_sub_;
+  }
+
+  // PSUBSCRIBE/PUNSUBSCRIBE variant
+  bool IsPSub() const {
+    return is_p_sub_;
+  }
+
  protected:
   std::string name_;
 
@@ -102,6 +112,9 @@ class CommandId {
 
   // Whether the command can only be used by admin connections.
   bool restricted_ = false;
+
+  bool is_pub_sub_ = false;
+  bool is_p_sub_ = false;
 };
 
 }  // namespace facade

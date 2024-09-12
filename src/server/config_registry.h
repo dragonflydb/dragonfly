@@ -34,16 +34,17 @@ class ConfigRegistry {
   };
 
   // Returns true if the value was updated.
-  SetResult Set(std::string_view config_name, std::string_view value);
+  SetResult Set(std::string_view config_name, std::string_view value) ABSL_LOCKS_EXCLUDED(mu_);
 
-  std::optional<std::string> Get(std::string_view config_name);
+  std::optional<std::string> Get(std::string_view config_name) ABSL_LOCKS_EXCLUDED(mu_);
 
   void Reset();
 
-  std::vector<std::string> List(std::string_view glob) const;
+  std::vector<std::string> List(std::string_view glob) const ABSL_LOCKS_EXCLUDED(mu_);
 
  private:
-  void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb);
+  void RegisterInternal(std::string_view name, bool is_mutable, WriteCb cb)
+      ABSL_LOCKS_EXCLUDED(mu_);
 
   mutable util::fb2::Mutex mu_;
 

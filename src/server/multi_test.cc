@@ -72,10 +72,11 @@ TEST_F(MultiTest, MultiAndFlush) {
 }
 
 TEST_F(MultiTest, MultiWithError) {
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
   EXPECT_THAT(Run({"multi"}), "OK");
   EXPECT_THAT(Run({"set", "x", "y"}), "QUEUED");
   EXPECT_THAT(Run({"set", "x"}), ErrArg("wrong number of arguments for 'set' command"));
-  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT Transaction discarded because of previous errors"));
 
   EXPECT_THAT(Run({"multi"}), "OK");
   EXPECT_THAT(Run({"set", "z", "y"}), "QUEUED");
@@ -484,6 +485,14 @@ TEST_F(MultiTest, Watch) {
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
 
+  // Check watch with nonempty exec body
+  EXPECT_EQ(Run({"watch", "a"}), "OK");
+  Run({"multi"});
+  Run({"get", "a"});
+  Run({"get", "b"});
+  Run({"get", "c"});
+  ASSERT_THAT(Run({"exec"}), kExecSuccess);
+
   // Check watch data cleared after EXEC.
   Run({"set", "a", "1"});
   Run({"multi"});
@@ -499,10 +508,9 @@ TEST_F(MultiTest, Watch) {
   // Check EXEC doesn't miss watched key expiration.
   Run({"watch", "a"});
   Run({"expire", "a", "1"});
-
   AdvanceTime(1000);
-
   Run({"multi"});
+  Run({"get", "a"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
 
   // Check unwatch.
@@ -747,7 +755,7 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
 
 TEST_F(MultiTest, ScriptFlagsEmbedded) {
   const char* s1 = R"(
-  #!lua flags=allow-undeclared-keys
+  --!df flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
 )";
 
@@ -756,7 +764,7 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
   EXPECT_EQ(Run({"eval", s1, "0"}), "works");
 
   const char* s2 = R"(
-  #!lua flags=this-is-an-error
+  --!df flags=this-is-an-error
   redis.call('SET', 'random-key', 'failed')
   )";
 
@@ -801,7 +809,7 @@ TEST_F(MultiTest, ScriptBadCommand) {
   const char* s2 = "redis.call('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
   const char* s3 = "redis.acall('FLUSHALL'); redis.set(KEYS[1], ARGS[1]);";
   const char* s4 = R"(
-    #!lua flags=disable-atomicity
+    --!df flags=disable-atomicity
     redis.call('FLUSHALL');
     return "OK";
   )";
@@ -827,7 +835,7 @@ TEST_F(MultiTest, MultiEvalModeConflict) {
   }
 
   const char* s1 = R"(
-  #!lua flags=allow-undeclared-keys
+  --!df flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
 )";
 

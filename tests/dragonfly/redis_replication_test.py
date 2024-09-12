@@ -44,6 +44,17 @@ async def check_data(seeder, replicas, c_replicas):
         assert await seeder.compare(capture, port=replica.port)
 
 
+# Start replication
+async def run_replication(client: aioredis.Redis, port):
+    res = await client.execute_command("REPLICAOF localhost " + str(port))
+    assert res == "OK"
+    await wait_available_async(client)
+
+
+async def replicate_all(replicas, port):
+    await asyncio.gather(*(asyncio.create_task(run_replication(c, port)) for c in replicas))
+
+
 full_sync_replication_specs = [
     ([1], dict(keys=100, dbcount=1, unsupported_types=[ValueType.JSON])),
     ([1], dict(keys=5000, dbcount=2, unsupported_types=[ValueType.JSON])),
@@ -66,11 +77,10 @@ async def test_replication_full_sync(
         port=port_picker.get_available_port(), proactor_threads=t_replicas[0]
     )
     replica.start()
-    c_replica = aioredis.Redis(port=replica.port)
+    c_replica = replica.client()
     assert await c_replica.ping()
 
-    await c_replica.execute_command("REPLICAOF", "localhost", master.port)
-    await wait_available_async(c_replica)
+    await run_replication(c_replica, master.port)
     await await_synced(c_master, c_replica, seeder_config["dbcount"])
 
     capture = await seeder.capture()
@@ -98,7 +108,7 @@ async def test_replication_stable_sync(
         port=port_picker.get_available_port(), proactor_threads=t_replicas[0]
     )
     replica.start()
-    c_replica = aioredis.Redis(port=replica.port)
+    c_replica = replica.client()
     assert await c_replica.ping()
 
     await c_replica.execute_command("REPLICAOF", "localhost", master.port)
@@ -155,12 +165,7 @@ async def test_redis_replication_all(
     stream_task = asyncio.create_task(seeder.run())
     await asyncio.sleep(0.0)
 
-    # Start replication
-    async def run_replication(c_replica):
-        await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
-        await wait_available_async(c_replica)
-
-    await asyncio.gather(*(asyncio.create_task(run_replication(c)) for c in c_replicas))
+    await replicate_all(c_replicas, master.port)
 
     # Wait for streaming to finish
     assert (
@@ -213,18 +218,13 @@ async def test_redis_master_restart(
     # Start replicas
     df_factory.start_all(replicas)
 
-    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+    c_replicas = [replica.client() for replica in replicas]
 
     # Start data stream
     stream_task = asyncio.create_task(seeder.run())
     await asyncio.sleep(0.0)
 
-    # Start replication
-    async def run_replication(c_replica):
-        await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
-        await wait_available_async(c_replica)
-
-    await asyncio.gather(*(asyncio.create_task(run_replication(c)) for c in c_replicas))
+    await replicate_all(c_replicas, master.port)
 
     # Wait for streaming to finish
     assert (
@@ -242,7 +242,7 @@ async def test_redis_master_restart(
         await seeder.run(target_deviation=0.1)
 
     # Check data after stable state stream
-    await asyncio.gather(*(asyncio.create_task(wait_available_async(c)) for c in c_replicas))
+    await wait_available_async(c_replicas)
     await await_synced_all(c_master, c_replicas)
     await check_data(seeder, replicas, c_replicas)
 
@@ -286,18 +286,13 @@ async def test_disconnect_master(
     # Start replicas
     df_factory.start_all(replicas)
 
-    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
+    c_replicas = [replica.client() for replica in replicas]
 
     # Start data stream
     stream_task = asyncio.create_task(seeder.run())
     await asyncio.sleep(0.5)
 
-    # Start replication
-    async def run_replication(c_replica):
-        await c_replica.execute_command("REPLICAOF localhost " + str(proxy.port))
-        await wait_available_async(c_replica)
-
-    await asyncio.gather(*(asyncio.create_task(run_replication(c)) for c in c_replicas))
+    await replicate_all(c_replicas, proxy.port)
 
     # Break the connection between master and replica
     await proxy.close(proxy_task)
@@ -311,7 +306,7 @@ async def test_disconnect_master(
     await stream_task
 
     # Check data after stable state stream
-    await asyncio.gather(*(asyncio.create_task(wait_available_async(c)) for c in c_replicas))
+    await wait_available_async(c_replicas)
     await await_synced_all(c_master, c_replicas)
     await check_data(seeder, replicas, c_replicas)
 

@@ -77,7 +77,7 @@ TEST_F(SearchParserTest, Scanner) {
 
   NEXT_TOK(TOK_LPAREN);
   NEXT_EQ(TOK_TERM, string, "5a");
-  NEXT_EQ(TOK_UINT32, uint32_t, 6);
+  NEXT_EQ(TOK_UINT32, string, "6");
   NEXT_TOK(TOK_RPAREN);
 
   SetInput(R"( "hello\"world" )");
@@ -95,20 +95,78 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_TERM, string, "tag");
   NEXT_TOK(TOK_RCURLBR);
 
+  SetInput("@color:{blue\\,1\\\\\\$\\+}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, R"(blue,1\$+)");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\.1\\\"\\%\\=}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue.1\"%=");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\<1\\'\\^\\~}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue<1'^~");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\>1\\:\\&\\/}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue>1:&/");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\{1\\;\\*\\ }");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue{1;* ");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\}1\\!\\(}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue}1!(");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\[1\\@\\)}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue[1@)");
+  NEXT_TOK(TOK_RCURLBR);
+
+  SetInput("@color:{blue\\]1\\#\\-}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TAG_VAL, string, "blue]1#-");
+  NEXT_TOK(TOK_RCURLBR);
+
   SetInput("почтальон Печкин");
   NEXT_EQ(TOK_TERM, string, "почтальон");
   NEXT_EQ(TOK_TERM, string, "Печкин");
 
-  double d;
-  ASSERT_TRUE(absl::SimpleAtod("33.3", &d));
   SetInput("33.3");
-  NEXT_EQ(TOK_DOUBLE, double, d);
+  NEXT_EQ(TOK_DOUBLE, string, "33.3");
 }
 
 TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(0, Parse(" foo bar (baz) "));
   EXPECT_EQ(0, Parse(" -(foo) @foo:bar @ss:[1 2]"));
   EXPECT_EQ(0, Parse("@foo:{ tag1 | tag2 }"));
+
+  EXPECT_EQ(0, Parse("@foo:{1|2}"));
+  EXPECT_EQ(0, Parse("@foo:{1|2.0|4|3.0}"));
+  EXPECT_EQ(0, Parse("@foo:{1|hello|3.0|world|4}"));
 
   EXPECT_EQ(1, Parse(" -(foo "));
   EXPECT_EQ(1, Parse(" foo:bar "));
@@ -124,7 +182,7 @@ TEST_F(SearchParserTest, ParseParams) {
 
   SetInput("$name $k");
   NEXT_EQ(TOK_TERM, string, "alex");
-  NEXT_EQ(TOK_UINT32, uint32_t, 10);
+  NEXT_EQ(TOK_UINT32, string, "10");
 }
 
 TEST_F(SearchParserTest, Quotes) {
@@ -137,8 +195,8 @@ TEST_F(SearchParserTest, Quotes) {
 
 TEST_F(SearchParserTest, Numeric) {
   SetInput("11 123123123123 '22'");
-  NEXT_EQ(TOK_UINT32, uint32_t, 11);
-  NEXT_EQ(TOK_DOUBLE, double, 123123123123.0);
+  NEXT_EQ(TOK_UINT32, string, "11");
+  NEXT_EQ(TOK_DOUBLE, string, "123123123123");
   NEXT_EQ(TOK_TERM, string, "22");
 }
 
@@ -156,7 +214,7 @@ TEST_F(SearchParserTest, KNNfull) {
   NEXT_TOK(TOK_LBRACKET);
 
   NEXT_TOK(TOK_KNN);
-  NEXT_EQ(TOK_UINT32, uint32_t, 1);
+  NEXT_EQ(TOK_UINT32, string, "1");
   NEXT_TOK(TOK_FIELD);
   NEXT_TOK(TOK_TERM);
 
@@ -164,7 +222,7 @@ TEST_F(SearchParserTest, KNNfull) {
   NEXT_EQ(TOK_TERM, string, "vec_sort");
 
   NEXT_TOK(TOK_EF_RUNTIME);
-  NEXT_EQ(TOK_UINT32, uint32_t, 15);
+  NEXT_EQ(TOK_UINT32, string, "15");
 
   NEXT_TOK(TOK_RBRACKET);
 }

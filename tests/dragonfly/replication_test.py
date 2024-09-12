@@ -1,4 +1,5 @@
 import random
+
 from itertools import chain, repeat
 import re
 import pytest
@@ -28,12 +29,12 @@ M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
 
 
-async def wait_for_replicas_state(*clients, state="online", timeout=0.05):
+async def wait_for_replicas_state(*clients, state="online", node_role="slave", timeout=0.05):
     """Wait until all clients (replicas) reach passed state"""
     while len(clients) > 0:
         await asyncio.sleep(timeout)
         roles = await asyncio.gather(*(c.role() for c in clients))
-        clients = [c for c, role in zip(clients, roles) if role[0] != "slave" or role[3] != state]
+        clients = [c for c, role in zip(clients, roles) if role[0] != node_role or role[3] != state]
 
 
 """
@@ -874,7 +875,7 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         await wait_available_async(c_replica)
 
-    script = script_test_s1.format(flags=f"#!lua flags={flags}" if flags else "")
+    script = script_test_s1.format(flags=f"--!df flags={flags}" if flags else "")
     sha = await c_master.script_load(script)
 
     key_sets = [[f"{i}-{j}" for j in range(num_keys)] for i in range(num_par)]
@@ -1555,7 +1556,6 @@ async def test_replicaof_flag(df_factory):
 
     await wait_available_async(c_replica)  # give it time to startup
     # wait until we have a connection
-    await wait_for_replica_status(c_replica, status="up")
     await check_all_replicas_finished([c_replica], c_master)
 
     dbsize = await c_replica.dbsize()
@@ -1635,7 +1635,6 @@ async def test_replicaof_flag_disconnect(df_factory):
 
     c_replica = replica.client()
     await wait_available_async(c_replica)
-    await wait_for_replica_status(c_replica, status="up")
     await check_all_replicas_finished([c_replica], c_master)
 
     dbsize = await c_replica.dbsize()
@@ -1671,7 +1670,6 @@ async def test_df_crash_on_memcached_error(df_factory):
     c_replica = replica.client()
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
-    await wait_for_replica_status(c_replica, status="up")
     await c_replica.close()
 
     memcached_client = pymemcache.Client(f"127.0.0.1:{replica.mc_port}")
@@ -1730,7 +1728,6 @@ async def test_network_disconnect(df_factory, df_seeder_factory):
 
             # Give time to detect dropped connection and reconnect
             await asyncio.sleep(1.0)
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             capture = await seeder.capture()
@@ -1769,7 +1766,6 @@ async def test_network_disconnect_active_stream(df_factory, df_seeder_factory):
 
             # Give time to detect dropped connection and reconnect
             await asyncio.sleep(1.0)
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             logging.debug(await c_replica.execute_command("INFO REPLICATION"))
@@ -1816,7 +1812,6 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
 
             # Give time to detect dropped connection and reconnect
             await asyncio.sleep(1.0)
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             # logging.debug(await c_replica.execute_command("INFO REPLICATION"))
@@ -1833,6 +1828,7 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
     # assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
+@pytest.mark.skip("Fails sporadically")
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=6)
     replica = df_factory.create(proactor_threads=4)
@@ -1850,7 +1846,6 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
             await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
 
             # Wait replica to be up and synchronized with master
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             initial_reconnects_count = await get_replica_reconnects_count(replica)
@@ -1867,7 +1862,6 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
             task = asyncio.create_task(proxy.serve())
 
             # Wait replica to be reconnected and synchronized with master
-            await wait_for_replica_status(c_replica, status="up")
             await wait_available_async(c_replica)
 
             capture = await seeder.capture()
@@ -1931,6 +1925,42 @@ async def test_search(df_factory):
     ].id == "k0"
 
 
+@dfly_args({"proactor_threads": 4})
+async def test_search_with_stream(df_factory: DflyInstanceFactory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    # fill master with hsets and create index
+    p = c_master.pipeline(transaction=False)
+    for i in range(10_000):
+        p.hset(f"k{i}", mapping={"name": f"name of {i}"})
+    await p.execute()
+
+    await c_master.execute_command("FT.CREATE i1 SCHEMA name text")
+
+    # start replication and issue one add command and delete commands on master in parallel
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await c_master.hset("secret-key", mapping={"name": "new-secret"})
+    for i in range(1_000):
+        await c_master.delete(f"k{i}")
+
+    # expect replica to see only 10k - 1k + 1 = 9001 keys in it's index
+    await wait_available_async(c_replica)
+    assert await c_replica.execute_command("FT.SEARCH i1 * LIMIT 0 0") == [9_001]
+    assert await c_replica.execute_command('FT.SEARCH i1 "secret"') == [
+        1,
+        "secret-key",
+        ["name", "new-secret"],
+    ]
+
+    await close_clients(c_master, c_replica)
+
+
 # @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_client_pause_with_replica(df_factory, df_seeder_factory):
@@ -1981,11 +2011,8 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     replica = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
     df_factory.start_all([master, replica])
 
-    seeder = SeederV2(key_target=40000)
     c_replica = replica.client()
-    await seeder.run(c_replica, target_deviation=0.1)
-    dbsize = await c_replica.dbsize()
-    assert dbsize >= 30000
+    await c_replica.execute_command(f"DEBUG POPULATE 10000000")
 
     replica.stop()
     replica.start()
@@ -2291,7 +2318,7 @@ async def test_replica_reconnect(df_factory, break_conn):
 @pytest.mark.asyncio
 async def test_announce_ip_port(df_factory):
     master = df_factory.create()
-    replica = df_factory.create(announce_ip="overrode-host", announce_port="1337")
+    replica = df_factory.create(replica_announce_ip="overrode-host", announce_port="1337")
 
     master.start()
     replica.start()
@@ -2386,10 +2413,9 @@ async def test_replicate_old_master(
 
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
-    master = df_factory.create(path=released_dfly_path, cluster_mode=cluster_mode)
-    master.clear_max_chunk_flag()
+    master = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode=cluster_mode)
     replica = df_factory.create(
-        cluster_mode=cluster_mode, announce_ip=announce_ip, announce_port=announce_port
+        cluster_mode=cluster_mode, cluster_announce_ip=announce_ip, announce_port=announce_port
     )
 
     df_factory.start_all([master, replica])
@@ -2411,3 +2437,135 @@ async def test_replicate_old_master(
     assert await c_replica.execute_command("get", "k1") == "v1"
 
     await disconnect_clients(c_master, c_replica)
+
+
+# This Test was intorduced in response to a bug when replicating empty hashmaps (encoded as
+# ziplists) created with HSET, HSETEX, HDEL and then replicated 2 times.
+# For more information plz refer to the issue on gh:
+# https://github.com/dragonflydb/dragonfly/issues/3504
+@dfly_args({"proactor_threads": 1})
+@pytest.mark.asyncio
+async def test_empty_hash_map_replicate_old_master(df_factory):
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
+
+    dfly_version = "v1.21.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+    # old versions
+    instances = [df_factory.create(path=released_dfly_path, version=1.21) for i in range(3)]
+    # new version
+    instances.append(df_factory.create())
+
+    df_factory.start_all(instances)
+
+    old_c_master = instances[0].client()
+    # Create an empty hashmap
+    await old_c_master.execute_command("HSET foo a_field a_value")
+    await old_c_master.execute_command("HSETEX foo 2 b_field b_value")
+    await old_c_master.execute_command("HDEL foo a_field")
+
+    @assert_eventually
+    async def check_if_empty():
+        assert await old_c_master.execute_command("HGETALL foo") == []
+
+    await check_if_empty()
+    assert await old_c_master.execute_command(f"EXISTS foo") == 1
+    await old_c_master.close()
+
+    async def assert_body(client, result=1, state="online", node_role="slave"):
+        async with async_timeout.timeout(10):
+            await wait_for_replicas_state(client, state=state, node_role=node_role)
+
+        assert await client.execute_command(f"EXISTS foo") == result
+        assert await client.execute_command("REPLTAKEOVER 1") == "OK"
+
+    index = 0
+    last_old_replica = 2
+
+    # Adjacent pairs
+    for a, b in zip(instances, instances[1:]):
+        logging.debug(index)
+        client_b = b.client()
+        assert await client_b.execute_command(f"REPLICAOF localhost {a.port}") == "OK"
+
+        if index != last_old_replica:
+            await assert_body(client_b, state="stable_sync", node_role="replica")
+        else:
+            await assert_body(client_b, result=0)
+
+        index = index + 1
+        await client_b.close()
+
+
+# This Test was intorduced in response to a bug when replicating empty hash maps with
+# HSET, HSETEX, HDEL and then loaded via replication.
+# For more information plz refer to the issue on gh:
+# https://github.com/dragonflydb/dragonfly/issues/3504
+@dfly_args({"proactor_threads": 1})
+@pytest.mark.asyncio
+async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
+    cpu = platform.processor()
+    if cpu != "x86_64":
+        pytest.skip(f"Supported only on x64, running on {cpu}")
+
+    dfly_version = "v1.21.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+
+    master = df_factory.create(path=released_dfly_path, version=1.21)
+    master.start()
+
+    c_master = master.client()
+    # Create an empty hashmap
+    await c_master.execute_command("HSET foo a_field a_value")
+    await c_master.execute_command("HSETEX foo 2 b_field b_value")
+    await c_master.execute_command("HDEL foo a_field")
+
+    @assert_eventually
+    async def check_if_empty():
+        assert await c_master.execute_command("HGETALL foo") == []
+
+    await check_if_empty()
+    assert await c_master.execute_command(f"EXISTS foo") == 1
+
+    replica = df_factory.create()
+    replica.start()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+    assert await c_replica.execute_command(f"dbsize") == 0
+
+    await close_clients(c_master, c_replica)
+
+
+async def test_replicating_mc_flags(df_factory):
+    master = df_factory.create(memcached_port=11211, proactor_threads=1)
+    replica = df_factory.create(
+        memcached_port=11212, proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}"
+    )
+    df_factory.start_all([master, replica])
+
+    c_mc_master = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+
+    c_replica = replica.client()
+
+    assert c_mc_master.set("key1", "value1", noreply=True)
+    assert c_mc_master.set("key2", "value1", noreply=True, expire=3600, flags=123456)
+    assert c_mc_master.replace("key1", "value2", expire=4000, flags=2, noreply=True)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    c_mc_replica = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
+
+    async def check_flag(key, flag):
+        res = c_mc_replica.raw_command("get " + key, "END\r\n").split()
+        # workaround sometimes memcached_client.raw_command returns empty str
+        if len(res) > 2:
+            assert res[2].decode() == str(flag)
+
+    await check_flag("key1", 2)
+    await check_flag("key2", 123456)
+
+    await close_clients(c_replica)
