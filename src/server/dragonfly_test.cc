@@ -27,7 +27,6 @@ ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(double, oom_deny_ratio);
-ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 
 namespace dfly {
@@ -461,7 +460,6 @@ TEST_F(DflyEngineTest, Bug207) {
   shard_set->TEST_EnableCacheMode();
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
-  absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
 
   ssize_t i = 0;
   RespExpr resp;
@@ -491,7 +489,6 @@ TEST_F(DflyEngineTest, StickyEviction) {
   shard_set->TEST_EnableCacheMode();
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
-  absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
 
   max_memory_limit = 300000;
 
@@ -670,7 +667,6 @@ TEST_F(DefragDflyEngineTest, TestDefragOption) {
   absl::SetFlag(&FLAGS_mem_defrag_threshold, 0.0);
   absl::SetFlag(&FLAGS_mem_defrag_check_sec_interval, 0);
   absl::SetFlag(&FLAGS_mem_defrag_waste_threshold, 0.1);
-  absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
 
   //  Fill data into dragonfly and then check if we have
   //  any location in memory to defrag. See issue #448 for details about this.
