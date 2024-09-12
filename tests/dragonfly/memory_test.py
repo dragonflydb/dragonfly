@@ -2,6 +2,8 @@ import pytest
 from redis import asyncio as aioredis
 from .utility import *
 import logging
+from . import dfly_args
+
 
 
 @pytest.mark.opt_only
@@ -47,3 +49,67 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
         assert delta < max_unaccounted
 
     await disconnect_clients(client)
+
+
+@pytest.mark.asyncio
+@dfly_args(
+    {
+        "port": 1111,
+        "admin_port": 1112,
+        "maxmemory": "512mb",
+        "proactor_threads": 2,
+        "rss_oom_deny_ratio": 0.5,
+    }
+)
+async def test_rss_oom_ratio(df_factory):
+    """
+    Test dragonfly rejects denyoom commands and new connections when rss memory is above maxmemory*rss_oom_deny_ratio
+    Test dragonfly does not rejects when rss memory goes below threshold
+    """
+    df_server = df_factory.create()
+    df_server.start()
+
+    client = aioredis.Redis(port=df_server.port)
+    await client.execute_command("DEBUG POPULATE 10000 key 40000 RAND")
+
+    await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
+
+    admin_client = aioredis.Redis(port=df_server.admin_port)
+    await admin_client.ping()
+
+    info = await admin_client.info("memory")
+    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+
+    reject_limit = 256 * 1024 * 1024  # 256mb
+    assert info["used_memory"] > reject_limit
+    assert info["used_memory_rss"] > reject_limit
+
+    # get command from existing connection should not be rejected
+    await client.execute_command("get x")
+
+    # reject set due to oom
+    with pytest.raises(redis.exceptions.ResponseError):
+        await client.execute_command("set x y")
+
+    # new client create should also fail
+    client = aioredis.Redis(port=df_server.port)
+    with pytest.raises(redis.exceptions.ConnectionError):
+        await client.ping()
+
+    # new admin port client create should not fail
+    admin_client = aioredis.Redis(port=df_server.admin_port)
+    await admin_client.ping()
+
+    # flush to free memory
+    await admin_client.flushall()
+
+    await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
+
+    info = await admin_client.info("memory")
+    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+    assert info["used_memory"] < reject_limit
+    assert info["used_memory_rss"] < reject_limit
+
+    # now new client create shoud not fail
+    client = aioredis.Redis(port=df_server.port)
+    await client.execute_command("set x y")
