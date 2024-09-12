@@ -112,20 +112,21 @@ void DflyCmd::ReplicaInfo::Cancel() {
   // Update state and cancel context.
   replica_state = SyncState::CANCELLED;
   cntx.Cancel();
-
   // Wait for tasks to finish.
   shard_set->RunBlockingInParallel([this](EngineShard* shard) {
+    VLOG(2) << "Disconnecting flow " << shard->shard_id();
+
     FlowInfo* flow = &flows[shard->shard_id()];
     if (flow->cleanup) {
       flow->cleanup();
     }
-
+    VLOG(2) << "After flow cleanup " << shard->shard_id();
     flow->full_sync_fb.JoinIfNeeded();
     flow->conn = nullptr;
   });
-
   // Wait for error handler to quit.
   cntx.JoinErrorHandler();
+  VLOG(1) << "Disconnecting replica " << address << ":" << listening_port;
 }
 
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
@@ -569,10 +570,15 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
       shard->shard_id() == 0 ? SaveMode::SINGLE_SHARD_WITH_SUMMARY : SaveMode::SINGLE_SHARD;
   flow->saver = std::make_unique<RdbSaver>(flow->conn->socket(), save_mode, false);
 
-  flow->cleanup = [flow]() {
-    flow->saver->Cancel();
+  flow->cleanup = [flow, shard]() {
+    // socket shutdown is needed before calling saver->Cancel(). Because
+    // we might cancel while the write to socket is blocking and
+    // therefore if we wont cancel the socket the full sync fiber might
+    // not get to pop entries from channel, which can cause dead lock if channel is full and some
+    // callbacks are blocked on trying to insert to channel.
     flow->TryShutdownSocket();
-    flow->full_sync_fb.JoinIfNeeded();
+    flow->saver->CancelInShard(shard);  // stops writing to journal stream to channel
+    flow->full_sync_fb.JoinIfNeeded();  // finishes poping data from channel
     flow->saver.reset();
   };
 
@@ -598,10 +604,8 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
 }
 
 void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
-  // Shard can be null for io thread.
-  if (shard != nullptr) {
-    flow->saver->StopSnapshotInShard(shard);
-  }
+  DCHECK(shard);
+  flow->saver->StopFullSyncInShard(shard);
 
   // Wait for full sync to finish.
   flow->full_sync_fb.JoinIfNeeded();

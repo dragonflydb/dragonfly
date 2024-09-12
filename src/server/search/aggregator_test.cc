@@ -77,9 +77,10 @@ TEST(AggregatorTest, GroupWithReduce) {
 
   std::string_view fields[] = {"tag"};
   std::vector<Reducer> reducers = {
-      Reducer{"", "count", FindReducerFunc("COUNT")}, Reducer{"i", "sum-i", FindReducerFunc("SUM")},
-      Reducer{"half-i", "distinct-hi", FindReducerFunc("COUNT_DISTINCT")},
-      Reducer{"null-field", "distinct-null", FindReducerFunc("COUNT_DISTINCT")}};
+      Reducer{"", "count", FindReducerFunc(ReducerFunc::COUNT)},
+      Reducer{"i", "sum-i", FindReducerFunc(ReducerFunc::SUM)},
+      Reducer{"half-i", "distinct-hi", FindReducerFunc(ReducerFunc::COUNT_DISTINCT)},
+      Reducer{"null-field", "distinct-null", FindReducerFunc(ReducerFunc::COUNT_DISTINCT)}};
   PipelineStep steps[] = {MakeGroupStep(fields, std::move(reducers))};
 
   auto result = Process(values, steps);

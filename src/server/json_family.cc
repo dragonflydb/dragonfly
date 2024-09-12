@@ -453,14 +453,21 @@ string ConvertToJsonPointer(string_view json_path) {
   return result;
 }
 
-string ConvertExpressionToJsonPointer(string_view json_path) {
-  if (json_path.empty() || !absl::StartsWith(json_path, "$.")) {
+std::optional<std::string> ConvertExpressionToJsonPointer(string_view json_path) {
+  if (json_path.empty()) {
     VLOG(1) << "retrieved malformed JSON path expression: " << json_path;
-    return {};
+    return std::nullopt;
   }
 
-  // remove prefix
-  json_path.remove_prefix(2);
+  // Remove prefix
+  if (json_path.front() == '$') {
+    json_path.remove_prefix(1);
+  }
+  if (json_path.front() == '.') {
+    json_path.remove_prefix(1);
+  }
+
+  DCHECK(json_path.length());
 
   std::string pointer;
   vector<string> splitted = absl::StrSplit(json_path, '.');
@@ -468,12 +475,12 @@ string ConvertExpressionToJsonPointer(string_view json_path) {
     if (it.front() == '[' && it.back() == ']') {
       std::string index = it.substr(1, it.size() - 2);
       if (index.empty()) {
-        return {};
+        return std::nullopt;
       }
 
       for (char ch : index) {
         if (!std::isdigit(ch)) {
-          return {};
+          return std::nullopt;
         }
       }
 
@@ -1261,17 +1268,17 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   };
 
   auto inserter = [&](JsonType& json) {
-    // Set a new value if the path doesn't exist and the nx condition is not set.
+    // Set a new value if the path doesn't exist and the xx condition is not set.
     if (!path_exists && !is_xx_condition) {
-      string pointer = ConvertExpressionToJsonPointer(path);
-      if (pointer.empty()) {
+      auto pointer = ConvertExpressionToJsonPointer(path);
+      if (!pointer) {
         VLOG(1) << "Failed to convert the following expression path to a valid JSON pointer: "
                 << path;
         return OpStatus::SYNTAX_ERR;
       }
 
       error_code ec;
-      jsoncons::jsonpointer::add(json, pointer, new_json, ec);
+      jsoncons::jsonpointer::add(json, pointer.value(), new_json, ec);
       if (ec) {
         VLOG(1) << "Failed to add a JSON value to the following path: " << path
                 << " with the error: " << ec.message();
@@ -1375,13 +1382,11 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
 
 void JsonFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
-  string_view key = parser.Next();
-  string_view path = parser.Next();
-  string_view json_str = parser.Next();
+  auto [key, path, json_str] = parser.Next<string_view, string_view, string_view>();
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  int res = parser.HasNext() ? parser.Switch("NX", 1, "XX", 2) : 0;
+  auto res = parser.TryMapNext("NX", 1, "XX", 2);
   bool is_xx_condition = (res == 2), is_nx_condition = (res == 1);
 
   if (parser.Error() || parser.HasNext())  // also clear the parser error dcheck

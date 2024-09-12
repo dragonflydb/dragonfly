@@ -734,6 +734,8 @@ void DebugCmd::Exec() {
   for (const auto& k_v : freq_cnt) {
     StrAppend(&res, k_v.second, ":", k_v.first, "\n");
   }
+  StrAppend(&res, "--------------------------\n");
+
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   rb->SendVerbatimString(res);
 }

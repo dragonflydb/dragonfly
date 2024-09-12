@@ -44,6 +44,8 @@ using namespace facade;
 
 using CI = CommandId;
 
+enum class ExpT { EX, PX, EXAT, PXAT };
+
 constexpr uint32_t kMaxStrLen = 1 << 28;
 
 void CopyValueToBuffer(const PrimeValue& pv, char* dest) {
@@ -758,9 +760,10 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
   facade::SinkReplyBuilder* builder = cntx->reply_builder();
 
   while (parser.HasNext()) {
-    parser.ToUpper();
-    if (base::_in(parser.Peek(), {"EX", "PX", "EXAT", "PXAT"})) {
-      auto [opt, int_arg] = parser.Next<string_view, int64_t>();
+    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
+                                          "PXAT", ExpT::PXAT);
+        exp_type) {
+      auto int_arg = parser.Next<int64_t>();
 
       if (auto err = parser.Error(); err) {
         return cntx->SendError(err->MakeReply());
@@ -779,8 +782,8 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
 
       DbSlice::ExpireParams expiry{
           .value = int_arg,
-          .unit = (opt[0] == 'P') ? TimeUnit::MSEC : TimeUnit::SEC,
-          .absolute = absl::EndsWith(opt, "AT"),
+          .unit = *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC,
+          .absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT,
       };
 
       int64_t now_ms = GetCurrentTimeMs();
@@ -802,7 +805,7 @@ void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
     } else if (parser.Check("_MCFLAGS")) {
       sparams.memcache_flags = parser.Next<uint32_t>();
     } else {
-      uint16_t flag = parser.Switch(  //
+      uint16_t flag = parser.MapNext(  //
           "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
           "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
       sparams.flags |= flag;
@@ -970,9 +973,11 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
 
   DbSlice::ExpireParams exp_params;
   bool defined = false;
-  while (parser.ToUpper().HasNext()) {
-    if (base::_in(parser.Peek(), {"EX", "PX", "EXAT", "PXAT"})) {
-      auto [ex, int_arg] = parser.Next<string_view, int64_t>();
+  while (parser.HasNext()) {
+    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
+                                          "PXAT", ExpT::PXAT);
+        exp_type) {
+      auto int_arg = parser.Next<int64_t>();
       if (auto err = parser.Error(); err) {
         return cntx->SendError(err->MakeReply());
       }
@@ -985,9 +990,10 @@ void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
         return cntx->SendError(InvalidExpireTime("getex"));
       }
 
-      exp_params.absolute = base::_in(ex, {"EXAT", "PXAT"});
+      exp_params.absolute = *exp_type == ExpT::EXAT || *exp_type == ExpT::PXAT;
       exp_params.value = int_arg;
-      exp_params.unit = ex[0] == 'P' ? TimeUnit::MSEC : TimeUnit::SEC;
+      exp_params.unit =
+          *exp_type == ExpT::PX || *exp_type == ExpT::PXAT ? TimeUnit::MSEC : TimeUnit::SEC;
       defined = true;
     } else if (parser.Check("PERSIST")) {
       exp_params.persist = true;

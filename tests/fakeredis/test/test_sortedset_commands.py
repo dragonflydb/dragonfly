@@ -8,18 +8,11 @@ from typing import Tuple, List, Optional
 import pytest
 import redis
 import redis.client
-from packaging.version import Version
-
-REDIS_VERSION = Version(redis.__version__)
 
 
 def round_str(x):
     assert isinstance(x, bytes)
     return round(float(x))
-
-
-def zincrby(r, key, amount, value):
-    return r.zincrby(key, amount, value)
 
 
 def test_zpopmin(r: redis.Redis):
@@ -215,14 +208,14 @@ def test_zcount_wrong_type(r: redis.Redis):
 
 def test_zincrby(r: redis.Redis):
     r.zadd("foo", {"one": 1})
-    assert zincrby(r, "foo", 10, "one") == 11
+    assert r.zincrby("foo", 10, "one") == 11
     assert r.zrange("foo", 0, -1, withscores=True) == [(b"one", 11)]
 
 
 def test_zincrby_wrong_type(r: redis.Redis):
     r.sadd("foo", "bar")
     with pytest.raises(redis.ResponseError):
-        zincrby(r, "foo", 10, "one")
+        r.zincrby("foo", 10, "one")
 
 
 def test_zrange_descending(r: redis.Redis):

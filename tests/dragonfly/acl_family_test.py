@@ -680,16 +680,23 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
     publisher = df.client()
 
     async def publish_worker(client):
+        logging.debug("Starting publish_worker")
         for i in range(0, 10):
+            logging.debug(f"publisher iteration: {i}")
             await client.publish("channel", "message")
 
     async def subscribe_worker(channel: aioredis.client.PubSub):
+        logging.debug("Starting subscribe_worker")
         total_msgs = 1
         async with async_timeout.timeout(10):
             while total_msgs != 10:
-                res = await channel.get_message(ignore_subscribe_messages=True, timeout=5)
-                if total_msgs is not None:
+                try:
+                    res = await channel.get_message(ignore_subscribe_messages=True, timeout=5)
+                    logging.debug(f"subscriber iteration: {total_msgs}")
                     total_msgs = total_msgs + 1
+                    await asyncio.sleep(0.01)
+                except asyncio.TimeoutError:
+                    pass
 
     await publisher.execute_command("ACL SETUSER kostas >tmp ON +@slow +SUBSCRIBE allchannels")
 

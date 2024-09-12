@@ -85,8 +85,16 @@ class ClusterFamily {
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   void StartSlotMigrations(std::vector<MigrationInfo> migrations);
-  SlotRanges RemoveOutgoingMigrations(std::shared_ptr<ClusterConfig> new_config,
-                                      std::shared_ptr<ClusterConfig> old_config)
+
+  // must be destroyed excluded set_config_mu and migration_mu_ locks
+  struct PreparedToRemoveOutgoingMigrations {
+    std::vector<std::shared_ptr<OutgoingMigration>> migrations;
+    SlotRanges slot_ranges;
+    ~PreparedToRemoveOutgoingMigrations() ABSL_LOCKS_EXCLUDED(migration_mu_, set_config_mu);
+  };
+
+  [[nodiscard]] PreparedToRemoveOutgoingMigrations TakeOutOutgoingMigrations(
+      std::shared_ptr<ClusterConfig> new_config, std::shared_ptr<ClusterConfig> old_config)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
   void RemoveIncomingMigrations(const std::vector<MigrationInfo>& migrations)
       ABSL_LOCKS_EXCLUDED(migration_mu_);

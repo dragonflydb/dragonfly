@@ -65,15 +65,15 @@ struct CmdArgParser {
   void ExpectTag(std::string_view tag);
 
   // Consume next value
-  template <class... Cases> auto Switch(Cases&&... cases) {
+  template <class... Cases> auto MapNext(Cases&&... cases) {
     if (cur_i_ >= args_.size()) {
       Report(OUT_OF_BOUNDS, cur_i_);
-      return typename decltype(SwitchImpl(std::string_view(),
-                                          std::forward<Cases>(cases)...))::value_type{};
+      return typename decltype(MapImpl(std::string_view(),
+                                       std::forward<Cases>(cases)...))::value_type{};
     }
 
     auto idx = cur_i_++;
-    auto res = SwitchImpl(SafeSV(idx), std::forward<Cases>(cases)...);
+    auto res = MapImpl(SafeSV(idx), std::forward<Cases>(cases)...);
     if (!res) {
       Report(INVALID_CASES, idx);
       return typename decltype(res)::value_type{};
@@ -81,16 +81,31 @@ struct CmdArgParser {
     return *res;
   }
 
-  // Check if the next value if equal to a specific tag. If equal, its consumed.
-  bool Check(std::string_view tag) {
-    if (cur_i_ >= args_.size())
+  // Consume next value if can map it and return mapped result or return nullopt
+  template <class... Cases>
+  auto TryMapNext(Cases&&... cases)
+      -> std::optional<std::tuple_element_t<1, std::tuple<Cases...>>> {
+    if (cur_i_ >= args_.size()) {
+      return std::nullopt;
+    }
+
+    auto res = MapImpl(SafeSV(cur_i_), std::forward<Cases>(cases)...);
+    cur_i_ = res ? cur_i_ + 1 : cur_i_;
+    return res;
+  }
+
+  // Check if the next value is equal to a specific tag. If equal, its consumed.
+  template <class... Args> bool Check(std::string_view tag, Args*... args) {
+    if (cur_i_ + sizeof...(Args) >= args_.size())
       return false;
 
     std::string_view arg = SafeSV(cur_i_);
     if (!absl::EqualsIgnoreCase(arg, tag))
       return false;
 
-    cur_i_++;
+    ((*args = Convert<Args>(++cur_i_)), ...);
+
+    ++cur_i_;
 
     return true;
   }
@@ -137,13 +152,13 @@ struct CmdArgParser {
 
  private:
   template <class T, class... Cases>
-  std::optional<std::decay_t<T>> SwitchImpl(std::string_view arg, std::string_view tag, T&& value,
-                                            Cases&&... cases) {
+  std::optional<std::decay_t<T>> MapImpl(std::string_view arg, std::string_view tag, T&& value,
+                                         Cases&&... cases) {
     if (absl::EqualsIgnoreCase(arg, tag))
       return std::forward<T>(value);
 
     if constexpr (sizeof...(cases) > 0)
-      return SwitchImpl(arg, cases...);
+      return MapImpl(arg, cases...);
 
     return std::nullopt;
   }
@@ -172,8 +187,10 @@ struct CmdArgParser {
   }
 
   void Report(ErrorType type, size_t idx) {
-    if (!error_)
+    if (!error_) {
       error_ = {type, idx};
+      cur_i_ = args_.size();
+    }
   }
 
   template <typename T> T Num(size_t idx) {

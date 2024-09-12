@@ -1015,7 +1015,7 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
         make_unexpected("BITFIELD_RO only supports the GET subcommand");
       }
       using pol = Overflow::Policy;
-      auto res = parser.Switch("SAT", pol::SAT, "WRAP", pol::WRAP, "FAIL", pol::FAIL);
+      auto res = parser.MapNext("SAT", pol::SAT, "WRAP", pol::WRAP, "FAIL", pol::FAIL);
       if (!parser.HasError()) {
         result.push_back(Overflow{res});
         continue;

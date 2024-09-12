@@ -61,7 +61,7 @@ bool SerializedSearchDoc::operator>=(const SerializedSearchDoc& other) const {
 
 bool SearchParams::ShouldReturnField(std::string_view field) const {
   auto cb = [field](const auto& entry) { return entry.first == field; };
-  return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
+  return !return_fields.fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
 string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
@@ -228,8 +228,18 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     }
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
-    auto doc_data = params.return_fields ? accessor->Serialize(base_->schema, *params.return_fields)
-                                         : accessor->Serialize(base_->schema);
+
+    SearchDocData doc_data;
+    if (params.return_fields.ShouldReturnAllFields()) {
+      /*
+      In this case we need to load the whole document.
+      For JSON indexes it would be {"$", <the whole document as string>}
+      */
+      doc_data = accessor->SerializeDocument(base_->schema);
+    } else {
+      /* Load only selected fields */
+      doc_data = accessor->Serialize(base_->schema, params.return_fields.GetFields());
+    }
 
     auto score = search_results.scores.empty() ? monostate{} : std::move(search_results.scores[i]);
     out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), std::move(score)});
@@ -239,18 +249,14 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
                       std::move(search_results.profile)};
 }
 
-vector<absl::flat_hash_map<string, search::SortableValue>> ShardDocIndex::SearchForAggregator(
-    const OpArgs& op_args, ArgSlice load_fields, search::SearchAlgorithm* search_algo) const {
+vector<SearchDocData> ShardDocIndex::SearchForAggregator(
+    const OpArgs& op_args, const AggregateParams& params,
+    search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.GetDbSlice();
   auto search_results = search_algo->Search(&indices_);
 
   if (!search_results.error.empty())
     return {};
-
-  // Convert load_fields into return_list required by accessor interface
-  SearchParams::FieldReturnList return_fields;
-  for (string_view load_field : load_fields)
-    return_fields.emplace_back(indices_.GetSchema().LookupAlias(load_field), load_field);
 
   vector<absl::flat_hash_map<string, search::SortableValue>> out;
   for (DocId doc : search_results.ids) {
@@ -262,7 +268,15 @@ vector<absl::flat_hash_map<string, search::SortableValue>> ShardDocIndex::Search
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
     auto extracted = indices_.ExtractStoredValues(doc);
-    auto loaded = accessor->Serialize(base_->schema, return_fields);
+
+    SearchDocData loaded;
+    if (params.load_fields.ShouldReturnAllFields()) {
+      // Load all fields
+      loaded = accessor->Serialize(base_->schema);
+    } else {
+      // Load only selected fields
+      loaded = accessor->Serialize(base_->schema, params.load_fields.GetFields());
+    }
 
     out.emplace_back(make_move_iterator(extracted.begin()), make_move_iterator(extracted.end()));
     out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));

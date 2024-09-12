@@ -753,11 +753,9 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
 
 string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned num_uniq_shards) {
   string result;
-  result.reserve(stored_cmds.size() * 10);
-  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "\n");
-  for (const auto& scmd : stored_cmds) {
-    absl::StrAppend(&result, "  ", scmd.Cid()->name(), " ", scmd.NumArgs(), "\n");
-  }
+  size_t max_len = std::min<size_t>(20u, stored_cmds.size());
+  absl::StrAppend(&result, "EXEC/", num_uniq_shards, "/", max_len);
+
   return result;
 }
 
@@ -2187,6 +2185,10 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   // Clean the context no matter the outcome
   absl::Cleanup exec_clear = [&cntx] { MultiCleanup(cntx); };
 
+  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
+    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
+  }
+
   // Check basic invariants
   if (!exec_info.IsCollecting()) {
     return cntx->SendError("EXEC without MULTI");
@@ -2194,10 +2196,6 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 
   if (IsWatchingOtherDbs(cntx->db_index(), exec_info)) {
     return cntx->SendError("Dragonfly does not allow WATCH and EXEC on different databases");
-  }
-
-  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
-    return cntx->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
