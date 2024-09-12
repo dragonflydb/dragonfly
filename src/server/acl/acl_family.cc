@@ -788,7 +788,7 @@ MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames
   for (auto& command : commands) {
     if (command.empty())
       continue;
-    std::vector<std::string_view> cmds = absl::StrSplit(command, ' ');
+    std::vector<std::string_view> cmds = absl::StrSplit(command, ' ', absl::SkipEmpty());
     if (!absl::EqualsIgnoreCase(cmds[0], "USER") || cmds.size() < 4) {
       return {};
     }
