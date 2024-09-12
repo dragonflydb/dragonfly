@@ -407,10 +407,6 @@ class CompactObj {
     return taglen_;
   }
 
-  bool IsJson() const {
-    return taglen_ == JSON_TAG;
-  }
-
  private:
   void EncodeString(std::string_view str);
   size_t DecodedLen(size_t sz) const;
