@@ -33,7 +33,7 @@ extern "C" {
 
 ABSL_RETIRED_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
 
-ABSL_DECLARE_FLAG(bool, experimental_flat_json);
+ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 
 namespace dfly {
 using namespace std;
