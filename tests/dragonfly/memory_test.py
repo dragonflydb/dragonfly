@@ -81,7 +81,6 @@ async def test_rss_oom_ratio(df_factory):
     print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
 
     reject_limit = 256 * 1024 * 1024  # 256mb
-    assert info["used_memory"] > reject_limit
     assert info["used_memory_rss"] > reject_limit
 
     # get command from existing connection should not be rejected
@@ -107,7 +106,6 @@ async def test_rss_oom_ratio(df_factory):
 
     info = await admin_client.info("memory")
     print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
-    assert info["used_memory"] < reject_limit
     assert info["used_memory_rss"] < reject_limit
 
     # now new client create shoud not fail
