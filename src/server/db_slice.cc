@@ -1086,7 +1086,6 @@ void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
 
 void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size) {
   int64_t delta = static_cast<int64_t>(it->second.MallocUsed()) - static_cast<int64_t>(orig_size);
-
   AccountObjectMemory(key, it->second.ObjType(), delta, GetDBTable(db_ind));
 
   auto& db = *db_arr_[db_ind];

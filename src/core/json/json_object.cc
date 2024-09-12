@@ -25,8 +25,7 @@ optional<JsonType> JsonFromString(string_view input, PMR_NS::memory_resource* mr
   parser.finish_parse(decoder, ec);
 
   if (decoder.is_valid()) {
-    auto res = decoder.get_result();
-    return res;
+    return decoder.get_result();
   }
   return nullopt;
 }
