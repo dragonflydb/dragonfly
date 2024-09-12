@@ -212,6 +212,40 @@ template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb
 
 using OptSize = optional<size_t>;
 
+struct JsonGetParams {
+  std::optional<std::string> indent;
+  std::optional<std::string> new_line;
+  std::optional<std::string> space;
+  bool no_escape = false;  // Flag for NOESCAPE option
+  std::vector<std::pair<std::string_view, WrappedJsonPath>> paths;
+};
+
+std::optional<JsonGetParams> ParseJsonGetParams(CmdArgParser* parser, ConnectionContext* cntx) {
+  JsonGetParams parsed_args;
+  while (parser->HasNext()) {
+    if (parser->Check("NOESCAPE")) {
+      parsed_args.no_escape = true;
+    } else if (parser->Check("SPACE")) {
+      parsed_args.space = parser->Next();
+    } else if (parser->Check("NEWLINE")) {
+      parsed_args.new_line = parser->Next();
+    } else if (parser->Check("INDENT")) {
+      parsed_args.indent = parser->Next();
+    } else {
+      std::string_view path_str = parser->Next();
+
+      auto json_path = ParseJsonPath(path_str);
+      if (!json_path) {
+        cntx->SendError(json_path.error());
+        return std::nullopt;
+      }
+
+      parsed_args.paths.emplace_back(path_str, std::move(json_path).value());
+    }
+  }
+  return parsed_args;
+}
+
 facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
   auto& db_slice = op_args.GetDbSlice();
 
@@ -517,14 +551,13 @@ bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJs
 }
 
 OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
-                                const vector<pair<string_view, WrappedJsonPath>>& paths,
-                                const std::optional<std::string>& indent,
-                                const std::optional<std::string>& new_line,
-                                const std::optional<std::string>& space) {
+                                const JsonGetParams& params) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   RETURN_ON_BAD_STATUS(result);
 
+  const auto& paths = params.paths;
   const JsonType& json_entry = *(result.value());
+
   if (paths.empty()) {
     // this implicitly means that we're using . which
     // means we just brings all values
@@ -538,17 +571,17 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
       .indent_size(0)
       .new_line_chars("");
 
-  if (indent) {
+  if (params.indent) {
     options.indent_size(1);
-    options.indent_chars(*indent);
+    options.indent_chars(params.indent.value());
   }
 
-  if (new_line) {
-    options.new_line_chars(*new_line);
+  if (params.new_line) {
+    options.new_line_chars(params.new_line.value());
   }
 
-  if (space) {
-    options.after_key_chars(*space);
+  if (params.space) {
+    options.after_key_chars(params.space.value());
   }
 
   const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
@@ -1841,50 +1874,26 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
 
-  std::optional<std::string> indent;
-  std::optional<std::string> new_line;
-  std::optional<std::string> space;
-
-  vector<pair<string_view, WrappedJsonPath>> paths;
-
-  while (parser.HasNext()) {
-    if (parser.Check("SPACE")) {
-      space = parser.Next();
-      continue;
-    }
-    if (parser.Check("NEWLINE")) {
-      new_line = parser.Next();
-      continue;
-    }
-    if (parser.Check("INDENT")) {
-      indent = parser.Next();
-      continue;
-    }
-
-    string_view path_str = parser.Next();
-    WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path_str));
-
-    paths.emplace_back(path_str, std::move(json_path));
+  auto params = ParseJsonGetParams(&parser, cntx);
+  if (!params) {
+    return;  // ParseJsonGetParams should have already sent an error
   }
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpJsonGet(t->GetOpArgs(shard), key, paths, indent, new_line, space);
+    return OpJsonGet(t->GetOpArgs(shard), key, params.value());
   };
 
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (result) {
-    rb->SendBulkString(*result);
+
+  if (result == OpStatus::KEY_NOTFOUND) {
+    rb->SendNull();  // Match Redis
   } else {
-    if (result == facade::OpStatus::KEY_NOTFOUND) {
-      rb->SendNull();  // Match Redis
-    } else {
-      cntx->SendError(result.status());
-    }
+    reply_generic::Send(result, rb);
   }
 }
 
