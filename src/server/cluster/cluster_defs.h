@@ -114,7 +114,7 @@ using ClusterShardInfos = std::vector<ClusterShardInfo>;
 
 // MigrationState constants are ordered in state changing order
 enum class MigrationState : uint8_t {
-  C_NO_STATE,
+  C_NO_STATE,  // TODO remove
   C_CONNECTING,
   C_SYNC,
   C_ERROR,
