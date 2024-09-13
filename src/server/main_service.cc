@@ -1340,6 +1340,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
       return true;
     }
     cntx->SendError(std::move(*err));
+    std::ignore = cntx->reply_builder()->ConsumeLastError();
     return true;  // return false only for internal error aborts
   }
 
