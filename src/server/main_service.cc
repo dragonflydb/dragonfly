@@ -1381,7 +1381,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return false;
   }
 
-  auto reason = cntx->reply_builder()->ConsumeLastError();
+  std::string reason = cntx->reply_builder()->ConsumeLastError();
   if (!reason.empty()) {
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
