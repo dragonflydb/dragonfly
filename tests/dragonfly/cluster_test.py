@@ -154,7 +154,7 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
 
     async for states, breaker in tick_timer(get_status, timeout=timeout):
         with breaker:
-            assert len(states) != 0 and all(status in state for state in states), states
+            assert len(states) != 0 and all(status == state[2] for state in states), states
 
 
 async def check_for_no_state_status(admin_clients):
@@ -1111,13 +1111,11 @@ async def test_cluster_flushall_during_migration(
 
     await nodes[0].client.execute_command("flushall")
 
+    status1 = await nodes[1].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+    )
     assert (
-        len(
-            await nodes[1].admin_client.execute_command(
-                "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
-            )
-        )
-        == 0
+        len(status1) == 0 or "FINISHED" not in status1[0]
     ), "Weak test case - finished migration too early"
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")

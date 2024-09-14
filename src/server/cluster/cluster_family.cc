@@ -679,8 +679,6 @@ void ClusterFamily::StartSlotMigrations(std::vector<MigrationInfo> migrations) {
 
 static string_view StateToStr(MigrationState state) {
   switch (state) {
-    case MigrationState::C_NO_STATE:
-      return "NO_STATE"sv;
     case MigrationState::C_CONNECTING:
       return "CONNECTING"sv;
     case MigrationState::C_SYNC:
