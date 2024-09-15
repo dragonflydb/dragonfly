@@ -6,11 +6,9 @@
 
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
-#include <gtest/gtest.h>
 #include <mimalloc.h>
 
 #include <algorithm>
-#include <cstddef>
 #include <memory_resource>
 #include <random>
 #include <string>
@@ -18,6 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "base/gtest.h"
 #include "core/compact_object.h"
 #include "core/mi_memory_resource.h"
 #include "glog/logging.h"
@@ -454,5 +453,26 @@ TEST_F(StringSetTest, IterateEmpty) {
     CHECK(false) << "Found entry " << s << " in empty set";
   }
 }
+
+void BM_Clone(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  StringSet ss1, ss2;
+  for (size_t i = 0; i < 2000; ++i) {
+    string str = random_string(generator, 10);
+    ss1.Add(str);
+  }
+  ss2.Reserve(ss1.UpperBoundSize());
+  while (state.KeepRunning()) {
+    for (auto src : ss1) {
+      ss2.Add(src);
+    }
+    state.PauseTiming();
+    ss2.Clear();
+    ss2.Reserve(ss1.UpperBoundSize());
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Clone);
 
 }  // namespace dfly
