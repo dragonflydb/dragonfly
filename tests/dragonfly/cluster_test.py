@@ -153,16 +153,14 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
     )
 
     async for states, breaker in tick_timer(get_status, timeout=timeout):
-        if type(states) != list:
-            states = [states]
         with breaker:
-            assert all(status in state for state in states), states
+            assert len(states) != 0 and all(status == state[2] for state in states), states
 
 
 async def check_for_no_state_status(admin_clients):
     for client in admin_clients:
         state = await client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-        if state != "NO_STATE":
+        if len(state) != 0:
             logging.debug(f"SLOT-MIGRATION-STATUS is {state}, instead of NO_STATE")
             assert False
 
@@ -1059,7 +1057,7 @@ async def test_config_consistency(df_factory: DflyInstanceFactory):
     await asyncio.sleep(0.2)
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "CONNECTING")
-    await wait_for_status(nodes[1].admin_client, nodes[0].id, "NO_STATE")
+    await check_for_no_state_status([nodes[1].admin_client])
 
     logging.debug("Push migration config to target node")
     await push_config(json.dumps(generate_config(nodes)), [nodes[1].admin_client])
@@ -1113,13 +1111,11 @@ async def test_cluster_flushall_during_migration(
 
     await nodes[0].client.execute_command("flushall")
 
+    status1 = await nodes[1].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+    )
     assert (
-        "FINISHED"
-        not in (
-            await nodes[1].admin_client.execute_command(
-                "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
-            )
-        )[0]
+        len(status1) == 0 or "FINISHED" not in status1[0]
     ), "Weak test case - finished migration too early"
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
@@ -1193,16 +1189,17 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
         key = "KEY" + str(i)
         assert await nodes[0 if (key_slot(key) // 3000) == 0 else 1].client.set(key, "value")
 
-    assert (
-        await nodes[0].admin_client.execute_command(
-            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
-        )
-    )[0].startswith(f"out {nodes[1].id} FINISHED keys:7")
-    assert (
-        await nodes[1].admin_client.execute_command(
-            "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
-        )
-    )[0].startswith(f"in {nodes[0].id} FINISHED keys:7")
+    status = await nodes[0].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id
+    )
+    status[0].pop()
+    assert status[0] == ["out", nodes[1].id, "FINISHED", 7]
+
+    status = await nodes[1].admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+    )
+    status[0].pop()
+    assert status[0] == ["in", nodes[0].id, "FINISHED", 7]
 
     nodes[0].migrations = []
     nodes[0].slots = [(0, 2999)]
@@ -1418,13 +1415,9 @@ async def test_cluster_fuzzymigration(
         res = True
         for node in nodes:
             states = await node.admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
-            if states != "NO_STATE":
-                logging.debug(states)
+            logging.debug(states)
             for state in states:
-                parsed_state = re.search("([a-z]+) ([a-z0-9]+) ([A-Z]+)", state)
-                if parsed_state == None:
-                    continue
-                direction, node_id, st = parsed_state.group(1, 2, 3)
+                direction, node_id, st, _, _ = state
                 if direction == "out":
                     if st == "FINISHED":
                         m_id = [id for id, x in enumerate(node.migrations) if x.node_id == node_id][

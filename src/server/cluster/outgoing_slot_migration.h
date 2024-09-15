@@ -90,7 +90,7 @@ class OutgoingMigration : private ProtocolClient {
   util::fb2::Fiber main_sync_fb_;
 
   mutable util::fb2::Mutex state_mu_;
-  MigrationState state_ ABSL_GUARDED_BY(state_mu_) = MigrationState::C_NO_STATE;
+  MigrationState state_ ABSL_GUARDED_BY(state_mu_) = MigrationState::C_CONNECTING;
 
   boost::intrusive_ptr<Transaction> tx_;
 
