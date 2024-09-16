@@ -61,14 +61,14 @@ ParseResult<JsonExpression> ParseJsonPathAsExpression(std::string_view path) {
   return res;
 }
 
-ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, bool is_legacy_mode_path) {
+ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, JsonPathType path_type) {
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
     auto path_result = json::ParsePath(path.view());
     if (!path_result) {
       VLOG(1) << "Invalid Json path: " << path << ' ' << path_result.error() << std::endl;
       return nonstd::make_unexpected(kSyntaxErr);
     }
-    return WrappedJsonPath{std::move(path_result).value(), std::move(path), is_legacy_mode_path};
+    return WrappedJsonPath{std::move(path_result).value(), std::move(path), path_type};
   }
 
   auto expr_result = ParseJsonPathAsExpression(path.view());
@@ -76,22 +76,23 @@ ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, bool is_legacy_mod
     VLOG(1) << "Invalid Json path: " << path << ' ' << expr_result.error() << std::endl;
     return nonstd::make_unexpected(kSyntaxErr);
   }
-  return WrappedJsonPath{std::move(expr_result).value(), std::move(path), is_legacy_mode_path};
+  return WrappedJsonPath{std::move(expr_result).value(), std::move(path), path_type};
 }
 
 ParseResult<WrappedJsonPath> ParseJsonPathV1(std::string_view path) {
   if (path.empty() || path == WrappedJsonPath::kV1PathRootElement) {
-    return ParseJsonPath(StringOrView::FromView(WrappedJsonPath::kV2PathRootElement), true);
+    return ParseJsonPath(StringOrView::FromView(WrappedJsonPath::kV2PathRootElement),
+                         JsonPathType::Legacy);
   }
 
   std::string v2_path = absl::StrCat(
       WrappedJsonPath::kV2PathRootElement, path.front() != '.' && path.front() != '[' ? "." : "",
       path);  // Convert to V2 path; TODO(path.front() != all kinds of symbols)
-  return ParseJsonPath(StringOrView::FromString(std::move(v2_path)), true);
+  return ParseJsonPath(StringOrView::FromString(std::move(v2_path)), JsonPathType::Legacy);
 }
 
 ParseResult<WrappedJsonPath> ParseJsonPathV2(std::string_view path) {
-  return ParseJsonPath(StringOrView::FromView(path), false);
+  return ParseJsonPath(StringOrView::FromView(path), JsonPathType::V2);
 }
 
 bool IsJsonPathV2(std::string_view path) {
@@ -493,8 +494,33 @@ size_t CountJsonFields(const JsonType& j) {
 }
 
 struct EvaluateOperationOptions {
-  bool save_first_result = false;
+  EvaluateOperationOptions() = default;
+
+  EvaluateOperationOptions(bool return_nil_if_key_not_found_, bool save_first_result)
+      : return_nil_if_key_not_found(return_nil_if_key_not_found_) {
+    if (save_first_result) {
+      cb_result_options.saving_order = CallbackResultOptions::SavingOrder::SAVE_FIRST;
+    }
+  }
+
   bool return_nil_if_key_not_found = false;
+  CallbackResultOptions cb_result_options{};
+};
+
+struct MutateOperationOptions {
+  MutateOperationOptions() = default;
+
+  explicit MutateOperationOptions(bool empty_is_nil) {
+    if (empty_is_nil) {
+      cb_result_options.on_empty = CallbackResultOptions::OnEmpty::SEND_NIL;
+    }
+  }
+
+  explicit MutateOperationOptions(JsonReplaceVerify verify_op_) : verify_op(std::move(verify_op_)) {
+  }
+
+  JsonReplaceVerify verify_op;
+  CallbackResultOptions cb_result_options{};
 };
 
 template <typename T>
@@ -507,18 +533,15 @@ OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std
 // GCC 13.1 throws spurious warnings around this code.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-    return JsonCallbackResult<T>{true, false, true};  // set legacy mode to return nil
+    return JsonCallbackResult<T>{
+        {JsonPathType::Legacy, options.cb_result_options.saving_order,
+         CallbackResultOptions::OnEmpty::SEND_NIL}};  // set legacy mode to return nil
 #pragma GCC diagnostic pop
   }
 
   RETURN_ON_BAD_STATUS(result);
-  return json_path.Evaluate<T>(*result, cb, options.save_first_result);
+  return json_path.Evaluate<T>(*result, cb, options.cb_result_options);
 }
-
-struct MutateOperationOptions {
-  JsonReplaceVerify verify_op;
-  bool empty_is_nil = false;
-};
 
 template <typename T>
 OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_args,
@@ -537,7 +560,7 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_a
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
-  auto mutate_res = json_path.Mutate(json_val, cb, options.empty_is_nil);
+  auto mutate_res = json_path.Mutate(json_val, cb, options.cb_result_options);
 
   // Make sure that we don't have other internal issue with the operation
   if (mutate_res && options.verify_op) {
@@ -590,13 +613,14 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
     options.after_key_chars(params.space.value());
   }
 
-  const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
-
   auto cb = [](std::string_view, const JsonType& val) { return val; };
 
-  auto eval_wrapped = [&json_entry, &cb, legacy_mode_is_enabled](
-                          const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-    auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, false, legacy_mode_is_enabled);
+  const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
+  CallbackResultOptions cb_options{.path_type = legacy_mode_is_enabled ? JsonPathType::Legacy
+                                                                       : JsonPathType::V2};
+
+  auto eval_wrapped = [&](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
+    auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, cb_options);
 
     DCHECK(legacy_mode_is_enabled == eval_result.IsV1());
 
@@ -637,7 +661,7 @@ auto OpType(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
   auto cb = [](const string_view&, const JsonType& val) -> std::string {
     return JsonTypeToName(val);
   };
-  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {false, true});
+  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {true, false});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_view key,
@@ -662,9 +686,8 @@ OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-
   return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb),
-                                        {true, json_path.IsLegacyModePath()});
+                                        {json_path.IsLegacyModePath(), true});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_view key,
@@ -822,7 +845,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = json_path.Mutate<Nothing>(result.value(), std::move(cb), false);
+  auto res = json_path.Mutate<Nothing>(result.value(), std::move(cb));
   RETURN_ON_BAD_STATUS(res);
 
   if (deletion_items.empty()) {
@@ -867,7 +890,7 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
   };
 
   return JsonEvaluateOperation<StringVec>(op_args, key, json_path, std::move(cb),
-                                          {true, json_path.IsLegacyModePath()});
+                                          {json_path.IsLegacyModePath(), true});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_view key,
@@ -946,7 +969,7 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     return {false, std::move(str)};
   };
   return JsonMutateOperation<std::string>(op_args, key, path, std::move(cb),
-                                          {.verify_op = {}, .empty_is_nil = true});
+                                          MutateOperationOptions{true});
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -1138,7 +1161,7 @@ std::vector<std::optional<std::string>> OpJsonMGet(const WrappedJsonPath& json_p
 
     auto eval_wrapped = [&json_val,
                          &cb](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-      auto eval_result = json_path.Evaluate<JsonType>(json_val, std::move(cb), false);
+      auto eval_result = json_path.Evaluate<JsonType>(json_val, std::move(cb));
 
       if (eval_result.IsV1()) {
         return eval_result.AsV1();
@@ -1256,8 +1279,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     return OpStatus::OK;
   };
 
-  auto res =
-      JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb), {.verify_op = inserter});
+  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb),
+                                          MutateOperationOptions{std::move(inserter)});
   RETURN_ON_BAD_STATUS(res);
   return operation_result;
 }
