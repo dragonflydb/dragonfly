@@ -1181,7 +1181,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   // Don't interrupt running multi commands or admin connections.
-  if (!dispatching_in_multi && (!cntx->conn() || !cntx->conn()->IsPrivileged())) {
+  if (!dispatching_in_multi && cntx->conn() && !cntx->conn()->IsPrivileged()) {
     bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
