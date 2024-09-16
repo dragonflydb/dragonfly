@@ -84,6 +84,10 @@ class CommandId {
     restricted_ = restricted;
   }
 
+  void SetFlag(uint32_t flag) {
+    opt_mask_ |= flag;
+  }
+
   static uint32_t OptCount(uint32_t mask);
 
   // PUBLISH/SUBSCRIBE/UNSUBSCRIBE variant
