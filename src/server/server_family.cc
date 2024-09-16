@@ -999,13 +999,13 @@ void ServerFamily::FlushAll(ConnectionContext* cntx) {
 // error (if any occured) with a future.
 std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_path,
                                                             LoadExistingKeys existing_keys) {
-  fs::path path(load_path);
+  std::string path(load_path);
 
   if (load_path.empty()) {
     fs::path dir_path(GetFlag(FLAGS_dir));
     string filename = GetFlag(FLAGS_dbfilename);
     dir_path.append(filename);
-    path = dir_path;
+    path = dir_path.generic_string();
   }
 
   DCHECK_GT(shard_count(), 0u);
@@ -1016,7 +1016,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
     return future;
   }
 
-  auto paths_result = snapshot_storage_->LoadPaths(path.generic_string());
+  auto paths_result = snapshot_storage_->LoadPaths(path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
@@ -1027,7 +1027,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
   std::vector<std::string> paths = *paths_result;
 
-  LOG(INFO) << "Loading " << path.generic_string();
+  LOG(INFO) << "Loading " << path;
 
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
