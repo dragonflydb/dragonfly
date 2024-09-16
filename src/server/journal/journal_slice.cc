@@ -54,6 +54,8 @@ JournalSlice::JournalSlice() {
 }
 
 JournalSlice::~JournalSlice() {
+  // this mutex is needed to prevent destroying object during change_cb_arr_ executions
+  lock_guard lk(cb_mu_);
   // CHECK(!shard_file_);
 }
 
