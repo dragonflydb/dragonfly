@@ -102,7 +102,7 @@ async def test_rss_oom_ratio(df_factory):
     # flush to free memory
     await admin_client.flushall()
 
-    await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
+    await asyncio.sleep(2)  # Wait for another RSS heartbeat update in Dragonfly
 
     info = await admin_client.info("memory")
     print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
