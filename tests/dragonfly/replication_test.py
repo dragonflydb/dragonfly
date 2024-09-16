@@ -2347,6 +2347,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory)
     c_master = master.client()
     c_replica = replica.client()
 
+    await c_master.execute_command("debug", "populate", "200000", "foo", "500")
     seeder = SeederV2(key_target=200_000)
 
     seeder_task = asyncio.create_task(seeder.run(c_master, target_deviation=0.1))
