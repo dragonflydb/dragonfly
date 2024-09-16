@@ -283,6 +283,10 @@ void StringMap::ObjDelete(void* obj, bool has_ttl) const {
   sdsfree(s1);
 }
 
+void* StringMap::ObjectClone(const void* obj, bool has_ttl) const {
+  return nullptr;
+}
+
 detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {
   sds f = (sds)obj;
   return detail::SdsPair(f, GetValue(f));

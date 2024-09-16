@@ -123,6 +123,7 @@ class ScoreMap : public DenseSet {
   size_t ObjectAllocSize(const void* obj) const final;
   uint32_t ObjExpireTime(const void* obj) const final;
   void ObjDelete(void* obj, bool has_ttl) const final;
+  void* ObjectClone(const void* obj, bool has_ttl) const final;
 };
 
 }  // namespace dfly

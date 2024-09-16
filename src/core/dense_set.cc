@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "glog/logging.h"
+#include "base/logging.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -197,6 +197,47 @@ bool DenseSet::Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const {
   return ObjEqual(dptr.GetObject(), ptr, cookie);
 }
 
+void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const {
+  while (len) {
+    unsigned dest_id = 0;
+    for (unsigned i = 0; i < len; ++i) {
+      auto& src = items[i];
+      if (src.obj) {
+        // The majority of the CPU is spent in this block.
+        void* new_obj = other->ObjectClone(src.obj, src.has_ttl);
+        uint64_t hash = Hash(src.obj, 0);
+        other->AddUnique(new_obj, src.has_ttl, hash);
+        src.obj = nullptr;
+      }
+
+      const DenseLinkKey* link = src.link;
+      if (link) {
+        src.link = nullptr;
+        auto& dest = items[dest_id++];
+        DCHECK(!link->next.IsEmpty());
+        if (src.fetch_tail) {
+          // switch to the final state.
+          DCHECK(link->next.IsObject());
+          dest.obj = link->next.Raw();
+          src.fetch_tail = false;
+        } else {
+          dest.obj = link->Raw();
+          if (link->next.IsObject()) {
+            // next state - pre-terminal, fetch the final object.
+            dest.fetch_tail = true;
+            dest.link = link;
+          } else {
+            dest.link = link->next.AsLink();
+            __builtin_prefetch(dest.link, 0, 1);
+          }
+        }
+        __builtin_prefetch(dest.obj, 0, 1);
+      }
+    }
+    len = dest_id;
+  }
+}
+
 bool DenseSet::NoItemBelongsBucket(uint32_t bid) const {
   auto& entries = const_cast<DenseSet*>(this)->entries_;
   DensePtr* curr = &entries[bid];
@@ -261,6 +302,41 @@ void DenseSet::Reserve(size_t sz) {
     capacity_log_ = absl::bit_width(sz) - 1;
     Grow(prev_size);
   }
+}
+
+void DenseSet::Fill(DenseSet* other) const {
+  DCHECK(other->entries_.empty());
+
+  other->Reserve(UpperBoundSize());
+
+  constexpr unsigned kArrLen = 32;
+  CloneItem arr[kArrLen];
+  unsigned len = 0;
+
+  for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+    const DensePtr* ptr = &(*it);
+
+    if (!ptr->IsEmpty()) {
+      arr[len].has_ttl = ptr->HasTtl();
+
+      if (ptr->IsObject()) {
+        arr[len].link = nullptr;
+        arr[len].obj = ptr->Raw();
+        __builtin_prefetch(arr[len].obj, 0, 1);
+      } else {
+        arr[len].link = ptr->AsLink();
+        arr[len].obj = nullptr;
+        __builtin_prefetch(arr[len].link, 0, 1);
+      }
+
+      ++len;
+      if (len == kArrLen) {
+        CloneBatch(kArrLen, arr, other);
+        len = 0;
+      }
+    }
+  }
+  CloneBatch(len, arr, other);
 }
 
 void DenseSet::Grow(size_t prev_size) {

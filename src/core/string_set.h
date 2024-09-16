@@ -112,6 +112,7 @@ class StringSet : public DenseSet {
   size_t ObjectAllocSize(const void* s1) const override;
   uint32_t ObjExpireTime(const void* obj) const override;
   void ObjDelete(void* obj, bool has_ttl) const override;
+  void* ObjectClone(const void* obj, bool has_ttl) const override;
 };
 
 }  // end namespace dfly

@@ -244,6 +244,8 @@ class DenseSet {
   uint32_t Scan(uint32_t cursor, const ItemCb& cb) const;
   void Reserve(size_t sz);
 
+  void Fill(DenseSet* other) const;
+
   // set an abstract time that allows expiry.
   void set_time(uint32_t val) {
     time_now_ = val;
@@ -264,6 +266,7 @@ class DenseSet {
   virtual size_t ObjectAllocSize(const void* obj) const = 0;
   virtual uint32_t ObjExpireTime(const void* obj) const = 0;
   virtual void ObjDelete(void* obj, bool has_ttl) const = 0;
+  virtual void* ObjectClone(const void* obj, bool has_ttl) const = 0;
 
   void CollectExpired();
 
@@ -323,6 +326,15 @@ class DenseSet {
   DenseSet& operator=(DenseSet&) = delete;
 
   bool Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const;
+
+  struct CloneItem {
+    const DenseLinkKey* link = nullptr;
+    void* obj = nullptr;
+    bool has_ttl = false;
+    bool fetch_tail = false;
+  };
+
+  void CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const;
 
   MemoryResource* mr() {
     return entries_.get_allocator().resource();
