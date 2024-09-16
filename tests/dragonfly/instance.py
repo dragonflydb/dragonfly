@@ -47,6 +47,22 @@ class DflyStartException(Exception):
     pass
 
 
+def symbolize_stack_trace(binary_path, lines):
+    pattern = rb"@\s*(0x[0-9a-fA-F]+)"
+    matcher = re.compile(pattern)
+    addr2line_proc = subprocess.Popen(
+        ["/usr/bin/addr2line", "-fCa", "-e", binary_path], stdin=subprocess.PIPE
+    )
+    for line in lines:
+        res = matcher.search(line)
+        if res:
+            g = res.group(1) + b"\n"
+            addr2line_proc.stdin.write(g)
+
+    addr2line_proc.stdin.close()
+    addr2line_proc.wait()
+
+
 class DflyInstance:
     """
     Represents a runnable and stoppable Dragonfly instance
@@ -60,8 +76,9 @@ class DflyInstance:
         self.proc: Optional[subprocess.Popen] = None
         self._client: Optional[RedisClient] = None
         self.log_files: List[str] = []
-
         self.dynamic_port = False
+        self.sed_proc = None
+
         if self.params.existing_port:
             self._port = self.params.existing_port
         elif "port" in self.args:
@@ -150,7 +167,7 @@ class DflyInstance:
         sed_cmd = ["sed", "-u", "-e", sed_format]
         if self.params.buffered_out:
             sed_cmd.remove("-u")
-        subprocess.Popen(sed_cmd, stdin=self.proc.stdout)
+        self.sed_proc = subprocess.Popen(sed_cmd, stdin=self.proc.stdout, stdout=subprocess.PIPE)
 
     def set_proc_to_none(self):
         self.proc = None
@@ -188,6 +205,18 @@ class DflyInstance:
             proc.kill()
             proc.communicate()
             raise Exception("Unable to terminate DragonflyDB gracefully, it was killed")
+        finally:
+            if self.sed_proc:
+                sed_out = self.sed_proc.stdout.readlines()
+
+                # Deduplicate output - we somewhere duplicate the output, probably due
+                # to tty redirections.
+                seen = set()
+                sed_out = [x for x in sed_out if not (x in seen or seen.add(x))]
+
+                for str in sed_out:
+                    print(str.decode())
+                symbolize_stack_trace(proc.args[0], sed_out)
 
     def _start(self):
         if self.params.existing_port:

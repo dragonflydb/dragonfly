@@ -707,6 +707,8 @@ async def test_unix_domain_socket(df_factory, tmp_dir):
 
 async def test_unix_socket_only(df_factory, tmp_dir):
     server = df_factory.create(proactor_threads=1, port=0, unixsocket="./df.sock")
+    # we call _start because we start() wait for the port to become available and
+    # we run here a process without a port.
     server._start()
 
     await asyncio.sleep(1)
