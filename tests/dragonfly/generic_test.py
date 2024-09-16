@@ -144,3 +144,7 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
     assert (
         info["evicted_keys"] > 0
     ), f"Weak testcase: policy based eviction was not triggered. {info}"
+    print(info)
+
+    info = await c_master.info("memory")
+    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')

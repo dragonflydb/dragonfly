@@ -149,7 +149,10 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
       db_slice_->bytes_per_object() * table_free_items * GetFlag(FLAGS_table_growth_margin);
   bool res = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
   VLOG(2) << "available: " << table_free_items << ", res: " << res;
-
+  if (!res) {
+    LOG_EVERY_T(INFO, 1) << "mem_available: " << mem_available
+                         << " table_free_items:" << table_free_items;
+  }
   return res;
 }
 
