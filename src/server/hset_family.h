@@ -32,6 +32,7 @@ class HSetFamily {
  private:
   // TODO: to move it to anonymous namespace in cc file.
 
+  static void HExpire(CmdArgList args, ConnectionContext* cntx);
   static void HDel(CmdArgList args, ConnectionContext* cntx);
   static void HLen(CmdArgList args, ConnectionContext* cntx);
   static void HExists(CmdArgList args, ConnectionContext* cntx);

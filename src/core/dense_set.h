@@ -187,6 +187,14 @@ class DenseSet {
       return curr_entry_->HasTtl() ? owner_->ObjExpireTime(curr_entry_->GetObject()) : UINT32_MAX;
     }
 
+    //TODO
+    uint32_t SetExpiryTime(uint32_t at) const {
+      //TODO feels like there are two paths here:
+      // 1. The item has TTL from before, and we can easily set the TTL.
+      // 2. It doesnt have TTL, and we need to do something extra?
+      return curr_entry_->HasTtl() ? owner_->ObjExpireTime(curr_entry_->GetObject()) : UINT32_MAX;
+    }
+
     bool HasExpiry() const {
       return curr_entry_->HasTtl();
     }
@@ -314,6 +322,7 @@ class DenseSet {
   // Returns the previous object if it has been replaced.
   // nullptr, if obj was added.
   void* AddOrReplaceObj(void* obj, bool has_ttl);
+  void* ReplaceObj(void* obj, bool has_ttl);
 
   // Assumes that the object does not exist in the set.
   void AddUnique(void* obj, bool has_ttl, uint64_t hashcode);
@@ -355,6 +364,10 @@ class DenseSet {
   // Returns DensePtr if the object with such key already exists,
   // Returns null if obj was added.
   DensePtr* AddOrFindDense(void* obj, bool has_ttl);
+
+  // Returns DensePtr if the object with such key exists,
+  // Returns null if key does not exist.
+  DensePtr* FindDense(void* obj);
 
   // ============ Pseudo Linked List in DenseSet end ==================
 

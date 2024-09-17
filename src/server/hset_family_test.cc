@@ -119,6 +119,12 @@ TEST_F(HSetFamilyTest, HIncr) {
   EXPECT_THAT(resp, ErrArg("hash value is not an integer"));
 }
 
+TEST_F(HSetFamilyTest, HIncrRespected) {
+  Run({"hset", "key", "a", "1"});
+  EXPECT_EQ(11, CheckedInt({"hincrby", "key", "a", "10"}));
+  EXPECT_EQ(11, CheckedInt({"hget", "key", "a"}));
+}
+
 TEST_F(HSetFamilyTest, HScan) {
   for (int i = 0; i < 10; i++) {
     Run({"HSET", "myhash", absl::StrCat("Field-", i), absl::StrCat("Value-", i)});
@@ -381,6 +387,22 @@ TEST_F(HSetFamilyTest, Issue2102) {
   EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", "k1", "v1"}), 1);
   AdvanceTime(10'000);
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
+}
+
+TEST_F(HSetFamilyTest, HExpire) {
+  // Set key with element that will expire after 1s
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(CheckedInt({"HSET", "key", absl::StrCat("k", i), "v"}), 1);
+  }
+  //TODO ensure we dont add any items that dont exist. make new test for that
+  EXPECT_EQ(CheckedInt({"HEXPIRE", "key", "10", "k0", "k1", "k2"}), 0);
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
+}
+
+TEST_F(HSetFamilyTest, HExpireNoAddNew) {
+  // There should be no new fields added by a HEXPIRE command
+  EXPECT_EQ(CheckedInt({"HEXPIRE", "key", "10", "k0", "k1"}), 0);
 }
 
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {

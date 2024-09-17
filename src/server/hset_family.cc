@@ -725,6 +725,61 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
   }
 }
 
+
+OpResult<vector<string>> OpHexpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec, CmdArgList values, const OpSetParams& op_sp = OpSetParams{}) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
+  vector<string> res;
+  res.reserve(values.size());
+
+  if (!op_res) {
+    if (op_res.status() == OpStatus::KEY_NOTFOUND){
+        for (size_t i = 0; i < values.size(); i++) {
+          res.emplace_back("-2");
+        }
+        return res;
+        }
+    return op_res.status();
+  }
+
+  auto& find_res = *op_res;
+
+  auto& it = find_res.it;
+  PrimeValue& pv = it->second;
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
+
+  if (pv.Encoding() == kEncodingListPack) {
+    // a valid result can never be a listpack, since it doesnt keep ttl
+    uint8_t* lp  = (uint8_t*)pv.RObjPtr();
+    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
+    stats->listpack_bytes -= lpBytes(lp);
+    stats->listpack_blob_cnt--;
+    StringMap* sm = HSetFamily::ConvertToStrMap(lp);
+    pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  }
+
+  StringMap* sm = GetStringMap(pv, op_args.db_cntx);
+
+  for (size_t i = 0; i < values.size(); i++) {
+    string_view field = ToSV(values[i]);
+    auto it = sm->Find(field);
+    LOG(INFO) << field << " : " << typeid(it).name();
+    if(it != sm->end()) {
+      LOG(INFO) << it->second;
+      sm->UpdateTTL(it->first, ttl_sec);
+      res.emplace_back(ttl_sec == 0 ? "0" : "1");
+    } else {
+      res.emplace_back("-2");
+    }
+  }
+
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+
+  return res;
+}
+
+
+
 // HSETEX key [NX] tll_sec field value field value ...
 void HSetEx(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
@@ -803,6 +858,49 @@ void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
     cntx->SendLong(*result);
+  } else {
+    cntx->SendError(result.status());
+  }
+}
+
+void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
+  LOG(INFO) << "HEXPIRE()";
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+  string_view ttl_str = parser.Next();
+  uint32_t ttl_sec;
+  constexpr uint32_t kMaxTtl = (1UL << 26);
+
+  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
+    return cntx->SendError(kInvalidIntErr);
+  }
+
+  bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv));
+  if (!static_cast<bool>(parser.Check("FIELDS"sv))) {
+    return cntx->SendError("Mandatory argument FIELDS is missing or not at the right position", kSyntaxErrType);
+  }
+
+  string_view numFieldsStr = parser.Next();
+  uint32_t numFields;
+  if (!absl::SimpleAtoi(numFieldsStr, &numFields) || numFields == 0) {
+    return cntx->SendError(kInvalidIntErr);
+  }
+
+  if (!parser.HasExactly(numFields)) {
+    return cntx->SendError("The `numfields` parameter must match the number of arguments", kSyntaxErrType);
+  }
+
+  CmdArgList fields = parser.Tail();
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHexpire(t->GetOpArgs(shard), key, ttl_sec, fields);
+  };
+  OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (result) {
+    //TODO this result needs to be integers, not strings
+    rb->SendStringArr(absl::Span<const string>{*result}, RedisReplyBuilder::ARRAY);
   } else {
     cntx->SendError(result.status());
   }
@@ -1188,6 +1286,7 @@ constexpr uint32_t kHScan = READ | HASH | SLOW;
 constexpr uint32_t kHSet = WRITE | HASH | FAST;
 constexpr uint32_t kHSetEx = WRITE | HASH | FAST;
 constexpr uint32_t kHSetNx = WRITE | HASH | FAST;
+constexpr uint32_t kHExpire = WRITE | HASH | FAST;
 constexpr uint32_t kHStrLen = READ | HASH | FAST;
 constexpr uint32_t kHVals = READ | HASH | SLOW;
 }  // namespace acl
@@ -1210,6 +1309,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
       << CI{"HSCAN", CO::READONLY, -3, 1, 1, acl::kHScan}.HFUNC(HScan)
       << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kHSet}.HFUNC(HSet)
       << CI{"HSETEX", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, acl::kHSetEx}.SetHandler(HSetEx)
+      << CI{"HEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kHExpire}.HFUNC(HExpire)
       << CI{"HSETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::kHSetNx}.HFUNC(HSetNx)
       << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1, acl::kHStrLen}.HFUNC(HStrLen)
       << CI{"HVALS", CO::READONLY, 2, 1, 1, acl::kHVals}.HFUNC(HVals);

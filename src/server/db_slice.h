@@ -318,7 +318,7 @@ class DbSlice {
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                                 uint64_t expire_at_ms) ABSL_LOCKS_EXCLUDED(local_mu_);
 
-  // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
+  // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it, ExpIterator exp_it,
                                          const ExpireParams& params) ABSL_LOCKS_EXCLUDED(local_mu_);

@@ -337,6 +337,13 @@ void DenseSet::Grow(size_t prev_size) {
   }
 }
 
+auto DenseSet::FindDense(void* ptr) -> DensePtr* {
+  uint64_t hc = Hash(ptr, 0);
+  uint32_t bucket_id = BucketId(hc);
+  DensePtr* dptr = Find(ptr, bucket_id, 0).second;
+  return dptr;
+}
+
 auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
   uint64_t hc = Hash(ptr, 0);
 
@@ -542,6 +549,28 @@ void* DenseSet::PopInternal() {
 
   --size_;
   return ret;
+}
+
+void* DenseSet::ReplaceObj(void* obj, bool has_ttl) {
+  DensePtr* ptr = FindDense(obj);
+  if (!ptr)
+    return nullptr;
+
+  /*
+  If we know we want to replace it, this goes out the window?
+  if (ptr->IsLink()) {
+    ptr = ptr->AsLink();
+  }
+  */
+
+  void* res = ptr->Raw();
+  obj_malloc_used_ -= ObjectAllocSize(res);
+  obj_malloc_used_ += ObjectAllocSize(obj);
+
+  ptr->SetObject(obj);
+  ptr->SetTtl(has_ttl);
+
+  return res;
 }
 
 void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {

@@ -105,6 +105,7 @@ class StringMap : public DenseSet {
   // Returns true if field was added
   // otherwise updates its value and returns false.
   bool AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX);
+  bool UpdateTTL(const void* obj, uint32_t ttl_sec);
 
   // Returns true if field was added
   // false, if already exists. In that case no update is done.
@@ -114,7 +115,7 @@ class StringMap : public DenseSet {
 
   bool Contains(std::string_view s1) const;
 
-  /// @brief  Returns value of the key or nullptr if key not found.
+  /// @brief  Returns value of the key or an empty iterator if key not found.
   /// @param key
   /// @return sds
   iterator Find(std::string_view member) {
