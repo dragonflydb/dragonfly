@@ -2347,18 +2347,24 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory)
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("debug", "populate", "200000", "foo", "500")
+    await c_master.execute_command("debug", "populate", "200000", "foo", "5000")
     seeder = SeederV2(key_target=200_000)
 
     seeder_task = asyncio.create_task(seeder.run(c_master, target_deviation=0.1))
-    await asyncio.sleep(2)  # wait for seeder running
+    await asyncio.sleep(0.1)  # wait for seeder running
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await asyncio.sleep(0.2)  # wait for replication to start
+    await c_replica.execute_command(
+        "debug replica pause"
+    )  # puase replica to trigger reconnect on master
+    await asyncio.sleep(0.5)
+    await c_replica.execute_command("debug replica resume")  # resume replication
     await seeder_task
     await asyncio.sleep(1)
 
     await assert_replica_reconnections(replica, 0)
-    df_factory.stop_all()
+    await check_all_replicas_finished([c_replica], c_master)
 
 
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
