@@ -83,8 +83,7 @@ class JsonMemTracker {
     }
 
     const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
-    const bool net_positive = current >= start_size_;
-    size_t diff = net_positive ? (current - start_size_) : (start_size_ - current);
+    int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
     PrimeValue& pv = it_->it->second;
     // If the diff is 0 it means the object uses the same memory as before. No actio needed.
     if (diff == 0) {
@@ -94,9 +93,9 @@ class JsonMemTracker {
     // and because the operation sets the size to 0 we also need to include the size of
     // the pointer.
     if (op_set_) {
-      diff += mi_usable_size(pv.GetJson());
+      diff += static_cast<int64_t>(mi_usable_size(pv.GetJson()));
     }
-    pv.SetJsonSize(net_positive, diff);
+    pv.SetJsonSize(diff);
     // Under any flow we must not end up with this special value.
     DCHECK(pv.MallocUsed() != 0);
   }

@@ -1053,7 +1053,7 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     }
     size_t end_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     DCHECK(end_size > start_size);
-    pv_->SetJsonSize(true, end_size - start_size);
+    pv_->SetJsonSize(end_size - start_size);
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }

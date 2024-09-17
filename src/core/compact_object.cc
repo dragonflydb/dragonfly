@@ -52,10 +52,7 @@ size_t QlMAllocSize(quicklist* ql) {
   return res + ql->count * 16;  // we account for each member 16 bytes.
 }
 
-uint32_t JsonEnconding() {
-  static bool is_experimental = absl::GetFlag(FLAGS_experimental_flat_json);
-  return is_experimental ? kEncodingJsonFlat : kEncodingJsonCons;
-}
+const thread_local uint32_t kJsonEnconding = absl::GetFlag(FLAGS_experimental_flat_json);
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
@@ -582,7 +579,7 @@ size_t CompactObj::Size() const {
         raw_size = u_.r_obj.Size();
         break;
       case JSON_TAG:
-        if (JsonEnconding() == kEncodingJsonFlat) {
+        if (kJsonEnconding == kEncodingJsonFlat) {
           raw_size = u_.json_obj.flat.json_len;
         } else {
           raw_size = u_.json_obj.cons.json_ptr->size();
@@ -691,14 +688,14 @@ std::optional<int64_t> CompactObj::TryGetInt() const {
 
 auto CompactObj::GetJson() const -> JsonType* {
   if (ObjType() == OBJ_JSON) {
-    DCHECK_EQ(JsonEnconding(), kEncodingJsonCons);
+    DCHECK_EQ(kJsonEnconding, kEncodingJsonCons);
     return u_.json_obj.cons.json_ptr;
   }
   return nullptr;
 }
 
 void CompactObj::SetJson(JsonType&& j) {
-  if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
+  if (taglen_ == JSON_TAG && kJsonEnconding == kEncodingJsonCons) {
     DCHECK(u_.json_obj.cons.json_ptr != nullptr);  // must be allocated
     u_.json_obj.cons.json_ptr->swap(j);
     // We do not set bytes_used as this is needed. Consider the two following cases:
@@ -715,17 +712,13 @@ void CompactObj::SetJson(JsonType&& j) {
   u_.json_obj.cons.bytes_used = 0;
 }
 
-void CompactObj::SetJsonSize(bool net_positive, size_t size) {
-  if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
+void CompactObj::SetJsonSize(int64_t size) {
+  if (taglen_ == JSON_TAG && kJsonEnconding == kEncodingJsonCons) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    if (u_.json_obj.cons.bytes_used == 0) {
-      u_.json_obj.cons.bytes_used = size;
-    } else if (net_positive) {
-      u_.json_obj.cons.bytes_used += size;
-    } else {
-      DCHECK(u_.json_obj.cons.bytes_used >= size);
-      u_.json_obj.cons.bytes_used -= size;
+    if (size < 0) {
+      DCHECK(static_cast<int64_t>(u_.json_obj.cons.bytes_used) >= size);
     }
+    u_.json_obj.cons.bytes_used += size;
   }
 }
 
@@ -1041,7 +1034,7 @@ void CompactObj::Free() {
     u_.small_str.Free();
   } else if (taglen_ == JSON_TAG) {
     DVLOG(1) << "Freeing JSON object";
-    if (JsonEnconding() == kEncodingJsonCons) {
+    if (kJsonEnconding == kEncodingJsonCons) {
       DeleteMR<JsonType>(u_.json_obj.cons.json_ptr);
     } else {
       tl.local_mr->deallocate(u_.json_obj.flat.flat_ptr, u_.json_obj.flat.json_len, kAlignSize);
@@ -1067,7 +1060,7 @@ size_t CompactObj::MallocUsed() const {
     // TODO fix this once we fully support flat json
     // This is here because accessing a union field that is not active
     // is UB.
-    if (JsonEnconding() == kEncodingJsonFlat) {
+    if (kJsonEnconding == kEncodingJsonFlat) {
       return 0;
     }
     return u_.json_obj.cons.bytes_used;
