@@ -258,14 +258,14 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
         return false;
       }
 
-      auto r_it = rhs.array_range().begin();
-      return std::all_of(lhs.array_range().begin(), lhs.array_range().end(), [&](const auto& l_it) {
-        if (!JsonAreEquals(l_it, *r_it)) {
+      auto rhs_array = rhs.array_range();
+      for (auto l_it = lhs.array_range().begin(), r_it = rhs_array.begin(); r_it != rhs_array.end();
+           ++r_it, ++l_it) {
+        if (!JsonAreEquals(*l_it, *r_it)) {
           return false;
         }
-        ++r_it;
-        return true;
-      });
+      }
+      return true;
     }
 
     case json_type::object_value: {
