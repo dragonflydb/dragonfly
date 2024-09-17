@@ -1331,7 +1331,7 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
 bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
-  DCHECK(cntx->reply_builder()->ConsumeLastError().empty());
+
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
@@ -1375,6 +1375,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   ReplyGuard reply_guard(cntx, cid->name());
 #endif
   uint64_t invoke_time_usec = 0;
+  DCHECK(cntx->reply_builder()->ConsumeLastError().empty());
   try {
     invoke_time_usec = cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
