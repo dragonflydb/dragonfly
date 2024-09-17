@@ -59,19 +59,31 @@ template <typename T> void OptionalEmplace(bool keep_defined, T src, T* dest) {
 
 }  // namespace details
 
-enum class JsonPathType { V2, Legacy /*Or V1*/ };
-constexpr JsonPathType kDefaultJsonPathType = JsonPathType::V2;
+enum class JsonPathType { kV2, kLegacy /*Or V1*/ };
+constexpr JsonPathType kDefaultJsonPathType = JsonPathType::kV2;
 
 struct CallbackResultOptions {
-  enum class SavingOrder { SAVE_FIRST, SAVE_LAST };
-  enum class OnEmpty { SEND_NIL, SEND_WRONGTYPE };
+  enum class SavingOrder { kSaveFirst, kSaveLast };
+  enum class OnEmpty { kSendNil, kSendWrongType };
 
-  static constexpr SavingOrder kDefaultSavingOrder = SavingOrder::SAVE_LAST;
-  static constexpr OnEmpty kDefaultOnEmpty = OnEmpty::SEND_WRONGTYPE;
+  CallbackResultOptions() = default;
+
+  explicit CallbackResultOptions(JsonPathType path_type_) : path_type(path_type_) {
+  }
+
+  explicit CallbackResultOptions(SavingOrder saving_order_) : saving_order(saving_order_) {
+  }
+
+  explicit CallbackResultOptions(OnEmpty on_empty_) : on_empty(on_empty_) {
+  }
+
+  CallbackResultOptions(JsonPathType path_type_, SavingOrder saving_order_, OnEmpty on_empty_)
+      : path_type(path_type_), saving_order(saving_order_), on_empty(on_empty_) {
+  }
 
   std::optional<JsonPathType> path_type = std::nullopt;
-  SavingOrder saving_order{kDefaultSavingOrder};
-  OnEmpty on_empty{kDefaultOnEmpty};
+  SavingOrder saving_order{SavingOrder::kSaveLast};
+  OnEmpty on_empty{OnEmpty::kSendWrongType};
 };
 
 template <typename T> class JsonCallbackResult {
@@ -95,12 +107,12 @@ template <typename T> class JsonCallbackResult {
       return;
     }
 
-    details::OptionalEmplace(options_.saving_order == SavingOrder::SAVE_FIRST, std::move(value),
+    details::OptionalEmplace(options_.saving_order == SavingOrder::kSaveFirst, std::move(value),
                              &result_.front());
   }
 
   bool IsV1() const {
-    return options_.path_type == JsonPathType::Legacy;
+    return options_.path_type == JsonPathType::kLegacy;
   }
 
   const T& AsV1() const {
@@ -116,12 +128,12 @@ template <typename T> class JsonCallbackResult {
   }
 
   bool ShouldSendNil() const {
-    return IsV1() && options_.on_empty == OnEmpty::SEND_NIL && result_.empty();
+    return IsV1() && options_.on_empty == OnEmpty::kSendNil && result_.empty();
   }
 
   bool ShouldSendWrongType() const {
     if (IsV1()) {
-      if (result_.empty() && options_.on_empty == OnEmpty::SEND_WRONGTYPE)
+      if (result_.empty() && options_.on_empty == OnEmpty::kSendWrongType)
         return true;
 
       if constexpr (is_optional<T>::value) {
@@ -133,7 +145,7 @@ template <typename T> class JsonCallbackResult {
 
  private:
   absl::InlinedVector<T, 2> result_;
-  CallbackResultOptions options_{.path_type = kDefaultJsonPathType};
+  CallbackResultOptions options_{kDefaultJsonPathType};
 };
 
 class WrappedJsonPath {
@@ -153,7 +165,7 @@ class WrappedJsonPath {
   JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb,
                                  CallbackResultOptions options = {}) const {
     JsonCallbackResult<T> eval_result{{options.path_type.value_or(path_type_), options.saving_order,
-                                       CallbackResultOptions::OnEmpty::SEND_NIL}};
+                                       CallbackResultOptions::OnEmpty::kSendNil}};
 
     auto eval_callback = [&cb, &eval_result](std::string_view path, const JsonType& val) {
       eval_result.AddValue(cb(path, val));
@@ -227,7 +239,7 @@ class WrappedJsonPath {
   }
 
   bool IsLegacyModePath() const {
-    return path_type_ == JsonPathType::Legacy;
+    return path_type_ == JsonPathType::kLegacy;
   }
 
   bool RefersToRootElement() const {
