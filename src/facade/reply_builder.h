@@ -138,7 +138,7 @@ class SinkReplyBuilder {
 
   void ExpectReply();
   bool HasReplied() const {
-    return true;  // WE break it for now
+    return has_replied_;
   }
 
   virtual size_t UsedMemory() const;

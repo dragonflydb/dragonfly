@@ -855,11 +855,13 @@ void ReqSerializer::SendCommand(std::string_view str) {
 
 void RedisReplyBuilder2Base::SendNull() {
   ReplyScope scope(this);
+  has_replied_ = true;
   resp3_ ? WritePieces(kNullStringR3) : WritePieces(kNullStringR2);
 }
 
 void RedisReplyBuilder2Base::SendSimpleString(std::string_view str) {
   ReplyScope scope(this);
+  has_replied_ = true;
   if (str.size() <= kMaxInlineSize * 2)
     return WritePieces(kSimplePref, str, kCRLF);
 
@@ -870,6 +872,7 @@ void RedisReplyBuilder2Base::SendSimpleString(std::string_view str) {
 
 void RedisReplyBuilder2Base::SendBulkString(std::string_view str) {
   ReplyScope scope(this);
+  has_replied_ = true;
   if (str.size() <= kMaxInlineSize)
     return WritePieces(kLengthPrefix, uint32_t(str.size()), kCRLF, str, kCRLF);
 
@@ -880,10 +883,12 @@ void RedisReplyBuilder2Base::SendBulkString(std::string_view str) {
 
 void RedisReplyBuilder2Base::SendLong(long val) {
   ReplyScope scope(this);
+  has_replied_ = true;
   WritePieces(kLongPref, val, kCRLF);
 }
 
 void RedisReplyBuilder2Base::SendDouble(double val) {
+  has_replied_ = true;
   char buf[DoubleToStringConverter::kBase10MaximalLength + 8];  // +8 to be on the safe side.
   static_assert(ABSL_ARRAYSIZE(buf) < kMaxInlineSize, "Write temporary string from buf inline");
   string_view val_str = FormatDouble(val, buf, ABSL_ARRAYSIZE(buf));
@@ -897,6 +902,7 @@ void RedisReplyBuilder2Base::SendDouble(double val) {
 
 void RedisReplyBuilder2Base::SendNullArray() {
   ReplyScope scope(this);
+  has_replied_ = true;
   WritePieces("*-1", kCRLF);
 }
 
@@ -905,6 +911,7 @@ static_assert(START_SYMBOLS2[RedisReplyBuilder2Base::MAP][0] == '%' &&
               START_SYMBOLS2[RedisReplyBuilder2Base::SET][0] == '~');
 
 void RedisReplyBuilder2Base::StartCollection(unsigned len, CollectionType ct) {
+  has_replied_ = true;
   if (!IsResp3()) {  // RESP2 supports only arrays
     if (ct == MAP)
       len *= 2;
@@ -916,6 +923,7 @@ void RedisReplyBuilder2Base::StartCollection(unsigned len, CollectionType ct) {
 
 void RedisReplyBuilder2Base::SendError(std::string_view str, std::string_view type) {
   ReplyScope scope(this);
+  has_replied_ = true;
 
   if (type.empty()) {
     type = str;
@@ -942,6 +950,7 @@ char* RedisReplyBuilder2Base::FormatDouble(double d, char* dest, unsigned len) {
 }
 
 void RedisReplyBuilder2Base::SendVerbatimString(std::string_view str, VerbatimFormat format) {
+  has_replied_ = true;
   DCHECK(format <= VerbatimFormat::MARKDOWN);
   if (!IsResp3())
     return SendBulkString(str);
