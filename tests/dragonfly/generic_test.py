@@ -129,7 +129,7 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
     )
     df_factory.start_all([master])
     c_master = master.client()
-    await c_master.execute_command("DEBUG POPULATE 6000 size 44000")
+    await c_master.execute_command("DEBUG POPULATE 6000 size 40000")
 
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
     info = await c_master.info("memory")
@@ -144,7 +144,6 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
     assert (
         info["evicted_keys"] > 0
     ), f"Weak testcase: policy based eviction was not triggered. {info}"
-    print(info)
 
     info = await c_master.info("memory")
     print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
