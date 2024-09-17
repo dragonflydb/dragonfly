@@ -810,6 +810,20 @@ string ConnectionLogContext(const facade::Connection* conn) {
   return absl::StrCat("(", conn->RemoteEndpointStr(), ")");
 }
 
+string FailedCommandToString(std::string_view command, facade::CmdArgList args,
+                             std::string_view reason) {
+  string result;
+  absl::StrAppend(&result, " ", command);
+
+  for (auto arg : args) {
+    absl::StrAppend(&result, " ", facade::ToSV(arg));
+  }
+
+  absl::StrAppend(&result, " failed with reason: ", reason);
+
+  return result;
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1326,6 +1340,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
       return true;
     }
     cntx->SendError(std::move(*err));
+    std::ignore = cntx->reply_builder()->ConsumeLastError();
     return true;  // return false only for internal error aborts
   }
 
@@ -1365,6 +1380,11 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
+  }
+
+  std::string reason = cntx->reply_builder()->ConsumeLastError();
+  if (!reason.empty()) {
+    LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
 
   auto cid_name = cid->name();

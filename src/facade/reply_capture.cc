@@ -18,6 +18,7 @@ namespace facade {
 using namespace std;
 
 void CapturingReplyBuilder::SendError(std::string_view str, std::string_view type) {
+  last_error_ = str;
   SKIP_LESS(ReplyMode::ONLY_ERR);
   Capture(Error{str, type});
 }

@@ -244,7 +244,6 @@ void SinkReplyBuilder2::SendError(ErrorReply error) {
 void SinkReplyBuilder2::SendError(OpStatus status) {
   if (status == OpStatus::OK)
     return SendSimpleString("OK");
-  //    return SendOk();
   SendError(StatusToMsg(status));
 }
 
@@ -924,6 +923,7 @@ void RedisReplyBuilder2Base::SendError(std::string_view str, std::string_view ty
       type = kSyntaxErrType;
   }
   tl_facade_stats->reply_stats.err_count[type]++;
+  last_error_ = str;
 
   if (str[0] != '-')
     WritePieces("-ERR ", str, kCRLF);
