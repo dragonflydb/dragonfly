@@ -2011,11 +2011,8 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     replica = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
     df_factory.start_all([master, replica])
 
-    seeder = SeederV2(key_target=40000)
     c_replica = replica.client()
-    await seeder.run(c_replica, target_deviation=0.1)
-    dbsize = await c_replica.dbsize()
-    assert dbsize >= 30000
+    await c_replica.execute_command(f"DEBUG POPULATE 10000000")
 
     replica.stop()
     replica.start()

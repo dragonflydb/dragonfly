@@ -1911,7 +1911,7 @@ struct RdbLoader::ObjSettings {
   bool has_expired = false;
 
   bool is_sticky = false;
-  bool has_mc_flags;
+  bool has_mc_flags = false;
 
   void Reset() {
     expiretime = 0;
