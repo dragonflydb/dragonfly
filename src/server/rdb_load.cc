@@ -2478,8 +2478,8 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     PrimeValue pv;
     if (ec_ = FromOpaque(item->val, &pv); ec_) {
       if ((*ec_).value() == errc::empty_key) {
-        LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
-                   << item->val.rdb_type;
+        LOG(WARNING) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
+                     << item->val.rdb_type;
         continue;
       }
       LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
@@ -2488,8 +2488,8 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     }
     // We need this extra check because we don't return empty_key
     if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
-      LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
-                 << item->val.rdb_type;
+      LOG(WARNING) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
+                   << item->val.rdb_type;
       continue;
     }
 
