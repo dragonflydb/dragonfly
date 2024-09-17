@@ -1388,6 +1388,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   ReplyGuard reply_guard(cntx, cid->name());
 #endif
   uint64_t invoke_time_usec = 0;
+  // DCHECK(cntx->reply_builder()->ConsumeLastError().empty()); TODO check why this fails
+  auto rply = cntx->reply_builder();
   try {
     invoke_time_usec = cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
@@ -1395,8 +1397,11 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return false;
   }
 
+  VLOG(1) << "ConsumeLastError: " << cid->name();
   std::string reason = cntx->reply_builder()->ConsumeLastError();
+
   if (!reason.empty()) {
+    VLOG(1) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
 
@@ -2308,12 +2313,12 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (scheduled) {
-    VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
+    VLOG(2) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
 
   cntx->cid = exec_cid_;
-  VLOG(1) << "Exec completed";
+  VLOG(2) << "Exec completed";
 }
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
