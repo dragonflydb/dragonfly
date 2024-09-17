@@ -1397,7 +1397,6 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return false;
   }
 
-  VLOG(1) << "ConsumeLastError: " << cid->name();
   std::string reason = cntx->reply_builder()->ConsumeLastError();
 
   if (!reason.empty()) {
