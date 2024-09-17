@@ -310,7 +310,7 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
   return OpStatus::OK;
 }
 
-size_t GetJsonArrayIndex(int index, size_t size) {
+size_t NormalizeIndex(int index, size_t size) {
   if (index >= 0) {
     return index;
   }
@@ -994,10 +994,9 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     }
 
     size_t array_size = val->size();
-    size_t removal_index = std::min(GetJsonArrayIndex(index, array_size), array_size - 1);
+    size_t removal_index = std::min(NormalizeIndex(index, array_size), array_size - 1);
 
-    auto it = GetJsonArrayIterator(
-        val, removal_index);  // std::next(val->array_range().begin(), ToPtrDiff(removal_index));
+    auto it = GetJsonArrayIterator(val, removal_index);
     string str;
     error_code ec;
     it->dump(str, {}, ec);
@@ -1028,8 +1027,8 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
 
     size_t array_size = val->size();
 
-    size_t trim_start_index = GetJsonArrayIndex(start_index, array_size);
-    size_t trim_end_index = GetJsonArrayIndex(stop_index, array_size);
+    size_t trim_start_index = NormalizeIndex(start_index, array_size);
+    size_t trim_end_index = NormalizeIndex(stop_index, array_size);
 
     if (trim_start_index >= array_size || trim_start_index > trim_end_index) {
       val->erase(val->array_range().begin(), val->array_range().end());
@@ -1038,14 +1037,10 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
 
     trim_end_index = std::min(trim_end_index, array_size);
 
-    auto trim_start_it = GetJsonArrayIterator(
-        val,
-        trim_start_index);  // std::next(val->array_range().begin(), ToPtrDiff(trim_start_index));
+    auto trim_start_it = GetJsonArrayIterator(val, trim_start_index);
     auto trim_end_it = val->array_range().end();
     if (trim_end_index < val->size()) {
-      trim_end_it = GetJsonArrayIterator(
-          val, trim_end_index +
-                   1);  // std::next(val->array_range().begin(), ToPtrDiff(trim_end_index + 1));
+      trim_end_it = GetJsonArrayIterator(val, trim_end_index + 1);
     }
 
     *val = jsoncons::json_array<JsonType>(trim_start_it, trim_end_it);
@@ -1135,8 +1130,8 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
       return -1;
     }
 
-    size_t pos_start_index = GetJsonArrayIndex(start_index, array_size);
-    size_t pos_end_index = end_index == 0 ? array_size : GetJsonArrayIndex(end_index, array_size);
+    size_t pos_start_index = NormalizeIndex(start_index, array_size);
+    size_t pos_end_index = end_index == 0 ? array_size : NormalizeIndex(end_index, array_size);
 
     if (pos_start_index >= array_size && pos_end_index < array_size) {
       return -1;
