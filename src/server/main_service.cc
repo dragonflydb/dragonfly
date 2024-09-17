@@ -1389,7 +1389,6 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
 #endif
   uint64_t invoke_time_usec = 0;
   // DCHECK(cntx->reply_builder()->ConsumeLastError().empty()); TODO check why this fails
-  auto rply = cntx->reply_builder();
   try {
     invoke_time_usec = cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
