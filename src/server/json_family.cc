@@ -310,7 +310,7 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
   return OpStatus::OK;
 }
 
-size_t NormalizeIndex(int index, size_t size) {
+size_t NormalizeNegativeIndex(int index, size_t size) {
   if (index >= 0) {
     return index;
   }
@@ -994,7 +994,7 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     }
 
     size_t array_size = val->size();
-    size_t removal_index = std::min(NormalizeIndex(index, array_size), array_size - 1);
+    size_t removal_index = std::min(NormalizeNegativeIndex(index, array_size), array_size - 1);
 
     auto it = GetJsonArrayIterator(val, removal_index);
     string str;
@@ -1027,8 +1027,8 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
 
     size_t array_size = val->size();
 
-    size_t trim_start_index = NormalizeIndex(start_index, array_size);
-    size_t trim_end_index = NormalizeIndex(stop_index, array_size);
+    size_t trim_start_index = NormalizeNegativeIndex(start_index, array_size);
+    size_t trim_end_index = NormalizeNegativeIndex(stop_index, array_size);
 
     if (trim_start_index >= array_size || trim_start_index > trim_end_index) {
       val->erase(val->array_range().begin(), val->array_range().end());
@@ -1130,8 +1130,9 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
       return -1;
     }
 
-    size_t pos_start_index = NormalizeIndex(start_index, array_size);
-    size_t pos_end_index = end_index == 0 ? array_size : NormalizeIndex(end_index, array_size);
+    size_t pos_start_index = NormalizeNegativeIndex(start_index, array_size);
+    size_t pos_end_index =
+        end_index == 0 ? array_size : NormalizeNegativeIndex(end_index, array_size);
 
     if (pos_start_index >= array_size && pos_end_index < array_size) {
       return -1;
