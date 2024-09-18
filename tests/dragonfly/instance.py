@@ -1,5 +1,6 @@
 import dataclasses
 import os
+import threading
 import time
 import subprocess
 import aiohttp
@@ -48,19 +49,35 @@ class DflyStartException(Exception):
 
 
 def symbolize_stack_trace(binary_path, lines):
-    pattern = rb"@\s*(0x[0-9a-fA-F]+)"
-    matcher = re.compile(pattern)
     addr2line_proc = subprocess.Popen(
         ["/usr/bin/addr2line", "-fCa", "-e", binary_path], stdin=subprocess.PIPE
     )
     for line in lines:
-        res = matcher.search(line)
-        if res:
-            g = res.group(1) + b"\n"
-            addr2line_proc.stdin.write(g)
+        addr2line_proc.stdin.write(line.encode())
 
     addr2line_proc.stdin.close()
     addr2line_proc.wait()
+
+
+def read_sedout(pipe, stacktrace):
+    try:
+        seen = set()
+        pattern = r"@\s*(0x[0-9a-fA-F]+)"
+        matcher = re.compile(pattern)
+
+        for line in iter(pipe.readline, b""):
+            # Deduplicate output - we somewhere duplicate the output, probably due
+            # to tty redirections.
+            if line not in seen:
+                seen.add(line)
+                print(line)
+                res = matcher.search(line)
+                if res:
+                    stacktrace.append(res.group(1) + "\n")
+    except ValueError:
+        pass
+    finally:
+        pipe.close()
 
 
 class DflyInstance:
@@ -167,7 +184,18 @@ class DflyInstance:
         sed_cmd = ["sed", "-u", "-e", sed_format]
         if self.params.buffered_out:
             sed_cmd.remove("-u")
-        self.sed_proc = subprocess.Popen(sed_cmd, stdin=self.proc.stdout, stdout=subprocess.PIPE)
+        self.sed_proc = subprocess.Popen(
+            sed_cmd,
+            stdin=self.proc.stdout,
+            stdout=subprocess.PIPE,
+            bufsize=1,
+            universal_newlines=True,
+        )
+        self.stacktrace = []
+        self.sed_thread = threading.Thread(
+            target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
+        )
+        self.sed_thread.start()
 
     def set_proc_to_none(self):
         self.proc = None
@@ -207,16 +235,9 @@ class DflyInstance:
             raise Exception("Unable to terminate DragonflyDB gracefully, it was killed")
         finally:
             if self.sed_proc:
-                sed_out = self.sed_proc.stdout.readlines()
-
-                # Deduplicate output - we somewhere duplicate the output, probably due
-                # to tty redirections.
-                seen = set()
-                sed_out = [x for x in sed_out if not (x in seen or seen.add(x))]
-
-                for str in sed_out:
-                    print(str.decode())
-                symbolize_stack_trace(proc.args[0], sed_out)
+                self.sed_proc.communicate()
+                self.sed_thread.join()
+                symbolize_stack_trace(proc.args[0], self.stacktrace)
 
     def _start(self):
         if self.params.existing_port:
