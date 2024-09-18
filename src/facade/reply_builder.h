@@ -422,8 +422,10 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
   void SendError(std::string_view str, std::string_view type = {}) override;
   void SendProtocolError(std::string_view str) override;
 
-  static char* FormatDouble(double d, char* dest, unsigned len);
   virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT) override;
+
+  static char* FormatDouble(double d, char* dest, unsigned len);
+  static std::string SerializeCommand(std::string_view command);
 
   bool IsResp3() const override {
     return resp3_;
@@ -496,24 +498,6 @@ class RedisReplyBuilder2 : public RedisReplyBuilder2Base {
 
   // TODO: Remove
   void SendMGetResponse(SinkReplyBuilder::MGetResponse resp) override;
-
-  static std::string SerializeCommmand(std::string_view cmd);
-};
-
-class ReqSerializer {
- public:
-  explicit ReqSerializer(::io::Sink* stream) : sink_(stream) {
-  }
-
-  void SendCommand(std::string_view str);
-
-  std::error_code ec() const {
-    return ec_;
-  }
-
- private:
-  ::io::Sink* sink_;
-  std::error_code ec_;
 };
 
 }  // namespace facade

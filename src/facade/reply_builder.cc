@@ -846,13 +846,6 @@ void RedisReplyBuilder::SendStringArrInternal(
   Send(vec.data(), vec_indx + 1);
 }
 
-void ReqSerializer::SendCommand(std::string_view str) {
-  VLOG(2) << "SendCommand: " << str;
-
-  iovec v[] = {IoVec(str), IoVec(kCRLF)};
-  ec_ = sink_->Write(v, ABSL_ARRAYSIZE(v));
-}
-
 void RedisReplyBuilder2Base::SendNull() {
   ReplyScope scope(this);
   has_replied_ = true;
@@ -962,6 +955,10 @@ void RedisReplyBuilder2Base::SendVerbatimString(std::string_view str, VerbatimFo
   else
     WriteRef(str);
   WritePieces(kCRLF);
+}
+
+std::string RedisReplyBuilder2Base::SerializeCommand(std::string_view command) {
+  return string{command} + kCRLF;
 }
 
 void RedisReplyBuilder2::SendSimpleStrArr2(const facade::ArgRange& strs) {
