@@ -249,6 +249,44 @@ std::optional<JsonGetParams> ParseJsonGetParams(CmdArgParser* parser, Connection
   return parsed_args;
 }
 
+// This method makes a comparison of json considering their types
+// For example, 3 != 3.0 because json_type::int64_value != json_type::double_value
+bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
+  if (lhs.type() != rhs.type()) {
+    return false;
+  }
+  switch (lhs.type()) {
+    case json_type::array_value: {
+      if (lhs.size() != rhs.size()) {
+        return false;
+      }
+
+      auto rhs_array = rhs.array_range();
+      for (auto l_it = lhs.array_range().begin(), r_it = rhs_array.begin(); r_it != rhs_array.end();
+           ++r_it, ++l_it) {
+        if (!JsonAreEquals(*l_it, *r_it)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    case json_type::object_value: {
+      if (lhs.size() != rhs.size()) {
+        return false;
+      }
+      return std::all_of(
+          lhs.object_range().begin(), lhs.object_range().end(), [&](const auto& l_it) {
+            auto r_it = rhs.find(l_it.key());
+            return r_it != rhs.object_range().end() && JsonAreEquals(l_it.value(), r_it->value());
+          });
+    }
+
+    default:
+      return lhs == rhs;
+  }
+}
+
 facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
   auto& db_slice = op_args.GetDbSlice();
 
@@ -735,51 +773,57 @@ void BinOpApply(double num, bool num_is_double, ArithmeticOpType op, JsonType* v
   if (val->is_double() || num_is_double) {
     *val = result;
   } else {
-    *val = (uint64_t)result;
+    *val = static_cast<uint64_t>(result);
   }
   *overflow = false;
 }
 
+// Tmp solution with struct CallbackResult, because MutateCallbackResult<std::optional<JsonType>>
+// does not compile
+struct DoubleArithmeticCallbackResult {
+  explicit DoubleArithmeticCallbackResult(bool legacy_mode_is_enabled_)
+      : legacy_mode_is_enabled(legacy_mode_is_enabled_) {
+    if (!legacy_mode_is_enabled) {
+      json_value.emplace(jsoncons::json_array_arg);
+    }
+  }
+
+  void AddValue(JsonType val) {
+    if (legacy_mode_is_enabled) {
+      json_value = std::move(val);
+    } else {
+      json_value->emplace_back(std::move(val));
+    }
+  }
+
+  void AddEmptyValue() {
+    if (!legacy_mode_is_enabled) {
+      json_value->emplace_back(JsonType::null());
+    }
+  }
+
+  std::optional<JsonType> json_value;
+  bool legacy_mode_is_enabled;
+};
+
 OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
-                                    const WrappedJsonPath& json_path, double num,
+                                    const WrappedJsonPath& json_path, string_view num,
                                     ArithmeticOpType op_type) {
+  bool has_fractional_part = num.find('.') != string::npos;
+  double double_value = 0;
+
+  if (!ParseDouble(num, &double_value)) {
+    VLOG(2) << "Failed to parse number as double: " << num;
+    return OpStatus::WRONG_TYPE;
+  }
+
   bool is_result_overflow = false;
-  double int_part;
-  bool has_fractional_part = (modf(num, &int_part) != 0);
 
-  // Tmp solution with struct CallbackResult, because MutateCallbackResult<std::optional<JsonType>>
-  // does not compile
-  struct CallbackResult {
-    explicit CallbackResult(bool legacy_mode_is_enabled_)
-        : legacy_mode_is_enabled(legacy_mode_is_enabled_) {
-      if (!legacy_mode_is_enabled) {
-        json_value.emplace(jsoncons::json_array_arg);
-      }
-    }
-
-    void AddValue(JsonType val) {
-      if (legacy_mode_is_enabled) {
-        json_value = std::move(val);
-      } else {
-        json_value->emplace_back(std::move(val));
-      }
-    }
-
-    void AddEmptyValue() {
-      if (!legacy_mode_is_enabled) {
-        json_value->emplace_back(JsonType::null());
-      }
-    }
-
-    std::optional<JsonType> json_value;
-    bool legacy_mode_is_enabled;
-  };
-
-  CallbackResult result{json_path.IsLegacyModePath()};
+  DoubleArithmeticCallbackResult result{json_path.IsLegacyModePath()};
   auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
     if (val->is_number()) {
       bool res = false;
-      BinOpApply(num, has_fractional_part, op_type, val, &res);
+      BinOpApply(double_value, has_fractional_part, op_type, val, &res);
       if (res) {
         is_result_overflow = true;
       } else {
@@ -1109,7 +1153,7 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     size_t pos = -1;
     auto it = next(val.array_range().begin(), start_index);
     while (it != val.array_range().end()) {
-      if (search_val == *it) {
+      if (JsonAreEquals(search_val, *it)) {
         pos = start_index;
         break;
       }
@@ -1525,25 +1569,21 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+  string_view path = parser.Next();
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
+  optional<JsonType> search_value = JsonFromString(parser.Next());
   if (!search_value) {
     cntx->SendError(kSyntaxErr);
     return;
   }
 
-  if (search_value->is_object() || search_value->is_array()) {
-    cntx->SendError(kWrongTypeErr);
-    return;
-  }
-
   int start_index = 0;
-  if (args.size() >= 4) {
-    if (!absl::SimpleAtoi(ArgS(args, 3), &start_index)) {
+  if (parser.HasNext()) {
+    if (!absl::SimpleAtoi(parser.Next(), &start_index)) {
       VLOG(1) << "Failed to convert the start index to numeric" << ArgS(args, 3);
       cntx->SendError(kInvalidIntErr);
       return;
@@ -1551,8 +1591,8 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 
   int end_index = 0;
-  if (args.size() >= 5) {
-    if (!absl::SimpleAtoi(ArgS(args, 4), &end_index)) {
+  if (parser.HasNext()) {
+    if (!absl::SimpleAtoi(parser.Next(), &end_index)) {
       VLOG(1) << "Failed to convert the stop index to numeric" << ArgS(args, 4);
       cntx->SendError(kInvalidIntErr);
       return;
@@ -1765,16 +1805,10 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
 
-  double dnum;
-  if (!ParseDouble(num, &dnum)) {
-    cntx->SendError(kWrongTypeErr);
-    return;
-  }
-
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, dnum, OP_ADD);
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_ADD);
   };
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1787,16 +1821,10 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
 
-  double dnum;
-  if (!ParseDouble(num, &dnum)) {
-    cntx->SendError(kWrongTypeErr);
-    return;
-  }
-
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, dnum, OP_MULTIPLY);
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_MULTIPLY);
   };
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
