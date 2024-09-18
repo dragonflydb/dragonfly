@@ -1830,7 +1830,6 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
     # assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
-@pytest.mark.skip("Fails sporadically")
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=6)
     replica = df_factory.create(proactor_threads=4)
