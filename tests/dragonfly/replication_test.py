@@ -2553,9 +2553,13 @@ async def test_replicating_mc_flags(df_factory):
 
     c_replica = replica.client()
 
-    assert c_mc_master.set("key1", "value1", noreply=True)
-    assert c_mc_master.set("key2", "value1", noreply=True, expire=3600, flags=123456)
-    assert c_mc_master.replace("key1", "value2", expire=4000, flags=2, noreply=True)
+    assert c_mc_master.set("key1", "value0", noreply=True)
+    assert c_mc_master.set("key2", "value2", noreply=True, expire=3600, flags=123456)
+    assert c_mc_master.replace("key1", "value1", expire=4000, flags=2, noreply=True)
+
+    c_master = master.client()
+    for i in range(3, 100):
+        await c_master.set(f"key{i}", f"value{i}")
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
@@ -2571,4 +2575,51 @@ async def test_replicating_mc_flags(df_factory):
     await check_flag("key1", 2)
     await check_flag("key2", 123456)
 
-    await close_clients(c_replica)
+    for i in range(1, 100):
+        assert c_mc_replica.get(f"key{i}") == str.encode(f"value{i}")
+
+    await close_clients(c_replica, c_master)
+
+
+@pytest.mark.asyncio
+async def test_double_take_over(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT)
+    replica = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT + 1)
+    df_factory.start_all([master, replica])
+
+    seeder = df_seeder_factory.create(port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
+    await seeder.run(target_deviation=0.1)
+
+    capture = await seeder.capture(port=master.port)
+
+    c_replica = replica.client()
+
+    logging.debug("start replication")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}")
+    await wait_available_async(c_replica)
+
+    logging.debug("running repltakover")
+    await c_replica.execute_command(f"REPLTAKEOVER 10")
+    assert await c_replica.execute_command("role") == ["master", []]
+
+    @assert_eventually
+    async def check_master_status():
+        assert master.proc.poll() == 0, "Master process did not exit correctly."
+
+    await check_master_status()
+
+    logging.debug("restart previous master")
+    master.start()
+    c_master = master.client()
+
+    logging.debug("start second replication")
+    await c_master.execute_command(f"REPLICAOF localhost {replica.admin_port}")
+    await wait_available_async(c_master)
+
+    logging.debug("running second repltakover")
+    await c_master.execute_command(f"REPLTAKEOVER 10")
+    assert await c_master.execute_command("role") == ["master", []]
+
+    assert await seeder.compare(capture, port=master.port)
+
+    await disconnect_clients(c_master, c_replica)
