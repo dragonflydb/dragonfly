@@ -38,7 +38,6 @@
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
-ABSL_DECLARE_FLAG(bool, experimental_flat_json);
 
 namespace dfly {
 
@@ -62,7 +61,7 @@ class JsonMemTracker {
   void SetJsonSize(PrimeValue& pv, bool is_op_set) {
     const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
-    // If the diff is 0 it means the object uses the same memory as before. No actio needed.
+    // If the diff is 0 it means the object use the same memory as before. No action needed.
     if (diff == 0) {
       return;
     }
@@ -327,7 +326,7 @@ OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view ke
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
-  if (absl::GetFlag(FLAGS_experimental_flat_json)) {
+  if (JsonEnconding() == kEncodingJsonFlat) {
     flexbuffers::Builder fbb;
     json::FromJsonType(value, &fbb);
     fbb.Finish();

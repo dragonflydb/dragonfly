@@ -52,11 +52,6 @@ size_t QlMAllocSize(quicklist* ql) {
   return res + ql->count * 16;  // we account for each member 16 bytes.
 }
 
-uint32_t JsonEnconding() {
-  static thread_local uint32_t json_enc = absl::GetFlag(FLAGS_experimental_flat_json);
-  return json_enc;
-}
-
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
   switch (encoding) {
     case kEncodingStrMap2: {
@@ -526,6 +521,12 @@ void RobjWrapper::MakeInnerRoom(size_t current_cap, size_t desired, MemoryResour
 }
 
 }  // namespace detail
+
+uint32_t JsonEnconding() {
+  static thread_local uint32_t json_enc =
+      absl::GetFlag(FLAGS_experimental_flat_json) ? kEncodingJsonFlat : kEncodingJsonCons;
+  return json_enc;
+}
 
 using namespace std;
 

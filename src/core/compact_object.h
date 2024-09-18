@@ -102,6 +102,8 @@ using CompactObjType = unsigned;
 
 constexpr CompactObjType kInvalidCompactObjType = std::numeric_limits<CompactObjType>::max();
 
+uint32_t JsonEnconding();
+
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
 
