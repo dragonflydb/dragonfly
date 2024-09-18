@@ -1286,9 +1286,11 @@ async def test_take_over_seeder(
     stop_info = True
     await info_task
 
-    # Need to wait a bit to give time to write the shutdown snapshot
-    await asyncio.sleep(1)
-    assert master.proc.poll() == 0, "Master process did not exit correctly."
+    @assert_eventually
+    def assert_master_exists():
+        assert master.proc.poll() == 0, "Master process did not exit correctly."
+
+    assert_master_exists()
 
     master.start()
     c_master = master.client()
