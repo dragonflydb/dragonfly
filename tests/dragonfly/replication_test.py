@@ -2578,15 +2578,10 @@ async def test_replicating_mc_flags(df_factory):
     await close_clients(c_replica, c_master)
 
 
-@pytest.mark.parametrize("master_threads, replica_threads", [[4, 4]])
 @pytest.mark.asyncio
-async def test_double_take_over(df_factory, df_seeder_factory, master_threads, replica_threads):
-    master = df_factory.create(
-        proactor_threads=master_threads, dbfilename="", admin_port=ADMIN_PORT
-    )
-    replica = df_factory.create(
-        proactor_threads=replica_threads, dbfilename="", admin_port=ADMIN_PORT + 1
-    )
+async def test_double_take_over(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT)
+    replica = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT + 1)
     df_factory.start_all([master, replica])
 
     seeder = df_seeder_factory.create(port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
@@ -2604,8 +2599,11 @@ async def test_double_take_over(df_factory, df_seeder_factory, master_threads, r
     await c_replica.execute_command(f"REPLTAKEOVER 10")
     assert await c_replica.execute_command("role") == ["master", []]
 
-    await asyncio.sleep(0.1)
-    assert master.proc.poll() == 0, "Master process did not exit correctly."
+    @assert_eventually
+    async def check_master_status():
+        assert master.proc.poll() == 0, "Master process did not exit correctly."
+
+    await check_master_status()
 
     logging.debug("restart previous master")
     master.start()
