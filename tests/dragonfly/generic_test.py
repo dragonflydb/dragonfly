@@ -125,7 +125,11 @@ async def test_restricted_commands(df_factory):
 @pytest.mark.asyncio
 async def test_reply_guard_oom(df_factory, df_seeder_factory):
     master = df_factory.create(
-        proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
+        proactor_threads=1,
+        cache_mode="true",
+        maxmemory="256mb",
+        enable_heartbeat_eviction="false",
+        rss_oom_deny_ratio=2,
     )
     df_factory.start_all([master])
     c_master = master.client()
