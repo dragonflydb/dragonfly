@@ -135,6 +135,8 @@ class PrimeBumpPolicy {
 
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   ssize_t mem_available = db_slice_->memory_budget() + mem_offset_;
+  VLOG(2) << "CanGrow: mem_available: " << mem_available << ", soft_limit_: " << soft_limit_
+          << " apply_memory_limit_: " << apply_memory_limit_;
   if (!apply_memory_limit_ || mem_available > soft_limit_)
     return true;
 
