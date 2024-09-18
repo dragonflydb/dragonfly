@@ -310,6 +310,25 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
   return OpStatus::OK;
 }
 
+size_t NormalizeNegativeIndex(int index, size_t size) {
+  if (index >= 0) {
+    return index;
+  }
+
+  if (static_cast<size_t>(-index) > size) {
+    return 0;
+  }
+  return size + index;
+}
+
+auto GetJsonArrayIterator(JsonType* val, size_t index) {
+  return std::next(val->array_range().begin(), static_cast<ptrdiff_t>(index));
+}
+
+auto GetJsonArrayIterator(const JsonType& val, size_t index) {
+  return std::next(val.array_range().begin(), static_cast<ptrdiff_t>(index));
+}
+
 string JsonTypeToName(const JsonType& val) {
   using namespace std::string_literals;
 
@@ -974,19 +993,10 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
       return {};
     }
 
-    size_t removal_index;
-    if (index < 0) {
-      int temp_index = index + val->size();
-      removal_index = abs(temp_index);
-    } else {
-      removal_index = index;
-    }
+    size_t array_size = val->size();
+    size_t removal_index = std::min(NormalizeNegativeIndex(index, array_size), array_size - 1);
 
-    if (removal_index >= val->size()) {
-      removal_index %= val->size();  // rounded to the array boundaries.
-    }
-
-    auto it = val->array_range().begin() + removal_index;
+    auto it = GetJsonArrayIterator(val, removal_index);
     string str;
     error_code ec;
     it->dump(str, {}, ec);
@@ -1014,29 +1024,23 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
     if (val->empty()) {
       return {false, 0};
     }
-    size_t trim_start_index;
-    if (start_index < 0) {
-      trim_start_index = 0;
-    } else {
-      trim_start_index = start_index;
-    }
 
-    size_t trim_end_index;
-    if ((size_t)stop_index >= val->size()) {
-      trim_end_index = val->size();
-    } else {
-      trim_end_index = stop_index;
-    }
+    size_t array_size = val->size();
 
-    if (trim_start_index >= val->size() || trim_start_index > trim_end_index) {
+    size_t trim_start_index = NormalizeNegativeIndex(start_index, array_size);
+    size_t trim_end_index = NormalizeNegativeIndex(stop_index, array_size);
+
+    if (trim_start_index >= array_size || trim_start_index > trim_end_index) {
       val->erase(val->array_range().begin(), val->array_range().end());
       return {false, 0};
     }
 
-    auto trim_start_it = std::next(val->array_range().begin(), trim_start_index);
+    trim_end_index = std::min(trim_end_index, array_size);
+
+    auto trim_start_it = GetJsonArrayIterator(val, trim_start_index);
     auto trim_end_it = val->array_range().end();
     if (trim_end_index < val->size()) {
-      trim_end_it = std::next(val->array_range().begin(), trim_end_index + 1);
+      trim_end_it = GetJsonArrayIterator(val, trim_end_index + 1);
     }
 
     *val = jsoncons::json_array<JsonType>(trim_start_it, trim_end_it);
@@ -1055,38 +1059,28 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
   // If at least one index isn't valid within an array in the json doc, the operation is discarded.
   // Negative indexes start from the end of the array.
   auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<size_t> {
-    if (out_of_boundaries_encountered) {
+    if (out_of_boundaries_encountered || !val->is_array()) {
       return {};
     }
 
-    if (!val->is_array()) {
-      return {};
-    }
+    size_t array_size = val->size();
+    size_t insert_before_index;
 
-    size_t removal_index;
     if (index < 0) {
-      if (val->empty()) {
+      if (static_cast<size_t>(-index) > array_size) {
         out_of_boundaries_encountered = true;
         return {};
       }
-
-      int temp_index = index + val->size();
-      if (temp_index < 0) {
-        out_of_boundaries_encountered = true;
-        return {};
-      }
-
-      removal_index = temp_index;
+      insert_before_index = array_size + index;
     } else {
-      if ((size_t)index > val->size()) {
+      if (static_cast<size_t>(index) > val->size()) {
         out_of_boundaries_encountered = true;
         return {};
       }
-
-      removal_index = index;
+      insert_before_index = index;
     }
 
-    auto it = next(val->array_range().begin(), removal_index);
+    auto it = GetJsonArrayIterator(val, insert_before_index);
     for (auto& new_val : new_values) {
       it = val->insert(it, new_val);
       it++;
@@ -1130,38 +1124,41 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
       return -1;
     }
 
-    // Negative value or out-of-range index is handled by rounding the index to the array's start
-    // and end. example: for array size 9 and index -11 the index mapped to index 7.
-    if (start_index < 0) {
-      start_index %= val.size();
-      start_index += val.size();
+    size_t array_size = val.size();
+
+    if (start_index < 0 && static_cast<size_t>(-start_index) > array_size) {
+      return -1;
     }
 
-    // See the comment above.
-    // A value index of 0 means searching until the end of the array.
-    if (end_index == 0) {
-      end_index = val.size();
-    } else if (end_index < 0) {
-      end_index %= val.size();
-      end_index += val.size();
+    size_t pos_start_index = NormalizeNegativeIndex(start_index, array_size);
+    size_t pos_end_index =
+        end_index == 0 ? array_size : NormalizeNegativeIndex(end_index, array_size);
+
+    if (pos_start_index >= array_size && pos_end_index < array_size) {
+      return -1;
     }
 
-    if (start_index > end_index) {
+    pos_start_index = std::min(pos_start_index, array_size - 1);
+    pos_end_index = std::min(pos_end_index, array_size - 1);
+
+    if (pos_start_index > pos_end_index) {
       return -1;
     }
 
     size_t pos = -1;
-    auto it = next(val.array_range().begin(), start_index);
+    auto it = GetJsonArrayIterator(val, pos_start_index);
     while (it != val.array_range().end()) {
       if (JsonAreEquals(search_val, *it)) {
-        pos = start_index;
+        pos = pos_start_index;
+        break;
+      }
+
+      if (pos_start_index == pos_end_index) {
         break;
       }
 
       ++it;
-      if (++start_index == end_index) {
-        break;
-      }
+      pos_start_index++;
     }
 
     return pos;
@@ -1686,11 +1683,6 @@ void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
 
   if (!absl::SimpleAtoi(ArgS(args, 3), &stop_index)) {
     VLOG(1) << "Failed to parse array stop index";
-    cntx->SendError(kInvalidIntErr);
-    return;
-  }
-
-  if (stop_index < 0) {
     cntx->SendError(kInvalidIntErr);
     return;
   }
