@@ -29,10 +29,6 @@ void CapturingReplyBuilder::SendMGetResponse(MGetResponse resp) {
 }
 
 void CapturingReplyBuilder::SendError(OpStatus status) {
-  if (status != OpStatus::OK) {
-    last_error_ = StatusToMsg(status);
-  }
-
   SKIP_LESS(ReplyMode::ONLY_ERR);
   Capture(status);
 }

@@ -2103,9 +2103,6 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     )
     await seeder.run(target_deviation=0.1)
 
-    info = await c_master.info("memory")
-    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
-
     info = await c_master.info("stats")
     assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
 

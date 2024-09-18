@@ -1388,7 +1388,6 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   ReplyGuard reply_guard(cntx, cid->name());
 #endif
   uint64_t invoke_time_usec = 0;
-  // DCHECK(cntx->reply_builder()->ConsumeLastError().empty()); TODO check why this fails
   try {
     invoke_time_usec = cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
@@ -1399,7 +1398,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   std::string reason = cntx->reply_builder()->ConsumeLastError();
 
   if (!reason.empty()) {
-    VLOG(1) << FailedCommandToString(cid->name(), tail_args, reason);
+    VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
 
