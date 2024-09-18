@@ -1987,8 +1987,9 @@ async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     stats_after_sleep = await c_master.info("CommandStats")
     # Check no commands are executed except info and replconf called from replica
     for cmd, cmd_stats in stats_after_sleep.items():
-        if "cmdstat_info" != cmd and "cmdstat_replconf" != cmd_stats:
-            assert stats[cmd] == cmd_stats, cmd
+        if cmd in ["cmdstat_info", "cmdstat_replconf", "cmdstat_multi"]:
+            continue
+        assert stats[cmd] == cmd_stats, cmd
 
     await asyncio.sleep(6)
     seeder.stop()

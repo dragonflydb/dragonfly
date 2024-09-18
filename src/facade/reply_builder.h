@@ -138,7 +138,7 @@ class SinkReplyBuilder {
 
   void ExpectReply();
   bool HasReplied() const {
-    return true;  // WE break it for now
+    return has_replied_;
   }
 
   virtual size_t UsedMemory() const;
@@ -152,6 +152,10 @@ class SinkReplyBuilder {
   virtual void StartAggregate();
   virtual void StopAggregate();
 
+  std::string ConsumeLastError() {
+    return std::exchange(last_error_, std::string{});
+  }
+
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
 
@@ -160,6 +164,9 @@ class SinkReplyBuilder {
   std::string batch_;
   ::io::Sink* sink_;
   std::error_code ec_;
+
+  // msg and kind/type
+  std::string last_error_;
 
   bool should_batch_ : 1;
 

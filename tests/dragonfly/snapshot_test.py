@@ -309,14 +309,15 @@ async def test_info_persistence_field(async_client):
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
-    "DRAGONFLY_S3_BUCKET" not in os.environ, reason="AWS S3 snapshots bucket is not configured"
+    "DRAGONFLY_S3_BUCKET" not in os.environ or os.environ["DRAGONFLY_S3_BUCKET"] == "",
+    reason="AWS S3 snapshots bucket is not configured",
 )
 @dfly_args({**BASIC_ARGS, "dir": "s3://{DRAGONFLY_S3_BUCKET}{DRAGONFLY_TMP}", "dbfilename": ""})
-async def test_s3_snapshot(self, async_client):
+async def test_s3_snapshot(async_client, tmp_dir):
     seeder = StaticSeeder(key_target=10_000)
     await seeder.run(async_client)
 
-    start_capture = await StaticSeeder.capture()
+    start_capture = await StaticSeeder.capture(async_client)
 
     try:
         # save + flush + load
@@ -325,7 +326,7 @@ async def test_s3_snapshot(self, async_client):
         await async_client.execute_command(
             "DFLY LOAD "
             + os.environ["DRAGONFLY_S3_BUCKET"]
-            + str(self.tmp_dir)
+            + str(tmp_dir)
             + "/snapshot-summary.dfs"
         )
 
@@ -349,7 +350,7 @@ async def test_s3_snapshot(self, async_client):
 
         delete_objects(
             os.environ["DRAGONFLY_S3_BUCKET"],
-            str(self.tmp_dir)[1:],
+            str(tmp_dir)[1:],
         )
 
 
