@@ -15,11 +15,13 @@
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 #include <jsoncons_ext/mergepatch/mergepatch.hpp>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
+#include "core/mi_memory_resource.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
@@ -36,7 +38,6 @@
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
-ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 
 namespace dfly {
 
@@ -50,6 +51,34 @@ using JsonReplaceVerify = std::function<void(JsonType&)>;
 using CI = CommandId;
 
 namespace {
+
+class JsonMemTracker {
+ public:
+  JsonMemTracker() {
+    start_size_ = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+  }
+
+  void SetJsonSize(PrimeValue& pv, bool is_op_set) {
+    const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
+    // If the diff is 0 it means the object use the same memory as before. No action needed.
+    if (diff == 0) {
+      return;
+    }
+    // If op_set_ it means we JSON.SET or JSON.MSET was called. This is a blind update,
+    // and because the operation sets the size to 0 we also need to include the size of
+    // the pointer.
+    if (is_op_set) {
+      diff += static_cast<int64_t>(mi_usable_size(pv.GetJson()));
+    }
+    pv.SetJsonSize(diff);
+    // Under any flow we must not end up with this special value.
+    DCHECK(pv.MallocUsed() != 0);
+  }
+
+ private:
+  size_t start_size_{0};
+};
 
 template <typename T> using ParseResult = io::Result<T, std::string>;
 
@@ -287,7 +316,7 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
   }
 }
 
-facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
+OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view key, JsonType value) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -297,7 +326,7 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
-  if (absl::GetFlag(FLAGS_experimental_flat_json)) {
+  if (JsonEnconding() == kEncodingJsonFlat) {
     flexbuffers::Builder fbb;
     json::FromJsonType(value, &fbb);
     fbb.Finish();
@@ -307,7 +336,7 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
     res.it->second.SetJson(std::move(value));
   }
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
-  return OpStatus::OK;
+  return std::move(res);
 }
 
 size_t NormalizeNegativeIndex(int index, size_t size) {
@@ -591,6 +620,8 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_a
   auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
 
+  JsonMemTracker mem_tracker;
+
   PrimeValue& pv = it_res->it->second;
 
   JsonType* json_val = pv.GetJson();
@@ -606,6 +637,8 @@ OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_a
     options.verify_op(*json_val);
   }
 
+  // we need to manually run this before the PostUpdater run
+  mem_tracker.SetJsonSize(pv, false);
   it_res->post_updater.Run();
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
@@ -875,15 +908,23 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     return static_cast<long>(db_slice.Del(op_args.db_cntx, it));
   }
-  OpResult<JsonType*> result = GetJson(op_args, key);
-  if (!result) {
+  JsonMemTracker tracker;
+  // FindMutable because we need to run the AutoUpdater at the end which will account
+  // the deltas calculated from the MemoryTracker
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  if (!it_res) {
     return 0;
   }
+
+  PrimeValue& pv = it_res->it->second;
+  JsonType* json_val = pv.GetJson();
+
+  absl::Cleanup update_size_on_exit([tracker, &pv]() mutable { tracker.SetJsonSize(pv, false); });
 
   if (json_path.HoldsJsonPath()) {
     const json::Path& path = json_path.AsJsonPath();
     long deletions = json::MutatePath(
-        path, [](optional<string_view>, JsonType* val) { return true; }, *result);
+        path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
     return deletions;
   }
 
@@ -893,7 +934,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = json_path.Mutate<Nothing>(result.value(), std::move(cb));
+  auto res = json_path.Mutate<Nothing>(json_val, std::move(cb));
   RETURN_ON_BAD_STATUS(res);
 
   if (deletion_items.empty()) {
@@ -911,7 +952,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   }
 
   std::error_code ec;
-  jsoncons::jsonpatch::apply_patch(*result.value(), patch, ec);
+  jsoncons::jsonpatch::apply_patch(*json_val, patch, ec);
   if (ec) {
     VLOG(1) << "Failed to apply patch on json with error: " << ec.message();
     return 0;
@@ -1259,10 +1300,18 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    OpStatus st = SetJson(op_args, key, std::move(parsed_json.value()));
-    if (st != OpStatus::OK) {
-      return st;
+    JsonMemTracker mem_tracker;
+    // We need to deep copy parsed_json.value() and not use move! The reason is that otherwise
+    // it's really difficult to properly track memory deltas because even if we move below,
+    // the deallocation of parsed_json won't happen in the scope of SetJson but in the scope
+    // of this function. Because of this, the memory tracking will be off. Another solution here,
+    // is to use absl::Cleanup and dispatch another Find() but that's too complicated because then
+    // you need to take into account the order of destructors.
+    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, parsed_json.value());
+    if (st.status() != OpStatus::OK) {
+      return st.status();
     }
+    mem_tracker.SetJsonSize(st->it->second, st->is_new);
     return true;
   }
 
@@ -1278,6 +1327,9 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     path_exists = true;
     if (!is_nx_condition) {
       operation_result = true;
+      static_assert(
+          std::is_same_v<std::allocator_traits<JsonType>::propagate_on_container_copy_assignment,
+                         std::false_type>);
       *val = new_json;
     }
     return {};
@@ -1307,9 +1359,13 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     return OpStatus::OK;
   };
 
+  // JsonMutateOperation uses it's own JsonMemTracker. It will work, because updates to already
+  // existing json keys use copy assign, so we don't really need to account for the memory
+  // allocated by ShardJsonFromString above since it's not being moved here at all.
   auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb),
                                           MutateOperationOptions{std::move(inserter), {}});
   RETURN_ON_BAD_STATUS(res);
+
   return operation_result;
 }
 
@@ -1361,8 +1417,6 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  // DCHECK(!json_path.HoldsJsonPath());
-
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";

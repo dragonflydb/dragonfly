@@ -1,6 +1,7 @@
 import pytest
 from redis import asyncio as aioredis
 from .utility import *
+import logging
 
 
 @pytest.mark.opt_only
@@ -30,11 +31,19 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
     print(f"Running {cmd}")
     await client.execute_command(cmd)
 
-    await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
+    await asyncio.sleep(2)  # Wait for another RSS heartbeat update in Dragonfly
 
     info = await client.info("memory")
-    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+    logging.info(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
     assert info["used_memory"] > min_rss, "Weak testcase: too little used memory"
-    assert info["used_memory_rss"] - info["used_memory"] < max_unaccounted
+    delta = info["used_memory_rss"] - info["used_memory"]
+    # It could be the case that the machine is configured to use swap if this assertion fails
+    assert delta > 0
+    assert delta < max_unaccounted
+    delta = info["used_memory_rss"] - info["object_used_memory"]
+    # TODO investigate why it fails on string
+    if type == "json":
+        assert delta > 0
+        assert delta < max_unaccounted
 
     await disconnect_clients(client)

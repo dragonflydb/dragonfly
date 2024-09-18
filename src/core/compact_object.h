@@ -12,6 +12,7 @@
 
 #include "base/pmr/memory_resource.h"
 #include "core/json/json_object.h"
+#include "core/mi_memory_resource.h"
 #include "core/small_string.h"
 #include "core/string_or_view.h"
 
@@ -100,6 +101,8 @@ struct TieredColdRecord;
 using CompactObjType = unsigned;
 
 constexpr CompactObjType kInvalidCompactObjType = std::numeric_limits<CompactObjType>::max();
+
+uint32_t JsonEnconding();
 
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
@@ -309,6 +312,8 @@ class CompactObj {
   // into here, no copying is allowed!
   void SetJson(JsonType&& j);
   void SetJson(const uint8_t* buf, size_t len);
+  // Adjusts the size used by json
+  void SetJsonSize(int64_t size);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
@@ -445,13 +450,21 @@ class CompactObj {
     };
   } __attribute__((packed));
 
+  struct JsonConsT {
+    JsonType* json_ptr;
+    size_t bytes_used;
+  };
+
+  struct FlatJsonT {
+    uint32_t json_len;
+    uint8_t* flat_ptr;
+  };
+
   struct JsonWrapper {
     union {
-      JsonType* json_ptr;
-      uint8_t* flat_ptr;
+      JsonConsT cons;
+      FlatJsonT flat;
     };
-    uint32_t json_len = 0;
-    uint8_t encoding = 0;
   };
 
   // My main data structure. Union of representations.
@@ -475,7 +488,7 @@ class CompactObj {
   } u_;
 
   //
-  static_assert(sizeof(u_) == 16, "");
+  static_assert(sizeof(u_) == 16);
 
   uint8_t mask_ = 0;
 

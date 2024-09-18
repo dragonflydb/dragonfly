@@ -1043,11 +1043,17 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     std::memcpy(lp, src_lp, bytes);
     pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
   } else if (rdb_type_ == RDB_TYPE_JSON) {
-    auto json = JsonFromString(blob, CompactObj::memory_resource());
-    if (!json) {
-      ec_ = RdbError(errc::bad_json_string);
+    size_t start_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    {
+      auto json = JsonFromString(blob, CompactObj::memory_resource());
+      if (!json) {
+        ec_ = RdbError(errc::bad_json_string);
+      }
+      pv_->SetJson(std::move(*json));
     }
-    pv_->SetJson(std::move(*json));
+    size_t end_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    DCHECK(end_size > start_size);
+    pv_->SetJsonSize(end_size - start_size);
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
