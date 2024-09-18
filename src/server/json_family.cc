@@ -1312,7 +1312,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     // is to use absl::Cleanup and dispatch another Find() but that's too complicated because then
     // you need to take into account the order of destructors.
     OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, parsed_json.value());
-    if (st != OpStatus::OK) {
+    if (st.status() != OpStatus::OK) {
       return st.status();
     }
     mem_tracker.SetJsonSize(st->it->second, st->is_new);
