@@ -1813,7 +1813,13 @@ TEST_F(JsonFamilyTest, ArrPopLegacy) {
   ASSERT_THAT(resp, "OK");
 
   resp = Run({"JSON.ARRPOP", "json", "."});
-  EXPECT_THAT(resp, ErrArg("wrong JSON type of path value"));
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  resp = Run({"JSON.SET", "json", ".", "[]"});
+  ASSERT_THAT(resp, "OK");
+
+  resp = Run({"JSON.ARRPOP", "json", "."});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
 TEST_F(JsonFamilyTest, ArrTrim) {
