@@ -78,7 +78,7 @@ async def test_rss_oom_ratio(df_factory):
     await admin_client.ping()
 
     info = await admin_client.info("memory")
-    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+    logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
 
     reject_limit = 256 * 1024 * 1024  # 256mb
     assert info["used_memory_rss"] > reject_limit
@@ -105,7 +105,7 @@ async def test_rss_oom_ratio(df_factory):
     await asyncio.sleep(2)  # Wait for another RSS heartbeat update in Dragonfly
 
     info = await admin_client.info("memory")
-    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+    logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
     assert info["used_memory_rss"] < reject_limit
 
     # now new client create shoud not fail

@@ -141,4 +141,4 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
     await seeder.run(target_deviation=0.1)
 
     info = await c_master.info("stats")
-    assert info["evicted_keys"] > 0, f"Weak testcase: policy based eviction was not triggered."
+    assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
