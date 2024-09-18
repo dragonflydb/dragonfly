@@ -591,6 +591,7 @@ class DflySeeder:
             pipe = client.pipeline(transaction=tx_data[1])
             for cmd in tx_data[0]:
                 pipe.execute_command(*cmd)
+                # logging.debug(f"runing cmd: {cmd}")
 
             try:
                 await pipe.execute()
@@ -598,6 +599,7 @@ class DflySeeder:
                 if self.stop_on_failure:
                     await self._close_client(client)
                     raise SystemExit(e)
+                logging.debug(f"failed with error {e}")
             except Exception as e:
                 await self._close_client(client)
                 raise SystemExit(e)
