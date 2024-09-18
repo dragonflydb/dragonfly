@@ -15,6 +15,7 @@
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 #include <jsoncons_ext/mergepatch/mergepatch.hpp>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/flatbuffers.h"
@@ -52,39 +53,15 @@ using CI = CommandId;
 
 namespace {
 
-// This class should be used before any json is allocated within a flow and must be destructed
-// last. If it's constructed first locally it will be destructed last as the order of
-// destructors in C++ is the opposite of constructors. If this condition is ever violated
-// the memory tracking will be off, because we must first destruct the temporaries
-// created in json flows and then calculate how much memory is left and assign that to the
-// json object within the CompactObject to get an accurate result.
-// It uses RAII to set the memory usage of json objects.
 class JsonMemTracker {
  public:
-  explicit JsonMemTracker(const OpArgs& args, std::string_view key, bool op_set = false)
-      : op_args_(args), key_(key), op_set_{op_set} {
+  JsonMemTracker() {
     start_size_ = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
-    auto it_res = op_args_.GetDbSlice().FindMutable(op_args_.db_cntx, key_, OBJ_JSON);
-    if (it_res.ok()) {
-      it_ = std::move(it_res);
-      PrimeValue& pv = it_res->it->second;
-      already_existing_value_size_ = pv.MallocUsed();
-    }
   }
 
-  ~JsonMemTracker() {
-    if (!it_) {
-      it_ = op_args_.GetDbSlice().FindMutable(op_args_.db_cntx, key_, OBJ_JSON);
-    }
-    // Key doesn't exist. This is for flows that exit early or deleted the key like
-    // JSON.DEL with root path.
-    if (!it_) {
-      return;
-    }
-
+  void SetJsonSize(PrimeValue& pv, bool is_op_set) {
     const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
     int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
-    PrimeValue& pv = it_->it->second;
     // If the diff is 0 it means the object uses the same memory as before. No actio needed.
     if (diff == 0) {
       return;
@@ -92,7 +69,7 @@ class JsonMemTracker {
     // If op_set_ it means we JSON.SET or JSON.MSET was called. This is a blind update,
     // and because the operation sets the size to 0 we also need to include the size of
     // the pointer.
-    if (op_set_) {
+    if (is_op_set) {
       diff += static_cast<int64_t>(mi_usable_size(pv.GetJson()));
     }
     pv.SetJsonSize(diff);
@@ -101,12 +78,7 @@ class JsonMemTracker {
   }
 
  private:
-  const OpArgs& op_args_;
-  std::string_view key_;
-  bool op_set_;
   size_t start_size_{0};
-  size_t already_existing_value_size_{0};
-  OpResult<DbSlice::ItAndUpdater> it_{OpStatus::KEY_NOTFOUND};
 };
 
 template <typename T> using ParseResult = io::Result<T, std::string>;
@@ -304,7 +276,7 @@ std::optional<JsonGetParams> ParseJsonGetParams(CmdArgParser* parser, Connection
   return parsed_args;
 }
 
-facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
+OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view key, JsonType value) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -324,7 +296,7 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
     res.it->second.SetJson(std::move(value));
   }
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
-  return OpStatus::OK;
+  return std::move(res);
 }
 
 string JsonTypeToName(const JsonType& val) {
@@ -581,6 +553,8 @@ OpResult<JsonCallbackResult<optional<T>>> UpdateEntry(const OpArgs& op_args, std
   auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
 
+  JsonMemTracker mem_tracker;
+
   PrimeValue& pv = it_res->it->second;
 
   JsonType* json_val = pv.GetJson();
@@ -596,6 +570,8 @@ OpResult<JsonCallbackResult<optional<T>>> UpdateEntry(const OpArgs& op_args, std
     verify_op(*json_val);
   }
 
+  // we need to manually run this before the PostUpdater run
+  mem_tracker.SetJsonSize(pv, false);
   it_res->post_updater.Run();
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
@@ -734,7 +710,6 @@ OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_vie
 template <typename T>
 auto OpToggle(const OpArgs& op_args, string_view key,
               const WrappedJsonPath& json_path) {  // TODO(change the output type for enhanced path)
-  JsonMemTracker tracker(op_args, key);
   auto cb = [](std::optional<std::string_view>,
                JsonType* val) -> MutateCallbackResult<std::optional<T>> {
     if (val->is_bool()) {
@@ -788,7 +763,6 @@ void BinOpApply(double num, bool num_is_double, ArithmeticOpType op, JsonType* v
 OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
                                     const WrappedJsonPath& json_path, double num,
                                     ArithmeticOpType op_type) {
-  JsonMemTracker tracker(op_args, key);
   bool is_result_overflow = false;
   double int_part;
   bool has_fractional_part = (modf(num, &int_part) != 0);
@@ -858,16 +832,23 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     return static_cast<long>(db_slice.Del(op_args.db_cntx, it));
   }
-  JsonMemTracker tracker(op_args, key);
-  OpResult<JsonType*> result = GetJson(op_args, key);
-  if (!result) {
+  JsonMemTracker tracker;
+  // FindMutable because we need to run the AutoUpdater at the end which will account
+  // the deltas calculated from the MemoryTracker
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  if (!it_res) {
     return 0;
   }
+
+  PrimeValue& pv = it_res->it->second;
+  JsonType* json_val = pv.GetJson();
+
+  absl::Cleanup update_size_on_exit([tracker, &pv]() mutable { tracker.SetJsonSize(pv, false); });
 
   if (json_path.HoldsJsonPath()) {
     const json::Path& path = json_path.AsJsonPath();
     long deletions = json::MutatePath(
-        path, [](optional<string_view>, JsonType* val) { return true; }, *result);
+        path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
     return deletions;
   }
 
@@ -877,7 +858,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = json_path.Mutate<Nothing>(result.value(), std::move(cb));
+  auto res = json_path.Mutate<Nothing>(json_val, std::move(cb));
   RETURN_ON_BAD_STATUS(res);
 
   if (deletion_items.empty()) {
@@ -895,7 +876,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   }
 
   std::error_code ec;
-  jsoncons::jsonpatch::apply_patch(*result.value(), patch, ec);
+  jsoncons::jsonpatch::apply_patch(*json_val, patch, ec);
   if (ec) {
     VLOG(1) << "Failed to apply patch on json with error: " << ec.message();
     return 0;
@@ -927,7 +908,6 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
 
 OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_view key,
                                                   const WrappedJsonPath& path, string_view value) {
-  JsonMemTracker tracker(op_args, key);
   auto cb = [&](optional<string_view>, JsonType* val) -> MutateCallbackResult<size_t> {
     if (!val->is_string())
       return {};
@@ -944,7 +924,6 @@ OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_
 // Returns the numbers of values cleared.
 // Clears containers(arrays or objects) and zeroing numbers.
 OpResult<long> OpClear(const OpArgs& op_args, string_view key, const WrappedJsonPath& path) {
-  JsonMemTracker tracker(op_args, key);
   long clear_items = 0;
 
   auto cb = [&clear_items](std::optional<std::string_view>,
@@ -972,7 +951,6 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, const WrappedJson
 
 // Returns string vector that represents the pop out values.
 auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int index) {
-  JsonMemTracker tracker(op_args, key);
   auto cb = [index](std::optional<std::string_view>,
                     JsonType* val) -> MutateCallbackResult<std::string> {
     if (!val->is_array() || val->empty()) {
@@ -1009,7 +987,6 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
 // Returns numeric vector that represents the new length of the array at each path.
 auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& path, int start_index,
                int stop_index) {
-  JsonMemTracker tracker(op_args, key);
   auto cb = [&](optional<string_view>, JsonType* val) -> MutateCallbackResult<size_t> {
     if (!val->is_array()) {
       return {};
@@ -1053,7 +1030,6 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
 OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_view key,
                                                   const WrappedJsonPath& json_path, int index,
                                                   const vector<JsonType>& new_values) {
-  JsonMemTracker tracker(op_args, key);
   bool out_of_boundaries_encountered = false;
 
   // Insert user-supplied value into the supplied index that should be valid.
@@ -1108,7 +1084,6 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
 
 auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& path,
                  const vector<JsonType>& append_values) {
-  JsonMemTracker tracker(op_args, key);
   auto cb = [&](std::optional<std::string_view>,
                 JsonType* val) -> MutateCallbackResult<std::optional<std::size_t>> {
     if (!val->is_array()) {
@@ -1245,7 +1220,6 @@ auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path, std::string_view json_str,
                      bool is_nx_condition, bool is_xx_condition) {
-  JsonMemTracker tracker(op_args, key, true);
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
@@ -1269,10 +1243,18 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    OpStatus st = SetJson(op_args, key, std::move(parsed_json.value()));
+    JsonMemTracker mem_tracker;
+    // We need to deep copy parsed_json.value() and not use move! The reason is that otherwise
+    // it's really difficult to properly track memory deltas because even if we move below,
+    // the deallocation of parsed_json won't happen in the scope of SetJson but in the scope
+    // of this function. Because of this, the memory tracking will be off. Another solution here,
+    // is to use absl::Cleanup and dispatch another Find() but that's too complicated because then
+    // you need to take into account the order of destructors.
+    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, parsed_json.value());
     if (st != OpStatus::OK) {
-      return st;
+      return st.status();
     }
+    mem_tracker.SetJsonSize(st->it->second, st->is_new);
     return true;
   }
 
@@ -1320,6 +1302,9 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     return OpStatus::OK;
   };
 
+  // UpdateEntry uses it's own JsonMemTracker. It will work, because updates to already
+  // existing json keys use copy assign, so we don't really need to account for the memory
+  // allocated by ShardJsonFromString above since it's not being moved here at all.
   auto res = UpdateEntry<Nothing>(op_args, key, json_path, std::move(cb), inserter);
   RETURN_ON_BAD_STATUS(res);
 
@@ -1374,7 +1359,6 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  JsonMemTracker tracker(op_args, key);
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
