@@ -5,7 +5,7 @@ from redis import asyncio as aioredis
 from .utility import *
 from . import dfly_args
 
-BASE_PORT = 40001
+BASE_PORT = 30001
 
 
 async def insert_cluster_data(cluster_client: redis.RedisCluster):
