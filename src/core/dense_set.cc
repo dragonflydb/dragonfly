@@ -25,6 +25,8 @@ constexpr size_t kMinSizeShift = 2;
 constexpr size_t kMinSize = 1 << kMinSizeShift;
 constexpr bool kAllowDisplacements = true;
 
+#define PREFETCH_READ(x) __builtin_prefetch(x, 0, 1)
+
 DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
     : owner_(const_cast<DenseSet*>(owner)), curr_entry_(nullptr) {
   curr_list_ = is_end ? owner_->entries_.end() : owner_->entries_.begin();
@@ -198,8 +200,13 @@ bool DenseSet::Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const {
 }
 
 void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const {
+  // We handle a batch of items to minimize data dependencies when accessing memory for a single
+  // item. We prefetch the memory for entire batch before actually reading data from any of the
+  // elements.
   while (len) {
     unsigned dest_id = 0;
+    // we walk "len" linked lists in parallel, and prefetch their next, obj pointers
+    // before actually processing them.
     for (unsigned i = 0; i < len; ++i) {
       auto& src = items[i];
       if (src.obj) {
@@ -228,12 +235,14 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
             dest.link = link;
           } else {
             dest.link = link->next.AsLink();
-            __builtin_prefetch(dest.link, 0, 1);
+            PREFETCH_READ(dest.link);
           }
         }
-        __builtin_prefetch(dest.obj, 0, 1);
+        PREFETCH_READ(dest.obj);
       }
     }
+
+    // update the length of the batch for the next iteration.
     len = dest_id;
   }
 }
@@ -322,11 +331,11 @@ void DenseSet::Fill(DenseSet* other) const {
       if (ptr->IsObject()) {
         arr[len].link = nullptr;
         arr[len].obj = ptr->Raw();
-        __builtin_prefetch(arr[len].obj, 0, 1);
+        PREFETCH_READ(arr[len].obj);
       } else {
         arr[len].link = ptr->AsLink();
         arr[len].obj = nullptr;
-        __builtin_prefetch(arr[len].link, 0, 1);
+        PREFETCH_READ(arr[len].link);
       }
 
       ++len;
