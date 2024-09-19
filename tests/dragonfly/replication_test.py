@@ -1290,7 +1290,7 @@ async def test_take_over_seeder(
     def assert_master_exists():
         assert master.proc.poll() == 0, "Master process did not exit correctly."
 
-    assert_master_exists()
+    await assert_master_exists()
 
     master.start()
     c_master = master.client()
