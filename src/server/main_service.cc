@@ -1172,6 +1172,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
+  absl::Cleanup clear_last_error(
+      [cntx]() { std::ignore = cntx->reply_builder()->ConsumeLastError(); });
   CHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
@@ -1375,7 +1377,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   ReplyGuard reply_guard(cntx, cid->name());
 #endif
   uint64_t invoke_time_usec = 0;
-  DCHECK(cntx->reply_builder()->ConsumeLastError().empty());
+  auto last_error = cntx->reply_builder()->ConsumeLastError();
+  DCHECK(last_error.empty());
   try {
     invoke_time_usec = cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
