@@ -877,7 +877,8 @@ bool CompactObj::HasAllocated() const {
 
 bool CompactObj::TagAllowsEmptyValue() const {
   const auto type = ObjType();
-  return type == OBJ_JSON || type == OBJ_STREAM || type == OBJ_STRING || type == OBJ_SBF;
+  return type == OBJ_JSON || type == OBJ_STREAM || type == OBJ_STRING || type == OBJ_SBF ||
+         type == OBJ_SET;
 }
 
 void __attribute__((noinline)) CompactObj::GetString(string* res) const {
