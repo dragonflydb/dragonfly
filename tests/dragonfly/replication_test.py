@@ -1287,7 +1287,7 @@ async def test_take_over_seeder(
     await info_task
 
     @assert_eventually
-    def assert_master_exists():
+    async def assert_master_exists():
         assert master.proc.poll() == 0, "Master process did not exit correctly."
 
     await assert_master_exists()
