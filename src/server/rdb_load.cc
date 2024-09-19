@@ -230,7 +230,8 @@ string ModuleTypeName(uint64_t module_id) {
 
 bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
-         type == RDB_TYPE_STREAM_LISTPACKS;
+         type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
+         type == RDB_TYPE_HASH_WITH_EXPIRY;
 }
 
 }  // namespace
