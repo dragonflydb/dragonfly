@@ -5,7 +5,6 @@ import logging
 from . import dfly_args
 
 
-
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",
