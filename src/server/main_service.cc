@@ -104,9 +104,7 @@ ABSL_FLAG(double, oom_deny_ratio, 1.1,
           "memory is above this value");
 
 ABSL_FLAG(double, rss_oom_deny_ratio, 1.1,
-          "commands with flag denyoom will return OOM when the ratio between maxmemory and rss "
-          "memory is above this value, new connections from non admin port will be rejected. To "
-          "disable set to negative value");
+          "When the ratio between maxmemory and RSS memory exceeds this value, commands marked as DENYOOM will fail with OOM error and new connections to non-admin port will be rejected. Negative value disables this feature.");
 
 ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
