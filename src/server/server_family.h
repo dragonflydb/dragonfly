@@ -337,7 +337,6 @@ class ServerFamily {
   util::AcceptServer* acceptor_ = nullptr;
   std::vector<facade::Listener*> listeners_;
   bool accepting_connections_ = true;
-  time_t global_stats_update_time_ = 0;
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable util::fb2::Mutex replicaof_mu_, save_mu_;
