@@ -932,6 +932,43 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
   return res;
 }
 
+struct SetReplies {
+  SetReplies(ConnectionContext* cntx)
+      : rb{static_cast<RedisReplyBuilder*>(cntx->reply_builder())},
+        script{cntx->conn_state.script_info} {
+    DCHECK(dynamic_cast<RedisReplyBuilder*>(cntx->reply_builder()));
+  }
+
+  void SendNumeric(OpResult<uint32_t> result) const {
+    switch (result.status()) {
+      case OpStatus::OK:
+        return rb->SendLong(result.value());
+      case OpStatus::WRONG_TYPE:
+        return rb->SendError(kWrongTypeErr);
+      default:
+        return rb->SendLong(0);
+    }
+  }
+
+  template <typename T> void Send(vector<T>* sv) {
+    if (script)  // output is sorted under scripts
+      sort(sv->begin(), sv->end());
+
+    rb->SendStringArr(*sv, RedisReplyBuilder::SET);
+  }
+
+  void Send(const ResultSetView& rsv) {
+    if (!rsv)
+      return rb->SendError(rsv.status());
+
+    SvArray arr = ToSvArray(rsv.value());
+    Send(&arr);
+  }
+
+  RedisReplyBuilder* rb;
+  bool script;
+};
+
 void SAdd(CmdArgList args, ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
   auto values = args.subspan(1);
@@ -964,14 +1001,7 @@ void SIsMember(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
-  switch (result.status()) {
-    case OpStatus::OK:
-      return cntx->SendLong(1);
-    case OpStatus::WRONG_TYPE:
-      return cntx->SendError(OpStatus::WRONG_TYPE);
-    default:
-      return cntx->SendLong(0);
-  }
+  SetReplies{cntx}.SendNumeric(result ? OpResult<uint32_t>(1) : result.status());
 }
 
 void SMIsMember(CmdArgList args, ConnectionContext* cntx) {
@@ -1030,16 +1060,9 @@ void SRem(CmdArgList args, ConnectionContext* cntx) {
   auto cb = [key, vals](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, vals, false);
   };
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
-  switch (result.status()) {
-    case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
-    case OpStatus::OK:
-      return cntx->SendLong(result.value());
-    default:
-      return cntx->SendLong(0);
-  }
+  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  SetReplies{cntx}.SendNumeric(result);
 }
 
 void SCard(CmdArgList args, ConnectionContext* cntx) {
@@ -1055,15 +1078,7 @@ void SCard(CmdArgList args, ConnectionContext* cntx) {
   };
 
   OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-
-  switch (result.status()) {
-    case OpStatus::OK:
-      return cntx->SendLong(result.value());
-    case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
-    default:
-      return cntx->SendLong(0);
-  }
+  SetReplies{cntx}.SendNumeric(result);
 }
 
 void SPop(CmdArgList args, ConnectionContext* cntx) {
@@ -1119,17 +1134,7 @@ void SDiff(CmdArgList args, ConnectionContext* cntx) {
 
   cntx->transaction->ScheduleSingleHop(std::move(cb));
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
-  if (!rsv) {
-    cntx->SendError(rsv.status());
-    return;
-  }
-
-  SvArray arr = ToSvArray(rsv.value());
-  if (cntx->conn_state.script_info) {  // sort under script
-    sort(arr.begin(), arr.end());
-  }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendStringArr(arr, RedisReplyBuilder::SET);
+  SetReplies{cntx}.Send(rsv);
 }
 
 void SDiffStore(CmdArgList args, ConnectionContext* cntx) {
@@ -1192,13 +1197,7 @@ void SMembers(CmdArgList args, ConnectionContext* cntx) {
   OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
 
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    StringVec& svec = result.value();
-
-    if (cntx->conn_state.script_info) {  // sort under script
-      sort(svec.begin(), svec.end());
-    }
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->SendStringArr(*result, RedisReplyBuilder::SET);
+    SetReplies{cntx}.Send(&result.value());
   } else {
     cntx->SendError(result.status());
   }
@@ -1248,12 +1247,7 @@ void SInter(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->ScheduleSingleHop(std::move(cb));
   OpResult<SvArray> result = InterResultVec(result_set, cntx->transaction->GetUniqueShardCnt());
   if (result) {
-    SvArray arr = std::move(*result);
-    if (cntx->conn_state.script_info) {  // sort under script
-      sort(arr.begin(), arr.end());
-    }
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->SendStringArr(arr, RedisReplyBuilder::SET);
+    SetReplies{cntx}.Send(&*result);
   } else {
     cntx->SendError(result.status());
   }
@@ -1338,16 +1332,7 @@ void SUnion(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->ScheduleSingleHop(std::move(cb));
 
   ResultSetView unionset = UnionResultVec(result_set);
-  if (unionset) {
-    SvArray arr = ToSvArray(*unionset);
-    if (cntx->conn_state.script_info) {  // sort under script
-      sort(arr.begin(), arr.end());
-    }
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->SendStringArr(arr, RedisReplyBuilder::SET);
-  } else {
-    cntx->SendError(unionset.status());
-  }
+  SetReplies{cntx}.Send(unionset);
 }
 
 void SUnionStore(CmdArgList args, ConnectionContext* cntx) {
