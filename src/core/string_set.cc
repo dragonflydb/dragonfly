@@ -133,4 +133,18 @@ void StringSet::ObjDelete(void* obj, bool has_ttl) const {
   sdsfree((sds)obj);
 }
 
+void* StringSet::ObjectClone(const void* obj, bool has_ttl) const {
+  sds src = (sds)obj;
+  if (has_ttl) {
+    size_t slen = sdslen(src);
+    char* ttlptr = src + slen + 1;
+    uint32_t at = absl::little_endian::Load32(ttlptr);
+    sds newsds = AllocImmutableWithTtl(slen, at);
+    if (slen)
+      memcpy(newsds, src, slen);
+    return newsds;
+  }
+  return sdsnewlen(src, sdslen(src));
+}
+
 }  // namespace dfly
