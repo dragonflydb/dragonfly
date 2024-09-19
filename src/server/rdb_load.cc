@@ -2479,12 +2479,16 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   DbContext db_cntx{&namespaces.GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
   DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
 
+  auto error_msg = [](const auto* item, auto db_ind) {
+    return absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
+                        item->val.rdb_type);
+  };
+
   for (const auto* item : ib) {
     PrimeValue pv;
     if (ec_ = FromOpaque(item->val, &pv); ec_) {
       if ((*ec_).value() == errc::empty_key) {
-        auto error = absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
-                                  item->val.rdb_type);
+        auto error = error_msg(item, db_ind);
         if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
           LOG(WARNING) << error;
         } else {
@@ -2498,8 +2502,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     }
     // We need this extra check because we don't return empty_key
     if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
-      LOG(WARNING) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
-                   << item->val.rdb_type;
+      LOG(WARNING) << error_msg(item, db_ind);
       continue;
     }
 
