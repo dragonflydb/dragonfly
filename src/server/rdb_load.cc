@@ -228,6 +228,11 @@ string ModuleTypeName(uint64_t module_id) {
   return string{name};
 }
 
+bool RdbTypeAllowedEmpty(int type) {
+  return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
+         type == RDB_TYPE_STREAM_LISTPACKS;
+}
+
 }  // namespace
 
 class DecompressImpl {
@@ -2478,8 +2483,13 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     PrimeValue pv;
     if (ec_ = FromOpaque(item->val, &pv); ec_) {
       if ((*ec_).value() == errc::empty_key) {
-        LOG(WARNING) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
-                     << item->val.rdb_type;
+        auto error = absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
+                                  item->val.rdb_type);
+        if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
+          LOG(WARNING) << error;
+        } else {
+          LOG(ERROR) << error;
+        }
         continue;
       }
       LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
