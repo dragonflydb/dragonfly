@@ -1081,7 +1081,7 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
   return nullopt;
 }
 
-static optional<ErrorReply> ShouldDenyOnOOM(const CommandId* cid) {
+bool ShouldDenyOnOOM(const CommandId* cid) {
   ServerState& etl = *ServerState::tlocal();
   if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
     uint64_t start_ns = absl::GetCurrentTimeNanos();
@@ -1093,17 +1093,17 @@ static optional<ErrorReply> ShouldDenyOnOOM(const CommandId* cid) {
       DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
                     << memory_stats.rss_mem << " ,limit " << max_memory_limit;
       etl.stats.oom_error_cmd_cnt++;
-      return facade::ErrorReply{kOutOfMemory};
+      return true;
     }
   }
-  return nullopt;
+  return false;
 }
 
 optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
                                                      const ConnectionContext* cntx,
                                                      CmdArgList tail_args) {
-  if (auto res = ShouldDenyOnOOM(cid); res.has_value()) {
-    return res;
+  if (ShouldDenyOnOOM(cid)) {
+    return facade::ErrorReply{kOutOfMemory};
   }
 
   return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",

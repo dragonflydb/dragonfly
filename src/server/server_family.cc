@@ -981,11 +981,6 @@ void ServerFamily::UpdateMemoryGlobalStats() {
                    // bellow runs only on one shard we return is the shard is not 0.
     return;
   }
-  time_t curr_time = time(nullptr);
-  if (curr_time == global_stats_update_time_) {  // Runs one a second.
-    return;
-  }
-  global_stats_update_time_ = curr_time;
 
   uint64_t mem_current = used_mem_current.load(std::memory_order_relaxed);
   if (mem_current > used_mem_peak.load(memory_order_relaxed)) {
@@ -999,7 +994,7 @@ void ServerFamily::UpdateMemoryGlobalStats() {
     if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
       rss_mem_peak.store(total_rss, memory_order_relaxed);
     }
-    double rss_oom_deny_ratio = absl::GetFlag(FLAGS_rss_oom_deny_ratio);
+    double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
     if (rss_oom_deny_ratio > 0) {
       size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
       if (total_rss > memory_limit && accepting_connections_) {
