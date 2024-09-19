@@ -26,7 +26,7 @@ ABSL_FLAG(vector<string>, restricted_commands, {},
           "Commands restricted to connections on the admin port");
 
 ABSL_FLAG(vector<string>, oom_deny_commands, {},
-          "aditinal commands that will be marked as denyoom");
+          "Additinal commands that will be marked as denyoom");
 namespace dfly {
 
 using namespace facade;
