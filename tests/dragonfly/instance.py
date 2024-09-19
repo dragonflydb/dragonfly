@@ -326,7 +326,7 @@ class DflyInstance:
     async def metrics(self):
         session = aiohttp.ClientSession()
         resp = await session.get(f"http://localhost:{self.port}/metrics")
-        data = await resp.text()
+        data = await resp.text(encoding="utf-8")
         await session.close()
         return {
             metric_family.name: metric_family
