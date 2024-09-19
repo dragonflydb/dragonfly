@@ -457,9 +457,12 @@ TEST_F(DflyEngineTest, OOM) {
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
   max_memory_limit = 300000;
-  shard_set->TEST_EnableCacheMode();
+
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
+  ResetService();
+
+  shard_set->TEST_EnableCacheMode();
 
   ssize_t i = 0;
   RespExpr resp;
@@ -486,11 +489,11 @@ TEST_F(DflyEngineTest, Bug207) {
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {
-  shard_set->TEST_EnableCacheMode();
+  max_memory_limit = 300000;
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
-
-  max_memory_limit = 300000;
+  ResetService();
+  shard_set->TEST_EnableCacheMode();
 
   string tmp_val(100, '.');
 
