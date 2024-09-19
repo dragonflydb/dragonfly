@@ -2337,9 +2337,9 @@ async def test_announce_ip_port(df_factory):
 
 
 @pytest.mark.asyncio
-async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory):
+async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # setting replication_timeout to a very small value to force the replica to timeout
-    master = df_factory.create(replication_timeout=50, vmodule="replica=2,dflycmd=2")
+    master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2")
     replica = df_factory.create()
 
     df_factory.start_all([master, replica])
@@ -2348,23 +2348,31 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory)
     c_replica = replica.client()
 
     await c_master.execute_command("debug", "populate", "200000", "foo", "5000")
-    seeder = SeederV2(key_target=200_000)
+    seeder = df_seeder_factory.create(port=master.port)
+    seeder_task = asyncio.create_task(seeder.run())
 
-    seeder_task = asyncio.create_task(seeder.run(c_master, target_deviation=0.1))
-    await asyncio.sleep(0.1)  # wait for seeder running
+    await asyncio.sleep(0.5)  # wait for seeder running
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await asyncio.sleep(0.2)  # wait for replication to start
+
+    # wait for full sync
+    async with async_timeout.timeout(3):
+        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.05)
+
     await c_replica.execute_command(
         "debug replica pause"
     )  # puase replica to trigger reconnect on master
-    await asyncio.sleep(0.5)
-    await c_replica.execute_command("debug replica resume")  # resume replication
-    await seeder_task
+
     await asyncio.sleep(1)
 
-    await assert_replica_reconnections(replica, 0)
+    await c_replica.execute_command("debug replica resume")  # resume replication
+
+    await asyncio.sleep(1)  # replica will start resync
+    seeder.stop()
+    await seeder_task
+
     await check_all_replicas_finished([c_replica], c_master)
+    await assert_replica_reconnections(replica, 0)
 
 
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
