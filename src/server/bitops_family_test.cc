@@ -235,6 +235,23 @@ TEST_F(BitOpsFamilyTest, SetBitMissingKey) {
   }
 }
 
+TEST_F(BitOpsFamilyTest, SetBitIncorrectValues) {
+  EXPECT_EQ(0, CheckedInt({"setbit", "foo", "0", "1"}));
+  EXPECT_THAT(Run({"setbit", "foo", "1", "-1"}),
+              ErrArg("ERR value is not an integer or out of range"));
+  EXPECT_THAT(Run({"setbit", "foo", "2", "11"}),
+              ErrArg("ERR value is not an integer or out of range"));
+  EXPECT_THAT(Run({"setbit", "foo", "3", "a"}),
+              ErrArg("ERR value is not an integer or out of range"));
+  EXPECT_THAT(Run({"setbit", "foo", "4", "O"}),
+              ErrArg("ERR value is not an integer or out of range"));
+  EXPECT_EQ(1, CheckedInt({"getbit", "foo", "0"}));
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "1"}));
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "2"}));
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "3"}));
+  EXPECT_EQ(0, CheckedInt({"getbit", "foo", "4"}));
+}
+
 const int32_t EXPECTED_VALUES_BYTES_BIT_COUNT[] = {  // got this from redis 0 as start index
     4, 7, 11, 14, 17, 21, 21, 21, 21};
 

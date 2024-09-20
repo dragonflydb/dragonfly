@@ -15,6 +15,22 @@
 
 namespace facade {
 
+// Helper class for numerical range restriction during parsing
+template <auto min, auto max> struct FInt {
+  decltype(min) value = {};
+  operator decltype(min)() {
+    return value;
+  }
+
+  static_assert(std::is_same_v<decltype(min), decltype(max)>, "inconsistent types");
+  static constexpr auto kMin = min;
+  static constexpr auto kMax = max;
+};
+
+template <class T> constexpr bool is_fint = false;
+
+template <auto min, auto max> constexpr bool is_fint<FInt<min, max>> = true;
+
 // Utility class for easily parsing command options from argument lists.
 struct CmdArgParser {
   enum ErrorType { OUT_OF_BOUNDS, SHORT_OPT_TAIL, INVALID_INT, INVALID_CASES, INVALID_NEXT };
@@ -170,13 +186,25 @@ struct CmdArgParser {
   }
 
   template <class T> T Convert(size_t idx) {
-    static_assert(std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view>,
-                  "incorrect type");
+    static_assert(
+        std::is_arithmetic_v<T> || std::is_constructible_v<T, std::string_view> || is_fint<T>,
+        "incorrect type");
     if constexpr (std::is_arithmetic_v<T>) {
       return Num<T>(idx);
     } else if constexpr (std::is_constructible_v<T, std::string_view>) {
       return static_cast<T>(SafeSV(idx));
+    } else if constexpr (is_fint<T>) {
+      return {ConvertFInt<T::kMin, T::kMax>(idx)};
     }
+  }
+
+  template <auto min, auto max> FInt<min, max> ConvertFInt(size_t idx) {
+    auto res = Num<decltype(min)>(idx);
+    if (res < min || res > max) {
+      Report(INVALID_INT, idx);
+      return {};
+    }
+    return {res};
   }
 
   std::string_view SafeSV(size_t i) const {
