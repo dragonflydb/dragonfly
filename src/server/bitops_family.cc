@@ -343,8 +343,14 @@ std::string ElementAccess::Value() const {
 
 void ElementAccess::Commit(std::string_view new_value) const {
   if (shard_) {
-    element_iter_->second.SetString(new_value);
-    post_updater_.Run();
+    if (new_value.empty() && IsNewEntry()) {
+      // No need to run, it was a new entry and it got removed
+      post_updater_.Cancel();
+      context_.GetDbSlice(shard_->shard_id()).Del(context_, element_iter_);
+    } else {
+      element_iter_->second.SetString(new_value);
+      post_updater_.Run();
+    }
   }
 }
 
@@ -1159,7 +1165,7 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(shard_bitop), false);  // we still have more work to do
   // All result from each shard
   const auto joined_results = CombineResultOp(result_set, op);
-  // Second phase - save to targe key if successful
+  // Second phase - save to target key if successful
   if (!joined_results) {
     cntx->transaction->Conclude();
     cntx->SendError(joined_results.status());

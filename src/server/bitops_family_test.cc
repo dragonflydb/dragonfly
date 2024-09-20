@@ -410,7 +410,7 @@ TEST_F(BitOpsFamilyTest, BitOpsNot) {
   // Make sure that this works with none existing key as well
   EXPECT_EQ(0, CheckedInt({"bitop", "NOT", "bit-op-not-none-existing-key-results",
                            "this-key-do-not-exists"}));
-  EXPECT_EQ(Run({"get", "bit-op-not-none-existing-key-results"}), "");
+  ASSERT_THAT(Run({"get", "bit-op-not-none-existing-key-results"}), ArgType(RespExpr::Type::NIL));
 
   // test bitop not
   resp = Run({"set", KEY_VALUES_BIT_OP[0].first, KEY_VALUES_BIT_OP[0].second});
