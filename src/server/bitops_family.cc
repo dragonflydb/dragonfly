@@ -1209,12 +1209,11 @@ void SetBit(CmdArgList args, ConnectionContext* cntx) {
   // Support for the command "SETBIT key offset new_value"
   // see https://redis.io/commands/setbit/
 
-  uint32_t offset{0};
-  int32_t value{0};
-  std::string_view key = ArgS(args, 0);
+  CmdArgParser parser(args);
+  auto [key, offset, value] = parser.Next<string_view, uint32_t, FInt<0, 1>>();
 
-  if (!absl::SimpleAtoi(ArgS(args, 1), &offset) || !absl::SimpleAtoi(ArgS(args, 2), &value)) {
-    return cntx->SendError(kInvalidIntErr);
+  if (auto err = parser.Error(); err) {
+    return cntx->SendError(err->MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
