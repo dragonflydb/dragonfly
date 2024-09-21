@@ -737,8 +737,9 @@ void DflyCmd::BreakStalledFlowsInShard() {
     int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_replication_timeout)) * 1'000'000LL;
     int64_t now = absl::GetCurrentTimeNanos();
     if (last_write_ns > 0 && last_write_ns + timeout_ns < now) {
-      VLOG(1) << "Breaking full sync for sync_id " << sync_id << " last_write_ts: " << last_write_ns
-              << ", now: " << now;
+      LOG(INFO) << "Breaking full sync for sync_id " << sync_id
+                << " last_write_ts: " << last_write_ns << ", now: " << now;
+
       deleted.push_back(sync_id);
       replica_lock.unlock();
       replica_ptr->Cancel();

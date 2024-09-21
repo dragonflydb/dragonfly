@@ -2153,7 +2153,11 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     ++keys_loaded;
+    int64_t start = absl::GetCurrentTimeNanos();
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+    int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+    LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
+
     settings.Reset();
   }  // main load loop
 
@@ -2466,7 +2470,8 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 
   while (blocked_shards_.load(memory_order_relaxed) > 0)
     ThisFiber::SleepFor(100us);
-  shard_set->Add(sid, std::move(cb));
+  bool preempted = shard_set->Add(sid, std::move(cb));
+  VLOG_IF(2, preempted) << "FlushShardAsync was throttled";
 }
 
 void RdbLoader::FlushAllShards() {
@@ -2605,6 +2610,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
   constexpr size_t kBufSize = 128;
   if (out_buf.size() >= kBufSize) {
+    // Despite being async, this function can block if the shard queue is full.
     FlushShardAsync(sid);
   }
 
