@@ -1762,8 +1762,12 @@ void ZBooleanOperation(CmdArgList args, ConnectionContext* cntx, bool is_union, 
   for (auto& op_res : maps) {
     if (op_res.status() == OpStatus::SKIPPED)
       continue;
-    if (!op_res)
+    if (!op_res) {
+      if (store) {
+        cntx->transaction->Conclude();
+      }
       return cntx->SendError(op_res.status());
+    }
 
     if (result.empty())
       result = std::move(op_res.value());
