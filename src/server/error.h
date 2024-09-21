@@ -35,11 +35,12 @@ using facade::kWrongTypeErr;
 
 #ifndef RETURN_ON_BAD_STATUS
 
-#define RETURN_ON_BAD_STATUS(x) \
-  do {                          \
-    if (!(x)) {                 \
-      return (x).status();      \
-    }                           \
+#define RETURN_ON_BAD_STATUS(x)  \
+  do {                           \
+    OpStatus __s = (x).status(); \
+    if (__s != OpStatus::OK) {   \
+      return (x).status();       \
+    }                            \
   } while (0)
 
 #endif  // RETURN_ON_BAD_STATUS
