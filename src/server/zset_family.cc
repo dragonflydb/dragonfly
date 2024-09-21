@@ -2846,7 +2846,7 @@ void GeoSearchStoreGeneric(ConnectionContext* cntx, const GeoShape& shape_ref, s
     DCHECK(geo_ops.store == GeoStoreType::kStoreDist || geo_ops.store == GeoStoreType::kStoreHash);
     ShardId dest_shard = Shard(geo_ops.store_key, shard_set->size());
     DVLOG(1) << "store shard:" << dest_shard << ", key " << geo_ops.store_key;
-    AddResult add_result;
+    OpResult<AddResult> add_result;
     vector<ScoredMemberView> smvec;
     for (const auto& p : ga) {
       if (geo_ops.store == GeoStoreType::kStoreDist) {
@@ -3065,10 +3065,19 @@ void ZSetFamily::GeoRadius(CmdArgList args, ConnectionContext* cntx) {
         i++;
       }
     } else if (cur_arg == "WITHCOORD") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withcoord = true;
     } else if (cur_arg == "WITHDIST") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withdist = true;
     } else if (cur_arg == "WITHHASH") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return cntx->SendError(kStoreCompatErr);
+      }
       geo_ops.withhash = true;
     } else if (cur_arg == "STORE") {
       if (geo_ops.store != GeoStoreType::kNoStore) {
@@ -3101,6 +3110,7 @@ void ZSetFamily::GeoRadius(CmdArgList args, ConnectionContext* cntx) {
     }
   }
   // parsing completed
+
   // member must be empty
   string_view member;
   GeoSearchStoreGeneric(cntx, shape, key, member, geo_ops);

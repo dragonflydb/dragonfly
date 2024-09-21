@@ -1160,12 +1160,13 @@ TEST_F(ZSetFamilyTest, GeoRadius) {
                             "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
                             "53.3498", "Dublin"}));
 
-  auto resp = Run(
-      {"GEORADIUS", "America", "13.4050", "52.5200", "500", "500", "KM", "WITHCOORD", "WITHDIST"});
+  auto resp = Run({"GEORADIUS", "invalid_key", "16.3738", "48.2082", "900", "KM"});
   EXPECT_THAT(resp.GetVec().empty(), true);
 
-  resp = Run(
-      {"GEORADIUS", "Europe", "130.4050", "52.5200", "10", "10", "KM", "WITHCOORD", "WITHDIST"});
+  resp = Run({"GEORADIUS", "America", "13.4050", "52.5200", "500", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"GEORADIUS", "Europe", "130.4050", "52.5200", "10", "KM", "WITHCOORD", "WITHDIST"});
   EXPECT_THAT(resp.GetVec().empty(), true);
 
   resp = Run({"GEORADIUS", "Europe", "13.4050", "52.5200", "500", "KM", "COUNT", "3", "WITHCOORD",
@@ -1188,7 +1189,7 @@ TEST_F(ZSetFamilyTest, GeoRadius) {
           RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
                                 RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))))));
 
-  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "9.1427", "38.7369", "700", "KM", "STORE",
+  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "3.7038", "40.4168", "700", "KM", "STORE",
                            "store_key"}));
   resp = Run({"ZRANGE", "store_key", "0", "-1"});
   EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
@@ -1196,7 +1197,7 @@ TEST_F(ZSetFamilyTest, GeoRadius) {
   EXPECT_THAT(resp,
               RespArray(ElementsAre("Madrid", "3471766229222696", "Lisbon", "3473121093062745")));
 
-  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "9.1427", "38.7369", "700", "KM", "STOREDIST",
+  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "3.7038", "40.4168", "700", "KM", "STOREDIST",
                            "store_dist_key"}));
   resp = Run({"ZRANGE", "store_dist_key", "0", "-1", "WITHSCORES"});
   EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "0", "Lisbon", "502.20769462704084")));
