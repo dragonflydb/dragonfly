@@ -106,7 +106,7 @@ class Transaction {
   }
 
  public:
-  // Result returned by callbacks. Most should use the implcit conversion from OpStatus.
+  // Result returned by callbacks. Most should use the implicit conversion from OpStatus.
   struct RunnableResult {
     enum Flag : uint16_t {
       // Can be issued by a **single** shard callback to avoid concluding, i.e. perform one more hop
