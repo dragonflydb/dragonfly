@@ -103,6 +103,7 @@ class ZSetFamily {
   static void GeoDist(CmdArgList args, ConnectionContext* cntx);
   static void GeoSearch(CmdArgList args, ConnectionContext* cntx);
   static void GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx);
+  static void GeoRadius(CmdArgList args, ConnectionContext* cntx);
 };
 
 }  // namespace dfly

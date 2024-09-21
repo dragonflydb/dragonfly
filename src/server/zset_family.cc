@@ -3004,6 +3004,108 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
   GeoSearchStoreGeneric(cntx, shape, key, member, geo_ops);
 }
 
+void ZSetFamily::GeoRadius(CmdArgList args, ConnectionContext* cntx) {
+  // parse arguments
+  string_view key = ArgS(args, 0);
+  GeoShape shape = {};
+  GeoSearchOpts geo_ops;
+
+  if (3 < args.size()) {
+    string_view longitude_str = ArgS(args, 1);
+    string_view latitude_str = ArgS(args, 2);
+    pair<double, double> longlat;
+    if (!ParseLongLat(longitude_str, latitude_str, &longlat)) {
+      string err =
+          absl::StrCat("-ERR invalid longitude,latitude pair ", longitude_str, ",", latitude_str);
+      return cntx->SendError(err, kSyntaxErrType);
+    }
+    shape.xy[0] = longlat.first;
+    shape.xy[1] = longlat.second;
+  } else {
+    return cntx->SendError(kSyntaxErr);
+  }
+
+  if (5 < args.size()) {
+    if (!ParseDouble(ArgS(args, 3), &shape.t.radius)) {
+      return cntx->SendError(kInvalidFloatErr);
+    }
+    string_view unit = ArgS(args, 4);
+    shape.conversion = ExtractUnit(unit);
+    geo_ops.conversion = shape.conversion;
+    if (shape.conversion == -1) {
+      return cntx->SendError("unsupported unit provided. please use M, KM, FT, MI");
+    }
+    shape.type = CIRCULAR_TYPE;
+  }
+
+  for (size_t i = 5; i < args.size(); ++i) {
+    ToUpper(&args[i]);
+
+    string_view cur_arg = ArgS(args, i);
+    if (cur_arg == "ASC") {
+      if (geo_ops.sorting != Sorting::kUnsorted) {
+        return cntx->SendError(kAscDescErr);
+      } else {
+        geo_ops.sorting = Sorting::kAsc;
+      }
+    } else if (cur_arg == "DESC") {
+      if (geo_ops.sorting != Sorting::kUnsorted) {
+        return cntx->SendError(kAscDescErr);
+      } else {
+        geo_ops.sorting = Sorting::kDesc;
+      }
+    } else if (cur_arg == "COUNT") {
+      if (i + 1 < args.size() && absl::SimpleAtoi(ArgS(args, i + 1), &geo_ops.count)) {
+        i++;
+      } else {
+        return cntx->SendError(kSyntaxErr);
+      }
+      if (i + 1 < args.size() && ArgS(args, i + 1) == "ANY") {
+        geo_ops.any = true;
+        i++;
+      }
+    } else if (cur_arg == "WITHCOORD") {
+      geo_ops.withcoord = true;
+    } else if (cur_arg == "WITHDIST") {
+      geo_ops.withdist = true;
+    } else if (cur_arg == "WITHHASH") {
+      geo_ops.withhash = true;
+    } else if (cur_arg == "STORE") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return cntx->SendError(kStoreTypeErr);
+      } else if (geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) {
+        return cntx->SendError(kStoreCompatErr);
+      }
+      if (i + 1 < args.size()) {
+        geo_ops.store_key = ArgS(args, i + 1);
+        geo_ops.store = GeoStoreType::kStoreHash;
+        i++;
+      } else {
+        return cntx->SendError(kSyntaxErr);
+      }
+    } else if (cur_arg == "STOREDIST") {
+      if (geo_ops.store != GeoStoreType::kNoStore) {
+        return cntx->SendError(kStoreTypeErr);
+      } else if (geo_ops.withcoord || geo_ops.withdist || geo_ops.withhash) {
+        return cntx->SendError(kStoreCompatErr);
+      }
+      if (i + 1 < args.size()) {
+        geo_ops.store_key = ArgS(args, i + 1);
+        geo_ops.store = GeoStoreType::kStoreDist;
+        i++;
+      } else {
+        return cntx->SendError(kSyntaxErr);
+      }
+    } else {
+      return cntx->SendError(kSyntaxErr);
+    }
+  }
+  // parsing completed
+  // member must be empty
+  string_view member;
+  GeoSearchStoreGeneric(cntx, shape, key, member, geo_ops);
+}
+
 void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
   GeoShape shape = {};
   GeoSearchOpts geo_ops;
@@ -3139,6 +3241,7 @@ constexpr uint32_t kGeoPos = READ | GEO | SLOW;
 constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
 constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
+constexpr uint32_t kGeoRadius = WRITE | GEO | SLOW;
 }  // namespace acl
 
 void ZSetFamily::Register(CommandRegistry* registry) {
@@ -3191,7 +3294,9 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
       << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
       << CI{"GEORADIUSBYMEMBER", CO::WRITE | CO::STORE_LAST_KEY, -4, 1, 1, acl::kGeoRadiusByMember}
-             .HFUNC(GeoRadiusByMember);
+             .HFUNC(GeoRadiusByMember)
+      << CI{"GEORADIUS", CO::WRITE | CO::STORE_LAST_KEY, -4, 1, 1, acl::kGeoRadius}.HFUNC(
+             GeoRadius);
 }
 
 }  // namespace dfly

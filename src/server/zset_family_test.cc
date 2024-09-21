@@ -1148,6 +1148,60 @@ TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
                            "WITHHASH and WITHCOORDS options"));
 }
 
+// GEORADIUS key longitude latitude radius <m | km | ft | mi>
+//   [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC | DESC]
+//   [STORE key | STOREDIST key]
+
+TEST_F(ZSetFamilyTest, GeoRadius) {
+  EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+
+  auto resp = Run(
+      {"GEORADIUS", "America", "13.4050", "52.5200", "500", "500", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run(
+      {"GEORADIUS", "Europe", "130.4050", "52.5200", "10", "10", "KM", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"GEORADIUS", "Europe", "13.4050", "52.5200", "500", "KM", "COUNT", "3", "WITHCOORD",
+              "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))),
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293),
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))))));
+
+  resp = Run(
+      {"GEORADIUS", "Europe", "13.4050", "52.5200", "500", "KM", "DESC", "WITHCOORD", "WITHDIST"});
+  EXPECT_THAT(
+      resp,
+      RespArray(ElementsAre(
+          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293),
+                                RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))),
+          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378),
+                                RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))))));
+
+  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "9.1427", "38.7369", "700", "KM", "STORE",
+                           "store_key"}));
+  resp = Run({"ZRANGE", "store_key", "0", "-1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
+  resp = Run({"ZRANGE", "store_key", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("Madrid", "3471766229222696", "Lisbon", "3473121093062745")));
+
+  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "9.1427", "38.7369", "700", "KM", "STOREDIST",
+                           "store_dist_key"}));
+  resp = Run({"ZRANGE", "store_dist_key", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "0", "Lisbon", "502.20769462704084")));
+}
+
 TEST_F(ZSetFamilyTest, RangeLimit) {
   auto resp = Run({"ZRANGEBYSCORE", "", "0.0", "0.0", "limit", "0"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
