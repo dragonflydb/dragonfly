@@ -2197,7 +2197,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
+  uint64_t start = absl::GetCurrentTimeNanos();
   Metrics m = GetMetrics(cntx->ns);
+  uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+  LOG_IF(INFO, delta_ms > 100) << "GetMetrics took " << delta_ms << " ms";
+
   DbStats total;
   for (const auto& db_stats : m.db_stats)
     total += db_stats;

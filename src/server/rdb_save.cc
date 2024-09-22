@@ -1118,6 +1118,8 @@ class RdbSaver::Impl {
   }
 
  private:
+  error_code WriteRecord(io::Bytes src);
+
   unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
 
   io::Sink* sink_;
@@ -1201,26 +1203,54 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
         continue;
 
       DVLOG(2) << "Pulled " << record.id;
-      last_write_time_ns_ = absl::GetCurrentTimeNanos();
-      io_error = sink_->Write(io::Buffer(record.value));
-
-      stats.rdb_save_usec += (absl::GetCurrentTimeNanos() - last_write_time_ns_) / 1'000;
-      stats.rdb_save_count++;
-      last_write_time_ns_ = -1;
+      auto start = absl::GetCurrentTimeNanos();
+      io_error = WriteRecord(io::Buffer(record.value));
       if (io_error) {
-        VLOG(1) << "Error writing to sink " << io_error.message();
-        break;
+        break;  // from the inner TryPop loop.
       }
+
+      auto delta_usec = (absl::GetCurrentTimeNanos() - start) / 1'000;
+      stats.rdb_save_usec += delta_usec;
+      stats.rdb_save_count++;
     } while ((channel_.TryPop(record)));
   }  // while (channel_.Pop())
 
   for (auto& ptr : shard_snapshots_) {
     ptr->Join();
   }
-  DVLOG(1) << "Finish ConsumeChannel";
+  VLOG(1) << "ConsumeChannel finished " << io_error;
+
   DCHECK(!channel_.TryPop(record));
 
   return io_error;
+}
+
+error_code RdbSaver::Impl::WriteRecord(io::Bytes src) {
+  // For huge values, we break them up into chunks of upto several MBs to send in a single call,
+  // so we could be more responsive.
+  error_code ec;
+  size_t start_size = src.size();
+  last_write_time_ns_ = absl::GetCurrentTimeNanos();
+  do {
+    io::Bytes part = src.subspan(0, 8_MB);
+    src.remove_prefix(part.size());
+
+    ec = sink_->Write(part);
+
+    int64_t now = absl::GetCurrentTimeNanos();
+    unsigned delta_ms = (now - last_write_time_ns_) / 1000'000;
+    last_write_time_ns_ = now;
+
+    // Log extreme timings into the log for visibility.
+    LOG_IF(INFO, delta_ms > 1000) << "Channel write took " << delta_ms << " ms while writing "
+                                  << part.size() << "/" << start_size;
+    if (ec) {
+      LOG(INFO) << "Error writing to rdb sink " << ec.message();
+      break;
+    }
+  } while (!src.empty());
+  last_write_time_ns_ = -1;
+  return ec;
 }
 
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
