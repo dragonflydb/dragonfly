@@ -17,6 +17,9 @@ spec:
   {{- if and (eq .Values.service.type "LoadBalancer") (ne .Values.service.loadBalancerIP "") }}
   loadBalancerIP: {{ .Values.service.loadBalancerIP }}
   {{- end }}
+  {{- if and (eq .Values.service.type "ClusterIP") (ne .Values.service.clusterIP "") }}
+  clusterIP: {{ .Values.service.clusterIP }}
+  {{- end }}
   ports:
     - port: {{ .Values.service.port }}
       targetPort: dragonfly
