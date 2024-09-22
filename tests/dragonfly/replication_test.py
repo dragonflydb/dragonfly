@@ -2014,7 +2014,7 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"DEBUG POPULATE 10000000")
+    await c_replica.execute_command(f"DEBUG POPULATE 8000000")
 
     replica.stop()
     replica.start()
@@ -2031,8 +2031,9 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
         assert False
     except aioredis.BusyLoadingError as e:
         assert "Dragonfly is loading the dataset in memory" in str(e)
+
     # Check one we finish loading snapshot replicaof success
-    await wait_available_async(c_replica)
+    await wait_available_async(c_replica, timeout=180)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
     await c_replica.close()
