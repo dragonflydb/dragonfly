@@ -2085,6 +2085,7 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
         maxmemory="512mb",
         logtostdout="true",
         enable_heartbeat_eviction="false",
+        rss_oom_deny_ratio=1.3,
     )
     replica = df_factory.create(proactor_threads=2)
     df_factory.start_all([master, replica])

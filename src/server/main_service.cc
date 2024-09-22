@@ -103,6 +103,11 @@ ABSL_FLAG(double, oom_deny_ratio, 1.1,
           "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
           "memory is above this value");
 
+ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
+          "When the ratio between maxmemory and RSS memory exceeds this value, commands marked as "
+          "DENYOOM will fail with OOM error and new connections to non-admin port will be "
+          "rejected. Negative value disables this feature.");
+
 ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
@@ -859,6 +864,16 @@ Service::Service(ProactorPool* pp)
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
 
+void SetOomDenyRatioOnAllThreads(double ratio) {
+  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->oom_deny_ratio = ratio; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
+void SetRssOomDenyRatioOnAllThreads(double ratio) {
+  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
 Service::~Service() {
   delete shard_set;
   shard_set = nullptr;
@@ -884,7 +899,22 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("masteruser");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
-  config_registry.RegisterMutable("oom_deny_ratio");
+
+  config_registry.RegisterMutable("oom_deny_ratio", [](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<double>();
+    if (res.has_value()) {
+      SetOomDenyRatioOnAllThreads(*res);
+    }
+    return res.has_value();
+  });
+
+  config_registry.RegisterMutable("rss_oom_deny_ratio", [](const absl::CommandLineFlag& flag) {
+    auto res = flag.TryGet<double>();
+    if (res.has_value()) {
+      SetRssOomDenyRatioOnAllThreads(*res);
+    }
+    return res.has_value();
+  });
   config_registry.RegisterMutable("pipeline_squash");
   config_registry.RegisterMutable("pipeline_queue_limit",
                                   [pool = &pp_](const absl::CommandLineFlag& flag) {
@@ -925,7 +955,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   }
 
   // Initialize shard_set with a global callback running once in a while in the shard threads.
-  shard_set->Init(shard_num, [this] { server_family_.GetDflyCmd()->BreakStalledFlowsInShard(); });
+  shard_set->Init(shard_num, [this] {
+    server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
+    server_family_.UpdateMemoryGlobalStats();
+  });
+  SetOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_oom_deny_ratio));
+  SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
@@ -1046,21 +1081,29 @@ static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
   return nullopt;
 }
 
+bool ShouldDenyOnOOM(const CommandId* cid) {
+  ServerState& etl = *ServerState::tlocal();
+  if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
+    uint64_t start_ns = absl::GetCurrentTimeNanos();
+    auto memory_stats = etl.GetMemoryUsage(start_ns);
+
+    if (memory_stats.used_mem > (max_memory_limit * etl.oom_deny_ratio) ||
+        (etl.rss_oom_deny_ratio > 0 &&
+         memory_stats.rss_mem > (max_memory_limit * etl.rss_oom_deny_ratio))) {
+      DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
+                    << memory_stats.rss_mem << " ,limit " << max_memory_limit;
+      etl.stats.oom_error_cmd_cnt++;
+      return true;
+    }
+  }
+  return false;
+}
+
 optional<ErrorReply> Service::VerifyCommandExecution(const CommandId* cid,
                                                      const ConnectionContext* cntx,
                                                      CmdArgList tail_args) {
-  ServerState& etl = *ServerState::tlocal();
-
-  if ((cid->opt_mask() & CO::DENYOOM) && etl.is_master) {
-    uint64_t start_ns = absl::GetCurrentTimeNanos();
-
-    uint64_t used_memory = etl.GetUsedMemory(start_ns);
-    double oom_deny_ratio = GetFlag(FLAGS_oom_deny_ratio);
-    if (used_memory > (max_memory_limit * oom_deny_ratio)) {
-      DLOG(WARNING) << "Out of memory, used " << used_memory << " vs limit " << max_memory_limit;
-      etl.stats.oom_error_cmd_cnt++;
-      return facade::ErrorReply{kOutOfMemory};
-    }
+  if (ShouldDenyOnOOM(cid)) {
+    return facade::ErrorReply{kOutOfMemory};
   }
 
   return VerifyConnectionAclStatus(cid, cntx, "ACL rules changed between the MULTI and EXEC",
@@ -1383,7 +1426,9 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   }
 
   std::string reason = cntx->reply_builder()->ConsumeLastError();
+
   if (!reason.empty()) {
+    VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
 
@@ -2295,12 +2340,12 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (scheduled) {
-    VLOG(1) << "Exec unlocking " << exec_info.body.size() << " commands";
+    VLOG(2) << "Exec unlocking " << exec_info.body.size() << " commands";
     cntx->transaction->UnlockMulti();
   }
 
   cntx->cid = exec_cid_;
-  VLOG(1) << "Exec completed";
+  VLOG(2) << "Exec completed";
 }
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {

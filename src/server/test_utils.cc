@@ -28,6 +28,7 @@ extern "C" {
 using namespace std;
 
 ABSL_DECLARE_FLAG(string, dbfilename);
+ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 ABSL_DECLARE_FLAG(size_t, acllog_max_len);
@@ -152,6 +153,7 @@ BaseFamilyTest::~BaseFamilyTest() {
 void BaseFamilyTest::SetUpTestSuite() {
   kInitSegmentLog = 1;
 
+  absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
   absl::SetFlag(&FLAGS_dbfilename, "");
   init_zmalloc_threadlocal(mi_heap_get_backing());
 
