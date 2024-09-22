@@ -975,6 +975,15 @@ void ServerFamily::Shutdown() {
   });
 }
 
+bool ServerFamily::HasPrivilegedInterface() {
+  for (auto* listener : listeners_) {
+    if (listener->IsPrivilegedInterface()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void ServerFamily::UpdateMemoryGlobalStats() {
   ShardId sid = EngineShard::tlocal()->shard_id();
   if (sid != 0) {  // This function is executed periodicaly on all shards. To ensure the logic
@@ -997,7 +1006,7 @@ void ServerFamily::UpdateMemoryGlobalStats() {
     double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
     if (rss_oom_deny_ratio > 0) {
       size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
-      if (total_rss > memory_limit && accepting_connections_) {
+      if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
         for (auto* listener : listeners_) {
           if (!listener->IsPrivilegedInterface()) {
             listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });

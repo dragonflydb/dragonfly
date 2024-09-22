@@ -263,6 +263,7 @@ class ServerFamily {
   void UpdateMemoryGlobalStats();
 
  private:
+  bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();
   void LoadFromSnapshot() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
