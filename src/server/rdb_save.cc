@@ -1212,8 +1212,6 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       auto delta_usec = (absl::GetCurrentTimeNanos() - start) / 1'000;
       stats.rdb_save_usec += delta_usec;
       stats.rdb_save_count++;
-      last_write_time_ns_ = -1;
-
     } while ((channel_.TryPop(record)));
   }  // while (channel_.Pop())
 
@@ -1251,7 +1249,7 @@ error_code RdbSaver::Impl::WriteRecord(io::Bytes src) {
       break;
     }
   } while (!src.empty());
-
+  last_write_time_ns_ = -1;
   return ec;
 }
 
