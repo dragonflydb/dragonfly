@@ -499,6 +499,12 @@ TEST_F(StringFamilyTest, Range) {
 
   Run({"SET", "key4", "1"});
   EXPECT_EQ(Run({"getrange", "key4", "-1", "-2"}), "");
+
+  EXPECT_EQ(CheckedInt({"SETRANGE", "key5", "1", ""}), 0);
+  EXPECT_EQ(Run({"GET", "key5"}).type, facade::RespExpr::NIL);
+
+  EXPECT_EQ(CheckedInt({"SETRANGE", "num", "6", ""}), 4);
+  EXPECT_EQ(Run({"GET", "num"}), "1234");
 }
 
 TEST_F(StringFamilyTest, IncrByFloat) {
