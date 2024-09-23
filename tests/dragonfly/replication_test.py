@@ -674,7 +674,7 @@ async def test_rewrites(df_factory):
         # Check BITOP turns into SET
         await check("BITOP OR kdest k1 k2", r"SET kdest 1100")
         c_master = master.client()
-        # See gh issue
+        # See gh issue #3528
         await c_master.execute_command(f"HSET foo bar val")
         await skip_cmd()
         await check("BITOP NOT foo tmp", r"DEL foo")
