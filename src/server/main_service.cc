@@ -2354,6 +2354,9 @@ void Service::Exec(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
+  if (cluster::IsClusterEnabled()) {
+    return cntx->SendError("PUBLISH is not supported in cluster mode yet");
+  }
   string_view channel = ArgS(args, 0);
   string_view messages[] = {ArgS(args, 1)};
 
@@ -2362,10 +2365,16 @@ void Service::Publish(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Subscribe(CmdArgList args, ConnectionContext* cntx) {
+  if (cluster::IsClusterEnabled()) {
+    return cntx->SendError("SUBSCRIBE is not supported in cluster mode yet");
+  }
   cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args));
 }
 
 void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
+  if (cluster::IsClusterEnabled()) {
+    return cntx->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
+  }
   if (args.size() == 0) {
     cntx->UnsubscribeAll(true);
   } else {
@@ -2374,10 +2383,16 @@ void Service::Unsubscribe(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::PSubscribe(CmdArgList args, ConnectionContext* cntx) {
+  if (cluster::IsClusterEnabled()) {
+    return cntx->SendError("PSUBSCRIBE is not supported in cluster mode yet");
+  }
   cntx->ChangePSubscription(true, true, args);
 }
 
 void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
+  if (cluster::IsClusterEnabled()) {
+    return cntx->SendError("PUNSUBSCRIBE is not supported in cluster mode yet");
+  }
   if (args.size() == 0) {
     cntx->PUnsubscribeAll(true);
   } else {
@@ -2429,6 +2444,9 @@ void Service::Monitor(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
+  if (cluster::IsClusterEnabled()) {
+    return cntx->SendError("PUBSUB is not supported in cluster mode yet");
+  }
   if (args.size() < 1) {
     cntx->SendError(WrongNumArgsError(cntx->cid->name()));
     return;
