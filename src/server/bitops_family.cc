@@ -285,11 +285,16 @@ class ElementAccess {
   EngineShard* shard_ = nullptr;
   mutable DbSlice::AutoUpdater post_updater_;
 
+  void SetFields(EngineShard* shard, DbSlice::AddOrFindResult res);
+
  public:
   ElementAccess(std::string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
   }
 
   OpStatus Find(EngineShard* shard);
+  // Still finds the element even if it's WRONG_TYPE. This is used for blind updates.
+  // See BITOP operation.
+  OpStatus FindAllowWrongType(EngineShard* shard);
 
   bool IsNewEntry() const {
     CHECK_NOTNULL(shard_);
@@ -317,6 +322,13 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
   return res.status() != OpStatus::KEY_NOTFOUND;
 }
 
+void ElementAccess::SetFields(EngineShard* shard, DbSlice::AddOrFindResult res) {
+  element_iter_ = res.it;
+  added_ = res.is_new;
+  shard_ = shard;
+  post_updater_ = std::move(res.post_updater);
+}
+
 OpStatus ElementAccess::Find(EngineShard* shard) {
   auto op_res = context_.GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
   RETURN_ON_BAD_STATUS(op_res);
@@ -325,10 +337,17 @@ OpStatus ElementAccess::Find(EngineShard* shard) {
   if (!add_res.is_new && add_res.it->second.ObjType() != OBJ_STRING) {
     return OpStatus::WRONG_TYPE;
   }
-  element_iter_ = add_res.it;
-  added_ = add_res.is_new;
-  shard_ = shard;
-  post_updater_ = std::move(add_res.post_updater);
+
+  SetFields(shard, std::move(add_res));
+  return OpStatus::OK;
+}
+
+OpStatus ElementAccess::FindAllowWrongType(EngineShard* shard) {
+  auto op_res = context_.GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& add_res = *op_res;
+
+  SetFields(shard, std::move(add_res));
   return OpStatus::OK;
 }
 
@@ -1179,9 +1198,11 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
     auto store_cb = [&](Transaction* t, EngineShard* shard) {
       if (shard->shard_id() == dest_shard) {
         ElementAccess operation{dest_key, t->GetOpArgs(shard)};
-        auto find_res = operation.Find(shard);
+        auto find_res = operation.FindAllowWrongType(shard);
 
-        if (find_res == OpStatus::OK) {
+        // BITOP command acts as a blind update. If the key existed and its type
+        // was not a string
+        if (find_res == OpStatus::OK || find_res == OpStatus::WRONG_TYPE) {
           operation.Commit(op_result);
 
           if (shard->journal()) {

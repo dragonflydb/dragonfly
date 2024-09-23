@@ -416,6 +416,11 @@ TEST_F(BitOpsFamilyTest, BitOpsNot) {
   EXPECT_EQ(0, CheckedInt({"bitop", "NOT", "foo", "this-key-do-not-exists"}));
   ASSERT_THAT(Run({"get", "foo"}), ArgType(RespExpr::Type::NIL));
 
+  // Change the type of foo. Bitops is similar to set command. It's a blind update.
+  ASSERT_THAT(Run({"hset", "foo", "bar", "val"}), IntArg(1));
+  EXPECT_EQ(0, CheckedInt({"bitop", "NOT", "foo", "this-key-do-not-exists"}));
+  ASSERT_THAT(Run({"get", "foo"}), ArgType(RespExpr::Type::NIL));
+
   // test bitop not
   resp = Run({"set", KEY_VALUES_BIT_OP[0].first, KEY_VALUES_BIT_OP[0].second});
   EXPECT_EQ(KEY_VALUES_BIT_OP[0].second.Size(),

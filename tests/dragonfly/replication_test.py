@@ -574,15 +574,17 @@ async def test_rewrites(df_factory):
         print("Got:", mcmd)
         return mcmd
 
-    async def is_match_rsp(rx):
+    async def is_match_rsp(rx, tmp=False):
         mcmd = await get_next_command()
+        if tmp:
+            assert mcmd == rx
         print(mcmd, rx)
         return re.match(rx, mcmd)
 
     async def skip_cmd():
         await is_match_rsp(r".*")
 
-    async def check(cmd, rx):
+    async def check(cmd, rx, tmp=False):
         await c_master.execute_command(cmd)
         match = await is_match_rsp(rx)
         assert match
@@ -673,6 +675,18 @@ async def test_rewrites(df_factory):
         await skip_cmd()
         # Check BITOP turns into SET
         await check("BITOP OR kdest k1 k2", r"SET kdest 1100")
+        c_master = master.client()
+        # See gh issue
+        await c_master.execute_command(f"HSET foo bar val")
+        await skip_cmd()
+        await check("BITOP NOT foo tmp", r"DEL foo")
+        await c_master.execute_command(f"DEL foo")
+        await skip_cmd()
+        await c_master.execute_command(f"HSET foo bar val")
+        await skip_cmd()
+        await c_master.set("k3", "-")
+        await skip_cmd()
+        await check("BITOP NOT foo k3", r"SET foo \\xd2", True)
 
         # Check there is no rewrite for LMOVE on single shard
         await c_master.lpush("list", "v1", "v2", "v3", "v4")
@@ -2659,25 +2673,5 @@ async def test_double_take_over(df_factory, df_seeder_factory):
     assert await c_master.execute_command("role") == ["master", []]
 
     assert await seeder.compare(capture, port=master.port)
-
-    await disconnect_clients(c_master, c_replica)
-
-
-@pytest.mark.asyncio
-async def test_bug_3528(df_factory):
-    master = df_factory.create()
-    replica = df_factory.create()
-    df_factory.start_all([master, replica])
-
-    c_replica = replica.client()
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(c_replica)
-
-    c_master = master.client()
-    await c_master.execute_command(f"HSET foo bar val")
-    await c_master.execute_command(f"BITOP not foo 1")
-
-    with pytest.raises(redis.exceptions.ResponseError):
-        await c_replica.execute_command(f"GET foo")
 
     await disconnect_clients(c_master, c_replica)
