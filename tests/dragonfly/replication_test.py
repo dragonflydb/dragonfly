@@ -2664,7 +2664,7 @@ async def test_double_take_over(df_factory, df_seeder_factory):
 
 
 @pytest.mark.asyncio
-async def test_bug_3528(df_factory, df_seeder_factory):
+async def test_bug_3528(df_factory):
     master = df_factory.create()
     replica = df_factory.create()
     df_factory.start_all([master, replica])
