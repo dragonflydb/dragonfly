@@ -574,17 +574,15 @@ async def test_rewrites(df_factory):
         print("Got:", mcmd)
         return mcmd
 
-    async def is_match_rsp(rx, tmp=False):
+    async def is_match_rsp(rx):
         mcmd = await get_next_command()
-        if tmp:
-            assert mcmd == rx
         print(mcmd, rx)
         return re.match(rx, mcmd)
 
     async def skip_cmd():
         await is_match_rsp(r".*")
 
-    async def check(cmd, rx, tmp=False):
+    async def check(cmd, rx):
         await c_master.execute_command(cmd)
         match = await is_match_rsp(rx)
         assert match
@@ -686,7 +684,7 @@ async def test_rewrites(df_factory):
         await skip_cmd()
         await c_master.set("k3", "-")
         await skip_cmd()
-        await check("BITOP NOT foo k3", r"SET foo \\xd2", True)
+        await check("BITOP NOT foo k3", r"SET foo \\xd2")
 
         # Check there is no rewrite for LMOVE on single shard
         await c_master.lpush("list", "v1", "v2", "v3", "v4")
