@@ -412,6 +412,10 @@ TEST_F(BitOpsFamilyTest, BitOpsNot) {
                            "this-key-do-not-exists"}));
   ASSERT_THAT(Run({"get", "bit-op-not-none-existing-key-results"}), ArgType(RespExpr::Type::NIL));
 
+  EXPECT_EQ(Run({"set", "foo", "bar"}), "OK");
+  EXPECT_EQ(0, CheckedInt({"bitop", "NOT", "foo", "this-key-do-not-exists"}));
+  ASSERT_THAT(Run({"get", "foo"}), ArgType(RespExpr::Type::NIL));
+
   // test bitop not
   resp = Run({"set", KEY_VALUES_BIT_OP[0].first, KEY_VALUES_BIT_OP[0].second});
   EXPECT_EQ(KEY_VALUES_BIT_OP[0].second.Size(),
