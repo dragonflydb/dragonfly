@@ -34,7 +34,8 @@ class EngineShard {
     uint64_t defrag_task_invocation_total = 0;
     uint64_t poll_execution_total = 0;
 
-    uint64_t tx_immediate_total = 0;
+    // number of optimistic executions - that were run as part of the scheduling.
+    uint64_t tx_optimistic_total = 0;
     uint64_t tx_ooo_total = 0;
 
     Stats& operator+=(const Stats&);

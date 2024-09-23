@@ -128,12 +128,12 @@ TEST_F(StreamFamilyTest, XRead) {
   Run({"xadd", "foo", "1-*", "k2", "v2"});
   Run({"xadd", "foo", "1-*", "k3", "v3"});
   Run({"xadd", "bar", "1-*", "k4", "v4"});
-  EXPECT_EQ(GetMetrics().shard_stats.tx_immediate_total, 4u);
+  EXPECT_EQ(GetMetrics().shard_stats.tx_optimistic_total, 4u);
 
   // Receive all records from a single stream, in a single hop
   auto resp = Run({"xread", "streams", "foo", "0"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(3)));
-  EXPECT_EQ(GetMetrics().shard_stats.tx_immediate_total, 5u);
+  EXPECT_EQ(GetMetrics().shard_stats.tx_optimistic_total, 5u);
 
   // Receive all records from both streams.
   resp = Run({"xread", "streams", "foo", "bar", "0", "0"});

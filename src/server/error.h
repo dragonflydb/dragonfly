@@ -39,7 +39,7 @@ using facade::kWrongTypeErr;
   do {                           \
     OpStatus __s = (x).status(); \
     if (__s != OpStatus::OK) {   \
-      return (x).status();       \
+      return __s;                \
     }                            \
   } while (0)
 
