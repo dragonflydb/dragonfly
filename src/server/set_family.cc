@@ -1542,4 +1542,32 @@ int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue
   return GetExpiry(db_context, st, field);
 }
 
+int32_t SetFamily::FieldSetExpireTime(const DbContext& db_context, PrimeValue& pv,
+                                      std::string_view field, uint32_t ttl_sec) {
+  DCHECK_EQ(OBJ_SET, pv.ObjType());
+
+  SetType st{pv.RObjPtr(), pv.Encoding()};
+
+  if (st.second == kEncodingIntSet) {
+    // IntSets cant keep a ttl
+
+    intset* is = (intset*)pv.RObjPtr();
+    StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+    if (!ss) {
+      return 5;  // TODO
+      // return OpStatus::OUT_OF_MEMORY;
+    }
+    pv.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
+  }
+  StringSetWrapper ss{st, db_context};
+  auto it = ss->Find(field);
+  if (it == ss->end())
+    return -2;
+
+  it.SetExpiryTime(ttl_sec);
+
+  // ss->UpdateTTL(it, ttl_sec);
+  return 1;
+}
+
 }  // namespace dfly

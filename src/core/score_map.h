@@ -122,6 +122,7 @@ class ScoreMap : public DenseSet {
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const final;
   size_t ObjectAllocSize(const void* obj) const final;
   uint32_t ObjExpireTime(const void* obj) const final;
+  uint32_t ObjSetExpireTime(const void* obj, uint32_t ttl_sec) override;
   void ObjDelete(void* obj, bool has_ttl) const final;
 };
 

@@ -725,20 +725,20 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
   }
 }
 
-
-OpResult<vector<string>> OpHexpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec, CmdArgList values, const OpSetParams& op_sp = OpSetParams{}) {
+OpResult<vector<string>> OpHexpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
+                                   CmdArgList values, const OpSetParams& op_sp = OpSetParams{}) {
   auto& db_slice = op_args.GetDbSlice();
   auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
   vector<string> res;
   res.reserve(values.size());
 
   if (!op_res) {
-    if (op_res.status() == OpStatus::KEY_NOTFOUND){
-        for (size_t i = 0; i < values.size(); i++) {
-          res.emplace_back("-2");
-        }
-        return res;
-        }
+    if (op_res.status() == OpStatus::KEY_NOTFOUND) {
+      for (size_t i = 0; i < values.size(); i++) {
+        res.emplace_back("-2");
+      }
+      return res;
+    }
     return op_res.status();
   }
 
@@ -750,7 +750,7 @@ OpResult<vector<string>> OpHexpire(const OpArgs& op_args, string_view key, uint3
 
   if (pv.Encoding() == kEncodingListPack) {
     // a valid result can never be a listpack, since it doesnt keep ttl
-    uint8_t* lp  = (uint8_t*)pv.RObjPtr();
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
     DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
     stats->listpack_bytes -= lpBytes(lp);
     stats->listpack_blob_cnt--;
@@ -763,10 +763,11 @@ OpResult<vector<string>> OpHexpire(const OpArgs& op_args, string_view key, uint3
   for (size_t i = 0; i < values.size(); i++) {
     string_view field = ToSV(values[i]);
     auto it = sm->Find(field);
+    // TODO include the Find-piece inside the method to not expose the internals of the StringMap
     LOG(INFO) << field << " : " << typeid(it).name();
-    if(it != sm->end()) {
+    if (it != sm->end()) {
       LOG(INFO) << it->second;
-      sm->UpdateTTL(it->first, ttl_sec);
+      it.SetExpiryTime(ttl_sec);
       res.emplace_back(ttl_sec == 0 ? "0" : "1");
     } else {
       res.emplace_back("-2");
@@ -777,8 +778,6 @@ OpResult<vector<string>> OpHexpire(const OpArgs& op_args, string_view key, uint3
 
   return res;
 }
-
-
 
 // HSETEX key [NX] tll_sec field value field value ...
 void HSetEx(CmdArgList args, ConnectionContext* cntx) {
@@ -877,7 +876,8 @@ void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
 
   bool skip_if_exists = static_cast<bool>(parser.Check("NX"sv));
   if (!static_cast<bool>(parser.Check("FIELDS"sv))) {
-    return cntx->SendError("Mandatory argument FIELDS is missing or not at the right position", kSyntaxErrType);
+    return cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                           kSyntaxErrType);
   }
 
   string_view numFieldsStr = parser.Next();
@@ -887,7 +887,8 @@ void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (!parser.HasExactly(numFields)) {
-    return cntx->SendError("The `numfields` parameter must match the number of arguments", kSyntaxErrType);
+    return cntx->SendError("The `numfields` parameter must match the number of arguments",
+                           kSyntaxErrType);
   }
 
   CmdArgList fields = parser.Tail();
@@ -899,7 +900,7 @@ void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    //TODO this result needs to be integers, not strings
+    // TODO this result needs to be integers, not strings
     rb->SendStringArr(absl::Span<const string>{*result}, RedisReplyBuilder::ARRAY);
   } else {
     cntx->SendError(result.status());
@@ -1374,6 +1375,31 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
       return -3;
     return it.HasExpiry() ? it.ExpiryTime() : -1;
   }
+}
+
+int32_t HSetFamily::FieldSetExpireTime(const DbContext& db_context, PrimeValue& pv,
+                                       std::string_view field, uint32_t ttl_sec) {
+  DCHECK_EQ(OBJ_HASH, pv.ObjType());
+
+  if (pv.Encoding() == kEncodingListPack) {
+    // a valid result can never be a listpack, since it doesnt keep ttl
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    /*
+    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
+    stats->listpack_bytes -= lpBytes(lp);
+    stats->listpack_blob_cnt--;
+*/
+    StringMap* sm = HSetFamily::ConvertToStrMap(lp);
+    pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  }
+
+  StringMap* sm = GetStringMap(pv, db_context);
+  auto it = sm->Find(field);
+  if (it == sm->end())
+    return -2;
+
+  it.SetExpiryTime(ttl_sec);
+  return 1;
 }
 
 }  // namespace dfly

@@ -187,12 +187,9 @@ class DenseSet {
       return curr_entry_->HasTtl() ? owner_->ObjExpireTime(curr_entry_->GetObject()) : UINT32_MAX;
     }
 
-    //TODO
-    uint32_t SetExpiryTime(uint32_t at) const {
-      //TODO feels like there are two paths here:
-      // 1. The item has TTL from before, and we can easily set the TTL.
-      // 2. It doesnt have TTL, and we need to do something extra?
-      return curr_entry_->HasTtl() ? owner_->ObjExpireTime(curr_entry_->GetObject()) : UINT32_MAX;
+    uint32_t SetExpiryTime(uint32_t ttl_sec) {
+      //TODO is uint32 the right return type?
+      return owner_->ObjSetExpireTime(curr_entry_->GetObject(), ttl_sec);
     }
 
     bool HasExpiry() const {
@@ -271,6 +268,7 @@ class DenseSet {
   virtual bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const = 0;
   virtual size_t ObjectAllocSize(const void* obj) const = 0;
   virtual uint32_t ObjExpireTime(const void* obj) const = 0;
+  virtual uint32_t ObjSetExpireTime(const void* obj, uint32_t ttl_sec) = 0;
   virtual void ObjDelete(void* obj, bool has_ttl) const = 0;
 
   void CollectExpired();

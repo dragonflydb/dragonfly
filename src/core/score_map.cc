@@ -128,6 +128,11 @@ uint32_t ScoreMap::ObjExpireTime(const void* obj) const {
   return UINT32_MAX;
 }
 
+uint32_t ScoreMap::ObjSetExpireTime(const void* obj, uint32_t ttl_sec) {
+  // Should not reach.
+  return UINT32_MAX;
+}
+
 void ScoreMap::ObjDelete(void* obj, bool has_ttl) const {
   sds s1 = (sds)obj;
   sdsfree(s1);

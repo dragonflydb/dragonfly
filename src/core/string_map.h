@@ -99,13 +99,13 @@ class StringMap : public DenseSet {
     }
 
     using IteratorBase::ExpiryTime;
+    using IteratorBase::SetExpiryTime;
     using IteratorBase::HasExpiry;
   };
 
   // Returns true if field was added
   // otherwise updates its value and returns false.
   bool AddOrUpdate(std::string_view field, std::string_view value, uint32_t ttl_sec = UINT32_MAX);
-  bool UpdateTTL(const void* obj, uint32_t ttl_sec);
 
   // Returns true if field was added
   // false, if already exists. In that case no update is done.
@@ -158,6 +158,7 @@ class StringMap : public DenseSet {
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const final;
   size_t ObjectAllocSize(const void* obj) const final;
   uint32_t ObjExpireTime(const void* obj) const final;
+  uint32_t ObjSetExpireTime(const void* obj, uint32_t ttl_sec) override;
   void ObjDelete(void* obj, bool has_ttl) const final;
 };
 

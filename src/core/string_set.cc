@@ -20,6 +20,8 @@ namespace dfly {
 
 namespace {
 
+constexpr uint64_t kValTtlBit = 1ULL << 63;
+
 inline bool MayHaveTtl(sds s) {
   char* alloc_ptr = (char*)sdsAllocPtr(s);
   return sdslen(s) + 1 + 4 <= zmalloc_usable_size(alloc_ptr);
@@ -27,7 +29,7 @@ inline bool MayHaveTtl(sds s) {
 
 sds AllocImmutableWithTtl(uint32_t len, uint32_t at) {
   sds res = AllocSdsWithSpace(len, sizeof(at));
-  absl::little_endian::Store32(res + len + 1, at);
+  absl::little_endian::Store32(res + len + 1, at); //Save TTL
 
   return res;
 }
@@ -127,6 +129,25 @@ uint32_t StringSet::ObjExpireTime(const void* str) const {
 
   char* ttlptr = s + sdslen(s) + 1;
   return absl::little_endian::Load32(ttlptr);
+}
+
+uint32_t StringSet::ObjSetExpireTime(const void* obj, uint32_t ttl_sec) {
+  DCHECK_GT(ttl_sec, 0u);  // ttl_sec == 0 would mean find and delete immediately
+  sds str = (sds)obj;
+  char* valptr = str + sdslen(str) + 1;
+
+  uint32_t at = time_now() + ttl_sec;
+  uint64_t val = absl::little_endian::Load64(valptr);
+
+  DCHECK(val & kValTtlBit);
+  if (val & kValTtlBit) {
+    // if we already have a ttl, update it.
+    absl::little_endian::Store32(valptr + 8, at);
+  } else {
+    Add(str, ttl_sec);
+  }
+
+  return 1;
 }
 
 void StringSet::ObjDelete(void* obj, bool has_ttl) const {

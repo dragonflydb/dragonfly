@@ -33,6 +33,10 @@ class SetFamily {
   static int32_t FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
                                  std::string_view field);
 
+
+  static int32_t FieldSetExpireTime(const DbContext& db_context, PrimeValue& pv,
+                                   std::string_view field, uint32_t ttl_sec);
+
  private:
 };
 

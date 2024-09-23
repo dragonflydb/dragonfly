@@ -671,6 +671,30 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
 
 // returns -2 if the key was not found, -3 if the field was not found,
 // -1 if ttl on the field was not found.
+OpResult<long> OpFieldExpire(Transaction* t, EngineShard* shard, string_view key, string_view field, uint32_t ttl_sec) {
+   //TODO vent litt med den generelle implementasjonen
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  const DbContext& db_cntx = t->GetDbContext();
+  auto find_res = db_slice.FindMutable(db_cntx, key);
+  auto& it = find_res.it;
+  if (!IsValid(it))
+    return -2;
+
+  if (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)
+    return OpStatus::WRONG_TYPE;
+
+  int32_t res = -1;
+  if (it->second.ObjType() == OBJ_SET) {
+    res = SetFamily::FieldSetExpireTime(db_cntx, it->second, field, ttl_sec);
+  } else {
+    DCHECK_EQ(OBJ_HASH, it->second.ObjType());
+    res = HSetFamily::FieldSetExpireTime(db_cntx, it->second, field, ttl_sec);
+  }
+  return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
+}
+
+// returns -2 if the key was not found, -3 if the field was not found,
+// -1 if ttl on the field was not found.
 OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   const DbContext& db_cntx = t->GetDbContext();

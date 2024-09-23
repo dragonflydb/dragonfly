@@ -87,6 +87,7 @@ class StringSet : public DenseSet {
     }
 
     using IteratorBase::ExpiryTime;
+    using IteratorBase::SetExpiryTime;
     using IteratorBase::HasExpiry;
   };
 
@@ -111,6 +112,7 @@ class StringSet : public DenseSet {
 
   size_t ObjectAllocSize(const void* s1) const override;
   uint32_t ObjExpireTime(const void* obj) const override;
+  uint32_t ObjSetExpireTime(const void* obj, uint32_t ttl_sec) override;
   void ObjDelete(void* obj, bool has_ttl) const override;
 };
 

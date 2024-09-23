@@ -261,30 +261,6 @@ size_t StringMap::ObjectAllocSize(const void* obj) const {
   return res;
 }
 
-bool StringMap::UpdateTTL(const void* obj, uint32_t ttl_sec) {
-  sds str = (sds)obj;
-  char* valptr = str + sdslen(str) + 1;
-
-  uint32_t at = time_now() + ttl_sec;
-  uint64_t val = absl::little_endian::Load64(valptr);
-
-  DCHECK(val & kValTtlBit);
-  if (val & kValTtlBit) {
-    // if we already have a ttl, update it.
-    absl::little_endian::Store32(valptr + 8, at);
-  } else {
-    // At this point we actually need to reallocate the value if it doesnt have a TTL
-    auto pair = detail::SdsPair(str, GetValue(str));
-    auto [newkey, sdsval_tag] = CreateEntry(pair->first, pair->second, time_now(), ttl_sec);
-
-    sds prev_entry = (sds)ReplaceObj(newkey, sdsval_tag & kValTtlBit);
-    if (prev_entry) {
-      ObjDelete(prev_entry, false);
-    }
-  }
-  return false; //TODO
-}
-
 uint32_t StringMap::ObjExpireTime(const void* obj) const {
   sds str = (sds)obj;
   const char* valptr = str + sdslen(str) + 1;
@@ -298,6 +274,31 @@ uint32_t StringMap::ObjExpireTime(const void* obj) const {
 
   // Should not reach.
   return UINT32_MAX;
+}
+
+uint32_t StringMap::ObjSetExpireTime(const void* obj, uint32_t ttl_sec) {
+  sds str = (sds)obj;
+  char* valptr = str + sdslen(str) + 1;
+
+  uint32_t at = time_now() + ttl_sec;
+  uint64_t val = absl::little_endian::Load64(valptr);
+
+  DCHECK(val & kValTtlBit);
+  if (val & kValTtlBit) {
+    // if we already have a ttl, update it.
+    absl::little_endian::Store32(valptr + 8, at);
+  } else {
+    // At this point we actually need to reallocate the key-value if it doesnt have a TTL
+    auto pair = detail::SdsPair(str, GetValue(str));
+    auto [newkey, sdsval_tag] = CreateEntry(pair->first, pair->second, time_now(), ttl_sec);
+
+    sds prev_entry = (sds)ReplaceObj(newkey, sdsval_tag & kValTtlBit);
+    if (prev_entry) {
+      ObjDelete(prev_entry, false);
+    }
+  }
+  //TODO
+  return 1;
 }
 
 void StringMap::ObjDelete(void* obj, bool has_ttl) const {
