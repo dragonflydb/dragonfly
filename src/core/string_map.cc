@@ -276,6 +276,10 @@ uint32_t StringMap::ObjExpireTime(const void* obj) const {
   return UINT32_MAX;
 }
 
+void StringMap::ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) {
+  return SdsUpdateExpireTime(obj, time_now() + ttl_sec, 8);
+}
+
 void StringMap::ObjDelete(void* obj, bool has_ttl) const {
   sds s1 = (sds)obj;
   sds value = GetValue(s1);
@@ -283,8 +287,13 @@ void StringMap::ObjDelete(void* obj, bool has_ttl) const {
   sdsfree(s1);
 }
 
-void* StringMap::ObjectClone(const void* obj, bool has_ttl) const {
-  return nullptr;
+void* StringMap::ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const {
+  uint32_t ttl_sec = add_ttl ? 0 : (has_ttl ? ObjExpireTime(obj) : UINT32_MAX);
+  sds str = (sds)obj;
+  auto pair = detail::SdsPair(str, GetValue(str));
+  auto [newkey, sdsval_tag] = CreateEntry(pair->first, pair->second, time_now(), ttl_sec);
+
+  return (void*)newkey;
 }
 
 detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {

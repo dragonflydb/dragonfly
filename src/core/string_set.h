@@ -88,6 +88,7 @@ class StringSet : public DenseSet {
 
     using IteratorBase::ExpiryTime;
     using IteratorBase::HasExpiry;
+    using IteratorBase::SetExpiryTime;
   };
 
   iterator begin() {
@@ -111,8 +112,10 @@ class StringSet : public DenseSet {
 
   size_t ObjectAllocSize(const void* s1) const override;
   uint32_t ObjExpireTime(const void* obj) const override;
+  void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) override;
   void ObjDelete(void* obj, bool has_ttl) const override;
-  void* ObjectClone(const void* obj, bool has_ttl) const override;
+  void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const override;
+  sds MakeSetSds(std::string_view src, uint32_t ttl_sec) const;
 };
 
 }  // end namespace dfly

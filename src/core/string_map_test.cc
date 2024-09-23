@@ -127,6 +127,25 @@ TEST_F(StringMapTest, IterateExpired) {
   EXPECT_EQ(it, sm_->end());
 }
 
+TEST_F(StringMapTest, SetFieldExpireHasExpiry) {
+  EXPECT_TRUE(sm_->AddOrUpdate("k1", "v1", 5));
+  auto k = sm_->Find("k1");
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 5);
+  k.SetExpiryTime(1);
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 1);
+}
+
+TEST_F(StringMapTest, SetFieldExpireNoHasExpiry) {
+  EXPECT_TRUE(sm_->AddOrUpdate("k1", "v1"));
+  auto k = sm_->Find("k1");
+  EXPECT_FALSE(k.HasExpiry());
+  k.SetExpiryTime(1);
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 1);
+}
+
 unsigned total_wasted_memory = 0;
 
 TEST_F(StringMapTest, ReallocIfNeeded) {

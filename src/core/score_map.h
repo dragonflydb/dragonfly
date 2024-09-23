@@ -122,8 +122,9 @@ class ScoreMap : public DenseSet {
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const final;
   size_t ObjectAllocSize(const void* obj) const final;
   uint32_t ObjExpireTime(const void* obj) const final;
-  void ObjDelete(void* obj, bool has_ttl) const final;
-  void* ObjectClone(const void* obj, bool has_ttl) const final;
+  void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) override;
+  void ObjDelete(void* obj, bool has_ttl) const override;
+  void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const final;
 };
 
 }  // namespace dfly

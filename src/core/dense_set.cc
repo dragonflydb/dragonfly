@@ -46,6 +46,17 @@ DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
   }
 }
 
+void DenseSet::IteratorBase::SetExpiryTime(uint32_t ttl_sec) {
+  if (!HasExpiry()) {
+    auto src = curr_entry_->GetObject();
+    void* new_obj = owner_->ObjectClone(src, false, true);
+    curr_entry_->SetObject(new_obj);
+    curr_entry_->SetTtl(true);
+    owner_->ObjDelete(src, false);
+  }
+  owner_->ObjUpdateExpireTime(curr_entry_->GetObject(), ttl_sec);
+}
+
 void DenseSet::IteratorBase::Advance() {
   bool step_link = false;
   DCHECK(curr_entry_);
@@ -211,7 +222,7 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
       auto& src = items[i];
       if (src.obj) {
         // The majority of the CPU is spent in this block.
-        void* new_obj = other->ObjectClone(src.obj, src.has_ttl);
+        void* new_obj = other->ObjectClone(src.obj, src.has_ttl, false);
         uint64_t hash = Hash(src.obj, 0);
         other->AddUnique(new_obj, src.has_ttl, hash);
         src.obj = nullptr;
