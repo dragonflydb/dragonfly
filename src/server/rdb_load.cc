@@ -719,7 +719,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
       lp = lpNew(sv.size());
       if (!ziplistValidateIntegrity((uint8_t*)sv.data(), sv.size(), 1,
                                     ziplistEntryConvertAndValidate, &lp)) {
-        LOG(ERROR) << "Ziplist integrity check failed.";
+        LOG(ERROR) << "Ziplist integrity check failed: " << sv.size();
         zfree(lp);
         ec_ = RdbError(errc::rdb_file_corrupted);
         return false;
