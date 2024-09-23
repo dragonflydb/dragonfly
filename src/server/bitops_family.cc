@@ -344,8 +344,12 @@ std::string ElementAccess::Value() const {
 void ElementAccess::Commit(std::string_view new_value) const {
   if (shard_) {
     if (new_value.empty()) {
-      // No need to run, it was a new entry and it got removed
-      post_updater_.Cancel();
+      if (!IsNewEntry()) {
+        post_updater_.Run();
+      } else {
+        // No need to run, it was a new entry and it got removed
+        post_updater_.Cancel();
+      }
       context_.GetDbSlice(shard_->shard_id()).Del(context_, element_iter_);
     } else {
       element_iter_->second.SetString(new_value);
@@ -1179,17 +1183,17 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
 
         if (find_res == OpStatus::OK) {
           operation.Commit(op_result);
-        }
 
-        if (shard->journal()) {
-          if (op_result.empty()) {
-            // We need to delete it if the key exists. If it doesn't, we just
-            // skip it and do not send it to the replica at all.
-            if (!operation.IsNewEntry()) {
-              RecordJournal(t->GetOpArgs(shard), "DEL", {dest_key});
+          if (shard->journal()) {
+            if (op_result.empty()) {
+              // We need to delete it if the key exists. If it doesn't, we just
+              // skip it and do not send it to the replica at all.
+              if (!operation.IsNewEntry()) {
+                RecordJournal(t->GetOpArgs(shard), "DEL", {dest_key});
+              }
+            } else {
+              RecordJournal(t->GetOpArgs(shard), "SET", {dest_key, op_result});
             }
-          } else {
-            RecordJournal(t->GetOpArgs(shard), "SET", {dest_key, op_result});
           }
         }
       }

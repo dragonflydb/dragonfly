@@ -2661,3 +2661,23 @@ async def test_double_take_over(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=master.port)
 
     await disconnect_clients(c_master, c_replica)
+
+
+@pytest.mark.asyncio
+async def test_bug_3528(df_factory, df_seeder_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_replica = replica.client()
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_available_async(c_replica)
+
+    c_master = master.client()
+    await c_master.execute_command(f"HSET foo bar val")
+    await c_master.execute_command(f"BITOP not foo 1")
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await c_replica.execute_command(f"GET foo")
+
+    await disconnect_clients(c_master, c_replica)
