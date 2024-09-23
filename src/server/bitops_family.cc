@@ -1201,7 +1201,7 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
         auto find_res = operation.FindAllowWrongType(shard);
 
         // BITOP command acts as a blind update. If the key existed and its type
-        // was not a string
+        // was not a string we still want to Commit with the new value.
         if (find_res == OpStatus::OK || find_res == OpStatus::WRONG_TYPE) {
           operation.Commit(op_result);
 
