@@ -1161,4 +1161,19 @@ TEST_F(ZSetFamilyTest, RangeLimit) {
   EXPECT_THAT(resp, ArrLen(0));
 }
 
+TEST_F(ZSetFamilyTest, RangeStore) {
+  EXPECT_EQ(3, CheckedInt({"ZADD", "src", "1", "a", "2", "b", "3", "c"}));
+  EXPECT_EQ(3, CheckedInt({"ZRANGESTORE", "dest", "src", "0", "-1"}));
+
+  RespExpr resp = Run({"ZRANGE", "dest", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2", "c", "3"));
+
+  // Override dest.
+
+  EXPECT_EQ(0, CheckedInt({"ZRANGESTORE", "dest", "not-found", "0", "-1"}));
+
+  resp = Run({"ZRANGE", "dest", "0", "-1"});
+  EXPECT_THAT(resp, ArrLen(0));
+}
+
 }  // namespace dfly

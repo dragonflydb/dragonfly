@@ -2198,6 +2198,11 @@ void ZSetFamily::ZRangeByScore(CmdArgList args, ConnectionContext* cntx) {
   ZRangeGeneric(args, cntx, RangeParams{.interval_type = RangeParams::SCORE});
 }
 
+void ZSetFamily::ZRangeStore(CmdArgList args, ConnectionContext* cntx) {
+  ZRangeGeneric(args.subspan(1), cntx,
+                RangeParams{.with_scores = true, .store_key = ArgS(args, 0)});
+}
+
 void ZSetFamily::ZRevRangeByScore(CmdArgList args, ConnectionContext* cntx) {
   ZRangeGeneric(args, cntx, RangeParams{.reverse = true, .interval_type = RangeParams::SCORE});
 }
@@ -2447,12 +2452,61 @@ void ZSetFamily::ZRangeInternal(CmdArgList args, RangeParams range_params,
     }
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRange(range_spec, t->GetOpArgs(shard), key);
+  OpResult<ScoredArray> range_result;
+  ShardId src_shard = Shard(key, shard_set->size());
+  auto range_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() != src_shard) {
+      // Only run ZRANGE on the source shard.
+      return OpStatus::OK;
+    }
+    range_result = OpRange(range_spec, t->GetOpArgs(shard), key);
+    return OpStatus::OK;
   };
+  // Don't conclude the transaction if we're storing the result.
+  cntx->transaction->Execute(std::move(range_cb), !range_params.store_key);
 
-  OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  OutputScoredArrayResult(result, range_params, cntx);
+  if (range_result.status() == OpStatus::WRONG_TYPE) {
+    if (range_params.store_key) {
+      cntx->transaction->Conclude();
+    }
+    return cntx->SendError(kWrongTypeErr);
+  }
+  LOG_IF(WARNING, !range_result && range_result.status() != OpStatus::KEY_NOTFOUND)
+      << "Unexpected status " << range_result.status();
+
+  if (!range_params.store_key) {
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendScoredArray(range_result.value(), range_params.with_scores);
+    return;
+  }
+
+  OpResult<AddResult> add_result;
+  ShardId dest_shard = Shard(*range_params.store_key, shard_set->size());
+  auto add_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() != dest_shard) {
+      // Only write the result on the target shard.
+      return OpStatus::OK;
+    }
+
+    std::vector<ScoredMemberView> mvec(range_result->size());
+    size_t i = 0;
+    for (const auto& [str, score] : *range_result) {
+      mvec[i++] = {score, str};
+    }
+
+    add_result =
+        OpAdd(t->GetOpArgs(shard), ZParams{.override = true}, *range_params.store_key, mvec);
+
+    return OpStatus::OK;
+  };
+  cntx->transaction->Execute(std::move(add_cb), true);
+
+  if (add_result.status() == OpStatus::OUT_OF_MEMORY) {
+    return cntx->SendError(add_result.status());
+  }
+  LOG_IF(WARNING, !add_result) << "Unexpected status " << add_result.status();
+
+  return cntx->SendLong(range_result->size());
 }
 
 void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx) {
@@ -3125,6 +3179,7 @@ constexpr uint32_t kZRandMember = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZRank = READ | SORTEDSET | FAST;
 constexpr uint32_t kZRangeByLex = READ | SORTEDSET | SLOW;
 constexpr uint32_t kZRangeByScore = READ | SORTEDSET | SLOW;
+constexpr uint32_t kZRangeStore = WRITE | SORTEDSET | SLOW;
 constexpr uint32_t kZScore = READ | SORTEDSET | FAST;
 constexpr uint32_t kZMScore = READ | SORTEDSET | FAST;
 constexpr uint32_t kZRemRangeByRank = WRITE | SORTEDSET | SLOW;
@@ -3174,6 +3229,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZRank}.HFUNC(ZRank)
       << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, acl::kZRangeByLex}.HFUNC(ZRangeByLex)
       << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, acl::kZRangeByScore}.HFUNC(ZRangeByScore)
+      << CI{"ZRANGESTORE", CO::WRITE | CO::DENYOOM, -5, 1, 2, acl::kZRangeStore}.HFUNC(ZRangeStore)
       << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZScore}.HFUNC(ZScore)
       << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZMScore}.HFUNC(ZMScore)
       << CI{"ZREMRANGEBYRANK", CO::WRITE, 4, 1, 1, acl::kZRemRangeByRank}.HFUNC(ZRemRangeByRank)
