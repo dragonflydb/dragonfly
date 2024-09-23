@@ -147,13 +147,14 @@ OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t
     if (end < 0)
       end = strlen + end;
 
+    end = min(end, strlen - 1);
+
+    if (strlen == 0 || start > end)
+      return "";
+
     start = max(start, 0);
     end = max(end, 0);
 
-    if (strlen == 0 || start > end || start >= strlen)
-      return "";
-
-    end = min(end, strlen - 1);
     return slice.substr(start, end - start + 1);
   };
 
@@ -1290,13 +1291,11 @@ void StringFamily::StrLen(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StringFamily::GetRange(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view from = ArgS(args, 1);
-  string_view to = ArgS(args, 2);
-  int32_t start, end;
+  CmdArgParser parser(args);
+  auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
-  if (!absl::SimpleAtoi(from, &start) || !absl::SimpleAtoi(to, &end)) {
-    return cntx->SendError(kInvalidIntErr);
+  if (auto err = parser.Error(); err) {
+    return cntx->SendError(err->MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {

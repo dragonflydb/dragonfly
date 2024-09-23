@@ -496,6 +496,9 @@ TEST_F(StringFamilyTest, Range) {
   Run({"SET", "num", "1234"});
   EXPECT_EQ(Run({"getrange", "num", "3", "5000"}), "4");
   EXPECT_EQ(Run({"getrange", "num", "-5000", "10000"}), "1234");
+
+  Run({"SET", "key4", "1"});
+  EXPECT_EQ(Run({"getrange", "key4", "-1", "-2"}), "");
 }
 
 TEST_F(StringFamilyTest, IncrByFloat) {
