@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -98,7 +96,7 @@ template <typename T> class JsonCallbackResult {
   JsonCallbackResult() {
   }
 
-  explicit JsonCallbackResult(CallbackResultOptions options) : options_(options) {
+  explicit JsonCallbackResult(CallbackResultOptions options) : options_(std::move(options)) {
   }
 
   void AddValue(T value) {
@@ -119,8 +117,8 @@ template <typename T> class JsonCallbackResult {
     return result_.front();
   }
 
-  const absl::InlinedVector<T, 2>& AsV2() const {
-    return std::move(result_);
+  const auto& AsV2() const {
+    return result_;
   }
 
   bool Empty() const {
@@ -144,7 +142,7 @@ template <typename T> class JsonCallbackResult {
   }
 
  private:
-  absl::InlinedVector<T, 2> result_;
+  std::vector<T> result_;
   CallbackResultOptions options_{kDefaultJsonPathType};
 };
 

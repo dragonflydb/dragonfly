@@ -593,13 +593,9 @@ OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std
                                                       EvaluateOperationOptions options = {}) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   if (options.return_nil_if_key_not_found && result == OpStatus::KEY_NOTFOUND) {
-// GCC 13.1 throws spurious warnings around this code.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
     return JsonCallbackResult<T>{
         {JsonPathType::kLegacy, options.cb_result_options.saving_order,
          CallbackResultOptions::OnEmpty::kSendNil}};  // set legacy mode to return nil
-#pragma GCC diagnostic pop
   }
 
   RETURN_ON_BAD_STATUS(result);
