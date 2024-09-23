@@ -217,7 +217,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   defrag_task_invocation_total += o.defrag_task_invocation_total;
   poll_execution_total += o.poll_execution_total;
   tx_ooo_total += o.tx_ooo_total;
-  tx_immediate_total += o.tx_immediate_total;
+  tx_optimistic_total += o.tx_optimistic_total;
 
   return *this;
 }
