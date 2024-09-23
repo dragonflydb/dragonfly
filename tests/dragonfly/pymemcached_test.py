@@ -55,7 +55,7 @@ def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     so all the commands are pipelined. Assert pipelines work correctly and the
     succeeding regular command receives a reply (it should join the pipeline as last).
     """
-    keys = [f"k{i}" for i in range(100)]
+    keys = [f"k{i}" for i in range(200)]
     values = [f"d{i}" for i in range(len(keys))]
 
     for k, v in zip(keys, values):
@@ -67,7 +67,7 @@ def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
 
     info = Redis(port=df_server.port).info()
-    assert info["total_pipelined_commands"] > len(keys) / 3  # sometimes CI is slow
+    assert info["total_pipelined_commands"] > len(keys) / 4  # sometimes CI is slow
 
 
 @dfly_args(DEFAULT_ARGS)

@@ -93,7 +93,6 @@ struct GroupInfo {
   size_t consumer_size;
   size_t pending_size;
   streamID last_id;
-  size_t pel_count;
   int64_t entries_read;
   int64_t lag;
   vector<NACKInfo> stream_nack_vec;
@@ -716,6 +715,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
        * if we find that there is already an entry for this ID. */
       streamNACK* nack = StreamCreateNACK(opts.consumer);
       int group_inserted = raxTryInsert(opts.group->pel, buf, sizeof(buf), nack, nullptr);
+
       int consumer_inserted = raxTryInsert(opts.consumer->pel, buf, sizeof(buf), nack, nullptr);
 
       /* Now we can check if the entry was already busy, and
@@ -726,6 +726,8 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
         nack = static_cast<streamNACK*>(raxFind(opts.group->pel, buf, sizeof(buf)));
         DCHECK(nack != raxNotFound);
         raxRemove(nack->consumer->pel, buf, sizeof(buf), NULL);
+        LOG_IF(DFATAL, nack->consumer->pel->numnodes == 0) << "Invalid rax state";
+
         /* Update the consumer and NACK metadata. */
         nack->consumer = opts.consumer;
         nack->delivery_time = GetCurrentTimeMs();
@@ -733,6 +735,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
         /* Add the entry in the new consumer local PEL. */
         raxInsert(opts.consumer->pel, buf, sizeof(buf), nack, NULL);
       } else if (group_inserted == 1 && consumer_inserted == 0) {
+        LOG(DFATAL) << "Internal error";
         return OpStatus::SKIPPED;  // ("NACK half-created. Should not be possible.");
       }
     }
@@ -842,7 +845,7 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
   vector<RecordVec> response(shard_args.Size());
   unsigned index = 0;
   for (string_view key : shard_args) {
-    auto sitem = opts.stream_ids.at(key);
+    const auto& sitem = opts.stream_ids.at(key);
     auto& dest = response[index++];
     if (!sitem.group && opts.read_group) {
       continue;
@@ -977,6 +980,8 @@ void GetConsumers(stream* s, streamCG* cg, long long count, GroupInfo* ginfo) {
     ConsumerInfo consumer_info;
     streamConsumer* consumer = static_cast<streamConsumer*>(ri_consumers.data);
 
+    LOG_IF(DFATAL, consumer->pel->numnodes == 0) << "Invalid rax state";
+
     consumer_info.name = consumer->name;
     consumer_info.seen_time = consumer->seen_time;
     consumer_info.pel_count = raxSize(consumer->pel);
@@ -1047,7 +1052,6 @@ OpResult<StreamInfo> OpStreams(const DbContext& db_cntx, string_view key, Engine
         ginfo.pending_size = raxSize(cg->pel);
         ginfo.entries_read = cg->entries_read;
         ginfo.lag = streamCGLag(s, cg);
-        ginfo.pel_count = raxSize(cg->pel);
         GetGroupPEL(s, cg, count, &ginfo);
         GetConsumers(s, cg, count, &ginfo);
 
@@ -1263,6 +1267,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
         /* Release the NACK */
         raxRemove(cgr_res->cg->pel, buf.begin(), sizeof(buf), nullptr);
         raxRemove(nack->consumer->pel, buf.begin(), sizeof(buf), nullptr);
+        LOG_IF(DFATAL, nack->consumer->pel->numnodes == 0) << "Invalid rax state";
         streamFreeNACK(nack);
       }
       continue;
@@ -1303,6 +1308,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
          * NACK above because of the FORCE option. */
         if (nack->consumer) {
           raxRemove(nack->consumer->pel, buf.begin(), sizeof(buf), nullptr);
+          LOG_IF(DFATAL, nack->consumer->pel->numnodes == 0) << "Invalid rax state";
         }
       }
       // Set the delivery time for the entry.
@@ -1361,7 +1367,7 @@ vector<GroupConsumerPair> OpGetGroupConsumerPairs(const ShardArgs& shard_args,
   for (string_view key : shard_args) {
     streamCG* group = nullptr;
     streamConsumer* consumer = nullptr;
-    auto& dest = sid_items[index++];
+    GroupConsumerPair& dest = sid_items[index++];
 
     auto group_res = FindGroup(op_args, key, opts.group);
     if (!group_res) {
@@ -1797,18 +1803,17 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   return result;
 }
 
-void CreateGroup(CmdArgList args, string_view key, ConnectionContext* cntx) {
-  if (args.size() < 2)
-    return cntx->SendError(UnknownSubCmd("CREATE", "XGROUP"));
+void CreateGroup(facade::CmdArgParser* parser, ConnectionContext* cntx) {
+  auto key = parser->Next();
 
   CreateOpts opts;
-  opts.gname = ArgS(args, 0);
-  opts.id = ArgS(args, 1);
-  if (args.size() >= 3) {
-    ToUpper(&args[2]);
-    if (ArgS(args, 2) == "MKSTREAM")
-      opts.flags |= kCreateOptMkstream;
+  std::tie(opts.gname, opts.id) = parser->Next<string_view, string_view>();
+  if (parser->Check("MKSTREAM")) {
+    opts.flags |= kCreateOptMkstream;
   }
+
+  if (auto err = parser->Error(); err)
+    return cntx->SendError(err->MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreate(t->GetOpArgs(shard), key, opts);
@@ -1823,7 +1828,15 @@ void CreateGroup(CmdArgList args, string_view key, ConnectionContext* cntx) {
   }
 }
 
-void DestroyGroup(string_view key, string_view gname, ConnectionContext* cntx) {
+void DestroyGroup(facade::CmdArgParser* parser, ConnectionContext* cntx) {
+  auto [key, gname] = parser->Next<string_view, string_view>();
+
+  if (auto err = parser->Error(); err)
+    return cntx->SendError(err->MakeReply());
+
+  if (parser->HasNext())
+    return cntx->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
@@ -1841,8 +1854,15 @@ void DestroyGroup(string_view key, string_view gname, ConnectionContext* cntx) {
   }
 }
 
-void CreateConsumer(string_view key, string_view gname, string_view consumer,
-                    ConnectionContext* cntx) {
+void CreateConsumer(facade::CmdArgParser* parser, ConnectionContext* cntx) {
+  auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
+
+  if (auto err = parser->Error(); err)
+    return cntx->SendError(err->MakeReply());
+
+  if (parser->HasNext())
+    return cntx->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
@@ -1862,8 +1882,15 @@ void CreateConsumer(string_view key, string_view gname, string_view consumer,
   }
 }
 
-void DelConsumer(string_view key, string_view gname, string_view consumer,
-                 ConnectionContext* cntx) {
+void DelConsumer(facade::CmdArgParser* parser, ConnectionContext* cntx) {
+  auto [key, gname, consumer] = parser->Next<string_view, string_view, string_view>();
+
+  if (auto err = parser->Error(); err)
+    return cntx->SendError(err->MakeReply());
+
+  if (parser->HasNext())
+    return cntx->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
@@ -1882,18 +1909,21 @@ void DelConsumer(string_view key, string_view gname, string_view consumer,
   }
 }
 
-void SetId(string_view key, string_view gname, CmdArgList args, ConnectionContext* cntx) {
-  facade::CmdArgParser parser{args};
+void SetId(facade::CmdArgParser* parser, ConnectionContext* cntx) {
+  auto [key, gname, id] = parser->Next<string_view, string_view, string_view>();
 
-  string_view id = parser.Next();
-  while (parser.HasNext()) {
-    if (parser.Check("ENTRIESREAD")) {
+  while (parser->HasNext()) {
+    if (parser->Check("ENTRIESREAD")) {
       // TODO: to support ENTRIESREAD.
       return cntx->SendError(kSyntaxErr);
     } else {
       return cntx->SendError(kSyntaxErr);
     }
   }
+
+  if (auto err = parser->Error(); err)
+    return cntx->SendError(err->MakeReply());
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
   };
@@ -1910,20 +1940,23 @@ void SetId(string_view key, string_view gname, CmdArgList args, ConnectionContex
 }
 
 void XGroupHelp(CmdArgList args, ConnectionContext* cntx) {
-  string_view help_arr[] = {
-      "CREATE <key> <groupname> <id|$> [option]",
-      "    Create a new consumer group. Options are:",
-      "    * MKSTREAM",
-      "      Create the empty stream if it does not exist.",
-      "CREATECONSUMER <key> <groupname> <consumer>",
-      "    Create a new consumer in the specified group.",
-      "DELCONSUMER <key> <groupname> <consumer>",
-      "    Remove the specified consumer.",
-      "DESTROY <key> <groupname>",
-      "    Remove the specified group.",
-      "SETID <key> <groupname> <id|$>",
-      "    Set the current group ID.",
-  };
+  string_view help_arr[] = {"XGROUP <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+                            "CREATE <key> <groupname> <id|$> [option]",
+                            "    Create a new consumer group. Options are:",
+                            "    * MKSTREAM",
+                            "      Create the empty stream if it does not exist.",
+                            "    * ENTRIESREAD entries_read",
+                            "      Set the group's entries_read counter (internal use).",
+                            "CREATECONSUMER <key> <groupname> <consumer>",
+                            "    Create a new consumer in the specified group.",
+                            "DELCONSUMER <key> <groupname> <consumer>",
+                            "    Remove the specified consumer.",
+                            "DESTROY <key> <groupname>",
+                            "    Remove the specified group.",
+                            "SETID <key> <groupname> <id|$> [ENTRIESREAD entries_read]",
+                            "    Set the current group ID and entries_read counter.",
+                            "HELP",
+                            "    Print this help."};
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   return rb->SendSimpleStrArr(help_arr);
 }
@@ -2027,11 +2060,12 @@ void FetchGroupInfo(Transaction* tx, ReadOpts* opts) {
   tx->Execute(std::move(cb), false);
 
   for (size_t i = 0; i < shard_set->size(); i++) {
-    auto s_item = res_pairs[i];
-    auto s_args = tx->GetShardArgs(i);
+    const auto& s_item = res_pairs[i];
     if (s_item.size() == 0) {
       continue;
     }
+
+    ShardArgs s_args = tx->GetShardArgs(i);
     unsigned index = 0;
     for (string_view key : s_args) {
       StreamIDsItem& item = opts->stream_ids.at(key);
@@ -2316,63 +2350,21 @@ void StreamFamily::XDel(CmdArgList args, ConnectionContext* cntx) {
   cntx->SendError(result.status());
 }
 
+void HelpSubCmd(facade::CmdArgParser* parser, ConnectionContext* cntx) {
+  XGroupHelp(parser->Tail(), cntx);
+}
+
 void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
 
-  string_view sub_cmd = parser.ToUpper().Next();
-  if (sub_cmd == "HELP") {
-    string_view help[] = {"XGROUP <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
-                          "CREATE <key> <groupname> <id|$> [option]",
-                          "    Create a new consumer group. Options are:",
-                          "    * MKSTREAM",
-                          "      Create the empty stream if it does not exist.",
-                          "    * ENTRIESREAD entries_read",
-                          "      Set the group's entries_read counter (internal use).",
-                          "CREATECONSUMER <key> <groupname> <consumer>",
-                          "    Create a new consumer in the specified group.",
-                          "DELCONSUMER <key> <groupname> <consumer>",
-                          "    Remove the specified consumer.",
-                          "DESTROY <key> <groupname>",
-                          "    Remove the specified group.",
-                          "SETID <key> <groupname> <id|$> [ENTRIESREAD entries_read]",
-                          "    Set the current group ID and entries_read counter.",
-                          "HELP",
-                          "    Print this help."};
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    return rb->SendStringArr(help);
-  }
+  auto sub_cmd_func = parser.MapNext("HELP", &HelpSubCmd, "CREATE", &CreateGroup, "DESTROY",
+                                     &DestroyGroup, "CREATECONSUMER", &CreateConsumer,
+                                     "DELCONSUMER", &DelConsumer, "SETID", &SetId);
 
-  if (!parser.HasAtLeast(2))
-    return cntx->SendError(kSyntaxErr, kScriptErrType);
+  if (auto err = parser.Error(); err)
+    return cntx->SendError(err->MakeReply());
 
-  string_view key = parser.Next();
-
-  if (sub_cmd == "CREATE") {
-    args.remove_prefix(2);
-    return CreateGroup(std::move(args), key, cntx);
-  }
-
-  string_view gname = parser.Next();
-  if (sub_cmd == "DESTROY" && args.size() == 3) {
-    return DestroyGroup(key, gname, cntx);
-  }
-
-  if (sub_cmd == "CREATECONSUMER" && args.size() == 4) {
-    string_view cname = parser.Next();
-    return CreateConsumer(key, gname, cname, cntx);
-  }
-
-  if (sub_cmd == "DELCONSUMER" && args.size() == 4) {
-    string_view cname = parser.Next();
-    return DelConsumer(key, gname, cname, cntx);
-  }
-
-  if (sub_cmd == "SETID" && args.size() >= 4) {
-    args.remove_prefix(3);
-    return SetId(key, gname, std::move(args), cntx);
-  }
-
-  return cntx->SendError(UnknownSubCmd(sub_cmd, "XGROUP"));
+  sub_cmd_func(&parser, cntx);
 }
 
 void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
@@ -2531,7 +2523,7 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
             }
 
             rb->SendBulkString("pel-count");
-            rb->SendLong(ginfo.pel_count);
+            rb->SendLong(ginfo.pending_size);
 
             rb->SendBulkString("pending");
             rb->StartArray(ginfo.stream_nack_vec.size());
@@ -2932,14 +2924,14 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
   auto tp = (opts->timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts->timeout)
                             : Transaction::time_point::max();
 
-  const auto key_checker = [&opts](EngineShard* owner, const DbContext& context, Transaction* tx,
-                                   std::string_view key) -> bool {
+  const auto key_checker = [opts](EngineShard* owner, const DbContext& context, Transaction* tx,
+                                  std::string_view key) -> bool {
     auto& db_slice = context.GetDbSlice(owner->shard_id());
     auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
     if (!res_it.ok())
       return false;
 
-    auto sitem = opts->stream_ids.at(key);
+    const StreamIDsItem& sitem = opts->stream_ids.at(key);
     if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)
       return true;
 
@@ -2970,7 +2962,7 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
                                           .ms = UINT64_MAX,
                                           .seq = UINT64_MAX,
                                       }};
-      auto sitem = opts->stream_ids.at(*wake_key);
+      const StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
       range_opts.start = sitem.id;
       if (sitem.id.val.ms == UINT64_MAX || sitem.id.val.seq == UINT64_MAX) {
         range_opts.start.val = sitem.group->last_id;  // only for '>'
@@ -2980,7 +2972,14 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
       range_opts.group = sitem.group;
       range_opts.consumer = sitem.consumer;
       range_opts.noack = opts->noack;
-
+      if (sitem.consumer) {
+        if (sitem.consumer->pel->numnodes == 0) {
+          LOG(DFATAL) << "Internal error when accessing consumer data, seen_time "
+                      << sitem.consumer->seen_time;
+          result = OpStatus::CANCELLED;
+          return OpStatus::OK;
+        }
+      }
       result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
       key = *wake_key;
     }
@@ -3001,55 +3000,64 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
   return rb->SendNullArray();
 }
 
+struct OpReadSingleShardContext {
+  ReadOpts* opts;
+  facade::ErrorReply error{OpStatus::OK};
+  bool requires_blocking = false;
+  vector<RecordVec> prefetched_results;
+};
+
+Transaction::RunnableResult OpReadSingleShard(Transaction* tx, EngineShard* es,
+                                              OpReadSingleShardContext* context) {
+  auto last_ids = OpLastIDs(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()));
+  if (!last_ids)
+    return last_ids.status();
+
+  absl::flat_hash_map<string, streamID> last_ids_map(last_ids->begin(), last_ids->end());
+  auto has_entries = HasEntries(last_ids_map, context->opts);
+  if (!has_entries.has_value()) {
+    context->error = has_entries.error();
+    return OpStatus::INVALID_VALUE;
+  }
+
+  // If no entries are available, avoid concluding to proceed waiting with acquired keys
+  if (!*has_entries) {
+    context->requires_blocking = true;
+    return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
+  }
+
+  context->prefetched_results =
+      OpRead(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()), *context->opts);
+  DCHECK(!context->prefetched_results.empty());
+
+  return OpStatus::OK;
+}
+
 // Determine if entries are available and read them in a single hop. Returns nullopt in case of an
 // error and replies.
 std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, ReadOpts* opts) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   auto* tx = cntx->transaction;
+  OpReadSingleShardContext op_cntx;
+  op_cntx.opts = opts;
 
-  vector<RecordVec> prefetched_results;
-  bool requires_blocking = false;
-
-  optional<facade::ErrorReply> detailed_err;
-  auto res = tx->ScheduleSingleHop([&](auto* tx, auto* es) -> Transaction::RunnableResult {
-    auto last_ids = OpLastIDs(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()));
-    if (!last_ids)
-      return last_ids.status();
-
-    absl::flat_hash_map<string, streamID> last_ids_map(last_ids->begin(), last_ids->end());
-    auto has_entries = HasEntries(last_ids_map, opts);
-    if (!has_entries.has_value()) {
-      detailed_err = has_entries.error();
-      return OpStatus::INVALID_VALUE;
-    }
-
-    // If no entries are available, avoid concluding to proceed waiting with acquired keys
-    if (!*has_entries) {
-      requires_blocking = true;
-      return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
-    }
-
-    prefetched_results = OpRead(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()), *opts);
-    DCHECK(!prefetched_results.empty());
-    return OpStatus::OK;
-  });
-
-  if (detailed_err.has_value()) {
-    cntx->SendError(*detailed_err);
-    return std::nullopt;
-  }
+  auto res = tx->ScheduleSingleHop(
+      [&](auto* tx, auto* es) { return OpReadSingleShard(tx, es, &op_cntx); });
 
   if (res != OpStatus::OK) {
-    if (res == OpStatus::WRONG_TYPE)
+    if (res == OpStatus::INVALID_VALUE)
+      cntx->SendError(op_cntx.error);
+    else if (res == OpStatus::WRONG_TYPE)
       cntx->SendError(kWrongTypeErr);
     else
       rb->SendNullArray();
     return std::nullopt;
   }
 
-  if (requires_blocking)
+  if (op_cntx.requires_blocking)
     return vector<RecordVec>{};
-  return {std::move(prefetched_results)};
+
+  return {std::move(op_cntx.prefetched_results)};
 }
 
 // Read entries from given streams
@@ -3166,8 +3174,10 @@ void XReadGeneric(CmdArgList args, bool read_group, ConnectionContext* cntx) {
     return;
   }
 
+  // TODO: we conduct lots of hops that seems to be could be collapsed into the shard
+  // callback. For example, FetchGroupInfo can probably be moved into OpRead.
   if (opts->read_group) {
-    FetchGroupInfo(cntx->transaction, &*opts);
+    FetchGroupInfo(cntx->transaction, &opts.value());
   }
 
   return XReadImpl(args, &opts.value(), cntx);

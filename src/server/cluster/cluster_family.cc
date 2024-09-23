@@ -679,8 +679,6 @@ void ClusterFamily::StartSlotMigrations(std::vector<MigrationInfo> migrations) {
 
 static string_view StateToStr(MigrationState state) {
   switch (state) {
-    case MigrationState::C_NO_STATE:
-      return "NO_STATE"sv;
     case MigrationState::C_CONNECTING:
       return "CONNECTING"sv;
     case MigrationState::C_SYNC:
@@ -708,15 +706,22 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
     }
   }
 
-  vector<string> reply;
+  struct Reply {
+    string_view direction;
+    string node_id;
+    string_view state;
+    size_t keys_number;
+    string error;
+  };
+  vector<Reply> reply;
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
-  auto append_answer = [&reply](string_view direction, string_view node_id, string_view filter,
-                                MigrationState state, size_t keys_number, string_view error) {
+  auto append_answer = [&reply](string_view direction, string node_id, string_view filter,
+                                MigrationState state, size_t keys_number, string error) {
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
-      reply.push_back(absl::StrCat(direction, " ", node_id, " ", StateToStr(state),
-                                   " keys:", keys_number, " errors:", error));
+      reply.emplace_back(
+          Reply{direction, std::move(node_id), StateToStr(state), keys_number, std::move(error)});
     }
   };
 
@@ -730,10 +735,14 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
                   m->GetKeyCount(), m->GetErrorStr());
   }
 
-  if (reply.empty()) {
-    rb->SendSimpleString(StateToStr(MigrationState::C_NO_STATE));
-  } else {
-    rb->SendStringArr(reply);
+  rb->StartArray(reply.size());
+  for (const auto& r : reply) {
+    rb->StartArray(5);
+    rb->SendBulkString(r.direction);
+    rb->SendBulkString(r.node_id);
+    rb->SendBulkString(r.state);
+    rb->SendLong(r.keys_number);
+    rb->SendBulkString(r.error);
   }
 }
 

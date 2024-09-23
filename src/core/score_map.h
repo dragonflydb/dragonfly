@@ -124,6 +124,7 @@ class ScoreMap : public DenseSet {
   uint32_t ObjExpireTime(const void* obj) const final;
   uint32_t ObjSetExpireTime(const void* obj, uint32_t ttl_sec) override;
   void ObjDelete(void* obj, bool has_ttl) const final;
+  void* ObjectClone(const void* obj, bool has_ttl) const final;
 };
 
 }  // namespace dfly

@@ -143,4 +143,29 @@ TEST_F(CmdArgParserTest, IgnoreCase) {
   EXPECT_EQ(absl::implicit_cast<string_view>(parser.Next()), "world"sv);
 }
 
+TEST_F(CmdArgParserTest, FixedRangeInt) {
+  {
+    auto parser = Make({"10", "-10", "12"});
+
+    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 10);
+    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), -10);
+    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 0);
+
+    auto err = parser.Error();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err->type, CmdArgParser::INVALID_INT);
+    EXPECT_EQ(err->index, 2);
+  }
+
+  {
+    auto parser = Make({"-12"});
+    EXPECT_EQ((parser.Next<FInt<-11, 11>>().value), 0);
+
+    auto err = parser.Error();
+    EXPECT_TRUE(err);
+    EXPECT_EQ(err->type, CmdArgParser::INVALID_INT);
+    EXPECT_EQ(err->index, 0);
+  }
+}
+
 }  // namespace facade

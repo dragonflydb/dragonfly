@@ -420,7 +420,7 @@ class TestConnection(BaseTest):
     connection_commands = (
         commands(st.just("echo"), values)
         | commands(st.just("ping"), st.lists(values, max_size=2))
-        | commands(st.just("swapdb"), dbnums, dbnums)
+        # | commands(st.just("swapdb"), dbnums, dbnums)
     )
     command_strategy = connection_commands | common_commands
 

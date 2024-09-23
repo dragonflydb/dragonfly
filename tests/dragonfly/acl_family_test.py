@@ -195,7 +195,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     # return multiple errors for each command failed. Since the nature of the error
     # is the same, that a rule has changed we should squash those error messages into
     # one.
-    assert res[0].args[0] == "kk ACL rules changed between the MULTI and EXEC"
+    assert res[0].args[0] == "kk ACL rules changed between the MULTI and EXEC", res
 
     await admin_client.close()
     await client.close()
@@ -485,7 +485,8 @@ async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
 
 @pytest.mark.asyncio
 async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
-    acl_file_content = "USER roy ON #ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@string +@fast +hset\nUSER john on nopass +@string"
+    # Note the extra space below, it's intented to also check that we properly parse extra spaces
+    acl_file_content = "USER    roy ON #ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@string +@fast +hset\nUSER john on nopass +@string"
 
     acl = create_temp_file(acl_file_content, tmp_dir)
 

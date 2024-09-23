@@ -19,6 +19,15 @@ inputs:
   filter:
     required: false
     type: string
+  aws-access-key-id:
+    required: true
+    type: string
+  aws-secret-access-key:
+    required: true
+    type: string
+  s3-bucket:
+    required: true
+    type: string
 
 runs:
   using: "composite"
@@ -56,6 +65,12 @@ runs:
         if [[ $code -ne 0 ]]; then
           exit 1
         fi
+      env:
+        # Add environment variables to enable the S3 snapshot test.
+        DRAGONFLY_S3_BUCKET: ${{ inputs.s3-bucket }}
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_REGION: us-east-1
 
     - name: Send notification on failure
       if: failure() && github.ref == 'refs/heads/main'

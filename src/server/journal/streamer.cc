@@ -13,7 +13,7 @@
 
 using namespace facade;
 
-ABSL_FLAG(uint32_t, replication_timeout, 10000,
+ABSL_FLAG(uint32_t, replication_timeout, 30000,
           "Time in milliseconds to wait for the replication writes being stuck.");
 
 ABSL_FLAG(uint32_t, replication_stream_output_limit, 64_KB,

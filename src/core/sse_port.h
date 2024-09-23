@@ -5,6 +5,8 @@
 #pragma once
 #if defined(__aarch64__)
 #include "base/sse2neon.h"
+#elif defined(__riscv) || defined(__riscv__)
+#include "base/sse2rvv.h"
 #elif defined(__s390x__)
 #include <vecintrin.h>
 #else

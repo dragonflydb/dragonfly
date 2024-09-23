@@ -43,6 +43,7 @@ class ZSetFamily {
     bool with_scores = false;
     bool reverse = false;
     enum IntervalType { LEX, RANK, SCORE } interval_type = RANK;
+    std::optional<std::string_view> store_key = std::nullopt;
   };
 
   struct ZRangeSpec {
@@ -78,6 +79,7 @@ class ZSetFamily {
   static void ZRangeByLex(CmdArgList args, ConnectionContext* cntx);
   static void ZRevRangeByLex(CmdArgList args, ConnectionContext* cntx);
   static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
+  static void ZRangeStore(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx);
   static void ZRemRangeByLex(CmdArgList args, ConnectionContext* cntx);

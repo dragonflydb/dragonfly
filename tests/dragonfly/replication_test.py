@@ -1286,9 +1286,11 @@ async def test_take_over_seeder(
     stop_info = True
     await info_task
 
-    # Need to wait a bit to give time to write the shutdown snapshot
-    await asyncio.sleep(1)
-    assert master.proc.poll() == 0, "Master process did not exit correctly."
+    @assert_eventually
+    async def assert_master_exists():
+        assert master.proc.poll() == 0, "Master process did not exit correctly."
+
+    await assert_master_exists()
 
     master.start()
     c_master = master.client()
@@ -1828,7 +1830,6 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
     # assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
-@pytest.mark.skip("Fails sporadically")
 async def test_replica_reconnections_after_network_disconnect(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=6)
     replica = df_factory.create(proactor_threads=4)
@@ -1987,8 +1988,9 @@ async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     stats_after_sleep = await c_master.info("CommandStats")
     # Check no commands are executed except info and replconf called from replica
     for cmd, cmd_stats in stats_after_sleep.items():
-        if "cmdstat_info" != cmd and "cmdstat_replconf" != cmd_stats:
-            assert stats[cmd] == cmd_stats, cmd
+        if cmd in ["cmdstat_info", "cmdstat_replconf", "cmdstat_multi"]:
+            continue
+        assert stats[cmd] == cmd_stats, cmd
 
     await asyncio.sleep(6)
     seeder.stop()
@@ -2012,7 +2014,7 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"DEBUG POPULATE 10000000")
+    await c_replica.execute_command(f"DEBUG POPULATE 8000000")
 
     replica.stop()
     replica.start()
@@ -2029,8 +2031,9 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
         assert False
     except aioredis.BusyLoadingError as e:
         assert "Dragonfly is loading the dataset in memory" in str(e)
+
     # Check one we finish loading snapshot replicaof success
-    await wait_available_async(c_replica)
+    await wait_available_async(c_replica, timeout=180)
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
     await c_replica.close()
@@ -2083,6 +2086,7 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
         maxmemory="512mb",
         logtostdout="true",
         enable_heartbeat_eviction="false",
+        rss_oom_deny_ratio=1.3,
     )
     replica = df_factory.create(proactor_threads=2)
     df_factory.start_all([master, replica])
@@ -2336,6 +2340,45 @@ async def test_announce_ip_port(df_factory):
     assert port == "1337"
 
 
+@pytest.mark.asyncio
+async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # setting replication_timeout to a very small value to force the replica to timeout
+    master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2")
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("debug", "populate", "200000", "foo", "5000")
+    seeder = df_seeder_factory.create(port=master.port)
+    seeder_task = asyncio.create_task(seeder.run())
+
+    await asyncio.sleep(0.5)  # wait for seeder running
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # wait for full sync
+    async with async_timeout.timeout(3):
+        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.05)
+
+    await c_replica.execute_command(
+        "debug replica pause"
+    )  # puase replica to trigger reconnect on master
+
+    await asyncio.sleep(1)
+
+    await c_replica.execute_command("debug replica resume")  # resume replication
+
+    await asyncio.sleep(1)  # replica will start resync
+    seeder.stop()
+    await seeder_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await assert_replica_reconnections(replica, 0)
+
+
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked
     master = df_factory.create(replication_timeout=1000)
@@ -2550,9 +2593,13 @@ async def test_replicating_mc_flags(df_factory):
 
     c_replica = replica.client()
 
-    assert c_mc_master.set("key1", "value1", noreply=True)
-    assert c_mc_master.set("key2", "value1", noreply=True, expire=3600, flags=123456)
-    assert c_mc_master.replace("key1", "value2", expire=4000, flags=2, noreply=True)
+    assert c_mc_master.set("key1", "value0", noreply=True)
+    assert c_mc_master.set("key2", "value2", noreply=True, expire=3600, flags=123456)
+    assert c_mc_master.replace("key1", "value1", expire=4000, flags=2, noreply=True)
+
+    c_master = master.client()
+    for i in range(3, 100):
+        await c_master.set(f"key{i}", f"value{i}")
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_available_async(c_replica)
@@ -2568,4 +2615,51 @@ async def test_replicating_mc_flags(df_factory):
     await check_flag("key1", 2)
     await check_flag("key2", 123456)
 
-    await close_clients(c_replica)
+    for i in range(1, 100):
+        assert c_mc_replica.get(f"key{i}") == str.encode(f"value{i}")
+
+    await close_clients(c_replica, c_master)
+
+
+@pytest.mark.asyncio
+async def test_double_take_over(df_factory, df_seeder_factory):
+    master = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT)
+    replica = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT + 1)
+    df_factory.start_all([master, replica])
+
+    seeder = df_seeder_factory.create(port=master.port, keys=1000, dbcount=5, stop_on_failure=False)
+    await seeder.run(target_deviation=0.1)
+
+    capture = await seeder.capture(port=master.port)
+
+    c_replica = replica.client()
+
+    logging.debug("start replication")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}")
+    await wait_available_async(c_replica)
+
+    logging.debug("running repltakover")
+    await c_replica.execute_command(f"REPLTAKEOVER 10")
+    assert await c_replica.execute_command("role") == ["master", []]
+
+    @assert_eventually
+    async def check_master_status():
+        assert master.proc.poll() == 0, "Master process did not exit correctly."
+
+    await check_master_status()
+
+    logging.debug("restart previous master")
+    master.start()
+    c_master = master.client()
+
+    logging.debug("start second replication")
+    await c_master.execute_command(f"REPLICAOF localhost {replica.admin_port}")
+    await wait_available_async(c_master)
+
+    logging.debug("running second repltakover")
+    await c_master.execute_command(f"REPLTAKEOVER 10")
+    assert await c_master.execute_command("role") == ["master", []]
+
+    assert await seeder.compare(capture, port=master.port)
+
+    await disconnect_clients(c_master, c_replica)

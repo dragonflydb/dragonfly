@@ -5,7 +5,7 @@ from redis import asyncio as aioredis
 from .utility import *
 from . import dfly_args
 
-BASE_PORT = 40001
+BASE_PORT = 30001
 
 
 async def insert_cluster_data(cluster_client: redis.RedisCluster):
@@ -19,11 +19,11 @@ async def check_cluster_data(cluster_client: redis.RedisCluster):
 
 
 def run_cluster_mgr(args):
+    print(f"Running cluster_mgr.py {args}")
     result = subprocess.run(["../tools/cluster_mgr.py", *args])
     return result.returncode == 0
 
 
-@pytest.mark.xfail
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_mgr(df_factory):
     NODES = 3

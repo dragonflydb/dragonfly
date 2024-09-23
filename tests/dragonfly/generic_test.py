@@ -125,11 +125,15 @@ async def test_restricted_commands(df_factory):
 @pytest.mark.asyncio
 async def test_reply_guard_oom(df_factory, df_seeder_factory):
     master = df_factory.create(
-        proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
+        proactor_threads=1,
+        cache_mode="true",
+        maxmemory="256mb",
+        enable_heartbeat_eviction="false",
+        rss_oom_deny_ratio=2,
     )
     df_factory.start_all([master])
     c_master = master.client()
-    await c_master.execute_command("DEBUG POPULATE 6000 size 44000")
+    await c_master.execute_command("DEBUG POPULATE 6000 size 40000")
 
     seeder = df_seeder_factory.create(
         port=master.port, keys=5000, val_size=1000, stop_on_failure=False
@@ -138,3 +142,29 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
 
     info = await c_master.info("stats")
     assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
+
+
+@pytest.mark.asyncio
+async def test_denyoom_commands(df_factory):
+    df_server = df_factory.create(
+        proactor_threads=1, maxmemory="256mb", oom_deny_commands="get", oom_deny_ratio=0.7
+    )
+    df_server.start()
+    client = df_server.client()
+    await client.execute_command("DEBUG POPULATE 7000 size 44000")
+
+    min_deny = 250 * 1024 * 1024  # 250mb
+    info = await client.info("memory")
+    print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+    assert info["used_memory"] > min_deny, "Weak testcase: too little used memory"
+
+    # reject set due to oom
+    with pytest.raises(redis.exceptions.ResponseError):
+        await client.execute_command("set x y")
+
+    # reject get because it is set in oom_deny_commands
+    with pytest.raises(redis.exceptions.ResponseError):
+        await client.execute_command("get x")
+
+    # mget should not be rejected
+    await client.execute_command("mget x")

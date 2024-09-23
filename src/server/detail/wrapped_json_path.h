@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -59,19 +57,46 @@ template <typename T> void OptionalEmplace(bool keep_defined, T src, T* dest) {
 
 }  // namespace details
 
+enum class JsonPathType { kV2, kLegacy /*Or V1*/ };
+constexpr JsonPathType kDefaultJsonPathType = JsonPathType::kV2;
+
+struct CallbackResultOptions {
+  enum class SavingOrder { kSaveFirst, kSaveLast };
+  enum class OnEmpty { kSendNil, kSendWrongType };
+
+  CallbackResultOptions() = default;
+
+  explicit CallbackResultOptions(JsonPathType path_type_) : path_type(path_type_) {
+  }
+
+  explicit CallbackResultOptions(SavingOrder saving_order_) : saving_order(saving_order_) {
+  }
+
+  explicit CallbackResultOptions(OnEmpty on_empty_) : on_empty(on_empty_) {
+  }
+
+  CallbackResultOptions(JsonPathType path_type_, SavingOrder saving_order_, OnEmpty on_empty_)
+      : path_type(path_type_), saving_order(saving_order_), on_empty(on_empty_) {
+  }
+
+  std::optional<JsonPathType> path_type = std::nullopt;
+  SavingOrder saving_order{SavingOrder::kSaveLast};
+  OnEmpty on_empty{OnEmpty::kSendWrongType};
+};
+
 template <typename T> class JsonCallbackResult {
   template <typename V> struct is_optional : std::false_type {};
 
   template <typename V> struct is_optional<std::optional<V>> : std::true_type {};
 
  public:
+  using SavingOrder = CallbackResultOptions::SavingOrder;
+  using OnEmpty = CallbackResultOptions::OnEmpty;
+
   JsonCallbackResult() {
   }
 
-  JsonCallbackResult(bool legacy_mode_is_enabled, bool save_first_result, bool empty_is_nil)
-      : only_save_first_(save_first_result),
-        is_legacy_(legacy_mode_is_enabled),
-        empty_is_nil_(empty_is_nil) {
+  explicit JsonCallbackResult(CallbackResultOptions options) : options_(std::move(options)) {
   }
 
   void AddValue(T value) {
@@ -80,19 +105,20 @@ template <typename T> class JsonCallbackResult {
       return;
     }
 
-    details::OptionalEmplace(only_save_first_, std::move(value), &result_.front());
+    details::OptionalEmplace(options_.saving_order == SavingOrder::kSaveFirst, std::move(value),
+                             &result_.front());
   }
 
   bool IsV1() const {
-    return is_legacy_;
+    return options_.path_type == JsonPathType::kLegacy;
   }
 
   const T& AsV1() const {
     return result_.front();
   }
 
-  const absl::InlinedVector<T, 2>& AsV2() const {
-    return std::move(result_);
+  const auto& AsV2() const {
+    return result_;
   }
 
   bool Empty() const {
@@ -100,12 +126,12 @@ template <typename T> class JsonCallbackResult {
   }
 
   bool ShouldSendNil() const {
-    return is_legacy_ && empty_is_nil_ && result_.empty();
+    return IsV1() && options_.on_empty == OnEmpty::kSendNil && result_.empty();
   }
 
   bool ShouldSendWrongType() const {
-    if (is_legacy_) {
-      if (result_.empty() && !empty_is_nil_)
+    if (IsV1()) {
+      if (result_.empty() && options_.on_empty == OnEmpty::kSendWrongType)
         return true;
 
       if constexpr (is_optional<T>::value) {
@@ -116,11 +142,8 @@ template <typename T> class JsonCallbackResult {
   }
 
  private:
-  absl::InlinedVector<T, 2> result_;
-
-  bool only_save_first_ = false;
-  bool is_legacy_ = false;
-  bool empty_is_nil_ = false;
+  std::vector<T> result_;
+  CallbackResultOptions options_{kDefaultJsonPathType};
 };
 
 class WrappedJsonPath {
@@ -128,28 +151,19 @@ class WrappedJsonPath {
   static constexpr std::string_view kV1PathRootElement = ".";
   static constexpr std::string_view kV2PathRootElement = "$";
 
-  WrappedJsonPath(json::Path json_path, StringOrView path, bool is_legacy_mode_path)
-      : parsed_path_(std::move(json_path)),
-        path_(std::move(path)),
-        is_legacy_mode_path_(is_legacy_mode_path) {
+  WrappedJsonPath(json::Path json_path, StringOrView path, JsonPathType path_type)
+      : parsed_path_(std::move(json_path)), path_(std::move(path)), path_type_(path_type) {
   }
 
-  WrappedJsonPath(JsonExpression expression, StringOrView path, bool is_legacy_mode_path)
-      : parsed_path_(std::move(expression)),
-        path_(std::move(path)),
-        is_legacy_mode_path_(is_legacy_mode_path) {
+  WrappedJsonPath(JsonExpression expression, StringOrView path, JsonPathType path_type)
+      : parsed_path_(std::move(expression)), path_(std::move(path)), path_type_(path_type) {
   }
 
   template <typename T>
   JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb,
-                                 bool save_first_result) const {
-    return Evaluate(json_entry, cb, save_first_result, IsLegacyModePath());
-  }
-
-  template <typename T>
-  JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb,
-                                 bool save_first_result, bool legacy_mode_is_enabled) const {
-    JsonCallbackResult<T> eval_result{legacy_mode_is_enabled, save_first_result, true};
+                                 CallbackResultOptions options = {}) const {
+    JsonCallbackResult<T> eval_result{{options.path_type.value_or(path_type_), options.saving_order,
+                                       CallbackResultOptions::OnEmpty::kSendNil}};
 
     auto eval_callback = [&cb, &eval_result](std::string_view path, const JsonType& val) {
       eval_result.AddValue(cb(path, val));
@@ -172,8 +186,9 @@ class WrappedJsonPath {
 
   template <typename T>
   OpResult<JsonCallbackResult<std::optional<T>>> Mutate(JsonType* json_entry,
-                                                        JsonPathMutateCallback<T> cb) const {
-    JsonCallbackResult<std::optional<T>> mutate_result{IsLegacyModePath(), false, false};
+                                                        JsonPathMutateCallback<T> cb,
+                                                        CallbackResultOptions options = {}) const {
+    JsonCallbackResult<std::optional<T>> mutate_result{InitializePathType(options)};
 
     auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
                                                  JsonType* val) -> bool {
@@ -222,7 +237,7 @@ class WrappedJsonPath {
   }
 
   bool IsLegacyModePath() const {
-    return is_legacy_mode_path_;
+    return path_type_ == JsonPathType::kLegacy;
   }
 
   bool RefersToRootElement() const {
@@ -243,9 +258,17 @@ class WrappedJsonPath {
   }
 
  private:
+  CallbackResultOptions InitializePathType(CallbackResultOptions options) const {
+    if (!options.path_type) {
+      options.path_type = path_type_;
+    }
+    return options;
+  }
+
+ private:
   std::variant<json::Path, JsonExpression> parsed_path_;
   StringOrView path_;
-  bool is_legacy_mode_path_;
+  JsonPathType path_type_ = kDefaultJsonPathType;
 };
 
 }  // namespace dfly

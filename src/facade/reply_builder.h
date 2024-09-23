@@ -138,7 +138,7 @@ class SinkReplyBuilder {
 
   void ExpectReply();
   bool HasReplied() const {
-    return true;  // WE break it for now
+    return has_replied_;
   }
 
   virtual size_t UsedMemory() const;
@@ -152,6 +152,10 @@ class SinkReplyBuilder {
   virtual void StartAggregate();
   virtual void StopAggregate();
 
+  std::string ConsumeLastError() {
+    return std::exchange(last_error_, std::string{});
+  }
+
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
 
@@ -160,6 +164,9 @@ class SinkReplyBuilder {
   std::string batch_;
   ::io::Sink* sink_;
   std::error_code ec_;
+
+  // msg and kind/type
+  std::string last_error_;
 
   bool should_batch_ : 1;
 
@@ -415,8 +422,10 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
   void SendError(std::string_view str, std::string_view type = {}) override;
   void SendProtocolError(std::string_view str) override;
 
-  static char* FormatDouble(double d, char* dest, unsigned len);
   virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT) override;
+
+  static char* FormatDouble(double d, char* dest, unsigned len);
+  static std::string SerializeCommand(std::string_view command);
 
   bool IsResp3() const override {
     return resp3_;
@@ -489,24 +498,6 @@ class RedisReplyBuilder2 : public RedisReplyBuilder2Base {
 
   // TODO: Remove
   void SendMGetResponse(SinkReplyBuilder::MGetResponse resp) override;
-
-  static std::string SerializeCommmand(std::string_view cmd);
-};
-
-class ReqSerializer {
- public:
-  explicit ReqSerializer(::io::Sink* stream) : sink_(stream) {
-  }
-
-  void SendCommand(std::string_view str);
-
-  std::error_code ec() const {
-    return ec_;
-  }
-
- private:
-  ::io::Sink* sink_;
-  std::error_code ec_;
 };
 
 }  // namespace facade

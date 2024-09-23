@@ -20,10 +20,6 @@
 #include <openssl/ssl.h>
 #endif
 
-namespace facade {
-class ReqSerializer;
-};  // namespace facade
-
 namespace dfly {
 
 class Service;
@@ -117,7 +113,6 @@ class ProtocolClient {
  private:
   ServerContext server_context_;
 
-  std::unique_ptr<facade::ReqSerializer> serializer_;
   std::unique_ptr<facade::RedisParser> parser_;
   facade::RespVec resp_args_;
   base::IoBuf resp_buf_;

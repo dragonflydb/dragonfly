@@ -15,11 +15,13 @@
 #include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
 #include <jsoncons_ext/mergepatch/mergepatch.hpp>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
+#include "core/mi_memory_resource.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "server/acl/acl_commands_def.h"
@@ -36,7 +38,6 @@
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
           "otherwise uses legacy jsoncons implementation.");
-ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 
 namespace dfly {
 
@@ -51,6 +52,34 @@ using CI = CommandId;
 
 namespace {
 
+class JsonMemTracker {
+ public:
+  JsonMemTracker() {
+    start_size_ = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+  }
+
+  void SetJsonSize(PrimeValue& pv, bool is_op_set) {
+    const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
+    // If the diff is 0 it means the object use the same memory as before. No action needed.
+    if (diff == 0) {
+      return;
+    }
+    // If op_set_ it means we JSON.SET or JSON.MSET was called. This is a blind update,
+    // and because the operation sets the size to 0 we also need to include the size of
+    // the pointer.
+    if (is_op_set) {
+      diff += static_cast<int64_t>(mi_usable_size(pv.GetJson()));
+    }
+    pv.SetJsonSize(diff);
+    // Under any flow we must not end up with this special value.
+    DCHECK(pv.MallocUsed() != 0);
+  }
+
+ private:
+  size_t start_size_{0};
+};
+
 template <typename T> using ParseResult = io::Result<T, std::string>;
 
 ParseResult<JsonExpression> ParseJsonPathAsExpression(std::string_view path) {
@@ -61,14 +90,14 @@ ParseResult<JsonExpression> ParseJsonPathAsExpression(std::string_view path) {
   return res;
 }
 
-ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, bool is_legacy_mode_path) {
+ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, JsonPathType path_type) {
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
     auto path_result = json::ParsePath(path.view());
     if (!path_result) {
       VLOG(1) << "Invalid Json path: " << path << ' ' << path_result.error() << std::endl;
       return nonstd::make_unexpected(kSyntaxErr);
     }
-    return WrappedJsonPath{std::move(path_result).value(), std::move(path), is_legacy_mode_path};
+    return WrappedJsonPath{std::move(path_result).value(), std::move(path), path_type};
   }
 
   auto expr_result = ParseJsonPathAsExpression(path.view());
@@ -76,22 +105,23 @@ ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, bool is_legacy_mod
     VLOG(1) << "Invalid Json path: " << path << ' ' << expr_result.error() << std::endl;
     return nonstd::make_unexpected(kSyntaxErr);
   }
-  return WrappedJsonPath{std::move(expr_result).value(), std::move(path), is_legacy_mode_path};
+  return WrappedJsonPath{std::move(expr_result).value(), std::move(path), path_type};
 }
 
 ParseResult<WrappedJsonPath> ParseJsonPathV1(std::string_view path) {
   if (path.empty() || path == WrappedJsonPath::kV1PathRootElement) {
-    return ParseJsonPath(StringOrView::FromView(WrappedJsonPath::kV2PathRootElement), true);
+    return ParseJsonPath(StringOrView::FromView(WrappedJsonPath::kV2PathRootElement),
+                         JsonPathType::kLegacy);
   }
 
   std::string v2_path = absl::StrCat(
       WrappedJsonPath::kV2PathRootElement, path.front() != '.' && path.front() != '[' ? "." : "",
       path);  // Convert to V2 path; TODO(path.front() != all kinds of symbols)
-  return ParseJsonPath(StringOrView::FromString(std::move(v2_path)), true);
+  return ParseJsonPath(StringOrView::FromString(std::move(v2_path)), JsonPathType::kLegacy);
 }
 
 ParseResult<WrappedJsonPath> ParseJsonPathV2(std::string_view path) {
-  return ParseJsonPath(StringOrView::FromView(path), false);
+  return ParseJsonPath(StringOrView::FromView(path), JsonPathType::kV2);
 }
 
 bool IsJsonPathV2(std::string_view path) {
@@ -211,8 +241,82 @@ template <typename T> void Send(const OpResult<T>& result, RedisReplyBuilder* rb
 }  // namespace reply_generic
 
 using OptSize = optional<size_t>;
+using SavingOrder = CallbackResultOptions::SavingOrder;
+using OnEmpty = CallbackResultOptions::OnEmpty;
 
-facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& value) {
+struct JsonGetParams {
+  std::optional<std::string> indent;
+  std::optional<std::string> new_line;
+  std::optional<std::string> space;
+  bool no_escape = false;  // Flag for NOESCAPE option
+  std::vector<std::pair<std::string_view, WrappedJsonPath>> paths;
+};
+
+std::optional<JsonGetParams> ParseJsonGetParams(CmdArgParser* parser, ConnectionContext* cntx) {
+  JsonGetParams parsed_args;
+  while (parser->HasNext()) {
+    if (parser->Check("NOESCAPE")) {
+      parsed_args.no_escape = true;
+    } else if (parser->Check("SPACE")) {
+      parsed_args.space = parser->Next();
+    } else if (parser->Check("NEWLINE")) {
+      parsed_args.new_line = parser->Next();
+    } else if (parser->Check("INDENT")) {
+      parsed_args.indent = parser->Next();
+    } else {
+      std::string_view path_str = parser->Next();
+
+      auto json_path = ParseJsonPath(path_str);
+      if (!json_path) {
+        cntx->SendError(json_path.error());
+        return std::nullopt;
+      }
+
+      parsed_args.paths.emplace_back(path_str, std::move(json_path).value());
+    }
+  }
+  return parsed_args;
+}
+
+// This method makes a comparison of json considering their types
+// For example, 3 != 3.0 because json_type::int64_value != json_type::double_value
+bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
+  if (lhs.type() != rhs.type()) {
+    return false;
+  }
+  switch (lhs.type()) {
+    case json_type::array_value: {
+      if (lhs.size() != rhs.size()) {
+        return false;
+      }
+
+      auto rhs_array = rhs.array_range();
+      for (auto l_it = lhs.array_range().begin(), r_it = rhs_array.begin(); r_it != rhs_array.end();
+           ++r_it, ++l_it) {
+        if (!JsonAreEquals(*l_it, *r_it)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    case json_type::object_value: {
+      if (lhs.size() != rhs.size()) {
+        return false;
+      }
+      return std::all_of(
+          lhs.object_range().begin(), lhs.object_range().end(), [&](const auto& l_it) {
+            auto r_it = rhs.find(l_it.key());
+            return r_it != rhs.object_range().end() && JsonAreEquals(l_it.value(), r_it->value());
+          });
+    }
+
+    default:
+      return lhs == rhs;
+  }
+}
+
+OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view key, JsonType value) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -222,7 +326,7 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
-  if (absl::GetFlag(FLAGS_experimental_flat_json)) {
+  if (JsonEnconding() == kEncodingJsonFlat) {
     flexbuffers::Builder fbb;
     json::FromJsonType(value, &fbb);
     fbb.Finish();
@@ -232,7 +336,26 @@ facade::OpStatus SetJson(const OpArgs& op_args, string_view key, JsonType&& valu
     res.it->second.SetJson(std::move(value));
   }
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
-  return OpStatus::OK;
+  return std::move(res);
+}
+
+size_t NormalizeNegativeIndex(int index, size_t size) {
+  if (index >= 0) {
+    return index;
+  }
+
+  if (static_cast<size_t>(-index) > size) {
+    return 0;
+  }
+  return size + index;
+}
+
+auto GetJsonArrayIterator(JsonType* val, size_t index) {
+  return std::next(val->array_range().begin(), static_cast<ptrdiff_t>(index));
+}
+
+auto GetJsonArrayIterator(const JsonType& val, size_t index) {
+  return std::next(val.array_range().begin(), static_cast<ptrdiff_t>(index));
 }
 
 string JsonTypeToName(const JsonType& val) {
@@ -459,8 +582,8 @@ size_t CountJsonFields(const JsonType& j) {
 }
 
 struct EvaluateOperationOptions {
-  bool save_first_result = false;
   bool return_nil_if_key_not_found = false;
+  CallbackResultOptions cb_result_options;
 };
 
 template <typename T>
@@ -470,24 +593,30 @@ OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std
                                                       EvaluateOperationOptions options = {}) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   if (options.return_nil_if_key_not_found && result == OpStatus::KEY_NOTFOUND) {
-// GCC 13.1 throws spurious warnings around this code.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-    return JsonCallbackResult<T>{true, false, true};  // set legacy mode to return nil
-#pragma GCC diagnostic pop
+    return JsonCallbackResult<T>{
+        {JsonPathType::kLegacy, options.cb_result_options.saving_order,
+         CallbackResultOptions::OnEmpty::kSendNil}};  // set legacy mode to return nil
   }
 
   RETURN_ON_BAD_STATUS(result);
-  return json_path.Evaluate<T>(*result, cb, options.save_first_result);
+  return json_path.Evaluate<T>(*result, cb, options.cb_result_options);
 }
 
+struct MutateOperationOptions {
+  JsonReplaceVerify verify_op;
+  CallbackResultOptions cb_result_options;
+};
+
 template <typename T>
-OpResult<JsonCallbackResult<optional<T>>> UpdateEntry(const OpArgs& op_args, std::string_view key,
-                                                      const WrappedJsonPath& json_path,
-                                                      JsonPathMutateCallback<T> cb,
-                                                      JsonReplaceVerify verify_op = {}) {
+OpResult<JsonCallbackResult<optional<T>>> JsonMutateOperation(const OpArgs& op_args,
+                                                              std::string_view key,
+                                                              const WrappedJsonPath& json_path,
+                                                              JsonPathMutateCallback<T> cb,
+                                                              MutateOperationOptions options = {}) {
   auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
   RETURN_ON_BAD_STATUS(it_res);
+
+  JsonMemTracker mem_tracker;
 
   PrimeValue& pv = it_res->it->second;
 
@@ -497,13 +626,15 @@ OpResult<JsonCallbackResult<optional<T>>> UpdateEntry(const OpArgs& op_args, std
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
-  auto mutate_res = json_path.Mutate(json_val, cb);
+  auto mutate_res = json_path.Mutate(json_val, cb, options.cb_result_options);
 
   // Make sure that we don't have other internal issue with the operation
-  if (mutate_res && verify_op) {
-    verify_op(*json_val);
+  if (mutate_res && options.verify_op) {
+    options.verify_op(*json_val);
   }
 
+  // we need to manually run this before the PostUpdater run
+  mem_tracker.SetJsonSize(pv, false);
   it_res->post_updater.Run();
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
@@ -517,14 +648,13 @@ bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJs
 }
 
 OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
-                                const vector<pair<string_view, WrappedJsonPath>>& paths,
-                                const std::optional<std::string>& indent,
-                                const std::optional<std::string>& new_line,
-                                const std::optional<std::string>& space) {
+                                const JsonGetParams& params) {
   OpResult<JsonType*> result = GetJson(op_args, key);
   RETURN_ON_BAD_STATUS(result);
 
+  const auto& paths = params.paths;
   const JsonType& json_entry = *(result.value());
+
   if (paths.empty()) {
     // this implicitly means that we're using . which
     // means we just brings all values
@@ -538,26 +668,27 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
       .indent_size(0)
       .new_line_chars("");
 
-  if (indent) {
+  if (params.indent) {
     options.indent_size(1);
-    options.indent_chars(*indent);
+    options.indent_chars(params.indent.value());
   }
 
-  if (new_line) {
-    options.new_line_chars(*new_line);
+  if (params.new_line) {
+    options.new_line_chars(params.new_line.value());
   }
 
-  if (space) {
-    options.after_key_chars(*space);
+  if (params.space) {
+    options.after_key_chars(params.space.value());
   }
-
-  const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
 
   auto cb = [](std::string_view, const JsonType& val) { return val; };
 
-  auto eval_wrapped = [&json_entry, &cb, legacy_mode_is_enabled](
-                          const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-    auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, false, legacy_mode_is_enabled);
+  const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
+  CallbackResultOptions cb_options{legacy_mode_is_enabled ? JsonPathType::kLegacy
+                                                          : JsonPathType::kV2};
+
+  auto eval_wrapped = [&](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
+    auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, cb_options);
 
     DCHECK(legacy_mode_is_enabled == eval_result.IsV1());
 
@@ -598,7 +729,7 @@ auto OpType(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
   auto cb = [](const string_view&, const JsonType& val) -> std::string {
     return JsonTypeToName(val);
   };
-  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {false, true});
+  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {true, {}});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_view key,
@@ -611,7 +742,8 @@ OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_vie
     }
   };
 
-  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb), {true, true});
+  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb),
+                                        {true, CallbackResultOptions{SavingOrder::kSaveFirst}});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_view key,
@@ -623,9 +755,9 @@ OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-
-  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb),
-                                        {true, json_path.IsLegacyModePath()});
+  return JsonEvaluateOperation<OptSize>(
+      op_args, key, json_path, std::move(cb),
+      {json_path.IsLegacyModePath(), CallbackResultOptions{SavingOrder::kSaveFirst}});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_view key,
@@ -637,7 +769,8 @@ OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_vie
       return std::nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb), {true, true});
+  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb),
+                                        {true, CallbackResultOptions{SavingOrder::kSaveFirst}});
 }
 
 template <typename T>
@@ -652,7 +785,7 @@ auto OpToggle(const OpArgs& op_args, string_view key,
     }
     return {};
   };
-  return UpdateEntry<std::optional<T>>(op_args, key, json_path, std::move(cb));
+  return JsonMutateOperation<std::optional<T>>(op_args, key, json_path, std::move(cb));
 }
 
 template <typename T>
@@ -688,51 +821,57 @@ void BinOpApply(double num, bool num_is_double, ArithmeticOpType op, JsonType* v
   if (val->is_double() || num_is_double) {
     *val = result;
   } else {
-    *val = (uint64_t)result;
+    *val = static_cast<uint64_t>(result);
   }
   *overflow = false;
 }
 
+// Tmp solution with struct CallbackResult, because MutateCallbackResult<std::optional<JsonType>>
+// does not compile
+struct DoubleArithmeticCallbackResult {
+  explicit DoubleArithmeticCallbackResult(bool legacy_mode_is_enabled_)
+      : legacy_mode_is_enabled(legacy_mode_is_enabled_) {
+    if (!legacy_mode_is_enabled) {
+      json_value.emplace(jsoncons::json_array_arg);
+    }
+  }
+
+  void AddValue(JsonType val) {
+    if (legacy_mode_is_enabled) {
+      json_value = std::move(val);
+    } else {
+      json_value->emplace_back(std::move(val));
+    }
+  }
+
+  void AddEmptyValue() {
+    if (!legacy_mode_is_enabled) {
+      json_value->emplace_back(JsonType::null());
+    }
+  }
+
+  std::optional<JsonType> json_value;
+  bool legacy_mode_is_enabled;
+};
+
 OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
-                                    const WrappedJsonPath& json_path, double num,
+                                    const WrappedJsonPath& json_path, string_view num,
                                     ArithmeticOpType op_type) {
+  bool has_fractional_part = num.find('.') != string::npos;
+  double double_value = 0;
+
+  if (!ParseDouble(num, &double_value)) {
+    VLOG(2) << "Failed to parse number as double: " << num;
+    return OpStatus::WRONG_TYPE;
+  }
+
   bool is_result_overflow = false;
-  double int_part;
-  bool has_fractional_part = (modf(num, &int_part) != 0);
 
-  // Tmp solution with struct CallbackResult, because MutateCallbackResult<std::optional<JsonType>>
-  // does not compile
-  struct CallbackResult {
-    explicit CallbackResult(bool legacy_mode_is_enabled_)
-        : legacy_mode_is_enabled(legacy_mode_is_enabled_) {
-      if (!legacy_mode_is_enabled) {
-        json_value.emplace(jsoncons::json_array_arg);
-      }
-    }
-
-    void AddValue(JsonType val) {
-      if (legacy_mode_is_enabled) {
-        json_value = std::move(val);
-      } else {
-        json_value->emplace_back(std::move(val));
-      }
-    }
-
-    void AddEmptyValue() {
-      if (!legacy_mode_is_enabled) {
-        json_value->emplace_back(JsonType::null());
-      }
-    }
-
-    std::optional<JsonType> json_value;
-    bool legacy_mode_is_enabled;
-  };
-
-  CallbackResult result{json_path.IsLegacyModePath()};
+  DoubleArithmeticCallbackResult result{json_path.IsLegacyModePath()};
   auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
     if (val->is_number()) {
       bool res = false;
-      BinOpApply(num, has_fractional_part, op_type, val, &res);
+      BinOpApply(double_value, has_fractional_part, op_type, val, &res);
       if (res) {
         is_result_overflow = true;
       } else {
@@ -744,7 +883,7 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
     return {};
   };
 
-  auto res = UpdateEntry<Nothing>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
 
   if (is_result_overflow)
     return OpStatus::INVALID_NUMERIC_RESULT;
@@ -765,15 +904,23 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     return static_cast<long>(db_slice.Del(op_args.db_cntx, it));
   }
-  OpResult<JsonType*> result = GetJson(op_args, key);
-  if (!result) {
+  JsonMemTracker tracker;
+  // FindMutable because we need to run the AutoUpdater at the end which will account
+  // the deltas calculated from the MemoryTracker
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  if (!it_res) {
     return 0;
   }
+
+  PrimeValue& pv = it_res->it->second;
+  JsonType* json_val = pv.GetJson();
+
+  absl::Cleanup update_size_on_exit([tracker, &pv]() mutable { tracker.SetJsonSize(pv, false); });
 
   if (json_path.HoldsJsonPath()) {
     const json::Path& path = json_path.AsJsonPath();
     long deletions = json::MutatePath(
-        path, [](optional<string_view>, JsonType* val) { return true; }, *result);
+        path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
     return deletions;
   }
 
@@ -783,7 +930,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = json_path.Mutate<Nothing>(result.value(), std::move(cb));
+  auto res = json_path.Mutate<Nothing>(json_val, std::move(cb));
   RETURN_ON_BAD_STATUS(res);
 
   if (deletion_items.empty()) {
@@ -801,7 +948,7 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   }
 
   std::error_code ec;
-  jsoncons::jsonpatch::apply_patch(*result.value(), patch, ec);
+  jsoncons::jsonpatch::apply_patch(*json_val, patch, ec);
   if (ec) {
     VLOG(1) << "Failed to apply patch on json with error: " << ec.message();
     return 0;
@@ -827,8 +974,9 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
     return vec;
   };
 
-  return JsonEvaluateOperation<StringVec>(op_args, key, json_path, std::move(cb),
-                                          {true, json_path.IsLegacyModePath()});
+  return JsonEvaluateOperation<StringVec>(
+      op_args, key, json_path, std::move(cb),
+      {json_path.IsLegacyModePath(), CallbackResultOptions{SavingOrder::kSaveFirst}});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_view key,
@@ -843,7 +991,7 @@ OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_
     return {false, len};  // do not delete, new value len
   };
 
-  return UpdateEntry<size_t>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<size_t>(op_args, key, path, std::move(cb));
 }
 
 // Returns the numbers of values cleared.
@@ -869,7 +1017,7 @@ OpResult<long> OpClear(const OpArgs& op_args, string_view key, const WrappedJson
     return {};
   };
 
-  auto res = UpdateEntry<Nothing>(op_args, key, path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, path, std::move(cb));
   RETURN_ON_BAD_STATUS(res);
   return clear_items;
 }
@@ -882,19 +1030,10 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
       return {};
     }
 
-    size_t removal_index;
-    if (index < 0) {
-      int temp_index = index + val->size();
-      removal_index = abs(temp_index);
-    } else {
-      removal_index = index;
-    }
+    size_t array_size = val->size();
+    size_t removal_index = std::min(NormalizeNegativeIndex(index, array_size), array_size - 1);
 
-    if (removal_index >= val->size()) {
-      removal_index %= val->size();  // rounded to the array boundaries.
-    }
-
-    auto it = val->array_range().begin() + removal_index;
+    auto it = GetJsonArrayIterator(val, removal_index);
     string str;
     error_code ec;
     it->dump(str, {}, ec);
@@ -906,7 +1045,9 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     val->erase(it);
     return {false, std::move(str)};
   };
-  return UpdateEntry<std::string>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<std::string>(
+      op_args, key, path, std::move(cb),
+      MutateOperationOptions{{}, CallbackResultOptions{OnEmpty::kSendNil}});
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -920,35 +1061,29 @@ auto OpArrTrim(const OpArgs& op_args, string_view key, const WrappedJsonPath& pa
     if (val->empty()) {
       return {false, 0};
     }
-    size_t trim_start_index;
-    if (start_index < 0) {
-      trim_start_index = 0;
-    } else {
-      trim_start_index = start_index;
-    }
 
-    size_t trim_end_index;
-    if ((size_t)stop_index >= val->size()) {
-      trim_end_index = val->size();
-    } else {
-      trim_end_index = stop_index;
-    }
+    size_t array_size = val->size();
 
-    if (trim_start_index >= val->size() || trim_start_index > trim_end_index) {
+    size_t trim_start_index = NormalizeNegativeIndex(start_index, array_size);
+    size_t trim_end_index = NormalizeNegativeIndex(stop_index, array_size);
+
+    if (trim_start_index >= array_size || trim_start_index > trim_end_index) {
       val->erase(val->array_range().begin(), val->array_range().end());
       return {false, 0};
     }
 
-    auto trim_start_it = std::next(val->array_range().begin(), trim_start_index);
+    trim_end_index = std::min(trim_end_index, array_size);
+
+    auto trim_start_it = GetJsonArrayIterator(val, trim_start_index);
     auto trim_end_it = val->array_range().end();
     if (trim_end_index < val->size()) {
-      trim_end_it = std::next(val->array_range().begin(), trim_end_index + 1);
+      trim_end_it = GetJsonArrayIterator(val, trim_end_index + 1);
     }
 
     *val = jsoncons::json_array<JsonType>(trim_start_it, trim_end_it);
     return {false, val->size()};
   };
-  return UpdateEntry<size_t>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<size_t>(op_args, key, path, std::move(cb));
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -961,38 +1096,28 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
   // If at least one index isn't valid within an array in the json doc, the operation is discarded.
   // Negative indexes start from the end of the array.
   auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<size_t> {
-    if (out_of_boundaries_encountered) {
+    if (out_of_boundaries_encountered || !val->is_array()) {
       return {};
     }
 
-    if (!val->is_array()) {
-      return {};
-    }
+    size_t array_size = val->size();
+    size_t insert_before_index;
 
-    size_t removal_index;
     if (index < 0) {
-      if (val->empty()) {
+      if (static_cast<size_t>(-index) > array_size) {
         out_of_boundaries_encountered = true;
         return {};
       }
-
-      int temp_index = index + val->size();
-      if (temp_index < 0) {
-        out_of_boundaries_encountered = true;
-        return {};
-      }
-
-      removal_index = temp_index;
+      insert_before_index = array_size + index;
     } else {
-      if ((size_t)index > val->size()) {
+      if (static_cast<size_t>(index) > val->size()) {
         out_of_boundaries_encountered = true;
         return {};
       }
-
-      removal_index = index;
+      insert_before_index = index;
     }
 
-    auto it = next(val->array_range().begin(), removal_index);
+    auto it = GetJsonArrayIterator(val, insert_before_index);
     for (auto& new_val : new_values) {
       it = val->insert(it, new_val);
       it++;
@@ -1000,7 +1125,7 @@ OpResult<JsonCallbackResult<OptSize>> OpArrInsert(const OpArgs& op_args, string_
     return {false, val->size()};
   };
 
-  auto res = UpdateEntry<size_t>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<size_t>(op_args, key, json_path, std::move(cb));
   if (out_of_boundaries_encountered) {
     return OpStatus::OUT_OF_RANGE;
   }
@@ -1019,7 +1144,7 @@ auto OpArrAppend(const OpArgs& op_args, string_view key, const WrappedJsonPath& 
     }
     return {false, val->size()};
   };
-  return UpdateEntry<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
+  return JsonMutateOperation<std::optional<std::size_t>>(op_args, key, path, std::move(cb));
 }
 
 // Returns a numeric vector representing each JSON value first index of the JSON scalar.
@@ -1036,38 +1161,41 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
       return -1;
     }
 
-    // Negative value or out-of-range index is handled by rounding the index to the array's start
-    // and end. example: for array size 9 and index -11 the index mapped to index 7.
-    if (start_index < 0) {
-      start_index %= val.size();
-      start_index += val.size();
+    size_t array_size = val.size();
+
+    if (start_index < 0 && static_cast<size_t>(-start_index) > array_size) {
+      return -1;
     }
 
-    // See the comment above.
-    // A value index of 0 means searching until the end of the array.
-    if (end_index == 0) {
-      end_index = val.size();
-    } else if (end_index < 0) {
-      end_index %= val.size();
-      end_index += val.size();
+    size_t pos_start_index = NormalizeNegativeIndex(start_index, array_size);
+    size_t pos_end_index =
+        end_index == 0 ? array_size : NormalizeNegativeIndex(end_index, array_size);
+
+    if (pos_start_index >= array_size && pos_end_index < array_size) {
+      return -1;
     }
 
-    if (start_index > end_index) {
+    pos_start_index = std::min(pos_start_index, array_size - 1);
+    pos_end_index = std::min(pos_end_index, array_size - 1);
+
+    if (pos_start_index > pos_end_index) {
       return -1;
     }
 
     size_t pos = -1;
-    auto it = next(val.array_range().begin(), start_index);
+    auto it = GetJsonArrayIterator(val, pos_start_index);
     while (it != val.array_range().end()) {
-      if (search_val == *it) {
-        pos = start_index;
+      if (JsonAreEquals(search_val, *it)) {
+        pos = pos_start_index;
+        break;
+      }
+
+      if (pos_start_index == pos_end_index) {
         break;
       }
 
       ++it;
-      if (++start_index == end_index) {
-        break;
-      }
+      pos_start_index++;
     }
 
     return pos;
@@ -1098,7 +1226,7 @@ std::vector<std::optional<std::string>> OpJsonMGet(const WrappedJsonPath& json_p
 
     auto eval_wrapped = [&json_val,
                          &cb](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-      auto eval_result = json_path.Evaluate<JsonType>(json_val, std::move(cb), false);
+      auto eval_result = json_path.Evaluate<JsonType>(json_val, std::move(cb));
 
       if (eval_result.IsV1()) {
         return eval_result.AsV1();
@@ -1168,10 +1296,18 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    OpStatus st = SetJson(op_args, key, std::move(parsed_json.value()));
-    if (st != OpStatus::OK) {
-      return st;
+    JsonMemTracker mem_tracker;
+    // We need to deep copy parsed_json.value() and not use move! The reason is that otherwise
+    // it's really difficult to properly track memory deltas because even if we move below,
+    // the deallocation of parsed_json won't happen in the scope of SetJson but in the scope
+    // of this function. Because of this, the memory tracking will be off. Another solution here,
+    // is to use absl::Cleanup and dispatch another Find() but that's too complicated because then
+    // you need to take into account the order of destructors.
+    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, parsed_json.value());
+    if (st.status() != OpStatus::OK) {
+      return st.status();
     }
+    mem_tracker.SetJsonSize(st->it->second, st->is_new);
     return true;
   }
 
@@ -1187,6 +1323,9 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     path_exists = true;
     if (!is_nx_condition) {
       operation_result = true;
+      static_assert(
+          std::is_same_v<std::allocator_traits<JsonType>::propagate_on_container_copy_assignment,
+                         std::false_type>);
       *val = new_json;
     }
     return {};
@@ -1216,8 +1355,13 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     return OpStatus::OK;
   };
 
-  auto res = UpdateEntry<Nothing>(op_args, key, json_path, std::move(cb), inserter);
+  // JsonMutateOperation uses it's own JsonMemTracker. It will work, because updates to already
+  // existing json keys use copy assign, so we don't really need to account for the memory
+  // allocated by ShardJsonFromString above since it's not being moved here at all.
+  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb),
+                                          MutateOperationOptions{std::move(inserter), {}});
   RETURN_ON_BAD_STATUS(res);
+
   return operation_result;
 }
 
@@ -1269,8 +1413,6 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
 // implemented yet.
 OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
                  const WrappedJsonPath& json_path, std::string_view json_str) {
-  // DCHECK(!json_path.HoldsJsonPath());
-
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
@@ -1292,7 +1434,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = UpdateEntry<Nothing>(op_args, key, json_path, std::move(cb));
+  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
 
   if (res.status() != OpStatus::KEY_NOTFOUND)
     return res.status();
@@ -1474,25 +1616,21 @@ void JsonFamily::MGet(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view path = ArgS(args, 1);
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+  string_view path = parser.Next();
 
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-  optional<JsonType> search_value = JsonFromString(ArgS(args, 2));
+  optional<JsonType> search_value = JsonFromString(parser.Next());
   if (!search_value) {
     cntx->SendError(kSyntaxErr);
     return;
   }
 
-  if (search_value->is_object() || search_value->is_array()) {
-    cntx->SendError(kWrongTypeErr);
-    return;
-  }
-
   int start_index = 0;
-  if (args.size() >= 4) {
-    if (!absl::SimpleAtoi(ArgS(args, 3), &start_index)) {
+  if (parser.HasNext()) {
+    if (!absl::SimpleAtoi(parser.Next(), &start_index)) {
       VLOG(1) << "Failed to convert the start index to numeric" << ArgS(args, 3);
       cntx->SendError(kInvalidIntErr);
       return;
@@ -1500,8 +1638,8 @@ void JsonFamily::ArrIndex(CmdArgList args, ConnectionContext* cntx) {
   }
 
   int end_index = 0;
-  if (args.size() >= 5) {
-    if (!absl::SimpleAtoi(ArgS(args, 4), &end_index)) {
+  if (parser.HasNext()) {
+    if (!absl::SimpleAtoi(parser.Next(), &end_index)) {
       VLOG(1) << "Failed to convert the stop index to numeric" << ArgS(args, 4);
       cntx->SendError(kInvalidIntErr);
       return;
@@ -1595,11 +1733,6 @@ void JsonFamily::ArrTrim(CmdArgList args, ConnectionContext* cntx) {
 
   if (!absl::SimpleAtoi(ArgS(args, 3), &stop_index)) {
     VLOG(1) << "Failed to parse array stop index";
-    cntx->SendError(kInvalidIntErr);
-    return;
-  }
-
-  if (stop_index < 0) {
     cntx->SendError(kInvalidIntErr);
     return;
   }
@@ -1714,16 +1847,10 @@ void JsonFamily::NumIncrBy(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
 
-  double dnum;
-  if (!ParseDouble(num, &dnum)) {
-    cntx->SendError(kWrongTypeErr);
-    return;
-  }
-
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, dnum, OP_ADD);
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_ADD);
   };
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1736,16 +1863,10 @@ void JsonFamily::NumMultBy(CmdArgList args, ConnectionContext* cntx) {
   string_view path = ArgS(args, 1);
   string_view num = ArgS(args, 2);
 
-  double dnum;
-  if (!ParseDouble(num, &dnum)) {
-    cntx->SendError(kWrongTypeErr);
-    return;
-  }
-
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, dnum, OP_MULTIPLY);
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_MULTIPLY);
   };
 
   OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
@@ -1841,50 +1962,26 @@ void JsonFamily::Get(CmdArgList args, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
 
-  std::optional<std::string> indent;
-  std::optional<std::string> new_line;
-  std::optional<std::string> space;
-
-  vector<pair<string_view, WrappedJsonPath>> paths;
-
-  while (parser.HasNext()) {
-    if (parser.Check("SPACE")) {
-      space = parser.Next();
-      continue;
-    }
-    if (parser.Check("NEWLINE")) {
-      new_line = parser.Next();
-      continue;
-    }
-    if (parser.Check("INDENT")) {
-      indent = parser.Next();
-      continue;
-    }
-
-    string_view path_str = parser.Next();
-    WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path_str));
-
-    paths.emplace_back(path_str, std::move(json_path));
+  auto params = ParseJsonGetParams(&parser, cntx);
+  if (!params) {
+    return;  // ParseJsonGetParams should have already sent an error
   }
 
   if (auto err = parser.Error(); err)
     return cntx->SendError(err->MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpJsonGet(t->GetOpArgs(shard), key, paths, indent, new_line, space);
+    return OpJsonGet(t->GetOpArgs(shard), key, params.value());
   };
 
   Transaction* trans = cntx->transaction;
   OpResult<string> result = trans->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (result) {
-    rb->SendBulkString(*result);
+
+  if (result == OpStatus::KEY_NOTFOUND) {
+    rb->SendNull();  // Match Redis
   } else {
-    if (result == facade::OpStatus::KEY_NOTFOUND) {
-      rb->SendNull();  // Match Redis
-    } else {
-      cntx->SendError(result.status());
-    }
+    reply_generic::Send(result, rb);
   }
 }
 

@@ -134,6 +134,8 @@ ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
+ABSL_DECLARE_FLAG(double, oom_deny_ratio);
+ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(cond, m)                                           \
@@ -959,11 +961,6 @@ void ServerFamily::Shutdown() {
   }
 
   pb_task_->Await([this] {
-    if (stats_caching_task_) {
-      pb_task_->CancelPeriodic(stats_caching_task_);
-      stats_caching_task_ = 0;
-    }
-
     auto ec = journal_->Close();
     LOG_IF(ERROR, ec) << "Error closing journal " << ec;
 
@@ -976,6 +973,57 @@ void ServerFamily::Shutdown() {
     dfly_cmd_->Shutdown();
     DebugCmd::Shutdown();
   });
+}
+
+bool ServerFamily::HasPrivilegedInterface() {
+  for (auto* listener : listeners_) {
+    if (listener->IsPrivilegedInterface()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void ServerFamily::UpdateMemoryGlobalStats() {
+  ShardId sid = EngineShard::tlocal()->shard_id();
+  if (sid != 0) {  // This function is executed periodicaly on all shards. To ensure the logic
+                   // bellow runs only on one shard we return is the shard is not 0.
+    return;
+  }
+
+  uint64_t mem_current = used_mem_current.load(std::memory_order_relaxed);
+  if (mem_current > used_mem_peak.load(memory_order_relaxed)) {
+    used_mem_peak.store(mem_current, memory_order_relaxed);
+  }
+
+  io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
+  if (sdata_res) {
+    size_t total_rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
+    rss_mem_current.store(total_rss, memory_order_relaxed);
+    if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
+      rss_mem_peak.store(total_rss, memory_order_relaxed);
+    }
+    double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
+    if (rss_oom_deny_ratio > 0) {
+      size_t memory_limit = max_memory_limit * rss_oom_deny_ratio;
+      if (total_rss > memory_limit && accepting_connections_ && HasPrivilegedInterface()) {
+        for (auto* listener : listeners_) {
+          if (!listener->IsPrivilegedInterface()) {
+            listener->socket()->proactor()->Await([listener]() { listener->pause_accepting(); });
+          }
+        }
+        accepting_connections_ = false;
+
+      } else if (total_rss < memory_limit && !accepting_connections_) {
+        for (auto* listener : listeners_) {
+          if (!listener->IsPrivilegedInterface()) {
+            listener->socket()->proactor()->Await([listener]() { listener->resume_accepting(); });
+          }
+        }
+        accepting_connections_ = true;
+      }
+    }
+  }
 }
 
 struct AggregateLoadResult {
@@ -999,13 +1047,13 @@ void ServerFamily::FlushAll(ConnectionContext* cntx) {
 // error (if any occured) with a future.
 std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_path,
                                                             LoadExistingKeys existing_keys) {
-  fs::path path(load_path);
+  std::string path(load_path);
 
   if (load_path.empty()) {
     fs::path dir_path(GetFlag(FLAGS_dir));
     string filename = GetFlag(FLAGS_dbfilename);
     dir_path.append(filename);
-    path = dir_path;
+    path = dir_path.generic_string();
   }
 
   DCHECK_GT(shard_count(), 0u);
@@ -1016,7 +1064,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
     return future;
   }
 
-  auto paths_result = snapshot_storage_->LoadPaths(path.generic_string());
+  auto paths_result = snapshot_storage_->LoadPaths(path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 
@@ -1027,7 +1075,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
   std::vector<std::string> paths = *paths_result;
 
-  LOG(INFO) << "Loading " << path.generic_string();
+  LOG(INFO) << "Loading " << path;
 
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
@@ -2149,7 +2197,11 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
+  uint64_t start = absl::GetCurrentTimeNanos();
   Metrics m = GetMetrics(cntx->ns);
+  uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+  LOG_IF(INFO, delta_ms > 100) << "GetMetrics took " << delta_ms << " ms";
+
   DbStats total;
   for (const auto& db_stats : m.db_stats)
     total += db_stats;
@@ -2278,7 +2330,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("garbage_collected", m.events.garbage_collected);
     append("bump_ups", m.events.bumpups);
     append("stash_unloaded", m.events.stash_unloaded);
-    append("oom_rejections", m.events.insertion_rejections);
+    append("oom_rejections", m.events.insertion_rejections + m.coordinator_stats.oom_error_cmd_cnt);
     append("traverse_ttl_sec", m.traverse_ttl_per_sec);
     append("delete_ttl_sec", m.delete_ttl_per_sec);
     append("keyspace_hits", m.events.hits);
@@ -2374,7 +2426,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
 
   if (should_enter("TRANSACTION", true)) {
     append("tx_shard_polls", m.shard_stats.poll_execution_total);
-    append("tx_shard_immediate_total", m.shard_stats.tx_immediate_total);
+    append("tx_shard_optimistic_total", m.shard_stats.tx_optimistic_total);
     append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
     append("tx_global_total", m.coordinator_stats.tx_global_cnt);
     append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);

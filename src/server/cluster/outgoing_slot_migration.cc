@@ -142,7 +142,6 @@ void OutgoingMigration::Finish(bool is_error) {
       case MigrationState::C_FINISHED:
         return;  // Already finished, nothing else to do
 
-      case MigrationState::C_NO_STATE:
       case MigrationState::C_CONNECTING:
         should_cancel_flows = false;
         break;

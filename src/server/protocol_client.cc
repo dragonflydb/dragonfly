@@ -209,7 +209,6 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
       } else {
         sock_.reset(mythread->CreateSocket());
       }
-      serializer_ = std::make_unique<ReqSerializer>(sock_.get());
     } else {
       return cntx->GetError();
     }
@@ -385,11 +384,10 @@ bool ProtocolClient::CheckRespFirstTypes(initializer_list<RespExpr::Type> types)
 }
 
 error_code ProtocolClient::SendCommand(string_view command) {
-  serializer_->SendCommand(command);
-  error_code ec = serializer_->ec();
-  if (!ec) {
+  string formatted_command = RedisReplyBuilder2Base::SerializeCommand(command);
+  auto ec = sock_->Write(io::Buffer(formatted_command));
+  if (!ec)
     TouchIoTime();
-  }
   return ec;
 }
 

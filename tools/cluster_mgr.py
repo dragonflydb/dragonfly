@@ -409,7 +409,8 @@ def migrate(args):
     sync_status = []
     while True:
         sync_status = send_command(target_node, ["DFLYCLUSTER", "SLOT-MIGRATION-STATUS"])
-        if sync_status == "NO_STATE":
+        if len(sync_status) == 0:
+            # Migration didn't start yet
             continue
         if len(sync_status) != 1:
             die_with_err(f"Unexpected number of migrations {len(sync_status)}: {sync_status}")

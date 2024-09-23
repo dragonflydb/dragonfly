@@ -228,6 +228,12 @@ string ModuleTypeName(uint64_t module_id) {
   return string{name};
 }
 
+bool RdbTypeAllowedEmpty(int type) {
+  return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
+         type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
+         type == RDB_TYPE_HASH_WITH_EXPIRY;
+}
+
 }  // namespace
 
 class DecompressImpl {
@@ -713,7 +719,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
       lp = lpNew(sv.size());
       if (!ziplistValidateIntegrity((uint8_t*)sv.data(), sv.size(), 1,
                                     ziplistEntryConvertAndValidate, &lp)) {
-        LOG(ERROR) << "Ziplist integrity check failed.";
+        LOG(ERROR) << "Ziplist integrity check failed: " << sv.size();
         zfree(lp);
         ec_ = RdbError(errc::rdb_file_corrupted);
         return false;
@@ -1043,11 +1049,17 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
     std::memcpy(lp, src_lp, bytes);
     pv_->InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
   } else if (rdb_type_ == RDB_TYPE_JSON) {
-    auto json = JsonFromString(blob, CompactObj::memory_resource());
-    if (!json) {
-      ec_ = RdbError(errc::bad_json_string);
+    size_t start_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    {
+      auto json = JsonFromString(blob, CompactObj::memory_resource());
+      if (!json) {
+        ec_ = RdbError(errc::bad_json_string);
+      }
+      pv_->SetJson(std::move(*json));
     }
-    pv_->SetJson(std::move(*json));
+    size_t end_size = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    DCHECK(end_size > start_size);
+    pv_->SetJsonSize(end_size - start_size);
   } else {
     LOG(FATAL) << "Unsupported rdb type " << rdb_type_;
   }
@@ -1905,7 +1917,7 @@ struct RdbLoader::ObjSettings {
   bool has_expired = false;
 
   bool is_sticky = false;
-  bool has_mc_flags;
+  bool has_mc_flags = false;
 
   void Reset() {
     expiretime = 0;
@@ -2141,7 +2153,11 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     ++keys_loaded;
+    int64_t start = absl::GetCurrentTimeNanos();
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+    int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+    LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
+
     settings.Reset();
   }  // main load loop
 
@@ -2454,7 +2470,8 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 
   while (blocked_shards_.load(memory_order_relaxed) > 0)
     ThisFiber::SleepFor(100us);
-  shard_set->Add(sid, std::move(cb));
+  bool preempted = shard_set->Add(sid, std::move(cb));
+  VLOG_IF(2, preempted) << "FlushShardAsync was throttled";
 }
 
 void RdbLoader::FlushAllShards() {
@@ -2474,12 +2491,21 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   DbContext db_cntx{&namespaces.GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
   DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
 
+  auto error_msg = [](const auto* item, auto db_ind) {
+    return absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
+                        item->val.rdb_type);
+  };
+
   for (const auto* item : ib) {
     PrimeValue pv;
     if (ec_ = FromOpaque(item->val, &pv); ec_) {
       if ((*ec_).value() == errc::empty_key) {
-        LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
-                   << item->val.rdb_type;
+        auto error = error_msg(item, db_ind);
+        if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
+          LOG(WARNING) << error;
+        } else {
+          LOG(ERROR) << error;
+        }
         continue;
       }
       LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
@@ -2488,8 +2514,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     }
     // We need this extra check because we don't return empty_key
     if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
-      LOG(ERROR) << "Found empty key: " << item->key << " in DB " << db_ind << " rdb_type "
-                 << item->val.rdb_type;
+      LOG(WARNING) << error_msg(item, db_ind);
       continue;
     }
 
@@ -2585,6 +2610,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
   constexpr size_t kBufSize = 128;
   if (out_buf.size() >= kBufSize) {
+    // Despite being async, this function can block if the shard queue is full.
     FlushShardAsync(sid);
   }
 
