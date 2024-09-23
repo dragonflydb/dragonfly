@@ -121,6 +121,7 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
   if (verify_commands_) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
       cntx_->SendError(std::move(*err));
+      std::ignore = cntx_->reply_builder()->ConsumeLastError();
       return !error_abort_;
     }
   }
