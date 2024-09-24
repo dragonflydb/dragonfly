@@ -589,6 +589,19 @@ TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
   EXPECT_EQ(Run({"select", "0"}), "OK");
 }
 
+TEST_F(ClusterFamilyTest, ClusterModePubSubNotAllowed) {
+  EXPECT_THAT(Run({"PUBLISH", "ch", "message"}),
+              ErrArg("PUBLISH is not supported in cluster mode yet"));
+  EXPECT_THAT(Run({"SUBSCRIBE", "ch"}), ErrArg("SUBSCRIBE is not supported in cluster mode yet"));
+  EXPECT_THAT(Run({"UNSUBSCRIBE", "ch"}),
+              ErrArg("UNSUBSCRIBE is not supported in cluster mode yet"));
+  EXPECT_THAT(Run({"PSUBSCRIBE", "ch?"}),
+              ErrArg("PSUBSCRIBE is not supported in cluster mode yet"));
+  EXPECT_THAT(Run({"PUNSUBSCRIBE", "ch?"}),
+              ErrArg("PUNSUBSCRIBE is not supported in cluster mode yet"));
+  EXPECT_THAT(Run({"PUBSUB", "CHANNELS"}), ErrArg("PUBSUB is not supported in cluster mode yet"));
+}
+
 TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   InitWithDbFilename();
 

@@ -567,6 +567,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
         ("LIST"),
     ],
 )
+@pytest.mark.slow
 async def test_big_value_serialization_memory_limit(df_factory, query):
     dbfilename = f"dump_{tmp_file_name()}"
     instance = df_factory.create(dbfilename=dbfilename)

@@ -260,7 +260,10 @@ class ServerFamily {
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);
 
+  void UpdateMemoryGlobalStats();
+
  private:
+  bool HasPrivilegedInterface();
   void JoinSnapshotSchedule();
   void LoadFromSnapshot() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
@@ -330,11 +333,11 @@ class ServerFamily {
   util::fb2::Fiber snapshot_schedule_fb_;
   std::optional<util::fb2::Future<GenericError>> load_result_;
 
-  uint32_t stats_caching_task_ = 0;
   Service& service_;
 
   util::AcceptServer* acceptor_ = nullptr;
   std::vector<facade::Listener*> listeners_;
+  bool accepting_connections_ = true;
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable util::fb2::Mutex replicaof_mu_, save_mu_;

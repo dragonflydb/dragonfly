@@ -841,11 +841,11 @@ void Transaction::DispatchHop() {
   std::bitset<1024> poll_flags(0);
   unsigned run_cnt = 0;
   IterateActiveShards([&poll_flags, &run_cnt](auto& sd, auto i) {
-    if ((sd.local_mask & RAN_IMMEDIATELY) == 0) {
+    if ((sd.local_mask & OPTIMISTIC_EXECUTION) == 0) {
       run_cnt++;
       poll_flags.set(i, true);
     }
-    sd.local_mask &= ~RAN_IMMEDIATELY;  // we'll run it next time if it avoided concluding
+    sd.local_mask &= ~OPTIMISTIC_EXECUTION;  // we'll run it next time if it avoided concluding
   });
 
   DCHECK_EQ(run_cnt, poll_flags.count());
@@ -1019,13 +1019,13 @@ OpArgs Transaction::GetOpArgs(EngineShard* shard) const {
 }
 
 // This function should not block since it's run via RunBriefInParallel.
-bool Transaction::ScheduleInShard(EngineShard* shard, bool can_run_immediately) {
+bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   ShardId sid = SidToId(shard->shard_id());
   auto& sd = shard_data_[sid];
 
   DCHECK(sd.local_mask & ACTIVE);
   DCHECK_EQ(sd.local_mask & KEYLOCK_ACQUIRED, 0);
-  sd.local_mask &= ~(OUT_OF_ORDER | RAN_IMMEDIATELY);
+  sd.local_mask &= ~(OUT_OF_ORDER | OPTIMISTIC_EXECUTION);
 
   TxQueue* txq = shard->txq();
   KeyLockArgs lock_args;
@@ -1042,12 +1042,13 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool can_run_immediately) 
     bool shard_unlocked = shard->shard_lock()->Check(mode);
 
     // Check if we can run immediately
-    if (shard_unlocked && can_run_immediately &&
+    if (shard_unlocked && execute_optimistic &&
         CheckLocks(GetDbSlice(shard->shard_id()), mode, lock_args)) {
-      sd.local_mask |= RAN_IMMEDIATELY;
-      shard->stats().tx_immediate_total++;
+      sd.local_mask |= OPTIMISTIC_EXECUTION;
+      shard->stats().tx_optimistic_total++;
 
       RunCallback(shard);
+
       // Check state again, it could've been updated if the callback returned AVOID_CONCLUDING flag.
       // Only possible for single shard.
       if (coordinator_state_ & COORD_CONCLUDING)

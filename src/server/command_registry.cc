@@ -25,6 +25,8 @@ ABSL_FLAG(vector<string>, rename_command, {},
 ABSL_FLAG(vector<string>, restricted_commands, {},
           "Commands restricted to connections on the admin port");
 
+ABSL_FLAG(vector<string>, oom_deny_commands, {},
+          "Additinal commands that will be marked as denyoom");
 namespace dfly {
 
 using namespace facade;
@@ -108,6 +110,10 @@ CommandRegistry::CommandRegistry() {
   for (string name : GetFlag(FLAGS_restricted_commands)) {
     restricted_cmds_.emplace(AsciiStrToUpper(name));
   }
+
+  for (string name : GetFlag(FLAGS_oom_deny_commands)) {
+    oomdeny_cmds_.emplace(AsciiStrToUpper(name));
+  }
 }
 
 void CommandRegistry::Init(unsigned int thread_count) {
@@ -131,6 +137,10 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
     cmd.SetRestricted(true);
+  }
+
+  if (oomdeny_cmds_.find(k) != oomdeny_cmds_.end()) {
+    cmd.SetFlag(CO::DENYOOM);
   }
 
   cmd.SetFamily(family_of_commands_.size() - 1);

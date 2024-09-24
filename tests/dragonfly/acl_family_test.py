@@ -195,7 +195,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     # return multiple errors for each command failed. Since the nature of the error
     # is the same, that a rule has changed we should squash those error messages into
     # one.
-    assert res[0].args[0] == "kk ACL rules changed between the MULTI and EXEC"
+    assert res[0].args[0] == "kk ACL rules changed between the MULTI and EXEC", res
 
     await admin_client.close()
     await client.close()

@@ -29,6 +29,9 @@ void CapturingReplyBuilder::SendMGetResponse(MGetResponse resp) {
 }
 
 void CapturingReplyBuilder::SendError(OpStatus status) {
+  if (status != OpStatus::OK) {
+    last_error_ = StatusToMsg(status);
+  }
   SKIP_LESS(ReplyMode::ONLY_ERR);
   Capture(status);
 }
@@ -215,6 +218,8 @@ void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
 
   CaptureVisitor cv{rb};
   visit(cv, std::move(pl));
+  // Consumed and printed by InvokeCmd. We just send the actual error here
+  std::ignore = rb->ConsumeLastError();
 }
 
 void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {

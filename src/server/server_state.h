@@ -174,7 +174,11 @@ class ServerState {  // public struct - to allow initialization.
     gstate_ = s;
   }
 
-  uint64_t GetUsedMemory(uint64_t now_ns);
+  struct MemoryUsageStats {
+    uint64_t used_mem = 0;
+    uint64_t rss_mem = 0;
+  };
+  MemoryUsageStats GetMemoryUsage(uint64_t now_ns);
 
   bool AllowInlineScheduling() const;
 
@@ -283,6 +287,8 @@ class ServerState {  // public struct - to allow initialization.
 
   // Exec descriptor frequency count for this thread.
   absl::flat_hash_map<std::string, unsigned> exec_freq_count;
+  double oom_deny_ratio;
+  double rss_oom_deny_ratio;
 
  private:
   int64_t live_transactions_ = 0;
@@ -311,8 +317,9 @@ class ServerState {  // public struct - to allow initialization.
 
   absl::flat_hash_map<std::string, base::Histogram> call_latency_histos_;
   uint32_t thread_index_ = 0;
-  uint64_t used_mem_cached_ = 0;  // thread local cache of used_mem_current
+
   uint64_t used_mem_last_update_ = 0;
+  MemoryUsageStats memory_stats_cached_;  // thread local cache of used and rss memory current
 
   static __thread ServerState* state_;
 };
