@@ -684,18 +684,21 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
         logging.debug("Starting publish_worker")
         for i in range(0, 10):
             logging.debug(f"publisher iteration: {i}")
-            await client.publish("channel", "message")
+            await client.publish("channel", f"message{i}")
 
     async def subscribe_worker(channel: aioredis.client.PubSub):
         logging.debug("Starting subscribe_worker")
-        total_msgs = 1
+        total_msgs = 0
         async with async_timeout.timeout(10):
             while total_msgs != 10:
                 try:
                     res = await channel.get_message(ignore_subscribe_messages=True, timeout=5)
+                    if res is None:
+                        await asyncio.sleep(0.01)
+                        continue
+                    assert res["data"] == f"message{total_msgs}"
                     logging.debug(f"subscriber iteration: {total_msgs}")
                     total_msgs = total_msgs + 1
-                    await asyncio.sleep(0.01)
                 except asyncio.TimeoutError:
                     pass
 
@@ -706,6 +709,10 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
     )
     subscriber_obj = subscriber.pubsub()
     await subscriber_obj.subscribe("channel")
+
+    # There's a rare timing issue if we don't wait here, but given the weak guarantees of Pub/Sub,
+    # that's probably OK.
+    await asyncio.sleep(1)
 
     subscribe_task = asyncio.create_task(subscribe_worker(subscriber_obj))
     await publish_worker(publisher)
