@@ -2839,6 +2839,10 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
+  if (!ServerState::tlocal()->is_master) {
+    return cntx->SendError("Replicating a replica is unsupported");
+  }
+
   if (args.size() % 2 == 1)
     goto err;
   for (unsigned i = 0; i < args.size(); i += 2) {
