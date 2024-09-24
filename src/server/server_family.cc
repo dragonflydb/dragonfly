@@ -2839,8 +2839,11 @@ void ServerFamily::ReplTakeOver(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
-  if (!ServerState::tlocal()->is_master) {
-    return cntx->SendError("Replicating a replica is unsupported");
+  {
+    util::fb2::LockGuard lk(replicaof_mu_);
+    if (!ServerState::tlocal()->is_master) {
+      return cntx->SendError("Replicating a replica is unsupported");
+    }
   }
 
   if (args.size() % 2 == 1)
