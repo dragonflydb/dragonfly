@@ -37,11 +37,11 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-latest"]
+        container: ["ubuntu-dev:20"]
         build-type: [Debug]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
-        runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        runner: [ubuntu-dev:20, [self-hosted, linux, ARM64]]
 
     runs-on: ubuntu-latest
     env:
