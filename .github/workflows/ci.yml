@@ -39,8 +39,16 @@ jobs:
         # Test of these containers
         container: ["ubuntu-dev:20"]
         build-type: [Debug]
-        runner: [ubuntu-latest, [ARM64]]
-    runs-on: ${{ matrix.runner }}
+        runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        compiler: [{ cxx: g++, c: gcc }]
+        cxx_flags: ["-Werror"]
+
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_CACHE_SIZE: 6G
+      SCCACHE_ERROR_LOG: /tmp/sccache_log.txt
+      # SCCACHE_LOG: debug
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
