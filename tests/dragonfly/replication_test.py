@@ -2663,3 +2663,25 @@ async def test_double_take_over(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=master.port)
 
     await disconnect_clients(c_master, c_replica)
+
+
+@pytest.mark.asyncio
+async def test_replica_of_replica(df_factory):
+    # Can't connect a replica to a replica, but OK to connect 2 replicas to the same master
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+    replica2 = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica, replica2])
+
+    c_replica = replica.client()
+    c_replica2 = replica2.client()
+
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await c_replica2.execute_command(f"REPLICAOF localhost {replica.port}")
+
+    assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+
+    await disconnect_clients(c_replica, c_replica2)
