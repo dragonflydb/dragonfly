@@ -1312,6 +1312,12 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   if (cgr_res->cg) {
     raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
     streamFreeCG(cgr_res->cg);
+
+    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+    if (blocking_controller) {
+      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+    }
+
     return OpStatus::OK;
   }
 
@@ -2743,8 +2749,6 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
 }
 
 void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
-  // CHECK(false) << "Support groups";
-
   // If BLOCK is not set just return an empty array as there are no resolvable
   // entries.
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
@@ -2766,7 +2770,7 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
     if (!res_it.ok())
       return false;
 
-    const StreamIDsItem& sitem = opts->stream_ids.at(key);
+    StreamIDsItem& sitem = opts->stream_ids.at(key);
     if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)
       return true;
 
@@ -2775,6 +2779,15 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
     streamID last_id = s->last_id;
     if (s->length) {
       streamLastValidID(s, &last_id);
+    }
+
+    // Update group pointer and check it's validity
+    if (opts->read_group) {
+      owner->tmp_str1 =
+          sdscpylen(owner->tmp_str1, opts->group_name.data(), opts->group_name.length());
+      sitem.group = streamLookupCG(s, owner->tmp_str1);
+      if (!sitem.group)
+        return true;  // abort
     }
 
     return streamCompareID(&last_id, &sitem.group->last_id) > 0;
@@ -2797,15 +2810,33 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
                                           .ms = UINT64_MAX,
                                           .seq = UINT64_MAX,
                                       }};
-      const StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
+      StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
       range_opts.start = sitem.id;
+
+      // Expect group to exist? No guarantees from transactional framework
+      if (opts->read_group && !sitem.group) {
+        result = OpStatus::INVALID_VALUE;
+        return OpStatus::OK;
+      }
+
       if (sitem.id.val.ms == UINT64_MAX || sitem.id.val.seq == UINT64_MAX) {
         range_opts.start.val = sitem.group->last_id;  // only for '>'
         streamIncrID(&range_opts.start.val);
       }
 
       range_opts.group = sitem.group;
-      range_opts.consumer = sitem.consumer;
+
+      // Update consumer
+      if (sitem.group) {
+        shard->tmp_str1 =
+            sdscpylen(shard->tmp_str1, opts->consumer_name.data(), opts->consumer_name.length());
+        range_opts.consumer = streamLookupConsumer(sitem.group, shard->tmp_str1, SLC_NO_REFRESH);
+        if (!range_opts.consumer) {
+          range_opts.consumer = streamCreateConsumer(sitem.group, shard->tmp_str1, NULL, 0,
+                                                     SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+        }
+      }
+
       range_opts.noack = opts->noack;
       if (sitem.consumer) {
         if (sitem.consumer->pel->numnodes == 0) {
@@ -2831,6 +2862,8 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
       rb->StartArray(2);
     }
     return StreamReplies{rb}.SendStreamRecords(key, *result);
+  } else if (result.status() == OpStatus::INVALID_VALUE) {
+    return rb->SendError("NOGROUP the consumer group this client was blocked on no longer exists");
   }
   return rb->SendNullArray();
 }
@@ -2935,8 +2968,6 @@ void XReadGeneric2(CmdArgList args, ConnectionContext* cntx, bool read_group) {
     return cntx->SendError(**err);
   }
 
-  // Block if no entries are available
-  // todo: don't reuse pointers in blocking!!
   if (!have_entries.load(memory_order_relaxed))
     return XReadBlock(&*opts, cntx);
 
@@ -3028,7 +3059,8 @@ void StreamFamily::XSetId(CmdArgList args, ConnectionContext* cntx) {
   switch (result) {
     case OpStatus::STREAM_ID_SMALL:
       return cntx->SendError(
-          "The ID specified in XSETID is smaller than the target stream top item");
+          "The ID specified in XSETID is smaller than the "
+          "target stream top item");
     case OpStatus::ENTRIES_ADDED_SMALL:
       return cntx->SendError(
           "The entries_added specified in XSETID is smaller than "
