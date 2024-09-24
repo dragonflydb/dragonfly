@@ -141,19 +141,27 @@ OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t
                                  int32_t end) {
   auto read = [start, end](std::string_view slice) mutable -> string_view {
     int32_t strlen = slice.size();
-
-    if (start < 0)
-      start = strlen + start;
-    if (end < 0)
-      end = strlen + end;
-
-    end = min(end, strlen - 1);
-
-    if (strlen == 0 || start > end)
+    if (strlen == 0)
       return "";
 
-    start = max(start, 0);
-    end = max(end, 0);
+    if (start < 0) {
+      if (end < start) {
+        return "";
+      }
+      start = strlen + start;
+      start = max(start, 0);
+    }
+
+    if (end < 0) {
+      end = strlen + end;
+      end = max(end, 0);
+    } else {
+      end = min(end, strlen - 1);
+    }
+
+    if (start > end) {
+      return "";
+    }
 
     return slice.substr(start, end - start + 1);
   };
