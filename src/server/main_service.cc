@@ -931,6 +931,25 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
 
+  config_registry.RegisterMutable(
+      "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
+        auto res = flag.TryGet<std::string>();
+        if (!res.has_value() || (!res->empty() && !absl::EqualsIgnoreCase(*res, "EX"))) {
+          return false;
+        }
+
+        pool->AwaitBrief([&res](unsigned, auto*) {
+          auto* shard = EngineShard::tlocal();
+          if (shard) {
+            auto shard_id = shard->shard_id();
+            auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id);
+            db_slice.SetNotifyKeyspaceEvents(*res);
+          }
+        });
+
+        return true;
+      });
+
   serialization_max_chunk_size = GetFlag(FLAGS_serialization_max_chunk_size);
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {

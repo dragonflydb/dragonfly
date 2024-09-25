@@ -511,6 +511,10 @@ class DbSlice {
     return pt->Traverse(cursor, std::forward<Cb>(cb));
   }
 
+  // Does not check for non supported events. Callers must parse the string and reject it
+  // if it's not empty and not EX.
+  void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
