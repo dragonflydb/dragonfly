@@ -2846,8 +2846,14 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
     }
   }
 
+  auto err_cb = [&]() mutable {
+    LOG(ERROR) << "Error in receiving command: " << args;
+    cntx->SendError(kSyntaxErr);
+  };
+
   if (args.size() % 2 == 1)
-    goto err;
+    return err_cb();
+
   for (unsigned i = 0; i < args.size(); i += 2) {
     DCHECK_LT(i + 1, args.size());
     ToUpper(&args[i]);
@@ -2925,16 +2931,11 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
       return;
     } else {
       VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();
-      goto err;
+      return err_cb();
     }
   }
 
-  cntx->SendOk();
-  return;
-
-err:
-  LOG(ERROR) << "Error in receiving command: " << args;
-  cntx->SendError(kSyntaxErr);
+  return cntx->SendOk();
 }
 
 void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
