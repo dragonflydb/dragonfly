@@ -673,6 +673,15 @@ async def test_rewrites(df_factory):
         await skip_cmd()
         # Check BITOP turns into SET
         await check("BITOP OR kdest k1 k2", r"SET kdest 1100")
+        # See gh issue #3528
+        await c_master.execute_command(f"HSET foo bar val")
+        await skip_cmd()
+        await check("BITOP NOT foo tmp", r"DEL foo")
+        await c_master.execute_command(f"HSET foo bar val")
+        await skip_cmd()
+        await c_master.set("k3", "-")
+        await skip_cmd()
+        await check("BITOP NOT foo k3", r"SET foo \\xd2")
 
         # Check there is no rewrite for LMOVE on single shard
         await c_master.lpush("list", "v1", "v2", "v3", "v4")
