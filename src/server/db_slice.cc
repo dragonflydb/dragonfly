@@ -1301,6 +1301,26 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
   bool record_keys = owner_->journal() != nullptr || expired_keys_events_recording_;
   vector<string> keys_to_journal;
 
+  auto return_cb = [&, this]() mutable {
+    // send the deletion to the replicas.
+    // fiber preemption could happen in this phase.
+    for (string_view key : keys_to_journal) {
+      if (auto journal = owner_->journal(); journal)
+        RecordExpiry(db_ind, key);
+
+      if (expired_keys_events_recording_)
+        db_table->expired_keys_events_.emplace_back(key);
+    }
+
+    auto time_finish = absl::GetCurrentTimeNanos();
+    events_.evicted_keys += evicted_items;
+    DVLOG(2) << "Evicted: " << evicted_bytes;
+    DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted_items << "/"
+             << max_eviction_per_hb;
+    DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
+    return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
+  };
+
   {
     FiberAtomicGuard guard;
     for (int32_t slot_id = num_slots - 1; slot_id >= 0; --slot_id) {
@@ -1336,30 +1356,13 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
 
           // returns when whichever condition is met first
           if ((evicted_items == max_eviction_per_hb) || (evicted_bytes >= increase_goal_bytes))
-            goto finish;
+            return return_cb();
         }
       }
     }
   }
 
-finish:
-  // send the deletion to the replicas.
-  // fiber preemption could happen in this phase.
-  for (string_view key : keys_to_journal) {
-    if (auto journal = owner_->journal(); journal)
-      RecordExpiry(db_ind, key);
-
-    if (expired_keys_events_recording_)
-      db_table->expired_keys_events_.emplace_back(key);
-  }
-
-  auto time_finish = absl::GetCurrentTimeNanos();
-  events_.evicted_keys += evicted_items;
-  DVLOG(2) << "Evicted: " << evicted_bytes;
-  DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted_items << "/"
-           << max_eviction_per_hb;
-  DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
-  return {evicted_items, evicted_bytes};
+  return return_cb();
 }
 
 void DbSlice::CreateDb(DbIndex db_ind) {
