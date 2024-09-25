@@ -46,7 +46,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        for i in {1..1000}; do
+        for i in {1..10000}; do
             pytest -xv dragonfly/replication_test.py::test_take_over_counters[df_factory0-8-8]
             if [ $? -ne 0 ]; then
                 echo "Command failed on iteration $i"
