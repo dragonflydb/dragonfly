@@ -651,7 +651,7 @@ constexpr uint32_t kGenPass = acl::SLOW;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
-// based on the secocond argument) because each of the subcommands has different ACL
+// based on the second argument) because each of the subcommands has different ACL
 // categories. Therefore, to keep it compatible with the CommandId, I need to treat them
 // as separate commands in the registry. This is the least intrusive change because it's very
 // easy to handle that case explicitly in `DispatchCommand`.
@@ -990,6 +990,14 @@ using OptCat = std::optional<uint32_t>;
 // bool == true if +
 // bool == false if -
 std::pair<OptCat, bool> AclFamily::MaybeParseAclCategory(std::string_view command) const {
+  if (absl::EqualsIgnoreCase(command, "ALLCOMMANDS")) {
+    return {cat_table_.at("ALL"), true};
+  }
+
+  if (absl::EqualsIgnoreCase(command, "NOCOMMANDS")) {
+    return {cat_table_.at("ALL"), false};
+  }
+
   if (absl::StartsWith(command, "+@")) {
     auto res = cat_table_.find(command.substr(2));
     if (res == cat_table_.end()) {
