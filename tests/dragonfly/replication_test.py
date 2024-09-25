@@ -2706,3 +2706,15 @@ async def test_big_containers(df_factory):
     replica_data = await StaticSeeder.capture(c_replica)
     master_data = await StaticSeeder.capture(c_master)
     assert master_data == replica_data
+
+
+@pytest.mark.asyncio
+async def test_reproduce_shutdown(df_factory):
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await disconnect_clients(c_master, c_replica)
