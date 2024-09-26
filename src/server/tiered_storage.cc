@@ -312,7 +312,7 @@ TieredStorage::TieredStorage(size_t max_size, DbSlice* db_slice)
       bins_{make_unique<tiering::SmallBins>()} {
   write_depth_limit_ = absl::GetFlag(FLAGS_tiered_storage_write_depth);
   size_t mem_per_shard = max_memory_limit / shard_set->size();
-  SetMemoryLowLimit(absl::GetFlag(FLAGS_tiered_low_memory_factor) * mem_per_shard);
+  SetMemoryLowWatermark(absl::GetFlag(FLAGS_tiered_low_memory_factor) * mem_per_shard);
 }
 
 TieredStorage::~TieredStorage() {
@@ -329,7 +329,7 @@ void TieredStorage::Close() {
   op_manager_->Close();
 }
 
-void TieredStorage::SetMemoryLowLimit(size_t mem_limit) {
+void TieredStorage::SetMemoryLowWatermark(size_t mem_limit) {
   op_manager_->memory_low_limit_ = mem_limit;
   VLOG(1) << "Memory low limit is " << mem_limit;
 }
@@ -338,6 +338,7 @@ util::fb2::Future<string> TieredStorage::Read(DbIndex dbid, string_view key,
                                               const PrimeValue& value) {
   util::fb2::Future<std::string> fut;
   Read(dbid, key, value, [fut](const std::string& value) mutable { fut.Resolve(value); });
+
   return fut;
 }
 
