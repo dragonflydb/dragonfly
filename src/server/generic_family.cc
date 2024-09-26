@@ -30,6 +30,7 @@ extern "C" {
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
+#include "server/search/doc_index.h"
 #include "server/set_family.h"
 #include "server/transaction.h"
 #include "util/varz.h"
@@ -151,7 +152,7 @@ class RdbRestoreValue : protected RdbLoaderBase {
 
   std::optional<DbSlice::ItAndUpdater> Add(std::string_view payload, std::string_view key,
                                            DbSlice& db_slice, const DbContext& cntx,
-                                           const RestoreArgs& args);
+                                           const RestoreArgs& args, EngineShard* shard);
 
  private:
   std::optional<OpaqueObj> Parse(std::string_view payload);
@@ -178,7 +179,8 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view 
 std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
                                                           std::string_view key, DbSlice& db_slice,
                                                           const DbContext& cntx,
-                                                          const RestoreArgs& args) {
+                                                          const RestoreArgs& args,
+                                                          EngineShard* shard) {
   auto opaque_res = Parse(data);
   if (!opaque_res) {
     return std::nullopt;
@@ -194,6 +196,7 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
   auto res = db_slice.AddNew(cntx, key, std::move(pv), args.ExpirationTime());
   res->it->first.SetSticky(args.Sticky());
   if (res) {
+    shard->search_indices()->AddDoc(key, cntx, res->it->second);
     return std::move(res.value());
   }
   return std::nullopt;
@@ -444,8 +447,8 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   }
 
   RdbRestoreValue loader(serialized_value_.version.value());
-  auto restored_dest_it =
-      loader.Add(serialized_value_.value, dest_key_, db_slice, op_args.db_cntx, restore_args);
+  auto restored_dest_it = loader.Add(serialized_value_.value, dest_key_, db_slice, op_args.db_cntx,
+                                     restore_args, shard);
 
   if (restored_dest_it) {
     auto& dest_it = restored_dest_it->it;
@@ -535,7 +538,7 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
   }
 
   RdbRestoreValue loader(rdb_version);
-  auto res = loader.Add(payload, key, db_slice, op_args.db_cntx, restore_args);
+  auto res = loader.Add(payload, key, db_slice, op_args.db_cntx, restore_args, op_args.shard);
   return res.has_value();
 }
 
@@ -1579,6 +1582,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     if (destination_should_not_exist)
       return OpStatus::KEY_EXISTS;
 
+    op_args.shard->search_indices()->RemoveDoc(to_key, op_args.db_cntx, to_res.it->second);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
 
@@ -1615,6 +1619,8 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     to_res = std::move(*op_result);
     to_res.it->first.SetSticky(sticky);
   }
+
+  op_args.shard->search_indices()->AddDoc(to_key, op_args.db_cntx, to_res.it->second);
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {
