@@ -1452,11 +1452,6 @@ void DbSlice::ResetEvents() {
 }
 
 void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
-  if (notify_keyspace_events.empty()) {
-    for (auto& db : db_arr_) {
-      db->expired_keys_events_.clear();
-    }
-  }
   expired_keys_events_recording_ = !notify_keyspace_events.empty();
 }
 
