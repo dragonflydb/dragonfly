@@ -1201,7 +1201,9 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     return pos;
   };
 
-  return JsonEvaluateOperation<std::optional<long>>(op_args, key, json_path, std::move(cb));
+  return JsonEvaluateOperation<std::optional<long>>(
+      op_args, key, json_path, std::move(cb),
+      {false, CallbackResultOptions{CallbackResultOptions::OnEmpty::kSendWrongType}});
 }
 
 // Returns string vector that represents the query result of each supplied key.
