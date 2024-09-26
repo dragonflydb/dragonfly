@@ -1529,4 +1529,37 @@ int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue
   return GetExpiry(db_context, st, field);
 }
 
+vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, PrimeValue& pv, uint32_t ttl_sec,
+                                            CmdArgList values) {
+  DCHECK_EQ(OBJ_SET, pv.ObjType());
+  vector<long> res;
+  res.reserve(values.size());
+
+  if (pv.Encoding() == kEncodingIntSet) {
+    // a valid result can never be a intset, since it doesnt keep ttl
+    intset* is = (intset*)pv.RObjPtr();
+    StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+    if (!ss) {
+      std::vector<long> out(values.size(), -2);
+      return out;
+    }
+    pv.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
+  }
+
+  SetType st{pv.RObjPtr(), pv.Encoding()};
+  StringSetWrapper ss{st, op_args.db_cntx};
+
+  for (size_t i = 0; i < values.size(); i++) {
+    string_view field = ToSV(values[i]);
+    auto it = ss->Find(field);
+    if (it != ss->end()) {
+      it.SetExpiryTime(ttl_sec);
+      res.emplace_back(ttl_sec == 0 ? 0 : 1);
+    } else {
+      res.emplace_back(-2);
+    }
+  }
+  return res;
+}
+
 }  // namespace dfly

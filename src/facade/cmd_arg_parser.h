@@ -174,6 +174,10 @@ struct CmdArgParser {
     return cur_i_ + i <= args_.size() && !error_;
   }
 
+  bool HasExactly(size_t i) const {
+    return cur_i_ + i == args_.size() && !error_;
+  }
+
  private:
   template <class T, class... Cases>
   std::optional<std::decay_t<T>> MapImpl(std::string_view arg, std::string_view tag, T&& value,
