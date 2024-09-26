@@ -205,10 +205,6 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
 
   VLOG(1) << "Read entry " << entry.ToString();
 
-  if (opcode == journal::Op::EXEC) {
-    return entry;
-  }
-
   auto ec = ReadCommand(&entry.cmd);
   if (ec)
     return make_unexpected(ec);
