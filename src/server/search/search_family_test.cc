@@ -774,6 +774,41 @@ TEST_F(SearchFamilyTest, SimpleExpiry) {
   Run({"flushall"});
 }
 
+TEST_F(SearchFamilyTest, DocsEditing) {
+  auto resp = Run({"JSON.SET", "k1", ".", R"({"a":"1"})"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "k1", IsArray("$", R"({"a":"1"})")));
+
+  // Test dump and restore
+  resp = Run({"DUMP", "k1"});
+  auto dump = resp.GetBuf();
+
+  resp = Run({"DEL", "k1"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"RESTORE", "k1", "0", ToSV(dump)});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "k1", IsArray("$", R"({"a":"1"})")));
+
+  // Test renaming a key
+  EXPECT_EQ(Run({"RENAME", "k1", "new_k1"}), "OK");
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "new_k1", IsArray("$", R"({"a":"1"})")));
+
+  EXPECT_EQ(Run({"RENAME", "new_k1", "k1"}), "OK");
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "k1", IsArray("$", R"({"a":"1"})")));
+}
+
 TEST_F(SearchFamilyTest, AggregateGroupBy) {
   Run({"hset", "key:1", "word", "item1", "foo", "10", "text", "\"first key\"", "non_indexed_value",
        "1"});
