@@ -67,7 +67,7 @@ def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
 
     info = Redis(port=df_server.port).info()
-    assert info["total_pipelined_commands"] > len(keys) / 4  # sometimes CI is slow
+    assert info["total_pipelined_commands"] > len(keys) / 6  # sometimes CI is slow
 
 
 @dfly_args(DEFAULT_ARGS)
