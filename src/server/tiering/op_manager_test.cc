@@ -20,6 +20,16 @@ namespace dfly::tiering {
 using namespace std;
 using namespace std::string_literals;
 
+ostream& operator<<(ostream& os, const OpManager::Stats& stats) {
+  return os << "pending_read_cnt: " << stats.pending_read_cnt
+            << ", pending_stash_cnt: " << stats.pending_stash_cnt
+            << ", alloc_bytes: " << stats.disk_stats.allocated_bytes
+            << ", capacity_bytes: " << stats.disk_stats.capacity_bytes
+            << ", heap_buf_allocs: " << stats.disk_stats.heap_buf_alloc_count
+            << ", registered_buf_allocs: " << stats.disk_stats.registered_buf_alloc_count
+            << ", max_file_size: " << stats.disk_stats.max_file_size;
+}
+
 struct OpManagerTest : PoolTestBase, OpManager {
   OpManagerTest() : OpManager(256_MB) {
   }
@@ -76,7 +86,7 @@ TEST_F(OpManagerTest, SimpleStashesWithReads) {
     while (stashed_.size() < 100)
       util::ThisFiber::SleepFor(1ms);
 
-    EXPECT_EQ(GetStats().disk_stats.allocated_bytes, 100 * kPageSize);
+    EXPECT_EQ(GetStats().disk_stats.allocated_bytes, 100 * kPageSize) << GetStats();
 
     for (unsigned i = 0; i < 100; i++) {
       EXPECT_GE(stashed_[i].offset, i > 0);
