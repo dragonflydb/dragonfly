@@ -225,9 +225,6 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     with pytest.raises(redis.exceptions.NoPermissionError):
         await client.execute_command(f"SET x{x} {x}")
 
-    await admin_client.close()
-    await client.close()
-
 
 @pytest.mark.asyncio
 async def test_acl_deluser(df_server):
@@ -247,8 +244,6 @@ async def test_acl_deluser(df_server):
         await client.execute_command("EXEC")
 
     assert await client.execute_command("ACL WHOAMI") == "User is default"
-
-    await close_clients(admin_client, client)
 
 
 script = """
@@ -279,8 +274,6 @@ async def test_acl_del_user_while_running_lua_script(df_server):
         res = await admin_client.get(f"key{i}")
         assert res == "100000"
 
-    await admin_client.close()
-
 
 @pytest.mark.asyncio
 @pytest.mark.skip("Non deterministic")
@@ -298,9 +291,6 @@ async def test_acl_with_long_running_script(df_server):
     for i in range(1, 4):
         res = await admin_client.get(f"key{i}")
         assert res == "100000"
-
-    await client.close()
-    await admin_client.close()
 
 
 def create_temp_file(content, tmp_dir):
@@ -324,8 +314,6 @@ async def test_bad_acl_file(df_factory, tmp_dir):
 
     with pytest.raises(redis.exceptions.ResponseError):
         await client.execute_command("ACL LOAD")
-
-    await client.close()
 
 
 @pytest.mark.asyncio
@@ -380,8 +368,6 @@ async def test_good_acl_file(df_factory, tmp_dir):
     assert "user roy on #ea71c25a7a60224 resetchannels -@all +@string +hset" in result
     assert "user vlad off ~foo ~bar* resetchannels -@all +@string" in result
     assert "user default on nopass ~* &* +@all" in result
-
-    await client.close()
 
 
 @pytest.mark.asyncio
@@ -463,8 +449,6 @@ async def test_require_pass(df_factory):
     res = await client.execute_command("GET foo")
     assert res == "44"
 
-    await client.close()
-
 
 @pytest.mark.asyncio
 @dfly_args({"port": 1111, "requirepass": "temp"})
@@ -480,7 +464,6 @@ async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
     client = aioredis.Redis(username="default", password="jordan", port=df.port)
 
     assert await client.set("foo", "bar")
-    await client.close()
 
 
 @pytest.mark.asyncio
@@ -608,8 +591,6 @@ async def test_namespaces(df_server):
     assert await roman.execute_command("AUTH roman roman_pass") == "OK"
     assert await roman.execute_command("GET foo") == None
 
-    await close_clients(admin, adi, shahar, roman)
-
 
 @pytest.mark.asyncio
 async def test_default_user_bug(df_server):
@@ -622,8 +603,6 @@ async def test_default_user_bug(df_server):
 
     with pytest.raises(redis.exceptions.ResponseError):
         await client.execute_command("SET foo bar")
-
-    await client.close()
 
 
 @pytest.mark.asyncio
@@ -641,8 +620,6 @@ async def test_auth_resp3_bug(df_factory):
     assert res["mode"] == "standalone"
     assert res["role"] == "master"
     assert res["id"] == 1
-
-    await client.close()
 
 
 @pytest.mark.asyncio
