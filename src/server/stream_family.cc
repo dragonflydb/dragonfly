@@ -1313,6 +1313,7 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
     raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
     streamFreeCG(cgr_res->cg);
 
+    // Awake readers blocked on this group
     auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
     if (blocking_controller) {
       blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
