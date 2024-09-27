@@ -2694,3 +2694,15 @@ async def test_replica_of_replica(df_factory):
     assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
 
     await disconnect_clients(c_replica, c_replica2)
+
+
+@pytest.mark.asyncio
+async def test_reproduce_shutdown(df_factory):
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await disconnect_clients(c_master, c_replica)
