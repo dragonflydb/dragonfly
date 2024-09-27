@@ -9,6 +9,7 @@
 
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
+#include <random>
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -730,5 +731,70 @@ static void BM_UnpackSimd(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_UnpackSimd);
+
+static void BM_LpCompare(benchmark::State& state) {
+  std::random_device rd;
+  uint8_t* lp = lpNew(0);
+  for (unsigned i = 0; i < 100; ++i) {
+    lp = lpAppendInteger(lp, rd() % (1ULL << 48));
+  }
+
+  string val = absl::StrCat(1ULL << 49);
+  while (state.KeepRunning()) {
+    uint8_t* elem = lpLast(lp);
+    while (elem) {
+      lpCompare(elem, reinterpret_cast<const uint8_t*>(val.data()), val.size());
+      elem = lpPrev(lp, elem);
+    }
+  }
+  lpFree(lp);
+}
+BENCHMARK(BM_LpCompare);
+
+static void BM_LpCompareInt(benchmark::State& state) {
+  std::random_device rd;
+  uint8_t* lp = lpNew(0);
+  for (unsigned i = 0; i < 100; ++i) {
+    lp = lpAppendInteger(lp, rd() % (1ULL << 48));
+  }
+
+  int64_t val = 1ULL << 49;
+  while (state.KeepRunning()) {
+    uint8_t* elem = lpLast(lp);
+    int64_t sz;
+    while (elem) {
+      DCHECK_NE(0xFF, *elem);
+      unsigned char* value = lpGet(elem, &sz, NULL);
+      if (!value) {
+        int res = sz == val;
+        benchmark::DoNotOptimize(res);
+      }
+      elem = lpPrev(lp, elem);
+    }
+  }
+  lpFree(lp);
+}
+BENCHMARK(BM_LpCompareInt);
+
+static void BM_LpGet(benchmark::State& state) {
+  uint8_t* lp = lpNew(0);
+  int64_t val = -1;
+  for (unsigned i = 0; i < 60; ++i) {
+    lp = lpAppendInteger(lp, val);
+    val *= 2;
+  }
+
+  while (state.KeepRunning()) {
+    uint8_t* elem = lpLast(lp);
+    int64_t sz;
+    while (elem) {
+      unsigned char* value = lpGet(elem, &sz, NULL);
+      CHECK(!value && sz < 0);
+      elem = lpPrev(lp, elem);
+    }
+  }
+  lpFree(lp);
+}
+BENCHMARK(BM_LpGet);
 
 }  // namespace dfly
