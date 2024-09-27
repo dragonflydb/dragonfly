@@ -1689,9 +1689,6 @@ async def test_df_crash_on_replicaof_flag(df_factory):
     res = await c_replica.execute_command("DBSIZE")
     assert res == 0
 
-    master.stop()
-    replica.stop()
-
 
 async def test_network_disconnect(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=6)
@@ -1721,9 +1718,6 @@ async def test_network_disconnect(df_factory, df_seeder_factory):
             assert await seeder.compare(capture, replica.port)
         finally:
             await proxy.close(task)
-
-    master.stop()
-    replica.stop()
 
 
 async def test_network_disconnect_active_stream(df_factory, df_seeder_factory):
@@ -1762,9 +1756,6 @@ async def test_network_disconnect_active_stream(df_factory, df_seeder_factory):
             assert await seeder.compare(capture, replica.port)
         finally:
             await proxy.close(task)
-
-    master.stop()
-    replica.stop()
 
 
 async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
@@ -1807,9 +1798,6 @@ async def test_network_disconnect_small_buffer(df_factory, df_seeder_factory):
             assert await seeder.compare(capture, replica.port)
         finally:
             await proxy.close(task)
-
-    master.stop()
-    replica.stop()
 
     # Partial replication is currently not implemented so the following does not work
     # assert master.is_in_logs("Partial sync requested from stale LSN")
@@ -1858,9 +1846,6 @@ async def test_replica_reconnections_after_network_disconnect(df_factory, df_see
 
         finally:
             await proxy.close(task)
-
-    master.stop()
-    replica.stop()
 
 
 async def test_search(df_factory):
