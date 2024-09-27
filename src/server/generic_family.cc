@@ -1043,6 +1043,9 @@ struct SortEntry
         }
         this->score = 0;
       }
+      if (std::isnan(this->score)) {
+        return false;
+      }
     }
     key = std::move(item);
     return true;
