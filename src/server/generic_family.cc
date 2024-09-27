@@ -1040,8 +1040,15 @@ struct SortEntry
 
   bool Parse(std::string&& item) {
     if constexpr (!ALPHA) {
-      if (!absl::SimpleAtod(item, &this->score))
+      if (!absl::SimpleAtod(item, &this->score)) {
+        if (!item.empty()) {
+          return false;
+        }
+        this->score = 0;
+      }
+      if (std::isnan(this->score)) {
         return false;
+      }
     }
     key = std::move(item);
     return true;
@@ -1055,12 +1062,20 @@ struct SortEntry
     return true;
   }
 
-  std::conditional_t<ALPHA, const std::string&, double> Cmp() const {
-    if constexpr (ALPHA) {
-      return key;
-    } else {
-      return this->score;
+  static bool less(const SortEntry& l, const SortEntry& r) {
+    if constexpr (!ALPHA) {
+      if (l.score < r.score) {
+        return true;
+      } else if (r.score < l.score) {
+        return false;
+      }
+      // to prevent unstrict order we compare values lexicographically
     }
+    return l.key < r.key;
+  }
+
+  static bool greater(const SortEntry& l, const SortEntry& r) {
+    return less(r, l);
   }
 };
 
@@ -1179,19 +1194,13 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
 
   auto result_type = fetch_result.type();
   auto sort_call = [cntx, bounds, reversed, result_type](auto& entries) {
+    using value_t = typename std::decay_t<decltype(entries)>::value_type;
+    auto cmp = reversed ? &value_t::greater : &value_t::less;
     if (bounds) {
       auto sort_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
-      std::partial_sort(entries.begin(), sort_it, entries.end(),
-                        [reversed](const auto& lhs, const auto& rhs) {
-                          return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
-                        });
+      std::partial_sort(entries.begin(), sort_it, entries.end(), cmp);
     } else {
-      std::sort(entries.begin(), entries.end(),
-                [reversed, &entries](const auto& lhs, const auto& rhs) -> bool {
-                  DCHECK((&rhs - entries.data()) >= 0);
-                  DCHECK((&rhs - entries.data()) < int64_t(entries.size()));
-                  return reversed ? rhs.Cmp() < lhs.Cmp() : lhs.Cmp() < rhs.Cmp();
-                });
+      std::sort(entries.begin(), entries.end(), cmp);
     }
 
     auto start_it = entries.begin();

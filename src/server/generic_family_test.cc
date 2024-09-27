@@ -478,7 +478,17 @@ TEST_F(GenericFamilyTest, Sort) {
 
   Run({"set", "foo", "bar"});
   ASSERT_THAT(Run({"sort", "foo"}), ErrArg("WRONGTYPE "));
-  ;
+
+  Run({"rpush", "list-3", ""});
+  ASSERT_THAT(Run({"sort", "list-3"}), "");
+
+  Run({"rpush", "list-3", "2", "0", "", "-0.14", "0.12", "-0", "-123123", "7654"});
+  ASSERT_THAT(Run({"sort", "list-3"}).GetVec(),
+              ElementsAre("-123123", "-0.14", "", "", "-0", "0", "0.12", "2", "7654"));
+
+  Run({"rpush", "NANvalue", "nan"});
+  ASSERT_THAT(Run({"sort", "NANvalue"}),
+              ErrArg("One or more scores can't be converted into double"));
 }
 
 TEST_F(GenericFamilyTest, SortBug3636) {
