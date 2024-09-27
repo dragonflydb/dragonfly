@@ -605,6 +605,30 @@ TEST_F(CompactObjectTest, RawInterface) {
   }
 }
 
+TEST_F(CompactObjectTest, LpGet2) {
+  int64_t val = -1;
+  uint8_t* lp = lpNew(0);
+  for (int j = 0; j < 60; ++j) {
+    lp = lpAppendInteger(lp, val);
+    val *= 2;
+  }
+  val = 1;
+  for (int j = 0; j < 600; ++j) {
+    string str(j * 500, 'a');
+    lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(str.data()), str.size());
+  }
+  uint8_t* ptr = lpFirst(lp);
+  while (ptr) {
+    int64_t len1, len2;
+    uint8_t* val1 = lpGet(ptr, &len1, nullptr);
+    uint8_t* val2 = lpGet2(ptr, &len2);
+    ASSERT_EQ(len1, len2);
+    ASSERT_TRUE(val1 == val2);
+    ptr = lpNext(lp, ptr);
+  }
+  lpFree(lp);
+}
+
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   const char* end = ascii + len;
 
@@ -764,7 +788,7 @@ static void BM_LpCompareInt(benchmark::State& state) {
     int64_t sz;
     while (elem) {
       DCHECK_NE(0xFF, *elem);
-      unsigned char* value = lpGet(elem, &sz, NULL);
+      unsigned char* value = lpGet2(elem, &sz);
       if (!value) {
         int res = sz == val;
         benchmark::DoNotOptimize(res);
@@ -777,6 +801,7 @@ static void BM_LpCompareInt(benchmark::State& state) {
 BENCHMARK(BM_LpCompareInt);
 
 static void BM_LpGet(benchmark::State& state) {
+  unsigned version = state.range(0);
   uint8_t* lp = lpNew(0);
   int64_t val = -1;
   for (unsigned i = 0; i < 60; ++i) {
@@ -788,13 +813,13 @@ static void BM_LpGet(benchmark::State& state) {
     uint8_t* elem = lpLast(lp);
     int64_t sz;
     while (elem) {
-      unsigned char* value = lpGet(elem, &sz, NULL);
+      unsigned char* value = (version == 1) ? lpGet(elem, &sz, NULL) : lpGet2(elem, &sz);
       CHECK(!value && sz < 0);
       elem = lpPrev(lp, elem);
     }
   }
   lpFree(lp);
 }
-BENCHMARK(BM_LpGet);
+BENCHMARK(BM_LpGet)->Arg(1)->Arg(2);
 
 }  // namespace dfly
