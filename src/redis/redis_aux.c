@@ -5,6 +5,7 @@
 
 #include "crc64.h"
 #include "endianconv.h"
+#include "quicklist.h"
 #include "zmalloc.h"
 
 Server server;
@@ -67,4 +68,56 @@ void memrev64(void* p) {
 uint64_t intrev64(uint64_t v) {
   memrev64(&v);
   return v;
+}
+
+// Based on quicklistGetIteratorAtIdx but without allocations
+void quicklistInitIterator(quicklistIter* iter, quicklist *quicklist, int direction,
+                           const long long idx) {
+    quicklistNode *n = NULL;
+    unsigned long long accum = 0;
+    int forward = idx < 0 ? 0 : 1; /* < 0 -> reverse, 0+ -> forward */
+    unsigned long long index = forward ? idx : (-idx) - 1;
+
+    iter->direction = direction;
+    iter->quicklist = quicklist;
+    iter->current = NULL;
+    iter->zi = NULL;
+
+    if (index >= quicklist->count) return;
+
+    /* Seek in the other direction if that way is shorter. */
+    int seek_forward = forward;
+    unsigned long long seek_index = index;
+    if (index > (quicklist->count - 1) / 2) {
+        seek_forward = !forward;
+        seek_index = quicklist->count - 1 - index;
+    }
+
+    n = seek_forward ? quicklist->head : quicklist->tail;
+    while (likely(n)) {
+        if ((accum + n->count) > seek_index) {
+            break;
+        } else {
+            accum += n->count;
+            n = seek_forward ? n->next : n->prev;
+        }
+    }
+
+    if (!n)
+      return;
+
+    iter->current = n;
+
+    /* Fix accum so it looks like we seeked in the other direction. */
+    if (seek_forward != forward)
+      accum = quicklist->count - n->count - accum;
+
+    if (forward) {
+        /* forward = normal head-to-tail offset. */
+        iter->offset = index - accum;
+    } else {
+        /* reverse = need negative offset for tail-to-head, so undo
+         * the result of the original index = (-idx) - 1 above. */
+        iter->offset = (-index) - 1 + accum;
+    }
 }

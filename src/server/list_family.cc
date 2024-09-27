@@ -543,14 +543,15 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
     index = -1;
   }
 
-  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, iter_direction, index);
+  quicklistIter qiter;
+  quicklistInitIterator(&qiter, ql, iter_direction, index);
   quicklistEntry entry;
   unsigned removed = 0;
   const uint8_t* elem_ptr = reinterpret_cast<const uint8_t*>(elem.data());
 
-  while (quicklistNext(qiter, &entry)) {
+  while (quicklistNext(&qiter, &entry)) {
     if (quicklistCompare(&entry, elem_ptr, elem.size())) {
-      quicklistDelEntry(qiter, &entry);
+      quicklistDelEntry(&qiter, &entry);
       removed++;
       if (count && removed == count)
         break;
@@ -559,7 +560,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
 
   it_res->post_updater.Run();
 
-  quicklistReleaseIterator(qiter);
+  quicklistCompressIterator(&qiter);
 
   if (quicklistCount(ql) == 0) {
     CHECK(db_slice.Del(op_args.db_cntx, it));
