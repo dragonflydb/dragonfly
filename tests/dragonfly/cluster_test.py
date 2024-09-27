@@ -1861,7 +1861,7 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
 
-    await disconnect_clients(*c_nodes, c_replica)
+    await close_clients(*c_nodes, c_replica)
     await proxy.close(proxy_task)
 
 
@@ -1938,7 +1938,7 @@ async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_fact
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
 
-    await disconnect_clients(c_replica, *node_clients)
+    await close_clients(c_replica, *node_clients)
 
 
 @dfly_args({"proactor_threads": 4})
@@ -2029,4 +2029,4 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
 
-    await disconnect_clients(c_replica, *node_clients)
+    await close_clients(c_replica, *node_clients)
