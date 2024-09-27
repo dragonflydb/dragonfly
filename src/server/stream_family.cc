@@ -800,36 +800,6 @@ stream* GetReadOnlyStream(const CompactObj& cobj) {
 
 }  // namespace
 
-// Returns a map of stream to the ID of the last entry in the stream. Any
-// streams not found are omitted from the result.
-OpResult<vector<pair<string, streamID>>> OpLastIDs(const OpArgs& op_args, const ShardArgs& args) {
-  DCHECK(!args.Empty());
-
-  auto& db_slice = op_args.GetDbSlice();
-
-  vector<pair<string, streamID>> last_ids;
-  for (string_view key : args) {
-    auto res_it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STREAM);
-    if (!res_it) {
-      if (res_it.status() == OpStatus::KEY_NOTFOUND) {
-        continue;
-      }
-      return res_it.status();
-    }
-
-    const CompactObj& cobj = (*res_it)->second;
-    stream* s = GetReadOnlyStream(cobj);
-
-    streamID last_id = s->last_id;
-    if (s->length) {
-      streamLastValidID(s, &last_id);
-    }
-    last_ids.emplace_back(key, last_id);
-  }
-
-  return last_ids;
-}
-
 // Returns the range response for each stream on this shard in order of
 // GetShardArgs.
 vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, const ReadOpts& opts) {
@@ -1342,6 +1312,13 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   if (cgr_res->cg) {
     raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
     streamFreeCG(cgr_res->cg);
+
+    // Awake readers blocked on this group
+    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+    if (blocking_controller) {
+      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
+    }
+
     return OpStatus::OK;
   }
 
@@ -1357,37 +1334,6 @@ struct GroupConsumerPairOpts {
   string_view group;
   string_view consumer;
 };
-
-vector<GroupConsumerPair> OpGetGroupConsumerPairs(const ShardArgs& shard_args,
-                                                  const OpArgs& op_args,
-                                                  const GroupConsumerPairOpts& opts) {
-  vector<GroupConsumerPair> sid_items(shard_args.Size());
-  unsigned index = 0;
-  // get group and consumer
-  for (string_view key : shard_args) {
-    streamCG* group = nullptr;
-    streamConsumer* consumer = nullptr;
-    GroupConsumerPair& dest = sid_items[index++];
-
-    auto group_res = FindGroup(op_args, key, opts.group);
-    if (!group_res) {
-      continue;
-    }
-    if (group = group_res->cg; !group) {
-      continue;
-    }
-
-    op_args.shard->tmp_str1 =
-        sdscpylen(op_args.shard->tmp_str1, opts.consumer.data(), opts.consumer.size());
-    consumer = streamLookupConsumer(group, op_args.shard->tmp_str1, SLC_NO_REFRESH);
-    if (!consumer) {
-      consumer = streamCreateConsumer(group, op_args.shard->tmp_str1, NULL, 0,
-                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
-    }
-    dest = {group, consumer};
-  }
-  return sid_items;
-}
 
 // XGROUP CREATECONSUMER key groupname consumername
 OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, string_view gname,
@@ -2044,92 +1990,6 @@ optional<pair<AddTrimOpts, unsigned>> ParseAddOrTrimArgsOrReply(CmdArgList args,
   }
 
   return make_pair(opts, id_indx);
-}
-
-void FetchGroupInfo(Transaction* tx, ReadOpts* opts) {
-  vector<vector<GroupConsumerPair>> res_pairs(shard_set->size());
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto sid = shard->shard_id();
-    ShardArgs s_args = t->GetShardArgs(sid);
-    GroupConsumerPairOpts gc_opts = {opts->group_name, opts->consumer_name};
-
-    res_pairs[sid] = OpGetGroupConsumerPairs(s_args, t->GetOpArgs(shard), gc_opts);
-    return OpStatus::OK;
-  };
-
-  tx->Execute(std::move(cb), false);
-
-  for (size_t i = 0; i < shard_set->size(); i++) {
-    const auto& s_item = res_pairs[i];
-    if (s_item.size() == 0) {
-      continue;
-    }
-
-    ShardArgs s_args = tx->GetShardArgs(i);
-    unsigned index = 0;
-    for (string_view key : s_args) {
-      StreamIDsItem& item = opts->stream_ids.at(key);
-      item.consumer = s_item[index].consumer;
-      item.group = s_item[index].group;
-      ++index;
-    }
-  }
-}
-
-// Returns true if the last-ids list has relevant entries according to read options,
-// false if blocking is required to fetch entries.
-io::Result<bool, facade::ErrorReply> HasEntries(
-    const absl::flat_hash_map<string, streamID>& last_ids, ReadOpts* opts) {
-  bool has_entries = false;
-  for (auto& [stream, requested_sitem] : opts->stream_ids) {
-    if (auto last_id_it = last_ids.find(stream); last_id_it != last_ids.end()) {
-      streamID last_id = last_id_it->second;
-
-      if (opts->read_group && !requested_sitem.group) {
-        // if the group associated with the key is not found,
-        // send NoGroupOrKey error.
-        // We are simply mimicking Redis' error message here.
-        // However, we could actually report more precise error message.
-        return nonstd::make_unexpected(facade::ErrorReply(
-            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option")));
-      }
-
-      // Resolve $ to the last ID in the stream.
-      if (requested_sitem.id.last_id && !opts->read_group) {
-        requested_sitem.id.val = last_id;
-        // We only include messages with IDs greater than the last message so
-        // increment the ID.
-        streamIncrID(&requested_sitem.id.val);
-        requested_sitem.id.last_id = false;
-        continue;
-      }
-      if (opts->read_group) {
-        // If '>' is not provided, consumer PEL is used. So don't need to block.
-        if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
-          has_entries = true;
-          opts->serve_history = true;
-          continue;
-        }
-        // we know the requested last_id only when we already have it
-        if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
-          requested_sitem.id.val = requested_sitem.group->last_id;
-          streamIncrID(&requested_sitem.id.val);
-        }
-      }
-
-      if (streamCompareID(&last_id, &requested_sitem.id.val) >= 0) {
-        has_entries = true;
-      }
-    } else {
-      if (opts->read_group) {
-        // See equivalent reply above
-        return nonstd::make_unexpected(facade::ErrorReply(
-            NoGroupOrKey(stream, opts->group_name, " in XREADGROUP with GROUP option")));
-      }
-    }
-  }
-
-  return has_entries;
 }
 
 struct StreamReplies {
@@ -2889,26 +2749,6 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
   return opts;
 }
 
-// Returns the last ID of each stream in the transaction.
-OpResult<absl::flat_hash_map<string, streamID>> FetchLastStreamIDs(Transaction* trans) {
-  vector<OpResult<vector<pair<string, streamID>>>> last_ids_res(shard_set->size());
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    ShardId sid = shard->shard_id();
-    last_ids_res[sid] = OpLastIDs(t->GetOpArgs(shard), t->GetShardArgs(shard->shard_id()));
-    return OpStatus::OK;
-  };
-  trans->Execute(std::move(cb), false);
-
-  absl::flat_hash_map<string, streamID> last_ids;
-  for (auto res : last_ids_res) {
-    if (!res)
-      return res.status();
-
-    last_ids.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
-  }
-  return last_ids;
-}
-
 void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
   // If BLOCK is not set just return an empty array as there are no resolvable
   // entries.
@@ -2931,7 +2771,7 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
     if (!res_it.ok())
       return false;
 
-    const StreamIDsItem& sitem = opts->stream_ids.at(key);
+    StreamIDsItem& sitem = opts->stream_ids.at(key);
     if (sitem.id.val.ms != UINT64_MAX && sitem.id.val.seq != UINT64_MAX)
       return true;
 
@@ -2940,6 +2780,15 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
     streamID last_id = s->last_id;
     if (s->length) {
       streamLastValidID(s, &last_id);
+    }
+
+    // Update group pointer and check it's validity
+    if (opts->read_group) {
+      owner->tmp_str1 =
+          sdscpylen(owner->tmp_str1, opts->group_name.data(), opts->group_name.length());
+      sitem.group = streamLookupCG(s, owner->tmp_str1);
+      if (!sitem.group)
+        return true;  // abort
     }
 
     return streamCompareID(&last_id, &sitem.group->last_id) > 0;
@@ -2962,15 +2811,33 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
                                           .ms = UINT64_MAX,
                                           .seq = UINT64_MAX,
                                       }};
-      const StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
+      StreamIDsItem& sitem = opts->stream_ids.at(*wake_key);
       range_opts.start = sitem.id;
+
+      // Expect group to exist? No guarantees from transactional framework
+      if (opts->read_group && !sitem.group) {
+        result = OpStatus::INVALID_VALUE;
+        return OpStatus::OK;
+      }
+
       if (sitem.id.val.ms == UINT64_MAX || sitem.id.val.seq == UINT64_MAX) {
         range_opts.start.val = sitem.group->last_id;  // only for '>'
         streamIncrID(&range_opts.start.val);
       }
 
       range_opts.group = sitem.group;
-      range_opts.consumer = sitem.consumer;
+
+      // Update consumer
+      if (sitem.group) {
+        shard->tmp_str1 =
+            sdscpylen(shard->tmp_str1, opts->consumer_name.data(), opts->consumer_name.length());
+        range_opts.consumer = streamLookupConsumer(sitem.group, shard->tmp_str1, SLC_NO_REFRESH);
+        if (!range_opts.consumer) {
+          range_opts.consumer = streamCreateConsumer(sitem.group, shard->tmp_str1, NULL, 0,
+                                                     SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+        }
+      }
+
       range_opts.noack = opts->noack;
       if (sitem.consumer) {
         if (sitem.consumer->pel->numnodes == 0) {
@@ -2996,124 +2863,123 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
       rb->StartArray(2);
     }
     return StreamReplies{rb}.SendStreamRecords(key, *result);
+  } else if (result.status() == OpStatus::INVALID_VALUE) {
+    return rb->SendError("NOGROUP the consumer group this client was blocked on no longer exists");
   }
   return rb->SendNullArray();
 }
 
-struct OpReadSingleShardContext {
-  ReadOpts* opts;
-  facade::ErrorReply error{OpStatus::OK};
-  bool requires_blocking = false;
-  vector<RecordVec> prefetched_results;
-};
-
-Transaction::RunnableResult OpReadSingleShard(Transaction* tx, EngineShard* es,
-                                              OpReadSingleShardContext* context) {
-  auto last_ids = OpLastIDs(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()));
-  if (!last_ids)
-    return last_ids.status();
-
-  absl::flat_hash_map<string, streamID> last_ids_map(last_ids->begin(), last_ids->end());
-  auto has_entries = HasEntries(last_ids_map, context->opts);
-  if (!has_entries.has_value()) {
-    context->error = has_entries.error();
-    return OpStatus::INVALID_VALUE;
+variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
+                                              ReadOpts* opts) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto res_it = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
+  if (!res_it) {
+    if (res_it.status() == OpStatus::WRONG_TYPE)
+      return facade::ErrorReply{res_it.status()};
+    else if (res_it.status() == OpStatus::KEY_NOTFOUND && opts->read_group)
+      return facade::ErrorReply{
+          NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
+    return false;
   }
 
-  // If no entries are available, avoid concluding to proceed waiting with acquired keys
-  if (!*has_entries) {
-    context->requires_blocking = true;
-    return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
-  }
+  const CompactObj& cobj = (*res_it)->second;
+  stream* s = GetReadOnlyStream(cobj);
 
-  context->prefetched_results =
-      OpRead(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()), *context->opts);
-  DCHECK(!context->prefetched_results.empty());
+  // Fetch last id
+  streamID last_id = s->last_id;
+  if (s->length)
+    streamLastValidID(s, &last_id);
 
-  return OpStatus::OK;
-}
+  // Check requested
+  auto& requested_sitem = opts->stream_ids.at(skey);
 
-// Determine if entries are available and read them in a single hop. Returns nullopt in case of an
-// error and replies.
-std::optional<vector<RecordVec>> XReadImplSingleShard(ConnectionContext* cntx, ReadOpts* opts) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  auto* tx = cntx->transaction;
-  OpReadSingleShardContext op_cntx;
-  op_cntx.opts = opts;
+  // Look up group consumer if needed
+  streamCG* group = nullptr;
+  streamConsumer* consumer = nullptr;
+  if (opts->read_group) {
+    auto& tmp_str = op_args.shard->tmp_str1;
+    tmp_str = sdscpylen(tmp_str, opts->group_name.data(), opts->group_name.size());
+    group = streamLookupCG(s, tmp_str);
 
-  auto res = tx->ScheduleSingleHop(
-      [&](auto* tx, auto* es) { return OpReadSingleShard(tx, es, &op_cntx); });
+    if (!group)
+      return facade::ErrorReply{
+          NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
-  if (res != OpStatus::OK) {
-    if (res == OpStatus::INVALID_VALUE)
-      cntx->SendError(op_cntx.error);
-    else if (res == OpStatus::WRONG_TYPE)
-      cntx->SendError(kWrongTypeErr);
-    else
-      rb->SendNullArray();
-    return std::nullopt;
-  }
-
-  if (op_cntx.requires_blocking)
-    return vector<RecordVec>{};
-
-  return {std::move(op_cntx.prefetched_results)};
-}
-
-// Read entries from given streams
-void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  auto* tx = cntx->transaction;
-
-  vector<RecordVec> prefetched_results;
-  bool requires_blocking = false;
-
-  // If only a single shard is active, we can read the items immediately without wasting another hop
-  if (!tx->IsScheduled() && tx->GetUniqueShardCnt() == 1) {
-    auto result = XReadImplSingleShard(cntx, opts);
-    if (!result)
-      return;  // replied with error
-
-    prefetched_results = std::move(*result);
-    requires_blocking = prefetched_results.empty();
-  } else {
-    auto last_ids = FetchLastStreamIDs(cntx->transaction);
-    if (!last_ids) {
-      cntx->transaction->Conclude();
-      if (last_ids.status() == OpStatus::WRONG_TYPE)
-        return cntx->SendError(kWrongTypeErr);
-
-      return rb->SendNullArray();
+    tmp_str = sdscpylen(tmp_str, opts->consumer_name.data(), opts->consumer_name.size());
+    consumer = streamLookupConsumer(group, tmp_str, SLC_NO_REFRESH);
+    if (!consumer) {
+      consumer = streamCreateConsumer(group, op_args.shard->tmp_str1, NULL, 0,
+                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
     }
 
-    auto has_entries = HasEntries(*last_ids, opts);
-    if (!has_entries.has_value()) {
-      cntx->transaction->Conclude();
-      cntx->SendError(has_entries.error());
-      return;
-    }
-
-    requires_blocking = !has_entries.value();
+    requested_sitem.group = group;
+    requested_sitem.consumer = consumer;
   }
 
-  // If no items are available, proceeed with blocking flow
-  if (requires_blocking)
-    return XReadBlock(opts, cntx);
+  // Resolve $ to the last ID in the stream.
+  if (requested_sitem.id.last_id && !opts->read_group) {
+    requested_sitem.id.val = last_id;
+    streamIncrID(&requested_sitem.id.val);  // include id's strictly greater
+    requested_sitem.id.last_id = false;
+    return false;
+  }
 
-  // Read entries or move them from prefetched
+  if (opts->read_group) {
+    // If '>' is not provided, consumer PEL is used. So don't need to block.
+    if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
+      opts->serve_history = true;
+      return true;
+    }
+
+    // we know the requested last_id only when we already have it
+    if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
+      requested_sitem.id.val = requested_sitem.group->last_id;
+      streamIncrID(&requested_sitem.id.val);
+    }
+  }
+
+  return streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
+}
+
+void XReadGeneric2(CmdArgList args, ConnectionContext* cntx, bool read_group) {
+  optional<ReadOpts> opts = ParseReadArgsOrReply(args, read_group, cntx);
+  if (!opts)
+    return;
+
+  auto* tx = cntx->transaction;
+
+  // Determine if streams have entries
+  AggregateValue<optional<facade::ErrorReply>> err;
+  atomic_bool have_entries = false;
+
+  auto cb = [&](auto* tx, auto* es) {
+    auto op_args = tx->GetOpArgs(es);
+    for (string_view skey : tx->GetShardArgs(es->shard_id())) {
+      if (auto res = HasEntries2(op_args, skey, &*opts); holds_alternative<facade::ErrorReply>(res))
+        err = get<facade::ErrorReply>(res);
+      else if (holds_alternative<bool>(res) && get<bool>(res))
+        have_entries.store(true, memory_order_relaxed);
+    }
+    return OpStatus::OK;
+  };
+  tx->Execute(cb, false);
+
+  if (err) {
+    tx->Conclude();
+    return cntx->SendError(**err);
+  }
+
+  if (!have_entries.load(memory_order_relaxed))
+    return XReadBlock(&*opts, cntx);
+
   vector<vector<RecordVec>> xread_resp;
-  if (prefetched_results.empty()) {
-    xread_resp.resize(shard_set->size());
-    auto read_cb = [&](Transaction* t, EngineShard* shard) {
-      ShardId sid = shard->shard_id();
-      xread_resp[sid] = OpRead(t->GetOpArgs(shard), t->GetShardArgs(sid), *opts);
-      return OpStatus::OK;
-    };
-    cntx->transaction->Execute(std::move(read_cb), true);
-  } else {
-    DCHECK_EQ(tx->GetUniqueShardCnt(), 1u);
-    xread_resp = {std::move(prefetched_results)};
-  }
+  xread_resp.resize(shard_set->size());
+  auto read_cb = [&](Transaction* t, EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    xread_resp[sid] = OpRead(t->GetOpArgs(shard), t->GetShardArgs(sid), *opts);
+    return OpStatus::OK;
+  };
+  tx->Execute(std::move(read_cb), true);
 
   // Count number of streams and merge final results in correct order
   int resolved_streams = 0;
@@ -3126,7 +2992,7 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
       continue;
     }
 
-    ShardArgs shard_args = cntx->transaction->GetShardArgs(sid);
+    ShardArgs shard_args = tx->GetShardArgs(sid);
     DCHECK_EQ(shard_args.Size(), sub_results.size());
 
     auto shard_args_it = shard_args.begin();
@@ -3140,6 +3006,7 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
   }
 
   // Send all results back
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
   if (opts->read_group) {
     if (rb->IsResp3()) {
@@ -3168,27 +3035,12 @@ void XReadImpl(CmdArgList args, ReadOpts* opts, ConnectionContext* cntx) {
   }
 }
 
-void XReadGeneric(CmdArgList args, bool read_group, ConnectionContext* cntx) {
-  auto opts = ParseReadArgsOrReply(args, read_group, cntx);
-  if (!opts) {
-    return;
-  }
-
-  // TODO: we conduct lots of hops that seems to be could be collapsed into the shard
-  // callback. For example, FetchGroupInfo can probably be moved into OpRead.
-  if (opts->read_group) {
-    FetchGroupInfo(cntx->transaction, &opts.value());
-  }
-
-  return XReadImpl(args, &opts.value(), cntx);
-}
-
 void StreamFamily::XRead(CmdArgList args, ConnectionContext* cntx) {
-  return XReadGeneric(args, false, cntx);
+  return XReadGeneric2(args, cntx, false);
 }
 
 void StreamFamily::XReadGroup(CmdArgList args, ConnectionContext* cntx) {
-  return XReadGeneric(args, true, cntx);
+  return XReadGeneric2(args, cntx, true);
 }
 
 void StreamFamily::XSetId(CmdArgList args, ConnectionContext* cntx) {
@@ -3208,7 +3060,8 @@ void StreamFamily::XSetId(CmdArgList args, ConnectionContext* cntx) {
   switch (result) {
     case OpStatus::STREAM_ID_SMALL:
       return cntx->SendError(
-          "The ID specified in XSETID is smaller than the target stream top item");
+          "The ID specified in XSETID is smaller than the "
+          "target stream top item");
     case OpStatus::ENTRIES_ADDED_SMALL:
       return cntx->SendError(
           "The entries_added specified in XSETID is smaller than "
