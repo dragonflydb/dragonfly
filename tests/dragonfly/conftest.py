@@ -145,8 +145,8 @@ async def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     await factory.stop_all()
 
 
-@pytest_asyncio.fixture(scope="function")
-async def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
+@pytest.fixture(scope="function")
+def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
     """
     Start the default Dragonfly server that will be used for the default pools
     and clients.
