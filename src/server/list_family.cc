@@ -20,7 +20,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/server_state.h"
+#include "server/family_utils.h"
 #include "server/transaction.h"
 
 /**
@@ -283,8 +283,8 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   int pos = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
 
   for (string_view v : vals) {
-    es->tmp_str1 = sdscpylen(es->tmp_str1, v.data(), v.size());
-    quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
+    auto vsds = WrapSds(v);
+    quicklistPush(ql, vsds, sdslen(vsds), pos);
   }
 
   if (res.is_new) {

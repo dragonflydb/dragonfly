@@ -376,15 +376,9 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
       shard_id_(pb->GetPoolIndex()) {
-  tmp_str1 = sdsempty();
-
   defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
   queue_.Start(absl::StrCat("shard_queue_", shard_id()));
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
-}
-
-EngineShard::~EngineShard() {
-  sdsfree(tmp_str1);
 }
 
 void EngineShard::Shutdown() {

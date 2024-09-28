@@ -4,6 +4,8 @@
 
 #include "server/set_family.h"
 
+#include "server/family_utils.h"
+
 extern "C" {
 #include "redis/intset.h"
 #include "redis/redis_aux.h"
