@@ -112,13 +112,22 @@ class RdbLoaderBase {
     }
   };
 
+  // Contains the state of a pending partial read.
+  //
+  // This us used to load huge objects in parts (only loading a subset of
+  // elements at a time) (see LoadKeyValPair).
+  struct PendingRead {
+    // Number of elements remaining in the object.
+    size_t remaining = 0;
+  };
+
   class OpaqueObjLoader;
 
   io::Result<uint8_t> FetchType();
 
   template <typename T> io::Result<T> FetchInt();
 
-  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv);
+  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv, bool append = false);
 
   io::Result<uint64_t> LoadLen(bool* is_encoded);
   std::error_code FetchBuf(size_t size, void* dest);
@@ -173,6 +182,7 @@ class RdbLoaderBase {
   JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
   RdbVersion rdb_version_ = RDB_VERSION;
+  PendingRead pending_read_;
 };
 
 class RdbLoader : protected RdbLoaderBase {
@@ -247,6 +257,9 @@ class RdbLoader : protected RdbLoaderBase {
     bool has_mc_flags = false;
     uint32_t mc_flags = 0;
 
+    // Whether to append the item to an existing element.
+    bool append = false;
+
     friend void MPSC_intrusive_store_next(Item* dest, Item* nxt) {
       dest->next.store(nxt, std::memory_order_release);
     }
@@ -261,6 +274,8 @@ class RdbLoader : protected RdbLoaderBase {
   struct ObjSettings;
 
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
+  // Returns whether to discard the read key pair.
+  bool DiscardKey(std::string_view key, ObjSettings* settings);
   void ResizeDb(size_t key_num, size_t expire_num);
   std::error_code HandleAux();
 
@@ -301,6 +316,7 @@ class RdbLoader : protected RdbLoaderBase {
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;
 
+  // A free pool of allocated unused items.
   base::MPSCIntrusiveQueue<Item> item_queue_;
 };
 

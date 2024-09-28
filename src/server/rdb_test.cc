@@ -565,4 +565,23 @@ TEST_F(RdbTest, DflyLoadAppend) {
   EXPECT_EQ(Run({"get", "k2"}), "2");
 }
 
+// Tests loading a huge set, where the set is loaded in multiple partial reads.
+TEST_F(RdbTest, LoadHugeSet) {
+  // Add 2 sets with 200k elements each (note must have more than kMaxBlobLen
+  // elements to test partial reads).
+  Run({"debug", "populate", "2", "test", "100", "rand", "type", "set", "elements", "200000"});
+  ASSERT_EQ(200000, CheckedInt({"scard", "test:0"}));
+  ASSERT_EQ(200000, CheckedInt({"scard", "test:1"}));
+
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  resp = Run({"dfly", "load", save_info.file_name});
+  ASSERT_EQ(resp, "OK");
+
+  ASSERT_EQ(200000, CheckedInt({"scard", "test:0"}));
+  ASSERT_EQ(200000, CheckedInt({"scard", "test:1"}));
+}
+
 }  // namespace dfly
