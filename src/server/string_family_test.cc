@@ -499,12 +499,16 @@ TEST_F(StringFamilyTest, Range) {
 
   Run({"SET", "key4", "1"});
   EXPECT_EQ(Run({"getrange", "key4", "-1", "-2"}), "");
+  EXPECT_EQ(Run({"getrange", "key4", "0", "-2"}), "1");
 
   EXPECT_EQ(CheckedInt({"SETRANGE", "key5", "1", ""}), 0);
   EXPECT_EQ(Run({"GET", "key5"}).type, facade::RespExpr::NIL);
 
   EXPECT_EQ(CheckedInt({"SETRANGE", "num", "6", ""}), 4);
   EXPECT_EQ(Run({"GET", "num"}), "1234");
+
+  // we support only 256MB string so this test is failed now
+  // EXPECT_THAT(CheckedInt({"SETRANGE", "", "268435456", "0"}), 268435457);
 }
 
 TEST_F(StringFamilyTest, IncrByFloat) {

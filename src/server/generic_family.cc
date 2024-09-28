@@ -30,6 +30,7 @@ extern "C" {
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
+#include "server/search/doc_index.h"
 #include "server/set_family.h"
 #include "server/transaction.h"
 #include "util/varz.h"
@@ -151,7 +152,7 @@ class RdbRestoreValue : protected RdbLoaderBase {
 
   std::optional<DbSlice::ItAndUpdater> Add(std::string_view payload, std::string_view key,
                                            DbSlice& db_slice, const DbContext& cntx,
-                                           const RestoreArgs& args);
+                                           const RestoreArgs& args, EngineShard* shard);
 
  private:
   std::optional<OpaqueObj> Parse(std::string_view payload);
@@ -178,7 +179,8 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view 
 std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
                                                           std::string_view key, DbSlice& db_slice,
                                                           const DbContext& cntx,
-                                                          const RestoreArgs& args) {
+                                                          const RestoreArgs& args,
+                                                          EngineShard* shard) {
   auto opaque_res = Parse(data);
   if (!opaque_res) {
     return std::nullopt;
@@ -194,6 +196,7 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
   auto res = db_slice.AddNew(cntx, key, std::move(pv), args.ExpirationTime());
   res->it->first.SetSticky(args.Sticky());
   if (res) {
+    shard->search_indices()->AddDoc(key, cntx, res->it->second);
     return std::move(res.value());
   }
   return std::nullopt;
@@ -444,8 +447,8 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   }
 
   RdbRestoreValue loader(serialized_value_.version.value());
-  auto restored_dest_it =
-      loader.Add(serialized_value_.value, dest_key_, db_slice, op_args.db_cntx, restore_args);
+  auto restored_dest_it = loader.Add(serialized_value_.value, dest_key_, db_slice, op_args.db_cntx,
+                                     restore_args, shard);
 
   if (restored_dest_it) {
     auto& dest_it = restored_dest_it->it;
@@ -535,7 +538,7 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
   }
 
   RdbRestoreValue loader(rdb_version);
-  auto res = loader.Add(payload, key, db_slice, op_args.db_cntx, restore_args);
+  auto res = loader.Add(payload, key, db_slice, op_args.db_cntx, restore_args, op_args.shard);
   return res.has_value();
 }
 
@@ -1037,8 +1040,15 @@ struct SortEntry
 
   bool Parse(std::string&& item) {
     if constexpr (!ALPHA) {
-      if (!absl::SimpleAtod(item, &this->score))
+      if (!absl::SimpleAtod(item, &this->score)) {
+        if (!item.empty()) {
+          return false;
+        }
+        this->score = 0;
+      }
+      if (std::isnan(this->score)) {
         return false;
+      }
     }
     key = std::move(item);
     return true;
@@ -1052,12 +1062,20 @@ struct SortEntry
     return true;
   }
 
-  std::conditional_t<ALPHA, const std::string&, double> Cmp() const {
-    if constexpr (ALPHA) {
-      return key;
-    } else {
-      return this->score;
+  static bool less(const SortEntry& l, const SortEntry& r) {
+    if constexpr (!ALPHA) {
+      if (l.score < r.score) {
+        return true;
+      } else if (r.score < l.score) {
+        return false;
+      }
+      // to prevent unstrict order we compare values lexicographically
     }
+    return l.key < r.key;
+  }
+
+  static bool greater(const SortEntry& l, const SortEntry& r) {
+    return less(r, l);
   }
 };
 
@@ -1176,19 +1194,13 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
 
   auto result_type = fetch_result.type();
   auto sort_call = [cntx, bounds, reversed, result_type](auto& entries) {
+    using value_t = typename std::decay_t<decltype(entries)>::value_type;
+    auto cmp = reversed ? &value_t::greater : &value_t::less;
     if (bounds) {
       auto sort_it = entries.begin() + std::min(bounds->first + bounds->second, entries.size());
-      std::partial_sort(entries.begin(), sort_it, entries.end(),
-                        [reversed](const auto& lhs, const auto& rhs) {
-                          return bool(lhs.Cmp() < rhs.Cmp()) ^ reversed;
-                        });
+      std::partial_sort(entries.begin(), sort_it, entries.end(), cmp);
     } else {
-      std::sort(entries.begin(), entries.end(),
-                [reversed, &entries](const auto& lhs, const auto& rhs) -> bool {
-                  DCHECK((&rhs - entries.data()) >= 0);
-                  DCHECK((&rhs - entries.data()) < int64_t(entries.size()));
-                  return reversed ? rhs.Cmp() < lhs.Cmp() : lhs.Cmp() < rhs.Cmp();
-                });
+      std::sort(entries.begin(), entries.end(), cmp);
     }
 
     auto start_it = entries.begin();
@@ -1579,6 +1591,7 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     if (destination_should_not_exist)
       return OpStatus::KEY_EXISTS;
 
+    op_args.shard->search_indices()->RemoveDoc(to_key, op_args.db_cntx, to_res.it->second);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
 
@@ -1615,6 +1628,8 @@ OpResult<void> GenericFamily::OpRen(const OpArgs& op_args, string_view from_key,
     to_res = std::move(*op_result);
     to_res.it->first.SetSticky(sticky);
   }
+
+  op_args.shard->search_indices()->AddDoc(to_key, op_args.db_cntx, to_res.it->second);
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {

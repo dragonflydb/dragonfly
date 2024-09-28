@@ -19,8 +19,6 @@ enum class Op : uint8_t {
   SELECT = 6,
   EXPIRED = 9,
   COMMAND = 10,
-  MULTI_COMMAND = 11,
-  EXEC = 12,
   PING = 13,
   FIN = 14,
   LSN = 15

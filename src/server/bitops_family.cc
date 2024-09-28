@@ -220,27 +220,21 @@ int64_t NormalizedOffset(int64_t size, int64_t offset) {
 // end of the string and bits are false.
 // Note that when bits is false, it means that we are looking on byte boundaries.
 std::size_t CountBitSet(std::string_view str, int64_t start, int64_t end, bool bits) {
-  const int64_t size = bits ? str.size() * OFFSET_FACTOR : str.size();
+  const int64_t strlen = bits ? str.size() * OFFSET_FACTOR : str.size();
 
-  if (start > 0 && end > 0 && end < start) {
-    return 0;  // for illegal range with positive we just return 0
-  }
+  if (start < 0)
+    start = strlen + start;
+  if (end < 0)
+    end = strlen + end;
 
-  if (start < 0 && end < 0 && start > end) {
-    return 0;  // for illegal range with negative we just return 0
-  }
+  end = min(end, strlen);
 
-  start = NormalizedOffset(size, start);
-  if (end > 0 && end < start) {
+  if (strlen == 0 || start > end)
     return 0;
-  }
-  end = NormalizedOffset(size, end);
-  if (start > end) {
-    std::swap(start, end);  // we're going backward
-  }
-  if (end > size) {
-    end = size;  // don't overflow
-  }
+
+  start = max(start, int64_t(0));
+  end = max(end, int64_t(0));
+
   ++end;
   return bits ? CountBitSetByBitIndices(str, start, end)
               : CountBitSetByByteIndices(str, start, end);
@@ -285,11 +279,16 @@ class ElementAccess {
   EngineShard* shard_ = nullptr;
   mutable DbSlice::AutoUpdater post_updater_;
 
+  void SetFields(EngineShard* shard, DbSlice::AddOrFindResult res);
+
  public:
   ElementAccess(std::string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
   }
 
   OpStatus Find(EngineShard* shard);
+  // Still finds the element even if it's WRONG_TYPE. This is used for blind updates.
+  // See BITOP operation.
+  OpStatus FindAllowWrongType(EngineShard* shard);
 
   bool IsNewEntry() const {
     CHECK_NOTNULL(shard_);
@@ -317,6 +316,13 @@ std::optional<bool> ElementAccess::Exists(EngineShard* shard) {
   return res.status() != OpStatus::KEY_NOTFOUND;
 }
 
+void ElementAccess::SetFields(EngineShard* shard, DbSlice::AddOrFindResult res) {
+  element_iter_ = res.it;
+  added_ = res.is_new;
+  shard_ = shard;
+  post_updater_ = std::move(res.post_updater);
+}
+
 OpStatus ElementAccess::Find(EngineShard* shard) {
   auto op_res = context_.GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
   RETURN_ON_BAD_STATUS(op_res);
@@ -325,10 +331,17 @@ OpStatus ElementAccess::Find(EngineShard* shard) {
   if (!add_res.is_new && add_res.it->second.ObjType() != OBJ_STRING) {
     return OpStatus::WRONG_TYPE;
   }
-  element_iter_ = add_res.it;
-  added_ = add_res.is_new;
-  shard_ = shard;
-  post_updater_ = std::move(add_res.post_updater);
+
+  SetFields(shard, std::move(add_res));
+  return OpStatus::OK;
+}
+
+OpStatus ElementAccess::FindAllowWrongType(EngineShard* shard) {
+  auto op_res = context_.GetDbSlice(shard->shard_id()).AddOrFind(context_, key_);
+  RETURN_ON_BAD_STATUS(op_res);
+  auto& add_res = *op_res;
+
+  SetFields(shard, std::move(add_res));
   return OpStatus::OK;
 }
 
@@ -343,8 +356,18 @@ std::string ElementAccess::Value() const {
 
 void ElementAccess::Commit(std::string_view new_value) const {
   if (shard_) {
-    element_iter_->second.SetString(new_value);
-    post_updater_.Run();
+    if (new_value.empty()) {
+      if (!IsNewEntry()) {
+        post_updater_.Run();
+      } else {
+        // No need to run, it was a new entry and it got removed
+        post_updater_.Cancel();
+      }
+      context_.GetDbSlice(shard_->shard_id()).Del(context_, element_iter_);
+    } else {
+      element_iter_->second.SetString(new_value);
+      post_updater_.Run();
+    }
   }
 }
 
@@ -557,24 +580,17 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
   // See details at https://redis.io/commands/bitcount/
   // Please note that if the key don't exists, it would return 0
 
-  if (args.size() == 2 || args.size() > 4) {
-    return cntx->SendError(kSyntaxErr);
-  }
+  CmdArgParser parser(args);
+  auto key = parser.Next<string_view>();
 
-  std::string_view key = ArgS(args, 0);
-  bool as_bit = false;
-  int64_t start = 0;
-  int64_t end = std::numeric_limits<int64_t>::max();
-  if (args.size() >= 3) {
-    if (absl::SimpleAtoi(ArgS(args, 1), &start) == 0 ||
-        absl::SimpleAtoi(ArgS(args, 2), &end) == 0) {
-      return cntx->SendError(kInvalidIntErr);
-    }
-    if (args.size() == 4) {
-      if (!ToUpperAndGetAsBit(args, 3, &as_bit)) {
-        return cntx->SendError(kSyntaxErr);
-      }
-    }
+  auto [start, end] = parser.HasNext()
+                          ? parser.Next<int64_t, int64_t>()
+                          : std::pair<int64_t, int64_t>{0, std::numeric_limits<int64_t>::max()};
+
+  bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
+
+  if (!parser.Finalize()) {
+    return cntx->SendError(parser.Error()->MakeReply());
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
@@ -1159,7 +1175,7 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
   cntx->transaction->Execute(std::move(shard_bitop), false);  // we still have more work to do
   // All result from each shard
   const auto joined_results = CombineResultOp(result_set, op);
-  // Second phase - save to targe key if successful
+  // Second phase - save to target key if successful
   if (!joined_results) {
     cntx->transaction->Conclude();
     cntx->SendError(joined_results.status());
@@ -1169,14 +1185,24 @@ void BitOp(CmdArgList args, ConnectionContext* cntx) {
     auto store_cb = [&](Transaction* t, EngineShard* shard) {
       if (shard->shard_id() == dest_shard) {
         ElementAccess operation{dest_key, t->GetOpArgs(shard)};
-        auto find_res = operation.Find(shard);
+        auto find_res = operation.FindAllowWrongType(shard);
 
-        if (find_res == OpStatus::OK) {
+        // BITOP command acts as a blind update. If the key existed and its type
+        // was not a string we still want to Commit with the new value.
+        if (find_res == OpStatus::OK || find_res == OpStatus::WRONG_TYPE) {
           operation.Commit(op_result);
-        }
 
-        if (shard->journal()) {
-          RecordJournal(t->GetOpArgs(shard), "SET", {dest_key, op_result});
+          if (shard->journal()) {
+            if (op_result.empty()) {
+              // We need to delete it if the key exists. If it doesn't, we just
+              // skip it and do not send it to the replica at all.
+              if (!operation.IsNewEntry()) {
+                RecordJournal(t->GetOpArgs(shard), "DEL", {dest_key});
+              }
+            } else {
+              RecordJournal(t->GetOpArgs(shard), "SET", {dest_key, op_result});
+            }
+          }
         }
       }
       return OpStatus::OK;
@@ -1260,12 +1286,6 @@ OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, std::string_view 
   OpResult<std::string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
 
   if (result) {  // if this is not found, just return 0 - per Redis
-    if (result.value().empty()) {
-      return 0;
-    }
-    if (end == std::numeric_limits<int64_t>::max()) {
-      end = result.value().size();
-    }
     return CountBitSet(result.value(), start, end, bit_value);
   } else {
     return result.status();

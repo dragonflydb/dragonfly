@@ -4,8 +4,7 @@
  *
  *  https://github.com/antirez/listpack
  *
- * Copyright (c) 2017, Salvatore Sanfilippo <antirez at gmail dot com>
- * Copyright (c) 2020, Redis Labs, Inc
+ * Copyright (c) 2017,2020, Redis Ltd.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -41,6 +40,7 @@
 #include <stdio.h>
 #include <assert.h>
 
+#include "config.h"
 #include "listpack.h"
 #include "util.h"
 #include "zmalloc.h"
@@ -49,7 +49,6 @@
 #define LP_HDR_NUMELE_UNKNOWN UINT16_MAX
 #define LP_MAX_INT_ENCODING_LEN 9
 #define LP_MAX_BACKLEN_SIZE 5
-#define LP_MAX_ENTRY_BACKLEN 34359738367ULL
 #define LP_ENCODING_INT 0
 #define LP_ENCODING_STRING 1
 
@@ -99,26 +98,23 @@
 
 #define LP_ENCODING_6BIT_STR_LEN(p) ((p)[0] & 0x3F)
 #define LP_ENCODING_12BIT_STR_LEN(p) ((((p)[0] & 0xF) << 8) | (p)[1])
-#define LP_ENCODING_32BIT_STR_LEN(p) (((uint32_t)(p)[1]<<0) | \
-                                      ((uint32_t)(p)[2]<<8) | \
-                                      ((uint32_t)(p)[3]<<16) | \
-                                      ((uint32_t)(p)[4]<<24))
+#define LP_ENCODING_32BIT_STR_LEN(p)                                                                                   \
+    (((uint32_t)(p)[1] << 0) | ((uint32_t)(p)[2] << 8) | ((uint32_t)(p)[3] << 16) | ((uint32_t)(p)[4] << 24))
 
-#define lpGetTotalBytes(p)           (((uint32_t)(p)[0]<<0) | \
-                                      ((uint32_t)(p)[1]<<8) | \
-                                      ((uint32_t)(p)[2]<<16) | \
-                                      ((uint32_t)(p)[3]<<24))
+#define lpGetTotalBytes(p)                                                                                             \
+    (((uint32_t)(p)[0] << 0) | ((uint32_t)(p)[1] << 8) | ((uint32_t)(p)[2] << 16) | ((uint32_t)(p)[3] << 24))
 
-#define lpGetNumElements(p)          (((uint32_t)(p)[4]<<0) | \
-                                      ((uint32_t)(p)[5]<<8))
-#define lpSetTotalBytes(p,v) do { \
+#define lpGetNumElements(p) (((uint32_t)(p)[4] << 0) | ((uint32_t)(p)[5] << 8))
+#define lpSetTotalBytes(p, v)                                                                                          \
+    do {                                                                                                               \
     (p)[0] = (v)&0xff; \
     (p)[1] = ((v)>>8)&0xff; \
     (p)[2] = ((v)>>16)&0xff; \
     (p)[3] = ((v)>>24)&0xff; \
 } while(0)
 
-#define lpSetNumElements(p,v) do { \
+#define lpSetNumElements(p, v)                                                                                         \
+    do {                                                                                                               \
     (p)[4] = (v)&0xff; \
     (p)[5] = ((v)>>8)&0xff; \
 } while(0)
@@ -128,13 +124,15 @@
  * that this element is valid, so it can be freely used.
  * Generally functions such lpNext and lpDelete assume the input pointer is
  * already validated (since it's the return value of another function). */
-#define ASSERT_INTEGRITY(lp, p) do { \
+#define ASSERT_INTEGRITY(lp, p)                                                                                        \
+    do {                                                                                                               \
     assert((p) >= (lp)+LP_HDR_SIZE && (p) < (lp)+lpGetTotalBytes((lp))); \
 } while (0)
 
 /* Similar to the above, but validates the entire element length rather than just
  * it's pointer. */
-#define ASSERT_INTEGRITY_LEN(lp, p, len) do { \
+#define ASSERT_INTEGRITY_LEN(lp, p, len)                                                                               \
+    do {                                                                                                               \
     assert((p) >= (lp)+LP_HDR_SIZE && (p)+(len) < (lp)+lpGetTotalBytes((lp))); \
 } while (0)
 
@@ -145,8 +143,7 @@ static inline void lpAssertValidEntry(unsigned char* lp, size_t lpbytes, unsigne
 #define LISTPACK_MAX_SAFETY_SIZE (1<<30)
 int lpSafeToAdd(unsigned char* lp, size_t add) {
     size_t len = lp? lpGetTotalBytes(lp): 0;
-    if (len + add > LISTPACK_MAX_SAFETY_SIZE)
-        return 0;
+    if (len + add > LISTPACK_MAX_SAFETY_SIZE) return 0;
     return 1;
 }
 
@@ -166,11 +163,11 @@ int lpSafeToAdd(unsigned char* lp, size_t add) {
  *
  * -----------------------------------------------------------------------------
  *
- * Credits: this function was adapted from the Redis source code, file
+ * Credits: this function was adapted from the Redis OSS source code, file
  * "utils.c", function string2ll(), and is copyright:
  *
  * Copyright(C) 2011, Pieter Noordhuis
- * Copyright(C) 2011, Salvatore Sanfilippo
+ * Copyright(C) 2011, Redis Ltd.
  *
  * The function is released under the BSD 3-clause license.
  */
@@ -181,8 +178,7 @@ int lpStringToInt64(const char *s, unsigned long slen, int64_t *value) {
     uint64_t v;
 
     /* Abort if length indicates this cannot possibly be an int */
-    if (slen == 0)
-        return 0;
+    if (slen == 0 || slen >= LONG_STR_SIZE) return 0;
 
     /* Special case: first and only digit is 0. */
     if (slen == 1 && p[0] == '0') {
@@ -192,17 +188,18 @@ int lpStringToInt64(const char *s, unsigned long slen, int64_t *value) {
 
     if (p[0] == '-') {
         negative = 1;
-        p++; plen++;
+        p++;
+        plen++;
 
         /* Abort on only a negative sign. */
-        if (plen == slen)
-            return 0;
+        if (plen == slen) return 0;
     }
 
     /* First digit should be 1-9, otherwise the string should just be 0. */
     if (p[0] >= '1' && p[0] <= '9') {
         v = p[0]-'0';
-        p++; plen++;
+        p++;
+        plen++;
     } else {
         return 0;
     }
@@ -216,12 +213,12 @@ int lpStringToInt64(const char *s, unsigned long slen, int64_t *value) {
             return 0;
         v += p[0]-'0';
 
-        p++; plen++;
+        p++;
+        plen++;
     }
 
     /* Return if not all bytes were used. */
-    if (plen < slen)
-        return 0;
+    if (plen < slen) return 0;
 
     if (negative) {
         if (v > ((uint64_t)(-(INT64_MIN+1))+1)) /* Overflow. */
@@ -333,9 +330,12 @@ static inline int lpEncodeGetType(const unsigned char *ele, uint32_t size, unsig
         lpEncodeIntegerGetType(v, intenc, enclen);
         return LP_ENCODING_INT;
     } else {
-        if (size < 64) *enclen = 1+size;
-        else if (size < 4096) *enclen = 2+size;
-        else *enclen = 5+(uint64_t)size;
+        if (size < 64)
+            *enclen = 1 + size;
+        else if (size < 4096)
+            *enclen = 2 + size;
+        else
+            *enclen = 5 + (uint64_t)size;
         return LP_ENCODING_STRING;
     }
 }
@@ -569,10 +569,9 @@ unsigned long lpLength(unsigned char *lp) {
  * this lib.
  *
  * Similarly, there is no error returned since the listpack normally can be
- * assumed to be valid, so that would be a very high API cost. However a function
- * in order to check the integrity of the listpack at load time is provided,
- * check lpIsValid(). */
-static inline unsigned char *lpGetWithSize(unsigned char *p, int64_t *count, unsigned char *intbuf, uint64_t *entry_size) {
+ * assumed to be valid, so that would be a very high API cost. */
+static inline unsigned char *
+lpGetWithSize(unsigned char *p, int64_t *count, unsigned char *intbuf, uint64_t *entry_size) {
     int64_t val;
     uint64_t uval, negstart, negmax;
 
@@ -592,35 +591,23 @@ static inline unsigned char *lpGetWithSize(unsigned char *p, int64_t *count, uns
         negmax = 8191;
         if (entry_size) *entry_size = LP_ENCODING_13BIT_INT_ENTRY_SIZE;
     } else if (LP_ENCODING_IS_16BIT_INT(p[0])) {
-        uval = (uint64_t)p[1] |
-               (uint64_t)p[2]<<8;
+        uval = (uint64_t)p[1] | (uint64_t)p[2] << 8;
         negstart = (uint64_t)1<<15;
         negmax = UINT16_MAX;
         if (entry_size) *entry_size = LP_ENCODING_16BIT_INT_ENTRY_SIZE;
     } else if (LP_ENCODING_IS_24BIT_INT(p[0])) {
-        uval = (uint64_t)p[1] |
-               (uint64_t)p[2]<<8 |
-               (uint64_t)p[3]<<16;
+        uval = (uint64_t)p[1] | (uint64_t)p[2] << 8 | (uint64_t)p[3] << 16;
         negstart = (uint64_t)1<<23;
         negmax = UINT32_MAX>>8;
         if (entry_size) *entry_size = LP_ENCODING_24BIT_INT_ENTRY_SIZE;
     } else if (LP_ENCODING_IS_32BIT_INT(p[0])) {
-        uval = (uint64_t)p[1] |
-               (uint64_t)p[2]<<8 |
-               (uint64_t)p[3]<<16 |
-               (uint64_t)p[4]<<24;
+        uval = (uint64_t)p[1] | (uint64_t)p[2] << 8 | (uint64_t)p[3] << 16 | (uint64_t)p[4] << 24;
         negstart = (uint64_t)1<<31;
         negmax = UINT32_MAX;
         if (entry_size) *entry_size = LP_ENCODING_32BIT_INT_ENTRY_SIZE;
     } else if (LP_ENCODING_IS_64BIT_INT(p[0])) {
-        uval = (uint64_t)p[1] |
-               (uint64_t)p[2]<<8 |
-               (uint64_t)p[3]<<16 |
-               (uint64_t)p[4]<<24 |
-               (uint64_t)p[5]<<32 |
-               (uint64_t)p[6]<<40 |
-               (uint64_t)p[7]<<48 |
-               (uint64_t)p[8]<<56;
+        uval = (uint64_t)p[1] | (uint64_t)p[2] << 8 | (uint64_t)p[3] << 16 | (uint64_t)p[4] << 24 |
+               (uint64_t)p[5] << 32 | (uint64_t)p[6] << 40 | (uint64_t)p[7] << 48 | (uint64_t)p[8] << 56;
         negstart = (uint64_t)1<<63;
         negmax = UINT64_MAX;
         if (entry_size) *entry_size = LP_ENCODING_64BIT_INT_ENTRY_SIZE;
@@ -686,8 +673,7 @@ unsigned char *lpGetValue(unsigned char *p, unsigned int *slen, long long *lval)
 
 /* Find pointer to the entry equal to the specified entry. Skip 'skip' entries
  * between every comparison. Returns NULL when the field could not be found. */
-unsigned char *lpFind(unsigned char *lp, unsigned char *p, unsigned char *s, 
-                      uint32_t slen, unsigned int skip) {
+unsigned char *lpFind(unsigned char *lp, unsigned char *p, unsigned char *s, uint32_t slen, unsigned int skip) {
     int skipcnt = 0;
     unsigned char vencoding = 0;
     unsigned char *value;
@@ -735,7 +721,7 @@ unsigned char *lpFind(unsigned char *lp, unsigned char *p, unsigned char *s,
             /* Skip entry */
             skipcnt--;
 
-            /* Move to next entry, avoid use `lpNext` due to `ASSERT_INTEGRITY` in
+            /* Move to next entry, avoid use `lpNext` due to `lpAssertValidEntry` in
             * `lpNext` will call `lpBytes`, will cause performance degradation */
             p = lpSkip(p);
         }
@@ -787,12 +773,12 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
     unsigned char backlen[LP_MAX_BACKLEN_SIZE];
 
     uint64_t enclen; /* The length of the encoded element. */
-    int delete = (elestr == NULL && eleint == NULL);
+    int del_ele = (elestr == NULL && eleint == NULL);
 
     /* when deletion, it is conceptually replacing the element with a
      * zero-length element. So whatever we get passed as 'where', set
      * it to LP_REPLACE. */
-    if (delete) where = LP_REPLACE;
+    if (del_ele) where = LP_REPLACE;
 
     /* If we need to insert after the current element, we just jump to the
      * next element (that could be the EOF one) and handle the case of
@@ -831,7 +817,7 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
     /* We need to also encode the backward-parsable length of the element
      * and append it to the end: this allows to traverse the listpack from
      * the end to the start. */
-    unsigned long backlen_size = (!delete) ? lpEncodeBacklen(backlen,enclen) : 0;
+    unsigned long backlen_size = (!del_ele) ? lpEncodeBacklen(backlen, enclen) : 0;
     uint64_t old_listpack_bytes = lpGetTotalBytes(lp);
     uint32_t replaced_len  = 0;
     if (where == LP_REPLACE) {
@@ -840,8 +826,7 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
         ASSERT_INTEGRITY_LEN(lp, p, replaced_len);
     }
 
-    uint64_t new_listpack_bytes = old_listpack_bytes + enclen + backlen_size
-                                  - replaced_len;
+    uint64_t new_listpack_bytes = old_listpack_bytes + enclen + backlen_size - replaced_len;
     if (new_listpack_bytes > UINT32_MAX) return NULL;
 
     /* We now need to reallocate in order to make space or shrink the
@@ -853,9 +838,8 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
     unsigned char *dst = lp + poff; /* May be updated after reallocation. */
 
     /* Realloc before: we need more room. */
-    if (new_listpack_bytes > old_listpack_bytes &&
-        new_listpack_bytes > zmalloc_size(lp)) {
-        if ((lp = zrealloc(lp,new_listpack_bytes)) == NULL) return NULL;
+    if (new_listpack_bytes > old_listpack_bytes && new_listpack_bytes > zmalloc_size(lp)) {
+        if ((lp = zrealloc(lp, new_listpack_bytes)) == NULL) return NULL;
         dst = lp + poff;
     }
 
@@ -864,10 +848,7 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
     if (where == LP_BEFORE) {
         memmove(dst+enclen+backlen_size,dst,old_listpack_bytes-poff);
     } else { /* LP_REPLACE. */
-        long lendiff = (enclen+backlen_size)-replaced_len;
-        memmove(dst+replaced_len+lendiff,
-                dst+replaced_len,
-                old_listpack_bytes-poff-replaced_len);
+        memmove(dst + enclen + backlen_size, dst + replaced_len, old_listpack_bytes - poff - replaced_len);
     }
 
     /* Realloc after: we need to free space. */
@@ -881,13 +862,15 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
         *newp = dst;
         /* In case of deletion, set 'newp' to NULL if the next element is
          * the EOF element. */
-        if (delete && dst[0] == LP_EOF) *newp = NULL;
+        if (del_ele && dst[0] == LP_EOF) *newp = NULL;
     }
-    if (!delete) {
+    if (!del_ele) {
         if (enctype == LP_ENCODING_INT) {
             memcpy(dst,eleint,enclen);
-        } else {
+        } else if (elestr) {
             lpEncodeString(dst,elestr,size);
+        } else {
+            valkey_unreachable();
         }
         dst += enclen;
         memcpy(dst,backlen,backlen_size);
@@ -895,10 +878,10 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
     }
 
     /* Update header. */
-    if (where != LP_REPLACE || delete) {
+    if (where != LP_REPLACE || del_ele) {
         uint32_t num_elements = lpGetNumElements(lp);
         if (num_elements != LP_HDR_NUMELE_UNKNOWN) {
-            if (!delete)
+            if (!del_ele)
                 lpSetNumElements(lp,num_elements+1);
             else
                 lpSetNumElements(lp,num_elements-1);
@@ -1026,8 +1009,7 @@ unsigned char *lpDeleteRangeWithEntry(unsigned char *lp, unsigned char **p, unsi
     memmove(first, tail, eofptr - tail + 1);
     lpSetTotalBytes(lp, bytes - (tail - first));
     uint32_t numele = lpGetNumElements(lp);
-    if (numele != LP_HDR_NUMELE_UNKNOWN)
-        lpSetNumElements(lp, numele-deleted);
+    if (numele != LP_HDR_NUMELE_UNKNOWN) lpSetNumElements(lp, numele - deleted);
     lp = lpShrinkToFit(lp);
 
     /* Store the entry. */
@@ -1082,12 +1064,10 @@ unsigned char *lpDeleteRange(unsigned char *lp, long index, unsigned long num) {
  * input listpack argument equal to newly reallocated listpack return value. */
 unsigned char *lpMerge(unsigned char **first, unsigned char **second) {
     /* If any params are null, we can't merge, so NULL. */
-    if (first == NULL || *first == NULL || second == NULL || *second == NULL)
-        return NULL;
+    if (first == NULL || *first == NULL || second == NULL || *second == NULL) return NULL;
 
     /* Can't merge same list into itself. */
-    if (*first == *second)
-        return NULL;
+    if (*first == *second) return NULL;
 
     size_t first_bytes = lpBytes(*first);
     unsigned long first_len = lpLength(*first);
@@ -1131,17 +1111,13 @@ unsigned char *lpMerge(unsigned char **first, unsigned char **second) {
         /* append == appending to target */
         /* Copy source after target (copying over original [END]):
          *   [TARGET - END, SOURCE - HEADER] */
-        memcpy(target + target_bytes - 1,
-               source + LP_HDR_SIZE,
-               source_bytes - LP_HDR_SIZE);
+        memcpy(target + target_bytes - 1, source + LP_HDR_SIZE, source_bytes - LP_HDR_SIZE);
     } else {
         /* !append == prepending to target */
         /* Move target *contents* exactly size of (source - [END]),
          * then copy source into vacated space (source - [END]):
          *   [SOURCE - END, TARGET - HEADER] */
-        memmove(target + source_bytes - 1,
-                target + LP_HDR_SIZE,
-                target_bytes - LP_HDR_SIZE);
+        memmove(target + source_bytes - 1, target + LP_HDR_SIZE, target_bytes - LP_HDR_SIZE);
         memcpy(target, source, source_bytes - 1);
     }
 
@@ -1227,16 +1203,12 @@ unsigned char *lpValidateFirst(unsigned char *lp) {
  * The input argument 'pp' is a reference to the current record and is advanced on exit.
  * Returns 1 if valid, 0 if invalid. */
 int lpValidateNext(unsigned char *lp, unsigned char **pp, size_t lpbytes) {
-#define OUT_OF_RANGE(p) ( \
-        (p) < lp + LP_HDR_SIZE || \
-        (p) > lp + lpbytes - 1)
+#define OUT_OF_RANGE(p) ((p) < lp + LP_HDR_SIZE || (p) > lp + lpbytes - 1)
     unsigned char *p = *pp;
-    if (!p)
-        return 0;
+    if (!p) return 0;
 
     /* Before accessing p, make sure it's valid. */
-    if (OUT_OF_RANGE(p))
-        return 0;
+    if (OUT_OF_RANGE(p)) return 0;
 
     if (*p == LP_EOF) {
         *pp = NULL;
@@ -1245,12 +1217,10 @@ int lpValidateNext(unsigned char *lp, unsigned char **pp, size_t lpbytes) {
 
     /* check that we can read the encoded size */
     uint32_t lenbytes = lpCurrentEncodedSizeBytes(p);
-    if (!lenbytes)
-        return 0;
+    if (!lenbytes) return 0;
 
     /* make sure the encoded entry length doesn't reach outside the edge of the listpack */
-    if (OUT_OF_RANGE(p + lenbytes))
-        return 0;
+    if (OUT_OF_RANGE(p + lenbytes)) return 0;
 
     /* get the entry length and encoded backlen. */
     unsigned long entrylen = lpCurrentEncodedSizeUnsafe(p);
@@ -1258,16 +1228,14 @@ int lpValidateNext(unsigned char *lp, unsigned char **pp, size_t lpbytes) {
     entrylen += encodedBacklen;
 
     /* make sure the entry doesn't reach outside the edge of the listpack */
-    if (OUT_OF_RANGE(p + entrylen))
-        return 0;
+    if (OUT_OF_RANGE(p + entrylen)) return 0;
 
     /* move to the next entry */
     p += entrylen;
 
     /* make sure the encoded length at the end patches the one at the beginning. */
     uint64_t prevlen = lpDecodeBacklen(p-1);
-    if (prevlen + encodedBacklen != entrylen)
-        return 0;
+    if (prevlen + encodedBacklen != entrylen) return 0;
 
     *pp = p;
     return 1;
@@ -1282,23 +1250,18 @@ static inline void lpAssertValidEntry(unsigned char* lp, size_t lpbytes, unsigne
 /* Validate the integrity of the data structure.
  * when `deep` is 0, only the integrity of the header is validated.
  * when `deep` is 1, we scan all the entries one by one. */
-int lpValidateIntegrity(unsigned char *lp, size_t size, int deep, 
-                        listpackValidateEntryCB entry_cb, void *cb_userdata) {
+int lpValidateIntegrity(unsigned char *lp, size_t size, int deep, listpackValidateEntryCB entry_cb, void *cb_userdata) {
     /* Check that we can actually read the header. (and EOF) */
-    if (size < LP_HDR_SIZE + 1)
-        return 0;
+    if (size < LP_HDR_SIZE + 1) return 0;
 
     /* Check that the encoded size in the header must match the allocated size. */
     size_t bytes = lpGetTotalBytes(lp);
-    if (bytes != size)
-        return 0;
+    if (bytes != size) return 0;
 
     /* The last byte must be the terminator. */
-    if (lp[size-1] != LP_EOF)
-        return 0;
+    if (lp[size - 1] != LP_EOF) return 0;
 
-    if (!deep)
-        return 1;
+    if (!deep) return 1;
 
     /* Validate the individual entries. */
     uint32_t count = 0;
@@ -1309,23 +1272,19 @@ int lpValidateIntegrity(unsigned char *lp, size_t size, int deep,
 
         /* Validate this entry and move to the next entry in advance
          * to avoid callback crash due to corrupt listpack. */
-        if (!lpValidateNext(lp, &p, bytes))
-            return 0;
+        if (!lpValidateNext(lp, &p, bytes)) return 0;
 
         /* Optionally let the caller validate the entry too. */
-        if (entry_cb && !entry_cb(prev, numele, cb_userdata))
-            return 0;
+        if (entry_cb && !entry_cb(prev, numele, cb_userdata)) return 0;
 
         count++;
     }
 
     /* Make sure 'p' really does point to the end of the listpack. */
-    if (p != lp + size - 1)
-        return 0;
+    if (p != lp + size - 1) return 0;
 
     /* Check that the count in the header is correct */
-    if (numele != LP_HDR_NUMELE_UNKNOWN && numele != count)
-        return 0;
+    if (numele != LP_HDR_NUMELE_UNKNOWN && numele != count) return 0;
 
     return 1;
 }
@@ -1345,8 +1304,7 @@ unsigned int lpCompare(unsigned char *p, const unsigned char *s, uint32_t slen) 
          * string 's' and compare it to 'sval', it's much faster than convert
          * integer to string and comparing. */
         int64_t sval;
-        if (lpStringToInt64((const char*)s, slen, &sval))
-            return sz == sval;
+        if (lpStringToInt64((const char *)s, slen, &sval)) return sz == sval;
     }
 
     return 0;
@@ -1428,8 +1386,7 @@ void lpRandomPairs(unsigned char *lp, unsigned int count, listpackEntry *keys, l
         while (pickindex < count && lpindex == picks[pickindex].index) {
             int storeorder = picks[pickindex].order;
             lpSaveValue(key, klen, klval, &keys[storeorder]);
-            if (vals)
-                lpSaveValue(value, vlen, vlval, &vals[storeorder]);
+            if (vals) lpSaveValue(value, vlen, vlval, &vals[storeorder]);
              pickindex++;
         }
         lpindex += 2;
@@ -1451,8 +1408,7 @@ unsigned int lpRandomPairsUnique(unsigned char *lp, unsigned int count, listpack
     long long klval = 0;
     unsigned int total_size = lpLength(lp)/2;
     unsigned int index = 0;
-    if (count > total_size)
-        count = total_size;
+    if (count > total_size) count = total_size;
 
     /* To only iterate once, every time we try to pick a member, the probability
      * we pick it is the quotient of the count left we want to pick and the
@@ -1498,8 +1454,7 @@ void lpRepr(unsigned char *lp) {
         uint32_t encoded_size_bytes = lpCurrentEncodedSizeBytes(p);
         uint32_t encoded_size = lpCurrentEncodedSizeUnsafe(p);
         unsigned long back_len = lpEncodeBacklen(NULL, encoded_size);
-        printf(
-            "{\n"
+        printf("{\n"
                 "\taddr: 0x%08lx,\n"
                 "\tindex: %2d,\n"
                 "\toffset: %1lu,\n"
@@ -1507,12 +1462,7 @@ void lpRepr(unsigned char *lp) {
                 "\thdrlen: %3u,\n"
                 "\tbacklen: %2lu,\n"
                 "\tpayload: %1u\n",
-            (long unsigned)p,
-            index,
-            (unsigned long) (p-lp),
-            encoded_size + back_len,
-            encoded_size_bytes,
-            back_len,
+               (long unsigned)p, index, (unsigned long)(p - lp), encoded_size + back_len, encoded_size_bytes, back_len,
             encoded_size - encoded_size_bytes);
         printf("\tbytes: ");
         for (unsigned int i = 0; i < (encoded_size + back_len); i++) {

@@ -862,8 +862,6 @@ void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
     } else if (tx_data->opcode == journal::Op::PING) {
       force_ping_ = true;
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
-    } else if (tx_data->opcode == journal::Op::EXEC) {
-      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
     } else {
       ExecuteTx(std::move(*tx_data), cntx);
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);

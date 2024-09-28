@@ -673,6 +673,15 @@ async def test_rewrites(df_factory):
         await skip_cmd()
         # Check BITOP turns into SET
         await check("BITOP OR kdest k1 k2", r"SET kdest 1100")
+        # See gh issue #3528
+        await c_master.execute_command(f"HSET foo bar val")
+        await skip_cmd()
+        await check("BITOP NOT foo tmp", r"DEL foo")
+        await c_master.execute_command(f"HSET foo bar val")
+        await skip_cmd()
+        await c_master.set("k3", "-")
+        await skip_cmd()
+        await check("BITOP NOT foo k3", r"SET foo \\xd2")
 
         # Check there is no rewrite for LMOVE on single shard
         await c_master.lpush("list", "v1", "v2", "v3", "v4")
@@ -2663,3 +2672,25 @@ async def test_double_take_over(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=master.port)
 
     await disconnect_clients(c_master, c_replica)
+
+
+@pytest.mark.asyncio
+async def test_replica_of_replica(df_factory):
+    # Can't connect a replica to a replica, but OK to connect 2 replicas to the same master
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+    replica2 = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica, replica2])
+
+    c_replica = replica.client()
+    c_replica2 = replica2.client()
+
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+
+    with pytest.raises(redis.exceptions.ResponseError):
+        await c_replica2.execute_command(f"REPLICAOF localhost {replica.port}")
+
+    assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+
+    await disconnect_clients(c_replica, c_replica2)
