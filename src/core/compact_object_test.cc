@@ -605,7 +605,7 @@ TEST_F(CompactObjectTest, RawInterface) {
   }
 }
 
-TEST_F(CompactObjectTest, LpGet2) {
+TEST_F(CompactObjectTest, lpGetInteger) {
   int64_t val = -1;
   uint8_t* lp = lpNew(0);
   for (int j = 0; j < 60; ++j) {
@@ -621,9 +621,13 @@ TEST_F(CompactObjectTest, LpGet2) {
   while (ptr) {
     int64_t len1, len2;
     uint8_t* val1 = lpGet(ptr, &len1, nullptr);
-    uint8_t* val2 = lpGet2(ptr, &len2);
-    ASSERT_EQ(len1, len2);
-    ASSERT_TRUE(val1 == val2);
+    int res = lpGetInteger(ptr, &len2);
+    if (res) {
+      ASSERT_EQ(len1, len2);
+      ASSERT_TRUE(val1 == NULL);
+    } else {
+      ASSERT_TRUE(val1 != NULL);
+    }
     ptr = lpNext(lp, ptr);
   }
   lpFree(lp);
@@ -788,11 +792,9 @@ static void BM_LpCompareInt(benchmark::State& state) {
     int64_t sz;
     while (elem) {
       DCHECK_NE(0xFF, *elem);
-      unsigned char* value = lpGet2(elem, &sz);
-      if (!value) {
-        int res = sz == val;
-        benchmark::DoNotOptimize(res);
-      }
+      lpGetInteger(elem, &sz);
+      int res = sz == val;
+      benchmark::DoNotOptimize(res);
       elem = lpPrev(lp, elem);
     }
   }
@@ -811,11 +813,19 @@ static void BM_LpGet(benchmark::State& state) {
 
   while (state.KeepRunning()) {
     uint8_t* elem = lpLast(lp);
-    int64_t sz;
-    while (elem) {
-      unsigned char* value = (version == 1) ? lpGet(elem, &sz, NULL) : lpGet2(elem, &sz);
-      CHECK(!value && sz < 0);
-      elem = lpPrev(lp, elem);
+    int64_t ival;
+    if (version == 1) {
+      while (elem) {
+        unsigned char* value = lpGet(elem, &ival, NULL);
+        benchmark::DoNotOptimize(value);
+        elem = lpPrev(lp, elem);
+      }
+    } else {
+      while (elem) {
+        int res = lpGetInteger(elem, &ival);
+        benchmark::DoNotOptimize(res);
+        elem = lpPrev(lp, elem);
+      }
     }
   }
   lpFree(lp);

@@ -649,7 +649,7 @@ lpGetWithSize(unsigned char *p, int64_t *count, unsigned char *intbuf, uint64_t 
     }
 }
 
-unsigned char *lpGet2(unsigned char *p, int64_t *count) {
+int lpGetInteger(unsigned char *p, int64_t *ival) {
     int64_t val;
     uint64_t uval = 0, negstart = UINT64_MAX, negmax = 0;
     uint8_t encoding = p[0];
@@ -681,24 +681,15 @@ unsigned char *lpGet2(unsigned char *p, int64_t *count) {
                 negmax = UINT64_MAX;
             break;
             default:
-                // Invalid encoding, return a large integer value.
-                uval = 12345678900000000ULL + p[0];
+                return 0;
         }
-    } else if (encoding < LP_ENCODING_6BIT_STR_MASK) {        
-        *count = LP_ENCODING_6BIT_STR_LEN(p);        
-        return p + 1;
-    } else if (encoding < LP_ENCODING_13BIT_INT_MASK) {        
-        uval = ((encoding & 0x1f) << 8) | p[1];
+    } else if (encoding < LP_ENCODING_13BIT_INT_MASK && encoding >= LP_ENCODING_6BIT_STR_MASK) {
+   	    uval = ((encoding & 0x1f) << 8) | p[1];
         negstart = (uint64_t)1 << 12;
         negmax = 8191;        
-    } else if (encoding < LP_ENCODING_12BIT_STR_MASK) {
-        // LP_ENCODING_12BIT_STR
-        *count = LP_ENCODING_12BIT_STR_LEN(p);        
-        return p + 2;
     } else {
-        // LP_ENCODING_32BIT_STR
-        *count = LP_ENCODING_32BIT_STR_LEN(p);        
-        return p + 5;
+        // string encodings.
+        return 0;
     }
 
      /* We reach this code path only for integer encodings.
@@ -714,8 +705,8 @@ unsigned char *lpGet2(unsigned char *p, int64_t *count) {
         val = uval;
     }
     
-    *count = val;
-    return NULL;    
+    *ival = val;
+    return 1;    
 }
 
 unsigned char *lpGet(unsigned char *p, int64_t *count, unsigned char *intbuf) {
