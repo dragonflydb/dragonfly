@@ -117,8 +117,25 @@ class RdbLoaderBase {
   // This us used to load huge objects in parts (only loading a subset of
   // elements at a time) (see LoadKeyValPair).
   struct PendingRead {
+    // Number of elements in the object to reserve.
+    //
+    // Used to reserve the elements in a huge object up front, then append
+    // in next loads.
+    size_t reserve = 0;
+
     // Number of elements remaining in the object.
     size_t remaining = 0;
+  };
+
+  struct LoadConfig {
+    // Number of elements in the object to reserve.
+    //
+    // Used to reserve the elements in a huge object up front, then append
+    // in next loads.
+    size_t reserve = 0;
+
+    // Whether to append to the existing object or initialize a new object.
+    bool append = false;
   };
 
   class OpaqueObjLoader;
@@ -127,7 +144,8 @@ class RdbLoaderBase {
 
   template <typename T> io::Result<T> FetchInt();
 
-  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv, bool append = false);
+  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv);
+  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv, LoadConfig config);
 
   io::Result<uint64_t> LoadLen(bool* is_encoded);
   std::error_code FetchBuf(size_t size, void* dest);
@@ -257,8 +275,7 @@ class RdbLoader : protected RdbLoaderBase {
     bool has_mc_flags = false;
     uint32_t mc_flags = 0;
 
-    // Whether to append the item to an existing element.
-    bool append = false;
+    LoadConfig load_config;
 
     friend void MPSC_intrusive_store_next(Item* dest, Item* nxt) {
       dest->next.store(nxt, std::memory_order_release);

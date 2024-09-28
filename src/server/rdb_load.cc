@@ -70,7 +70,7 @@ using namespace tiering::literals;
 namespace {
 
 constexpr size_t kYieldPeriod = 50000;
-constexpr size_t kMaxBlobLen = 1ULL << 16;
+constexpr size_t kMaxBlobLen = 1ULL << 12;
 constexpr char kErrCat[] = "dragonfly.rdbload";
 
 inline void YieldIfNeeded(size_t i) {
@@ -384,8 +384,8 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
 
 class RdbLoaderBase::OpaqueObjLoader {
  public:
-  OpaqueObjLoader(int rdb_type, PrimeValue* pv, bool append)
-      : rdb_type_(rdb_type), pv_(pv), append_(append) {
+  OpaqueObjLoader(int rdb_type, PrimeValue* pv, LoadConfig config)
+      : rdb_type_(rdb_type), pv_(pv), config_(config) {
   }
 
   void operator()(long long val) {
@@ -429,8 +429,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   int rdb_type_;
   base::PODArray<char> tset_blob_;
   PrimeValue* pv_;
-  // Whether to append to the existing object or initialize a new object.
-  bool append_;
+  LoadConfig config_;
 };
 
 RdbLoaderBase::RdbLoaderBase() : origin_mem_buf_{16_KB} {
@@ -541,7 +540,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
     });
   } else {
     StringSet* set;
-    if (append_) {
+    if (config_.append) {
       // Note we only use append_ when the set size exceeds kMaxBlobLen,
       // which is greater than SetFamily::MaxIntsetEntries so we'll always use
       // a string set not an int set.
@@ -562,9 +561,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
       inner_obj = set;
 
-      /* It's faster to expand the dict to the right size asap in order
-       * to avoid rehashing */
-      set->Reserve(len);
+      // Expand the set up front to avoid rehashing.
+      set->Reserve((config_.reserve > len) ? config_.reserve : len);
     }
 
     size_t increment = 1;
@@ -606,7 +604,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   if (ec_)
     return;
 
-  if (!append_) {
+  if (!config_.append) {
     pv_->InitRobj(OBJ_SET, is_intset ? kEncodingIntSet : kEncodingStrMap2, inner_obj);
   }
   std::move(cleanup).Cancel();
@@ -1519,6 +1517,7 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
     if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
       len *= 2;
     }
+    pending_read_.reserve = len;
   }
 
   // Limit each read to kMaxBlobLen elements.
@@ -2507,8 +2506,13 @@ void RdbLoader::FlushAllShards() {
     FlushShardAsync(i);
 }
 
-std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv, bool append) {
-  OpaqueObjLoader visitor(opaque.rdb_type, pv, append);
+std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
+  return RdbLoaderBase::FromOpaque(opaque, pv, LoadConfig{});
+}
+
+std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv,
+                                          LoadConfig config) {
+  OpaqueObjLoader visitor(opaque.rdb_type, pv, config);
   std::visit(visitor, opaque.obj);
 
   return visitor.ec();
@@ -2530,7 +2534,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
     // If we're appending the item to an existing key, first load the
     // object.
-    if (item->append) {
+    if (item->load_config.append) {
       auto res = db_slice.FindMutable(db_cntx, item->key);
       if (!IsValid(res.it)) {
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
@@ -2539,7 +2543,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       pv_ptr = &res.it->second;
     }
 
-    if (ec_ = FromOpaque(item->val, pv_ptr, item->append); ec_) {
+    if (ec_ = FromOpaque(item->val, pv_ptr, item->load_config); ec_) {
       if ((*ec_).value() == errc::empty_key) {
         auto error = error_msg(item, db_ind);
         if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
@@ -2553,7 +2557,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       stop_early_ = true;
       break;
     }
-    if (item->append) {
+    if (item->load_config.append) {
       if (auto* ts = es->tiered_storage(); ts)
         ts->TryStash(db_cntx.db_index, item->key, pv_ptr);
       continue;
@@ -2622,7 +2626,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     // Delete the item if we fail to load the key/val pair.
     auto cleanup = absl::Cleanup([item] { delete item; });
 
-    item->append = pending_read_.remaining > 0;
+    item->load_config.append = pending_read_.remaining > 0;
 
     error_code ec = ReadObj(type, &item->val);
     if (ec) {
@@ -2642,6 +2646,11 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
       // Avoid copying the key if this is the last read of the object.
       item->key = std::move(key);
     }
+
+    item->load_config.reserve = pending_read_.reserve;
+    // Clear 'reserve' as we must only set when the object is first
+    // initialized.
+    pending_read_.reserve = 0;
 
     item->is_sticky = settings->is_sticky;
     item->has_mc_flags = settings->has_mc_flags;
