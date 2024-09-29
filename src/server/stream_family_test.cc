@@ -133,7 +133,7 @@ TEST_F(StreamFamilyTest, XRead) {
   // Receive all records from a single stream, in a single hop
   auto resp = Run({"xread", "streams", "foo", "0"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("foo", ArrLen(3)));
-  // EXPECT_EQ(GetMetrics().shard_stats.tx_optimistic_total, 5u); todo temporary disabled
+  EXPECT_EQ(GetMetrics().shard_stats.tx_optimistic_total, 5u);
 
   // Receive all records from both streams.
   resp = Run({"xread", "streams", "foo", "bar", "0", "0"});
