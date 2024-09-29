@@ -761,7 +761,7 @@ static void BM_UnpackSimd(benchmark::State& state) {
 BENCHMARK(BM_UnpackSimd);
 
 static void BM_LpCompare(benchmark::State& state) {
-  std::random_device rd;
+  std::mt19937_64 rd;
   uint8_t* lp = lpNew(0);
   for (unsigned i = 0; i < 100; ++i) {
     lp = lpAppendInteger(lp, rd() % (1ULL << 48));
@@ -780,7 +780,7 @@ static void BM_LpCompare(benchmark::State& state) {
 BENCHMARK(BM_LpCompare);
 
 static void BM_LpCompareInt(benchmark::State& state) {
-  std::random_device rd;
+  std::mt19937_64 rd;
   uint8_t* lp = lpNew(0);
   for (unsigned i = 0; i < 100; ++i) {
     lp = lpAppendInteger(lp, rd() % (1ULL << 48));
@@ -831,5 +831,27 @@ static void BM_LpGet(benchmark::State& state) {
   lpFree(lp);
 }
 BENCHMARK(BM_LpGet)->Arg(1)->Arg(2);
+
+extern "C" int lpStringToInt64(const char* s, unsigned long slen, int64_t* value);
+
+static void BM_LpString2Int(benchmark::State& state) {
+  int version = state.range(0);
+  std::mt19937_64 rd;
+  vector<string> values;
+  for (unsigned i = 0; i < 1000; ++i) {
+    int64_t val = rd();
+    values.push_back(absl::StrCat(val));
+  }
+
+  int64_t ival = 0;
+  while (state.KeepRunning()) {
+    for (const auto& val : values) {
+      int res = version == 1 ? lpStringToInt64(val.data(), val.size(), &ival)
+                             : absl::SimpleAtoi(val, &ival);
+      benchmark::DoNotOptimize(res);
+    }
+  }
+}
+BENCHMARK(BM_LpString2Int)->Arg(1)->Arg(2);
 
 }  // namespace dfly
