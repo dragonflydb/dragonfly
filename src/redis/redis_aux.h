@@ -14,25 +14,6 @@
 
 #define CONFIG_RUN_ID_SIZE 40U
 
-/* To improve the quality of the LRU approximation we take a set of keys
- * that are good candidate for eviction across performEvictions() calls.
- *
- * Entries inside the eviction pool are taken ordered by idle time, putting
- * greater idle times to the right (ascending order).
- *
- * When an LFU policy is used instead, a reverse frequency indication is used
- * instead of the idle time, so that we still evict by larger value (larger
- * inverse frequency means to evict keys with the least frequent accesses).
- *
- * Empty entries have the key pointer set to NULL. */
-
-typedef struct dict dict;
-
-uint64_t dictSdsHash(const void* key);
-int dictSdsKeyCompare(dict* privdata, const void* key1, const void* key2);
-void dictSdsDestructor(dict* privdata, void* val);
-size_t sdsZmallocSize(sds s);
-
 typedef struct ServerStub {
   size_t max_map_field_len, max_listpack_map_bytes;
 
@@ -75,5 +56,11 @@ const char *strEncoding(int encoding);
 #define OBJ_ENCODING_STREAM 10U /* Encoded as a radix tree of listpacks */
 #define OBJ_ENCODING_LISTPACK 11 /* Encoded as a listpack */
 #define OBJ_ENCODING_COMPRESS_INTERNAL 15U  /* Kept as lzf compressed, to pass compressed blob to another thread */
+
+typedef struct quicklistIter quicklistIter;
+typedef struct quicklist quicklist;
+
+void quicklistInitIterator(quicklistIter* iter, quicklist *quicklist, int direction, const long long idx);
+void quicklistCompressIterator(quicklistIter* iter);
 
 #endif /* __REDIS_AUX_H */

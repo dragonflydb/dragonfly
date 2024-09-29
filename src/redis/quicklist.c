@@ -1276,6 +1276,11 @@ void quicklistReleaseIterator(quicklistIter *iter) {
     zfree(iter);
 }
 
+// Based on quicklistReleaseIterator
+void quicklistCompressIterator(quicklistIter* iter) {
+  if (iter->current) quicklistCompress(iter->quicklist, iter->current);
+}
+
 /* Get next element in iterator.
  *
  * Note: You must NOT insert into the list while iterating over it.
