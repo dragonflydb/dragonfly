@@ -518,6 +518,7 @@ class Transaction {
   // subject to uncontended keys.
   bool ScheduleInShard(EngineShard* shard, bool execute_optimistic);
 
+  // Optimized extension of ScheduleInShard. Pulls several transactions queued for scheduling.
   static void ScheduleBatchInShard();
 
   // Set ARMED flags, start run barrier and submit poll tasks. Doesn't wait for the run barrier

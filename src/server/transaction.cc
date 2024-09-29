@@ -104,13 +104,8 @@ struct ScheduleContext {
 };
 
 struct ScheduleQ {
-  base::MPSCIntrusiveQueue<ScheduleContext> queue;
-
-  static constexpr size_t kSz = sizeof(queue);
-
-  char pad1[64];
-  atomic_bool armed{false};
-  char pad2[60];
+  alignas(64) base::MPSCIntrusiveQueue<ScheduleContext> queue;
+  alignas(64) atomic_bool armed{false};
 };
 
 void MPSC_intrusive_store_next(ScheduleContext* dest, ScheduleContext* next_node) {
@@ -1185,6 +1180,12 @@ void Transaction::ScheduleBatchInShard() {
     };
     if (j == 1)
       break;
+
+    // We signal that we're done with the current batch but then we check if there are more
+    // transactions to fetch in the next iteration.
+    // We do this to avoid the situation where we have a data race, where
+    // a transaction is added to the queue, we've checked that sq.armed is true and skipped
+    // adding the callback that fetches the transaction.
     sq.armed.store(false, memory_order_release);
   }
 }
