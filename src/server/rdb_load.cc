@@ -657,12 +657,37 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     lp = lpShrinkToFit(lp);
     pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
   } else {
-    StringMap* string_map = CompactObj::AllocateMR<StringMap>();
-    string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+    StringMap* string_map;
+    if (config_.append) {
+      // Note we only use append_ when the map size exceeds kMaxBlobLen,
+      // which is greater than 64 so we'll always use a StringMap set not
+      // listpack.
+      if (pv_->ObjType() != OBJ_HASH) {
+        LOG(ERROR) << "Invalid RDB type " << pv_->ObjType();
+        ec_ = RdbError(errc::invalid_rdb_type);
+        return;
+      }
+      if (pv_->Encoding() != kEncodingStrMap2) {
+        LOG(ERROR) << "Invalid encoding " << pv_->Encoding();
+        ec_ = RdbError(errc::invalid_encoding);
+        return;
+      }
 
-    auto cleanup = absl::MakeCleanup([&] { CompactObj::DeleteMR<StringMap>(string_map); });
+      string_map = static_cast<StringMap*>(pv_->RObjPtr());
+    } else {
+      string_map = CompactObj::AllocateMR<StringMap>();
+      string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+
+      // Expand the map up front to avoid rehashing.
+      string_map->Reserve((config_.reserve > len) ? config_.reserve : len);
+    }
+
+    auto cleanup = absl::MakeCleanup([&] {
+      if (!config_.append) {
+        CompactObj::DeleteMR<StringMap>(string_map);
+      }
+    });
     std::string key;
-    string_map->Reserve(len);
     for (const auto& seg : ltrace->arr) {
       for (size_t i = 0; i < seg.size(); i += increment) {
         // ToSV may reference an internal buffer, therefore we can use only before the
@@ -700,7 +725,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         }
       }
     }
-    pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    if (!config_.append) {
+      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    }
     std::move(cleanup).Cancel();
   }
 }
@@ -1581,27 +1608,37 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
 
 auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
-  SET_OR_UNEXPECT(LoadLen(nullptr), len);
-
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-
-  if (rdbtype == RDB_TYPE_HASH) {
-    len *= 2;
+  if (pending_read_.remaining > 0) {
+    len = pending_read_.remaining;
   } else {
-    DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
-    len *= 3;
+    SET_OR_UNEXPECT(LoadLen(NULL), len);
+
+    if (rdbtype == RDB_TYPE_HASH) {
+      len *= 2;
+    } else {
+      DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
+      len *= 3;
+    }
+
+    pending_read_.reserve = len;
   }
 
-  load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min<size_t>(len, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; ++j) {
-      error_code ec = ReadStringObj(&load_trace->arr[i][j].rdb_var);
-      if (ec)
-        return make_unexpected(ec);
-    }
-    len -= n;
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(1);
+  size_t n = std::min<size_t>(len, kMaxBlobLen);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    if (ec)
+      return make_unexpected(ec);
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (len > n) {
+    pending_read_.remaining = len - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
