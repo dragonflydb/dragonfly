@@ -605,6 +605,34 @@ TEST_F(CompactObjectTest, RawInterface) {
   }
 }
 
+TEST_F(CompactObjectTest, lpGetInteger) {
+  int64_t val = -1;
+  uint8_t* lp = lpNew(0);
+  for (int j = 0; j < 60; ++j) {
+    lp = lpAppendInteger(lp, val);
+    val *= 2;
+  }
+  val = 1;
+  for (int j = 0; j < 600; ++j) {
+    string str(j * 500, 'a');
+    lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(str.data()), str.size());
+  }
+  uint8_t* ptr = lpFirst(lp);
+  while (ptr) {
+    int64_t len1, len2;
+    uint8_t* val1 = lpGet(ptr, &len1, nullptr);
+    int res = lpGetInteger(ptr, &len2);
+    if (res) {
+      ASSERT_EQ(len1, len2);
+      ASSERT_TRUE(val1 == NULL);
+    } else {
+      ASSERT_TRUE(val1 != NULL);
+    }
+    ptr = lpNext(lp, ptr);
+  }
+  lpFree(lp);
+}
+
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
   const char* end = ascii + len;
 
@@ -764,11 +792,9 @@ static void BM_LpCompareInt(benchmark::State& state) {
     int64_t sz;
     while (elem) {
       DCHECK_NE(0xFF, *elem);
-      unsigned char* value = lpGet(elem, &sz, NULL);
-      if (!value) {
-        int res = sz == val;
-        benchmark::DoNotOptimize(res);
-      }
+      lpGetInteger(elem, &sz);
+      int res = sz == val;
+      benchmark::DoNotOptimize(res);
       elem = lpPrev(lp, elem);
     }
   }
@@ -777,6 +803,7 @@ static void BM_LpCompareInt(benchmark::State& state) {
 BENCHMARK(BM_LpCompareInt);
 
 static void BM_LpGet(benchmark::State& state) {
+  unsigned version = state.range(0);
   uint8_t* lp = lpNew(0);
   int64_t val = -1;
   for (unsigned i = 0; i < 60; ++i) {
@@ -786,15 +813,23 @@ static void BM_LpGet(benchmark::State& state) {
 
   while (state.KeepRunning()) {
     uint8_t* elem = lpLast(lp);
-    int64_t sz;
-    while (elem) {
-      unsigned char* value = lpGet(elem, &sz, NULL);
-      CHECK(!value && sz < 0);
-      elem = lpPrev(lp, elem);
+    int64_t ival;
+    if (version == 1) {
+      while (elem) {
+        unsigned char* value = lpGet(elem, &ival, NULL);
+        benchmark::DoNotOptimize(value);
+        elem = lpPrev(lp, elem);
+      }
+    } else {
+      while (elem) {
+        int res = lpGetInteger(elem, &ival);
+        benchmark::DoNotOptimize(res);
+        elem = lpPrev(lp, elem);
+      }
     }
   }
   lpFree(lp);
 }
-BENCHMARK(BM_LpGet);
+BENCHMARK(BM_LpGet)->Arg(1)->Arg(2);
 
 }  // namespace dfly
