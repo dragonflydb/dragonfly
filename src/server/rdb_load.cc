@@ -2507,11 +2507,11 @@ void RdbLoader::FlushAllShards() {
 }
 
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
-  return RdbLoaderBase::FromOpaque(opaque, pv, LoadConfig{});
+  return RdbLoaderBase::FromOpaque(opaque, LoadConfig{}, pv);
 }
 
-std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv,
-                                          LoadConfig config) {
+std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
+                                          CompactObj* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv, config);
   std::visit(visitor, opaque.obj);
 
@@ -2543,7 +2543,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       pv_ptr = &res.it->second;
     }
 
-    if (ec_ = FromOpaque(item->val, pv_ptr, item->load_config); ec_) {
+    if (ec_ = FromOpaque(item->val, item->load_config, pv_ptr); ec_) {
       if ((*ec_).value() == errc::empty_key) {
         auto error = error_msg(item, db_ind);
         if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
@@ -2558,8 +2558,6 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       break;
     }
     if (item->load_config.append) {
-      if (auto* ts = es->tiered_storage(); ts)
-        ts->TryStash(db_cntx.db_index, item->key, pv_ptr);
       continue;
     }
     // We need this extra check because we don't return empty_key
@@ -2636,7 +2634,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
     // If the key can be discarded, we must still continue to read the
     // object from the RDB so we can read the next key.
-    if (DiscardKey(key, settings)) {
+    if (ShouldDiscardKey(key, settings)) {
       continue;
     }
 
@@ -2664,7 +2662,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     out_buf.emplace_back(std::move(item));
     std::move(cleanup).Cancel();
 
-    constexpr size_t kBufSize = 128;
+    constexpr size_t kBufSize = 64;
     if (out_buf.size() >= kBufSize) {
       // Despite being async, this function can block if the shard queue is full.
       FlushShardAsync(sid);
@@ -2674,7 +2672,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   return kOk;
 }
 
-bool RdbLoader::DiscardKey(std::string_view key, ObjSettings* settings) {
+bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) const {
   if (!load_unowned_slots_ && cluster::IsClusterEnabled()) {
     const cluster::ClusterConfig* cluster_config = cluster::ClusterFamily::cluster_config();
     if (cluster_config != nullptr && !cluster_config->IsMySlot(key)) {

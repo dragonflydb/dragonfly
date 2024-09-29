@@ -145,7 +145,7 @@ class RdbLoaderBase {
   template <typename T> io::Result<T> FetchInt();
 
   static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv);
-  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv, LoadConfig config);
+  static std::error_code FromOpaque(const OpaqueObj& opaque, LoadConfig config, CompactObj* pv);
 
   io::Result<uint64_t> LoadLen(bool* is_encoded);
   std::error_code FetchBuf(size_t size, void* dest);
@@ -292,7 +292,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   std::error_code LoadKeyValPair(int type, ObjSettings* settings);
   // Returns whether to discard the read key pair.
-  bool DiscardKey(std::string_view key, ObjSettings* settings);
+  bool ShouldDiscardKey(std::string_view key, ObjSettings* settings) const;
   void ResizeDb(size_t key_num, size_t expire_num);
   std::error_code HandleAux();
 
