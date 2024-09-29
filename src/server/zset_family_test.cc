@@ -1148,10 +1148,6 @@ TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
                            "WITHHASH and WITHCOORDS options"));
 }
 
-// GEORADIUS key longitude latitude radius <m | km | ft | mi>
-//   [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC | DESC]
-//   [STORE key | STOREDIST key]
-
 TEST_F(ZSetFamilyTest, GeoRadius) {
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
