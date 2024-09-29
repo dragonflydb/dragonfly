@@ -70,8 +70,13 @@ using namespace tiering::literals;
 namespace {
 
 constexpr size_t kYieldPeriod = 50000;
-constexpr size_t kMaxBlobLen = 1ULL << 12;
 constexpr char kErrCat[] = "dragonfly.rdbload";
+
+// Maximum length of each LoadTrace segment.
+//
+// Note kMaxBlobLen must be a multiple of 6 to avoid truncating elements
+// containing 2 or 3 items.
+constexpr size_t kMaxBlobLen = 4092;
 
 inline void YieldIfNeeded(size_t i) {
   if (i % kYieldPeriod == 0) {
