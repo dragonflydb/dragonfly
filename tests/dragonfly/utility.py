@@ -658,14 +658,6 @@ class DflySeederFactory:
         return DflySeeder(log_file=self.log_file, **kwargs)
 
 
-async def disconnect_clients(*clients):
-    await asyncio.gather(*(c.connection_pool.disconnect() for c in clients))
-
-
-async def close_clients(*clients):
-    await asyncio.gather(*(c.close() for c in clients))
-
-
 def gen_ca_cert(ca_key_path, ca_cert_path):
     # We first need to generate the tls certificates to be used by the server
 

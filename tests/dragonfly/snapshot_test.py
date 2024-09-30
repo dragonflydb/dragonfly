@@ -15,7 +15,7 @@ import random
 from pymemcache.client.base import Client as MCClient
 
 from . import dfly_args
-from .utility import close_clients, wait_available_async, is_saving, tmp_file_name
+from .utility import wait_available_async, is_saving, tmp_file_name
 
 from .seeder import StaticSeeder
 
@@ -643,5 +643,3 @@ async def test_mc_flags_saving(memcached_client: MCClient, async_client: aioredi
 
     await check_flag("key1", 2)
     await check_flag("key2", 123456)
-
-    await close_clients(async_client)

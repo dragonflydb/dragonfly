@@ -332,8 +332,6 @@ async def test_emulated_cluster_with_replicas(df_factory):
         },
     }
 
-    await close_clients(c_master, *c_replicas)
-
 
 @dfly_args({"cluster_mode": "emulated"})
 async def test_cluster_info(async_client):
@@ -390,8 +388,6 @@ async def test_cluster_node_id(df_factory: DflyInstanceFactory):
 
     conn = node.client()
     assert "inigo montoya" == await get_node_id(conn)
-
-    await close_clients(conn)
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -520,8 +516,6 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     assert (await c_nodes[0].get("KEY0")) == "value"
     assert await c_nodes[1].execute_command("DBSIZE") == 0
 
-    await close_clients(*c_nodes, *c_nodes_admin)
-
 
 # Tests that master commands to the replica are applied regardless of slot ownership
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -631,8 +625,6 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
         assert await c_master.execute_command("dbsize") == 0
         assert await c_replica.execute_command("dbsize") == 0
 
-        await close_clients(c_master, c_master_admin, c_replica, c_replica_admin)
-
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceFactory):
@@ -740,8 +732,6 @@ async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceF
     assert await c_master.execute_command("dbsize") == (100_000 - slot_0_size)
     assert await c_replica.execute_command("dbsize") == (100_000 - slot_0_size)
 
-    await close_clients(c_master, c_master_admin, c_replica, c_replica_admin)
-
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "admin_port": 30001})
 async def test_cluster_blocking_command(df_server):
@@ -786,8 +776,6 @@ async def test_cluster_blocking_command(df_server):
         await v2
     assert "MOVED" in str(e_info.value)
 
-    await close_clients(c_master, c_master_admin)
-
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_blocking_commands_cancel(df_factory, df_seeder_factory):
@@ -827,8 +815,6 @@ async def test_blocking_commands_cancel(df_factory, df_seeder_factory):
         await list_task
     assert "MOVED 7141 127.0.0.1:30002" == str(list_e_info.value)
 
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
-
 
 @pytest.mark.parametrize("set_cluster_node_id", [True, False])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -847,7 +833,7 @@ async def test_cluster_native_client(
         for i in range(3)
     ]
     df_factory.start_all(masters)
-    c_masters = [aioredis.Redis(port=master.port) for master in masters]
+    c_masters = [master.client() for master in masters]
     c_masters_admin = [master.admin_client() for master in masters]
     master_ids = await asyncio.gather(*(get_node_id(c) for c in c_masters_admin))
 
@@ -935,7 +921,7 @@ async def test_cluster_native_client(
     seeder = df_seeder_factory.create(port=masters[0].port, cluster_mode=True)
     await seeder.run(target_deviation=0.1)
 
-    client = aioredis.RedisCluster(decode_responses=True, host="localhost", port=masters[0].port)
+    client = masters[0].cluster_client()
 
     assert await client.set("key0", "value") == True
     assert await client.get("key0") == "value"
@@ -1025,7 +1011,6 @@ async def test_cluster_native_client(
     await push_config(config, c_masters_admin + c_replicas_admin)
 
     await test_random_keys()
-    await close_clients(client, *c_masters, *c_masters_admin, *c_replicas, *c_replicas_admin)
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1073,7 +1058,6 @@ async def test_config_consistency(df_factory: DflyInstanceFactory):
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await check_for_no_state_status([node.admin_client for node in nodes])
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1129,8 +1113,6 @@ async def test_cluster_flushall_during_migration(
 
     assert await nodes[0].client.dbsize() == 0
 
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
-
 
 @pytest.mark.parametrize("interrupt", [False, True])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1180,7 +1162,6 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
         assert 0 in slots[0] and 9000 in slots[0]
         assert 9001 in slots[1] and 16383 in slots[1]
 
-        await close_clients(*[n.client for n in nodes], *[n.admin_client for n in nodes])
         return
 
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
@@ -1214,7 +1195,6 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
     assert await nodes[1].client.execute_command("DBSIZE") == 19
 
     await check_for_no_state_status([node.admin_client for node in nodes])
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cache_mode": "true"})
@@ -1265,8 +1245,6 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("ttl k_without_ttl") == -1
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
-
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_network_disconnect_during_migration(df_factory, df_seeder_factory):
@@ -1313,8 +1291,6 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
 
     capture = await seeder.capture()
     assert await seeder.compare(capture, nodes[1].instance.port)
-
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 @pytest.mark.parametrize(
@@ -1366,9 +1342,7 @@ async def test_cluster_fuzzymigration(
 
     # Start ten counters
     counter_keys = [f"_counter{i}" for i in range(10)]
-    counter_connections = [
-        aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port) for _ in range(10)
-    ]
+    counter_connections = [nodes[0].instance.cluster_client() for _ in range(10)]
     counters = [
         asyncio.create_task(list_counter(key, conn))
         for key, conn in zip(counter_keys, counter_connections)
@@ -1454,7 +1428,7 @@ async def test_cluster_fuzzymigration(
         await counter
 
     # Check counter consistency
-    cluster_client = aioredis.RedisCluster(host="localhost", port=nodes[0].instance.port)
+    cluster_client = nodes[0].instance.cluster_client()
     for key in counter_keys:
         counter_list = await cluster_client.lrange(key, 0, -1)
         for i, j in zip(counter_list, counter_list[1:]):
@@ -1464,9 +1438,6 @@ async def test_cluster_fuzzymigration(
     assert await seeder.compare(capture, nodes[0].instance.port)
 
     await asyncio.gather(*[c.close() for c in counter_connections])
-    await close_clients(
-        cluster_client, *[node.admin_client for node in nodes], *[node.client for node in nodes]
-    )
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1516,8 +1487,6 @@ async def test_cluster_config_reapply(df_factory: DflyInstanceFactory):
 
     for i in range(SIZE):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
-
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1597,10 +1566,9 @@ async def test_cluster_replication_migration(
     assert await seeder.compare(r2_capture, r1_node.instance.port)
     assert await seeder.compare(r1_capture, r2_node.instance.port)
 
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
-
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@pytest.mark.asyncio
 async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
     """Check data migration from one node to another."""
     instances = [
@@ -1659,8 +1627,6 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
 
     for i in range(SIZE):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
-
-    await close_clients(*[node.client for node in nodes], *[node.admin_client for node in nodes])
 
 
 def parse_lag(replication_info: str):
@@ -1747,8 +1713,6 @@ async def test_replicate_cluster(df_factory: DflyInstanceFactory, df_seeder_fact
     await c_replica.execute_command("REPLICAOF NO ONE")
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
-
-    await disconnect_clients(*c_nodes, c_replica)
 
 
 async def await_stable_sync(m_client: aioredis.Redis, replica_port, timeout=10):
@@ -1863,7 +1827,6 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
 
-    await disconnect_clients(*c_nodes, c_replica)
     await proxy.close(proxy_task)
 
 
@@ -1939,8 +1902,6 @@ async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_fact
     await c_replica.execute_command("REPLICAOF NO ONE")
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
-
-    await disconnect_clients(c_replica, *node_clients)
 
 
 @dfly_args({"proactor_threads": 4})
@@ -2030,5 +1991,3 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     await c_replica.execute_command("REPLICAOF NO ONE")
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
-
-    await disconnect_clients(c_replica, *node_clients)

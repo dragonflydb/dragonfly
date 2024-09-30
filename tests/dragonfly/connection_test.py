@@ -646,7 +646,6 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factor
 
     client = server.admin_client(password="XXX")
     assert await client.dbsize() == 0
-    await client.close()
 
 
 async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_factory):
@@ -655,7 +654,6 @@ async def test_tls_insecure(with_ca_tls_server_args, with_tls_client_args, df_fa
 
     client = aioredis.Redis(port=server.port, **with_tls_client_args, ssl_cert_reqs=None)
     assert await client.dbsize() == 0
-    await client.close()
 
 
 async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, df_factory):
@@ -664,7 +662,6 @@ async def test_tls_full_auth(with_ca_tls_server_args, with_ca_tls_client_args, d
 
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     assert await client.dbsize() == 0
-    await client.close()
 
 
 async def test_tls_reject(
@@ -680,7 +677,6 @@ async def test_tls_reject(
     client = server.client(**with_tls_client_args)
     with pytest.raises(redis_conn_error):
         await client.ping()
-    await client.close()
 
 
 @dfly_args({"proactor_threads": "4", "pipeline_squash": 10})
@@ -890,7 +886,6 @@ async def test_tls_when_read_write_is_interleaved(
     # This deadlocks
     client = aioredis.Redis(port=server.port, **with_ca_tls_client_args)
     await client.execute_command("GET foo")
-    await client.close()
 
 
 async def test_lib_name_ver(async_client: aioredis.Redis):

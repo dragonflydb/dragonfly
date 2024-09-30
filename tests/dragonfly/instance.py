@@ -12,6 +12,7 @@ import psutil
 import itertools
 from prometheus_client.parser import text_string_to_metric_families
 from redis.asyncio import Redis as RedisClient
+from redis.asyncio import RedisCluster as RedisCluster
 import signal
 
 
@@ -95,6 +96,7 @@ class DflyInstance:
         self.log_files: List[str] = []
         self.dynamic_port = False
         self.sed_proc = None
+        self.clients = []
 
         if self.params.existing_port:
             self._port = self.params.existing_port
@@ -126,16 +128,31 @@ class DflyInstance:
 
     def client(self, *args, **kwargs) -> RedisClient:
         host = "localhost" if self["bind"] is None else self["bind"]
-        return RedisClient(host=host, port=self.port, decode_responses=True, *args, **kwargs)
+        client = RedisClient(host=host, port=self.port, decode_responses=True, *args, **kwargs)
+        self.clients.append(client)
+        return client
 
     def admin_client(self, *args, **kwargs) -> RedisClient:
-        return RedisClient(
+        client = RedisClient(
             port=self.admin_port,
             single_connection_client=True,
             decode_responses=True,
             *args,
             **kwargs,
         )
+        self.clients.append(client)
+        return client
+
+    def cluster_client(self, *args, **kwargs) -> RedisCluster:
+        client = RedisCluster(
+            host="localhost", port=self.port, decode_responses=True, *args, **kwargs
+        )
+        self.clients.append(client)
+        return client
+
+    async def close_clients(self):
+        for client in self.clients:
+            await client.close()
 
     def __enter__(self):
         self.start()
@@ -422,9 +439,10 @@ class DflyInstanceFactory:
         for instance in instances:
             instance._wait_for_server()
 
-    def stop_all(self):
+    async def stop_all(self):
         """Stop all launched instances."""
         for instance in self.instances:
+            await instance.close_clients()
             instance.stop()
 
     def __repr__(self) -> str:
