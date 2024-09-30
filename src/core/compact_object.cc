@@ -163,21 +163,9 @@ pair<void*, bool> DefragIntSet(intset* is, float ratio) {
   if (!zmalloc_page_is_underutilized(is, ratio))
     return {is, false};
 
-  // Plain memcpy won't do it
-  int64_t llval;
-  int ii = 0;
-  intset* replacement = intsetNew();
-  while (intsetGet(is, ii++, &llval)) {
-    uint8_t success;
-    replacement = intsetAdd(replacement, llval, &success);
-    // I do not think this will ever be true simply because we shall have enough memory
-    // to allocate if memory is underutized. For safety I keep this check.
-    if (!success) {
-      zfree(replacement);
-      LOG(ERROR) << "Could not copy IntSet during defrag";
-      return {is, false};
-    }
-  }
+  const size_t blob_len = intsetBlobLen(is);
+  intset* replacement = (intset*)zmalloc(blob_len);
+  memcpy(replacement, is, blob_len);
 
   zfree(is);
   return {replacement, true};
