@@ -1184,14 +1184,6 @@ int quicklistDelRange(quicklist *quicklist, const long start, const long count) 
     return 1;
 }
 
-/* compare between a two entries */
-int quicklistCompare(const quicklistEntry* entry, const unsigned char *p2, const size_t p2_len) {
-    if (unlikely(QL_NODE_IS_PLAIN(entry->node))) {
-        return ((entry->sz == p2_len) && (memcmp(entry->value, p2, p2_len) == 0));
-    }
-    return lpCompare(entry->zi, p2, p2_len);
-}
-
 /* Returns a quicklist iterator 'iter'. After the initialization every
  * call to quicklistNext() will return the next element of the quicklist. */
 quicklistIter *quicklistGetIterator(quicklist *quicklist, int direction) {

@@ -370,6 +370,13 @@ TEST_F(ListFamilyTest, LRem) {
   Run({"set", "foo", "bar"});
   ASSERT_THAT(Run({"lrem", "foo", "0", "elem"}), ErrArg("WRONGTYPE"));
   ASSERT_THAT(Run({"lrem", "nexists", "0", "elem"}), IntArg(0));
+
+  // Triggers QUICKLIST_NODE_CONTAINER_PLAIN coverage
+  string val(10000, 'a');
+  Run({"rpush", kKey2, val, "12345678"});
+
+  ASSERT_THAT(Run({"lrem", kKey2, "1", "12345678"}), IntArg(1));
+  ASSERT_THAT(Run({"lrem", kKey2, "1", val}), IntArg(1));
 }
 
 TEST_F(ListFamilyTest, LTrim) {
