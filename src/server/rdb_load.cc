@@ -2542,7 +2542,12 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     if (item->load_config.append) {
       auto res = db_slice.FindMutable(db_cntx, item->key);
       if (!IsValid(res.it)) {
-        LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+        // If the item has expired we may not find the key. Note if the key
+        // is found, but expired since we started loading, we still append to
+        // avoid an inconsistent state where only part of the key is loaded.
+        if (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms) {
+          LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+        }
         continue;
       }
       pv_ptr = &res.it->second;
@@ -2571,8 +2576,10 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       continue;
     }
 
-    if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
+    if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
+      VLOG(1) << "Expire key on load: " << item->key;
       continue;
+    }
 
     auto op_res = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
     if (!op_res) {
@@ -2694,7 +2701,7 @@ bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) co
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
   if (ServerState::tlocal()->is_master && settings->has_expired) {
-    VLOG(2) << "Expire key: " << key;
+    VLOG(2) << "Expire key on read: " << key;
     return true;
   }
 
