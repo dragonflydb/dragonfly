@@ -220,27 +220,21 @@ int64_t NormalizedOffset(int64_t size, int64_t offset) {
 // end of the string and bits are false.
 // Note that when bits is false, it means that we are looking on byte boundaries.
 std::size_t CountBitSet(std::string_view str, int64_t start, int64_t end, bool bits) {
-  const int64_t size = bits ? str.size() * OFFSET_FACTOR : str.size();
+  const int64_t strlen = bits ? str.size() * OFFSET_FACTOR : str.size();
 
-  if (start > 0 && end > 0 && end < start) {
-    return 0;  // for illegal range with positive we just return 0
-  }
+  if (start < 0)
+    start = strlen + start;
+  if (end < 0)
+    end = strlen + end;
 
-  if (start < 0 && end < 0 && start > end) {
-    return 0;  // for illegal range with negative we just return 0
-  }
+  end = min(end, strlen);
 
-  start = NormalizedOffset(size, start);
-  if (end > 0 && end < start) {
+  if (strlen == 0 || start > end)
     return 0;
-  }
-  end = NormalizedOffset(size, end);
-  if (start > end) {
-    std::swap(start, end);  // we're going backward
-  }
-  if (end > size) {
-    end = size;  // don't overflow
-  }
+
+  start = max(start, int64_t(0));
+  end = max(end, int64_t(0));
+
   ++end;
   return bits ? CountBitSetByBitIndices(str, start, end)
               : CountBitSetByByteIndices(str, start, end);
@@ -586,24 +580,17 @@ void BitCount(CmdArgList args, ConnectionContext* cntx) {
   // See details at https://redis.io/commands/bitcount/
   // Please note that if the key don't exists, it would return 0
 
-  if (args.size() == 2 || args.size() > 4) {
-    return cntx->SendError(kSyntaxErr);
-  }
+  CmdArgParser parser(args);
+  auto key = parser.Next<string_view>();
 
-  std::string_view key = ArgS(args, 0);
-  bool as_bit = false;
-  int64_t start = 0;
-  int64_t end = std::numeric_limits<int64_t>::max();
-  if (args.size() >= 3) {
-    if (absl::SimpleAtoi(ArgS(args, 1), &start) == 0 ||
-        absl::SimpleAtoi(ArgS(args, 2), &end) == 0) {
-      return cntx->SendError(kInvalidIntErr);
-    }
-    if (args.size() == 4) {
-      if (!ToUpperAndGetAsBit(args, 3, &as_bit)) {
-        return cntx->SendError(kSyntaxErr);
-      }
-    }
+  auto [start, end] = parser.HasNext()
+                          ? parser.Next<int64_t, int64_t>()
+                          : std::pair<int64_t, int64_t>{0, std::numeric_limits<int64_t>::max()};
+
+  bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
+
+  if (!parser.Finalize()) {
+    return cntx->SendError(parser.Error()->MakeReply());
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
@@ -1299,12 +1286,6 @@ OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, std::string_view 
   OpResult<std::string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
 
   if (result) {  // if this is not found, just return 0 - per Redis
-    if (result.value().empty()) {
-      return 0;
-    }
-    if (end == std::numeric_limits<int64_t>::max()) {
-      end = result.value().size();
-    }
     return CountBitSet(result.value(), start, end, bit_value);
   } else {
     return result.status();

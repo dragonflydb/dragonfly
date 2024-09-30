@@ -47,8 +47,6 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
         assert delta > 0
         assert delta < max_unaccounted
 
-    await disconnect_clients(client)
-
 
 @pytest.mark.asyncio
 @dfly_args(

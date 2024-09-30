@@ -44,7 +44,7 @@ class TieredStorage {
   std::error_code Open(std::string_view path);
   void Close();
 
-  void SetMemoryLowLimit(size_t mem_limit);
+  void SetMemoryLowWatermark(size_t mem_limit);
 
   // Read offloaded value. It must be of external type
   util::fb2::Future<std::string> Read(DbIndex dbid, std::string_view key, const PrimeValue& value);

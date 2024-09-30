@@ -33,7 +33,14 @@ template <auto min, auto max> constexpr bool is_fint<FInt<min, max>> = true;
 
 // Utility class for easily parsing command options from argument lists.
 struct CmdArgParser {
-  enum ErrorType { OUT_OF_BOUNDS, SHORT_OPT_TAIL, INVALID_INT, INVALID_CASES, INVALID_NEXT };
+  enum ErrorType {
+    OUT_OF_BOUNDS,
+    SHORT_OPT_TAIL,
+    INVALID_INT,
+    INVALID_CASES,
+    INVALID_NEXT,
+    UNPROCESSED
+  };
 
   struct ErrorInfo {
     ErrorType type;
@@ -134,6 +141,14 @@ struct CmdArgParser {
       cur_i_ += n;
     }
     return *this;
+  }
+
+  bool Finalize() {
+    if (HasNext()) {
+      Report(UNPROCESSED, cur_i_);
+      return false;
+    }
+    return !HasError();
   }
 
   // In-place convert the next argument to uppercase

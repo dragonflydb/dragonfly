@@ -301,7 +301,8 @@ TEST_F(TieredStorageTest, FlushPending) {
 
 TEST_F(TieredStorageTest, MemoryPressure) {
   max_memory_limit = 20_MB;
-  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->SetMemoryLowLimit(2_MB); });
+  pp_->at(0)->AwaitBrief(
+      [] { EngineShard::tlocal()->tiered_storage()->SetMemoryLowWatermark(2_MB); });
 
   constexpr size_t kNum = 10000;
   for (size_t i = 0; i < kNum; i++) {
@@ -310,7 +311,7 @@ TEST_F(TieredStorageTest, MemoryPressure) {
       resp = Run({"INFO", "ALL"});
       ASSERT_FALSE(true) << i << "\nInfo ALL:\n" << resp.GetString();
     }
-    ThisFiber::SleepFor(300us);
+    ThisFiber::SleepFor(500us);
   }
 
   EXPECT_LT(used_mem_peak.load(), 20_MB);

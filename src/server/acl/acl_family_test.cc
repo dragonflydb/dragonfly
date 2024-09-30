@@ -116,6 +116,24 @@ TEST_F(AclFamilyTest, AclSetUser) {
   // +@NONE should not exist anymore. It's not in the spec.
   resp = Run({"ACL", "SETUSER", "rand", "+@NONE"});
   EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter +@NONE"));
+
+  resp = Run({"ACL", "SETUSER", "rand", "ALLCOMMANDS"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "LIST"});
+  vec = resp.GetVec();
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                        "user vlad on resetchannels -@all +acl",
+                                        "user rand off resetchannels +@all"));
+
+  resp = Run({"ACL", "SETUSER", "rand", "NOCOMMANDS"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"ACL", "LIST"});
+  vec = resp.GetVec();
+  EXPECT_THAT(vec, UnorderedElementsAre("user default on nopass ~* &* +@all",
+                                        "user vlad on resetchannels -@all +acl",
+                                        "user rand off resetchannels -@all"));
 }
 
 TEST_F(AclFamilyTest, AclDelUser) {

@@ -282,6 +282,7 @@ TEST_F(BitOpsFamilyTest, BitCountByteSubRange) {
   EXPECT_EQ(10, CheckedInt({"bitcount", "foo", "-3", "-1"}));
   EXPECT_EQ(13, CheckedInt({"bitcount", "foo", "-5", "-2"}));
   EXPECT_EQ(0, CheckedInt({"bitcount", "foo", "-1", "-2"}));  // illegal range
+  EXPECT_EQ(0, CheckedInt({"bitcount", "foo", "1", "0"}));    // illegal range
 }
 
 TEST_F(BitOpsFamilyTest, BitCountByteBitSubRange) {

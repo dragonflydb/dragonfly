@@ -81,6 +81,9 @@ int ld2string(char *buf, size_t len, long double value, ld2string_mode mode);
 #define LRU_CLOCK_MAX ((1<<LRU_BITS)-1) /* Max value of obj->lru */
 #define LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
 
+/* Bytes needed for long -> str + '\0' */
+#define LONG_STR_SIZE 21
+
 void serverLog(int level, const char *fmt, ...);
 void _serverPanic(const char *file, int line, const char *msg, ...);
 void _serverAssert(const char *estr, const char *file, int line);

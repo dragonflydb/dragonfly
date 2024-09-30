@@ -59,10 +59,7 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
       return;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
-    case journal::Op::MULTI_COMMAND:
       command = std::move(entry.cmd);
-      [[fallthrough]];
-    case journal::Op::EXEC:
       shard_cnt = entry.shard_cnt;
       dbid = entry.dbid;
       txid = entry.txid;

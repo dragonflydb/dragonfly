@@ -73,6 +73,10 @@ unsigned char *lpDeleteRange(unsigned char *lp, long index, unsigned long num);
 unsigned char *lpMerge(unsigned char **first, unsigned char **second);
 unsigned long lpLength(unsigned char *lp);
 unsigned char *lpGet(unsigned char *p, int64_t *count, unsigned char *intbuf);
+
+// Fills count and returns 1 if the item is an integer, 0 otherwise.
+int lpGetInteger(unsigned char *p, int64_t *ival);
+
 unsigned char *lpGetValue(unsigned char *p, unsigned int *slen, long long *lval);
 unsigned char *lpFind(unsigned char *lp, unsigned char *p, unsigned char *s, uint32_t slen, unsigned int skip);
 unsigned char *lpFirst(unsigned char *lp);
