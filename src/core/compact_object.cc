@@ -138,39 +138,86 @@ inline void FreeObjZset(unsigned encoding, void* ptr) {
   }
 }
 
+pair<void*, bool> DefragStrMap2(StringMap* sm, float ratio) {
+  bool realloced = false;
+
+  for (auto it = sm->begin(); it != sm->end(); ++it)
+    realloced |= it.ReallocIfNeeded(ratio);
+
+  return {sm, realloced};
+}
+
+pair<void*, bool> DefragListPack(uint8_t* lp, float ratio) {
+  if (!zmalloc_page_is_underutilized(lp, ratio))
+    return {lp, false};
+
+  size_t lp_bytes = lpBytes(lp);
+  uint8_t* replacement = lpNew(lpBytes(lp));
+  memcpy(replacement, lp, lp_bytes);
+  lpFree(lp);
+
+  return {replacement, true};
+}
+
+pair<void*, bool> DefragIntSet(intset* is, float ratio) {
+  if (!zmalloc_page_is_underutilized(is, ratio))
+    return {is, false};
+
+  // Plain memcpy won't do it
+  int64_t llval;
+  int ii = 0;
+  intset* replacement = intsetNew();
+  while (intsetGet(is, ii++, &llval)) {
+    uint8_t success;
+    replacement = intsetAdd(replacement, llval, &success);
+    // I do not think this will ever be true simply because we shall have enough memory
+    // to allocate if memory is underutized. For safety I keep this check.
+    if (!success) {
+      zfree(replacement);
+      LOG(ERROR) << "Could not copy IntSet during defrag";
+      return {is, false};
+    }
+  }
+
+  zfree(is);
+  return {replacement, true};
+}
+
 // Iterates over allocations of internal hash data structures and re-allocates
 // them if their pages are underutilized.
 // Returns pointer to new object ptr and whether any re-allocations happened.
-pair<void*, bool> DefragHash(MemoryResource* mr, unsigned encoding, void* ptr, float ratio) {
+pair<void*, bool> DefragHash(unsigned encoding, void* ptr, float ratio) {
   switch (encoding) {
     // Listpack is stored as a single contiguous array
     case kEncodingListPack: {
-      uint8_t* lp = (uint8_t*)ptr;
-      if (!zmalloc_page_is_underutilized(lp, ratio))
-        return {lp, false};
-
-      size_t lp_bytes = lpBytes(lp);
-      uint8_t* replacement = lpNew(lpBytes(lp));
-      memcpy(replacement, lp, lp_bytes);
-      lpFree(lp);
-
-      return {replacement, true};
-    };
+      return DefragListPack((uint8_t*)ptr, ratio);
+    }
 
     // StringMap supports re-allocation of it's internal nodes
     case kEncodingStrMap2: {
-      bool realloced = false;
-
-      StringMap* sm = (StringMap*)ptr;
-      for (auto it = sm->begin(); it != sm->end(); ++it)
-        realloced |= it.ReallocIfNeeded(ratio);
-
-      return {sm, realloced};
+      return DefragStrMap2((StringMap*)ptr, ratio);
     }
 
     default:
       ABSL_UNREACHABLE();
-  };
+  }
+}
+
+pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
+  switch (encoding) {
+    // Int sets have flat storage
+    case kEncodingIntSet: {
+      return DefragIntSet((intset*)ptr, ratio);
+    }
+
+    // StringMap supports re-allocation of it's internal nodes
+    case kEncodingStrMap2: {
+      return DefragStrMap2((StringMap*)ptr, ratio);
+    }
+
+    default:
+      ABSL_UNREACHABLE();
+  }
 }
 
 inline void FreeObjStream(void* ptr) {
@@ -391,7 +438,11 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
       return true;
     }
   } else if (type() == OBJ_HASH) {
-    auto [new_ptr, realloced] = DefragHash(tl.local_mr, encoding_, inner_obj_, ratio);
+    auto [new_ptr, realloced] = DefragHash(encoding_, inner_obj_, ratio);
+    inner_obj_ = new_ptr;
+    return realloced;
+  } else if (type() == OBJ_SET) {
+    auto [new_ptr, realloced] = DefragSet(encoding_, inner_obj_, ratio);
     inner_obj_ = new_ptr;
     return realloced;
   }
