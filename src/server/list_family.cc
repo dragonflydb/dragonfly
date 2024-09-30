@@ -547,10 +547,20 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   quicklistInitIterator(&qiter, ql, iter_direction, index);
   quicklistEntry entry;
   unsigned removed = 0;
-  const uint8_t* elem_ptr = reinterpret_cast<const uint8_t*>(elem.data());
+  int64_t ival;
+
+  // try parsing the element into an integer.
+  int is_int = lpStringToInt64(elem.data(), elem.size(), &ival);
+
+  auto is_match = [&](const quicklistEntry& entry) {
+    if (is_int != (entry.value == nullptr))
+      return false;
+
+    return is_int ? entry.longval == ival : ElemCompare(entry, elem);
+  };
 
   while (quicklistNext(&qiter, &entry)) {
-    if (quicklistCompare(&entry, elem_ptr, elem.size())) {
+    if (is_match(entry)) {
       quicklistDelEntry(&qiter, &entry);
       removed++;
       if (count && removed == count)

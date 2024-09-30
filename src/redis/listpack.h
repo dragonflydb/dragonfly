@@ -76,6 +76,7 @@ unsigned char *lpGet(unsigned char *p, int64_t *count, unsigned char *intbuf);
 
 // Fills count and returns 1 if the item is an integer, 0 otherwise.
 int lpGetInteger(unsigned char *p, int64_t *ival);
+int lpStringToInt64(const char *s, unsigned long slen, int64_t *value);
 
 unsigned char *lpGetValue(unsigned char *p, unsigned int *slen, long long *lval);
 unsigned char *lpFind(unsigned char *lp, unsigned char *p, unsigned char *s, uint32_t slen, unsigned int skip);
