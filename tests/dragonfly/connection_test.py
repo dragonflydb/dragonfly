@@ -411,20 +411,15 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
     await async_pool.disconnect()
 
 
-@dfly_args({"notify_keyspace_events": "Ex"})
-async def test_keyspace_events(async_client: aioredis.Redis):
-    pclient = async_client.pubsub()
-    await pclient.subscribe("__keyevent@0__:expired")
-
+async def produce_expiring_keys(async_client: aioredis.Redis):
     keys = []
     for i in range(10, 50):
         keys.append(f"k{i}")
         await async_client.set(keys[-1], "X", px=200 + i * 10)
+    return keys
 
-    # We don't support immediate expiration:
-    # keys += ['immediate']
-    # await async_client.set(keys[-1], 'Y', exat=123) # expired 50 years ago
 
+async def collect_expiring_events(pclient, keys):
     events = []
     async for message in pclient.listen():
         if message["type"] == "subscribe":
@@ -433,8 +428,48 @@ async def test_keyspace_events(async_client: aioredis.Redis):
         events.append(message)
         if len(events) >= len(keys):
             break
+    return events
+
+
+@dfly_args({"notify_keyspace_events": "Ex"})
+async def test_keyspace_events(async_client: aioredis.Redis):
+    pclient = async_client.pubsub()
+    await pclient.subscribe("__keyevent@0__:expired")
+
+    keys = await produce_expiring_keys(async_client)
+
+    # We don't support immediate expiration:
+    # keys += ['immediate']
+    # await async_client.set(keys[-1], 'Y', exat=123) # expired 50 years ago
+
+    events = await collect_expiring_events(pclient, keys)
 
     assert set(ev["data"] for ev in events) == set(keys)
+
+
+async def test_keyspace_events_config_set(async_client: aioredis.Redis):
+    # nonsense does not make sense as argument, we only accept ex or empty string
+    with pytest.raises((ResponseError)):
+        await async_client.config_set("notify_keyspace_events", "nonsense")
+
+    await async_client.config_set("notify_keyspace_events", "ex")
+    pclient = async_client.pubsub()
+    await pclient.subscribe("__keyevent@0__:expired")
+
+    keys = await produce_expiring_keys(async_client)
+
+    events = await collect_expiring_events(pclient, keys)
+
+    assert set(ev["data"] for ev in events) == set(keys)
+
+    keys = await produce_expiring_keys(async_client)
+    await async_client.config_set("notify_keyspace_events", "")
+    try:
+        async with async_timeout.timeout(1):
+            await collect_expiring_events(pclient, keys)
+        assert False
+    except:
+        pass
 
 
 async def test_big_command(df_server, size=8 * 1024):

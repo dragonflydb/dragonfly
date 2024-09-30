@@ -1454,6 +1454,10 @@ void DbSlice::ResetEvents() {
   events_ = {};
 }
 
+void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
+  expired_keys_events_recording_ = !notify_keyspace_events.empty();
+}
+
 void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
   if (client_tracking_map_.empty())
     return;
