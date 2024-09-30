@@ -545,12 +545,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       // which is greater than SetFamily::MaxIntsetEntries so we'll always use
       // a string set not an int set.
       if (pv_->ObjType() != OBJ_SET) {
-        LOG(ERROR) << "Invalid RDB type " << pv_->ObjType();
+        LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType();
         ec_ = RdbError(errc::invalid_rdb_type);
         return;
       }
       if (pv_->Encoding() != kEncodingStrMap2) {
-        LOG(ERROR) << "Invalid encoding " << pv_->Encoding();
+        LOG(DFATAL) << "Invalid encoding " << pv_->Encoding();
         ec_ = RdbError(errc::invalid_encoding);
         return;
       }
@@ -663,12 +663,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       // which is greater than 64 so we'll always use a StringMap set not
       // listpack.
       if (pv_->ObjType() != OBJ_HASH) {
-        LOG(ERROR) << "Invalid RDB type " << pv_->ObjType();
+        LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType();
         ec_ = RdbError(errc::invalid_rdb_type);
         return;
       }
       if (pv_->Encoding() != kEncodingStrMap2) {
-        LOG(ERROR) << "Invalid encoding " << pv_->Encoding();
+        LOG(DFATAL) << "Invalid encoding " << pv_->Encoding();
         ec_ = RdbError(errc::invalid_encoding);
         return;
       }
@@ -810,12 +810,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     // which is greater than server.zset_max_listpack_entries so we'll always
     // use a SortedMap set not listpack.
     if (pv_->ObjType() != OBJ_ZSET) {
-      LOG(ERROR) << "Invalid RDB type " << pv_->ObjType();
+      LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType();
       ec_ = RdbError(errc::invalid_rdb_type);
       return;
     }
     if (pv_->Encoding() != OBJ_ENCODING_SKIPLIST) {
-      LOG(ERROR) << "Invalid encoding " << pv_->Encoding();
+      LOG(DFATAL) << "Invalid encoding " << pv_->Encoding();
       ec_ = RdbError(errc::invalid_encoding);
       return;
     }
