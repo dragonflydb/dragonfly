@@ -39,9 +39,4 @@ CmdArgParser::~CmdArgParser() {
   // TODO DCHECK(!HasNext()) << "Not all args were processed";
 }
 
-void CmdArgParser::ToUpper(size_t i) {
-  for (auto& c : args_[i])
-    c = absl::ascii_toupper(c);
-}
-
 }  // namespace facade

@@ -371,12 +371,7 @@ void MemoryCmd::Track(CmdArgList args) {
 
   CmdArgParser parser(args);
 
-  string_view sub_cmd = parser.ToUpper().Next();
-  if (parser.HasError()) {
-    return cntx_->SendError(parser.Error()->MakeReply());
-  }
-
-  if (sub_cmd == "ADD") {
+  if (parser.Check("ADD")) {
     AllocationTracker::TrackingInfo tracking_info;
     std::tie(tracking_info.lower_bound, tracking_info.upper_bound, tracking_info.sample_odds) =
         parser.Next<size_t, size_t, double>();
@@ -398,7 +393,7 @@ void MemoryCmd::Track(CmdArgList args) {
     }
   }
 
-  if (sub_cmd == "REMOVE") {
+  if (parser.Check("REMOVE")) {
     auto [lower_bound, upper_bound] = parser.Next<size_t, size_t>();
     if (parser.HasError()) {
       return cntx_->SendError(parser.Error()->MakeReply());
@@ -418,12 +413,12 @@ void MemoryCmd::Track(CmdArgList args) {
     }
   }
 
-  if (sub_cmd == "CLEAR") {
+  if (parser.Check("CLEAR")) {
     shard_set->pool()->AwaitBrief([&](unsigned index, auto*) { AllocationTracker::Get().Clear(); });
     return cntx_->SendOk();
   }
 
-  if (sub_cmd == "GET") {
+  if (parser.Check("GET")) {
     auto ranges = AllocationTracker::Get().GetRanges();
     auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx_->reply_builder());
     rb->StartArray(ranges.size());
@@ -434,7 +429,7 @@ void MemoryCmd::Track(CmdArgList args) {
     return;
   }
 
-  if (sub_cmd == "ADDRESS") {
+  if (parser.Check("ADDRESS")) {
     string_view ptr_str = parser.Next();
     if (parser.HasError()) {
       return cntx_->SendError(parser.Error()->MakeReply());
