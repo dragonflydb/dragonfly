@@ -1410,8 +1410,7 @@ RdbSaver::~RdbSaver() {
   // We create an RdbSaver for each thread, so each one will Decommit for itself.
   auto* tlocal = ServerState::tlocal();
   if (tlocal) {
-    ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
-                                          ServerState::kGlibcmalloc);
+    ServerState::tlocal()->DecommitMemory(ServerState::kAll);
   }
 }
 
