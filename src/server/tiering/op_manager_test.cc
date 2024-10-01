@@ -27,7 +27,8 @@ ostream& operator<<(ostream& os, const OpManager::Stats& stats) {
             << ", capacity_bytes: " << stats.disk_stats.capacity_bytes
             << ", heap_buf_allocs: " << stats.disk_stats.heap_buf_alloc_count
             << ", registered_buf_allocs: " << stats.disk_stats.registered_buf_alloc_count
-            << ", max_file_size: " << stats.disk_stats.max_file_size;
+            << ", max_file_size: " << stats.disk_stats.max_file_size
+            << ", pending_ops: " << stats.disk_stats.pending_ops;
 }
 
 struct OpManagerTest : PoolTestBase, OpManager {
