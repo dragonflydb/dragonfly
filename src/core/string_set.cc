@@ -131,10 +131,8 @@ void* StringSet::ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const 
 }
 
 sds StringSet::MakeSetSds(string_view src, uint32_t ttl_sec) const {
-  DCHECK_GT(ttl_sec, 0u);  // ttl_sec == 0 would mean find and delete immediately
   if (ttl_sec != UINT32_MAX) {
     uint32_t at = time_now() + ttl_sec;
-    DCHECK_LT(time_now(), at);
 
     sds newsds = AllocImmutableWithTtl(src.size(), at);
     if (!src.empty())
