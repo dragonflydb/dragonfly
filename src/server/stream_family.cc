@@ -19,7 +19,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/server_state.h"
+#include "server/family_utils.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -1055,8 +1055,7 @@ OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard
   vector<ConsumerInfo> result;
   const CompactObj& cobj = (*res_it)->second;
   stream* s = GetReadOnlyStream(cobj);
-  shard->tmp_str1 = sdscpylen(shard->tmp_str1, group_name.data(), group_name.length());
-  streamCG* cg = streamLookupCG(s, shard->tmp_str1);
+  streamCG* cg = streamLookupCG(s, WrapSds(group_name));
   if (cg == NULL) {
     return OpStatus::INVALID_VALUE;
   }
@@ -1136,21 +1135,19 @@ struct FindGroupResult {
   DbSlice::AutoUpdater post_updater;
 };
 
-OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname) {
-  auto* shard = op_args.shard;
+OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname,
+                                    bool skip_group = true) {
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
-  if (!res_it)
-    return res_it.status();
+  RETURN_ON_BAD_STATUS(res_it);
 
   CompactObj& cobj = res_it->it->second;
-  FindGroupResult res;
-  res.s = (stream*)cobj.RObjPtr();
-  shard->tmp_str1 = sdscpylen(shard->tmp_str1, gname.data(), gname.size());
-  res.cg = streamLookupCG(res.s, shard->tmp_str1);
-  res.post_updater = std::move(res_it->post_updater);
+  auto* s = static_cast<stream*>(cobj.RObjPtr());
+  auto* cg = streamLookupCG(s, WrapSds(gname));
+  if (skip_group && !cg)
+    return OpStatus::SKIPPED;
 
-  return res;
+  return FindGroupResult{s, cg, std::move(res_it->post_updater)};
 }
 
 constexpr uint8_t kClaimForce = 1 << 0;
@@ -1210,11 +1207,8 @@ void AppendClaimResultItem(ClaimInfo& result, stream* s, streamID id) {
 OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts,
                             absl::Span<streamID> ids) {
   auto cgr_res = FindGroup(op_args, key, opts.group);
-  if (!cgr_res)
-    return cgr_res.status();
-  if (!cgr_res->cg) {
-    return OpStatus::SKIPPED;
-  }
+  RETURN_ON_BAD_STATUS(cgr_res);
+
   streamConsumer* consumer = nullptr;
   auto now = GetCurrentTimeMs();
   ClaimInfo result;
@@ -1262,12 +1256,10 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
       }
 
       // Try to get the consumer. If not found, create a new one.
-      op_args.shard->tmp_str1 =
-          sdscpylen(op_args.shard->tmp_str1, opts.consumer.data(), opts.consumer.size());
-      if ((consumer = streamLookupConsumer(cgr_res->cg, op_args.shard->tmp_str1, SLC_NO_REFRESH)) ==
-          nullptr) {
-        consumer = streamCreateConsumer(cgr_res->cg, op_args.shard->tmp_str1, nullptr, 0,
-                                        SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+      auto cname = WrapSds(opts.consumer);
+      if ((consumer = streamLookupConsumer(cgr_res->cg, cname, SLC_NO_REFRESH)) == nullptr) {
+        consumer =
+            streamCreateConsumer(cgr_res->cg, cname, nullptr, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
       }
 
       // If the entry belongs to the same consumer, we don't have to
@@ -1306,23 +1298,18 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
 // XGROUP DESTROY key groupname
 OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto cgr_res = FindGroup(op_args, key, gname);
-  if (!cgr_res)
-    return cgr_res.status();
+  RETURN_ON_BAD_STATUS(cgr_res);
 
-  if (cgr_res->cg) {
-    raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
-    streamFreeCG(cgr_res->cg);
+  raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
+  streamFreeCG(cgr_res->cg);
 
-    // Awake readers blocked on this group
-    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
-    if (blocking_controller) {
-      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
-    }
-
-    return OpStatus::OK;
+  // Awake readers blocked on this group
+  auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+  if (blocking_controller) {
+    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
   }
 
-  return OpStatus::SKIPPED;
+  return OpStatus::OK;
 }
 
 struct GroupConsumerPair {
@@ -1339,16 +1326,10 @@ struct GroupConsumerPairOpts {
 OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, string_view gname,
                                     string_view consumer_name) {
   auto cgroup_res = FindGroup(op_args, key, gname);
-  if (!cgroup_res)
-    return cgroup_res.status();
-  streamCG* cg = cgroup_res->cg;
-  if (cg == nullptr)
-    return OpStatus::SKIPPED;
+  RETURN_ON_BAD_STATUS(cgroup_res);
 
-  auto* shard = op_args.shard;
-  shard->tmp_str1 = sdscpylen(shard->tmp_str1, consumer_name.data(), consumer_name.size());
-  streamConsumer* consumer =
-      streamCreateConsumer(cg, shard->tmp_str1, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+  streamConsumer* consumer = streamCreateConsumer(cgroup_res->cg, WrapSds(consumer_name), NULL, 0,
+                                                  SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
 
   if (consumer)
     return OpStatus::OK;
@@ -1359,21 +1340,14 @@ OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, stri
 OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_view gname,
                                  string_view consumer_name) {
   auto cgroup_res = FindGroup(op_args, key, gname);
-  if (!cgroup_res)
-    return cgroup_res.status();
-
-  streamCG* cg = cgroup_res->cg;
-  if (cg == nullptr)
-    return OpStatus::SKIPPED;
+  RETURN_ON_BAD_STATUS(cgroup_res);
 
   long long pending = 0;
-  auto* shard = op_args.shard;
-
-  shard->tmp_str1 = sdscpylen(shard->tmp_str1, consumer_name.data(), consumer_name.size());
-  streamConsumer* consumer = streamLookupConsumer(cg, shard->tmp_str1, SLC_NO_REFRESH);
+  streamConsumer* consumer =
+      streamLookupConsumer(cgroup_res->cg, WrapSds(consumer_name), SLC_NO_REFRESH);
   if (consumer) {
     pending = raxSize(consumer->pel);
-    streamDelConsumer(cg, consumer);
+    streamDelConsumer(cgroup_res->cg, consumer);
   }
 
   return pending;
@@ -1381,12 +1355,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
 
 OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, string_view id) {
   auto cgr_res = FindGroup(op_args, key, gname);
-  if (!cgr_res)
-    return cgr_res.status();
-
-  streamCG* cg = cgr_res->cg;
-  if (cg == nullptr)
-    return OpStatus::SKIPPED;
+  RETURN_ON_BAD_STATUS(cgr_res);
 
   streamID sid;
   ParsedStreamId parsed_id;
@@ -1399,7 +1368,7 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
       return OpStatus::SYNTAX_ERR;
     }
   }
-  cg->last_id = sid;
+  cgr_res->cg->last_id = sid;
 
   return OpStatus::OK;
 }
@@ -1487,9 +1456,8 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
 // XACK key groupname id [id ...]
 OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gname,
                          absl::Span<streamID> ids) {
-  auto res = FindGroup(op_args, key, gname);
-  if (!res)
-    return res.status();
+  auto res = FindGroup(op_args, key, gname, false);
+  RETURN_ON_BAD_STATUS(res);
 
   if (res->cg == nullptr || res->s == nullptr) {
     return 0;
@@ -1516,9 +1484,9 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
 }
 
 OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const ClaimOpts& opts) {
-  auto cgr_res = FindGroup(op_args, key, opts.group);
-  if (!cgr_res)
-    return cgr_res.status();
+  auto cgr_res = FindGroup(op_args, key, opts.group, false);
+  RETURN_ON_BAD_STATUS(cgr_res);
+
   stream* stream = cgr_res->s;
   streamCG* group = cgr_res->cg;
 
@@ -1566,12 +1534,11 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
         continue;
     }
 
-    op_args.shard->tmp_str1 =
-        sdscpylen(op_args.shard->tmp_str1, opts.consumer.data(), opts.consumer.size());
+    auto cname = WrapSds(opts.consumer);
     if (consumer == nullptr) {
-      consumer = streamLookupConsumer(group, op_args.shard->tmp_str1, SLC_DEFAULT);
+      consumer = streamLookupConsumer(group, cname, SLC_DEFAULT);
       if (consumer == nullptr) {
-        consumer = streamCreateConsumer(group, op_args.shard->tmp_str1, nullptr, 0, SCC_DEFAULT);
+        consumer = streamCreateConsumer(group, cname, nullptr, 0, SCC_DEFAULT);
       }
     }
 
@@ -1722,29 +1689,19 @@ PendingExtendedResultList GetPendingExtendedResult(streamCG* cg, streamConsumer*
 
 OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const PendingOpts& opts) {
   auto cgroup_res = FindGroup(op_args, key, opts.group_name);
-  if (!cgroup_res) {
-    return cgroup_res.status();
-  }
+  RETURN_ON_BAD_STATUS(cgroup_res);
 
-  streamCG* cg = cgroup_res->cg;
-  if (cg == nullptr) {
-    return OpStatus::SKIPPED;
-  }
-
-  auto* shard = op_args.shard;
   streamConsumer* consumer = nullptr;
   if (!opts.consumer_name.empty()) {
-    shard->tmp_str1 =
-        sdscpylen(shard->tmp_str1, opts.consumer_name.data(), opts.consumer_name.size());
-    consumer = streamLookupConsumer(cg, shard->tmp_str1, SLC_NO_REFRESH);
+    consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name), SLC_NO_REFRESH);
   }
 
   PendingResult result;
 
   if (opts.count == -1) {
-    result = GetPendingReducedResult(cg);
+    result = GetPendingReducedResult(cgroup_res->cg);
   } else {
-    result = GetPendingExtendedResult(cg, consumer, opts);
+    result = GetPendingExtendedResult(cgroup_res->cg, consumer, opts);
   }
   return result;
 }
@@ -2784,9 +2741,7 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
 
     // Update group pointer and check it's validity
     if (opts->read_group) {
-      owner->tmp_str1 =
-          sdscpylen(owner->tmp_str1, opts->group_name.data(), opts->group_name.length());
-      sitem.group = streamLookupCG(s, owner->tmp_str1);
+      sitem.group = streamLookupCG(s, WrapSds(opts->group_name));
       if (!sitem.group)
         return true;  // abort
     }
@@ -2829,12 +2784,11 @@ void XReadBlock(ReadOpts* opts, ConnectionContext* cntx) {
 
       // Update consumer
       if (sitem.group) {
-        shard->tmp_str1 =
-            sdscpylen(shard->tmp_str1, opts->consumer_name.data(), opts->consumer_name.length());
-        range_opts.consumer = streamLookupConsumer(sitem.group, shard->tmp_str1, SLC_NO_REFRESH);
+        auto cname = WrapSds(opts->consumer_name);
+        range_opts.consumer = streamLookupConsumer(sitem.group, cname, SLC_NO_REFRESH);
         if (!range_opts.consumer) {
-          range_opts.consumer = streamCreateConsumer(sitem.group, shard->tmp_str1, NULL, 0,
-                                                     SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+          range_opts.consumer =
+              streamCreateConsumer(sitem.group, cname, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
         }
       }
 
@@ -2897,19 +2851,15 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   streamCG* group = nullptr;
   streamConsumer* consumer = nullptr;
   if (opts->read_group) {
-    auto& tmp_str = op_args.shard->tmp_str1;
-    tmp_str = sdscpylen(tmp_str, opts->group_name.data(), opts->group_name.size());
-    group = streamLookupCG(s, tmp_str);
-
+    group = streamLookupCG(s, WrapSds(opts->group_name));
     if (!group)
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
-    tmp_str = sdscpylen(tmp_str, opts->consumer_name.data(), opts->consumer_name.size());
-    consumer = streamLookupConsumer(group, tmp_str, SLC_NO_REFRESH);
+    auto cname = WrapSds(opts->consumer_name);
+    consumer = streamLookupConsumer(group, cname, SLC_NO_REFRESH);
     if (!consumer) {
-      consumer = streamCreateConsumer(group, op_args.shard->tmp_str1, NULL, 0,
-                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+      consumer = streamCreateConsumer(group, cname, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
     }
 
     requested_sitem.group = group;
