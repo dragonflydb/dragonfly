@@ -456,7 +456,7 @@ async def test_infomemory_while_snapshoting(df_factory, format: str):
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-bgsave"})
 async def test_bgsave_and_save(async_client: aioredis.Redis):
-    await async_client.execute_command("DEBUG POPULATE 20000")
+    await async_client.execute_command("DEBUG POPULATE 200000")
 
     await async_client.execute_command("BGSAVE")
     with pytest.raises(redis.exceptions.ResponseError):
