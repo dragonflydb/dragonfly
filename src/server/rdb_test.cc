@@ -567,11 +567,11 @@ TEST_F(RdbTest, DflyLoadAppend) {
 
 // Tests loading a huge set, where the set is loaded in multiple partial reads.
 TEST_F(RdbTest, LoadHugeSet) {
-  // Add 2 sets with 200k elements each (note must have more than kMaxBlobLen
+  // Add 2 sets with 100k elements each (note must have more than kMaxBlobLen
   // elements to test partial reads).
-  Run({"debug", "populate", "2", "test", "100", "rand", "type", "set", "elements", "200000"});
-  ASSERT_EQ(200000, CheckedInt({"scard", "test:0"}));
-  ASSERT_EQ(200000, CheckedInt({"scard", "test:1"}));
+  Run({"debug", "populate", "2", "test", "100", "rand", "type", "set", "elements", "100000"});
+  ASSERT_EQ(100000, CheckedInt({"scard", "test:0"}));
+  ASSERT_EQ(100000, CheckedInt({"scard", "test:1"}));
 
   RespExpr resp = Run({"save", "df"});
   ASSERT_EQ(resp, "OK");
@@ -580,8 +580,48 @@ TEST_F(RdbTest, LoadHugeSet) {
   resp = Run({"dfly", "load", save_info.file_name});
   ASSERT_EQ(resp, "OK");
 
-  ASSERT_EQ(200000, CheckedInt({"scard", "test:0"}));
-  ASSERT_EQ(200000, CheckedInt({"scard", "test:1"}));
+  ASSERT_EQ(100000, CheckedInt({"scard", "test:0"}));
+  ASSERT_EQ(100000, CheckedInt({"scard", "test:1"}));
+}
+
+// Tests loading a huge hmap, where the map is loaded in multiple partial
+// reads.
+TEST_F(RdbTest, LoadHugeHMap) {
+  // Add 2 sets with 100k elements each (note must have more than kMaxBlobLen
+  // elements to test partial reads).
+  Run({"debug", "populate", "2", "test", "100", "rand", "type", "hash", "elements", "100000"});
+  ASSERT_EQ(100000, CheckedInt({"hlen", "test:0"}));
+  ASSERT_EQ(100000, CheckedInt({"hlen", "test:1"}));
+
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  resp = Run({"dfly", "load", save_info.file_name});
+  ASSERT_EQ(resp, "OK");
+
+  ASSERT_EQ(100000, CheckedInt({"hlen", "test:0"}));
+  ASSERT_EQ(100000, CheckedInt({"hlen", "test:1"}));
+}
+
+// Tests loading a huge zset, where the zset is loaded in multiple partial
+// reads.
+TEST_F(RdbTest, LoadHugeZSet) {
+  // Add 2 sets with 100k elements each (note must have more than kMaxBlobLen
+  // elements to test partial reads).
+  Run({"debug", "populate", "2", "test", "100", "rand", "type", "zset", "elements", "100000"});
+  ASSERT_EQ(100000, CheckedInt({"zcard", "test:0"}));
+  ASSERT_EQ(100000, CheckedInt({"zcard", "test:1"}));
+
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  resp = Run({"dfly", "load", save_info.file_name});
+  ASSERT_EQ(resp, "OK");
+
+  ASSERT_EQ(100000, CheckedInt({"zcard", "test:0"}));
+  ASSERT_EQ(100000, CheckedInt({"zcard", "test:1"}));
 }
 
 }  // namespace dfly
