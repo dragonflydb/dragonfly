@@ -1409,9 +1409,7 @@ RdbSaver::~RdbSaver() {
   // Decommit local memory.
   // We create an RdbSaver for each thread, so each one will Decommit for itself.
   auto* tlocal = ServerState::tlocal();
-  if (tlocal) {
-    ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory);
-  }
+  tlocal->DecommitMemory(ServerState::kAllMemory);
 }
 
 void RdbSaver::StartSnapshotInShard(bool stream_journal, const Cancellation* cll,

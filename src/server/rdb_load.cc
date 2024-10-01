@@ -1996,9 +1996,7 @@ RdbLoader::~RdbLoader() {
   // We create an RdbLoader for each thread, so each one will Decommit for itself after
   // full sync ends (since we explicitly reset the RdbLoader).
   auto* tlocal = ServerState::tlocal();
-  if (tlocal) {
-    tlocal->DecommitMemory(ServerState::kAllMemory);
-  }
+  tlocal->DecommitMemory(ServerState::kAllMemory);
 }
 
 error_code RdbLoader::Load(io::Source* src) {
