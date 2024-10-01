@@ -145,7 +145,7 @@ void MemoryCmd::Run(CmdArgList args) {
 
   if (sub_cmd == "DECOMMIT") {
     shard_set->pool()->AwaitBrief(
-        [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAll); });
+        [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory); });
     return cntx_->SendSimpleString("OK");
   }
 

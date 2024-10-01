@@ -1997,7 +1997,7 @@ RdbLoader::~RdbLoader() {
   // full sync ends (since we explicitly reset the RdbLoader).
   auto* tlocal = ServerState::tlocal();
   if (tlocal) {
-    tlocal->DecommitMemory(ServerState::kAll);
+    tlocal->DecommitMemory(ServerState::kAllMemory);
   }
 }
 

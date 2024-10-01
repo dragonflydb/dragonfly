@@ -286,7 +286,7 @@ class ServerState {  // public struct - to allow initialization.
     kDataHeap = 1,
     kBackingHeap = 2,
     kGlibcmalloc = 4,
-    kAll = kDataHeap | kBackingHeap | kGlibcmalloc
+    kAllMemory = kDataHeap | kBackingHeap | kGlibcmalloc
   };
   void DecommitMemory(uint8_t flags);
 
