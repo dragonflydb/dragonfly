@@ -79,6 +79,7 @@ class StaticSeeder(SeederBase):
         data_size=100,
         variance=5,
         samples=10,
+        collection_size=None,
         types: typing.Optional[typing.List[str]] = None,
     ):
         SeederBase.__init__(self, types)
@@ -86,6 +87,11 @@ class StaticSeeder(SeederBase):
         self.data_size = data_size
         self.variance = variance
         self.samples = samples
+
+        if collection_size is None:
+            self.collection_size = data_size ** (1 / 3)
+        else:
+            self.collection_size = collection_size
 
     async def run(self, client: aioredis.Redis):
         """Run with specified options until key_target is met"""
@@ -105,9 +111,9 @@ class StaticSeeder(SeederBase):
             dsize = random.uniform(self.data_size / self.variance, self.data_size * self.variance)
             csize = 1
         else:
-            dsize = self.data_size ** (1 / 3)
-            dsize = random.uniform(dsize / self.variance, dsize * self.variance)
-            csize = int(self.data_size // dsize) + 1
+            csize = self.collection_size
+            csize = math.ceil(random.uniform(csize / self.variance, csize * self.variance))
+            dsize = self.data_size // csize
 
         args = ["DEBUG", "POPULATE", key_target, prefix, math.ceil(dsize)]
         args += ["RAND", "TYPE", dtype, "ELEMENTS", csize]
@@ -124,14 +130,26 @@ class Seeder(SeederBase):
 
     units: typing.List[Unit]
 
-    def __init__(self, units=10, key_target=10_000, data_size=100):
-        SeederBase.__init__(self)
+    def __init__(
+        self,
+        units=10,
+        key_target=10_000,
+        data_size=100,
+        collection_size=None,
+        types: typing.Optional[typing.List[str]] = None,
+    ):
+        SeederBase.__init__(self, types)
         self.key_target = key_target
         self.data_size = data_size
+        if collection_size is None:
+            self.collection_size = math.ceil(data_size ** (1 / 3))
+        else:
+            self.collection_size = collection_size
+
         self.units = [
             Seeder.Unit(
                 prefix=f"k-s{self.uid}u{i}-",
-                type=Seeder.DEFAULT_TYPES[i % len(Seeder.DEFAULT_TYPES)],
+                type=self.types[i % len(self.types)],
                 counter=0,
                 stop_key=f"_s{self.uid}u{i}-stop",
             )
@@ -147,6 +165,7 @@ class Seeder(SeederBase):
             target_ops if target_ops is not None else 0,
             target_deviation if target_deviation is not None else -1,
             self.data_size,
+            self.collection_size,
         ]
 
         sha = await client.script_load(Seeder._load_script("generate"))
