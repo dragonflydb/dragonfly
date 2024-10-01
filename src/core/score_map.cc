@@ -128,12 +128,16 @@ uint32_t ScoreMap::ObjExpireTime(const void* obj) const {
   return UINT32_MAX;
 }
 
+void ScoreMap::ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) {
+  // Should not reach.
+}
+
 void ScoreMap::ObjDelete(void* obj, bool has_ttl) const {
   sds s1 = (sds)obj;
   sdsfree(s1);
 }
 
-void* ScoreMap::ObjectClone(const void* obj, bool has_ttl) const {
+void* ScoreMap::ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const {
   return nullptr;
 }
 
