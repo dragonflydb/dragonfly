@@ -5,9 +5,7 @@
 namespace dfly {
 
 sds WrapSds(std::string_view s) {
-  static __thread sds tmp_sds = nullptr;
-  if (tmp_sds == nullptr)
-    tmp_sds = sdsempty();
+  static __thread sds tmp_sds = sdsempry();
   return tmp_sds = sdscpylen(tmp_sds, s.data(), s.length());
 }
 
