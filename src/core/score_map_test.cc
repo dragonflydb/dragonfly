@@ -129,7 +129,7 @@ TEST_F(ScoreMapTest, ReallocIfNeeded) {
   EXPECT_GT(wasted_before, wasted_after * 2);
 
   ASSERT_EQ(sm_->UpperBoundSize(), 1000);
-  for (size_t i = 0; i < 20; i++) {
+  for (size_t i = 0; i < 1000; i++) {
     auto res = sm_->Find(build_str(i * 10));
     ASSERT_EQ(res.has_value(), true);
     ASSERT_EQ((size_t)*res, i * 10);
