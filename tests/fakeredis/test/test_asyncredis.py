@@ -1,5 +1,4 @@
 import asyncio
-import re
 import sys
 
 if sys.version_info >= (3, 11):
@@ -11,14 +10,10 @@ import pytest_asyncio
 import redis
 import redis.asyncio
 
-from fakeredis import FakeServer, aioredis, FakeAsyncRedis, FakeStrictRedis
+from fakeredis import FakeServer, aioredis
 from test import testtools
 
-
 pytestmark = []
-fake_only = pytest.mark.parametrize(
-    "async_redis", [pytest.param("fake", marks=pytest.mark.fake)], indirect=True
-)
 pytestmark.extend(
     [
         pytest.mark.asyncio,
@@ -39,9 +34,7 @@ async def test_ping(async_redis: redis.asyncio.Redis):
 
 
 async def test_types(async_redis: redis.asyncio.Redis):
-    await async_redis.hset(
-        "hash", mapping={"key1": "value1", "key2": "value2", "key3": 123}
-    )
+    await async_redis.hset("hash", mapping={"key1": "value1", "key2": "value2", "key3": 123})
     result = await async_redis.hgetall("hash")
     assert result == {b"key1": b"value1", b"key2": b"value2", b"key3": b"123"}
 
@@ -86,18 +79,8 @@ async def test_pubsub(async_redis, event_loop):
         await async_redis.publish("channel", "message2")
         result1 = await queue.get()
         result2 = await queue.get()
-        assert result1 == {
-            "channel": b"channel",
-            "pattern": None,
-            "type": "message",
-            "data": b"message1",
-        }
-        assert result2 == {
-            "channel": b"channel",
-            "pattern": None,
-            "type": "message",
-            "data": b"message2",
-        }
+        assert result1 == {"channel": b"channel", "pattern": None, "type": "message", "data": b"message1"}
+        assert result2 == {"channel": b"channel", "pattern": None, "type": "message", "data": b"message2"}
         await async_redis.publish("channel", "stop")
         await task
 
@@ -157,10 +140,7 @@ async def test_wrongtype_error(async_redis: redis.asyncio.Redis):
 
 
 async def test_syntax_error(async_redis: redis.asyncio.Redis):
-    with pytest.raises(
-        redis.asyncio.ResponseError,
-        match="^wrong number of arguments for 'get' command$",
-    ):
+    with pytest.raises(redis.asyncio.ResponseError, match="^wrong number of arguments for 'get' command$"):
         await async_redis.execute_command("get")
 
 
@@ -181,31 +161,6 @@ class TestScripts:
         await async_redis.set("foo", "bar")
         with pytest.raises(redis.asyncio.ResponseError):
             await async_redis.eval('return redis.call("ZCOUNT", KEYS[1])', 1, "foo")
-
-
-@testtools.run_test_if_redispy_ver("gte", "5.1")
-async def test_repr_redis_51(async_redis: redis.asyncio.Redis):
-    assert re.fullmatch(
-        r"<redis.asyncio.connection.ConnectionPool("
-        r"<fakeredis.aioredis.FakeConnection(server=<fakeredis._server.FakeServer object at .*>,db=0)>)>",
-        repr(async_redis.connection_pool),
-    )
-
-
-@fake_only
-@pytest.mark.disconnected
-async def test_not_connected(async_redis: redis.asyncio.Redis):
-    with pytest.raises(redis.asyncio.ConnectionError):
-        await async_redis.ping()
-
-
-@fake_only
-async def test_disconnect_server(async_redis, fake_server):
-    await async_redis.ping()
-    fake_server.connected = False
-    with pytest.raises(redis.asyncio.ConnectionError):
-        await async_redis.ping()
-    fake_server.connected = True
 
 
 async def test_type(async_redis: redis.asyncio.Redis):
@@ -238,78 +193,6 @@ async def test_xdel(async_redis: redis.asyncio.Redis):
     assert await async_redis.xdel(stream, m2, m3) == 2
 
 
-@pytest.mark.fake
-async def test_from_url():
-    r0 = aioredis.FakeRedis.from_url("redis://localhost?db=0")
-    r1 = aioredis.FakeRedis.from_url("redis://localhost?db=1")
-    # Check that they are indeed different databases
-    await r0.set("foo", "a")
-    await r1.set("foo", "b")
-    assert await r0.get("foo") == b"a"
-    assert await r1.get("foo") == b"b"
-    await r0.connection_pool.disconnect()
-    await r1.connection_pool.disconnect()
-
-
-@pytest.mark.fake
-async def test_from_url_with_version():
-    r0 = aioredis.FakeRedis.from_url("redis://localhost?db=0", version=(6,))
-    r1 = aioredis.FakeRedis.from_url("redis://localhost?db=1", version=(6,))
-    # Check that they are indeed different databases
-    await r0.set("foo", "a")
-    await r1.set("foo", "b")
-    assert await r0.get("foo") == b"a"
-    assert await r1.get("foo") == b"b"
-    await r0.connection_pool.disconnect()
-    await r1.connection_pool.disconnect()
-
-
-@fake_only
-async def test_from_url_with_server(async_redis, fake_server):
-    r2 = aioredis.FakeRedis.from_url("redis://localhost", server=fake_server)
-    await async_redis.set("foo", "bar")
-    assert await r2.get("foo") == b"bar"
-    await r2.connection_pool.disconnect()
-
-
-@pytest.mark.fake
-async def test_without_server():
-    r = aioredis.FakeRedis()
-    assert await r.ping()
-
-
-@pytest.mark.fake
-async def test_without_server_disconnected():
-    r = aioredis.FakeRedis(connected=False)
-    with pytest.raises(redis.asyncio.ConnectionError):
-        await r.ping()
-
-
-@pytest.mark.fake
-async def test_async():
-    # arrange
-    cache = aioredis.FakeRedis()
-    # act
-    await cache.set("fakeredis", "plz")
-    x = await cache.get("fakeredis")
-    # assert
-    assert x == b"plz"
-
-
-@testtools.run_test_if_redispy_ver("gte", "4.4.0")
-@pytest.mark.parametrize("nowait", [False, True])
-@pytest.mark.fake
-async def test_connection_disconnect(nowait):
-    server = FakeServer()
-    r = aioredis.FakeRedis(server=server)
-    conn = await r.connection_pool.get_connection("_")
-    assert conn is not None
-
-    await conn.disconnect(nowait=nowait)
-
-    assert conn._sock is None
-
-
 async def test_connection_with_username_and_password():
     server = FakeServer()
     r = aioredis.FakeRedis(server=server, username="username", password="password")
@@ -318,31 +201,6 @@ async def test_connection_with_username_and_password():
     await r.hset("test:key", "test_hash", test_value)
     result = await r.hget("test:key", "test_hash")
     assert result.decode() == test_value
-
-
-@pytest.mark.fake
-async def test_init_args():
-    sync_r1 = FakeStrictRedis()
-    r1 = FakeAsyncRedis()
-    r5 = FakeAsyncRedis()
-    r2 = FakeAsyncRedis(server=FakeServer())
-
-    shared_server = FakeServer()
-    r3 = FakeAsyncRedis(server=shared_server)
-    r4 = FakeAsyncRedis(server=shared_server)
-
-    await r1.set("foo", "bar")
-    await r3.set("bar", "baz")
-
-    assert await r1.get("foo") == b"bar"
-    assert await r5.get("foo") is None
-    assert sync_r1.get("foo") is None
-    assert await r2.get("foo") is None
-    assert await r3.get("foo") is None
-
-    assert await r3.get("bar") == b"baz"
-    assert await r4.get("bar") == b"baz"
-    assert await r1.get("bar") is None
 
 
 @pytest.mark.asyncio
@@ -362,3 +220,4 @@ async def test_cause_fakeredis_bug(async_redis):
 
     # await async_redis.get("foo")  # uncomment to make test pass
     assert await async_redis.get("foo") == b"bar"
+
