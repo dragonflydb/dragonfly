@@ -9,6 +9,10 @@
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
+extern "C" {
+#include "redis/intset.h"
+#include "redis/zmalloc.h"
+}
 
 using namespace testing;
 using namespace std;
@@ -347,6 +351,31 @@ TEST_F(SetFamilyTest, SScan) {
   resp = Run({"sscan", "mystrset", "0", "match", "1*"});
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec.size(), 0);
+}
+
+TEST_F(SetFamilyTest, IntSetMemcpy) {
+  // This logic is used in CompactObject::DefragIntSet
+  intset* original = intsetNew();
+  uint8_t success = 0;
+  for (int i = 0; i < 250; ++i) {
+    original = intsetAdd(original, i, &success);
+    ASSERT_THAT(success, 1);
+  }
+  const size_t blob_len = intsetBlobLen(original);
+  intset* replacement = (intset*)zmalloc(blob_len);
+  memcpy(replacement, original, blob_len);
+
+  ASSERT_THAT(original->encoding, replacement->encoding);
+  ASSERT_THAT(original->length, replacement->length);
+
+  for (int i = 0; i < 250; ++i) {
+    int64_t value;
+    ASSERT_THAT(intsetGet(replacement, i, &value), 1);
+    ASSERT_THAT(value, i);
+  }
+
+  zfree(original);
+  zfree(replacement);
 }
 
 }  // namespace dfly
