@@ -10,6 +10,8 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
+#include "core/search/search.h"
+
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
 #include <hnswlib/hnswalg.h>
@@ -39,10 +41,13 @@ string ToLower(string_view word) {
 }
 
 // Get all words from text as matched by the ICU library
-absl::flat_hash_set<std::string> TokenizeWords(std::string_view text) {
+absl::flat_hash_set<std::string> TokenizeWords(std::string_view text,
+                                               const TextIndex::StopWords& stopwords) {
   absl::flat_hash_set<std::string> words;
-  for (std::string_view word : una::views::word_only::utf8(text))
-    words.insert(una::cases::to_lowercase_utf8(word));
+  for (std::string_view word : una::views::word_only::utf8(text)) {
+    if (std::string word_lc = una::cases::to_lowercase_utf8(word); !stopwords.contains(word_lc))
+      words.insert(std::move(word_lc));
+  }
   return words;
 }
 
@@ -166,7 +171,7 @@ template struct BaseStringIndex<CompressedSortedSet>;
 template struct BaseStringIndex<SortedVector>;
 
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
-  return TokenizeWords(value);
+  return TokenizeWords(value, *stopwords_);
 }
 
 absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) const {
@@ -184,6 +189,7 @@ FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
                                  PMR_NS::memory_resource* mr)
     : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
   DCHECK(!params.use_hnsw);
+  VLOG(0) << params.capacity << " " << params.dim;
   entries_.reserve(params.capacity * params.dim);
 }
 
