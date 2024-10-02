@@ -34,8 +34,9 @@ class RobjWrapper {
  public:
   using MemoryResource = PMR_NS::memory_resource;
 
-  RobjWrapper() {
+  RobjWrapper() : sz_(0), type_(0), encoding_(0) {
   }
+
   size_t MallocUsed() const;
 
   uint64_t HashCode() const;
@@ -78,7 +79,7 @@ class RobjWrapper {
   size_t InnerObjMallocUsed() const;
   void MakeInnerRoom(size_t current_cap, size_t desired, MemoryResource* mr);
 
-  void Set(void* p, uint32_t s) {
+  void Set(void* p, size_t s) {
     inner_obj_ = p;
     sz_ = s;
   }
@@ -86,13 +87,13 @@ class RobjWrapper {
   void* inner_obj_ = nullptr;
 
   // semantics depend on the type. For OBJ_STRING it's string length.
-  uint32_t sz_ = 0;
+  uint64_t sz_ : 56;
 
-  uint32_t type_ : 4;
-  uint32_t encoding_ : 4;
-  uint32_t : 24;
-
+  uint64_t type_ : 4;
+  uint64_t encoding_ : 4;
 } __attribute__((packed));
+
+static_assert(sizeof(RobjWrapper) == 16);
 
 struct TieredColdRecord;
 

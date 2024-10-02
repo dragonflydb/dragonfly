@@ -1375,43 +1375,6 @@ void quicklistSetDirection(quicklistIter *iter, int direction) {
     iter->direction = direction;
 }
 
-/* Duplicate the quicklist.
- * On success a copy of the original quicklist is returned.
- *
- * The original quicklist both on success or error is never modified.
- *
- * Returns newly allocated quicklist. */
-quicklist *quicklistDup(quicklist *orig) {
-    quicklist *copy;
-
-    copy = quicklistNew(orig->fill, orig->compress);
-
-    for (quicklistNode *current = orig->head; current; current = current->next) {
-        quicklistNode *node = quicklistCreateNode();
-
-        if (current->encoding == QUICKLIST_NODE_ENCODING_LZF) {
-            quicklistLZF *lzf = (quicklistLZF *)current->entry;
-            size_t lzf_sz = sizeof(*lzf) + lzf->sz;
-            node->entry = zmalloc(lzf_sz);
-            memcpy(node->entry, current->entry, lzf_sz);
-        } else if (current->encoding == QUICKLIST_NODE_ENCODING_RAW) {
-            node->entry = zmalloc(current->sz);
-            memcpy(node->entry, current->entry, current->sz);
-        }
-
-        node->count = current->count;
-        copy->count += node->count;
-        node->sz = current->sz;
-        node->encoding = current->encoding;
-        node->container = current->container;
-
-        _quicklistInsertNodeAfter(copy, copy->tail, node);
-    }
-
-    /* copy->count must equal orig->count here */
-    return copy;
-}
-
 /* Populate 'entry' with the element at the specified zero-based index
  * where 0 is the head, 1 is the element next to head
  * and so on. Negative integers are used in order to count
