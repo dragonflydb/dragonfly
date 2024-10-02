@@ -1,5 +1,6 @@
 import pytest
 import redis
+from redis.commands.bf import BFInfo
 
 from fakeredis import _msgs as msgs
 
