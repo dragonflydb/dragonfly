@@ -163,33 +163,14 @@ pair<sds, bool> ScoreMap::ReallocIfNeeded(void* obj, float ratio) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
 
-  auto* value_ptr = key + key_len + 1;
-  uint64_t value_tag = absl::little_endian::Load64(value_ptr);
-  sds value = (sds)(uint64_t(value_tag));
-
-  bool realloced_value = false;
-
-  // If the allocated value is underutilized, re-allocate it and update the pointer inside the key
-  if (zmalloc_page_is_underutilized(value, ratio)) {
-    size_t value_len = sdslen(value);
-    sds new_value = sdsnewlen(value, value_len);
-    memcpy(new_value, value, value_len);
-    uint64_t new_value_tag = uint64_t(new_value);
-    absl::little_endian::Store64(value_ptr, new_value_tag);
-    sdsfree(value);
-    realloced_value = true;
-  }
-
   if (!zmalloc_page_is_underutilized(key, ratio))
-    return {key, realloced_value};
+    return {key, false};
 
-  size_t space_size = 8;
-
-  sds new_key = AllocSdsWithSpace(key_len, space_size);
-  memcpy(new_key, key, key_len + 1 /* \0 */ + space_size);
+  sds newkey = AllocSdsWithSpace(key_len, 8);
+  memcpy(newkey, key, key_len + 8 + 1);
   sdsfree(key);
 
-  return {new_key, true};
+  return {newkey, true};
 }
 
 }  // namespace dfly
