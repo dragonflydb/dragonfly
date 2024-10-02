@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
-from test import testtools
 from typing import Tuple, List, Optional
 
 import pytest
 import redis
 import redis.client
+
+from test import testtools
 
 
 def round_str(x):

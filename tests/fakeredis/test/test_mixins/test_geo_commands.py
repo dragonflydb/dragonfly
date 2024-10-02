@@ -1,8 +1,9 @@
-from test import testtools
 from typing import Dict, Any
 
 import pytest
 import redis
+
+from test import testtools
 
 
 def test_geoadd_ch(r: redis.Redis):

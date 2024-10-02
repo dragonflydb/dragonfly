@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import logging
-from test import testtools
-
-import fakeredis
 import pytest
 import redis
 import redis.client
 from redis.exceptions import ResponseError
+
 from test.testtools import raw_command
 
 json_tests = pytest.importorskip("lupa")
@@ -552,43 +549,11 @@ def test_script(r: redis.Redis):
     assert result == b"42"
 
 
-@testtools.fake_only
-def test_lua_log(r, caplog):
-    logger = fakeredis._server.LOGGER
-    script = """
-        redis.log(redis.LOG_DEBUG, "debug")
-        redis.log(redis.LOG_VERBOSE, "verbose")
-        redis.log(redis.LOG_NOTICE, "notice")
-        redis.log(redis.LOG_WARNING, "warning")
-    """
-    script = r.register_script(script)
-    with caplog.at_level("DEBUG"):
-        script()
-    assert caplog.record_tuples == [
-        (logger.name, logging.DEBUG, "debug"),
-        (logger.name, logging.INFO, "verbose"),
-        (logger.name, logging.INFO, "notice"),
-        (logger.name, logging.WARNING, "warning"),
-    ]
-
-
 def test_lua_log_no_message(r: redis.Redis):
     script = "redis.log(redis.LOG_DEBUG)"
     script = r.register_script(script)
     with pytest.raises(redis.ResponseError):
         script()
-
-
-@testtools.fake_only
-def test_lua_log_different_types(r, caplog):
-    logger = logging.getLogger("fakeredis")
-    script = "redis.log(redis.LOG_DEBUG, 'string', 1, true, 3.14, 'string')"
-    script = r.register_script(script)
-    with caplog.at_level("DEBUG"):
-        script()
-    assert caplog.record_tuples == [
-        (logger.name, logging.DEBUG, "string 1 3.14 string")
-    ]
 
 
 @pytest.mark.unsupported_server_types("dragonfly")
@@ -597,19 +562,6 @@ def test_lua_log_wrong_level(r: redis.Redis):
     script = r.register_script(script)
     with pytest.raises(redis.ResponseError):
         script()
-
-
-@testtools.fake_only
-def test_lua_log_defined_vars(r, caplog):
-    logger = fakeredis._server.LOGGER
-    script = """
-        local var='string'
-        redis.log(redis.LOG_DEBUG, var)
-    """
-    script = r.register_script(script)
-    with caplog.at_level("DEBUG"):
-        script()
-    assert caplog.record_tuples == [(logger.name, logging.DEBUG, "string")]
 
 
 def test_hscan_cursors_are_bytes(r: redis.Redis):

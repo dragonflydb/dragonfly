@@ -34,7 +34,9 @@ async def test_ping(async_redis: redis.asyncio.Redis):
 
 
 async def test_types(async_redis: redis.asyncio.Redis):
-    await async_redis.hset("hash", mapping={"key1": "value1", "key2": "value2", "key3": 123})
+    await async_redis.hset(
+        "hash", mapping={"key1": "value1", "key2": "value2", "key3": 123}
+    )
     result = await async_redis.hgetall("hash")
     assert result == {b"key1": b"value1", b"key2": b"value2", b"key3": b"123"}
 
@@ -79,8 +81,18 @@ async def test_pubsub(async_redis, event_loop):
         await async_redis.publish("channel", "message2")
         result1 = await queue.get()
         result2 = await queue.get()
-        assert result1 == {"channel": b"channel", "pattern": None, "type": "message", "data": b"message1"}
-        assert result2 == {"channel": b"channel", "pattern": None, "type": "message", "data": b"message2"}
+        assert result1 == {
+            "channel": b"channel",
+            "pattern": None,
+            "type": "message",
+            "data": b"message1",
+        }
+        assert result2 == {
+            "channel": b"channel",
+            "pattern": None,
+            "type": "message",
+            "data": b"message2",
+        }
         await async_redis.publish("channel", "stop")
         await task
 
@@ -140,7 +152,10 @@ async def test_wrongtype_error(async_redis: redis.asyncio.Redis):
 
 
 async def test_syntax_error(async_redis: redis.asyncio.Redis):
-    with pytest.raises(redis.asyncio.ResponseError, match="^wrong number of arguments for 'get' command$"):
+    with pytest.raises(
+        redis.asyncio.ResponseError,
+        match="^wrong number of arguments for 'get' command$",
+    ):
         await async_redis.execute_command("get")
 
 
@@ -220,4 +235,3 @@ async def test_cause_fakeredis_bug(async_redis):
 
     # await async_redis.get("foo")  # uncomment to make test pass
     assert await async_redis.get("foo") == b"bar"
-
