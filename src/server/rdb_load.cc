@@ -418,6 +418,10 @@ class RdbLoaderBase::OpaqueObjLoader {
   sds ToSds(const RdbVariant& obj);
   string_view ToSV(const RdbVariant& obj);
 
+  // Returns whether pv_ has the given object type and encoding. If not ec_
+  // is set to the error.
+  bool EnsureObjEncoding(CompactObjType type, unsigned encoding);
+
   template <typename F> static void Iterate(const LoadTrace& ltrace, F&& f) {
     unsigned cnt = 0;
     for (const auto& seg : ltrace.arr) {
@@ -549,17 +553,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       // Note we only use append_ when the set size exceeds kMaxBlobLen,
       // which is greater than SetFamily::MaxIntsetEntries so we'll always use
       // a string set not an int set.
-      if (pv_->ObjType() != OBJ_SET) {
-        LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType();
-        ec_ = RdbError(errc::invalid_rdb_type);
+      if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
         return;
       }
-      if (pv_->Encoding() != kEncodingStrMap2) {
-        LOG(DFATAL) << "Invalid encoding " << pv_->Encoding();
-        ec_ = RdbError(errc::invalid_encoding);
-        return;
-      }
-
       set = static_cast<StringSet*>(pv_->RObjPtr());
     } else {
       set = CompactObj::AllocateMR<StringSet>();
@@ -667,14 +663,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       // Note we only use append_ when the map size exceeds kMaxBlobLen,
       // which is greater than 64 so we'll always use a StringMap set not
       // listpack.
-      if (pv_->ObjType() != OBJ_HASH) {
-        LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType();
-        ec_ = RdbError(errc::invalid_rdb_type);
-        return;
-      }
-      if (pv_->Encoding() != kEncodingStrMap2) {
-        LOG(DFATAL) << "Invalid encoding " << pv_->Encoding();
-        ec_ = RdbError(errc::invalid_encoding);
+      if (!EnsureObjEncoding(OBJ_HASH, kEncodingStrMap2)) {
         return;
       }
 
@@ -740,14 +729,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   quicklist* ql;
   if (config_.append) {
-    if (pv_->ObjType() != OBJ_LIST) {
-      LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType();
-      ec_ = RdbError(errc::invalid_rdb_type);
-      return;
-    }
-    if (pv_->Encoding() != OBJ_ENCODING_QUICKLIST) {
-      LOG(DFATAL) << "Invalid encoding " << pv_->Encoding();
-      ec_ = RdbError(errc::invalid_encoding);
+    if (!EnsureObjEncoding(OBJ_LIST, OBJ_ENCODING_QUICKLIST)) {
       return;
     }
 
@@ -836,14 +818,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     // Note we only use append_ when the set size exceeds kMaxBlobLen,
     // which is greater than server.zset_max_listpack_entries so we'll always
     // use a SortedMap set not listpack.
-    if (pv_->ObjType() != OBJ_ZSET) {
-      LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType();
-      ec_ = RdbError(errc::invalid_rdb_type);
-      return;
-    }
-    if (pv_->Encoding() != OBJ_ENCODING_SKIPLIST) {
-      LOG(DFATAL) << "Invalid encoding " << pv_->Encoding();
-      ec_ = RdbError(errc::invalid_encoding);
+    if (!EnsureObjEncoding(OBJ_ZSET, OBJ_ENCODING_SKIPLIST)) {
       return;
     }
 
@@ -1226,6 +1201,21 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
 
   LOG(FATAL) << "Unexpected variant";
   return string_view{};
+}
+
+bool RdbLoaderBase::OpaqueObjLoader::EnsureObjEncoding(CompactObjType type, unsigned encoding) {
+  if (pv_->ObjType() != type) {
+    LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType() << "; expected " << type;
+    ec_ = RdbError(errc::invalid_rdb_type);
+    return false;
+  }
+  if (pv_->Encoding() != encoding) {
+    LOG(DFATAL) << "Invalid encoding " << pv_->Encoding() << "; expected " << encoding;
+    ec_ = RdbError(errc::invalid_encoding);
+    return false;
+  }
+
+  return true;
 }
 
 std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
