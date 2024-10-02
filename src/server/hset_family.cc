@@ -845,12 +845,12 @@ void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kInvalidIntErr);
   }
 
-  if (!parser.HasExactly(numFields)) {
+  CmdArgList fields = parser.Tail();
+  if (fields.size() != numFields) {
     return cntx->SendError("The `numfields` parameter must match the number of arguments",
                            kSyntaxErrType);
   }
 
-  CmdArgList fields = parser.Tail();
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
   };
@@ -858,7 +858,6 @@ void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
   OpResult<vector<long>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
     rb->StartArray(result->size());
     const auto& array = result.value();
     for (const auto& v : array) {
@@ -1268,7 +1267,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
       << CI{"HINCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::kHIncrByFloat}.HFUNC(
              HIncrByFloat)
       << CI{"HKEYS", CO::READONLY, 2, 1, 1, acl::kHKeys}.HFUNC(HKeys)
-      << CI{"HEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kHExpire}.HFUNC(HExpire)
+      << CI{"HEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, acl::kHExpire}.HFUNC(HExpire)
       << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1, acl::kHRandField}.HFUNC(HRandField)
       << CI{"HSCAN", CO::READONLY, -3, 1, 1, acl::kHScan}.HFUNC(HScan)
       << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kHSet}.HFUNC(HSet)

@@ -1298,7 +1298,6 @@ void GenericFamily::FieldExpire(CmdArgList args, ConnectionContext* cntx) {
   OpResult<vector<long>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
     rb->StartArray(result->size());
     const auto& array = result.value();
     for (const auto& v : array) {
@@ -1811,7 +1810,7 @@ constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
-constexpr uint32_t kFieldExpire = WRITE | HASH | FAST;
+constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
