@@ -738,9 +738,29 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
-  quicklist* ql =
-      quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
-  auto cleanup = absl::Cleanup([&] { quicklistRelease(ql); });
+  quicklist* ql;
+  if (config_.append) {
+    if (pv_->ObjType() != OBJ_LIST) {
+      LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType();
+      ec_ = RdbError(errc::invalid_rdb_type);
+      return;
+    }
+    if (pv_->Encoding() != OBJ_ENCODING_QUICKLIST) {
+      LOG(DFATAL) << "Invalid encoding " << pv_->Encoding();
+      ec_ = RdbError(errc::invalid_encoding);
+      return;
+    }
+
+    ql = static_cast<quicklist*>(pv_->RObjPtr());
+  } else {
+    ql = quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
+  }
+
+  auto cleanup = absl::Cleanup([&] {
+    if (!config_.append) {
+      quicklistRelease(ql);
+    }
+  });
 
   Iterate(*ltrace, [&](const LoadBlob& blob) {
     unsigned container = blob.encoding;
@@ -802,7 +822,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
   std::move(cleanup).Cancel();
 
-  pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+  if (!config_.append) {
+    pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+  }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
@@ -1738,42 +1760,53 @@ auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
-  uint64_t len;
-  SET_OR_UNEXPECT(LoadLen(nullptr), len);
+  size_t len;
+  if (pending_read_.remaining > 0) {
+    len = pending_read_.remaining;
+  } else {
+    SET_OR_UNEXPECT(LoadLen(NULL), len);
+    pending_read_.reserve = len;
+  }
 
   if (len == 0)
     return Unexpected(errc::empty_key);
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
+  load_trace->arr.resize(1);
+  // Lists pack multiple entries into each list node (8Kb by default),
+  // therefore using a smaller segment length than kMaxBlobLen.
+  size_t n = std::min<size_t>(len, 512);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
+    if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
+      SET_OR_UNEXPECT(LoadLen(nullptr), container);
 
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min<size_t>(len, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; ++j) {
-      uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
-      if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
-        SET_OR_UNEXPECT(LoadLen(nullptr), container);
-
-        if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
-            container != QUICKLIST_NODE_CONTAINER_PLAIN) {
-          LOG(ERROR) << "Quicklist integrity check failed.";
-          return Unexpected(errc::rdb_file_corrupted);
-        }
-      }
-
-      RdbVariant var;
-      error_code ec = ReadStringObj(&var);
-      if (ec)
-        return make_unexpected(ec);
-
-      if (StrLen(var) == 0) {
+      if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
+          container != QUICKLIST_NODE_CONTAINER_PLAIN) {
+        LOG(ERROR) << "Quicklist integrity check failed.";
         return Unexpected(errc::rdb_file_corrupted);
       }
-      load_trace->arr[i][j].rdb_var = std::move(var);
-      load_trace->arr[i][j].encoding = container;
     }
-    len -= n;
+
+    RdbVariant var;
+    error_code ec = ReadStringObj(&var);
+    if (ec)
+      return make_unexpected(ec);
+
+    if (StrLen(var) == 0) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    load_trace->arr[0][i].rdb_var = std::move(var);
+    load_trace->arr[0][i].encoding = container;
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (len > n) {
+    pending_read_.remaining = len - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};

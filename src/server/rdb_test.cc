@@ -624,4 +624,24 @@ TEST_F(RdbTest, LoadHugeZSet) {
   ASSERT_EQ(100000, CheckedInt({"zcard", "test:1"}));
 }
 
+// Tests loading a huge list, where the list is loaded in multiple partial
+// reads.
+TEST_F(RdbTest, LoadHugeList) {
+  // Add 2 lists with 100k elements each (note must have more than 512*8Kb
+  // elements to test partial reads).
+  Run({"debug", "populate", "2", "test", "100", "rand", "type", "list", "elements", "100000"});
+  ASSERT_EQ(100000, CheckedInt({"llen", "test:0"}));
+  ASSERT_EQ(100000, CheckedInt({"llen", "test:1"}));
+
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  resp = Run({"dfly", "load", save_info.file_name});
+  ASSERT_EQ(resp, "OK");
+
+  ASSERT_EQ(100000, CheckedInt({"llen", "test:0"}));
+  ASSERT_EQ(100000, CheckedInt({"llen", "test:1"}));
+}
+
 }  // namespace dfly
