@@ -13,4 +13,7 @@ namespace dfly {
 // sds string (keys) with metadata attached to them.
 char* AllocSdsWithSpace(uint32_t strlen, uint32_t space);
 
+// Updates the expire time of the sds object. The offset is the number of bytes
+void SdsUpdateExpireTime(const void* obj, uint32_t time_at, uint32_t offset);
+
 }  // namespace dfly

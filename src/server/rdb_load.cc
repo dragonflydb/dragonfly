@@ -418,6 +418,10 @@ class RdbLoaderBase::OpaqueObjLoader {
   sds ToSds(const RdbVariant& obj);
   string_view ToSV(const RdbVariant& obj);
 
+  // Returns whether pv_ has the given object type and encoding. If not ec_
+  // is set to the error.
+  bool EnsureObjEncoding(CompactObjType type, unsigned encoding);
+
   template <typename F> static void Iterate(const LoadTrace& ltrace, F&& f) {
     unsigned cnt = 0;
     for (const auto& seg : ltrace.arr) {
@@ -549,17 +553,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       // Note we only use append_ when the set size exceeds kMaxBlobLen,
       // which is greater than SetFamily::MaxIntsetEntries so we'll always use
       // a string set not an int set.
-      if (pv_->ObjType() != OBJ_SET) {
-        LOG(ERROR) << "Invalid RDB type " << pv_->ObjType();
-        ec_ = RdbError(errc::invalid_rdb_type);
+      if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
         return;
       }
-      if (pv_->Encoding() != kEncodingStrMap2) {
-        LOG(ERROR) << "Invalid encoding " << pv_->Encoding();
-        ec_ = RdbError(errc::invalid_encoding);
-        return;
-      }
-
       set = static_cast<StringSet*>(pv_->RObjPtr());
     } else {
       set = CompactObj::AllocateMR<StringSet>();
@@ -662,12 +658,30 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     lp = lpShrinkToFit(lp);
     pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
   } else {
-    StringMap* string_map = CompactObj::AllocateMR<StringMap>();
-    string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+    StringMap* string_map;
+    if (config_.append) {
+      // Note we only use append_ when the map size exceeds kMaxBlobLen,
+      // which is greater than 64 so we'll always use a StringMap set not
+      // listpack.
+      if (!EnsureObjEncoding(OBJ_HASH, kEncodingStrMap2)) {
+        return;
+      }
 
-    auto cleanup = absl::MakeCleanup([&] { CompactObj::DeleteMR<StringMap>(string_map); });
+      string_map = static_cast<StringMap*>(pv_->RObjPtr());
+    } else {
+      string_map = CompactObj::AllocateMR<StringMap>();
+      string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+
+      // Expand the map up front to avoid rehashing.
+      string_map->Reserve((config_.reserve > len) ? config_.reserve : len);
+    }
+
+    auto cleanup = absl::MakeCleanup([&] {
+      if (!config_.append) {
+        CompactObj::DeleteMR<StringMap>(string_map);
+      }
+    });
     std::string key;
-    string_map->Reserve(len);
     for (const auto& seg : ltrace->arr) {
       for (size_t i = 0; i < seg.size(); i += increment) {
         // ToSV may reference an internal buffer, therefore we can use only before the
@@ -705,15 +719,30 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         }
       }
     }
-    pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    if (!config_.append) {
+      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    }
     std::move(cleanup).Cancel();
   }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
-  quicklist* ql =
-      quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
-  auto cleanup = absl::Cleanup([&] { quicklistRelease(ql); });
+  quicklist* ql;
+  if (config_.append) {
+    if (!EnsureObjEncoding(OBJ_LIST, OBJ_ENCODING_QUICKLIST)) {
+      return;
+    }
+
+    ql = static_cast<quicklist*>(pv_->RObjPtr());
+  } else {
+    ql = quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
+  }
+
+  auto cleanup = absl::Cleanup([&] {
+    if (!config_.append) {
+      quicklistRelease(ql);
+    }
+  });
 
   Iterate(*ltrace, [&](const LoadBlob& blob) {
     unsigned container = blob.encoding;
@@ -775,20 +804,41 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
   std::move(cleanup).Cancel();
 
-  pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+  if (!config_.append) {
+    pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+  }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   size_t zsetlen = ltrace->blob_count();
-  detail::SortedMap* zs = CompactObj::AllocateMR<detail::SortedMap>();
-  unsigned encoding = OBJ_ENCODING_SKIPLIST;
-  auto cleanup = absl::MakeCleanup([&] { CompactObj::DeleteMR<detail::SortedMap>(zs); });
 
-  if (zsetlen > 2 && !zs->Reserve(zsetlen)) {
-    LOG(ERROR) << "OOM in dictTryExpand " << zsetlen;
-    ec_ = RdbError(errc::out_of_memory);
-    return;
+  unsigned encoding = OBJ_ENCODING_SKIPLIST;
+  detail::SortedMap* zs;
+  if (config_.append) {
+    // Note we only use append_ when the set size exceeds kMaxBlobLen,
+    // which is greater than server.zset_max_listpack_entries so we'll always
+    // use a SortedMap set not listpack.
+    if (!EnsureObjEncoding(OBJ_ZSET, OBJ_ENCODING_SKIPLIST)) {
+      return;
+    }
+
+    zs = static_cast<detail::SortedMap*>(pv_->RObjPtr());
+  } else {
+    zs = CompactObj::AllocateMR<detail::SortedMap>();
+
+    size_t reserve = (config_.reserve > zsetlen) ? config_.reserve : zsetlen;
+    if (reserve > 2 && !zs->Reserve(reserve)) {
+      LOG(ERROR) << "OOM in dictTryExpand " << zsetlen;
+      ec_ = RdbError(errc::out_of_memory);
+      return;
+    }
   }
+
+  auto cleanup = absl::MakeCleanup([&] {
+    if (!config_.append) {
+      CompactObj::DeleteMR<detail::SortedMap>(zs);
+    }
+  });
 
   size_t maxelelen = 0, totelelen = 0;
 
@@ -827,7 +877,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
 
   std::move(cleanup).Cancel();
 
-  pv_->InitRobj(OBJ_ZSET, encoding, inner);
+  if (!config_.append) {
+    pv_->InitRobj(OBJ_ZSET, encoding, inner);
+  }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
@@ -1149,6 +1201,21 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
 
   LOG(FATAL) << "Unexpected variant";
   return string_view{};
+}
+
+bool RdbLoaderBase::OpaqueObjLoader::EnsureObjEncoding(CompactObjType type, unsigned encoding) {
+  if (pv_->ObjType() != type) {
+    LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType() << "; expected " << type;
+    ec_ = RdbError(errc::invalid_rdb_type);
+    return false;
+  }
+  if (pv_->Encoding() != encoding) {
+    LOG(DFATAL) << "Invalid encoding " << pv_->Encoding() << "; expected " << encoding;
+    ec_ = RdbError(errc::invalid_encoding);
+    return false;
+  }
+
+  return true;
 }
 
 std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
@@ -1586,65 +1653,84 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
 
 auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
-  SET_OR_UNEXPECT(LoadLen(nullptr), len);
-
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-
-  if (rdbtype == RDB_TYPE_HASH) {
-    len *= 2;
+  if (pending_read_.remaining > 0) {
+    len = pending_read_.remaining;
   } else {
-    DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
-    len *= 3;
+    SET_OR_UNEXPECT(LoadLen(NULL), len);
+
+    if (rdbtype == RDB_TYPE_HASH) {
+      len *= 2;
+    } else {
+      DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
+      len *= 3;
+    }
+
+    pending_read_.reserve = len;
   }
 
-  load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min<size_t>(len, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; ++j) {
-      error_code ec = ReadStringObj(&load_trace->arr[i][j].rdb_var);
-      if (ec)
-        return make_unexpected(ec);
-    }
-    len -= n;
+  // Limit each read to kMaxBlobLen elements.
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(1);
+  size_t n = std::min<size_t>(len, kMaxBlobLen);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    if (ec)
+      return make_unexpected(ec);
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (len > n) {
+    pending_read_.remaining = len - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
 auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
-  /* Read sorted set value. */
   uint64_t zsetlen;
-  SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
+  if (pending_read_.remaining > 0) {
+    zsetlen = pending_read_.remaining;
+  } else {
+    SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
+    pending_read_.reserve = zsetlen;
+  }
 
   if (zsetlen == 0)
     return Unexpected(errc::empty_key);
 
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize((zsetlen + kMaxBlobLen - 1) / kMaxBlobLen);
-
   double score;
 
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; ++j) {
-      error_code ec = ReadStringObj(&load_trace->arr[i][j].rdb_var);
-      if (ec)
-        return make_unexpected(ec);
-      if (rdbtype == RDB_TYPE_ZSET_2) {
-        SET_OR_UNEXPECT(FetchBinaryDouble(), score);
-      } else {
-        SET_OR_UNEXPECT(FetchDouble(), score);
-      }
-
-      if (isnan(score)) {
-        LOG(ERROR) << "Zset with NAN score detected";
-        return Unexpected(errc::rdb_file_corrupted);
-      }
-      load_trace->arr[i][j].score = score;
+  // Limit each read to kMaxBlobLen elements.
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(1);
+  size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    if (ec)
+      return make_unexpected(ec);
+    if (rdbtype == RDB_TYPE_ZSET_2) {
+      SET_OR_UNEXPECT(FetchBinaryDouble(), score);
+    } else {
+      SET_OR_UNEXPECT(FetchDouble(), score);
     }
-    zsetlen -= n;
+    if (isnan(score)) {
+      LOG(ERROR) << "Zset with NAN score detected";
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    load_trace->arr[0][i].score = score;
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (zsetlen > n) {
+    pending_read_.remaining = zsetlen - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
@@ -1664,42 +1750,53 @@ auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
-  uint64_t len;
-  SET_OR_UNEXPECT(LoadLen(nullptr), len);
+  size_t len;
+  if (pending_read_.remaining > 0) {
+    len = pending_read_.remaining;
+  } else {
+    SET_OR_UNEXPECT(LoadLen(NULL), len);
+    pending_read_.reserve = len;
+  }
 
   if (len == 0)
     return Unexpected(errc::empty_key);
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
+  load_trace->arr.resize(1);
+  // Lists pack multiple entries into each list node (8Kb by default),
+  // therefore using a smaller segment length than kMaxBlobLen.
+  size_t n = std::min<size_t>(len, 512);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
+    if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
+      SET_OR_UNEXPECT(LoadLen(nullptr), container);
 
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min<size_t>(len, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; ++j) {
-      uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
-      if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
-        SET_OR_UNEXPECT(LoadLen(nullptr), container);
-
-        if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
-            container != QUICKLIST_NODE_CONTAINER_PLAIN) {
-          LOG(ERROR) << "Quicklist integrity check failed.";
-          return Unexpected(errc::rdb_file_corrupted);
-        }
-      }
-
-      RdbVariant var;
-      error_code ec = ReadStringObj(&var);
-      if (ec)
-        return make_unexpected(ec);
-
-      if (StrLen(var) == 0) {
+      if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
+          container != QUICKLIST_NODE_CONTAINER_PLAIN) {
+        LOG(ERROR) << "Quicklist integrity check failed.";
         return Unexpected(errc::rdb_file_corrupted);
       }
-      load_trace->arr[i][j].rdb_var = std::move(var);
-      load_trace->arr[i][j].encoding = container;
     }
-    len -= n;
+
+    RdbVariant var;
+    error_code ec = ReadStringObj(&var);
+    if (ec)
+      return make_unexpected(ec);
+
+    if (StrLen(var) == 0) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    load_trace->arr[0][i].rdb_var = std::move(var);
+    load_trace->arr[0][i].encoding = container;
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (len > n) {
+    pending_read_.remaining = len - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};

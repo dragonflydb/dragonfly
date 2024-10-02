@@ -41,9 +41,6 @@ class EngineShard {
     Stats& operator+=(const Stats&);
   };
 
-  // EngineShard() is private down below.
-  ~EngineShard();
-
   // Sets up a new EngineShard in the thread.
   // If update_db_time is true, initializes periodic time update for its db_slice.
   static void InitThreadLocal(util::ProactorBase* pb);
@@ -121,9 +118,6 @@ class EngineShard {
   ShardDocIndices* search_indices() const {
     return shard_search_indices_.get();
   }
-
-  // for everyone to use for string transformations during atomic cpu sequences.
-  sds tmp_str1;
 
   // Moving average counters.
   enum MovingCnt { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };

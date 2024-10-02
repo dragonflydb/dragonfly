@@ -28,6 +28,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -979,7 +980,6 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
   unsigned added = 0;
   unsigned updated = 0;
 
-  sds& tmp_str = op_args.shard->tmp_str1;
   double new_score = 0;
   int retflags = 0;
 
@@ -1006,9 +1006,8 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
 
   for (size_t j = 0; j < members.size(); j++) {
     const auto& m = members[j];
-    tmp_str = sdscpylen(tmp_str, m.second.data(), m.second.size());
-
-    int retval = robj_wrapper->ZsetAdd(m.first, tmp_str, zparams.flags, &retflags, &new_score);
+    int retval =
+        robj_wrapper->ZsetAdd(m.first, WrapSds(m.second), zparams.flags, &retflags, &new_score);
 
     if (zparams.flags & ZADD_IN_INCR) {
       if (retval == 0) {
@@ -1430,9 +1429,7 @@ OpResult<unsigned> OpRank(const OpArgs& op_args, string_view key, string_view me
   }
   DCHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
   detail::SortedMap* ss = (detail::SortedMap*)robj_wrapper->inner_obj();
-  op_args.shard->tmp_str1 = sdscpylen(op_args.shard->tmp_str1, member.data(), member.size());
-
-  std::optional<unsigned> rank = ss->GetRank(op_args.shard->tmp_str1, reverse);
+  std::optional<unsigned> rank = ss->GetRank(WrapSds(member), reverse);
   if (!rank)
     return OpStatus::KEY_NOTFOUND;
 
@@ -1539,12 +1536,10 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
     return res_it.status();
 
   detail::RobjWrapper* robj_wrapper = res_it->it->second.GetRobjWrapper();
-  sds& tmp_str = op_args.shard->tmp_str1;
   unsigned deleted = 0;
-  for (string_view member : members) {
-    tmp_str = sdscpylen(tmp_str, member.data(), member.size());
-    deleted += ZsetDel(robj_wrapper, tmp_str);
-  }
+  for (string_view member : members)
+    deleted += ZsetDel(robj_wrapper, WrapSds(member));
+
   auto zlen = robj_wrapper->Size();
   res_it->post_updater.Run();
 
@@ -1566,11 +1561,8 @@ OpResult<double> OpScore(const OpArgs& op_args, string_view key, string_view mem
     return res_it.status();
 
   const PrimeValue& pv = res_it.value()->second;
-  sds& tmp_str = op_args.shard->tmp_str1;
-  tmp_str = sdscpylen(tmp_str, member.data(), member.size());
-
   const detail::RobjWrapper* robj_wrapper = pv.GetRobjWrapper();
-  auto res = GetZsetScore(robj_wrapper, tmp_str);
+  auto res = GetZsetScore(robj_wrapper, WrapSds(member));
   if (!res) {
     return OpStatus::MEMBER_NOTFOUND;
   }
@@ -1586,13 +1578,10 @@ OpResult<MScoreResponse> OpMScore(const OpArgs& op_args, string_view key,
   MScoreResponse scores(members.Size());
 
   const detail::RobjWrapper* robj_wrapper = res_it.value()->second.GetRobjWrapper();
-  sds& tmp_str = op_args.shard->tmp_str1;
 
   size_t i = 0;
-  for (string_view member : members.Range()) {
-    tmp_str = sdscpylen(tmp_str, member.data(), member.size());
-    scores[i++] = GetZsetScore(robj_wrapper, tmp_str);
-  }
+  for (string_view member : members.Range())
+    scores[i++] = GetZsetScore(robj_wrapper, WrapSds(member));
 
   return scores;
 }

@@ -4,6 +4,8 @@
 
 #include "core/sds_utils.h"
 
+#include "base/endian.h"
+
 extern "C" {
 #include "redis/sds.h"
 #include "redis/zmalloc.h"
@@ -42,6 +44,12 @@ inline int SdsHdrSize(char type) {
 }
 
 }  // namespace
+
+void SdsUpdateExpireTime(const void* obj, uint32_t time_at, uint32_t offset) {
+  sds str = (sds)obj;
+  char* valptr = str + sdslen(str) + 1;
+  absl::little_endian::Store32(valptr + offset, time_at);
+}
 
 char* AllocSdsWithSpace(uint32_t strlen, uint32_t space) {
   size_t usable;

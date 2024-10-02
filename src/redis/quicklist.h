@@ -176,7 +176,6 @@ quicklistIter *quicklistGetIteratorEntryAtIdx(quicklist *quicklist, const long l
 int quicklistNext(quicklistIter *iter, quicklistEntry *entry);
 void quicklistSetDirection(quicklistIter *iter, int direction);
 void quicklistReleaseIterator(quicklistIter *iter);
-quicklist *quicklistDup(quicklist *orig);
 void quicklistRotate(quicklist *quicklist);
 int quicklistPopCustom(quicklist *quicklist,
                        int where,
