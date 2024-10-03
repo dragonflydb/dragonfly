@@ -411,6 +411,17 @@ TEST_F(HSetFamilyTest, HExpireNoExpireEarly) {
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(UnorderedElementsAre("k0", "v0", "k1", "v1")));
 }
 
+TEST_F(HSetFamilyTest, HExpireNoSuchKey) {
+  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0"}), 1);
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0", "k1"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(-2))));
+}
+
+TEST_F(HSetFamilyTest, HExpireNoSuchField) {
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0", "k1"}),
+              RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+}
+
 TEST_F(HSetFamilyTest, HExpireNoAddNew) {
   Run({"HEXPIRE", "key", "10", "FIELDS", "1", "k0"});
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
