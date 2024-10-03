@@ -16,10 +16,9 @@ extern "C" {
 }
 namespace dfly {
 
-template <typename O>
-static std::vector<long> ExpireElements(void* ptr, const facade::CmdArgList values,
+template <typename DenseSet>
+static std::vector<long> ExpireElements(DenseSet* owner, const facade::CmdArgList values,
                                         uint32_t ttl_sec) {
-  O* owner = (O*)ptr;
   std::vector<long> res;
   res.reserve(values.size());
 

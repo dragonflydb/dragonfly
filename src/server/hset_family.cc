@@ -1358,7 +1358,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
 
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
-  vector<long> res = ExpireElements<StringMap>(sm, values, ttl_sec);
+  vector<long> res = ExpireElements(sm, values, ttl_sec);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, *pv);
   return res;
 }
