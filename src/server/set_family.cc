@@ -1545,7 +1545,7 @@ vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, PrimeValue& p
   }
 
   SetType st{pv.RObjPtr(), pv.Encoding()};
-  return CompactObj::ExpireElements<StringSet>(st.first, values, ttl_sec);
+  return ExpireElements<StringSet>(st.first, values, ttl_sec);
 }
 
 }  // namespace dfly
