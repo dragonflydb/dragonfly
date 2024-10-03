@@ -462,15 +462,24 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
   /* Update memory limits */
 
   // Start by reading global memory limits
-  constexpr auto base_mem = "/sys/fs/cgroup/memory"sv;
-  read_mem(StrCat(base_mem, "/memory.limit_in_bytes"), &mdata->mem_total);
-  read_mem(StrCat(base_mem, "/memory.max"), &mdata->mem_total);
+  auto parse_limits = [&](std::string_view base_mem) {
+    read_mem(StrCat(base_mem, "/memory.limit_in_bytes"), &mdata->mem_total);
+    read_mem(StrCat(base_mem, "/memory.max"), &mdata->mem_total);
+  };
+
+  // For v1
+  constexpr auto base_mem_v1 = "/sys/fs/cgroup/memory"sv;
+  parse_limits(base_mem_v1);
+  // For v2 if the previous failed
+  if (!read_something) {
+    constexpr auto base_mem_v2 = "/sys/fs/cgroup"sv;
+    parse_limits(base_mem_v2);
+  }
 
   // Read cgroup-specific limits
   read_mem(StrCat(mem_path, "/memory.limit_in_bytes"), &mdata->mem_total);
   read_mem(StrCat(mem_path, "/memory.max"), &mdata->mem_total);
   read_mem(StrCat(mem_path, "/memory.high"), &mdata->mem_avail);
-
   mdata->mem_avail = min(mdata->mem_avail, mdata->mem_total);
 
   /* Update thread limits */
