@@ -644,4 +644,24 @@ TEST_F(RdbTest, LoadHugeList) {
   ASSERT_EQ(100000, CheckedInt({"llen", "test:1"}));
 }
 
+// Tests loading a huge stream, where the stream is loaded in multiple partial
+// reads.
+TEST_F(RdbTest, LoadHugeStream) {
+  // Add a huge stream (test:0) with 2000 entries, and 4 1k elements per entry
+  // (note must be more than 512*4kb elements to test partial reads).
+  for (int i = 0; i != 2000; i++) {
+    Run({"debug", "populate", "1", "test", "2000", "rand", "type", "stream", "elements", "4"});
+  }
+  ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
+
+  RespExpr resp = Run({"save", "df"});
+  ASSERT_EQ(resp, "OK");
+
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  resp = Run({"dfly", "load", save_info.file_name});
+  ASSERT_EQ(resp, "OK");
+
+  ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
+}
+
 }  // namespace dfly

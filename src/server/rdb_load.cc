@@ -862,11 +862,22 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
-  CHECK(ltrace->stream_trace);
+  stream* s;
+  if (config_.append) {
+    if (!EnsureObjEncoding(OBJ_STREAM, OBJ_ENCODING_STREAM)) {
+      return;
+    }
 
-  stream* s = streamNew();
+    s = static_cast<stream*>(pv_->RObjPtr());
+  } else {
+    s = streamNew();
+  }
 
-  auto cleanup = absl::Cleanup([&] { freeStream(s); });
+  auto cleanup = absl::Cleanup([&] {
+    if (config_.append) {
+      freeStream(s);
+    }
+  });
 
   for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
     string_view nodekey = ToSV(ltrace->arr[i].rdb_var);
@@ -900,6 +911,19 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
       return;
     }
   }
+
+  // We only load the stream metadata and consumer groups (stream_trace) on
+  // the final read (when reading the stream in increments). Therefore if
+  // stream_trace is null add the partial stream, then stream_trace will be
+  // loaded later.
+  if (!ltrace->stream_trace) {
+    if (!config_.append) {
+      pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
+    }
+    std::move(cleanup).Cancel();
+    return;
+  }
+
   s->length = ltrace->stream_trace->stream_len;
   s->last_id.ms = ltrace->stream_trace->ms;
   s->last_id.seq = ltrace->stream_trace->seq;
@@ -970,7 +994,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   }
 
   std::move(cleanup).Cancel();
-  pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
+  if (!config_.append) {
+    pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
+  }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
@@ -1776,15 +1802,21 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
-  uint64_t listpacks;
-  SET_OR_UNEXPECT(LoadLen(nullptr), listpacks);
+  size_t listpacks;
+  if (pending_read_.remaining > 0) {
+    listpacks = pending_read_.remaining;
+  } else {
+    SET_OR_UNEXPECT(LoadLen(NULL), listpacks);
+  }
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  auto& blob_arr = load_trace->arr;
-  blob_arr.resize(listpacks * 2);
+  // Streams pack multiple entries into each stream node (4Kb or 100
+  // entries), therefore using a smaller segment length than kMaxBlobLen.
+  size_t n = std::min<size_t>(listpacks, 512);
+  load_trace->arr.resize(n * 2);
 
   error_code ec;
-  for (size_t i = 0; i < listpacks; ++i) {
+  for (size_t i = 0; i < n; ++i) {
     /* Get the master ID, the one we'll use as key of the radix tree
      * node: the entries inside the listpack itself are delta-encoded
      * relatively to this ID. */
@@ -1806,9 +1838,23 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
       return Unexpected(errc::rdb_file_corrupted);
     }
 
-    blob_arr[2 * i].rdb_var = std::move(stream_id);
-    blob_arr[2 * i + 1].rdb_var = std::move(blob);
+    load_trace->arr[2 * i].rdb_var = std::move(stream_id);
+    load_trace->arr[2 * i + 1].rdb_var = std::move(blob);
   }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  //
+  // We only load the stream metadata and consumer groups in the final read,
+  // so if there are still unread elements return the partial stream.
+  if (listpacks > n) {
+    pending_read_.remaining = listpacks - n;
+    return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
+  }
+
+  // Load stream metadata.
 
   load_trace->stream_trace.reset(new StreamTrace);
 

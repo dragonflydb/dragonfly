@@ -124,7 +124,15 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
     }
     json[json.size() - 1] = '}';  // Replace last ',' with '}'
     args.push_back(json);
+  } else if (type == "STREAM") {
+    cid = registry.Find("XADD");
+    args.push_back("*");
+    for (size_t i = 0; i < elements; ++i) {
+      args.push_back(GenerateValue(val_size / 2, random_value, gen));
+      args.push_back(GenerateValue(val_size / 2, random_value, gen));
+    }
   }
+
   return {cid, args};
 }
 
