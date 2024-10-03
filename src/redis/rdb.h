@@ -38,7 +38,7 @@
 
 /* The current RDB version. When the format changes in a way that is no longer
  * backward compatible this number gets incremented. */
-#define RDB_VERSION 11
+#define RDB_VERSION 12
 
 /* We would like to serialize to version 9 such that our rdb files
  * can be loaded by redis version 6 (RDB_VERSION 9) */
@@ -110,6 +110,7 @@
 /* Range 200-240 is used by Dragonfly specific opcodes */
 
 /* Special RDB opcodes (saved/loaded with rdbSaveType/rdbLoadType). */
+#define RDB_OPCODE_SLOT_INFO  244   /* Individual slot info, such as slot id and size (cluster mode only). */
 #define RDB_OPCODE_FUNCTION   246   /* engine data */
 #define RDB_OPCODE_FUNCTION2  245   /* function library data */
 #define RDB_OPCODE_FUNCTION_PRE_GA   246   /* old function library data for 7.0 rc1 and rc2 */
