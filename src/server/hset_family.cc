@@ -740,7 +740,7 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
     return op_res.status();
   }
 
-  PrimeValue& pv = (*op_res).it->second;
+  PrimeValue* pv = &((*op_res).it->second);
   return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
 }
 
@@ -1341,25 +1341,25 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
 }
 
 vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                             string_view key, CmdArgList values, PrimeValue& pv) {
-  DCHECK_EQ(OBJ_HASH, pv.ObjType());
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
+                                             string_view key, CmdArgList values, PrimeValue* pv) {
+  DCHECK_EQ(OBJ_HASH, pv->ObjType());
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv);
 
-  if (pv.Encoding() == kEncodingListPack) {
+  if (pv->Encoding() == kEncodingListPack) {
     // a valid result can never be a listpack, since it doesnt keep ttl
-    uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    uint8_t* lp = (uint8_t*)pv->RObjPtr();
     auto& db_slice = op_args.GetDbSlice();
     DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
     stats->listpack_bytes -= lpBytes(lp);
     stats->listpack_blob_cnt--;
     StringMap* sm = HSetFamily::ConvertToStrMap(lp);
-    pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
   }
 
   // This needs to be explicitly fetched again since the pv might have changed.
-  StringMap* sm = container_utils::GetStringMap(pv, op_args.db_cntx);
+  StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
   vector<long> res = ExpireElements<StringMap>(sm, values, ttl_sec);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, *pv);
   return res;
 }
 

@@ -1530,21 +1530,21 @@ int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue
 }
 
 vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                            CmdArgList values, PrimeValue& pv) {
-  DCHECK_EQ(OBJ_SET, pv.ObjType());
+                                            CmdArgList values, PrimeValue* pv) {
+  DCHECK_EQ(OBJ_SET, pv->ObjType());
 
-  if (pv.Encoding() == kEncodingIntSet) {
+  if (pv->Encoding() == kEncodingIntSet) {
     // a valid result can never be a intset, since it doesnt keep ttl
-    intset* is = (intset*)pv.RObjPtr();
+    intset* is = (intset*)pv->RObjPtr();
     StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
     if (!ss) {
       std::vector<long> out(values.size(), -2);
       return out;
     }
-    pv.InitRobj(OBJ_SET, kEncodingStrMap2, ss);
+    pv->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
   }
 
-  SetType st{pv.RObjPtr(), pv.Encoding()};
+  SetType st{pv->RObjPtr(), pv->Encoding()};
   return ExpireElements<StringSet>(st.first, values, ttl_sec);
 }
 

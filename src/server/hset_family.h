@@ -31,7 +31,7 @@ class HSetFamily {
 
   static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
                                                std::string_view key, CmdArgList values,
-                                               PrimeValue& pv);
+                                               PrimeValue* pv);
 
  private:
   // TODO: to move it to anonymous namespace in cc file.
