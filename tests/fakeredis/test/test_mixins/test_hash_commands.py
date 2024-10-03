@@ -1,8 +1,8 @@
-from test import testtools
-
 import pytest
 import redis
 import redis.client
+
+from test import testtools
 
 
 def test_hstrlen_missing(r: redis.Redis):
