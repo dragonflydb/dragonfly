@@ -15,6 +15,7 @@
 #include "core/mi_memory_resource.h"
 #include "core/small_string.h"
 #include "core/string_or_view.h"
+#include "facade/facade_types.h"
 
 namespace dfly {
 
@@ -150,6 +151,27 @@ class CompactObj {
  public:
   using PrefixArray = std::vector<std::string_view>;
   using MemoryResource = detail::RobjWrapper::MemoryResource;
+
+  template <typename O>
+  static std::vector<long> ExpireElements(void* ptr, const facade::CmdArgList values,
+                                          uint32_t ttl_sec) {
+    O* owner = (O*)ptr;
+    std::vector<long> res;
+    res.reserve(values.size());
+
+    for (size_t i = 0; i < values.size(); i++) {
+      std::string_view field = facade::ToSV(values[i]);
+      auto it = owner->Find(field);
+      if (it != owner->end()) {
+        it.SetExpiryTime(ttl_sec);
+        res.emplace_back(ttl_sec == 0 ? 0 : 1);
+      } else {
+        res.emplace_back(-2);
+      }
+    }
+
+    return res;
+  }
 
   CompactObj() {  // By default - empty string.
   }

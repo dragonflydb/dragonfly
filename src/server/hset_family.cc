@@ -1341,9 +1341,6 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
 vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, PrimeValue& pv,
                                              uint32_t ttl_sec, string_view key, CmdArgList values) {
   DCHECK_EQ(OBJ_HASH, pv.ObjType());
-  vector<long> res;
-  res.reserve(values.size());
-
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
   if (pv.Encoding() == kEncodingListPack) {
@@ -1359,18 +1356,7 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, PrimeValue& 
 
   // This needs to be explicitly fetched again since the pv might have changed.
   StringMap* sm = container_utils::GetStringMap(pv, op_args.db_cntx);
-
-  for (size_t i = 0; i < values.size(); i++) {
-    string_view field = ToSV(values[i]);
-    auto it = sm->Find(field);
-    if (it != sm->end()) {
-      it.SetExpiryTime(ttl_sec);
-      res.emplace_back(ttl_sec == 0 ? 0 : 1);
-    } else {
-      res.emplace_back(-2);
-    }
-  }
-
+  vector<long> res = CompactObj::ExpireElements<StringMap>(sm, values, ttl_sec);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
   return res;
 }
