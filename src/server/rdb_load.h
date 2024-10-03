@@ -128,6 +128,10 @@ class RdbLoaderBase {
   };
 
   struct LoadConfig {
+    // Whether the loaded item is being streamed incrementally in partial
+    // reads.
+    bool streamed = false;
+
     // Number of elements in the object to reserve.
     //
     // Used to reserve the elements in a huge object up front, then append
