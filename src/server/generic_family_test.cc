@@ -813,6 +813,20 @@ TEST_F(GenericFamilyTest, FieldExpireHset) {
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
 }
 
+TEST_F(GenericFamilyTest, FieldExpireNoSuchField) {
+  EXPECT_EQ(CheckedInt({"SADD", "key", "a"}), 1);
+  EXPECT_EQ(CheckedInt({"HSET", "key2", "k0", "v0"}), 1);
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(-2))));
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key2", "10", "k0", "b"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(-2))));
+}
+
+TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}),
+              RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+}
+
 TEST_F(GenericFamilyTest, ExpireTime) {
   EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));

@@ -1529,8 +1529,8 @@ int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue
   return GetExpiry(db_context, st, field);
 }
 
-vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, PrimeValue& pv, uint32_t ttl_sec,
-                                            CmdArgList values) {
+vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
+                                            CmdArgList values, PrimeValue& pv) {
   DCHECK_EQ(OBJ_SET, pv.ObjType());
 
   if (pv.Encoding() == kEncodingIntSet) {

@@ -686,9 +686,9 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
 
   PrimeValue& pv = it->second;
   if (pv.ObjType() == OBJ_SET) {
-    return SetFamily::SetFieldsExpireTime(op_args, pv, ttl_sec, values);
+    return SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
   } else {
-    return HSetFamily::SetFieldsExpireTime(op_args, pv, ttl_sec, key, values);
+    return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
   }
 }
 

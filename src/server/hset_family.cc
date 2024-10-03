@@ -741,7 +741,7 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   }
 
   PrimeValue& pv = (*op_res).it->second;
-  return HSetFamily::SetFieldsExpireTime(op_args, pv, ttl_sec, key, values);
+  return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
 }
 
 // HSETEX key [NX] tll_sec field value field value ...
@@ -1340,8 +1340,8 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
   }
 }
 
-vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, PrimeValue& pv,
-                                             uint32_t ttl_sec, string_view key, CmdArgList values) {
+vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
+                                             string_view key, CmdArgList values, PrimeValue& pv) {
   DCHECK_EQ(OBJ_HASH, pv.ObjType());
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, pv);
 
