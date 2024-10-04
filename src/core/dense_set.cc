@@ -477,32 +477,6 @@ void DenseSet::Grow(size_t prev_size) {
   }
 }
 
-auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
-  uint64_t hc = Hash(ptr, 0);
-
-  if (entries_.empty()) {
-    capacity_log_ = kMinSizeShift;
-    entries_.resize(kMinSize);
-    uint32_t bucket_id = BucketId(hc);
-    auto e = entries_.begin() + bucket_id;
-    obj_malloc_used_ += PushFront(e, ptr, has_ttl);
-    ++size_;
-    ++num_used_buckets_;
-
-    return nullptr;
-  }
-
-  // if the value is already in the set exit early
-  uint32_t bucket_id = BucketId(hc);
-  DensePtr* dptr = Find(ptr, bucket_id, 0).second;
-  if (dptr != nullptr) {
-    return dptr;
-  }
-
-  AddUnique(ptr, has_ttl, hc);
-  return nullptr;
-}
-
 // Assumes that the object does not exist in the set.
 void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   if (entries_.empty()) {
@@ -685,22 +659,25 @@ void* DenseSet::PopInternal() {
 }
 
 void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
-  DensePtr* ptr = AddOrFindDense(obj, has_ttl);
-  if (!ptr)
-    return nullptr;
+  uint64_t hc = Hash(obj, 0);
+  DensePtr* dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
 
-  if (ptr->IsLink()) {
-    ptr = ptr->AsLink();
+  if (dptr) {  // replace
+    if (dptr->IsLink())
+      dptr = dptr->AsLink();
+
+    void* res = dptr->Raw();
+    obj_malloc_used_ -= ObjectAllocSize(res);
+    obj_malloc_used_ += ObjectAllocSize(obj);
+
+    dptr->SetObject(obj);
+    dptr->SetTtl(has_ttl);
+
+    return res;
   }
 
-  void* res = ptr->Raw();
-  obj_malloc_used_ -= ObjectAllocSize(res);
-  obj_malloc_used_ += ObjectAllocSize(obj);
-
-  ptr->SetObject(obj);
-  ptr->SetTtl(has_ttl);
-
-  return res;
+  AddUnique(obj, has_ttl, hc);
+  return nullptr;
 }
 
 /**
