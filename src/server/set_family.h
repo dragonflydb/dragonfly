@@ -33,6 +33,9 @@ class SetFamily {
   static int32_t FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
                                  std::string_view field);
 
+  static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
+                                               CmdArgList values, PrimeValue* pv);
+
  private:
 };
 

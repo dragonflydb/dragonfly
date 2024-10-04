@@ -4,6 +4,8 @@
 
 #include "server/hset_family.h"
 
+#include "server/family_utils.h"
+
 extern "C" {
 #include "redis/listpack.h"
 #include "redis/redis_aux.h"
@@ -725,6 +727,23 @@ void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) 
   }
 }
 
+OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
+                                 CmdArgList values) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto op_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
+
+  if (!op_res) {
+    if (op_res.status() == OpStatus::KEY_NOTFOUND) {
+      std::vector<long> res(values.size(), -2);
+      return res;
+    }
+    return op_res.status();
+  }
+
+  PrimeValue* pv = &((*op_res).it->second);
+  return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
+}
+
 // HSETEX key [NX] tll_sec field value field value ...
 void HSetEx(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
@@ -803,6 +822,49 @@ void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
   OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
   if (result) {
     cntx->SendLong(*result);
+  } else {
+    cntx->SendError(result.status());
+  }
+}
+
+void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+  string_view ttl_str = parser.Next();
+  uint32_t ttl_sec;
+  constexpr uint32_t kMaxTtl = (1UL << 26);
+  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
+    return cntx->SendError(kInvalidIntErr);
+  }
+  if (!static_cast<bool>(parser.Check("FIELDS"sv))) {
+    return cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                           kSyntaxErrType);
+  }
+
+  string_view numFieldsStr = parser.Next();
+  uint32_t numFields;
+  if (!absl::SimpleAtoi(numFieldsStr, &numFields) || numFields == 0) {
+    return cntx->SendError(kInvalidIntErr);
+  }
+
+  CmdArgList fields = parser.Tail();
+  if (fields.size() != numFields) {
+    return cntx->SendError("The `numfields` parameter must match the number of arguments",
+                           kSyntaxErrType);
+  }
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
+  };
+
+  OpResult<vector<long>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (result) {
+    rb->StartArray(result->size());
+    const auto& array = result.value();
+    for (const auto& v : array) {
+      rb->SendLong(v);
+    }
   } else {
     cntx->SendError(result.status());
   }
@@ -1189,6 +1251,7 @@ constexpr uint32_t kHSet = WRITE | HASH | FAST;
 constexpr uint32_t kHSetEx = WRITE | HASH | FAST;
 constexpr uint32_t kHSetNx = WRITE | HASH | FAST;
 constexpr uint32_t kHStrLen = READ | HASH | FAST;
+constexpr uint32_t kHExpire = WRITE | HASH | FAST;
 constexpr uint32_t kHVals = READ | HASH | SLOW;
 }  // namespace acl
 
@@ -1206,6 +1269,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
       << CI{"HINCRBYFLOAT", CO::WRITE | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::kHIncrByFloat}.HFUNC(
              HIncrByFloat)
       << CI{"HKEYS", CO::READONLY, 2, 1, 1, acl::kHKeys}.HFUNC(HKeys)
+      << CI{"HEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -5, 1, 1, acl::kHExpire}.HFUNC(HExpire)
       << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1, acl::kHRandField}.HFUNC(HRandField)
       << CI{"HSCAN", CO::READONLY, -3, 1, 1, acl::kHScan}.HFUNC(HScan)
       << CI{"HSET", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kHSet}.HFUNC(HSet)
@@ -1274,6 +1338,29 @@ int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValu
       return -3;
     return it.HasExpiry() ? it.ExpiryTime() : -1;
   }
+}
+
+vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
+                                             string_view key, CmdArgList values, PrimeValue* pv) {
+  DCHECK_EQ(OBJ_HASH, pv->ObjType());
+  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv);
+
+  if (pv->Encoding() == kEncodingListPack) {
+    // a valid result can never be a listpack, since it doesnt keep ttl
+    uint8_t* lp = (uint8_t*)pv->RObjPtr();
+    auto& db_slice = op_args.GetDbSlice();
+    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
+    stats->listpack_bytes -= lpBytes(lp);
+    stats->listpack_blob_cnt--;
+    StringMap* sm = HSetFamily::ConvertToStrMap(lp);
+    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
+  }
+
+  // This needs to be explicitly fetched again since the pv might have changed.
+  StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
+  vector<long> res = ExpireElements(sm, values, ttl_sec);
+  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, *pv);
+  return res;
 }
 
 }  // namespace dfly

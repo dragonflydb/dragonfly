@@ -29,9 +29,14 @@ class HSetFamily {
   static int32_t FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
                                  std::string_view field);
 
+  static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
+                                               std::string_view key, CmdArgList values,
+                                               PrimeValue* pv);
+
  private:
   // TODO: to move it to anonymous namespace in cc file.
 
+  static void HExpire(CmdArgList args, ConnectionContext* cntx);
   static void HDel(CmdArgList args, ConnectionContext* cntx);
   static void HLen(CmdArgList args, ConnectionContext* cntx);
   static void HExists(CmdArgList args, ConnectionContext* cntx);

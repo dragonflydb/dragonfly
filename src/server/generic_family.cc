@@ -7,6 +7,7 @@
 #include <boost/operators.hpp>
 #include <optional>
 
+#include "facade/cmd_arg_parser.h"
 #include "facade/reply_builder.h"
 
 extern "C" {
@@ -44,6 +45,7 @@ using namespace facade;
 
 namespace {
 
+constexpr uint32_t kMaxTtl = (1UL << 26);
 constexpr size_t DUMP_FOOTER_SIZE = sizeof(uint64_t) + sizeof(uint16_t);  // version number and crc
 
 std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
@@ -672,6 +674,24 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   return res.status();
 }
 
+OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uint32_t ttl_sec,
+                                     CmdArgList values) {
+  auto& db_slice = op_args.GetDbSlice();
+  auto [it, expire_it, auto_updater] = db_slice.FindMutable(op_args.db_cntx, key);
+
+  if (!IsValid(it) || (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)) {
+    std::vector<long> res(values.size(), -2);
+    return res;
+  }
+
+  PrimeValue* pv = &it->second;
+  if (pv->ObjType() == OBJ_SET) {
+    return SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
+  } else {
+    return HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, key, values, pv);
+  }
+}
+
 // returns -2 if the key was not found, -3 if the field was not found,
 // -1 if ttl on the field was not found.
 OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, string_view field) {
@@ -1261,6 +1281,33 @@ void GenericFamily::Restore(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
+void GenericFamily::FieldExpire(CmdArgList args, ConnectionContext* cntx) {
+  CmdArgParser parser{args};
+  string_view key = parser.Next();
+  string_view ttl_str = parser.Next();
+  uint32_t ttl_sec;
+  if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
+    return cntx->SendError(kInvalidIntErr);
+  }
+  CmdArgList fields = parser.Tail();
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpFieldExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
+  };
+
+  OpResult<vector<long>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  if (result) {
+    rb->StartArray(result->size());
+    const auto& array = result.value();
+    for (const auto& v : array) {
+      rb->SendLong(v);
+    }
+  } else {
+    cntx->SendError(result.status());
+  }
+}
+
 // Returns -2 if key not found, WRONG_TYPE if key is not a set or hash
 // -1 if the field does not have associated TTL on it, and -3 if field is not found.
 void GenericFamily::FieldTtl(CmdArgList args, ConnectionContext* cntx) {
@@ -1763,6 +1810,7 @@ constexpr uint32_t kMove = KEYSPACE | WRITE | FAST;
 constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
+constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
@@ -1788,6 +1836,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
              PexpireAt)
       << CI{"PEXPIRE", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kPExpire}.HFUNC(
              Pexpire)
+      << CI{"FIELDEXPIRE", CO::WRITE | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kFieldExpire}.HFUNC(
+             FieldExpire)
       << CI{"RENAME", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
       << CI{"RENAMENX", CO::WRITE | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
