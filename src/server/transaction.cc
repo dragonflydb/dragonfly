@@ -1052,25 +1052,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   if (txid_ > 0 && shard->committed_txid() >= txid_)
     return false;
 
-  // Acquire intent locks. Intent locks are always acquired, even if already locked by others.
-  if (!IsGlobal()) {
-    lock_args = GetLockArgs(shard->shard_id());
-    bool shard_unlocked = shard->shard_lock()->Check(mode);
-
-    // Check if we can run immediately
-    if (shard_unlocked && execute_optimistic &&
-        CheckLocks(GetDbSlice(shard->shard_id()), mode, lock_args)) {
-      sd.local_mask |= OPTIMISTIC_EXECUTION;
-      shard->stats().tx_optimistic_total++;
-
-      RunCallback(shard);
-
-      // Check state again, it could've been updated if the callback returned AVOID_CONCLUDING flag.
-      // Only possible for single shard.
-      if (coordinator_state_ & COORD_CONCLUDING)
-        return true;
-    }
-
+  auto acquire_fp_locks = [&](bool shard_unlocked) mutable {
     bool keys_unlocked = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
     lock_granted = shard_unlocked && keys_unlocked;
 
@@ -1080,6 +1062,40 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
     }
 
     DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
+  };
+
+  auto release_fp_locks = [&]() {
+    GetDbSlice(shard->shard_id()).Release(mode, lock_args);
+    sd.local_mask &= ~KEYLOCK_ACQUIRED;
+  };
+
+  // Acquire intent locks. Intent locks are always acquired, even if already locked by others.
+  if (!IsGlobal()) {
+    lock_args = GetLockArgs(shard->shard_id());
+    bool shard_unlocked = shard->shard_lock()->Check(mode);
+
+    // Check if we can run immediately
+    if (shard_unlocked && execute_optimistic &&
+        CheckLocks(GetDbSlice(shard->shard_id()), mode, lock_args)) {
+      // We need to acquire the fp locks because the executing callback
+      // within RunCallback might preempt.
+      acquire_fp_locks(shard_unlocked);
+      sd.local_mask |= OPTIMISTIC_EXECUTION;
+      shard->stats().tx_optimistic_total++;
+
+      RunCallback(shard);
+
+      // Check state again, it could've been updated if the callback returned AVOID_CONCLUDING flag.
+      // Only possible for single shard.
+      if (coordinator_state_ & COORD_CONCLUDING) {
+        release_fp_locks();
+        return true;
+      }
+    }
+
+    if (!lock_granted) {
+      acquire_fp_locks(shard_unlocked);
+    }
   }
 
   // Single shard operations might have delayed acquiring txid unless neccessary.
@@ -1095,8 +1111,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   // fail this scheduling attempt for trans.
   if (!txq->Empty() && txid_ < txq->TailScore() && !lock_granted) {
     if (sd.local_mask & KEYLOCK_ACQUIRED) {
-      GetDbSlice(shard->shard_id()).Release(mode, lock_args);
-      sd.local_mask &= ~KEYLOCK_ACQUIRED;
+      release_fp_locks();
     }
     return false;
   }
