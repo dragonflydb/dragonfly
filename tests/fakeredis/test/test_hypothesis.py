@@ -2,31 +2,20 @@ import functools
 import math
 import operator
 import sys
-from typing import Tuple, Any
+from typing import Any, Tuple, Union
 
-import fakeredis
 import hypothesis
 import hypothesis.stateful
 import hypothesis.strategies as st
 import pytest
 import redis
-from fakeredis._server import _create_version
 from hypothesis.stateful import rule, initialize, precondition
 from hypothesis.strategies import SearchStrategy
 
+import fakeredis
+from fakeredis._server import _create_version
+
 self_strategy = st.runner()
-
-
-def get_redis_version() -> Tuple[int]:
-    try:
-        r = redis.StrictRedis("localhost", port=6380, db=2)
-        r.ping()
-        return _create_version(r.info()["redis_version"])
-    except redis.ConnectionError:
-        return (6,)
-    finally:
-        if hasattr(r, "close"):
-            r.close()  # Absent in older versions of redis-py
 
 
 @st.composite
@@ -38,7 +27,28 @@ def sample_attr(draw, name):
     return values[position]
 
 
-redis_ver = get_redis_version()
+def server_info() -> Tuple[str, Union[None, Tuple[int, ...]]]:
+    """Returns server's version or None if server is not running"""
+    client = None
+    try:
+        client = redis.Redis("localhost", port=6390, db=2)
+        client_info = client.info()
+        server_type = "dragonfly" if "dragonfly_version" in client_info else "redis"
+        server_version = (
+            client_info["redis_version"] if server_type != "dragonfly" else (7, 0)
+        )
+        server_version = _create_version(server_version) or (7,)
+        return server_type, server_version
+    except redis.ConnectionError as e:
+        print(e)
+        pytest.exit("Redis is not running")
+        return "redis", (6,)
+    finally:
+        if hasattr(client, "close"):
+            client.close()  # Absent in older versions of redis-py
+
+
+server_type, redis_ver = server_info()
 
 keys = sample_attr("keys")
 fields = sample_attr("fields")
@@ -49,9 +59,7 @@ int_as_bytes = st.builds(lambda x: str(default_normalize(x)).encode(), st.intege
 float_as_bytes = st.builds(
     lambda x: repr(default_normalize(x)).encode(), st.floats(width=32)
 )
-counts = st.integers(min_value=-3, max_value=3) | st.integers(
-    min_value=-2147483648, max_value=2147483647
-)
+counts = st.integers(min_value=-3, max_value=3) | st.integers()
 limits = st.just(()) | st.tuples(st.just("limit"), counts, counts)
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
 # a limited range (https://github.com/antirez/redis/issues/5737).
@@ -286,7 +294,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
     def __init__(self):
         super().__init__()
         try:
-            self.real = redis.StrictRedis("localhost", port=6380, db=2)
+            self.real = redis.StrictRedis("localhost", port=6390, db=2)
             self.real.ping()
         except redis.ConnectionError:
             pytest.skip("redis is not running")
@@ -294,7 +302,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             self.real.connection_pool.disconnect()
             pytest.skip("redis server is not 64-bit")
         self.fake = fakeredis.FakeStrictRedis(
-            server=fakeredis.FakeServer(version=redis_ver), port=6380, db=2
+            server=fakeredis.FakeServer(version=redis_ver), port=6390, db=2
         )
         # Disable the response parsing so that we can check the raw values returned
         self.fake.response_callbacks.clear()
@@ -403,15 +411,22 @@ class BaseTest:
 
     command_strategy: SearchStrategy
     create_command_strategy = st.nothing()
+    command_strategy_redis7 = st.nothing()
 
     @pytest.mark.slow
     def test(self):
         class Machine(CommonMachine):
             create_command_strategy = self.create_command_strategy
-            command_strategy = self.command_strategy
+            command_strategy = (
+                self.command_strategy | self.command_strategy_redis7
+                if redis_ver >= (7,)
+                else self.command_strategy
+            )
 
-        # hypothesis.settings.register_profile("debug", max_examples=10, verbosity=hypothesis.Verbosity.debug)
-        # hypothesis.settings.load_profile("debug")
+        hypothesis.settings.register_profile(
+            "debug", max_examples=10, verbosity=hypothesis.Verbosity.debug
+        )
+        hypothesis.settings.load_profile("debug")
         hypothesis.stateful.run_state_machine_as_test(Machine)
 
 
@@ -420,7 +435,7 @@ class TestConnection(BaseTest):
     connection_commands = (
         commands(st.just("echo"), values)
         | commands(st.just("ping"), st.lists(values, max_size=2))
-        # | commands(st.just("swapdb"), dbnums, dbnums)
+        | commands(st.just("swapdb"), dbnums, dbnums)
     )
     command_strategy = connection_commands | common_commands
 
@@ -478,6 +493,50 @@ class TestHash(BaseTest):
         | commands(st.just("hsetnx"), keys, fields, values)
         | commands(st.just("hstrlen"), keys, fields)
     )
+    command_strategy_redis7 = (
+        commands(
+            st.just("hpersist"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+        | commands(
+            st.just("hexpiretime"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+        | commands(
+            st.just("hpexpiretime"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+        | commands(
+            st.just("hexpire"),
+            keys,
+            expires_seconds,
+            st.none() | st.just("nx"),
+            st.none() | st.just("xx"),
+            st.none() | st.just("gt"),
+            st.none() | st.just("lt"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+        | commands(
+            st.just("hpexpire"),
+            keys,
+            expires_ms,
+            st.none() | st.just("nx"),
+            st.none() | st.just("xx"),
+            st.none() | st.just("gt"),
+            st.none() | st.just("lt"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+    )
     create_command_strategy = commands(
         st.just("hset"), keys, st.lists(st.tuples(fields, values), min_size=1)
     )
@@ -499,7 +558,7 @@ class TestList(BaseTest):
         | commands(
             st.sampled_from(["lpop", "rpop"]),
             keys,
-            st.just(None) | st.just([]) | counts,
+            st.just(None) | st.just([]) | st.integers(),
         )
         | commands(
             st.sampled_from(["lpush", "lpushx", "rpush", "rpushx"]),
@@ -781,8 +840,3 @@ def mutated_commands(commands):
         | add_arg(x, args)
         | swap_args(x),
     )
-
-
-class TestFuzz(BaseTest):
-    command_strategy = mutated_commands(TestJoint.command_strategy)
-    command_strategy = command_strategy.filter(lambda command: command.testable)

@@ -112,8 +112,8 @@ def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
     return args_dict
 
 
-@pytest.fixture(scope="function", params=[{}])
-def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
+@pytest_asyncio.fixture(scope="function", params=[{}])
+async def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
     """
     Create an instance factory with supplied params.
     """
@@ -142,7 +142,7 @@ def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
 
     factory = DflyInstanceFactory(params, args)
     yield factory
-    factory.stop_all()
+    await factory.stop_all()
 
 
 @pytest.fixture(scope="function")
@@ -183,23 +183,6 @@ def df_server(df_factory: DflyInstanceFactory) -> DflyInstance:
 @pytest.fixture(scope="function")
 def connection(df_server: DflyInstance):
     return redis.Connection(port=df_server.port)
-
-
-# @pytest.fixture(scope="class")
-# def sync_pool(df_server: DflyInstance):
-#     pool = redis.ConnectionPool(decode_responses=True, port=df_server.port)
-#     yield pool
-#     pool.disconnect()
-
-
-# @pytest.fixture(scope="class")
-# def client(sync_pool):
-#     """
-#     Return a client to the default instance with all entries flushed.
-#     """
-#     client = redis.Redis(connection_pool=sync_pool)
-#     client.flushall()
-#     return client
 
 
 @pytest.fixture(scope="function")

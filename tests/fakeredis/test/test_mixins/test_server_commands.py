@@ -3,9 +3,7 @@ from time import sleep
 
 import pytest
 import redis
-from fakeredis._commands import SUPPORTED_COMMANDS
 from redis.exceptions import ResponseError
-from test.testtools import fake_only
 
 
 @pytest.mark.unsupported_server_types("dragonfly")
@@ -44,20 +42,6 @@ def test_bgsave(r: redis.Redis):
 
 def test_lastsave(r: redis.Redis):
     assert isinstance(r.lastsave(), datetime)
-
-
-@fake_only
-def test_command(r: redis.Redis):
-    commands_dict = r.command()
-    one_word_commands = {cmd for cmd in SUPPORTED_COMMANDS if " " not in cmd}
-    assert one_word_commands - set(commands_dict.keys()) == set()
-
-
-@fake_only
-def test_command_count(r: redis.Redis):
-    assert r.command_count() >= len(
-        [cmd for cmd in SUPPORTED_COMMANDS if " " not in cmd]
-    )
 
 
 @pytest.mark.unsupported_server_types("dragonfly")

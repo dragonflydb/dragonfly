@@ -5,6 +5,7 @@ import pytest
 import redis
 from fakeredis import _msgs as msgs
 from redis.exceptions import ResponseError
+
 from test.testtools import raw_command
 
 

@@ -176,7 +176,6 @@ quicklistIter *quicklistGetIteratorEntryAtIdx(quicklist *quicklist, const long l
 int quicklistNext(quicklistIter *iter, quicklistEntry *entry);
 void quicklistSetDirection(quicklistIter *iter, int direction);
 void quicklistReleaseIterator(quicklistIter *iter);
-quicklist *quicklistDup(quicklist *orig);
 void quicklistRotate(quicklist *quicklist);
 int quicklistPopCustom(quicklist *quicklist,
                        int where,
@@ -186,7 +185,6 @@ int quicklistPopCustom(quicklist *quicklist,
                        void *(*saver)(unsigned char *data, size_t sz));
 int quicklistPop(quicklist *quicklist, int where, unsigned char **data, size_t *sz, long long *slong);
 unsigned long quicklistCount(const quicklist *ql);
-int quicklistCompare(const quicklistEntry *entry, const unsigned char *p2, const size_t p2_len);
 size_t quicklistGetLzf(const quicklistNode *node, void **data);
 void quicklistNodeLimit(int fill, size_t *size, unsigned int *count);
 int quicklistNodeExceedsLimit(int fill, size_t new_sz, unsigned int new_count);

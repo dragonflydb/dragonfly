@@ -187,6 +187,8 @@ class DenseSet {
       return curr_entry_->HasTtl() ? owner_->ObjExpireTime(curr_entry_->GetObject()) : UINT32_MAX;
     }
 
+    void SetExpiryTime(uint32_t ttl_sec);
+
     bool HasExpiry() const {
       return curr_entry_->HasTtl();
     }
@@ -265,8 +267,9 @@ class DenseSet {
   virtual bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const = 0;
   virtual size_t ObjectAllocSize(const void* obj) const = 0;
   virtual uint32_t ObjExpireTime(const void* obj) const = 0;
+  virtual void ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) = 0;
   virtual void ObjDelete(void* obj, bool has_ttl) const = 0;
-  virtual void* ObjectClone(const void* obj, bool has_ttl) const = 0;
+  virtual void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const = 0;
 
   void CollectExpired();
 

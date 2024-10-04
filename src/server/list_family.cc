@@ -20,7 +20,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/server_state.h"
+#include "server/family_utils.h"
 #include "server/transaction.h"
 
 /**
@@ -283,8 +283,8 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   int pos = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
 
   for (string_view v : vals) {
-    es->tmp_str1 = sdscpylen(es->tmp_str1, v.data(), v.size());
-    quicklistPush(ql, es->tmp_str1, sdslen(es->tmp_str1), pos);
+    auto vsds = WrapSds(v);
+    quicklistPush(ql, vsds, sdslen(vsds), pos);
   }
 
   if (res.is_new) {
@@ -543,14 +543,25 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
     index = -1;
   }
 
-  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, iter_direction, index);
+  quicklistIter qiter;
+  quicklistInitIterator(&qiter, ql, iter_direction, index);
   quicklistEntry entry;
   unsigned removed = 0;
-  const uint8_t* elem_ptr = reinterpret_cast<const uint8_t*>(elem.data());
+  int64_t ival;
 
-  while (quicklistNext(qiter, &entry)) {
-    if (quicklistCompare(&entry, elem_ptr, elem.size())) {
-      quicklistDelEntry(qiter, &entry);
+  // try parsing the element into an integer.
+  int is_int = lpStringToInt64(elem.data(), elem.size(), &ival);
+
+  auto is_match = [&](const quicklistEntry& entry) {
+    if (is_int != (entry.value == nullptr))
+      return false;
+
+    return is_int ? entry.longval == ival : ElemCompare(entry, elem);
+  };
+
+  while (quicklistNext(&qiter, &entry)) {
+    if (is_match(entry)) {
+      quicklistDelEntry(&qiter, &entry);
       removed++;
       if (count && removed == count)
         break;
@@ -559,7 +570,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
 
   it_res->post_updater.Run();
 
-  quicklistReleaseIterator(qiter);
+  quicklistCompressIterator(&qiter);
 
   if (quicklistCount(ql) == 0) {
     CHECK(db_slice.Del(op_args.db_cntx, it));

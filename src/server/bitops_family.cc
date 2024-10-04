@@ -958,25 +958,24 @@ OpResult<std::vector<ResultType>> StateExecutor::Execute(const CommandList& comm
   return results;
 }
 
-nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* prser) {
-  CmdArgParser& parser = *prser;
+nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* parser) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
-  if (!parser.HasAtLeast(2)) {
+
+  auto [encoding, offset_str] = parser->Next<string_view, string_view>();
+
+  if (encoding.empty()) {
     return make_unexpected(kSyntaxErr);
   }
-
-  auto encoding = parser.ToUpper().Next();
-  if (absl::StartsWith(encoding, "U")) {
+  if (encoding[0] == 'U' || encoding[0] == 'u') {
     parsed.type = EncodingType::UINT;
-  } else if (absl::StartsWith(encoding, "I")) {
+  } else if (encoding[0] == 'I' || encoding[0] == 'i') {
     parsed.type = EncodingType::INT;
   } else {
     return make_unexpected(kSyntaxErr);
   }
 
-  std::string_view bits = encoding;
-  bits = bits.substr(1);
+  std::string_view bits = encoding.substr(1);
 
   if (!absl::SimpleAtoi(bits, &parsed.encoding_bit_size)) {
     return make_unexpected(kSyntaxErr);
@@ -994,7 +993,6 @@ nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* pr
         "is.");
   }
 
-  std::string_view offset_str = parser.Next();
   bool is_proxy = false;
   if (absl::StartsWith(offset_str, "#")) {
     offset_str = offset_str.substr(1);
@@ -1013,20 +1011,20 @@ nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* pr
 // Returns the CommandList if the parsing completed succefully or std::string
 // to indicate an error
 nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, bool read_only) {
+  enum class Cmds { OVERFLOW, GET, SET, INCRBY };
   CommandList result;
 
   using nonstd::make_unexpected;
 
   CmdArgParser parser(args);
   while (parser.HasNext()) {
-    if (!parser.HasAtLeast(2)) {
+    auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW, "GET", Cmds::GET, "SET", Cmds::SET,
+                              "INCRBY", Cmds::INCRBY);
+    if (parser.Error()) {
       return make_unexpected(kSyntaxErr);
     }
 
-    auto op = parser.ToUpper().Next();
-
-    using namespace std::string_view_literals;
-    if (op == "OVERFLOW"sv) {
+    if (cmd == Cmds::OVERFLOW) {
       if (read_only) {
         make_unexpected("BITFIELD_RO only supports the GET subcommand");
       }
@@ -1042,11 +1040,12 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
 
     auto maybe_attr = ParseCommonAttr(&parser);
     if (!maybe_attr.has_value()) {
+      parser.Error();
       return make_unexpected(std::move(maybe_attr.error()));
     }
 
     auto attr = maybe_attr.value();
-    if (op == "GET"sv) {
+    if (cmd == Cmds::GET) {
       result.push_back(Command(Get(attr)));
       continue;
     }
@@ -1055,21 +1054,20 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
       return make_unexpected("BITFIELD_RO only supports the GET subcommand");
     }
 
-    auto value = parser.Next<int64_t>();
-    if (parser.HasError()) {
-      parser.Error();
+    int64_t value = parser.Next<int64_t>();
+    if (parser.Error()) {
       return make_unexpected(kSyntaxErr);
     }
-
-    if (op == "SET"sv) {
+    if (cmd == Cmds::SET) {
       result.push_back(Command(Set(attr, value)));
       continue;
     }
 
-    if (op == "INCRBY"sv) {
+    if (cmd == Cmds::INCRBY) {
       result.push_back(Command(IncrBy(attr, value)));
       continue;
     }
+    parser.Error();
     return make_unexpected(kSyntaxErr);
   }
 

@@ -23,6 +23,7 @@ class DiskStorage {
     uint64_t heap_buf_alloc_count = 0;
     uint64_t registered_buf_alloc_count = 0;
     size_t max_file_size = 0;
+    size_t pending_ops = 0;
   };
 
   using ReadCb = std::function<void(io::Result<std::string_view>)>;

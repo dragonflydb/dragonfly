@@ -649,6 +649,66 @@ lpGetWithSize(unsigned char *p, int64_t *count, unsigned char *intbuf, uint64_t 
     }
 }
 
+int lpGetInteger(unsigned char *p, int64_t *ival) {
+    int64_t val;
+    uint64_t uval = 0, negstart = UINT64_MAX, negmax = 0;
+    uint8_t encoding = p[0];
+    
+    // Prioritize checking for integers first.
+    if (encoding < LP_ENCODING_7BIT_UINT_MASK) {        
+        uval = encoding & 0x7f;    
+    } else if (encoding > LP_ENCODING_32BIT_STR) {
+        switch (encoding) {
+            case LP_ENCODING_16BIT_INT:
+                uval = (uint64_t)p[1] | (uint64_t)p[2] << 8;
+                negstart = (uint64_t)1<<15;
+                negmax = UINT16_MAX;
+                break;
+            case LP_ENCODING_24BIT_INT:
+                uval = (uint64_t)p[1] | (uint64_t)p[2] << 8 | (uint64_t)p[3] << 16;
+                negstart = (uint64_t)1<<23;
+                negmax = UINT32_MAX>>8;
+                break;
+            case LP_ENCODING_32BIT_INT:
+                uval = (uint64_t)p[1] | (uint64_t)p[2] << 8 | (uint64_t)p[3] << 16 | (uint64_t)p[4] << 24;
+                negstart = (uint64_t)1<<31;
+                negmax = UINT32_MAX;
+                break;
+            case LP_ENCODING_64BIT_INT:                
+                uval = (uint64_t)p[1] | (uint64_t)p[2] << 8 | (uint64_t)p[3] << 16 | (uint64_t)p[4] << 24 |
+               (uint64_t)p[5] << 32 | (uint64_t)p[6] << 40 | (uint64_t)p[7] << 48 | (uint64_t)p[8] << 56;
+                negstart = (uint64_t)1<<63;
+                negmax = UINT64_MAX;
+            break;
+            default:
+                return 0;
+        }
+    } else if (encoding < LP_ENCODING_13BIT_INT_MASK && encoding >= LP_ENCODING_6BIT_STR_MASK) {
+   	    uval = ((encoding & 0x1f) << 8) | p[1];
+        negstart = (uint64_t)1 << 12;
+        negmax = 8191;        
+    } else {
+        // string encodings.
+        return 0;
+    }
+
+     /* We reach this code path only for integer encodings.
+     * Convert the unsigned value to the signed one using two's complement
+     * rule. */
+    if (uval >= negstart) {
+        /* This three steps conversion should avoid undefined behaviors
+         * in the unsigned -> signed conversion. */
+        uval = negmax-uval;
+        val = uval;
+        val = -val-1;
+    } else {
+        val = uval;
+    }
+    
+    *ival = val;
+    return 1;    
+}
+
 unsigned char *lpGet(unsigned char *p, int64_t *count, unsigned char *intbuf) {
     return lpGetWithSize(p, count, intbuf, NULL);
 }

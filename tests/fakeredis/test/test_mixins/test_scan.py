@@ -2,6 +2,7 @@ from time import sleep
 
 import pytest
 import redis
+
 from test.testtools import key_val_dict
 
 

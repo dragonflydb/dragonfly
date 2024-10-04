@@ -5,7 +5,6 @@ from queue import Queue
 from time import sleep
 from typing import Optional, Dict, Any
 
-import fakeredis
 import pytest
 import redis
 from redis.client import PubSub
@@ -361,17 +360,6 @@ def test_pubsub_timeout(r, timeout_value):
         # For infinite timeout case don't wait for the message that will never appear.
         message = p.get_message(timeout=timeout_value)
         assert message is None
-
-
-@pytest.mark.fake
-def test_socket_cleanup_pubsub(fake_server):
-    r1 = fakeredis.FakeStrictRedis(server=fake_server)
-    r2 = fakeredis.FakeStrictRedis(server=fake_server)
-    ps = r1.pubsub()
-    with ps:
-        ps.subscribe("test")
-        ps.psubscribe("test*")
-    r2.publish("test", "foo")
 
 
 def test_pubsub_channels(r: redis.Redis):

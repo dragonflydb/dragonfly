@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <absl/random/random.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/types/span.h>
@@ -317,49 +316,6 @@ struct MemoryBytesFlag {
 
 bool AbslParseFlag(std::string_view in, dfly::MemoryBytesFlag* flag, std::string* err);
 std::string AbslUnparseFlag(const dfly::MemoryBytesFlag& flag);
-
-using RandomPick = std::uint32_t;
-
-class PicksGenerator {
- public:
-  virtual RandomPick Generate() = 0;
-  virtual ~PicksGenerator() = default;
-};
-
-class NonUniquePicksGenerator : public PicksGenerator {
- public:
-  /* The generated value will be within the closed-open interval [0, max_range) */
-  NonUniquePicksGenerator(RandomPick max_range);
-
-  RandomPick Generate() override;
-
- private:
-  const RandomPick max_range_;
-  absl::BitGen bitgen_{};
-};
-
-/*
- * Generates unique index in O(1).
- *
- * picks_count specifies the number of random indexes to be generated.
- * In other words, this is the number of times the Generate() function is called.
- *
- * The class uses Robert Floyd's sampling algorithm
- * https://dl.acm.org/doi/pdf/10.1145/30401.315746
- * */
-class UniquePicksGenerator : public PicksGenerator {
- public:
-  /* The generated value will be within the closed-open interval [0, max_range) */
-  UniquePicksGenerator(std::uint32_t picks_count, RandomPick max_range);
-
-  RandomPick Generate() override;
-
- private:
-  RandomPick current_random_limit_;
-  std::uint32_t remaining_picks_count_;
-  std::unordered_set<RandomPick> picked_indexes_;
-  absl::BitGen bitgen_{};
-};
 
 // Helper class used to guarantee atomicity between serialization of buckets
 class ABSL_LOCKABLE ThreadLocalMutex {

@@ -27,7 +27,7 @@ inline bool MayHaveTtl(sds s) {
 
 sds AllocImmutableWithTtl(uint32_t len, uint32_t at) {
   sds res = AllocSdsWithSpace(len, sizeof(at));
-  absl::little_endian::Store32(res + len + 1, at);
+  absl::little_endian::Store32(res + len + 1, at);  // Save TTL
 
   return res;
 }
@@ -43,22 +43,8 @@ bool StringSet::AddSds(sds s1) {
 }
 
 bool StringSet::Add(string_view src, uint32_t ttl_sec) {
-  DCHECK_GT(ttl_sec, 0u);  // ttl_sec == 0 would mean find and delete immediately
-
-  sds newsds = nullptr;
-  bool has_ttl = false;
-
-  if (ttl_sec == UINT32_MAX) {
-    newsds = sdsnewlen(src.data(), src.size());
-  } else {
-    uint32_t at = time_now() + ttl_sec;
-    DCHECK_LT(time_now(), at);
-
-    newsds = AllocImmutableWithTtl(src.size(), at);
-    if (!src.empty())
-      memcpy(newsds, src.data(), src.size());
-    has_ttl = true;
-  }
+  sds newsds = MakeSetSds(src, ttl_sec);
+  bool has_ttl = ttl_sec != UINT32_MAX;
 
   if (AddOrFindObj(newsds, has_ttl) != nullptr) {
     sdsfree(newsds);
@@ -129,22 +115,32 @@ uint32_t StringSet::ObjExpireTime(const void* str) const {
   return absl::little_endian::Load32(ttlptr);
 }
 
+void StringSet::ObjUpdateExpireTime(const void* obj, uint32_t ttl_sec) {
+  return SdsUpdateExpireTime(obj, time_now() + ttl_sec, 0);
+}
+
 void StringSet::ObjDelete(void* obj, bool has_ttl) const {
   sdsfree((sds)obj);
 }
 
-void* StringSet::ObjectClone(const void* obj, bool has_ttl) const {
+void* StringSet::ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const {
   sds src = (sds)obj;
-  if (has_ttl) {
-    size_t slen = sdslen(src);
-    char* ttlptr = src + slen + 1;
-    uint32_t at = absl::little_endian::Load32(ttlptr);
-    sds newsds = AllocImmutableWithTtl(slen, at);
-    if (slen)
-      memcpy(newsds, src, slen);
+  string_view sv{src, sdslen(src)};
+  uint32_t ttl_sec = add_ttl ? 0 : (has_ttl ? ObjExpireTime(obj) : UINT32_MAX);
+  return (void*)MakeSetSds(sv, ttl_sec);
+}
+
+sds StringSet::MakeSetSds(string_view src, uint32_t ttl_sec) const {
+  if (ttl_sec != UINT32_MAX) {
+    uint32_t at = time_now() + ttl_sec;
+
+    sds newsds = AllocImmutableWithTtl(src.size(), at);
+    if (!src.empty())
+      memcpy(newsds, src.data(), src.size());
     return newsds;
   }
-  return sdsnewlen(src, sdslen(src));
+
+  return sdsnewlen(src.data(), src.size());
 }
 
 }  // namespace dfly

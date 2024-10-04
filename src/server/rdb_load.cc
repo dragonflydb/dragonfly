@@ -70,8 +70,13 @@ using namespace tiering::literals;
 namespace {
 
 constexpr size_t kYieldPeriod = 50000;
-constexpr size_t kMaxBlobLen = 1ULL << 16;
 constexpr char kErrCat[] = "dragonfly.rdbload";
+
+// Maximum length of each LoadTrace segment.
+//
+// Note kMaxBlobLen must be a multiple of 6 to avoid truncating elements
+// containing 2 or 3 items.
+constexpr size_t kMaxBlobLen = 4092;
 
 inline void YieldIfNeeded(size_t i) {
   if (i % kYieldPeriod == 0) {
@@ -384,7 +389,8 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
 
 class RdbLoaderBase::OpaqueObjLoader {
  public:
-  OpaqueObjLoader(int rdb_type, PrimeValue* pv) : rdb_type_(rdb_type), pv_(pv) {
+  OpaqueObjLoader(int rdb_type, PrimeValue* pv, LoadConfig config)
+      : rdb_type_(rdb_type), pv_(pv), config_(config) {
   }
 
   void operator()(long long val) {
@@ -412,6 +418,10 @@ class RdbLoaderBase::OpaqueObjLoader {
   sds ToSds(const RdbVariant& obj);
   string_view ToSV(const RdbVariant& obj);
 
+  // Returns whether pv_ has the given object type and encoding. If not ec_
+  // is set to the error.
+  bool EnsureObjEncoding(CompactObjType type, unsigned encoding);
+
   template <typename F> static void Iterate(const LoadTrace& ltrace, F&& f) {
     unsigned cnt = 0;
     for (const auto& seg : ltrace.arr) {
@@ -428,6 +438,7 @@ class RdbLoaderBase::OpaqueObjLoader {
   int rdb_type_;
   base::PODArray<char> tset_blob_;
   PrimeValue* pv_;
+  LoadConfig config_;
 };
 
 RdbLoaderBase::RdbLoaderBase() : origin_mem_buf_{16_KB} {
@@ -493,7 +504,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   size_t len = ltrace->blob_count();
 
   bool is_intset = true;
-  if (rdb_type_ == RDB_TYPE_HASH && ltrace->blob_count() <= SetFamily::MaxIntsetEntries()) {
+  if (!config_.streamed && rdb_type_ == RDB_TYPE_HASH &&
+      ltrace->blob_count() <= SetFamily::MaxIntsetEntries()) {
     Iterate(*ltrace, [&](const LoadBlob& blob) {
       if (!holds_alternative<long long>(blob.rdb_var)) {
         is_intset = false;
@@ -502,7 +514,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       return true;
     });
   } else {
-    /* Use a regular set when there are too many entries. */
+    /* Use a regular set when there are too many entries, or when the
+     * set is being streamed. */
     is_intset = false;
   }
 
@@ -512,10 +525,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   auto cleanup = absl::MakeCleanup([&] {
     if (sdsele)
       sdsfree(sdsele);
-    if (is_intset) {
-      zfree(inner_obj);
-    } else {
-      CompactObj::DeleteMR<StringSet>(inner_obj);
+    if (inner_obj) {
+      if (is_intset) {
+        zfree(inner_obj);
+      } else {
+        CompactObj::DeleteMR<StringSet>(inner_obj);
+      }
     }
   });
 
@@ -535,15 +550,21 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       return true;
     });
   } else {
-    StringSet* set = CompactObj::AllocateMR<StringSet>();
-    set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
-    inner_obj = set;
+    StringSet* set;
+    if (config_.append) {
+      // Note we always use StringSet when the object is being streamed.
+      if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
+        return;
+      }
+      set = static_cast<StringSet*>(pv_->RObjPtr());
+    } else {
+      set = CompactObj::AllocateMR<StringSet>();
+      set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+      inner_obj = set;
 
-    // TODO: to move this logic to set_family similarly to ConvertToStrSet.
-
-    /* It's faster to expand the dict to the right size asap in order
-     * to avoid rehashing */
-    set->Reserve(len);
+      // Expand the set up front to avoid rehashing.
+      set->Reserve((config_.reserve > len) ? config_.reserve : len);
+    }
 
     size_t increment = 1;
     if (rdb_type_ == RDB_TYPE_SET_WITH_EXPIRY) {
@@ -583,7 +604,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 
   if (ec_)
     return;
-  pv_->InitRobj(OBJ_SET, is_intset ? kEncodingIntSet : kEncodingStrMap2, inner_obj);
+
+  if (!config_.append) {
+    pv_->InitRobj(OBJ_SET, is_intset ? kEncodingIntSet : kEncodingStrMap2, inner_obj);
+  }
   std::move(cleanup).Cancel();
 }
 
@@ -595,7 +619,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   size_t len = ltrace->blob_count() / increment;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
+  bool keep_lp = !config_.streamed && (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -634,12 +658,28 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     lp = lpShrinkToFit(lp);
     pv_->InitRobj(OBJ_HASH, kEncodingListPack, lp);
   } else {
-    StringMap* string_map = CompactObj::AllocateMR<StringMap>();
-    string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+    StringMap* string_map;
+    if (config_.append) {
+      // Note we always use StringMap when the object is being streamed.
+      if (!EnsureObjEncoding(OBJ_HASH, kEncodingStrMap2)) {
+        return;
+      }
 
-    auto cleanup = absl::MakeCleanup([&] { CompactObj::DeleteMR<StringMap>(string_map); });
+      string_map = static_cast<StringMap*>(pv_->RObjPtr());
+    } else {
+      string_map = CompactObj::AllocateMR<StringMap>();
+      string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+
+      // Expand the map up front to avoid rehashing.
+      string_map->Reserve((config_.reserve > len) ? config_.reserve : len);
+    }
+
+    auto cleanup = absl::MakeCleanup([&] {
+      if (!config_.append) {
+        CompactObj::DeleteMR<StringMap>(string_map);
+      }
+    });
     std::string key;
-    string_map->Reserve(len);
     for (const auto& seg : ltrace->arr) {
       for (size_t i = 0; i < seg.size(); i += increment) {
         // ToSV may reference an internal buffer, therefore we can use only before the
@@ -677,15 +717,30 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
         }
       }
     }
-    pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    if (!config_.append) {
+      pv_->InitRobj(OBJ_HASH, kEncodingStrMap2, string_map);
+    }
     std::move(cleanup).Cancel();
   }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
-  quicklist* ql =
-      quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
-  auto cleanup = absl::Cleanup([&] { quicklistRelease(ql); });
+  quicklist* ql;
+  if (config_.append) {
+    if (!EnsureObjEncoding(OBJ_LIST, OBJ_ENCODING_QUICKLIST)) {
+      return;
+    }
+
+    ql = static_cast<quicklist*>(pv_->RObjPtr());
+  } else {
+    ql = quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
+  }
+
+  auto cleanup = absl::Cleanup([&] {
+    if (!config_.append) {
+      quicklistRelease(ql);
+    }
+  });
 
   Iterate(*ltrace, [&](const LoadBlob& blob) {
     unsigned container = blob.encoding;
@@ -747,20 +802,39 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
   std::move(cleanup).Cancel();
 
-  pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+  if (!config_.append) {
+    pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+  }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   size_t zsetlen = ltrace->blob_count();
-  detail::SortedMap* zs = CompactObj::AllocateMR<detail::SortedMap>();
-  unsigned encoding = OBJ_ENCODING_SKIPLIST;
-  auto cleanup = absl::MakeCleanup([&] { CompactObj::DeleteMR<detail::SortedMap>(zs); });
 
-  if (zsetlen > 2 && !zs->Reserve(zsetlen)) {
-    LOG(ERROR) << "OOM in dictTryExpand " << zsetlen;
-    ec_ = RdbError(errc::out_of_memory);
-    return;
+  unsigned encoding = OBJ_ENCODING_SKIPLIST;
+  detail::SortedMap* zs;
+  if (config_.append) {
+    // Note we always use SortedMap when the object is being streamed.
+    if (!EnsureObjEncoding(OBJ_ZSET, OBJ_ENCODING_SKIPLIST)) {
+      return;
+    }
+
+    zs = static_cast<detail::SortedMap*>(pv_->RObjPtr());
+  } else {
+    zs = CompactObj::AllocateMR<detail::SortedMap>();
+
+    size_t reserve = (config_.reserve > zsetlen) ? config_.reserve : zsetlen;
+    if (reserve > 2 && !zs->Reserve(reserve)) {
+      LOG(ERROR) << "OOM in dictTryExpand " << zsetlen;
+      ec_ = RdbError(errc::out_of_memory);
+      return;
+    }
   }
+
+  auto cleanup = absl::MakeCleanup([&] {
+    if (!config_.append) {
+      CompactObj::DeleteMR<detail::SortedMap>(zs);
+    }
+  });
 
   size_t maxelelen = 0, totelelen = 0;
 
@@ -790,7 +864,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     return;
 
   void* inner = zs;
-  if (zs->Size() <= server.zset_max_listpack_entries &&
+  if (!config_.streamed && zs->Size() <= server.zset_max_listpack_entries &&
       maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
@@ -799,7 +873,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
 
   std::move(cleanup).Cancel();
 
-  pv_->InitRobj(OBJ_ZSET, encoding, inner);
+  if (!config_.append) {
+    pv_->InitRobj(OBJ_ZSET, encoding, inner);
+  }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
@@ -1121,6 +1197,21 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
 
   LOG(FATAL) << "Unexpected variant";
   return string_view{};
+}
+
+bool RdbLoaderBase::OpaqueObjLoader::EnsureObjEncoding(CompactObjType type, unsigned encoding) {
+  if (pv_->ObjType() != type) {
+    LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType() << "; expected " << type;
+    ec_ = RdbError(errc::invalid_rdb_type);
+    return false;
+  }
+  if (pv_->Encoding() != encoding) {
+    LOG(DFATAL) << "Invalid encoding " << pv_->Encoding() << "; expected " << encoding;
+    ec_ = RdbError(errc::invalid_encoding);
+    return false;
+  }
+
+  return true;
 }
 
 std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
@@ -1487,23 +1578,34 @@ auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
 
 auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
-  SET_OR_UNEXPECT(LoadLen(NULL), len);
-
-  if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
-    len *= 2;
+  if (pending_read_.remaining > 0) {
+    len = pending_read_.remaining;
+  } else {
+    SET_OR_UNEXPECT(LoadLen(NULL), len);
+    if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
+      len *= 2;
+    }
+    pending_read_.reserve = len;
   }
 
+  // Limit each read to kMaxBlobLen elements.
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
-  for (size_t i = 0; i < load_trace->arr.size(); i++) {
-    size_t n = std::min(len - i * kMaxBlobLen, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; j++) {
-      error_code ec = ReadStringObj(&load_trace->arr[i][j].rdb_var);
-      if (ec) {
-        return make_unexpected(ec);
-      }
+  load_trace->arr.resize(1);
+  size_t n = std::min(len, kMaxBlobLen);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; i++) {
+    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    if (ec) {
+      return make_unexpected(ec);
     }
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (len > n) {
+    pending_read_.remaining = len - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
@@ -1547,65 +1649,84 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
 
 auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
-  SET_OR_UNEXPECT(LoadLen(nullptr), len);
-
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-
-  if (rdbtype == RDB_TYPE_HASH) {
-    len *= 2;
+  if (pending_read_.remaining > 0) {
+    len = pending_read_.remaining;
   } else {
-    DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
-    len *= 3;
+    SET_OR_UNEXPECT(LoadLen(NULL), len);
+
+    if (rdbtype == RDB_TYPE_HASH) {
+      len *= 2;
+    } else {
+      DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
+      len *= 3;
+    }
+
+    pending_read_.reserve = len;
   }
 
-  load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min<size_t>(len, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; ++j) {
-      error_code ec = ReadStringObj(&load_trace->arr[i][j].rdb_var);
-      if (ec)
-        return make_unexpected(ec);
-    }
-    len -= n;
+  // Limit each read to kMaxBlobLen elements.
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(1);
+  size_t n = std::min<size_t>(len, kMaxBlobLen);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    if (ec)
+      return make_unexpected(ec);
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (len > n) {
+    pending_read_.remaining = len - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
 auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
-  /* Read sorted set value. */
   uint64_t zsetlen;
-  SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
+  if (pending_read_.remaining > 0) {
+    zsetlen = pending_read_.remaining;
+  } else {
+    SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
+    pending_read_.reserve = zsetlen;
+  }
 
   if (zsetlen == 0)
     return Unexpected(errc::empty_key);
 
-  unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize((zsetlen + kMaxBlobLen - 1) / kMaxBlobLen);
-
   double score;
 
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; ++j) {
-      error_code ec = ReadStringObj(&load_trace->arr[i][j].rdb_var);
-      if (ec)
-        return make_unexpected(ec);
-      if (rdbtype == RDB_TYPE_ZSET_2) {
-        SET_OR_UNEXPECT(FetchBinaryDouble(), score);
-      } else {
-        SET_OR_UNEXPECT(FetchDouble(), score);
-      }
-
-      if (isnan(score)) {
-        LOG(ERROR) << "Zset with NAN score detected";
-        return Unexpected(errc::rdb_file_corrupted);
-      }
-      load_trace->arr[i][j].score = score;
+  // Limit each read to kMaxBlobLen elements.
+  unique_ptr<LoadTrace> load_trace(new LoadTrace);
+  load_trace->arr.resize(1);
+  size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    if (ec)
+      return make_unexpected(ec);
+    if (rdbtype == RDB_TYPE_ZSET_2) {
+      SET_OR_UNEXPECT(FetchBinaryDouble(), score);
+    } else {
+      SET_OR_UNEXPECT(FetchDouble(), score);
     }
-    zsetlen -= n;
+    if (isnan(score)) {
+      LOG(ERROR) << "Zset with NAN score detected";
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    load_trace->arr[0][i].score = score;
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (zsetlen > n) {
+    pending_read_.remaining = zsetlen - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
@@ -1625,42 +1746,53 @@ auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
-  uint64_t len;
-  SET_OR_UNEXPECT(LoadLen(nullptr), len);
+  size_t len;
+  if (pending_read_.remaining > 0) {
+    len = pending_read_.remaining;
+  } else {
+    SET_OR_UNEXPECT(LoadLen(NULL), len);
+    pending_read_.reserve = len;
+  }
 
   if (len == 0)
     return Unexpected(errc::empty_key);
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize((len + kMaxBlobLen - 1) / kMaxBlobLen);
+  load_trace->arr.resize(1);
+  // Lists pack multiple entries into each list node (8Kb by default),
+  // therefore using a smaller segment length than kMaxBlobLen.
+  size_t n = std::min<size_t>(len, 512);
+  load_trace->arr[0].resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
+    if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
+      SET_OR_UNEXPECT(LoadLen(nullptr), container);
 
-  for (size_t i = 0; i < load_trace->arr.size(); ++i) {
-    size_t n = std::min<size_t>(len, kMaxBlobLen);
-    load_trace->arr[i].resize(n);
-    for (size_t j = 0; j < n; ++j) {
-      uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
-      if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
-        SET_OR_UNEXPECT(LoadLen(nullptr), container);
-
-        if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
-            container != QUICKLIST_NODE_CONTAINER_PLAIN) {
-          LOG(ERROR) << "Quicklist integrity check failed.";
-          return Unexpected(errc::rdb_file_corrupted);
-        }
-      }
-
-      RdbVariant var;
-      error_code ec = ReadStringObj(&var);
-      if (ec)
-        return make_unexpected(ec);
-
-      if (StrLen(var) == 0) {
+      if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
+          container != QUICKLIST_NODE_CONTAINER_PLAIN) {
+        LOG(ERROR) << "Quicklist integrity check failed.";
         return Unexpected(errc::rdb_file_corrupted);
       }
-      load_trace->arr[i][j].rdb_var = std::move(var);
-      load_trace->arr[i][j].encoding = container;
     }
-    len -= n;
+
+    RdbVariant var;
+    error_code ec = ReadStringObj(&var);
+    if (ec)
+      return make_unexpected(ec);
+
+    if (StrLen(var) == 0) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    load_trace->arr[0][i].rdb_var = std::move(var);
+    load_trace->arr[0][i].encoding = container;
+  }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  if (len > n) {
+    pending_read_.remaining = len - n;
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
@@ -2473,7 +2605,12 @@ void RdbLoader::FlushAllShards() {
 }
 
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
-  OpaqueObjLoader visitor(opaque.rdb_type, pv);
+  return RdbLoaderBase::FromOpaque(opaque, LoadConfig{}, pv);
+}
+
+std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
+                                          CompactObj* pv) {
+  OpaqueObjLoader visitor(opaque.rdb_type, pv, config);
   std::visit(visitor, opaque.obj);
 
   return visitor.ec();
@@ -2491,7 +2628,25 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   for (const auto* item : ib) {
     PrimeValue pv;
-    if (ec_ = FromOpaque(item->val, &pv); ec_) {
+    PrimeValue* pv_ptr = &pv;
+
+    // If we're appending the item to an existing key, first load the
+    // object.
+    if (item->load_config.append) {
+      auto res = db_slice.FindMutable(db_cntx, item->key);
+      if (!IsValid(res.it)) {
+        // If the item has expired we may not find the key. Note if the key
+        // is found, but expired since we started loading, we still append to
+        // avoid an inconsistent state where only part of the key is loaded.
+        if (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms) {
+          LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+        }
+        continue;
+      }
+      pv_ptr = &res.it->second;
+    }
+
+    if (ec_ = FromOpaque(item->val, item->load_config, pv_ptr); ec_) {
       if ((*ec_).value() == errc::empty_key) {
         auto error = error_msg(item, db_ind);
         if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
@@ -2505,14 +2660,19 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
       stop_early_ = true;
       break;
     }
+    if (item->load_config.append) {
+      continue;
+    }
     // We need this extra check because we don't return empty_key
     if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
       LOG(WARNING) << error_msg(item, db_ind);
       continue;
     }
 
-    if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms)
+    if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
+      VLOG(1) << "Expire key on load: " << item->key;
       continue;
+    }
 
     auto op_res = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
     if (!op_res) {
@@ -2549,29 +2709,82 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
   // load with different number of shards which makes database resizing unfeasible.
 }
 
+// Loads the next key/val pair.
+//
+// Huge objects may be loaded in parts, where only a subset of elements are
+// loaded at a time. This reduces the memory required to load huge objects and
+// prevents LoadItemsBuffer blocking. (Note so far only RDB_TYPE_SET and
+// RDB_TYPE_SET_WITH_EXPIRY support partial reads).
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
-  // We return the item in LoadItemsBuffer.
-  Item* item = item_queue_.Pop();
+  std::string key;
+  SET_OR_RETURN(ReadKey(), key);
 
-  if (item == nullptr) {
-    item = new Item;
-  }
-  auto cleanup = absl::Cleanup([item] { delete item; });
+  bool streamed = false;
+  do {
+    // If there is a cached Item in the free pool, take it, otherwise allocate
+    // a new Item (LoadItemsBuffer returns free items).
+    Item* item = item_queue_.Pop();
+    if (item == nullptr) {
+      item = new Item;
+    }
+    // Delete the item if we fail to load the key/val pair.
+    auto cleanup = absl::Cleanup([item] { delete item; });
 
-  // Read key
-  SET_OR_RETURN(ReadKey(), item->key);
+    item->load_config.append = pending_read_.remaining > 0;
 
-  // Read value
-  error_code ec = ReadObj(type, &item->val);
-  if (ec) {
-    VLOG(1) << "ReadObj error " << ec << " for key " << item->key;
-    return ec;
-  }
+    error_code ec = ReadObj(type, &item->val);
+    if (ec) {
+      VLOG(1) << "ReadObj error " << ec << " for key " << key;
+      return ec;
+    }
 
+    // If the key can be discarded, we must still continue to read the
+    // object from the RDB so we can read the next key.
+    if (ShouldDiscardKey(key, settings)) {
+      continue;
+    }
+
+    if (pending_read_.remaining > 0) {
+      item->key = key;
+      streamed = true;
+    } else {
+      // Avoid copying the key if this is the last read of the object.
+      item->key = std::move(key);
+    }
+
+    item->load_config.streamed = streamed;
+    item->load_config.reserve = pending_read_.reserve;
+    // Clear 'reserve' as we must only set when the object is first
+    // initialized.
+    pending_read_.reserve = 0;
+
+    item->is_sticky = settings->is_sticky;
+    item->has_mc_flags = settings->has_mc_flags;
+    item->mc_flags = settings->mc_flags;
+
+    ShardId sid = Shard(item->key, shard_set->size());
+    item->expire_ms = settings->expiretime;
+
+    auto& out_buf = shard_buf_[sid];
+
+    out_buf.emplace_back(std::move(item));
+    std::move(cleanup).Cancel();
+
+    constexpr size_t kBufSize = 64;
+    if (out_buf.size() >= kBufSize) {
+      // Despite being async, this function can block if the shard queue is full.
+      FlushShardAsync(sid);
+    }
+  } while (pending_read_.remaining > 0);
+
+  return kOk;
+}
+
+bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) const {
   if (!load_unowned_slots_ && cluster::IsClusterEnabled()) {
     const cluster::ClusterConfig* cluster_config = cluster::ClusterFamily::cluster_config();
-    if (cluster_config != nullptr && !cluster_config->IsMySlot(item->key)) {
-      return kOk;  // Ignoring item
+    if (cluster_config != nullptr && !cluster_config->IsMySlot(key)) {
+      return true;
     }
   }
 
@@ -2583,31 +2796,12 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
    * Similarly if the RDB is the preamble of an AOF file, we want to
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
-
   if (ServerState::tlocal()->is_master && settings->has_expired) {
-    VLOG(2) << "Expire key: " << item->key;
-    return kOk;
+    VLOG(2) << "Expire key on read: " << key;
+    return true;
   }
 
-  item->is_sticky = settings->is_sticky;
-  item->has_mc_flags = settings->has_mc_flags;
-  item->mc_flags = settings->mc_flags;
-
-  ShardId sid = Shard(item->key, shard_set->size());
-  item->expire_ms = settings->expiretime;
-
-  auto& out_buf = shard_buf_[sid];
-
-  out_buf.emplace_back(item);
-  std::move(cleanup).Cancel();
-
-  constexpr size_t kBufSize = 128;
-  if (out_buf.size() >= kBufSize) {
-    // Despite being async, this function can block if the shard queue is full.
-    FlushShardAsync(sid);
-  }
-
-  return kOk;
+  return false;
 }
 
 void RdbLoader::LoadScriptFromAux(string&& body) {

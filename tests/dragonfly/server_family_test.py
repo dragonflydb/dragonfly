@@ -95,8 +95,6 @@ async def test_client_kill(df_factory):
             with pytest.raises(Exception) as e_info:
                 await client_conn.ping()
 
-        await disconnect_clients(client, admin_client)
-
 
 async def test_scan(async_client: aioredis.Redis):
     """

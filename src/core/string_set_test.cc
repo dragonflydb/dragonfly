@@ -377,6 +377,25 @@ TEST_F(StringSetTest, Iteration) {
   EXPECT_EQ(to_insert.size(), 0);
 }
 
+TEST_F(StringSetTest, SetFieldExpireHasExpiry) {
+  EXPECT_TRUE(ss_->Add("k1", 100));
+  auto k = ss_->Find("k1");
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 100);
+  k.SetExpiryTime(1);
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 1);
+}
+
+TEST_F(StringSetTest, SetFieldExpireNoHasExpiry) {
+  EXPECT_TRUE(ss_->Add("k1"));
+  auto k = ss_->Find("k1");
+  EXPECT_FALSE(k.HasExpiry());
+  k.SetExpiryTime(10);
+  EXPECT_TRUE(k.HasExpiry());
+  EXPECT_EQ(k.ExpiryTime(), 10);
+}
+
 TEST_F(StringSetTest, Ttl) {
   EXPECT_TRUE(ss_->Add("bla"sv, 1));
   EXPECT_FALSE(ss_->Add("bla"sv, 1));

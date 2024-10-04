@@ -151,13 +151,6 @@ struct CmdArgParser {
     return !HasError();
   }
 
-  // In-place convert the next argument to uppercase
-  CmdArgParser& ToUpper() {
-    if (cur_i_ < args_.size())
-      ToUpper(cur_i_);
-    return *this;
-  }
-
   // Return remaining arguments
   CmdArgList Tail() const {
     return args_.subspan(cur_i_);
@@ -260,8 +253,6 @@ struct CmdArgParser {
     Report(INVALID_INT, idx);
     return {};
   }
-
-  void ToUpper(size_t i);
 
  private:
   size_t cur_i_ = 0;

@@ -190,8 +190,9 @@ std::error_code DiskStorage::Stash(io::Bytes bytes, io::Bytes footer, StashCb cb
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
-  return {alloc_.allocated_bytes(), alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_,
-          static_cast<size_t>(max_size_)};
+  return {
+      alloc_.allocated_bytes(),       alloc_.capacity(), heap_buf_alloc_cnt_, reg_buf_alloc_cnt_,
+      static_cast<size_t>(max_size_), pending_ops_};
 }
 
 bool DiskStorage::CanGrow() const {

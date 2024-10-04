@@ -1184,14 +1184,6 @@ int quicklistDelRange(quicklist *quicklist, const long start, const long count) 
     return 1;
 }
 
-/* compare between a two entries */
-int quicklistCompare(const quicklistEntry* entry, const unsigned char *p2, const size_t p2_len) {
-    if (unlikely(QL_NODE_IS_PLAIN(entry->node))) {
-        return ((entry->sz == p2_len) && (memcmp(entry->value, p2, p2_len) == 0));
-    }
-    return lpCompare(entry->zi, p2, p2_len);
-}
-
 /* Returns a quicklist iterator 'iter'. After the initialization every
  * call to quicklistNext() will return the next element of the quicklist. */
 quicklistIter *quicklistGetIterator(quicklist *quicklist, int direction) {
@@ -1274,6 +1266,11 @@ void quicklistReleaseIterator(quicklistIter *iter) {
     if (iter->current) quicklistCompress(iter->quicklist, iter->current);
 
     zfree(iter);
+}
+
+// Based on quicklistReleaseIterator
+void quicklistCompressIterator(quicklistIter* iter) {
+  if (iter->current) quicklistCompress(iter->quicklist, iter->current);
 }
 
 /* Get next element in iterator.
@@ -1376,43 +1373,6 @@ int quicklistNext(quicklistIter *iter, quicklistEntry *entry) {
 /* Sets the direction of a quicklist iterator. */
 void quicklistSetDirection(quicklistIter *iter, int direction) {
     iter->direction = direction;
-}
-
-/* Duplicate the quicklist.
- * On success a copy of the original quicklist is returned.
- *
- * The original quicklist both on success or error is never modified.
- *
- * Returns newly allocated quicklist. */
-quicklist *quicklistDup(quicklist *orig) {
-    quicklist *copy;
-
-    copy = quicklistNew(orig->fill, orig->compress);
-
-    for (quicklistNode *current = orig->head; current; current = current->next) {
-        quicklistNode *node = quicklistCreateNode();
-
-        if (current->encoding == QUICKLIST_NODE_ENCODING_LZF) {
-            quicklistLZF *lzf = (quicklistLZF *)current->entry;
-            size_t lzf_sz = sizeof(*lzf) + lzf->sz;
-            node->entry = zmalloc(lzf_sz);
-            memcpy(node->entry, current->entry, lzf_sz);
-        } else if (current->encoding == QUICKLIST_NODE_ENCODING_RAW) {
-            node->entry = zmalloc(current->sz);
-            memcpy(node->entry, current->entry, current->sz);
-        }
-
-        node->count = current->count;
-        copy->count += node->count;
-        node->sz = current->sz;
-        node->encoding = current->encoding;
-        node->container = current->container;
-
-        _quicklistInsertNodeAfter(copy, copy->tail, node);
-    }
-
-    /* copy->count must equal orig->count here */
-    return copy;
 }
 
 /* Populate 'entry' with the element at the specified zero-based index

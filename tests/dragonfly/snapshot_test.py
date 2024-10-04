@@ -15,7 +15,7 @@ import random
 from pymemcache.client.base import Client as MCClient
 
 from . import dfly_args
-from .utility import close_clients, wait_available_async, is_saving, tmp_file_name
+from .utility import wait_available_async, is_saving, tmp_file_name
 
 from .seeder import StaticSeeder
 
@@ -456,7 +456,7 @@ async def test_infomemory_while_snapshoting(df_factory, format: str):
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-bgsave"})
 async def test_bgsave_and_save(async_client: aioredis.Redis):
-    await async_client.execute_command("DEBUG POPULATE 20000")
+    await async_client.execute_command("DEBUG POPULATE 200000")
 
     await async_client.execute_command("BGSAVE")
     with pytest.raises(redis.exceptions.ResponseError):
@@ -643,5 +643,3 @@ async def test_mc_flags_saving(memcached_client: MCClient, async_client: aioredi
 
     await check_flag("key1", 2)
     await check_flag("key2", 123456)
-
-    await close_clients(async_client)
