@@ -28,6 +28,8 @@ class StringSet : public DenseSet {
   // Returns true if elem was added.
   bool Add(std::string_view s1, uint32_t ttl_sec = UINT32_MAX);
 
+  void AddMany(std::string_view elems[], size_t count, uint32_t ttl_sec, bool* res);
+
   bool Erase(std::string_view str) {
     return EraseInternal(&str, 1);
   }

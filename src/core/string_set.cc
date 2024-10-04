@@ -51,6 +51,38 @@ bool StringSet::Add(string_view src, uint32_t ttl_sec) {
   return true;
 }
 
+void StringSet::AddMany(string_view elems[], size_t count, uint32_t ttl_sec, bool* res) {
+  uint64_t hash[kMaxBatchLen];
+  string_view* data = elems;
+  bool has_ttl = ttl_sec != UINT32_MAX;
+
+  while (count >= kMaxBatchLen) {
+    for (unsigned i = 0; i < kMaxBatchLen; ++i) {
+      hash[i] = CompactObj::HashCode(data[i]);
+      Prefetch(hash[i]);
+    }
+
+    for (unsigned i = 0; i < kMaxBatchLen; ++i) {
+      void* prev = FindInternal(data + i, hash[i], 1);
+      if (prev != nullptr) {
+        res[i] = false;
+      } else {
+        res[i] = true;
+        sds field = MakeSetSds(data[i], ttl_sec);
+        AddUnique(field, has_ttl, hash[i]);
+      }
+    }
+
+    count -= kMaxBatchLen;
+    data += kMaxBatchLen;
+    res += kMaxBatchLen;
+  }
+
+  for (unsigned i = 0; i < count; ++i) {
+    res[i] = Add(data[i], ttl_sec);
+  }
+}
+
 std::optional<std::string> StringSet::Pop() {
   sds str = (sds)PopInternal();
 

@@ -93,8 +93,25 @@ struct StringSetWrapper {
 
   unsigned Add(const NewEntries& entries, uint32_t ttl_sec) const {
     unsigned res = 0;
-    for (string_view member : EntriesRange(entries))
-      res += ss->Add(member, ttl_sec);
+    string_view members[StringSet::kMaxBatchLen];
+    bool res_arr[StringSet::kMaxBatchLen];
+    unsigned len = 0;
+    for (string_view member : EntriesRange(entries)) {
+      members[len++] = member;
+      if (len == StringSet::kMaxBatchLen) {
+        ss->AddMany(members, StringSet::kMaxBatchLen, ttl_sec, res_arr);
+        for (unsigned i = 0; i < StringSet::kMaxBatchLen; ++i)
+          res += res_arr[i];
+        len = 0;
+      }
+    }
+
+    if (len) {
+      ss->AddMany(members, len, ttl_sec, res_arr);
+      for (unsigned i = 0; i < len; ++i)
+        res += res_arr[i];
+    }
+
     return res;
   }
 
