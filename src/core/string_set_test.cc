@@ -562,19 +562,11 @@ void BM_AddMany(benchmark::State& state) {
     strs.push_back(str);
   }
   ss.Reserve(elems);
-  array<string_view, 32> str_views;
 
   while (state.KeepRunning()) {
-    unsigned offset = 0;
-    while (offset < elems) {
-      unsigned len = min(elems - offset, 32u);
-      for (size_t i = 0; i < len; ++i) {
-        str_views[i] = strs[offset + i];
-      }
-      offset += len;
-      ss.AddMany({str_views.data(), len}, UINT32_MAX);
-    }
+    ss.AddMany(absl::MakeSpan(strs), UINT32_MAX);
     state.PauseTiming();
+    CHECK_EQ(ss.UpperBoundSize(), elems);
     ss.Clear();
     ss.Reserve(elems);
     state.ResumeTiming();
