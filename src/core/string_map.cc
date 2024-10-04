@@ -62,7 +62,7 @@ pair<sds, uint64_t> CreateEntry(string_view field, string_view value, uint32_t t
 }  // namespace
 
 StringMap::~StringMap() {
-  ClearInternal();
+  Clear();
 }
 
 bool StringMap::AddOrUpdate(string_view field, string_view value, uint32_t ttl_sec) {
@@ -99,10 +99,6 @@ bool StringMap::Contains(string_view field) const {
   // 1 - means it's string_view. See ObjEqual for details.
   uint64_t hashcode = Hash(&field, 1);
   return FindInternal(&field, hashcode, 1) != nullptr;
-}
-
-void StringMap::Clear() {
-  ClearInternal();
 }
 
 optional<pair<sds, sds>> StringMap::RandomPair() {

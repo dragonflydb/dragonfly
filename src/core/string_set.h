@@ -39,10 +39,6 @@ class StringSet : public DenseSet {
     return FindInternal(&s1, Hash(&s1, 1), 1) != nullptr;
   }
 
-  void Clear() {
-    ClearInternal();
-  }
-
   std::optional<std::string> Pop();
 
   class iterator : private IteratorBase {

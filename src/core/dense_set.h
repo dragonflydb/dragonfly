@@ -213,6 +213,10 @@ class DenseSet {
   explicit DenseSet(MemoryResource* mr = PMR_NS::get_default_resource());
   virtual ~DenseSet();
 
+  void Clear() {
+    ClearInternal(0, entries_.size());
+  }
+
   // Returns the number of elements in the map. Note that it might be that some of these elements
   // have expired and can't be accessed.
   size_t UpperBoundSize() const {
@@ -301,7 +305,7 @@ class DenseSet {
   // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
   // in the set may point to. This function only frees the allocated DenseLinkKeys created by
   // DenseSet. All data allocated by a derived class should be freed before calling this
-  void ClearInternal();
+  uint32_t ClearInternal(uint32_t start, uint32_t count);
 
   void IncreaseMallocUsed(size_t delta) {
     obj_malloc_used_ += delta;

@@ -179,16 +179,17 @@ void* DenseSet::PopDataFront(DenseSet::ChainVectorIterator it) {
   return ret;
 }
 
-void DenseSet::ClearInternal() {
+uint32_t DenseSet::ClearInternal(uint32_t start, uint32_t count) {
   constexpr unsigned kArrLen = 32;
   ClearItem arr[kArrLen];
   unsigned len = 0;
 
-  for (auto it = entries_.begin(); it != entries_.end(); ++it) {
-    if (it->IsEmpty())
+  size_t end = min<size_t>(entries_.size(), start + count);
+  for (size_t i = start; i < end; ++i) {
+    DensePtr ptr = entries_[i];
+    if (ptr.IsEmpty())
       continue;
 
-    DensePtr ptr = *it;
     auto& dest = arr[len++];
     dest.has_ttl = ptr.HasTtl();
 
@@ -208,11 +209,13 @@ void DenseSet::ClearInternal() {
 
   ClearBatch(len, arr);
 
-  entries_.clear();
-  num_used_buckets_ = 0;
-  num_links_ = 0;
-  size_ = 0;
-  expiration_used_ = false;
+  if (size_ == 0) {
+    entries_.clear();
+    num_used_buckets_ = 0;
+    num_links_ = 0;
+    expiration_used_ = false;
+  }
+  return end;
 }
 
 bool DenseSet::Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const {
@@ -277,6 +280,7 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
       auto& src = items[i];
       if (src.obj) {
         ObjDelete(src.obj, src.has_ttl);
+        --size_;
         src.obj = nullptr;
       }
 
@@ -285,6 +289,7 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
 
       if (src.ptr.IsObject()) {
         ObjDelete(src.ptr.Raw(), src.has_ttl);
+        --size_;
       } else {
         auto& dest = items[dest_id++];
         DenseLinkKey* link = src.ptr.AsLink();

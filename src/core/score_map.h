@@ -105,10 +105,6 @@ class ScoreMap : public DenseSet {
     return FindInternal(ele, Hash(ele, 0), 0);
   }
 
-  void Clear() {
-    ClearInternal();
-  }
-
   iterator begin() {
     return iterator{this, false};
   }
