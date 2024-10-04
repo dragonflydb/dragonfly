@@ -610,6 +610,98 @@ auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
   return {0, nullptr, nullptr};
 }
 
+#if 0
+void DenseSet::FindMany(const void** obj, unsigned len, uint32_t cookie, uint64_t* hash,
+                        bool* res) {
+  struct State {
+    uint32_t bid;
+    uint8_t index;
+    int8_t phase = 0;  // 0: self, 1: left, 2: right, 3: links, 4: done
+    DensePtr ptr;
+    void* obj = nullptr;
+  };
+
+  State states[kMaxBatchLen];
+  DCHECK_LE(len, kMaxBatchLen);
+
+  for (unsigned i = 0; i < len; ++i) {
+    hash[i] = Hash(obj[i], cookie);
+    states[i].bid = BucketId(hash[i]);
+    states[i].index = i;
+    res[i] = false;
+    PREFETCH_READ(&entries_[states[i].bid]);
+  }
+
+  for (unsigned i = 0; i < len; ++i) {
+    auto& state = states[i];
+    DensePtr* curr = &entries_[state.bid];
+    ExpireIfNeeded(nullptr, curr);
+    state.ptr = *curr;
+  }
+
+  while (len > 0) {
+    unsigned next_len = 0;
+    for (unsigned i = 0; i < len; ++i) {
+      auto& state = states[i];
+      unsigned j = state.index;
+      if (state.obj) {
+        if (ObjEqual(state.obj, obj[j], cookie)) {
+          res[j] = true;
+        }
+        state.obj = nullptr;
+      }
+
+      if (state.phase >= 4)
+        continue;
+
+      if (!state.ptr.IsEmpty()) {
+        state.obj = state.ptr.GetObject();
+        PREFETCH_READ(state.obj);
+      }
+
+      switch (state.phase) {
+        case 0:
+          if (state.bid > 0) {
+            state.phase = 1;
+            state.ptr = entries_[state.bid - 1];
+          } else {
+            state.phase = 2;
+            state.ptr = entries_[state.bid + 1];
+          }
+          PREFETCH_READ(state.ptr.Raw());
+          break;
+        case 1:
+          if (state.bid + 1 < entries_.size()) {
+            state.phase = 2;
+            state.ptr = entries_[state.bid + 1];
+          } else {
+            state.phase = 3;
+            state.ptr = entries_[state.bid];
+          }
+          break;
+        case 2:
+          state.phase = 3;
+          state.ptr = entries_[state.bid]; //
+          break;
+        case 3:
+          if (state.ptr.IsLink()) {
+            DenseLinkKey* link = state.ptr.AsLink();
+            state.ptr = link->next;
+            PREFETCH_READ(state.ptr.Raw());
+          } else {
+            state.phase = 4;
+            state.ptr.Reset();
+          }
+          break;
+      }
+      states[next_len++] = state;
+    }  // for
+    len = next_len;
+  } // while
+}
+
+#endif
+
 void DenseSet::Delete(DensePtr* prev, DensePtr* ptr) {
   void* obj = nullptr;
 

@@ -288,6 +288,7 @@ class DenseSet {
   }
 
   void* FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const;
+  // void FindMany(const void** obj, unsigned len, uint32_t cookie, uint64_t* hash, bool* res);
 
   IteratorBase FindIt(const void* ptr, uint32_t cookie) {
     if (Empty())
