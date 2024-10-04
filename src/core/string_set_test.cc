@@ -567,13 +567,12 @@ void BM_AddMany(benchmark::State& state) {
   while (state.KeepRunning()) {
     unsigned offset = 0;
     while (offset < elems) {
-      bool res[str_views.size()];
       unsigned len = min(elems - offset, 32u);
       for (size_t i = 0; i < len; ++i) {
         str_views[i] = strs[offset + i];
       }
       offset += len;
-      ss.AddMany(str_views.data(), len, UINT32_MAX, res);
+      ss.AddMany({str_views.data(), len}, UINT32_MAX);
     }
     state.PauseTiming();
     ss.Clear();

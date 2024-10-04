@@ -51,11 +51,16 @@ bool StringSet::Add(string_view src, uint32_t ttl_sec) {
   return true;
 }
 
-void StringSet::AddMany(string_view elems[], size_t count, uint32_t ttl_sec, bool* res) {
+unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec) {
   uint64_t hash[kMaxBatchLen];
-  string_view* data = elems;
+  string_view* data = span.data();
   bool has_ttl = ttl_sec != UINT32_MAX;
+  size_t count = span.size();
+  unsigned res = 0;
 
+  if (BucketCount() < count) {
+    Reserve(count);
+  }
   while (count >= kMaxBatchLen) {
     for (unsigned i = 0; i < kMaxBatchLen; ++i) {
       hash[i] = CompactObj::HashCode(data[i]);
@@ -64,10 +69,8 @@ void StringSet::AddMany(string_view elems[], size_t count, uint32_t ttl_sec, boo
 
     for (unsigned i = 0; i < kMaxBatchLen; ++i) {
       void* prev = FindInternal(data + i, hash[i], 1);
-      if (prev != nullptr) {
-        res[i] = false;
-      } else {
-        res[i] = true;
+      if (prev == nullptr) {
+        ++res;
         sds field = MakeSetSds(data[i], ttl_sec);
         AddUnique(field, has_ttl, hash[i]);
       }
@@ -79,8 +82,9 @@ void StringSet::AddMany(string_view elems[], size_t count, uint32_t ttl_sec, boo
   }
 
   for (unsigned i = 0; i < count; ++i) {
-    res[i] = Add(data[i], ttl_sec);
+    res += Add(data[i], ttl_sec);
   }
+  return res;
 }
 
 std::optional<std::string> StringSet::Pop() {

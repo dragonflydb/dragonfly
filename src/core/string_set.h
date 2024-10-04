@@ -4,10 +4,11 @@
 
 #pragma once
 
+#include <absl/types/span.h>
+
 #include <cstdint>
 #include <functional>
 #include <optional>
-#include <string>
 #include <string_view>
 
 #include "core/dense_set.h"
@@ -28,7 +29,7 @@ class StringSet : public DenseSet {
   // Returns true if elem was added.
   bool Add(std::string_view s1, uint32_t ttl_sec = UINT32_MAX);
 
-  void AddMany(std::string_view elems[], size_t count, uint32_t ttl_sec, bool* res);
+  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec);
 
   bool Erase(std::string_view str) {
     return EraseInternal(&str, 1);

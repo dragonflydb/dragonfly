@@ -94,22 +94,21 @@ struct StringSetWrapper {
   unsigned Add(const NewEntries& entries, uint32_t ttl_sec) const {
     unsigned res = 0;
     string_view members[StringSet::kMaxBatchLen];
-    bool res_arr[StringSet::kMaxBatchLen];
+    size_t entries_len = std::visit([](const auto& e) { return e.size(); }, entries);
     unsigned len = 0;
+    if (ss->BucketCount() < entries_len) {
+      ss->Reserve(entries_len);
+    }
     for (string_view member : EntriesRange(entries)) {
       members[len++] = member;
       if (len == StringSet::kMaxBatchLen) {
-        ss->AddMany(members, StringSet::kMaxBatchLen, ttl_sec, res_arr);
-        for (unsigned i = 0; i < StringSet::kMaxBatchLen; ++i)
-          res += res_arr[i];
+        res += ss->AddMany({members, StringSet::kMaxBatchLen}, ttl_sec);
         len = 0;
       }
     }
 
     if (len) {
-      ss->AddMany(members, len, ttl_sec, res_arr);
-      for (unsigned i = 0; i < len; ++i)
-        res += res_arr[i];
+      res += ss->AddMany({members, len}, ttl_sec);
     }
 
     return res;
