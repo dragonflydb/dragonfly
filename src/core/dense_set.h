@@ -304,7 +304,7 @@ class DenseSet {
   // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
   // in the set may point to. This function only frees the allocated DenseLinkKeys created by
   // DenseSet. All data allocated by a derived class should be freed before calling this
-  uint32_t ClearInternal(uint32_t start, uint32_t limit);
+  uint32_t ClearInternal(uint32_t start, uint32_t count);
 
   void IncreaseMallocUsed(size_t delta) {
     obj_malloc_used_ += delta;
