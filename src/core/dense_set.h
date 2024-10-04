@@ -331,10 +331,9 @@ class DenseSet {
   bool Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const;
 
   struct CloneItem {
-    const DenseLinkKey* link = nullptr;
+    DensePtr ptr;
     void* obj = nullptr;
     bool has_ttl = false;
-    bool fetch_tail = false;
   };
 
   void CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const;
