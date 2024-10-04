@@ -208,6 +208,7 @@ class DenseSet {
 
  public:
   using MemoryResource = PMR_NS::memory_resource;
+  static constexpr uint32_t kMaxBatchLen = 32;
 
   explicit DenseSet(MemoryResource* mr = PMR_NS::get_default_resource());
   virtual ~DenseSet();
@@ -316,6 +317,8 @@ class DenseSet {
 
   // Assumes that the object does not exist in the set.
   void AddUnique(void* obj, bool has_ttl, uint64_t hashcode);
+
+  void Prefetch(uint64_t hash);
 
  private:
   DenseSet(const DenseSet&) = delete;

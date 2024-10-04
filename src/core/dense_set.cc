@@ -549,6 +549,11 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   ++size_;
 }
 
+void DenseSet::Prefetch(uint64_t hash) {
+  uint32_t bid = BucketId(hash);
+  PREFETCH_READ(&entries_[bid]);
+}
+
 auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
     -> tuple<size_t, DensePtr*, DensePtr*> {
   DCHECK_LT(bid, entries_.size());
@@ -563,19 +568,23 @@ auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
   // first look for displaced nodes since this is quicker than iterating a potential long chain
   if (bid > 0) {
     curr = &entries_[bid - 1];
-    ExpireIfNeeded(nullptr, curr);
+    if (curr->IsDisplaced() && curr->GetDisplacedDirection() == -1) {
+      ExpireIfNeeded(nullptr, curr);
 
-    if (Equal(*curr, ptr, cookie)) {
-      return {bid - 1, nullptr, curr};
+      if (Equal(*curr, ptr, cookie)) {
+        return {bid - 1, nullptr, curr};
+      }
     }
   }
 
   if (bid + 1 < entries_.size()) {
     curr = &entries_[bid + 1];
-    ExpireIfNeeded(nullptr, curr);
+    if (curr->IsDisplaced() && curr->GetDisplacedDirection() == 1) {
+      ExpireIfNeeded(nullptr, curr);
 
-    if (Equal(*curr, ptr, cookie)) {
-      return {bid + 1, nullptr, curr};
+      if (Equal(*curr, ptr, cookie)) {
+        return {bid + 1, nullptr, curr};
+      }
     }
   }
 
