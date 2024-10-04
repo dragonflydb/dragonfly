@@ -338,6 +338,9 @@ class DenseSet {
 
   void CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const;
 
+  using ClearItem = CloneItem;
+  void ClearBatch(unsigned len, ClearItem* items);
+
   MemoryResource* mr() {
     return entries_.get_allocator().resource();
   }

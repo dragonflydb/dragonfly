@@ -180,20 +180,33 @@ void* DenseSet::PopDataFront(DenseSet::ChainVectorIterator it) {
 }
 
 void DenseSet::ClearInternal() {
+  constexpr unsigned kArrLen = 32;
+  ClearItem arr[kArrLen];
+  unsigned len = 0;
+
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
-    while (!it->IsEmpty()) {
-      bool has_ttl = it->HasTtl();
-      bool is_displ = it->IsDisplaced();
-      void* obj = PopDataFront(it);
-      int32_t delta = int32_t(BucketId(obj, 0)) - int32_t(it - entries_.begin());
-      if (is_displ) {
-        DCHECK(delta < 2 || delta > -2);
-      } else {
-        DCHECK_EQ(delta, 0);
-      }
-      ObjDelete(obj, has_ttl);
+    if (it->IsEmpty())
+      continue;
+
+    DensePtr ptr = *it;
+    auto& dest = arr[len++];
+    dest.has_ttl = ptr.HasTtl();
+
+    PREFETCH_READ(ptr.Raw());
+    if (ptr.IsObject()) {
+      dest.obj = ptr.Raw();
+      dest.ptr.Reset();
+    } else {
+      dest.ptr = ptr;
+      dest.obj = nullptr;
+    }
+    if (len == kArrLen) {
+      ClearBatch(kArrLen, arr);
+      len = 0;
     }
   }
+
+  ClearBatch(len, arr);
 
   entries_.clear();
   num_used_buckets_ = 0;
@@ -255,6 +268,39 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
   }
 }
 
+void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
+  while (len) {
+    unsigned dest_id = 0;
+    // we walk "len" linked lists in parallel, and prefetch their next, obj pointers
+    // before actually processing them.
+    for (unsigned i = 0; i < len; ++i) {
+      auto& src = items[i];
+      if (src.obj) {
+        ObjDelete(src.obj, src.has_ttl);
+        src.obj = nullptr;
+      }
+
+      if (src.ptr.IsEmpty())
+        continue;
+
+      if (src.ptr.IsObject()) {
+        ObjDelete(src.ptr.Raw(), src.has_ttl);
+      } else {
+        auto& dest = items[dest_id++];
+        DenseLinkKey* link = src.ptr.AsLink();
+        dest.obj = link->Raw();
+        dest.has_ttl = link->HasTtl();
+        dest.ptr = link->next;
+        PREFETCH_READ(dest.ptr.Raw());
+        PREFETCH_READ(dest.obj);
+        FreeLink(link);
+      }
+    }
+
+    // update the length of the batch for the next iteration.
+    len = dest_id;
+  }
+}
 bool DenseSet::NoItemBelongsBucket(uint32_t bid) const {
   auto& entries = const_cast<DenseSet*>(this)->entries_;
   DensePtr* curr = &entries[bid];
