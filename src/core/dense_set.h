@@ -310,13 +310,6 @@ class DenseSet {
     obj_malloc_used_ -= delta;
   }
 
-  // Returns previous if the equivalent object already exists,
-  // Returns nullptr if obj was added.
-  void* AddOrFindObj(void* obj, bool has_ttl) {
-    DensePtr* ptr = AddOrFindDense(obj, has_ttl);
-    return ptr ? ptr->GetObject() : nullptr;
-  }
-
   // Returns the previous object if it has been replaced.
   // nullptr, if obj was added.
   void* AddOrReplaceObj(void* obj, bool has_ttl);
@@ -368,10 +361,6 @@ class DenseSet {
 
   void* PopDataFront(ChainVectorIterator);
   DensePtr PopPtrFront(ChainVectorIterator);
-
-  // Returns DensePtr if the object with such key already exists,
-  // Returns null if obj was added.
-  DensePtr* AddOrFindDense(void* obj, bool has_ttl);
 
   // ============ Pseudo Linked List in DenseSet end ==================
 

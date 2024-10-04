@@ -38,19 +38,16 @@ StringSet::~StringSet() {
   Clear();
 }
 
-bool StringSet::AddSds(sds s1) {
-  return AddOrFindObj(s1, false) == nullptr;
-}
-
 bool StringSet::Add(string_view src, uint32_t ttl_sec) {
-  sds newsds = MakeSetSds(src, ttl_sec);
-  bool has_ttl = ttl_sec != UINT32_MAX;
-
-  if (AddOrFindObj(newsds, has_ttl) != nullptr) {
-    sdsfree(newsds);
+  uint64_t hash = Hash(&src, 1);
+  void* prev = FindInternal(&src, hash, 1);
+  if (prev != nullptr) {
     return false;
   }
 
+  sds newsds = MakeSetSds(src, ttl_sec);
+  bool has_ttl = ttl_sec != UINT32_MAX;
+  AddUnique(newsds, has_ttl, hash);
   return true;
 }
 

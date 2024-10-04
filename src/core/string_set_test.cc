@@ -531,4 +531,25 @@ void BM_Clear(benchmark::State& state) {
 }
 BENCHMARK(BM_Clear)->ArgName("elements")->Arg(32000);
 
+void BM_Add(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  StringSet ss;
+  unsigned elems = 100000;
+  for (size_t i = 0; i < elems; ++i) {
+    string str = random_string(generator, 16);
+    strs.push_back(str);
+  }
+  ss.Reserve(elems);
+  while (state.KeepRunning()) {
+    for (auto& str : strs)
+      ss.Add(str);
+    state.PauseTiming();
+    ss.Clear();
+    ss.Reserve(elems);
+    state.ResumeTiming();
+  }
+}
+BENCHMARK(BM_Add);
+
 }  // namespace dfly

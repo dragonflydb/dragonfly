@@ -28,9 +28,6 @@ class StringSet : public DenseSet {
   // Returns true if elem was added.
   bool Add(std::string_view s1, uint32_t ttl_sec = UINT32_MAX);
 
-  // Used currently by rdb_load. Returns true if elem was added.
-  bool AddSds(sds elem);
-
   bool Erase(std::string_view str) {
     return EraseInternal(&str, 1);
   }

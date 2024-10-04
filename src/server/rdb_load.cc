@@ -37,6 +37,7 @@ extern "C" {
 #include "core/string_set.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/cluster/cluster_family.h"
+#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
@@ -1029,16 +1030,14 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
     }
+
     unsigned char* lp = (unsigned char*)blob.data();
     StringSet* set = CompactObj::AllocateMR<StringSet>();
     for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
-      unsigned int slen = 0;
-      long long lval = 0;
-      unsigned char* res = lpGetValue(cur, &slen, &lval);
-      sds sdsele = res ? sdsnewlen(res, slen) : sdsfromlonglong(lval);
-      if (!set->AddSds(sdsele)) {
-        LOG(ERROR) << "Duplicate member " << sdsele;
-        sdsfree(sdsele);
+      unsigned char field_buf[LP_INTBUF_SIZE];
+      string_view elem = container_utils::LpGetView(cur, field_buf);
+      if (!set->Add(elem)) {
+        LOG(ERROR) << "Duplicate member " << elem;
         ec_ = RdbError(errc::duplicate_key);
         break;
       }
