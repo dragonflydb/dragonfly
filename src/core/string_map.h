@@ -121,8 +121,6 @@ class StringMap : public DenseSet {
     return iterator{FindIt(&member, 1)};
   }
 
-  void Clear();
-
   iterator begin() {
     return iterator{this};
   }
