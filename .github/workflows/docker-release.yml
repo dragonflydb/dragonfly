@@ -32,6 +32,16 @@ jobs:
       tag: ${{ steps.release-param.outputs.tag }}
       tag_latest: ${{ steps.release-param.outputs.tag_latest }}
     steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+      with:
+        egress-policy: audit
+
+    - name: Harden Runner
+      uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+      with:
+        egress-policy: audit
+
     - id: release-param
       run: |
         # If env.IS_PRERELEASE is true, set tag to alpha and do not enable tag_latest
@@ -63,15 +73,15 @@ jobs:
       run: env
 
     - name: checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       with:
         fetch-depth: 0
 
     - name: Install helm
-      uses: azure/setup-helm@v4
+      uses: azure/setup-helm@fe7b79cd5ee1e45176fcad797de68ecaf3ca4814 # v4.2.0
 
     - name: Setup Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
 
     - name: Configure Git
       if: env.IS_PRERELEASE != 'true'
@@ -106,7 +116,7 @@ jobs:
         helm push dragonfly-${{ env.TAG_NAME }}.tgz oci://ghcr.io/${{ github.repository }}/helm
 
     - name: GitHub Push
-      uses: CasperWA/push-protected@v2
+      uses: CasperWA/push-protected@74d25b8aa10e0c29024138735d32f3c0b75f9279 # v2.16.0
       with:
         token: ${{ secrets.DRAGONFLY_TOKEN }}
         branch: main

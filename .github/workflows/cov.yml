@@ -5,6 +5,9 @@ on:
       - cron: '0 6 * * *' # run at 6 AM UTC
     workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     # The CMake configure and build commands are platform agnostic and should work equally
@@ -29,7 +32,12 @@ jobs:
         - /:/hostroot
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden Runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
           submodules: true
       - name: Delete Space
@@ -49,7 +57,7 @@ jobs:
           apt update && apt install -y lcov pip
       - name: Cache build deps
         id: cache-deps
-        uses: actions/cache@v4
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
         with:
           path: |
             ~/.ccache
@@ -89,7 +97,7 @@ jobs:
           echo ls covout
           ls covout/
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
           name: coverage-report
           path: build/covout/

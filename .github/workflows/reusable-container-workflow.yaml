@@ -59,15 +59,20 @@ jobs:
             dockerfile: tools/packaging/Dockerfile.ubuntu
             tag_main: true
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+        with:
+          egress-policy: audit
+
       - name: checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
           fetch-depth: 1
           submodules: true
 
       - if: inputs.fetch_release
         name: Fetch release asset
-        uses: dsaltares/fetch-gh-release-asset@1.1.2
+        uses: dsaltares/fetch-gh-release-asset@aa2ab1243d6e0d5b405b973c89fa4d06a2d0fff7 # 1.1.2
         with:
           version: "tags/${{ inputs.release_version }}"
           regex: true
@@ -87,14 +92,14 @@ jobs:
 
       - name: Set up QEMU
         id: qemu
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
         with:
           platforms: arm64,amd64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@c47758b77c9736f4b2ef4073d4d51994fabfe349 # v3.7.1
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
         with:
           registry: ${{ inputs.registry }}
           username: ${{ inputs.registry_username }}
@@ -102,7 +107,7 @@ jobs:
 
       - name: Docker meta
         id: metadata
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@8e5442c4ef9f78752691e2d8f8d19755c6f78e81 # v5.5.1
         with:
           images: |
             ${{ inputs.image }}
@@ -132,7 +137,7 @@ jobs:
       #  build is broken based on platforms as load: true is not supported with multi-platform builds
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
         name: Build release image for amd64
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: .
           platforms: linux/amd64
@@ -150,7 +155,7 @@ jobs:
 
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
         name: Build release image for arm64
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
             context: .
             platforms: linux/arm64
@@ -190,7 +195,7 @@ jobs:
 
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
         name: Push release image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64

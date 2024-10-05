@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+
+  - package-ecosystem: gomod
+    directory: /contrib/charts/dragonfly
+    schedule:
+      interval: daily
+
+  - package-ecosystem: pip
+    directory: /tests/dragonfly
+    schedule:
+      interval: daily
+
+  - package-ecosystem: gomod
+    directory: /tools/replay
+    schedule:
+      interval: daily
+
+  - package-ecosystem: pip
+    directory: /tools
+    schedule:
+      interval: daily
