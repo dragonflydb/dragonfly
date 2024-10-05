@@ -45,7 +45,7 @@ function(gen_bison name)
  set_source_files_properties(${name}.cc ${name}_base.h PROPERTIES GENERATED TRUE)
 endfunction()
 
-if (APPLE)
+if (UNIX AND NOT LINUX)
   set(SED_REPL sed "-i" '')
 else()
   set(SED_REPL sed "-i")
