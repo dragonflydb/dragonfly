@@ -9,6 +9,9 @@ concurrency:
   group: dragonfly-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -36,10 +39,15 @@ jobs:
     #       --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Harden Runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
           submodules: true
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
         with:
           cache-dependency-path: tests/fakeredis/poetry.lock
           python-version: ${{ matrix.PYTHON_VERSION }}
@@ -86,7 +94,7 @@ jobs:
           redis-cli -p 6380 INFO ALL
       - name: Upload Tests Result xml
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
           name: tests-result-logs
           path: |
@@ -94,14 +102,14 @@ jobs:
 
       - name: Upload Tests Result html
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
           name: report-tests.html
           path: tests/fakeredis/report-tests.html
 
       - name: Publish Test Report
         if: ${{ github.event_name == 'pull_request' }}
-        uses: mikepenz/action-junit-report@v4
+        uses: mikepenz/action-junit-report@db71d41eb79864e25ab0337e395c352e84523afe # v4.3.1
         with:
           report_paths: tests/fakeredis/results-tests.xml
           # Do not create a check run
@@ -119,20 +127,25 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+        with:
+          egress-policy: audit
+
       - name: Bundle Tests Result to one artifact
-        uses: actions/upload-artifact/merge@v4
+        uses: actions/upload-artifact/merge@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
         with:
           delete-merged: true
           name: test-results-html
           pattern: '*.html'
 
       - name: Download html pages
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: test-results-html
           path: results/
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
         with:
           cache-dependency-path: tests/fakeredis/poetry.lock
           python-version: "3.12"
@@ -143,11 +156,11 @@ jobs:
           pytest_html_merger -i results/ -o merged/index.html
 
       - name: Publish to GitHub Pages
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: merged/
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'

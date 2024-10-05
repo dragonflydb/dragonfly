@@ -5,6 +5,9 @@ on:
     - cron: "0 9 * * *" # run at 6 AM UTC
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   benchmark:
     strategy:
@@ -43,16 +46,21 @@ jobs:
       id-token: write
 
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+        with:
+          egress-policy: audit
+
       - name: Setup namespace name
         id: setup
         run: echo "namespace=benchmark-$(date +"%Y-%m-%d-%s")" >> $GITHUB_OUTPUT
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
           submodules: true
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -140,7 +148,7 @@ jobs:
           python3 tools/benchmark/post_run_checks.py
 
       - name: Get Dragonfly logs
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
         if: always()
         with:
           timeout_minutes: 1
@@ -149,7 +157,7 @@ jobs:
             kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-0
 
       - name: Get Dragonfly replica logs
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
         if: always()
         with:
           timeout_minutes: 1
@@ -158,7 +166,7 @@ jobs:
             kubectl logs -n ${{ steps.setup.outputs.namespace }} dragonfly-sample-1
 
       - name: Describe dragonflydb object
-        uses: nick-fields/retry@v3
+        uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
         if: always()
         with:
           timeout_minutes: 1

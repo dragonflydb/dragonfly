@@ -15,8 +15,13 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+        with:
+          egress-policy: audit
+
       - name: Create Release
-        uses: ncipollo/release-action@v1
+        uses: ncipollo/release-action@2c591bcc8ecdcd2db72b97d6147f871fcd833ba5 # v1.14.0
         with:
           allowUpdates: true
           omitBody: true
@@ -29,10 +34,15 @@ jobs:
     name: Build aarch64 on ubuntu20.04
     needs: create-release
     steps:
-    - uses: actions/checkout@v4
+    - name: Harden Runner
+      uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       with:
         submodules: true
-    - uses: uraimo/run-on-arch-action@v2
+    - uses: uraimo/run-on-arch-action@b395267f2e280c600d098a503bde851df600e826 # v2
       name: Run commands
       id: runcmd
       with:
@@ -79,7 +89,7 @@ jobs:
         echo finished
         ls -al
     - name: Upload
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
       with:
         name: dragonfly-aarch64
         path: |
@@ -101,7 +111,12 @@ jobs:
       image: ghcr.io/romange/${{ matrix.container }}
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
     steps:
-    - uses: actions/checkout@v4
+    - name: Harden Runner
+      uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
       with:
         submodules: true
     - name: Configure
@@ -144,7 +159,7 @@ jobs:
             mv ./*.rpm ./results-artifacts/
           fi
     - name: Upload
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
       with:
         name: dragonfly-amd64-${{ matrix.name }}
         path: results-artifacts/*
@@ -152,14 +167,19 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-native, build-qemu]
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Harden Runner
+        uses: step-security/harden-runner@91182cccc01eb5e619899d80e4e971d6181294a7 # v2.10.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         name: Download files
         with:
           path: artifacts
       - name: See all the artifacts
         run: |
           ls -lR artifacts/
-      - uses: ncipollo/release-action@v1
+      - uses: ncipollo/release-action@2c591bcc8ecdcd2db72b97d6147f871fcd833ba5 # v1.14.0
         with:
           artifacts: "artifacts/dragonfly-*/*"
           allowUpdates: true
