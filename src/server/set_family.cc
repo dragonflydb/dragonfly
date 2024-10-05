@@ -102,13 +102,13 @@ struct StringSetWrapper {
     for (string_view member : EntriesRange(entries)) {
       members[len++] = member;
       if (len == StringSet::kMaxBatchLen) {
-        res += ss->AddMany({members, StringSet::kMaxBatchLen}, ttl_sec);
+        res += ss->AddMany(absl::MakeSpan(members, StringSet::kMaxBatchLen), ttl_sec);
         len = 0;
       }
     }
 
     if (len) {
-      res += ss->AddMany({members, len}, ttl_sec);
+      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec);
     }
 
     return res;
