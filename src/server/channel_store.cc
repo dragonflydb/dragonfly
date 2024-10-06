@@ -146,7 +146,7 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
     auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
     while (it != subscribers_ptr->end() && it->Thread() == idx) {
-      // A connection might have closed or be in the process of closing
+      // if ptr->cntx() is null, a connection might have closed or be in the process of closing
       if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr)
         send(ptr, it->pattern);
       it++;
