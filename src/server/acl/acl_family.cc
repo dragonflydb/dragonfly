@@ -41,22 +41,22 @@
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
 
-ABSL_FLAG(std::string, aclfile, "", "Path and name to aclfile");
+using namespace std;
+
+ABSL_FLAG(string, aclfile, "", "Path and name to aclfile");
 
 namespace dfly::acl {
 
 namespace {
 
-std::string PasswordsToString(const absl::flat_hash_set<std::string>& passwords, bool nopass,
-                              bool full_sha);
-using MaterializedContents = std::optional<std::vector<std::vector<std::string_view>>>;
+string PasswordsToString(const absl::flat_hash_set<string>& passwords, bool nopass, bool full_sha);
+using MaterializedContents = optional<vector<vector<string_view>>>;
 
-MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames,
-                                             std::string_view file_contents);
+MaterializedContents MaterializeFileContents(vector<string>* usernames, string_view file_contents);
 
-std::string AclKeysToString(const AclKeys& keys);
+string AclKeysToString(const AclKeys& keys);
 
-std::string AclPubSubToString(const AclPubSub& pub_sub);
+string AclPubSubToString(const AclPubSub& pub_sub);
 }  // namespace
 
 AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
@@ -74,19 +74,19 @@ void AclFamily::List(CmdArgList args, ConnectionContext* cntx) {
   rb->StartArray(registry.size());
 
   for (const auto& [username, user] : registry) {
-    std::string buffer = "user ";
-    const std::string password = PasswordsToString(user.Passwords(), user.HasNopass(), false);
+    string buffer = "user ";
+    const string password = PasswordsToString(user.Passwords(), user.HasNopass(), false);
 
-    const std::string acl_keys = AclKeysToString(user.Keys());
+    const string acl_keys = AclKeysToString(user.Keys());
 
-    const std::string acl_pub_sub = AclPubSubToString(user.PubSub());
+    const string acl_pub_sub = AclPubSubToString(user.PubSub());
 
-    const std::string maybe_space_com = acl_keys.empty() ? "" : " ";
+    const string maybe_space_com = acl_keys.empty() ? "" : " ";
 
-    const std::string acl_cat_and_commands =
+    const string acl_cat_and_commands =
         AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
 
-    using namespace std::string_view_literals;
+    using namespace string_view_literals;
 
     absl::StrAppend(&buffer, username, " ", user.IsActive() ? "on "sv : "off "sv, password,
                     acl_keys, maybe_space_com, acl_pub_sub, " ", acl_cat_and_commands);
@@ -117,7 +117,7 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
 using facade::ErrorReply;
 
 void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
-  std::string_view username = facade::ToSV(args[0]);
+  string_view username = facade::ToSV(args[0]);
   auto reg = registry_->GetRegistryWithWriteLock();
   const bool exists = reg.registry.contains(username);
   const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
@@ -140,8 +140,8 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
     cntx->SendOk();
     if (exists) {
       if (!reset_channels) {
-        StreamUpdatesToAllProactorConnections(std::string(username), user.AclCommands(),
-                                              user.Keys(), user.PubSub());
+        StreamUpdatesToAllProactorConnections(string(username), user.AclCommands(), user.Keys(),
+                                              user.PubSub());
       }
       // We evict connections that had their channels reseted
       else {
@@ -153,8 +153,7 @@ void AclFamily::SetUser(CmdArgList args, ConnectionContext* cntx) {
   std::visit(Overloaded{error_case, update_case}, std::move(req));
 }
 
-void AclFamily::EvictOpenConnectionsOnAllProactors(
-    const absl::flat_hash_set<std::string_view>& users) {
+void AclFamily::EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<string_view>& users) {
   auto close_cb = [&users]([[maybe_unused]] size_t id, util::Connection* conn) {
     CHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
@@ -187,10 +186,10 @@ void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
 
 void AclFamily::DelUser(CmdArgList args, ConnectionContext* cntx) {
   auto& registry = *registry_;
-  absl::flat_hash_set<std::string_view> users;
+  absl::flat_hash_set<string_view> users;
 
   for (auto arg : args) {
-    std::string_view username = facade::ToSV(arg);
+    string_view username = facade::ToSV(arg);
     if (username == "default") {
       continue;
     }
@@ -214,24 +213,24 @@ void AclFamily::WhoAmI(CmdArgList args, ConnectionContext* cntx) {
   rb->SendBulkString(absl::StrCat("User is ", cntx->authed_username));
 }
 
-std::string AclFamily::RegistryToString() const {
+string AclFamily::RegistryToString() const {
   auto registry_with_read_lock = registry_->GetRegistryWithLock();
   auto& registry = registry_with_read_lock.registry;
-  std::string result;
+  string result;
   for (auto& [username, user] : registry) {
-    std::string command = "USER ";
-    const std::string password = PasswordsToString(user.Passwords(), user.HasNopass(), true);
+    string command = "USER ";
+    const string password = PasswordsToString(user.Passwords(), user.HasNopass(), true);
 
-    const std::string acl_keys = AclKeysToString(user.Keys());
+    const string acl_keys = AclKeysToString(user.Keys());
 
-    const std::string maybe_space = acl_keys.empty() ? "" : " ";
+    const string maybe_space = acl_keys.empty() ? "" : " ";
 
-    const std::string acl_pub_sub = AclPubSubToString(user.PubSub());
+    const string acl_pub_sub = AclPubSubToString(user.PubSub());
 
-    const std::string acl_cat_and_commands =
+    const string acl_cat_and_commands =
         AclCatAndCommandToString(user.CatChanges(), user.CmdChanges());
 
-    using namespace std::string_view_literals;
+    using namespace string_view_literals;
 
     absl::StrAppend(&result, command, username, " ", user.IsActive() ? "ON "sv : "OFF "sv, password,
                     acl_keys, maybe_space, acl_pub_sub, " ", acl_cat_and_commands, "\n");
@@ -471,8 +470,8 @@ void AclFamily::Cat(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (args.size() == 1) {
-    ToUpper(&args[0]);
-    std::string_view category = facade::ToSV(args[0]);
+    string category = absl::AsciiStrToUpper(ArgS(args, 0));
+
     if (!cat_table_.contains(category)) {
       auto error = absl::StrCat("Unkown category: ", category);
       cntx->SendError(error);
@@ -605,8 +604,7 @@ void AclFamily::DryRun(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  ToUpper(&args[1]);
-  auto command = facade::ArgS(args, 1);
+  string command = absl::AsciiStrToUpper(ArgS(args, 1));
   auto* cid = cmd_registry_->Find(command);
   if (!cid) {
     auto error = absl::StrCat("Command '", command, "' not found");
