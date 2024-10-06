@@ -157,6 +157,9 @@ void Replica::Stop() {
   // so we can freely release resources (connections).
   sync_fb_.JoinIfNeeded();
   acks_fb_.JoinIfNeeded();
+  for (auto& flow : shard_flows_) {
+    flow.reset();
+  }
 }
 
 void Replica::Pause(bool pause) {

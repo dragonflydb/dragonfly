@@ -282,7 +282,12 @@ class ServerState {  // public struct - to allow initialization.
   // Decommits 3 possible heaps according to the flags.
   // For decommit_glibcmalloc the heap is global for the process, for others it's specific only
   // for this thread.
-  enum { kDataHeap = 1, kBackingHeap = 2, kGlibcmalloc = 4 };
+  enum {
+    kDataHeap = 1,
+    kBackingHeap = 2,
+    kGlibcmalloc = 4,
+    kAllMemory = kDataHeap | kBackingHeap | kGlibcmalloc
+  };
   void DecommitMemory(uint8_t flags);
 
   // Exec descriptor frequency count for this thread.

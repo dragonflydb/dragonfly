@@ -41,6 +41,15 @@ class RdbTest : public BaseFamilyTest {
   void SetUp();
 
   io::FileSource GetSource(string name);
+
+  std::error_code LoadRdb(const string& filename) {
+    return pp_->at(0)->Await([&] {
+      io::FileSource fs = GetSource(filename);
+
+      RdbLoader loader(service_.get());
+      return loader.Load(&fs);
+    });
+  }
 };
 
 void RdbTest::SetUp() {
@@ -84,19 +93,12 @@ TEST_F(RdbTest, Crc) {
 }
 
 TEST_F(RdbTest, LoadEmpty) {
-  io::FileSource fs = GetSource("empty.rdb");
-  RdbLoader loader(NULL);
-  auto ec = loader.Load(&fs);
+  auto ec = LoadRdb("empty.rdb");
   CHECK(!ec);
 }
 
 TEST_F(RdbTest, LoadSmall6) {
-  io::FileSource fs = GetSource("redis6_small.rdb");
-  RdbLoader loader{service_.get()};
-
-  // must run in proactor thread in order to avoid polluting the serverstate
-  // in the main, testing thread.
-  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+  auto ec = LoadRdb("redis6_small.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
 
@@ -128,12 +130,7 @@ TEST_F(RdbTest, LoadSmall6) {
 }
 
 TEST_F(RdbTest, Stream) {
-  io::FileSource fs = GetSource("redis6_stream.rdb");
-  RdbLoader loader{service_.get()};
-
-  // must run in proactor thread in order to avoid polluting the serverstate
-  // in the main, testing thread.
-  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+  auto ec = LoadRdb("redis6_stream.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
 
@@ -447,12 +444,7 @@ TEST_F(RdbTest, JsonTest) {
 class HllRdbTest : public RdbTest, public testing::WithParamInterface<string> {};
 
 TEST_P(HllRdbTest, Hll) {
-  io::FileSource fs = GetSource("hll.rdb");
-  RdbLoader loader{service_.get()};
-
-  // must run in proactor thread in order to avoid polluting the serverstate
-  // in the main, testing thread.
-  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+  auto ec = LoadRdb("hll.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
 
@@ -478,12 +470,7 @@ TEST_F(RdbTest, LoadSmall7) {
   // 2. A hashtable called my-hset encoded as RDB_TYPE_HASH_LISTPACK
   // 3. A set called my-set encoded as RDB_TYPE_SET_LISTPACK
   // 4. A zset called my-zset encoded as RDB_TYPE_ZSET_LISTPACK
-  io::FileSource fs = GetSource("redis7_small.rdb");
-  RdbLoader loader{service_.get()};
-
-  // must run in proactor thread in order to avoid polluting the serverstate
-  // in the main, testing thread.
-  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+  auto ec = LoadRdb("redis7_small.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
 
@@ -520,12 +507,7 @@ TEST_F(RdbTest, RedisJson) {
   // JSON.SET json-obj $
   // '{"company":"DragonflyDB","product":"Dragonfly","website":"https://dragondlydb.io","years-active":[2021,2022,2023,2024,"and
   // more!"]}'
-  io::FileSource fs = GetSource("redis_json.rdb");
-  RdbLoader loader{service_.get()};
-
-  // must run in proactor thread in order to avoid polluting the serverstate
-  // in the main, testing thread.
-  auto ec = pp_->at(0)->Await([&] { return loader.Load(&fs); });
+  auto ec = LoadRdb("redis_json.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
 
