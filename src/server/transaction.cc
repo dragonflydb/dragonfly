@@ -1074,12 +1074,12 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
     lock_args = GetLockArgs(shard->shard_id());
     bool shard_unlocked = shard->shard_lock()->Check(mode);
 
+    // We need to acquire the fp locks because the executing callback
+    // within RunCallback below might preempt.
     acquire_fp_locks(shard_unlocked);
 
     // Check if we can run immediately
     if (shard_unlocked && execute_optimistic && lock_granted) {
-      // We need to acquire the fp locks because the executing callback
-      // within RunCallback might preempt.
       sd.local_mask |= OPTIMISTIC_EXECUTION;
       shard->stats().tx_optimistic_total++;
 
