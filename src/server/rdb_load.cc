@@ -2307,6 +2307,16 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
+    if (type == RDB_OPCODE_SLOT_INFO) {
+      [[maybe_unused]] uint64_t slot_id;
+      SET_OR_RETURN(LoadLen(nullptr), slot_id);
+      [[maybe_unused]] uint64_t slot_size;
+      SET_OR_RETURN(LoadLen(nullptr), slot_size);
+      [[maybe_unused]] uint64_t expires_slot_size;
+      SET_OR_RETURN(LoadLen(nullptr), expires_slot_size);
+      continue;
+    }
+
     if (!rdbIsObjectTypeDF(type)) {
       return RdbError(errc::invalid_rdb_type);
     }
