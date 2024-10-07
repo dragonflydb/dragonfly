@@ -178,6 +178,9 @@ class Transaction {
     Transaction* tx;
   };
 
+  static void Init(unsigned num_shards);
+  static void Shutdown();
+
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
@@ -514,6 +517,9 @@ class Transaction {
   // if execute_optimistic is true - means we can try executing during the scheduling,
   // subject to uncontended keys.
   bool ScheduleInShard(EngineShard* shard, bool execute_optimistic);
+
+  // Optimized extension of ScheduleInShard. Pulls several transactions queued for scheduling.
+  static void ScheduleBatchInShard();
 
   // Set ARMED flags, start run barrier and submit poll tasks. Doesn't wait for the run barrier
   void DispatchHop();

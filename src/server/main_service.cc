@@ -979,6 +979,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
     server_family_.UpdateMemoryGlobalStats();
   });
+  Transaction::Init(shard_num);
+
   SetOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_oom_deny_ratio));
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
 
@@ -1010,6 +1012,7 @@ void Service::Shutdown() {
   shard_set->PreShutdown();
   namespaces.Clear();
   shard_set->Shutdown();
+  Transaction::Shutdown();
 
   pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
 

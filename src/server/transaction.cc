@@ -94,11 +94,30 @@ bool CheckLocks(const DbSlice& db_slice, IntentLock::Mode mode, const KeyLockArg
 struct ScheduleContext {
   Transaction* trans;
   bool optimistic_execution = false;
+
+  std::atomic<ScheduleContext*> next{nullptr};
+
   std::atomic_uint32_t fail_cnt{0};
 
   ScheduleContext(Transaction* t, bool optimistic) : trans(t), optimistic_execution(optimistic) {
   }
 };
+
+struct ScheduleQ {
+  alignas(64) base::MPSCIntrusiveQueue<ScheduleContext> queue;
+  alignas(64) atomic_bool armed{false};
+};
+
+void MPSC_intrusive_store_next(ScheduleContext* dest, ScheduleContext* next_node) {
+  dest->next.store(next_node, std::memory_order_relaxed);
+}
+
+ScheduleContext* MPSC_intrusive_load_next(const ScheduleContext& src) {
+  return src.next.load(std::memory_order_acquire);
+}
+
+// of shard_num arity.
+ScheduleQ* schedule_queues = nullptr;
 
 }  // namespace
 
@@ -145,6 +164,17 @@ Transaction::Guard::Guard(Transaction* tx) : tx(tx) {
 Transaction::Guard::~Guard() {
   tx->Conclude();
   tx->Refurbish();
+}
+
+void Transaction::Init(unsigned num_shards) {
+  DCHECK(schedule_queues == nullptr);
+  schedule_queues = new ScheduleQ[num_shards];
+}
+
+void Transaction::Shutdown() {
+  DCHECK(schedule_queues);
+  delete[] schedule_queues;
+  schedule_queues = nullptr;
 }
 
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
@@ -693,11 +723,11 @@ void Transaction::ScheduleInternal() {
   // Try running immediately (during scheduling) if we're concluding and either:
   // - have a single shard, and thus never have to cancel scheduling due to reordering
   // - run as an idempotent command, meaning we can safely repeat the operation if scheduling fails
-  bool can_run_immediately = !IsGlobal() && (coordinator_state_ & COORD_CONCLUDING) &&
-                             (unique_shard_cnt_ == 1 || (cid_->opt_mask() & CO::IDEMPOTENT));
+  bool optimistic_exec = !IsGlobal() && (coordinator_state_ & COORD_CONCLUDING) &&
+                         (unique_shard_cnt_ == 1 || (cid_->opt_mask() & CO::IDEMPOTENT));
 
   DVLOG(1) << "ScheduleInternal " << cid_->name() << " on " << unique_shard_cnt_ << " shards "
-           << " immediate run: " << can_run_immediately;
+           << " optimistic_execution: " << optimistic_exec;
 
   auto is_active = [this](uint32_t i) { return IsActive(i); };
 
@@ -719,29 +749,40 @@ void Transaction::ScheduleInternal() {
       // in the lower-level code. It's not really needed otherwise because we run inline.
 
       // single shard schedule operation can't fail
-      CHECK(ScheduleInShard(EngineShard::tlocal(), can_run_immediately));
+      CHECK(ScheduleInShard(EngineShard::tlocal(), optimistic_exec));
       run_barrier_.Dec();
       break;
     }
 
-    ScheduleContext schedule_ctx{this, can_run_immediately};
+    ScheduleContext schedule_ctx{this, optimistic_exec};
 
-    auto cb = [&schedule_ctx]() {
-      if (!schedule_ctx.trans->ScheduleInShard(EngineShard::tlocal(),
-                                               schedule_ctx.optimistic_execution)) {
-        schedule_ctx.fail_cnt.fetch_add(1, memory_order_relaxed);
+    if (unique_shard_cnt_ == 1) {
+      // Single shard optimization. Note: we could apply the same optimization
+      // to multi-shard transactions as well by creating a vector of ScheduleContext.
+      schedule_queues[unique_shard_id_].queue.Push(&schedule_ctx);
+      bool current_val = false;
+      if (schedule_queues[unique_shard_id_].armed.compare_exchange_strong(current_val, true,
+                                                                          memory_order_acq_rel)) {
+        shard_set->Add(unique_shard_id_, &Transaction::ScheduleBatchInShard);
       }
-      schedule_ctx.trans->FinishHop();
-    };
+    } else {
+      auto cb = [&schedule_ctx]() {
+        if (!schedule_ctx.trans->ScheduleInShard(EngineShard::tlocal(),
+                                                 schedule_ctx.optimistic_execution)) {
+          schedule_ctx.fail_cnt.fetch_add(1, memory_order_relaxed);
+        }
+        schedule_ctx.trans->FinishHop();
+      };
 
-    IterateActiveShards([cb](const auto& sd, ShardId i) { shard_set->Add(i, cb); });
+      IterateActiveShards([cb](const auto& sd, ShardId i) { shard_set->Add(i, cb); });
 
-    // Add this debugging function to print more information when we experience deadlock
-    // during tests.
-    ThisFiber::PrintLocalsCallback locals([&] {
-      return absl::StrCat("unique_shard_cnt_: ", unique_shard_cnt_,
-                          " run_barrier_cnt: ", run_barrier_.DEBUG_Count(), "\n");
-    });
+      // Add this debugging function to print more information when we experience deadlock
+      // during tests.
+      ThisFiber::PrintLocalsCallback locals([&] {
+        return absl::StrCat("unique_shard_cnt_: ", unique_shard_cnt_,
+                            " run_barrier_cnt: ", run_barrier_.DEBUG_Count(), "\n");
+      });
+    }
     run_barrier_.Wait();
 
     if (schedule_ctx.fail_cnt.load(memory_order_relaxed) == 0) {
@@ -1052,12 +1093,11 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   if (txid_ > 0 && shard->committed_txid() >= txid_)
     return false;
 
-  // Acquire intent locks. Intent locks are always acquired, even if already locked by others.
   if (!IsGlobal()) {
     lock_args = GetLockArgs(shard->shard_id());
     bool shard_unlocked = shard->shard_lock()->Check(mode);
 
-    // Check if we can run immediately
+    // Check if we can run optimistically
     if (shard_unlocked && execute_optimistic &&
         CheckLocks(GetDbSlice(shard->shard_id()), mode, lock_args)) {
       sd.local_mask |= OPTIMISTIC_EXECUTION;
@@ -1071,6 +1111,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
         return true;
     }
 
+    // Acquire intent locks. Intent locks are always acquired, even if already locked by others.
     bool keys_unlocked = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
     lock_granted = shard_unlocked && keys_unlocked;
 
@@ -1114,6 +1155,39 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   DVLOG(1) << "Insert into tx-queue, sid(" << sid << ") " << DebugId() << ", qlen " << txq->size();
 
   return true;
+}
+
+void Transaction::ScheduleBatchInShard() {
+  EngineShard* shard = EngineShard::tlocal();
+  auto& stats = shard->stats();
+  stats.tx_batch_schedule_calls_total++;
+
+  ShardId sid = shard->shard_id();
+  auto& sq = schedule_queues[sid];
+
+  for (unsigned j = 0;; ++j) {
+    // we pull the the
+    while (true) {
+      ScheduleContext* item = sq.queue.Pop();
+      if (!item)
+        break;
+
+      if (!item->trans->ScheduleInShard(shard, item->optimistic_execution)) {
+        item->fail_cnt.fetch_add(1, memory_order_relaxed);
+      }
+      item->trans->FinishHop();
+      stats.tx_batch_schedules_total++;
+    };
+    if (j == 1)
+      break;
+
+    // We signal that we're done with the current batch but then we check if there are more
+    // transactions to fetch in the next iteration.
+    // We do this to avoid the situation where we have a data race, where
+    // a transaction is added to the queue, we've checked that sq.armed is true and skipped
+    // adding the callback that fetches the transaction.
+    sq.armed.store(false, memory_order_release);
+  }
 }
 
 bool Transaction::CancelShardCb(EngineShard* shard) {
