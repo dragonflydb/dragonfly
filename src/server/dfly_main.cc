@@ -471,10 +471,11 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
   constexpr auto base_mem_v1 = "/sys/fs/cgroup/memory"sv;
   parse_limits(base_mem_v1);
   // For v2 if the previous failed
-  if (!read_something) {
-    constexpr auto base_mem_v2 = "/sys/fs/cgroup"sv;
-    parse_limits(base_mem_v2);
-  }
+  constexpr auto base_mem_v2 = "/sys/fs/cgroup"sv;
+  parse_limits(base_mem_v2);
+  // For v2 under /user.slice
+  constexpr auto base_mem_v2_slice = "/sys/fs/cgroup/user.slice"sv;
+  parse_limits(base_mem_v2_slice);
 
   // Read cgroup-specific limits
   read_mem(StrCat(mem_path, "/memory.limit_in_bytes"), &mdata->mem_total);
@@ -484,7 +485,6 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 
   /* Update thread limits */
 
-  constexpr auto base_cpu = "/sys/fs/cgroup/cpu"sv;
   auto read_cpu = [&read_something](string_view path, size_t* output) {
     double count{0}, timeshare{1};
 
@@ -543,8 +543,13 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     }
   };
 
+  constexpr auto base_cpu = "/sys/fs/cgroup/cpu"sv;
   read_cpu(base_cpu, max_threads);  // global cpu limits
-  read_cpu(cpu_path, max_threads);  // cgroup-specific limits
+  constexpr auto base_cpu_v2 = "/sys/fs/cgroup"sv;
+  read_cpu(base_cpu_v2, max_threads);  // global cpu limits
+  constexpr auto base_cpu_v2_slice = "/sys/fs/cgroup/user.slice"sv;
+  read_cpu(base_cpu_v2_slice, max_threads);  // global cpu limits
+  read_cpu(cpu_path, max_threads);           // cgroup-specific limits
 
   if (!read_something) {
     LOG(ERROR) << "Failed in deducing any cgroup limits with paths " << mem_path << " and "
