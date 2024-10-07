@@ -2287,7 +2287,6 @@ error_code RdbLoader::Load(io::Source* src) {
       SET_OR_RETURN(LoadLen(nullptr), slot_size);
       [[maybe_unused]] uint64_t expires_slot_size;
       SET_OR_RETURN(LoadLen(nullptr), expires_slot_size);
-      LOG(WARNING) << "Loaded and ignored RDB_OPCODE_SLOT_INFO";
       continue;
     }
 
