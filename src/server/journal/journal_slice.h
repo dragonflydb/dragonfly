@@ -37,7 +37,7 @@ class JournalSlice {
     return slice_index_ != UINT32_MAX;
   }
 
-  void AddLogRecord(const Entry& entry, bool await);
+  void AddLogRecord(const Entry& entry);
 
   // Register a callback that will be called every time a new entry is
   // added to the journal.

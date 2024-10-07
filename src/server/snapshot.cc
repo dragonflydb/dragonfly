@@ -397,20 +397,19 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 // value. This is guaranteed by the fact that OnJournalEntry runs always after OnDbChange, and
 // no database switch can be performed between those two calls, because they are part of one
 // transaction.
-void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
+void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item) {
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerializedToChannel.
   std::unique_lock lk(db_slice_->GetSerializationMutex());
+  DCHECK(item.opcode != journal::Op::NOOP);
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }
 
-  if (await) {
-    // This is the only place that flushes in streaming mode
-    // once the iterate buckets fiber finished.
-    PushSerializedToChannel(false);
-  }
+  // This is the only place that flushes in streaming mode
+  // once the iterate buckets fiber finished.
+  PushSerializedToChannel(false);
 }
 
 void SliceSnapshot::CloseRecordChannel() {

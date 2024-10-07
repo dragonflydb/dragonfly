@@ -226,10 +226,6 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
 // key.
 void RecordExpiry(DbIndex dbid, std::string_view key);
 
-// Trigger journal write to sink, no journal record will be added to journal.
-// Must be called from shard thread of journal to sink.
-void TriggerJournalWriteToSink();
-
 std::ostream& operator<<(std::ostream& os, ArgSlice list);
 
 }  // namespace dfly

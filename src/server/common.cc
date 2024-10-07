@@ -432,26 +432,22 @@ ThreadLocalMutex::~ThreadLocalMutex() {
 }
 
 void ThreadLocalMutex::lock() {
-  if (serialization_max_chunk_size != 0) {
-    DCHECK_EQ(EngineShard::tlocal(), shard_);
-    util::fb2::NoOpLock noop_lk_;
-    if (locked_fiber_ != nullptr) {
-      DCHECK(util::fb2::detail::FiberActive() != locked_fiber_);
-    }
-    cond_var_.wait(noop_lk_, [this]() { return !flag_; });
-    flag_ = true;
-    DCHECK_EQ(locked_fiber_, nullptr);
-    locked_fiber_ = util::fb2::detail::FiberActive();
+  DCHECK_EQ(EngineShard::tlocal(), shard_);
+  util::fb2::NoOpLock noop_lk_;
+  if (locked_fiber_ != nullptr) {
+    DCHECK(util::fb2::detail::FiberActive() != locked_fiber_);
   }
+  cond_var_.wait(noop_lk_, [this]() { return !flag_; });
+  flag_ = true;
+  DCHECK_EQ(locked_fiber_, nullptr);
+  locked_fiber_ = util::fb2::detail::FiberActive();
 }
 
 void ThreadLocalMutex::unlock() {
-  if (serialization_max_chunk_size != 0) {
-    DCHECK_EQ(EngineShard::tlocal(), shard_);
-    flag_ = false;
-    cond_var_.notify_one();
-    locked_fiber_ = nullptr;
-  }
+  DCHECK_EQ(EngineShard::tlocal(), shard_);
+  flag_ = false;
+  cond_var_.notify_one();
+  locked_fiber_ = nullptr;
 }
 
 }  // namespace dfly

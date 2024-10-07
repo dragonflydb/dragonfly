@@ -142,18 +142,13 @@ std::string_view JournalSlice::GetEntry(LSN lsn) const {
   return (*ring_buffer_)[lsn - start].data;
 }
 
-void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
+void JournalSlice::AddLogRecord(const Entry& entry) {
   DCHECK(ring_buffer_);
 
   JournalItem dummy;
   JournalItem* item;
-  if (entry.opcode == Op::NOOP) {
-    item = &dummy;
-    item->lsn = -1;
-    item->opcode = entry.opcode;
-    item->data = "";
-    item->slot = entry.slot;
-  } else {
+  DCHECK(entry.opcode != Op::NOOP);
+  {
     FiberAtomicGuard fg;
     // GetTail gives a pointer to a new tail entry in the buffer, possibly overriding the last entry
     // if the buffer is full.
@@ -172,15 +167,6 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     VLOG(2) << "Writing item [" << item->lsn << "]: " << entry.ToString();
   }
 
-#if 0
-    if (shard_file_) {
-      string line = absl::StrCat(item.lsn, " ", entry.txid, " ", entry.opcode, "\n");
-      error_code ec = shard_file_->Write(io::Buffer(line), file_offset_, 0);
-      CHECK_EC(ec);
-      file_offset_ += line.size();
-    }
-#endif
-
   // TODO: Remove the callbacks, replace with notifiers
   {
     std::shared_lock lk(cb_mu_);
@@ -190,7 +176,7 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
     const size_t size = change_cb_arr_.size();
     auto k_v = change_cb_arr_.begin();
     for (size_t i = 0; i < size; ++i) {
-      k_v->second(*item, await);
+      k_v->second(*item);
       ++k_v;
     }
   }
