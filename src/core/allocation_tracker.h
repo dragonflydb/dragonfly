@@ -46,8 +46,12 @@ class AllocationTracker {
   void ProcessDelete(void* ptr);
 
  private:
+  void UpdateAbsSizes();
+
   absl::InlinedVector<TrackingInfo, 4> tracking_;
   bool inside_tracker_ = false;
+  size_t abs_min_size_ = 0;
+  size_t abs_max_size_ = 0;
 };
 
 }  // namespace dfly

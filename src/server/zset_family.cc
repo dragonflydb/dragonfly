@@ -1106,8 +1106,8 @@ OpResult<unsigned> ParseAggregate(CmdArgList args, bool store, SetOpArgs* op_arg
     return OpStatus::SYNTAX_ERR;
   }
 
-  ToUpper(&args[1]);
-  auto filled = FillAggType(ArgS(args, 1), op_args);
+  string agg_type = absl::AsciiStrToUpper(ArgS(args, 1));
+  auto filled = FillAggType(agg_type, op_args);
   if (!filled) {
     return filled.status();
   }
@@ -1156,8 +1156,7 @@ OpResult<SetOpArgs> ParseSetOpArgs(CmdArgList args, bool store) {
   DCHECK_LE(opt_args_start, args.size());  // Checked inside DetermineKeys
 
   for (size_t i = opt_args_start; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-    string_view arg = ArgS(args, i);
+    string arg = absl::AsciiStrToUpper(ArgS(args, i));
     if (arg == "WEIGHTS") {
       auto parsed_cnt = ParseWeights(args.subspan(i), &op_args);
       if (!parsed_cnt) {
@@ -1815,9 +1814,7 @@ void ZSetFamily::ZAdd(CmdArgList args, ConnectionContext* cntx) {
   ZParams zparams;
   size_t i = 1;
   for (; i < args.size() - 1; ++i) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
+    string cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
 
     if (cur_arg == "XX") {
       zparams.flags |= ZADD_IN_XX;  // update only
@@ -2560,9 +2557,7 @@ void ZSetFamily::GeoAdd(CmdArgList args, ConnectionContext* cntx) {
   ZParams zparams;
   size_t i = 1;
   for (; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-
-    string_view cur_arg = ArgS(args, i);
+    string cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
 
     if (cur_arg == "XX") {
       zparams.flags |= ZADD_IN_XX;  // update only
@@ -2661,8 +2656,8 @@ void ZSetFamily::GeoPos(CmdArgList args, ConnectionContext* cntx) {
 void ZSetFamily::GeoDist(CmdArgList args, ConnectionContext* cntx) {
   double distance_multiplier = 1;
   if (args.size() == 4) {
-    ToUpper(&args[3]);
-    string_view unit = ArgS(args, 3);
+    string unit = absl::AsciiStrToUpper(ArgS(args, 3));
+
     distance_multiplier = ExtractUnit(unit);
     args.remove_suffix(1);
     if (distance_multiplier < 0) {
@@ -2933,9 +2928,8 @@ void ZSetFamily::GeoSearch(CmdArgList args, ConnectionContext* cntx) {
   bool by_set = false;
 
   for (size_t i = 1; i < args.size(); ++i) {
-    ToUpper(&args[i]);
+    string cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
 
-    string_view cur_arg = ArgS(args, i);
     if (cur_arg == "FROMMEMBER") {
       if (from_set) {
         return cntx->SendError(kFromMemberLonglatErr);
@@ -3071,9 +3065,8 @@ void ZSetFamily::GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx) {
   shape.type = CIRCULAR_TYPE;
 
   for (size_t i = 4; i < args.size(); ++i) {
-    ToUpper(&args[i]);
+    string cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
 
-    string_view cur_arg = ArgS(args, i);
     if (cur_arg == "ASC") {
       if (geo_ops.sorting != Sorting::kUnsorted) {
         return cntx->SendError(kAscDescErr);

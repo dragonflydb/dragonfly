@@ -24,6 +24,9 @@ bool AllocationTracker::Add(const TrackingInfo& info) {
   }
 
   tracking_.push_back(info);
+
+  UpdateAbsSizes();
+
   return true;
 }
 
@@ -37,6 +40,8 @@ bool AllocationTracker::Remove(size_t lower_bound, size_t upper_bound) {
                                  }),
                   tracking_.end());
 
+  UpdateAbsSizes();
+
   return before_size != tracking_.size();
 }
 
@@ -49,7 +54,7 @@ absl::Span<const AllocationTracker::TrackingInfo> AllocationTracker::GetRanges()
 }
 
 void AllocationTracker::ProcessNew(void* ptr, size_t size) {
-  if (tracking_.empty()) {
+  if (size < abs_min_size_ || size > abs_max_size_) {
     return;
   }
 
@@ -59,9 +64,13 @@ void AllocationTracker::ProcessNew(void* ptr, size_t size) {
 
   // Prevent endless recursion, in case logging allocates memory
   inside_tracker_ = true;
-  double random = absl::Uniform(g_bitgen, 0.0, 1.0);
   for (const auto& band : tracking_) {
-    if (random >= band.sample_odds || size > band.upper_bound || size < band.lower_bound) {
+    if (size > band.upper_bound || size < band.lower_bound) {
+      continue;
+    }
+
+    // Micro optimization: in case sample_odds == 1.0 - do not draw a random number
+    if (band.sample_odds != 1.0 && absl::Uniform(g_bitgen, 0.0, 1.0) >= band.sample_odds) {
       continue;
     }
 
@@ -90,6 +99,15 @@ void AllocationTracker::ProcessDelete(void* ptr) {
     }
   }
   inside_tracker_ = false;
+}
+
+void AllocationTracker::UpdateAbsSizes() {
+  abs_min_size_ = 0;
+  abs_max_size_ = 0;
+  for (const auto& tracker : tracking_) {
+    abs_min_size_ = std::min(abs_min_size_, tracker.lower_bound);
+    abs_max_size_ = std::max(abs_max_size_, tracker.upper_bound);
+  }
 }
 
 }  // namespace dfly
