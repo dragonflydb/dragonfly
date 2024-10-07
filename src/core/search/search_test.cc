@@ -16,13 +16,11 @@
 #include <memory_resource>
 #include <random>
 
-#include "absl/container/flat_hash_set.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
 #include "core/search/vector_utils.h"
-#include "gmock/gmock.h"
 
 namespace dfly {
 namespace search {

@@ -10,8 +10,6 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
-#include "core/search/search.h"
-
 #define UNI_ALGO_DISABLE_NFKC_NFKD
 
 #include <hnswlib/hnswalg.h>
@@ -189,7 +187,6 @@ FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
                                  PMR_NS::memory_resource* mr)
     : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
   DCHECK(!params.use_hnsw);
-  VLOG(0) << params.capacity << " " << params.dim;
   entries_.reserve(params.capacity * params.dim);
 }
 
