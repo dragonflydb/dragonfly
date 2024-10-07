@@ -83,14 +83,6 @@ uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
-bool CheckLocks(const DbSlice& db_slice, IntentLock::Mode mode, const KeyLockArgs& lock_args) {
-  for (LockFp fp : lock_args.fps) {
-    if (!db_slice.CheckLock(mode, lock_args.db_index, fp))
-      return false;
-  }
-  return true;
-}
-
 struct ScheduleContext {
   Transaction* trans;
   bool optimistic_execution = false;
