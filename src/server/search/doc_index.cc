@@ -8,6 +8,7 @@
 
 #include <memory>
 
+#include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "core/search/indices.h"
@@ -88,6 +89,11 @@ string DocIndexInfo::BuildRestoreCommand() const {
   // optional PREFIX 1 *prefix*
   if (!base_index.prefix.empty())
     absl::StrAppend(&out, " PREFIX", " 1 ", base_index.prefix);
+
+  // STOPWORDS
+  absl::StrAppend(&out, " STOPWORDS ", base_index.options.stopwords.size());
+  for (const auto& sw : base_index.options.stopwords)
+    absl::StrAppend(&out, " ", sw);
 
   absl::StrAppend(&out, " SCHEMA");
   for (const auto& [fident, finfo] : base_index.schema.fields) {
@@ -171,12 +177,12 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
 }
 
 ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index)
-    : base_{std::move(index)}, indices_{}, key_index_{} {
+    : base_{std::move(index)}, key_index_{} {
 }
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
   key_index_ = DocKeyIndex{};
-  indices_ = search::FieldIndices{&base_->schema, &base_->options, mr};
+  indices_.emplace(base_->schema, base_->options, mr);
 
   auto cb = [this](string_view key, BaseAccessor* doc) { indices_->Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);

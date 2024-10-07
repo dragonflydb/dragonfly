@@ -461,10 +461,10 @@ IndicesOptions::IndicesOptions() {
       "for",  "if",    "in",   "into",  "it",    "no",   "not",  "of", "on",  "or",   "such",
       "that", "their", "then", "there", "these", "they", "this", "to", "was", "will", "with"};
 
-  stopwords_ = kDefaultStopwords;
+  stopwords = kDefaultStopwords;
 }
 
-FieldIndices::FieldIndices(const Schema* schema, const IndicesOptions* options,
+FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
                            PMR_NS::memory_resource* mr)
     : schema_{schema}, options_{options} {
   CreateIndices(mr);
@@ -472,13 +472,13 @@ FieldIndices::FieldIndices(const Schema* schema, const IndicesOptions* options,
 }
 
 void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
-  for (const auto& [field_ident, field_info] : schema_->fields) {
+  for (const auto& [field_ident, field_info] : schema_.fields) {
     if ((field_info.flags & SchemaField::NOINDEX) > 0)
       continue;
 
     switch (field_info.type) {
       case SchemaField::TEXT:
-        indices_[field_ident] = make_unique<TextIndex>(mr, &options_->stopwords_);
+        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords);
         break;
       case SchemaField::NUMERIC:
         indices_[field_ident] = make_unique<NumericIndex>(mr);
@@ -507,7 +507,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
 }
 
 void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
-  for (const auto& [field_ident, field_info] : schema_->fields) {
+  for (const auto& [field_ident, field_info] : schema_.fields) {
     if ((field_info.flags & SchemaField::SORTABLE) == 0)
       continue;
 
@@ -546,18 +546,18 @@ void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
-  auto it = indices_.find(schema_->LookupAlias(field));
+  auto it = indices_.find(schema_.LookupAlias(field));
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
 BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
-  auto it = sort_indices_.find(schema_->LookupAlias(field));
+  auto it = sort_indices_.find(schema_.LookupAlias(field));
   return it != sort_indices_.end() ? it->second.get() : nullptr;
 }
 
 std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
   vector<TextIndex*> out;
-  for (const auto& [field_name, field_info] : schema_->fields) {
+  for (const auto& [field_name, field_info] : schema_.fields) {
     if (field_info.type != SchemaField::TEXT || (field_info.flags & SchemaField::NOINDEX) > 0)
       continue;
     auto* index = dynamic_cast<TextIndex*>(GetIndex(field_name));
@@ -572,7 +572,7 @@ const vector<DocId>& FieldIndices::GetAllDocs() const {
 }
 
 const Schema& FieldIndices::GetSchema() const {
-  return *schema_;
+  return schema_;
 }
 
 vector<pair<string, SortableValue>> FieldIndices::ExtractStoredValues(DocId doc) const {

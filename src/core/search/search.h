@@ -65,17 +65,17 @@ struct Schema {
 struct IndicesOptions {
   IndicesOptions();
   explicit IndicesOptions(absl::flat_hash_set<std::string> stopwords)
-      : stopwords_{std::move(stopwords)} {
+      : stopwords{std::move(stopwords)} {
   }
 
-  absl::flat_hash_set<std::string> stopwords_;
+  absl::flat_hash_set<std::string> stopwords;
 };
 
 // Collection of indices for all fields in schema
 class FieldIndices {
  public:
   // Create indices based on schema and options. Both must outlive the indices
-  FieldIndices(const Schema* schema, const IndicesOptions* options, PMR_NS::memory_resource* mr);
+  FieldIndices(const Schema& schema, const IndicesOptions& options, PMR_NS::memory_resource* mr);
 
   void Add(DocId doc, DocumentAccessor* access);
   void Remove(DocId doc, DocumentAccessor* access);
@@ -94,8 +94,8 @@ class FieldIndices {
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices(PMR_NS::memory_resource* mr);
 
-  const Schema* schema_;
-  const IndicesOptions* options_;
+  const Schema& schema_;
+  const IndicesOptions& options_;
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseSortIndex>> sort_indices_;

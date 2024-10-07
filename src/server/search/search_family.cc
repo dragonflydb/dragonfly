@@ -487,9 +487,9 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
 
     // STOWORDS count [words...]
     if (parser.Check("STOPWORDS")) {
-      index.options.stopwords_.clear();
+      index.options.stopwords.clear();
       for (size_t num = parser.Next<size_t>(); num > 0; num--)
-        index.options.stopwords_.emplace(parser.Next());
+        index.options.stopwords.emplace(parser.Next());
       continue;
     }
 

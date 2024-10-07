@@ -388,6 +388,7 @@ async def test_index_persistence(df_server):
     i1 = client.ft("i1")
     await i1.create_index(
         fix_schema_naming(IndexType.JSON, SCHEMA_1),
+        stopwords=["interesting", "stopwords"],
         definition=IndexDefinition(index_type=IndexType.JSON, prefix=["blog-"]),
     )
 
@@ -469,6 +470,11 @@ async def test_index_persistence(df_server):
     assert (await i2.search(Query("*").sort_by("age", asc=False).paging(0, 1))).docs[0][
         "age"
     ] == "199"
+
+    # Check stopwords were loaded
+    await client.json().set("blog-sw1", ".", {"title": "some stopwords"})
+    assert (await i1.search("some")).total == 1
+    assert (await i1.search("stopwords")).total == 0
 
     await i1.dropindex()
     await i2.dropindex()
