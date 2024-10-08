@@ -407,8 +407,6 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item) {
     serializer_->WriteJournalEntry(item.data);
   }
 
-  // This is the only place that flushes in streaming mode
-  // once the iterate buckets fiber finished.
   PushSerializedToChannel(false);
 }
 
