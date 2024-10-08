@@ -1044,18 +1044,6 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   if (txid_ > 0 && shard->committed_txid() >= txid_)
     return false;
 
-  auto acquire_fp_locks = [&](bool shard_unlocked) mutable {
-    bool keys_unlocked = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
-    lock_granted = shard_unlocked && keys_unlocked;
-
-    sd.local_mask |= KEYLOCK_ACQUIRED;
-    if (lock_granted) {
-      sd.local_mask |= OUT_OF_ORDER;
-    }
-
-    DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
-  };
-
   auto release_fp_locks = [&]() {
     GetDbSlice(shard->shard_id()).Release(mode, lock_args);
     sd.local_mask &= ~KEYLOCK_ACQUIRED;
@@ -1068,7 +1056,15 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
 
     // We need to acquire the fp locks because the executing callback
     // within RunCallback below might preempt.
-    acquire_fp_locks(shard_unlocked);
+    bool keys_unlocked = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
+    lock_granted = shard_unlocked && keys_unlocked;
+
+    sd.local_mask |= KEYLOCK_ACQUIRED;
+    if (lock_granted) {
+      sd.local_mask |= OUT_OF_ORDER;
+    }
+
+    DVLOG(3) << "Lock granted " << lock_granted << " for trans " << DebugId();
 
     // Check if we can run immediately
     if (shard_unlocked && execute_optimistic && lock_granted) {
