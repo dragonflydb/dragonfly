@@ -2,7 +2,7 @@
 name: bullmq-tests
 on:
   workflow_dispatch:
-
+  
 permissions:
   contents: read
 
