@@ -1,9 +1,11 @@
 import random
+import logging
 import string
 import pytest
 import asyncio
 import time
 import socket
+from threading import Thread
 import random
 import ssl
 from redis import asyncio as aioredis
@@ -369,6 +371,55 @@ async def test_publish_stuck(df_server: DflyInstance, async_client: aioredis.Red
     # Make sure all publishers unblock eventually
     for pub in asyncio.as_completed(publishers):
         await pub
+
+
+@pytest.mark.slow
+@dfly_args({"proactor_threads": "4"})
+async def test_pubsub_busy_connections(df_server: DflyInstance):
+    sleep = 60
+
+    async def sub_thread():
+        i = 0
+
+        async def sub_task():
+            nonlocal i
+            sleep_task = asyncio.create_task(asyncio.sleep(sleep))
+            while not sleep_task.done():
+                client = df_server.client()
+                pubsub = client.pubsub()
+                await pubsub.subscribe("channel")
+                # await pubsub.unsubscribe("channel")
+                i = i + 1
+                await client.close()
+
+        subs = [asyncio.create_task(sub_task()) for _ in range(10)]
+        for s in subs:
+            await s
+        logging.debug(f"Exiting thread after {i} subscriptions")
+
+    async def pub_task():
+        pub = df_server.client()
+        i = 0
+        sleep_task = asyncio.create_task(asyncio.sleep(sleep))
+        while not sleep_task.done():
+            await pub.publish("channel", f"message-{i}")
+            i = i + 1
+
+    def run_in_thread():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(sub_thread())
+
+    threads = []
+    for _ in range(10):
+        thread = Thread(target=run_in_thread)
+        thread.start()
+        threads.append(thread)
+
+    await pub_task()
+
+    for thread in threads:
+        thread.join()
 
 
 async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_connections=100):

@@ -1,9 +1,9 @@
 local LG_funcs = {}
 
-function LG_funcs.init(dsize)
+function LG_funcs.init(dsize, csize)
     LG_funcs.dsize = dsize
-    LG_funcs.csize = math.floor(dsize ^ (2/3))
-    LG_funcs.esize = math.ceil(dsize ^ (1/3))
+    LG_funcs.csize = csize
+    LG_funcs.esize = math.ceil(dsize / csize)
 end
 
 -- strings

@@ -387,9 +387,7 @@ void ClusterFamily::KeySlot(CmdArgList args, ConnectionContext* cntx) {
 void ClusterFamily::Cluster(CmdArgList args, ConnectionContext* cntx) {
   // In emulated cluster mode, all slots are mapped to the same host, and number of cluster
   // instances is thus 1.
-
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (!IsClusterEnabledOrEmulated()) {
     return cntx->SendError(kClusterDisabled);
@@ -445,8 +443,7 @@ void ClusterFamily::DflyCluster(CmdArgList args, ConnectionContext* cntx) {
     VLOG(2) << "Got DFLYCLUSTER command (NO_CLIENT_ID): " << args;
   }
 
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   args.remove_prefix(1);  // remove subcommand name
   if (sub_cmd == "GETSLOTINFO") {
     return DflyClusterGetSlotInfo(args, cntx);
@@ -747,8 +744,8 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, ConnectionContext* 
 }
 
 void ClusterFamily::DflyMigrate(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+
   args.remove_prefix(1);
   if (sub_cmd == "INIT") {
     InitMigration(args, cntx);
