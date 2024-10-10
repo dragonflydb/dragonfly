@@ -97,7 +97,7 @@ struct JournalItem {
   std::optional<cluster::SlotId> slot;
 };
 
-using ChangeCallback = std::function<void(const JournalItem&, bool await)>;
+using ChangeCallback = std::function<void(const JournalItem&)>;
 
 }  // namespace journal
 }  // namespace dfly

@@ -681,12 +681,6 @@ void EngineShard::RetireExpiredAndEvict() {
                                        eviction_redline - db_slice.memory_budget());
     }
   }
-
-  // Journal entries for expired entries are not writen to socket in the loop above.
-  // Trigger write to socket when loop finishes.
-  if (auto journal = EngineShard::tlocal()->journal(); journal) {
-    TriggerJournalWriteToSink();
-  }
 }
 
 void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms,
