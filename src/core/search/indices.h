@@ -87,10 +87,16 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
-  TextIndex(PMR_NS::memory_resource* mr) : BaseStringIndex(mr, false) {
+  using StopWords = absl::flat_hash_set<std::string>;
+
+  TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords)
+      : BaseStringIndex(mr, false), stopwords_{stopwords} {
   }
 
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
+
+ private:
+  const StopWords* stopwords_;
 };
 
 // Index for text fields.
