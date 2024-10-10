@@ -769,5 +769,16 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   return zs;
 }
 
+bool SortedMap::DefragIfNeeded(float ratio) {
+  bool realloced = false;
+
+  for (auto it = score_map->begin(); it != score_map->end(); ++it) {
+    realloced |= it.ReallocIfNeeded(ratio);
+    // Not sure if it's worth going over B+ tree cause lgn to delete + lgn to insert
+  }
+
+  return realloced;
+}
+
 }  // namespace detail
 }  // namespace dfly

@@ -146,4 +146,31 @@ detail::SdsScorePair ScoreMap::iterator::BreakToPair(void* obj) {
   return detail::SdsScorePair(f, GetValue(f));
 }
 
+bool ScoreMap::iterator::ReallocIfNeeded(float ratio) {
+  // Unwrap all links to correctly call SetObject()
+  auto* ptr = curr_entry_;
+  while (ptr->IsLink())
+    ptr = ptr->AsLink();
+
+  auto* obj = ptr->GetObject();
+  auto [new_obj, realloced] = static_cast<ScoreMap*>(owner_)->ReallocIfNeeded(obj, ratio);
+  ptr->SetObject(new_obj);
+
+  return realloced;
+}
+
+pair<sds, bool> ScoreMap::ReallocIfNeeded(void* obj, float ratio) {
+  sds key = (sds)obj;
+  size_t key_len = sdslen(key);
+
+  if (!zmalloc_page_is_underutilized(key, ratio))
+    return {key, false};
+
+  sds newkey = AllocSdsWithSpace(key_len, 8);
+  memcpy(newkey, key, key_len + 8 + 1);
+  sdsfree(key);
+
+  return {newkey, true};
+}
+
 }  // namespace dfly

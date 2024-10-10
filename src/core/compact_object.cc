@@ -171,6 +171,11 @@ pair<void*, bool> DefragIntSet(intset* is, float ratio) {
   return {replacement, true};
 }
 
+pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, float ratio) {
+  const bool reallocated = sm->DefragIfNeeded(ratio);
+  return {sm, reallocated};
+}
+
 // Iterates over allocations of internal hash data structures and re-allocates
 // them if their pages are underutilized.
 // Returns pointer to new object ptr and whether any re-allocations happened.
@@ -201,6 +206,23 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
     // StringMap supports re-allocation of it's internal nodes
     case kEncodingStrMap2: {
       return DefragStrMap2((StringMap*)ptr, ratio);
+    }
+
+    default:
+      ABSL_UNREACHABLE();
+  }
+}
+
+pair<void*, bool> DefragZSet(unsigned encoding, void* ptr, float ratio) {
+  switch (encoding) {
+    // Listpack is stored as a single contiguous array
+    case OBJ_ENCODING_LISTPACK: {
+      return DefragListPack((uint8_t*)ptr, ratio);
+    }
+
+    // SKIPLIST really means ScoreMap
+    case OBJ_ENCODING_SKIPLIST: {
+      return DefragSortedMap((detail::SortedMap*)ptr, ratio);
     }
 
     default:
@@ -420,19 +442,23 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
 }
 
 bool RobjWrapper::DefragIfNeeded(float ratio) {
+  auto do_defrag = [this, ratio](auto defrug_fun) mutable {
+    auto [new_ptr, realloced] = defrug_fun(encoding_, inner_obj_, ratio);
+    inner_obj_ = new_ptr;
+    return realloced;
+  };
+
   if (type() == OBJ_STRING) {
     if (zmalloc_page_is_underutilized(inner_obj(), ratio)) {
       ReallocateString(tl.local_mr);
       return true;
     }
   } else if (type() == OBJ_HASH) {
-    auto [new_ptr, realloced] = DefragHash(encoding_, inner_obj_, ratio);
-    inner_obj_ = new_ptr;
-    return realloced;
+    return do_defrag(DefragHash);
   } else if (type() == OBJ_SET) {
-    auto [new_ptr, realloced] = DefragSet(encoding_, inner_obj_, ratio);
-    inner_obj_ = new_ptr;
-    return realloced;
+    return do_defrag(DefragSet);
+  } else if (type() == OBJ_ZSET) {
+    return do_defrag(DefragZSet);
   }
   return false;
 }
