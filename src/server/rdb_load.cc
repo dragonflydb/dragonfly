@@ -734,10 +734,15 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
       return false;
 
     uint8_t* lp = nullptr;
-    if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
+
+    auto load_plain = [&]() {
       lp = (uint8_t*)zmalloc(sv.size());
       ::memcpy(lp, (uint8_t*)sv.data(), sv.size());
       quicklistAppendPlainNode(ql, lp, sv.size());
+    };
+
+    if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
+      load_plain();
       return true;
     }
 
@@ -759,10 +764,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
       lp = lpNew(sv.size());
       if (!ziplistValidateIntegrity((uint8_t*)sv.data(), sv.size(), 1,
                                     ziplistEntryConvertAndValidate, &lp)) {
-        LOG(ERROR) << "Ziplist integrity check failed: " << sv.size();
         zfree(lp);
-        ec_ = RdbError(errc::rdb_file_corrupted);
-        return false;
+        // TODO: Revert loading plain format here once we fix serialization size.
+        // LOG(ERROR) << "Ziplist integrity check failed: " << sv.size();
+        // ec_ = RdbError(errc::rdb_file_corrupted);
+        // return false;
+        load_plain();
+        return true;
       }
 
       /* Silently skip empty ziplists, if we'll end up with empty quicklist we'll fail later. */
