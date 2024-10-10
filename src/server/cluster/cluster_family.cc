@@ -871,7 +871,7 @@ void ClusterFamily::InitMigration(CmdArgList args, ConnectionContext* cntx) {
                       });
   if (!found) {
     VLOG(1) << "Unrecognized incoming migration from " << source_id;
-    return cntx->SendError(OutgoingMigration::kUnknownMigration);
+    return cntx->SendSimpleString(OutgoingMigration::kUnknownMigration);
   }
 
   VLOG(1) << "Init migration " << source_id;
