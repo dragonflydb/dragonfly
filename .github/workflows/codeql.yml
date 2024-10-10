@@ -40,11 +40,11 @@ jobs:
           languages: ${{ matrix.language }}
 
       - name: Autobuild
-        if: matrix.language = "python"
+        if: ${{ matrix.language == "python" }}
         uses: github/codeql-action/autobuild@v3
 
       - name: build
-        if: matrix.language = "cpp"
+        if: ${{ matrix.language == "cpp" }}
         run: |
           echo "build application using script"
           ./dragonfly/tools/release.sh
