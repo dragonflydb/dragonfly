@@ -8,6 +8,7 @@
 
 #include <memory>
 
+#include "absl/strings/str_cat.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "core/search/indices.h"
@@ -88,6 +89,11 @@ string DocIndexInfo::BuildRestoreCommand() const {
   // optional PREFIX 1 *prefix*
   if (!base_index.prefix.empty())
     absl::StrAppend(&out, " PREFIX", " 1 ", base_index.prefix);
+
+  // STOPWORDS
+  absl::StrAppend(&out, " STOPWORDS ", base_index.options.stopwords.size());
+  for (const auto& sw : base_index.options.stopwords)
+    absl::StrAppend(&out, " ", sw);
 
   absl::StrAppend(&out, " SCHEMA");
   for (const auto& [fident, finfo] : base_index.schema.fields) {
@@ -170,36 +176,35 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
   return obj_code == GetObjCode() && key.rfind(prefix, 0) == 0;
 }
 
-ShardDocIndex::ShardDocIndex(shared_ptr<DocIndex> index)
-    : base_{std::move(index)}, indices_{{}, nullptr}, key_index_{} {
+ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index)
+    : base_{std::move(index)}, key_index_{} {
 }
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) {
   key_index_ = DocKeyIndex{};
-  indices_ = search::FieldIndices{base_->schema, mr};
+  indices_.emplace(base_->schema, base_->options, mr);
 
-  auto cb = [this](string_view key, BaseAccessor* doc) { indices_.Add(key_index_.Add(key), doc); };
+  auto cb = [this](string_view key, BaseAccessor* doc) { indices_->Add(key_index_.Add(key), doc); };
   TraverseAllMatching(*base_, op_args, cb);
 
-  was_built_ = true;
   VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
 }
 
 void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
-  if (!was_built_)
+  if (!indices_)
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
-  indices_.Add(key_index_.Add(key), accessor.get());
+  indices_->Add(key_index_.Add(key), accessor.get());
 }
 
 void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
-  if (!was_built_)
+  if (!indices_)
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
   DocId id = key_index_.Remove(key);
-  indices_.Remove(id, accessor.get());
+  indices_->Remove(id, accessor.get());
 }
 
 bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
@@ -209,7 +214,7 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.GetDbSlice();
-  auto search_results = search_algo->Search(&indices_, params.limit_offset + params.limit_total);
+  auto search_results = search_algo->Search(&*indices_, params.limit_offset + params.limit_total);
 
   if (!search_results.error.empty())
     return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
@@ -253,7 +258,7 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.GetDbSlice();
-  auto search_results = search_algo->Search(&indices_);
+  auto search_results = search_algo->Search(&*indices_);
 
   if (!search_results.error.empty())
     return {};
@@ -267,7 +272,7 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
       continue;
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
-    auto extracted = indices_.ExtractStoredValues(doc);
+    auto extracted = indices_->ExtractStoredValues(doc);
 
     SearchDocData loaded;
     if (params.load_fields.ShouldReturnAllFields()) {
@@ -290,7 +295,7 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
 }
 
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
-  search::BaseIndex* base_index = indices_.GetIndex(field);
+  search::BaseIndex* base_index = indices_->GetIndex(field);
   if (base_index == nullptr) {
     return make_unexpected(ErrorReply{"-No such field"});
   }
@@ -312,8 +317,8 @@ ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
 }
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
-                                shared_ptr<DocIndex> index_ptr) {
-  auto shard_index = make_unique<ShardDocIndex>(index_ptr);
+                                shared_ptr<const DocIndex> index_ptr) {
+  auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr));
   auto [it, _] = indices_.emplace(name, std::move(shard_index));
 
   // Don't build while loading, shutting down, etc.

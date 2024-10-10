@@ -13,6 +13,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "absl/container/flat_hash_set.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "core/search/ast_expr.h"
@@ -454,8 +455,18 @@ string_view Schema::LookupAlias(string_view alias) const {
   return alias;
 }
 
-FieldIndices::FieldIndices(Schema schema, PMR_NS::memory_resource* mr)
-    : schema_{std::move(schema)}, all_ids_{}, indices_{} {
+IndicesOptions::IndicesOptions() {
+  static absl::flat_hash_set<std::string> kDefaultStopwords{
+      "a",    "is",    "the",  "an",    "and",   "are",  "as",   "at", "be",  "but",  "by",
+      "for",  "if",    "in",   "into",  "it",    "no",   "not",  "of", "on",  "or",   "such",
+      "that", "their", "then", "there", "these", "they", "this", "to", "was", "will", "with"};
+
+  stopwords = kDefaultStopwords;
+}
+
+FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
+                           PMR_NS::memory_resource* mr)
+    : schema_{schema}, options_{options} {
   CreateIndices(mr);
   CreateSortIndices(mr);
 }
@@ -467,7 +478,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
 
     switch (field_info.type) {
       case SchemaField::TEXT:
-        indices_[field_ident] = make_unique<TextIndex>(mr);
+        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords);
         break;
       case SchemaField::NUMERIC:
         indices_[field_ident] = make_unique<NumericIndex>(mr);
@@ -546,7 +557,7 @@ BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
 
 std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
   vector<TextIndex*> out;
-  for (auto& [field_name, field_info] : schema_.fields) {
+  for (const auto& [field_name, field_info] : schema_.fields) {
     if (field_info.type != SchemaField::TEXT || (field_info.flags & SchemaField::NOINDEX) > 0)
       continue;
     auto* index = dynamic_cast<TextIndex*>(GetIndex(field_name));
