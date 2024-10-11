@@ -1131,12 +1131,18 @@ async def test_flushall_in_full_sync(df_factory):
 
     await check_all_replicas_finished([c_replica], c_master)
 
-    # Check replica data consisten
+    # Check replica data is consistent
     hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
     assert hash1 == hash2
 
     # Make sure that a new sync ID is present, meaning replication restarted following FLUSHALL.
     new_syncid, _ = await c_replica.execute_command("DEBUG REPLICA OFFSET")
+    logging.info(len(new_syncid))
+    logging.info(new_syncid.endswith("\r"))
+    logging.info(new_syncid.endswith("\n"))
+    logging.info(len(syncid))
+    logging.info(syncid.endswith("\r"))
+    logging.info(syncid.endswith("\n"))
     assert new_syncid != syncid
 
 
