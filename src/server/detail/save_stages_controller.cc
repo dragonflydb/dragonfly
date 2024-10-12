@@ -344,6 +344,7 @@ void SaveStagesController::InitResources() {
 GenericError SaveStagesController::FinalizeFileMovement() {
   if (is_cloud_)
     return {};
+  DVLOG(1) << "FinalizeFileMovement start";
 
   // If the shared_err is set, the snapshot saving failed
   bool has_error = bool(shared_err_);
@@ -358,6 +359,7 @@ GenericError SaveStagesController::FinalizeFileMovement() {
     if (ec)
       break;
   }
+  DVLOG(1) << "FinalizeFileMovement end";
   return GenericError(ec);
 }
 
