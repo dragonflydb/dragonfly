@@ -1013,20 +1013,20 @@ nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* pa
 // Returns the CommandList if the parsing completed succefully or std::string
 // to indicate an error
 nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, bool read_only) {
-  enum class Cmds { OVERFLOW, GET, SET, INCRBY };
+  enum class Cmds { OVERFLOW_OPT, GET_OPT, SET_OPT, INCRBY_OPT };
   CommandList result;
 
   using nonstd::make_unexpected;
 
   CmdArgParser parser(args);
   while (parser.HasNext()) {
-    auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW, "GET", Cmds::GET, "SET", Cmds::SET,
-                              "INCRBY", Cmds::INCRBY);
+    auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW_OPT, "GET", Cmds::GET_OPT, "SET",
+                              Cmds::SET_OPT, "INCRBY", Cmds::INCRBY_OPT);
     if (parser.Error()) {
       return make_unexpected(kSyntaxErr);
     }
 
-    if (cmd == Cmds::OVERFLOW) {
+    if (cmd == Cmds::OVERFLOW_OPT) {
       if (read_only) {
         make_unexpected("BITFIELD_RO only supports the GET subcommand");
       }
@@ -1047,7 +1047,7 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
     }
 
     auto attr = maybe_attr.value();
-    if (cmd == Cmds::GET) {
+    if (cmd == Cmds::GET_OPT) {
       result.push_back(Command(Get(attr)));
       continue;
     }
@@ -1060,12 +1060,12 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
     if (parser.Error()) {
       return make_unexpected(kSyntaxErr);
     }
-    if (cmd == Cmds::SET) {
+    if (cmd == Cmds::SET_OPT) {
       result.push_back(Command(Set(attr, value)));
       continue;
     }
 
-    if (cmd == Cmds::INCRBY) {
+    if (cmd == Cmds::INCRBY_OPT) {
       result.push_back(Command(IncrBy(attr, value)));
       continue;
     }
