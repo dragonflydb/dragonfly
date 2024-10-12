@@ -78,7 +78,7 @@ TEST_F(RaxTreeTest, LowerBound) {
 
   // Test lower bound empty string
   vector<string> keys2;
-  for (auto it = map.lower_bound(""); it != map.end(); ++it)
+  for (auto it = map.lower_bound(string_view{}); it != map.end(); ++it)
     keys2.emplace_back((*it).first);
   EXPECT_EQ(keys, keys2);
 }
@@ -99,6 +99,9 @@ TEST_F(RaxTreeTest, Find) {
       EXPECT_TRUE(fit == map.end());
     }
   }
+
+  // Test find with empty string
+  EXPECT_TRUE(map.find(string_view{}) == map.end());
 }
 
 }  // namespace dfly::search
