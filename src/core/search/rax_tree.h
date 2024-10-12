@@ -3,12 +3,12 @@
 #include <absl/types/span.h>
 
 #include <cstdio>
-#include <memory_resource>
 #include <optional>
 #include <string_view>
 
-extern "C" {
+#include "base/pmr/memory_resource.h"
 
+extern "C" {
 #include "redis/rax.h"
 }
 
@@ -25,17 +25,20 @@ template <typename V> struct RaxTreeMap {
     friend struct FindIterator;
 
     SeekIterator() {
+      raxStart(&it_, nullptr);
+      it_.node = nullptr;
     }
 
     ~SeekIterator() {
-      if (it)
-        raxStop(&*it);
+      raxStop(&it_);
     }
 
+    SeekIterator(SeekIterator&&) = delete;       // self-referential
+    SeekIterator(const SeekIterator&) = delete;  // self-referential
+
     SeekIterator(rax* tree, const char* op, std::string_view key) {
-      it.emplace();
-      raxStart(&*it, tree);
-      raxSeek(&*it, op, to_key_ptr(key), key.size());
+      raxStart(&it_, tree);
+      raxSeek(&it_, op, to_key_ptr(key), key.size());
       operator++();
     }
 
@@ -43,7 +46,7 @@ template <typename V> struct RaxTreeMap {
     }
 
     bool operator==(const SeekIterator& rhs) const {
-      return it.has_value() == rhs.it.has_value() && (!it.has_value() || it->key == rhs.it->key);
+      return it_.node == rhs.it_.node;
     }
 
     bool operator!=(const SeekIterator& rhs) const {
@@ -51,30 +54,31 @@ template <typename V> struct RaxTreeMap {
     }
 
     SeekIterator& operator++() {
-      if (!raxNext(&*it)) {
-        raxStop(&*it);
-        it.reset();
+      if (!raxNext(&it_)) {
+        raxStop(&it_);
+        it_.node = nullptr;
       }
       return *this;
     }
 
     std::pair<std::string_view, V&> operator*() const {
-      return {std::string_view{reinterpret_cast<const char*>(it->key), it->key_len},
-              *reinterpret_cast<V*>(it->data)};
+      return {std::string_view{reinterpret_cast<const char*>(it_.key), it_.key_len},
+              *reinterpret_cast<V*>(it_.data)};
     }
 
    private:
-    std::optional<raxIterator> it;
+    raxIterator it_;
   };
 
+  // Result of find() call. Inherits from pair to mimic iterator interface, not incrementable.
   struct FindIterator : public std::optional<std::pair<std::string_view, V&>> {
     bool operator==(const SeekIterator& rhs) const {
-      if (this->has_value() != rhs.it.has_value())
+      if (this->has_value() != !bool(rhs.it_.flags & RAX_ITER_EOF))
         return false;
       if (!this->has_value())
         return true;
       return (*this)->first ==
-             std::string_view{reinterpret_cast<const char*>(rhs.it->key), rhs.it->key_len};
+             std::string_view{reinterpret_cast<const char*>(rhs.it_.key), rhs.it_.key_len};
     }
 
     bool operator!=(const SeekIterator& rhs) const {
@@ -83,7 +87,7 @@ template <typename V> struct RaxTreeMap {
   };
 
  public:
-  explicit RaxTreeMap(std::pmr::memory_resource* mr) : tree_(raxNew()), mr_(mr) {
+  explicit RaxTreeMap(PMR_NS::memory_resource* mr) : tree_(raxNew()), mr_(mr) {
   }
 
   size_t size() const {
@@ -124,7 +128,7 @@ template <typename V> struct RaxTreeMap {
   }
 
   rax* tree_;
-  std::pmr::memory_resource* mr_;
+  PMR_NS::memory_resource* mr_;
 };
 
 template <typename V>

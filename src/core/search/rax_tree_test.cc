@@ -13,6 +13,7 @@
 #include <memory_resource>
 
 #include "base/gtest.h"
+#include "base/iterator.h"
 #include "base/logging.h"
 
 extern "C" {
@@ -74,6 +75,12 @@ TEST_F(RaxTreeTest, LowerBound) {
 
   EXPECT_TRUE(it1 == map.end());
   EXPECT_TRUE(it2 == keys.end());
+
+  // Test lower bound empty string
+  vector<string> keys2;
+  for (auto it = map.lower_bound(""); it != map.end(); ++it)
+    keys2.emplace_back((*it).first);
+  EXPECT_EQ(keys, keys2);
 }
 
 TEST_F(RaxTreeTest, Find) {
