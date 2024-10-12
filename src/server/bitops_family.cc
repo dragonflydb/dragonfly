@@ -548,6 +548,8 @@ void BitPos(CmdArgList args, ConnectionContext* cntx) {
 
   if (!absl::SimpleAtoi(ArgS(args, 1), &value)) {
     return cntx->SendError(kInvalidIntErr);
+  } else if (value != 0 && value != 1) {
+    return cntx->SendError("The bit argument must be 1 or 0");
   }
 
   if (args.size() >= 3) {
@@ -1340,11 +1342,15 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view 
                                         int64_t start, int64_t end, bool as_bit) {
   OpResult<std::string> value = ReadValue(op_args.db_cntx, key, op_args.shard);
 
-  std::string_view value_str;
-  if (value) {  // non-existent keys are treated as empty strings, per Redis
-    value_str = value.value();
+  // non-existent keys are handled exactly as in Redis's implementation,
+  // even though it contradicts its docs:
+  //     If a clear bit isn't found in the specified range, the function returns -1
+  //     as the user specified a clear range and there are no 0 bits in that range
+  if (!value) {
+    return bit_value ? -1 : 0;
   }
 
+  std::string_view value_str = value.value();
   int64_t size = value_str.size();
   if (as_bit) {
     size *= OFFSET_FACTOR;
