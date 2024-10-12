@@ -62,7 +62,6 @@ extern "C" {
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/aws/aws.h"
-#include "util/fibers/fiber_file.h"
 
 using namespace std;
 
@@ -1654,6 +1653,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
+  VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   {
     util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
