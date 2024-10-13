@@ -69,7 +69,7 @@ double toDouble(string_view src);
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
-%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field"
+%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field" PREFIX "prefix"
 
 %precedence TERM TAG_VAL
 %left OR_OP
@@ -132,6 +132,7 @@ search_unary_expr:
   LPAREN search_expr RPAREN           { $$ = std::move($2); }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2)); }
   | TERM                              { $$ = AstTermNode(std::move($1)); }
+  | PREFIX                            { $$ = AstPrefixNode(std::move($1)); }
   | UINT32                            { $$ = AstTermNode(std::move($1)); }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 

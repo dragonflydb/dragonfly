@@ -11,10 +11,12 @@
 #include <optional>
 #include <vector>
 
+#include "absl/functional/function_ref.h"
 #include "base/pmr/memory_resource.h"
 #include "core/search/base.h"
 #include "core/search/block_list.h"
 #include "core/search/compressed_sorted_set.h"
+#include "core/search/rax_tree.h"
 
 // TODO: move core field definitions out of big header
 #include "core/search/search.h"
@@ -51,6 +53,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Pointer is valid as long as index is not mutated. Nullptr if not found
   const Container* Matching(std::string_view str) const;
 
+  // Iterate over all Machting on prefix.
+  void MatchingPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
+
   // Returns all the terms that appear as keys in the reverse index.
   std::vector<std::string> GetTerms() const;
 
@@ -79,9 +84,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 
   bool case_sensitive_ = false;
 
-  absl::flat_hash_map<PMR_NS::string, Container, PmrHash, PmrEqual,
-                      PMR_NS::polymorphic_allocator<std::pair<PMR_NS::string, Container>>>
-      entries_;
+  // absl::flat_hash_map<PMR_NS::string, Container, PmrHash, PmrEqual,
+  //                     PMR_NS::polymorphic_allocator<std::pair<PMR_NS::string, Container>>>
+  search::RaxTreeMap<Container> entries_;
 };
 
 // Index for text fields.

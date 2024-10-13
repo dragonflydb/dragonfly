@@ -122,6 +122,10 @@ template <typename V> struct RaxTreeMap {
     mr_->deallocate(old, sizeof(V), alignof(V));
   }
 
+  auto get_allocator() const {
+    return std::pmr::polymorphic_allocator<V>();
+  }
+
  private:
   static unsigned char* to_key_ptr(std::string_view key) {
     return reinterpret_cast<unsigned char*>(const_cast<char*>(key.data()));

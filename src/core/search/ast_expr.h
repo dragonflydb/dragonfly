@@ -24,9 +24,15 @@ struct AstStarNode {};
 
 // Matches terms in text fields
 struct AstTermNode {
-  AstTermNode(std::string term);
+  explicit AstTermNode(std::string term);
 
   std::string term;
+};
+
+struct AstPrefixNode {
+  explicit AstPrefixNode(std::string prefix);
+
+  std::string prefix;
 };
 
 // Matches numeric range
@@ -64,10 +70,13 @@ struct AstFieldNode {
 
 // Stores a list of tags for a tag query
 struct AstTagsNode {
-  AstTagsNode(std::string tag);
-  AstTagsNode(AstNode&& l, std::string tag);
+  // using SubTerm = std::variant<AstTermNode, AstPrefixNode>;
+  using SubTerm = std::string;
 
-  std::vector<std::string> tags;
+  explicit AstTagsNode(SubTerm tag);
+  AstTagsNode(AstNode&& l, SubTerm tag);
+
+  std::vector<SubTerm> tags;
 };
 
 // Applies nearest neighbor search to the final result set
@@ -97,8 +106,8 @@ struct AstSortNode {
 };
 
 using NodeVariants =
-    std::variant<std::monostate, AstStarNode, AstTermNode, AstRangeNode, AstNegateNode,
-                 AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
+    std::variant<std::monostate, AstStarNode, AstTermNode, AstPrefixNode, AstRangeNode,
+                 AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;
