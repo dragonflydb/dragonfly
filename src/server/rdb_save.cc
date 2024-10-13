@@ -49,7 +49,7 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 ABSL_FLAG(int, compression_level, 2, "The compression level to use on zstd/lz4 compression");
-ABSL_FLAG(bool, list_rdb_encode_v2, false, "Use v2 rdb encoding of list object");
+ABSL_FLAG(bool, list_rdb_encode_v2, true, "Use v2 rdb encoding of list object");
 
 namespace dfly {
 
