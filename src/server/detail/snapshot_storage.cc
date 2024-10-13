@@ -41,11 +41,8 @@ constexpr string_view kSummarySuffix = "summary.dfs"sv;
 
 pair<string, string> GetBucketPath(string_view path) {
   string_view clean = path;
-  if (absl::StartsWith(clean, kS3Prefix)) {
-    clean = absl::StripPrefix(clean, kS3Prefix);
-  } else {
-    clean = absl::StripPrefix(clean, kGCSPrefix);
-  }
+  auto prefix = absl::StartsWith(clean, kS3Prefix) ? kS3Prefix : kGCSPrefix;
+  clean = absl::StripPrefix(clean, prefix);
 
   size_t pos = clean.find('/');
   if (pos == string_view::npos) {

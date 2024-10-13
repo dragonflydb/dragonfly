@@ -54,6 +54,10 @@ class SnapshotStorage {
   // Searches for all the relevant snapshot files given the RDB file or DFS summary file path.
   io::Result<std::vector<std::string>, GenericError> ExpandSnapshot(const std::string& load_path);
 
+  virtual bool IsCloud() const {
+    return false;
+  }
+
  protected:
   virtual io::Result<std::vector<std::string>, GenericError> ExpandFromPath(
       const std::string& path) = 0;
@@ -94,6 +98,10 @@ class GcsSnapshotStorage : public SnapshotStorage {
   io::Result<std::string, GenericError> LoadPath(std::string_view dir,
                                                  std::string_view dbfilename) override;
 
+  bool IsCloud() const final {
+    return true;
+  }
+
  private:
   io::Result<std::vector<std::string>, GenericError> ExpandFromPath(const std::string& path) final;
 
@@ -116,6 +124,10 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 
   io::Result<std::string, GenericError> LoadPath(std::string_view dir,
                                                  std::string_view dbfilename) override;
+
+  bool IsCloud() const final {
+    return true;
+  }
 
  private:
   io::Result<std::vector<std::string>, GenericError> ExpandFromPath(const std::string& path) final;

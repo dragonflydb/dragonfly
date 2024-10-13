@@ -124,7 +124,6 @@ struct SaveStagesController : public SaveStagesInputs {
  private:
   time_t start_time_;
   std::filesystem::path full_path_;
-  bool is_cloud_;
 
   AggregateGenericError shared_err_;
   std::vector<std::pair<std::unique_ptr<RdbSnapshot>, std::filesystem::path>> snapshots_;
