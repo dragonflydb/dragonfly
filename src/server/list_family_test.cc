@@ -379,6 +379,15 @@ TEST_F(ListFamilyTest, LRem) {
   ASSERT_THAT(Run({"lrem", kKey2, "1", val}), IntArg(1));
 }
 
+TEST_F(ListFamilyTest, DumpRestorePlain) {
+  const string kValue(10'000, '#');
+  EXPECT_EQ(CheckedInt({"LPUSH", kKey1, kValue}), 1);
+  auto buffer = Run({"DUMP", kKey1}).GetBuf();
+  EXPECT_EQ(Run({"RESTORE", kKey2, "0", ToSV(buffer)}), "OK");
+  EXPECT_EQ(CheckedInt({"LLEN", kKey2}), 1);
+  EXPECT_EQ(Run({"LRANGE", kKey2, "0", "1"}), kValue);
+}
+
 TEST_F(ListFamilyTest, LTrim) {
   Run({"rpush", kKey1, "a", "b", "c", "d"});
   ASSERT_EQ(Run({"ltrim", kKey1, "-2", "-1"}), "OK");
