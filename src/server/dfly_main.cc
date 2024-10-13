@@ -73,8 +73,9 @@ ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal 
 ABSL_FLAG(bool, force_epoll, false,
           "If true - uses linux epoll engine underneath. "
           "Can fit for kernels older than 5.10.");
-ABSL_FLAG(string, allocation_tracker, "",
-          "Allocation ranges to log. Format is min:max,min:max,....");
+ABSL_FLAG(
+    string, allocation_tracker, "",
+    "Logs stack trace of memory allocation within these ranges. Format is min:max,min:max,....");
 
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
@@ -550,6 +551,7 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 #endif
 
 void SetupAllocationTracker(ProactorPool* pool) {
+#ifdef DFLY_ENABLE_MEMORY_TRACKING
   string flag = absl::GetFlag(FLAGS_allocation_tracker);
   vector<pair<size_t, size_t>> track_ranges;
   for (string_view entry : absl::StrSplit(flag, ",", absl::SkipEmpty())) {
@@ -581,6 +583,7 @@ void SetupAllocationTracker(ProactorPool* pool) {
       }
     }
   });
+#endif
 }
 
 }  // namespace
