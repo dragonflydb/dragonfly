@@ -309,20 +309,18 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
 
 void DenseSet::GrowBatch(uint32_t len, GrowItem* items,
                          std::vector<DensePtr, DensePtrAllocator>* new_entries) {
-  for (uint32_t i = 0; i < len; ++i) {
-    DensePtr* curr = &items[i].ptr;
-    DensePtr* prev = nullptr;
+  while (len) {
+    unsigned dest_id = 0;
+    for (uint32_t i = 0; i < len; ++i) {
+      DensePtr* curr = &items[i].ptr;
 
-    while (true) {
-      if (ExpireIfNeeded(prev, curr)) {
+      if (ExpireIfNeeded(nullptr, curr)) {
         // if curr has disappeared due to expiry and prev was converted from Link to a
         // regular DensePtr
-        if (prev && !prev->IsLink())
-          break;
       }
 
       if (curr->IsEmpty())
-        break;
+        continue;
       void* ptr = curr->GetObject();
 
       DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
@@ -338,28 +336,13 @@ void DenseSet::GrowBatch(uint32_t len, GrowItem* items,
       if (curr->IsObject()) {
         curr->Reset();  // reset the original placeholder (.next or root)
 
-        if (prev) {
-          DCHECK(prev->IsLink());
-
-          DenseLinkKey* plink = prev->AsLink();
-          DCHECK(&plink->next == curr);
-
-          // we want to make *prev a DensePtr instead of DenseLink and we
-          // want to deallocate the link.
-          DensePtr tmp = DensePtr::From(plink);
-          DCHECK(ObjectAllocSize(tmp.GetObject()));
-
-          FreeLink(plink);
-          *prev = tmp;
-        }
-
         DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
         DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
         PushFront(dest, dptr);
 
         dest->ClearDisplaced();
 
-        break;
+        continue;
       }  // if IsObject
 
       *curr = *dptr.Next();
@@ -367,7 +350,11 @@ void DenseSet::GrowBatch(uint32_t len, GrowItem* items,
 
       PushFront(dest, dptr);
       dest->ClearDisplaced();
+
+      items[dest_id++] = {*curr, nullptr};
     }
+    // update the length of the batch for the next iteration.
+    len = dest_id;
   }
 }
 
