@@ -155,7 +155,7 @@ async def test_dbfilenames(
         **BASIC_ARGS,
         "proactor_threads": 4,
         "dbfilename": "test-redis-load-rdb",
-        "list_rdb_encode_v2": "false",
+        "list_rdb_encode_v2": "false",  # Needed for compatibility with Redis 6
     }
 )
 async def test_redis_load_snapshot(
