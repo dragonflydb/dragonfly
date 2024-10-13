@@ -341,6 +341,13 @@ class DenseSet {
   using ClearItem = CloneItem;
   void ClearBatch(unsigned len, ClearItem* items);
 
+  struct GrowItem {
+    DensePtr ptr;
+    void* obj = nullptr;
+  };
+  void GrowBatch(uint32_t len, GrowItem* items,
+                 std::vector<DensePtr, DensePtrAllocator>* new_entries);
+
   MemoryResource* mr() {
     return entries_.get_allocator().resource();
   }
@@ -360,7 +367,7 @@ class DenseSet {
   // Return if bucket has no item which is not displaced and right/left bucket has no displaced item
   // belong to given bid
   bool NoItemBelongsBucket(uint32_t bid) const;
-  void Grow(size_t prev_size);
+  void Grow(size_t new_size);
 
   // ============ Pseudo Linked List Functions for interacting with Chains ==================
   size_t PushFront(ChainVectorIterator, void* obj, bool has_ttl);
