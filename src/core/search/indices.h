@@ -62,30 +62,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
  protected:
   Container* GetOrCreate(std::string_view word);
 
-  struct PmrEqual {
-    using is_transparent = void;
-    bool operator()(const PMR_NS::string& lhs, const PMR_NS::string& rhs) const {
-      return lhs == rhs;
-    }
-    bool operator()(const PMR_NS::string& lhs, const std::string_view& rhs) const {
-      return lhs == rhs;
-    }
-  };
-
-  struct PmrHash {
-    using is_transparent = void;
-    size_t operator()(const std::string_view& sv) const {
-      return absl::Hash<std::string_view>()(sv);
-    }
-    size_t operator()(const PMR_NS::string& pmrs) const {
-      return operator()(std::string_view{pmrs.data(), pmrs.size()});
-    }
-  };
-
   bool case_sensitive_ = false;
-
-  // absl::flat_hash_map<PMR_NS::string, Container, PmrHash, PmrEqual,
-  //                     PMR_NS::polymorphic_allocator<std::pair<PMR_NS::string, Container>>>
   search::RaxTreeMap<Container> entries_;
 };
 

@@ -70,13 +70,10 @@ struct AstFieldNode {
 
 // Stores a list of tags for a tag query
 struct AstTagsNode {
-  // using SubTerm = std::variant<AstTermNode, AstPrefixNode>;
-  using SubTerm = std::string;
+  AstTagsNode(std::string tag);
+  AstTagsNode(AstNode&& l, std::string tag);
 
-  explicit AstTagsNode(SubTerm tag);
-  AstTagsNode(AstNode&& l, SubTerm tag);
-
-  std::vector<SubTerm> tags;
+  std::vector<std::string> tags;
 };
 
 // Applies nearest neighbor search to the final result set

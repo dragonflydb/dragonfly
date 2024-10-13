@@ -274,7 +274,7 @@ TEST_F(SearchTest, CheckPrefix) {
   {
     PrepareQuery("pre*");
 
-    ExpectAll("pre", "prepre", "preacher", "prepared", "pretty", "predators", "precisely");
+    ExpectAll("pre", "prepre", "preachers", "prepared", "pRetty", "PRedators", "prEcisely!");
     ExpectNone("pristine", "represent", "repair", "depreciation");
 
     EXPECT_TRUE(Check()) << GetError();
@@ -282,8 +282,10 @@ TEST_F(SearchTest, CheckPrefix) {
   {
     PrepareQuery("new*");
 
-    ExpectAll("new", "New York", "Newham", "newbie", "news");
-    ExpectNone("ne", "renew", "nev", "ne-w", "notnew");
+    ExpectAll("new", "New York", "Newham", "newbie", "news", "Welcome to Newark!");
+    ExpectNone("ne", "renew", "nev", "ne-w", "notnew", "casino in neVada");
+
+    EXPECT_TRUE(Check()) << GetError();
   }
 }
 
