@@ -168,6 +168,8 @@ async def test_redis_load_snapshot(
         **LIGHTWEIGHT_SEEDER_ARGS, types=["STRING", "LIST", "SET", "HASH", "ZSET"]
     ).run(async_client)
 
+    await async_client.lpush("list", "A" * 10_000)
+
     await async_client.execute_command("SAVE", "rdb")
     dbsize = await async_client.dbsize()
 
