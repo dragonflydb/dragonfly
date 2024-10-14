@@ -110,9 +110,14 @@ class ConnectionContext {
   // pub/sub
   dfly::acl::AclPubSub pub_sub{{}, true};
 
+  unsigned thread_index() const {
+    return thread_index_;
+  }
+
  private:
   Connection* owner_;
   Protocol protocol_ = Protocol::REDIS;
+  unsigned thread_index_ = UINT_MAX;
   std::unique_ptr<SinkReplyBuilder> rbuilder_;
 };
 

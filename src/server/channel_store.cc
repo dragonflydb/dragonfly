@@ -43,9 +43,9 @@ auto BuildSender(string_view channel, facade::ArgRange messages) {
     }
   }
 
-  return [channel, buf = std::move(buf), views = std::move(views)](facade::Connection* conn,
-                                                                   string pattern) {
-    string_view channel_view{buf.get(), channel.size()};
+  return [channel_size = channel.size(), buf = std::move(buf), views = std::move(views)](
+             facade::Connection* conn, string pattern) {
+    string_view channel_view{buf.get(), channel_size};
     for (std::string_view message_view : views)
       conn->SendPubMessageAsync({std::move(pattern), buf, channel_view, message_view});
   };
