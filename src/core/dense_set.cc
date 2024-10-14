@@ -312,46 +312,61 @@ void DenseSet::GrowBatch(uint32_t len, GrowItem* items,
   while (len) {
     unsigned dest_id = 0;
     for (uint32_t i = 0; i < len; ++i) {
-      DensePtr* curr = &items[i].ptr;
+      auto& item = items[i];
+      if (!item.obj.IsEmpty()) {
+        DensePtr* curr = &item.obj;
 
-      if (ExpireIfNeeded(nullptr, curr)) {
-        // if curr has disappeared due to expiry and prev was converted from Link to a
-        // regular DensePtr
+        if (ExpireIfNeeded(nullptr, curr)) {
+          // if curr has disappeared due to expiry and prev was converted from Link to a
+          // regular DensePtr
+        }
+
+        if (curr->IsEmpty())
+          continue;
+        void* ptr = curr->GetObject();
+
+        DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
+
+        uint32_t bid = BucketId(ptr, 0);
+
+        // if the item does not move from the current chain, ensure
+        // it is not marked as displaced and move to the next item in the chain
+
+        auto dest = new_entries->begin() + bid;
+        DensePtr dptr = *curr;
+
+        if (curr->IsObject()) {
+          curr->Reset();  // reset the original placeholder (.next or root)
+
+          DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
+          DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
+          PushFront(dest, dptr);
+
+          dest->ClearDisplaced();
+
+          continue;
+        }  // if IsObject
+
+        *curr = *dptr.Next();
+        if (curr->IsLink()) {
+          PREFETCH_READ(curr->AsLink());
+        }
+
+        PREFETCH_READ(curr->Raw());
+        DCHECK(!curr->IsEmpty());
+
+        PushFront(dest, dptr);
+        dest->ClearDisplaced();
+      } else {
+        auto link = item.ptr.AsLink();
+        PREFETCH_READ(link->next.Raw());
+        PREFETCH_READ(link->Raw());
+
+        item.obj = item.ptr;
+        item.ptr.Reset();
       }
 
-      if (curr->IsEmpty())
-        continue;
-      void* ptr = curr->GetObject();
-
-      DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
-
-      uint32_t bid = BucketId(ptr, 0);
-
-      // if the item does not move from the current chain, ensure
-      // it is not marked as displaced and move to the next item in the chain
-
-      auto dest = new_entries->begin() + bid;
-      DensePtr dptr = *curr;
-
-      if (curr->IsObject()) {
-        curr->Reset();  // reset the original placeholder (.next or root)
-
-        DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
-        DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
-        PushFront(dest, dptr);
-
-        dest->ClearDisplaced();
-
-        continue;
-      }  // if IsObject
-
-      *curr = *dptr.Next();
-      DCHECK(!curr->IsEmpty());
-
-      PushFront(dest, dptr);
-      dest->ClearDisplaced();
-
-      items[dest_id++] = {*curr, nullptr};
+      items[dest_id++] = {item.ptr, item.obj};
     }
     // update the length of the batch for the next iteration.
     len = dest_id;
@@ -460,12 +475,22 @@ void DenseSet::Fill(DenseSet* other) const {
 
 void DenseSet::Grow(size_t new_size) {
   decltype(entries_) ne(new_size, entries_.get_allocator());
+  const auto kMaxBatchLen = 32;
   GrowItem items[kMaxBatchLen];
   uint32_t len = 0;
   // perform rehashing of items in the set
   for (auto& entry : entries_) {
+    PREFETCH_READ(entry.Raw());
     if (!entry.IsEmpty()) {
-      items[len++] = {entry, entry.IsLink() ? nullptr : entry.Raw()};
+      auto& item = items[len++];
+      if (entry.IsLink()) {
+        item.ptr = entry;
+        item.obj.Reset();
+      } else {
+        item.ptr.Reset();
+        item.obj = entry;
+      }
+
       if (len == kMaxBatchLen) {
         GrowBatch(len, items, &ne);
         len = 0;

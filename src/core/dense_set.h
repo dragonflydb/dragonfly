@@ -343,7 +343,7 @@ class DenseSet {
 
   struct GrowItem {
     DensePtr ptr;
-    void* obj = nullptr;
+    DensePtr obj;
   };
   void GrowBatch(uint32_t len, GrowItem* items,
                  std::vector<DensePtr, DensePtrAllocator>* new_entries);
