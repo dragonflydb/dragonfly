@@ -39,10 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: actions/setup-python@v5
-        with:
-          cache-dependency-path: tests/fakeredis/poetry.lock
-          python-version: ${{ matrix.PYTHON_VERSION }}
+            #- uses: actions/setup-python@v5
 
       - name: Install dependencies
         env:
@@ -50,9 +47,11 @@ jobs:
         shell: bash
         working-directory: tests/fakeredis
         run: |
-          python -m venv venv
+          apt update
+          apt install -y python3 python3.10-venv
+          python3 -m venv venv
           source venv/bin/activate
-          #python -m pip install poetry
+          python3 -m pip install poetry
           #echo "$HOME/.poetry/bin" >> $GITHUB_PATH
           #poetry install
       - name: Configure CMake
