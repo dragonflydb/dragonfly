@@ -90,6 +90,11 @@ DenseSet::DenseSet(MemoryResource* mr) : entries_(mr) {
 }
 
 DenseSet::~DenseSet() {
+  while (cached_link_num) {
+    mr()->deallocate(cached_links[--cached_link_num], sizeof(DenseLinkKey), alignof(DenseLinkKey));
+    --num_links_;
+  }
+
   // We can not call Clear from the base class because it internally calls ObjDelete which is
   // a virtual function. Therefore, destructor of the derived classes must clean up the table.
   CHECK(entries_.empty());
@@ -798,13 +803,18 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
 }
 
 auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
-  LinkAllocator la(mr());
-  DenseLinkKey* lk = la.allocate(1);
-  la.construct(lk);
+  DenseLinkKey* lk = nullptr;
+  if (cached_link_num) {
+    lk = cached_links[--cached_link_num];
+  } else {
+    LinkAllocator la(mr());
+    lk = la.allocate(1);
+    la.construct(lk);
+    ++num_links_;
+  }
 
   lk->next = next;
   lk->SetObject(data);
-  ++num_links_;
 
   return lk;
 }

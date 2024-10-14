@@ -390,9 +390,13 @@ class DenseSet {
   DenseLinkKey* NewLink(void* data, DensePtr next);
 
   inline void FreeLink(DenseLinkKey* plink) {
-    // deallocate the link if it is no longer a link as it is now in an empty list
-    mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
-    --num_links_;
+    if (cached_link_num < max_cached_links) {
+      cached_links[cached_link_num++] = plink;
+    } else {
+      // deallocate the link if it is no longer a link as it is now in an empty list
+      mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
+      --num_links_;
+    }
   }
 
   // Returns true if *node was deleted.
@@ -420,6 +424,10 @@ class DenseSet {
   uint32_t time_now_ = 0;
 
   mutable bool expiration_used_ = false;
+
+  static constexpr uint32_t max_cached_links = 8;
+  DenseLinkKey* cached_links[max_cached_links];
+  uint32_t cached_link_num = 0;
 };
 
 inline void* DenseSet::FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const {
