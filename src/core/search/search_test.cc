@@ -11,6 +11,7 @@
 #include <absl/strings/str_split.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <mimalloc.h>
 
 #include <algorithm>
 #include <memory_resource>
@@ -21,6 +22,10 @@
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
 #include "core/search/vector_utils.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 namespace dfly {
 namespace search {
@@ -80,6 +85,11 @@ Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldTyp
 
 class SearchTest : public ::testing::Test {
  protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+  }
+
   SearchTest() {
     PrepareSchema({{"field", SchemaField::TEXT}});
   }
@@ -255,6 +265,25 @@ TEST_F(SearchTest, CheckParenthesisPriority) {
 
     ExpectAll("true", "foo bar rab", "foo baz zab", "foo bar zab");
     ExpectNone("wrong", "foo bar baz", "foo rab zab", "foo bar what", "foo rab foo");
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
+TEST_F(SearchTest, CheckPrefix) {
+  {
+    PrepareQuery("pre*");
+
+    ExpectAll("pre", "prepre", "preachers", "prepared", "pRetty", "PRedators", "prEcisely!");
+    ExpectNone("pristine", "represent", "repair", "depreciation");
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+  {
+    PrepareQuery("new*");
+
+    ExpectAll("new", "New York", "Newham", "newbie", "news", "Welcome to Newark!");
+    ExpectNone("ne", "renew", "nev", "ne-w", "notnew", "casino in neVada");
 
     EXPECT_TRUE(Check()) << GetError();
   }

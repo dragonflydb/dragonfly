@@ -1,10 +1,9 @@
 #pragma once
 
-#include <absl/types/span.h>
-
-#include <cstdio>
+#include <cassert>
 #include <optional>
 #include <string_view>
+#include <utility>
 
 #include "base/pmr/memory_resource.h"
 
@@ -17,6 +16,7 @@ namespace dfly::search {
 // absl::flat_hash_map/std::unordered_map compatible tree map based on rax tree.
 // Allocates all objects on heap (with custom memory resource) as rax tree operates fully on
 // pointers.
+// TODO: Add full support for polymorphic allocators, including rax trie node allocations
 template <typename V> struct RaxTreeMap {
   struct FindIterator;
 
@@ -87,7 +87,7 @@ template <typename V> struct RaxTreeMap {
   };
 
  public:
-  explicit RaxTreeMap(PMR_NS::memory_resource* mr) : tree_(raxNew()), mr_(mr) {
+  explicit RaxTreeMap(PMR_NS::memory_resource* mr) : tree_(raxNew()), alloc_(mr) {
   }
 
   size_t size() const {
@@ -119,7 +119,12 @@ template <typename V> struct RaxTreeMap {
     V* old = nullptr;
     raxRemove(tree_, to_key_ptr(it->first.data()), it->first.size(),
               reinterpret_cast<void**>(&old));
-    mr_->deallocate(old, sizeof(V), alignof(V));
+    alloc_.destroy(old);
+    alloc_.deallocate(old, 1);
+  }
+
+  auto& get_allocator() const {
+    return alloc_;
   }
 
  private:
@@ -128,7 +133,7 @@ template <typename V> struct RaxTreeMap {
   }
 
   rax* tree_;
-  PMR_NS::memory_resource* mr_;
+  PMR_NS::polymorphic_allocator<V> alloc_;
 };
 
 template <typename V>
@@ -138,15 +143,14 @@ std::pair<typename RaxTreeMap<V>::FindIterator, bool> RaxTreeMap<V>::try_emplace
   if (auto it = find(key); it)
     return {it, false};
 
-  void* ptr = mr_->allocate(sizeof(V), alignof(V));
-  V* data = new (ptr) V(std::forward<Args>(args)...);
-  assert(uint64_t(ptr) == uint64_t(data));  // we free by the latter
+  V* ptr = alloc_.allocate(1);
+  alloc_.construct(ptr, std::forward<Args>(args)...);
 
   V* old = nullptr;
-  raxInsert(tree_, to_key_ptr(key), key.size(), data, reinterpret_cast<void**>(&old));
+  raxInsert(tree_, to_key_ptr(key), key.size(), ptr, reinterpret_cast<void**>(&old));
   assert(old == nullptr);
 
-  auto it = std::make_optional(std::pair<std::string_view, V&>(key, *data));
+  auto it = std::make_optional(std::pair<std::string_view, V&>(key, *ptr));
   return std::make_pair(FindIterator{it}, true);
 }
 
