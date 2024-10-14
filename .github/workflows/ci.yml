@@ -26,6 +26,17 @@ jobs:
           lsblk -l
           echo "sda rotational = $(cat /sys/block/sda/queue/rotational)"
           echo "sdb rotational = $(cat /sys/block/sdb/queue/rotational)"
+      - name: Create virtual environment
+        run: python -m venv venv
+      - name: Activate virtual environment
+        run: |
+          echo "Activating virtual environment"
+          source venv/bin/activate
+          python -m pip install --upgrade pip
+      - name: Install dependencies
+        run: |
+          source venv/bin/activate
+          pip install pre-commit
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pre-commit
