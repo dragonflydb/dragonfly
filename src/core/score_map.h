@@ -65,7 +65,11 @@ class ScoreMap : public DenseSet {
 
     // Try reducing memory fragmentation of the value by re-allocating. Returns true if
     // re-allocation happened.
-    bool ReallocIfNeeded(float ratio);
+    // If function is set, we call it with the old and the new sds. This is used for data
+    // structures that hold multiple storages that need to be update simultaneously. For example,
+    // SortedMap contains both a B+ tree and a ScoreMap with the former, containing pointers
+    // to the later. Therefore, we need to update those. This is handled by the cb below.
+    bool ReallocIfNeeded(float ratio, std::function<void(sds, sds)> = {});
 
     iterator& operator++() {
       Advance();

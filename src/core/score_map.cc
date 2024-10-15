@@ -146,19 +146,29 @@ detail::SdsScorePair ScoreMap::iterator::BreakToPair(void* obj) {
   return detail::SdsScorePair(f, GetValue(f));
 }
 
-bool ScoreMap::iterator::ReallocIfNeeded(float ratio) {
+bool ScoreMap::iterator::ReallocIfNeeded(float ratio, std::function<void(sds, sds)> cb) {
   // Unwrap all links to correctly call SetObject()
   auto* ptr = curr_entry_;
-  while (ptr->IsLink())
+
+  if (ptr->IsLink()) {
     ptr = ptr->AsLink();
+  }
 
+  // Note: we do not iterate over the links. Although we could that...
   auto* obj = ptr->GetObject();
-  auto [new_obj, realloced] = static_cast<ScoreMap*>(owner_)->ReallocIfNeeded(obj, ratio);
-  ptr->SetObject(new_obj);
+  auto [new_obj, reallocated] = static_cast<ScoreMap*>(owner_)->ReallocIfNeeded(obj, ratio);
+  if (reallocated) {
+    if (cb) {
+      cb((sds)obj, (sds)new_obj);
+    }
+    sdsfree((sds)obj);
+    ptr->SetObject(new_obj);
+  }
 
-  return realloced;
+  return reallocated;
 }
 
+// Does not Release obj. Callers must do so explicitly if a `Reallocation` happened
 pair<sds, bool> ScoreMap::ReallocIfNeeded(void* obj, float ratio) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
@@ -168,7 +178,6 @@ pair<sds, bool> ScoreMap::ReallocIfNeeded(void* obj, float ratio) {
 
   sds newkey = AllocSdsWithSpace(key_len, 8);
   memcpy(newkey, key, key_len + 8 + 1);
-  sdsfree(key);
 
   return {newkey, true};
 }

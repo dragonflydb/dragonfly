@@ -442,8 +442,8 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
 }
 
 bool RobjWrapper::DefragIfNeeded(float ratio) {
-  auto do_defrag = [this, ratio](auto defrug_fun) mutable {
-    auto [new_ptr, realloced] = defrug_fun(encoding_, inner_obj_, ratio);
+  auto do_defrag = [this, ratio](auto defrag_fun) mutable {
+    auto [new_ptr, realloced] = defrag_fun(encoding_, inner_obj_, ratio);
     inner_obj_ = new_ptr;
     return realloced;
   };
@@ -466,11 +466,11 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
 int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
   // copied from zsetAdd for listpack only.
   /* Turn options into simple to check vars. */
-  int incr = (in_flags & ZADD_IN_INCR) != 0;
-  int nx = (in_flags & ZADD_IN_NX) != 0;
-  int xx = (in_flags & ZADD_IN_XX) != 0;
-  int gt = (in_flags & ZADD_IN_GT) != 0;
-  int lt = (in_flags & ZADD_IN_LT) != 0;
+  bool incr = (in_flags & ZADD_IN_INCR) != 0;
+  bool nx = (in_flags & ZADD_IN_NX) != 0;
+  bool xx = (in_flags & ZADD_IN_XX) != 0;
+  bool gt = (in_flags & ZADD_IN_GT) != 0;
+  bool lt = (in_flags & ZADD_IN_LT) != 0;
   *out_flags = 0; /* We'll return our response flags. */
   double curscore;
 
