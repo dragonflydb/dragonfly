@@ -7,6 +7,7 @@
 
 extern "C" {
 #include "redis/lzfP.h"
+#include "redis/quicklist.h"
 }
 
 #include <optional>
@@ -21,6 +22,7 @@ extern "C" {
 
 typedef struct rax rax;
 typedef struct streamCG streamCG;
+typedef struct quicklistNode quicklistNode;
 
 namespace dfly {
 
@@ -247,6 +249,7 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
+  std::error_code SavePlainNodeAsZiplist(quicklistNode* node);
 
   // Might preempt
   void FlushIfNeeded(FlushState flush_state);
