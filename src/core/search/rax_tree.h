@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -119,7 +120,7 @@ template <typename V> struct RaxTreeMap {
     V* old = nullptr;
     raxRemove(tree_, to_key_ptr(it->first.data()), it->first.size(),
               reinterpret_cast<void**>(&old));
-    alloc_.destroy(old);
+    std::allocator_traits<decltype(alloc_)>::destroy(alloc_, old);
     alloc_.deallocate(old, 1);
   }
 
@@ -144,7 +145,7 @@ std::pair<typename RaxTreeMap<V>::FindIterator, bool> RaxTreeMap<V>::try_emplace
     return {it, false};
 
   V* ptr = alloc_.allocate(1);
-  alloc_.construct(ptr, std::forward<Args>(args)...);
+  std::allocator_traits<decltype(alloc_)>::construct(alloc_, ptr, std::forward<Args>(args)...);
 
   V* old = nullptr;
   raxInsert(tree_, to_key_ptr(key), key.size(), ptr, reinterpret_cast<void**>(&old));
