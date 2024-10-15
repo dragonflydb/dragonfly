@@ -331,14 +331,13 @@ class Connection : public util::Connection {
   void HandleRequests() final;
 
   // Start dispatch fiber and run IoLoop.
-  void ConnectionFlow(util::FiberSocketBase* peer);
+  void ConnectionFlow();
 
   // Main loop reading client messages and passing requests to dispatch queue.
-  std::variant<std::error_code, ParserStatus> IoLoop(util::FiberSocketBase* peer,
-                                                     SinkReplyBuilder* orig_builder);
+  std::variant<std::error_code, ParserStatus> IoLoop();
 
   // Returns true if HTTP header is detected.
-  io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
+  io::Result<bool> CheckForHttpProto();
 
   // Dispatches a single (Redis or MC) command.
   // `has_more` should indicate whether the io buffer has more commands
@@ -348,7 +347,7 @@ class Connection : public util::Connection {
                       absl::FunctionRef<MessageHandle()> cmd_msg_cb);
 
   // Handles events from dispatch queue.
-  void ExecutionFiber(util::FiberSocketBase* peer);
+  void ExecutionFiber();
 
   void SendAsync(MessageHandle msg);
 
@@ -358,7 +357,7 @@ class Connection : public util::Connection {
   // Create new pipeline request, re-use from pool when possible.
   PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
 
-  ParserStatus ParseRedis(SinkReplyBuilder* orig_builder);
+  ParserStatus ParseRedis();
   ParserStatus ParseMemcache();
 
   void OnBreakCb(int32_t mask);
@@ -373,8 +372,9 @@ class Connection : public util::Connection {
   bool ShouldEndDispatchFiber(const MessageHandle& msg);
 
   void LaunchDispatchFiberIfNeeded();  // Dispatch fiber is started lazily
+
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
-  void SquashPipeline(facade::SinkReplyBuilder*);
+  void SquashPipeline();
 
   // Clear pipelined messages, disaptching only intrusive ones.
   void ClearPipelinedMessages();
@@ -398,6 +398,9 @@ class Connection : public util::Connection {
   Protocol protocol_;
   ConnectionStats* stats_ = nullptr;
 
+  // cc_->reply_builder may change during the lifetime of the connection, due to injections.
+  // This is a pointer to the original, socket based reply builder that never changes.
+  SinkReplyBuilder* reply_builder_ = nullptr;
   util::HttpListenerBase* http_listener_;
   SSL_CTX* ssl_ctx_;
 
