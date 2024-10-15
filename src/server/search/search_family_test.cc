@@ -604,6 +604,22 @@ TEST_F(SearchFamilyTest, TestReturn) {
   EXPECT_THAT(resp, MatchEntry("k0", "vec_return", "20"));
 }
 
+TEST_F(SearchFamilyTest, TestStopWords) {
+  Run({"ft.create", "i1", "STOPWORDS", "3", "red", "green", "blue", "SCHEMA", "title", "TEXT"});
+
+  Run({"hset", "d:1", "title", "ReD? parrot flies away"});
+  Run({"hset", "d:2", "title", "GrEEn crocodile eats you"});
+  Run({"hset", "d:3", "title", "BLUe. Whale surfes the sea"});
+
+  EXPECT_THAT(Run({"ft.search", "i1", "red"}), kNoResults);
+  EXPECT_THAT(Run({"ft.search", "i1", "green"}), kNoResults);
+  EXPECT_THAT(Run({"ft.search", "i1", "blue"}), kNoResults);
+
+  EXPECT_THAT(Run({"ft.search", "i1", "parrot"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"ft.search", "i1", "crocodile"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"ft.search", "i1", "whale"}), AreDocIds("d:3"));
+}
+
 TEST_F(SearchFamilyTest, SimpleUpdates) {
   EXPECT_EQ(Run({"ft.create", "i1", "schema", "title", "text", "visits", "numeric"}), "OK");
 

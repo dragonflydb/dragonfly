@@ -38,20 +38,42 @@ StringSet::~StringSet() {
   Clear();
 }
 
-bool StringSet::AddSds(sds s1) {
-  return AddOrFindObj(s1, false) == nullptr;
-}
-
 bool StringSet::Add(string_view src, uint32_t ttl_sec) {
-  sds newsds = MakeSetSds(src, ttl_sec);
-  bool has_ttl = ttl_sec != UINT32_MAX;
-
-  if (AddOrFindObj(newsds, has_ttl) != nullptr) {
-    sdsfree(newsds);
+  uint64_t hash = Hash(&src, 1);
+  void* prev = FindInternal(&src, hash, 1);
+  if (prev != nullptr) {
     return false;
   }
 
+  sds newsds = MakeSetSds(src, ttl_sec);
+  bool has_ttl = ttl_sec != UINT32_MAX;
+  AddUnique(newsds, has_ttl, hash);
   return true;
+}
+
+unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec) {
+  uint64_t hash[kMaxBatchLen];
+  bool has_ttl = ttl_sec != UINT32_MAX;
+  unsigned count = span.size();
+  unsigned res = 0;
+
+  DCHECK_LE(count, kMaxBatchLen);
+
+  for (size_t i = 0; i < count; i++) {
+    hash[i] = CompactObj::HashCode(span[i]);
+    Prefetch(hash[i]);
+  }
+
+  for (unsigned i = 0; i < count; ++i) {
+    void* prev = FindInternal(&span[i], hash[i], 1);
+    if (prev == nullptr) {
+      ++res;
+      sds field = MakeSetSds(span[i], ttl_sec);
+      AddUnique(field, has_ttl, hash[i]);
+    }
+  }
+
+  return res;
 }
 
 std::optional<std::string> StringSet::Pop() {

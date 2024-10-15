@@ -11,6 +11,7 @@
 #include <absl/strings/str_split.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <mimalloc.h>
 
 #include <algorithm>
 #include <memory_resource>
@@ -21,6 +22,10 @@
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
 #include "core/search/vector_utils.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 namespace dfly {
 namespace search {
@@ -66,6 +71,8 @@ struct MockedDocument : public DocumentAccessor {
   Map fields_{};
 };
 
+IndicesOptions kEmptyOptions{{}};
+
 Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldType>> ilist) {
   Schema schema;
   for (auto [name, type] : ilist) {
@@ -78,6 +85,11 @@ Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldTyp
 
 class SearchTest : public ::testing::Test {
  protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+  }
+
   SearchTest() {
     PrepareSchema({{"field", SchemaField::TEXT}});
   }
@@ -105,7 +117,7 @@ class SearchTest : public ::testing::Test {
   bool Check() {
     absl::Cleanup cl{[this] { entries_.clear(); }};
 
-    FieldIndices index{schema_, PMR_NS::get_default_resource()};
+    FieldIndices index{schema_, kEmptyOptions, PMR_NS::get_default_resource()};
 
     shuffle(entries_.begin(), entries_.end(), default_random_engine{});
     for (DocId i = 0; i < entries_.size(); i++)
@@ -258,6 +270,25 @@ TEST_F(SearchTest, CheckParenthesisPriority) {
   }
 }
 
+TEST_F(SearchTest, CheckPrefix) {
+  {
+    PrepareQuery("pre*");
+
+    ExpectAll("pre", "prepre", "preachers", "prepared", "pRetty", "PRedators", "prEcisely!");
+    ExpectNone("pristine", "represent", "repair", "depreciation");
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+  {
+    PrepareQuery("new*");
+
+    ExpectAll("new", "New York", "Newham", "newbie", "news", "Welcome to Newark!");
+    ExpectNone("ne", "renew", "nev", "ne-w", "notnew", "casino in neVada");
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
 using Map = MockedDocument::Map;
 
 TEST_F(SearchTest, MatchField) {
@@ -372,6 +403,36 @@ TEST_F(SearchTest, IntegerTerms) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
+TEST_F(SearchTest, StopWords) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}});
+  IndicesOptions options{{"some", "words", "are", "left", "out"}};
+
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource()};
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  vector<string> documents = {"some words left out",      //
+                              "some can be found",        //
+                              "words are never matched",  //
+                              "explicitly found!"};
+  for (size_t i = 0; i < documents.size(); i++) {
+    MockedDocument doc{{{"title", documents[i]}}};
+    indices.Add(i, &doc);
+  }
+
+  // words is a stopword
+  algo.Init("words", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
+
+  // some is a stopword
+  algo.Init("some", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
+
+  // found is not a stopword
+  algo.Init("found", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
+}
+
 std::string ToBytes(absl::Span<const float> vec) {
   return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};
 }
@@ -380,7 +441,7 @@ TEST_F(SearchTest, Errors) {
   auto schema = MakeSimpleSchema(
       {{"score", SchemaField::NUMERIC}, {"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
 
   SearchAlgorithm algo{};
   QueryParams params;
@@ -404,7 +465,7 @@ class KnnTest : public SearchTest, public testing::WithParamInterface<bool /* hn
 TEST_P(KnnTest, Simple1D) {
   auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{GetParam(), 1};
-  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
 
   // Place points on a straight line
   for (size_t i = 0; i < 100; i++) {
@@ -461,7 +522,7 @@ TEST_P(KnnTest, Simple2D) {
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{GetParam(), 2};
-  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
     string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
@@ -523,7 +584,7 @@ TEST_P(KnnTest, Cosine) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
       SchemaField::VectorParams{GetParam(), 2, VectorSimilarity::COSINE};
-  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
 
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
     string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
@@ -567,7 +628,7 @@ TEST_P(KnnTest, AddRemove) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
       SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2};
-  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
 
   vector<MockedDocument> documents(10);
   for (size_t i = 0; i < 10; i++) {
@@ -615,7 +676,7 @@ TEST_P(KnnTest, AutoResize) {
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params =
       SchemaField::VectorParams{GetParam(), 1, VectorSimilarity::L2, kInitialCapacity};
-  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
 
   for (size_t i = 0; i < 100; i++) {
     MockedDocument doc{Map{{"pos", ToBytes({float(i)})}}};
@@ -634,7 +695,7 @@ static void BM_VectorSearch(benchmark::State& state) {
 
   auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
   schema.fields["pos"].special_params = SchemaField::VectorParams{false, ndims};
-  FieldIndices indices{schema, PMR_NS::get_default_resource()};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource()};
 
   auto random_vec = [ndims]() {
     vector<float> coords;

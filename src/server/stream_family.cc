@@ -1888,9 +1888,7 @@ optional<pair<AddTrimOpts, unsigned>> ParseAddOrTrimArgsOrReply(CmdArgList args,
 
   unsigned id_indx = 1;
   for (; id_indx < args.size(); ++id_indx) {
-    ToUpper(&args[id_indx]);
-    string_view arg = ArgS(args, id_indx);
-
+    string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
     size_t remaining_args = args.size() - id_indx - 1;
 
     if (is_xadd && arg == "NOMKSTREAM") {
@@ -2059,8 +2057,7 @@ absl::InlinedVector<streamID, 8> GetXclaimIds(CmdArgList& args) {
 
 void ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, ConnectionContext* cntx) {
   for (size_t i = 0; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-    string_view arg = ArgS(args, i);
+    string arg = absl::AsciiStrToUpper(ArgS(args, i));
     bool remaining_args = args.size() - i - 1 > 0;
 
     if (remaining_args) {
@@ -2186,8 +2183,8 @@ void StreamFamily::XGroup(CmdArgList args, ConnectionContext* cntx) {
 
 void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {"CONSUMERS <key> <groupname>",
                               "    Show consumers of <groupname>.",
@@ -2254,15 +2251,13 @@ void StreamFamily::XInfo(CmdArgList args, ConnectionContext* cntx) {
 
       if (args.size() >= 3) {
         full = 1;
-        ToUpper(&args[2]);
-        string_view full_arg = ArgS(args, 2);
+        string full_arg = absl::AsciiStrToUpper(ArgS(args, 2));
         if (full_arg != "FULL") {
           return cntx->SendError(
               "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
         }
         if (args.size() > 3) {
-          ToUpper(&args[3]);
-          string_view count_arg = ArgS(args, 3);
+          string count_arg = absl::AsciiStrToUpper(ArgS(args, 3));
           string_view count_value_arg = ArgS(args, 4);
           if (count_arg != "COUNT") {
             return cntx->SendError(
@@ -2447,8 +2442,7 @@ void StreamFamily::XLen(CmdArgList args, ConnectionContext* cntx) {
 
 bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, ConnectionContext* cntx) {
   size_t id_indx = 0;
-  ToUpper(&args[id_indx]);
-  string_view arg = ArgS(args, id_indx);
+  string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
 
   if (arg == "IDLE" && args.size() > 4) {
     id_indx++;
@@ -2579,8 +2573,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
   size_t id_indx = 0;
 
   if (opts.read_group) {
-    ToUpper(&args[id_indx]);
-    string_view arg = ArgS(args, id_indx);
+    string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
 
     if (arg.size() - 1 < 2) {
       cntx->SendError(kSyntaxErr);
@@ -2599,8 +2592,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
   }
 
   for (; id_indx < args.size(); ++id_indx) {
-    ToUpper(&args[id_indx]);
-    string_view arg = ArgS(args, id_indx);
+    string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
 
     bool remaining_args = args.size() - id_indx - 1 > 0;
     if (arg == "BLOCK" && remaining_args) {
@@ -3078,8 +3070,8 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
     if (args.size() != 5) {
       return cntx->SendError(WrongNumArgsError("XRANGE"), kSyntaxErrType);
     }
-    ToUpper(&args[3]);
-    string_view opt = ArgS(args, 3);
+
+    string opt = absl::AsciiStrToUpper(ArgS(args, 3));
     string_view val = ArgS(args, 4);
 
     if (opt != "COUNT" || !absl::SimpleAtoi(val, &range_opts.count)) {
@@ -3159,8 +3151,8 @@ void StreamFamily::XAutoClaim(CmdArgList args, ConnectionContext* cntx) {
   opts.start = rs.parsed_id.val;
 
   for (size_t i = 5; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-    string_view arg = ArgS(args, i);
+    string arg = absl::AsciiStrToUpper(ArgS(args, i));
+
     bool remaining_args = args.size() - i - 1 > 0;
 
     if (remaining_args) {

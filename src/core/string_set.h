@@ -4,10 +4,11 @@
 
 #pragma once
 
+#include <absl/types/span.h>
+
 #include <cstdint>
 #include <functional>
 #include <optional>
-#include <string>
 #include <string_view>
 
 #include "core/dense_set.h"
@@ -28,8 +29,7 @@ class StringSet : public DenseSet {
   // Returns true if elem was added.
   bool Add(std::string_view s1, uint32_t ttl_sec = UINT32_MAX);
 
-  // Used currently by rdb_load. Returns true if elem was added.
-  bool AddSds(sds elem);
+  template <typename T> unsigned AddMany(absl::Span<T> span, uint32_t ttl_sec);
 
   bool Erase(std::string_view str) {
     return EraseInternal(&str, 1);
@@ -37,10 +37,6 @@ class StringSet : public DenseSet {
 
   bool Contains(std::string_view s1) const {
     return FindInternal(&s1, Hash(&s1, 1), 1) != nullptr;
-  }
-
-  void Clear() {
-    ClearInternal();
   }
 
   std::optional<std::string> Pop();
@@ -108,6 +104,8 @@ class StringSet : public DenseSet {
  protected:
   uint64_t Hash(const void* ptr, uint32_t cookie) const override;
 
+  unsigned AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec);
+
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const override;
 
   size_t ObjectAllocSize(const void* s1) const override;
@@ -117,5 +115,29 @@ class StringSet : public DenseSet {
   void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const override;
   sds MakeSetSds(std::string_view src, uint32_t ttl_sec) const;
 };
+
+template <typename T> unsigned StringSet::AddMany(absl::Span<T> span, uint32_t ttl_sec) {
+  std::string_view views[kMaxBatchLen];
+  unsigned res = 0;
+  if (BucketCount() < span.size()) {
+    Reserve(span.size());
+  }
+
+  while (span.size() >= kMaxBatchLen) {
+    for (size_t i = 0; i < kMaxBatchLen; i++)
+      views[i] = span[i];
+
+    span.remove_prefix(kMaxBatchLen);
+    res += AddBatch(absl::MakeSpan(views), ttl_sec);
+  }
+
+  if (span.size()) {
+    for (size_t i = 0; i < span.size(); i++)
+      views[i] = span[i];
+
+    res += AddBatch(absl::MakeSpan(views, span.size()), ttl_sec);
+  }
+  return res;
+}
 
 }  // end namespace dfly

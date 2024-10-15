@@ -144,10 +144,8 @@ void MemoryCmd::Run(CmdArgList args) {
   }
 
   if (sub_cmd == "DECOMMIT") {
-    shard_set->pool()->AwaitBrief([](unsigned, auto* pb) {
-      ServerState::tlocal()->DecommitMemory(ServerState::kDataHeap | ServerState::kBackingHeap |
-                                            ServerState::kGlibcmalloc);
-    });
+    shard_set->pool()->AwaitBrief(
+        [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory); });
     return cntx_->SendSimpleString("OK");
   }
 
@@ -305,16 +303,16 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
   bool backing = false;
   bool show_arenas = false;
   if (args.size() >= 2) {
-    ToUpper(&args[1]);
+    string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 1));
 
-    if (ArgS(args, 1) == "SHOW") {
+    if (sub_cmd == "SHOW") {
       if (args.size() != 2)
         return cntx_->SendError(kSyntaxErr, kSyntaxErrType);
       show_arenas = true;
     } else {
       unsigned tid_indx = 1;
 
-      if (ArgS(args, tid_indx) == "BACKING") {
+      if (sub_cmd == "BACKING") {
         ++tid_indx;
         backing = true;
       }

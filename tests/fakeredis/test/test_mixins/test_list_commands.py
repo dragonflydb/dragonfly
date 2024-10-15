@@ -616,13 +616,6 @@ def test_blmove(r: redis.Redis):
     assert r.blmove("a", "b", 1, "RIGHT", "LEFT")
 
 
-@pytest.mark.disconnected
-@testtools.fake_only
-def test_lmove_disconnected_raises_connection_error(r: redis.Redis):
-    with pytest.raises(redis.ConnectionError):
-        r.lmove(1, 2, "LEFT", "RIGHT")
-
-
 def test_lpos(r: redis.Redis):
     assert r.rpush("a", "a", "b", "c", "1", "2", "3", "c", "c") == 8
     assert r.lpos("a", "a") == 0

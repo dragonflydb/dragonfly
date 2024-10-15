@@ -99,17 +99,8 @@ class RdbLoaderBase {
   };
 
   struct LoadTrace {
-    // Some traces are very long. We divide them into multiple segments.
-    std::vector<std::vector<LoadBlob>> arr;
+    std::vector<LoadBlob> arr;
     std::unique_ptr<StreamTrace> stream_trace;
-
-    size_t blob_count() const {
-      size_t count = 0;
-      for (const auto& seg : arr) {
-        count += seg.size();
-      }
-      return count;
-    }
   };
 
   // Contains the state of a pending partial read.
@@ -128,6 +119,10 @@ class RdbLoaderBase {
   };
 
   struct LoadConfig {
+    // Whether the loaded item is being streamed incrementally in partial
+    // reads.
+    bool streamed = false;
+
     // Number of elements in the object to reserve.
     //
     // Used to reserve the elements in a huge object up front, then append

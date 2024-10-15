@@ -24,9 +24,15 @@ struct AstStarNode {};
 
 // Matches terms in text fields
 struct AstTermNode {
-  AstTermNode(std::string term);
+  explicit AstTermNode(std::string term);
 
   std::string term;
+};
+
+struct AstPrefixNode {
+  explicit AstPrefixNode(std::string prefix);
+
+  std::string prefix;
 };
 
 // Matches numeric range
@@ -97,8 +103,8 @@ struct AstSortNode {
 };
 
 using NodeVariants =
-    std::variant<std::monostate, AstStarNode, AstTermNode, AstRangeNode, AstNegateNode,
-                 AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
+    std::variant<std::monostate, AstStarNode, AstTermNode, AstPrefixNode, AstRangeNode,
+                 AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;

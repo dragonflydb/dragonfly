@@ -73,6 +73,9 @@ ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal 
 ABSL_FLAG(bool, force_epoll, false,
           "If true - uses linux epoll engine underneath. "
           "Can fit for kernels older than 5.10.");
+ABSL_FLAG(
+    string, allocation_tracker, "",
+    "Logs stack trace of memory allocation within these ranges. Format is min:max,min:max,....");
 
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
@@ -462,20 +465,29 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
   /* Update memory limits */
 
   // Start by reading global memory limits
-  constexpr auto base_mem = "/sys/fs/cgroup/memory"sv;
-  read_mem(StrCat(base_mem, "/memory.limit_in_bytes"), &mdata->mem_total);
-  read_mem(StrCat(base_mem, "/memory.max"), &mdata->mem_total);
+  auto parse_limits = [&](std::string_view base_mem) {
+    read_mem(StrCat(base_mem, "/memory.limit_in_bytes"), &mdata->mem_total);
+    read_mem(StrCat(base_mem, "/memory.max"), &mdata->mem_total);
+  };
+
+  // For v1
+  constexpr auto base_mem_v1 = "/sys/fs/cgroup/memory"sv;
+  parse_limits(base_mem_v1);
+  // For v2 if the previous failed
+  constexpr auto base_mem_v2 = "/sys/fs/cgroup"sv;
+  parse_limits(base_mem_v2);
+  // For v2 under /user.slice
+  constexpr auto base_mem_v2_slice = "/sys/fs/cgroup/user.slice"sv;
+  parse_limits(base_mem_v2_slice);
 
   // Read cgroup-specific limits
   read_mem(StrCat(mem_path, "/memory.limit_in_bytes"), &mdata->mem_total);
   read_mem(StrCat(mem_path, "/memory.max"), &mdata->mem_total);
   read_mem(StrCat(mem_path, "/memory.high"), &mdata->mem_avail);
-
   mdata->mem_avail = min(mdata->mem_avail, mdata->mem_total);
 
   /* Update thread limits */
 
-  constexpr auto base_cpu = "/sys/fs/cgroup/cpu"sv;
   auto read_cpu = [&read_something](string_view path, size_t* output) {
     double count{0}, timeshare{1};
 
@@ -534,8 +546,13 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
     }
   };
 
+  constexpr auto base_cpu = "/sys/fs/cgroup/cpu"sv;
   read_cpu(base_cpu, max_threads);  // global cpu limits
-  read_cpu(cpu_path, max_threads);  // cgroup-specific limits
+  constexpr auto base_cpu_v2 = "/sys/fs/cgroup"sv;
+  read_cpu(base_cpu_v2, max_threads);  // global cpu limits
+  constexpr auto base_cpu_v2_slice = "/sys/fs/cgroup/user.slice"sv;
+  read_cpu(base_cpu_v2_slice, max_threads);  // global cpu limits
+  read_cpu(cpu_path, max_threads);           // cgroup-specific limits
 
   if (!read_something) {
     LOG(ERROR) << "Failed in deducing any cgroup limits with paths " << mem_path << " and "
@@ -546,6 +563,42 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 }
 
 #endif
+
+void SetupAllocationTracker(ProactorPool* pool) {
+#ifdef DFLY_ENABLE_MEMORY_TRACKING
+  string flag = absl::GetFlag(FLAGS_allocation_tracker);
+  vector<pair<size_t, size_t>> track_ranges;
+  for (string_view entry : absl::StrSplit(flag, ",", absl::SkipEmpty())) {
+    auto separator = entry.find(":");
+    if (separator == entry.npos) {
+      LOG(ERROR) << "Can't find ':' in element";
+      exit(-1);
+    }
+
+    pair<size_t, size_t> p;
+    if (!absl::SimpleAtoi(entry.substr(0, separator), &p.first)) {
+      LOG(ERROR) << "Can't parse first number in pair";
+      exit(-1);
+    }
+    if (!absl::SimpleAtoi(entry.substr(separator + 1), &p.second)) {
+      LOG(ERROR) << "Can't parse second number in pair";
+      exit(-1);
+    }
+
+    track_ranges.push_back(p);
+  }
+
+  pool->AwaitBrief([&](unsigned, ProactorBase*) {
+    for (auto range : track_ranges) {
+      if (!AllocationTracker::Get().Add(
+              {.lower_bound = range.first, .upper_bound = range.second, .sample_odds = 1.0})) {
+        LOG(ERROR) << "Unable to track allocation range";
+        exit(-1);
+      }
+    }
+  });
+#endif
+}
 
 }  // namespace
 }  // namespace dfly
@@ -732,6 +785,8 @@ Usage: dragonfly [FLAGS]
 #endif
 
   pool->Run();
+
+  SetupAllocationTracker(pool.get());
 
   AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
   acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));

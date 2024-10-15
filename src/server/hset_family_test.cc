@@ -119,6 +119,12 @@ TEST_F(HSetFamilyTest, HIncr) {
   EXPECT_THAT(resp, ErrArg("hash value is not an integer"));
 }
 
+TEST_F(HSetFamilyTest, HIncrRespected) {
+  Run({"hset", "key", "a", "1"});
+  EXPECT_EQ(11, CheckedInt({"hincrby", "key", "a", "10"}));
+  EXPECT_EQ(11, CheckedInt({"hget", "key", "a"}));
+}
+
 TEST_F(HSetFamilyTest, HScan) {
   for (int i = 0; i < 10; i++) {
     Run({"HSET", "myhash", absl::StrCat("Field-", i), absl::StrCat("Value-", i)});
@@ -380,6 +386,44 @@ TEST_F(HSetFamilyTest, Issue2102) {
   // Set key with element that will expire after 1s
   EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", "k1", "v1"}), 1);
   AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
+}
+
+TEST_F(HSetFamilyTest, HExpire) {
+  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1", "k2", "v2"}), 3);
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "3", "k0", "k1", "k2"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
+
+  EXPECT_EQ(CheckedInt({"HSETEX", "key2", "60", "k0", "v0", "k1", "v2"}), 2);
+  EXPECT_THAT(Run({"HEXPIRE", "key2", "10", "FIELDS", "2", "k0", "k1"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1))));
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HGETALL", "key2"}), RespArray(ElementsAre()));
+}
+
+TEST_F(HSetFamilyTest, HExpireNoExpireEarly) {
+  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1"}), 2);
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0", "k1"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1))));
+  AdvanceTime(9'000);
+  EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(UnorderedElementsAre("k0", "v0", "k1", "v1")));
+}
+
+TEST_F(HSetFamilyTest, HExpireNoSuchField) {
+  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0"}), 1);
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0", "k1"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(-2))));
+}
+
+TEST_F(HSetFamilyTest, HExpireNoSuchKey) {
+  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0", "k1"}),
+              RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+}
+
+TEST_F(HSetFamilyTest, HExpireNoAddNew) {
+  Run({"HEXPIRE", "key", "10", "FIELDS", "1", "k0"});
   EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
 }
 

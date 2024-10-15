@@ -555,8 +555,15 @@ TEST_F(BitOpsFamilyTest, BitPos) {
   EXPECT_EQ(-1, CheckedInt({"bitpos", "empty", "0"}));
   EXPECT_EQ(-1, CheckedInt({"bitpos", "empty", "0", "1"}));
 
-  // Non-existent key should be treated like an empty string.
-  EXPECT_EQ(-1, CheckedInt({"bitpos", "d", "0"}));
+  // Non-existent key should be treated like padded with zeros string.
+  EXPECT_EQ(-1, CheckedInt({"bitpos", "d", "1"}));
+  EXPECT_EQ(0, CheckedInt({"bitpos", "d", "0"}));
+
+  // Make sure we accept only 0 and 1 for the bit mode arguement.
+  const auto argument_must_be_0_or_1_error = ErrArg("ERR The bit argument must be 1 or 0");
+  ASSERT_THAT(Run({"bitpos", "d", "2"}), argument_must_be_0_or_1_error);
+  ASSERT_THAT(Run({"bitpos", "d", "42"}), argument_must_be_0_or_1_error);
+  ASSERT_THAT(Run({"bitpos", "d", "-1"}), argument_must_be_0_or_1_error);
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldParsing) {

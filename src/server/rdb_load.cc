@@ -37,6 +37,7 @@ extern "C" {
 #include "core/string_set.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/cluster/cluster_family.h"
+#include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/hset_family.h"
@@ -69,7 +70,6 @@ using namespace tiering::literals;
 
 namespace {
 
-constexpr size_t kYieldPeriod = 50000;
 constexpr char kErrCat[] = "dragonfly.rdbload";
 
 // Maximum length of each LoadTrace segment.
@@ -77,12 +77,6 @@ constexpr char kErrCat[] = "dragonfly.rdbload";
 // Note kMaxBlobLen must be a multiple of 6 to avoid truncating elements
 // containing 2 or 3 items.
 constexpr size_t kMaxBlobLen = 4092;
-
-inline void YieldIfNeeded(size_t i) {
-  if (i % kYieldPeriod == 0) {
-    ThisFiber::Yield();
-  }
-}
 
 class error_category : public std::error_category {
  public:
@@ -423,13 +417,9 @@ class RdbLoaderBase::OpaqueObjLoader {
   bool EnsureObjEncoding(CompactObjType type, unsigned encoding);
 
   template <typename F> static void Iterate(const LoadTrace& ltrace, F&& f) {
-    unsigned cnt = 0;
-    for (const auto& seg : ltrace.arr) {
-      for (const auto& blob : seg) {
-        if (!f(blob)) {
-          return;
-        }
-        YieldIfNeeded(++cnt);
+    for (const auto& blob : ltrace.arr) {
+      if (!f(blob)) {
+        return;
       }
     }
   }
@@ -501,10 +491,11 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const RdbSBF& src) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
-  size_t len = ltrace->blob_count();
+  size_t len = ltrace->arr.size();
 
   bool is_intset = true;
-  if (rdb_type_ == RDB_TYPE_HASH && ltrace->blob_count() <= SetFamily::MaxIntsetEntries()) {
+  if (!config_.streamed && rdb_type_ == RDB_TYPE_HASH &&
+      ltrace->arr.size() <= SetFamily::MaxIntsetEntries()) {
     Iterate(*ltrace, [&](const LoadBlob& blob) {
       if (!holds_alternative<long long>(blob.rdb_var)) {
         is_intset = false;
@@ -513,7 +504,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       return true;
     });
   } else {
-    /* Use a regular set when there are too many entries. */
+    /* Use a regular set when there are too many entries, or when the
+     * set is being streamed. */
     is_intset = false;
   }
 
@@ -550,9 +542,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
   } else {
     StringSet* set;
     if (config_.append) {
-      // Note we only use append_ when the set size exceeds kMaxBlobLen,
-      // which is greater than SetFamily::MaxIntsetEntries so we'll always use
-      // a string set not an int set.
+      // Note we always use StringSet when the object is being streamed.
       if (!EnsureObjEncoding(OBJ_SET, kEncodingStrMap2)) {
         return;
       }
@@ -571,33 +561,31 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
       increment = 2;
     }
 
-    for (const auto& seg : ltrace->arr) {
-      for (size_t i = 0; i < seg.size(); i += increment) {
-        string_view element = ToSV(seg[i].rdb_var);
+    for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
+      string_view element = ToSV(ltrace->arr[i].rdb_var);
 
-        uint32_t ttl_sec = UINT32_MAX;
-        if (increment == 2) {
-          int64_t ttl_time = -1;
-          string_view ttl_str = ToSV(seg[i + 1].rdb_var);
-          if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
-            LOG(ERROR) << "Can't parse set TTL " << ttl_str;
-            ec_ = RdbError(errc::rdb_file_corrupted);
-            return;
-          }
-
-          if (ttl_time != -1) {
-            if (ttl_time < set->time_now()) {
-              continue;
-            }
-
-            ttl_sec = ttl_time - set->time_now();
-          }
-        }
-        if (!set->Add(element, ttl_sec)) {
-          LOG(ERROR) << "Duplicate set members detected";
-          ec_ = RdbError(errc::duplicate_key);
+      uint32_t ttl_sec = UINT32_MAX;
+      if (increment == 2) {
+        int64_t ttl_time = -1;
+        string_view ttl_str = ToSV(ltrace->arr[i + 1].rdb_var);
+        if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
+          LOG(ERROR) << "Can't parse set TTL " << ttl_str;
+          ec_ = RdbError(errc::rdb_file_corrupted);
           return;
         }
+
+        if (ttl_time != -1) {
+          if (ttl_time < set->time_now()) {
+            continue;
+          }
+
+          ttl_sec = ttl_time - set->time_now();
+        }
+      }
+      if (!set->Add(element, ttl_sec)) {
+        LOG(ERROR) << "Duplicate set members detected";
+        ec_ = RdbError(errc::duplicate_key);
+        return;
       }
     }
   }
@@ -616,10 +604,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   if (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY)
     increment = 3;
 
-  size_t len = ltrace->blob_count() / increment;
+  size_t len = ltrace->arr.size() / increment;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
+  bool keep_lp = !config_.streamed && (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -638,16 +626,14 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   if (keep_lp) {
     uint8_t* lp = lpNew(lp_size);
 
-    for (const auto& seg : ltrace->arr) {
-      CHECK(seg.size() % 2 == 0);
-      for (size_t i = 0; i < seg.size(); i += 2) {
-        /* Add pair to listpack */
-        string_view sv = ToSV(seg[i].rdb_var);
-        lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
+    CHECK(ltrace->arr.size() % 2 == 0);
+    for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
+      /* Add pair to listpack */
+      string_view sv = ToSV(ltrace->arr[i].rdb_var);
+      lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
 
-        sv = ToSV(seg[i + 1].rdb_var);
-        lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
-      }
+      sv = ToSV(ltrace->arr[i + 1].rdb_var);
+      lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
     }
 
     if (ec_) {
@@ -660,9 +646,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   } else {
     StringMap* string_map;
     if (config_.append) {
-      // Note we only use append_ when the map size exceeds kMaxBlobLen,
-      // which is greater than 64 so we'll always use a StringMap set not
-      // listpack.
+      // Note we always use StringMap when the object is being streamed.
       if (!EnsureObjEncoding(OBJ_HASH, kEncodingStrMap2)) {
         return;
       }
@@ -682,41 +666,39 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       }
     });
     std::string key;
-    for (const auto& seg : ltrace->arr) {
-      for (size_t i = 0; i < seg.size(); i += increment) {
-        // ToSV may reference an internal buffer, therefore we can use only before the
-        // next call to ToSV. To workaround, copy the key locally.
-        key = ToSV(seg[i].rdb_var);
-        string_view val = ToSV(seg[i + 1].rdb_var);
+    for (size_t i = 0; i < ltrace->arr.size(); i += increment) {
+      // ToSV may reference an internal buffer, therefore we can use only before the
+      // next call to ToSV. To workaround, copy the key locally.
+      key = ToSV(ltrace->arr[i].rdb_var);
+      string_view val = ToSV(ltrace->arr[i + 1].rdb_var);
 
-        if (ec_)
-          return;
+      if (ec_)
+        return;
 
-        uint32_t ttl_sec = UINT32_MAX;
-        if (increment == 3) {
-          int64_t ttl_time = -1;
-          string_view ttl_str = ToSV(seg[i + 2].rdb_var);
-          if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
-            LOG(ERROR) << "Can't parse hashmap TTL for " << key << ", ttl='" << ttl_str
-                       << "', val=" << val;
-            ec_ = RdbError(errc::rdb_file_corrupted);
-            return;
-          }
-
-          if (ttl_time != -1) {
-            if (ttl_time < string_map->time_now()) {
-              continue;
-            }
-
-            ttl_sec = ttl_time - string_map->time_now();
-          }
-        }
-
-        if (!string_map->AddOrSkip(key, val, ttl_sec)) {
-          LOG(ERROR) << "Duplicate hash fields detected for field " << key;
+      uint32_t ttl_sec = UINT32_MAX;
+      if (increment == 3) {
+        int64_t ttl_time = -1;
+        string_view ttl_str = ToSV(ltrace->arr[i + 2].rdb_var);
+        if (!absl::SimpleAtoi(ttl_str, &ttl_time)) {
+          LOG(ERROR) << "Can't parse hashmap TTL for " << key << ", ttl='" << ttl_str
+                     << "', val=" << val;
           ec_ = RdbError(errc::rdb_file_corrupted);
           return;
         }
+
+        if (ttl_time != -1) {
+          if (ttl_time < string_map->time_now()) {
+            continue;
+          }
+
+          ttl_sec = ttl_time - string_map->time_now();
+        }
+      }
+
+      if (!string_map->AddOrSkip(key, val, ttl_sec)) {
+        LOG(ERROR) << "Duplicate hash fields detected for field " << key;
+        ec_ = RdbError(errc::rdb_file_corrupted);
+        return;
       }
     }
     if (!config_.append) {
@@ -810,14 +792,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
-  size_t zsetlen = ltrace->blob_count();
+  size_t zsetlen = ltrace->arr.size();
 
   unsigned encoding = OBJ_ENCODING_SKIPLIST;
   detail::SortedMap* zs;
   if (config_.append) {
-    // Note we only use append_ when the set size exceeds kMaxBlobLen,
-    // which is greater than server.zset_max_listpack_entries so we'll always
-    // use a SortedMap set not listpack.
+    // Note we always use SortedMap when the object is being streamed.
     if (!EnsureObjEncoding(OBJ_ZSET, OBJ_ENCODING_SKIPLIST)) {
       return;
     }
@@ -868,7 +848,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
     return;
 
   void* inner = zs;
-  if (zs->Size() <= server.zset_max_listpack_entries &&
+  if (!config_.streamed && zs->Size() <= server.zset_max_listpack_entries &&
       maxelelen <= server.zset_max_listpack_value && lpSafeToAdd(NULL, totelelen)) {
     encoding = OBJ_ENCODING_LISTPACK;
     inner = zs->ToListPack();
@@ -883,46 +863,68 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
-  CHECK(ltrace->stream_trace);
+  stream* s;
+  if (config_.append) {
+    if (!EnsureObjEncoding(OBJ_STREAM, OBJ_ENCODING_STREAM)) {
+      return;
+    }
 
-  stream* s = streamNew();
+    s = static_cast<stream*>(pv_->RObjPtr());
+  } else {
+    s = streamNew();
+  }
 
-  auto cleanup = absl::Cleanup([&] { freeStream(s); });
+  auto cleanup = absl::Cleanup([&] {
+    if (config_.append) {
+      freeStream(s);
+    }
+  });
 
-  for (const auto& seg : ltrace->arr) {
-    for (size_t i = 0; i < seg.size(); i += 2) {
-      string_view nodekey = ToSV(seg[i].rdb_var);
-      string_view data = ToSV(seg[i + 1].rdb_var);
+  for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
+    string_view nodekey = ToSV(ltrace->arr[i].rdb_var);
+    string_view data = ToSV(ltrace->arr[i + 1].rdb_var);
 
-      uint8_t* lp = (uint8_t*)data.data();
+    uint8_t* lp = (uint8_t*)data.data();
 
-      if (!streamValidateListpackIntegrity(lp, data.size(), 0)) {
-        LOG(ERROR) << "Stream listpack integrity check failed.";
-        ec_ = RdbError(errc::rdb_file_corrupted);
-        return;
-      }
-      unsigned char* first = lpFirst(lp);
-      if (first == NULL) {
-        /* Serialized listpacks should never be empty, since on
-         * deletion we should remove the radix tree key if the
-         * resulting listpack is empty. */
-        LOG(ERROR) << "Empty listpack inside stream";
-        ec_ = RdbError(errc::rdb_file_corrupted);
-        return;
-      }
-      uint8_t* copy_lp = (uint8_t*)zmalloc(data.size());
-      ::memcpy(copy_lp, lp, data.size());
-      /* Insert the key in the radix tree. */
-      int retval =
-          raxTryInsert(s->rax_tree, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
-      if (!retval) {
-        zfree(copy_lp);
-        LOG(ERROR) << "Listpack re-added with existing key";
-        ec_ = RdbError(errc::rdb_file_corrupted);
-        return;
-      }
+    if (!streamValidateListpackIntegrity(lp, data.size(), 0)) {
+      LOG(ERROR) << "Stream listpack integrity check failed.";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
+    }
+    unsigned char* first = lpFirst(lp);
+    if (first == NULL) {
+      /* Serialized listpacks should never be empty, since on
+       * deletion we should remove the radix tree key if the
+       * resulting listpack is empty. */
+      LOG(ERROR) << "Empty listpack inside stream";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
+    }
+    uint8_t* copy_lp = (uint8_t*)zmalloc(data.size());
+    ::memcpy(copy_lp, lp, data.size());
+    /* Insert the key in the radix tree. */
+    int retval =
+        raxTryInsert(s->rax_tree, (unsigned char*)nodekey.data(), nodekey.size(), copy_lp, NULL);
+    if (!retval) {
+      zfree(copy_lp);
+      LOG(ERROR) << "Listpack re-added with existing key";
+      ec_ = RdbError(errc::rdb_file_corrupted);
+      return;
     }
   }
+
+  // We only load the stream metadata and consumer groups (stream_trace) on
+  // the final read (when reading the stream in increments). Therefore if
+  // stream_trace is null add the partial stream, then stream_trace will be
+  // loaded later.
+  if (!ltrace->stream_trace) {
+    if (!config_.append) {
+      pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
+    }
+    std::move(cleanup).Cancel();
+    return;
+  }
+
   s->length = ltrace->stream_trace->stream_len;
   s->last_id.ms = ltrace->stream_trace->ms;
   s->last_id.seq = ltrace->stream_trace->seq;
@@ -993,7 +995,9 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   }
 
   std::move(cleanup).Cancel();
-  pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
+  if (!config_.append) {
+    pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
+  }
 }
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
@@ -1033,16 +1037,14 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
       ec_ = RdbError(errc::rdb_file_corrupted);
       return;
     }
+
     unsigned char* lp = (unsigned char*)blob.data();
     StringSet* set = CompactObj::AllocateMR<StringSet>();
     for (unsigned char* cur = lpFirst(lp); cur != nullptr; cur = lpNext(lp, cur)) {
-      unsigned int slen = 0;
-      long long lval = 0;
-      unsigned char* res = lpGetValue(cur, &slen, &lval);
-      sds sdsele = res ? sdsnewlen(res, slen) : sdsfromlonglong(lval);
-      if (!set->AddSds(sdsele)) {
-        LOG(ERROR) << "Duplicate member " << sdsele;
-        sdsfree(sdsele);
+      unsigned char field_buf[LP_INTBUF_SIZE];
+      string_view elem = container_utils::LpGetView(cur, field_buf);
+      if (!set->Add(elem)) {
+        LOG(ERROR) << "Duplicate member " << elem;
         ec_ = RdbError(errc::duplicate_key);
         break;
       }
@@ -1594,11 +1596,10 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
 
   // Limit each read to kMaxBlobLen elements.
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize(1);
   size_t n = std::min(len, kMaxBlobLen);
-  load_trace->arr[0].resize(n);
+  load_trace->arr.resize(n);
   for (size_t i = 0; i < n; i++) {
-    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec) {
       return make_unexpected(ec);
     }
@@ -1670,11 +1671,10 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
 
   // Limit each read to kMaxBlobLen elements.
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize(1);
   size_t n = std::min<size_t>(len, kMaxBlobLen);
-  load_trace->arr[0].resize(n);
+  load_trace->arr.resize(n);
   for (size_t i = 0; i < n; ++i) {
-    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec)
       return make_unexpected(ec);
   }
@@ -1706,11 +1706,10 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
 
   // Limit each read to kMaxBlobLen elements.
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize(1);
   size_t n = std::min<size_t>(zsetlen, kMaxBlobLen);
-  load_trace->arr[0].resize(n);
+  load_trace->arr.resize(n);
   for (size_t i = 0; i < n; ++i) {
-    error_code ec = ReadStringObj(&load_trace->arr[0][i].rdb_var);
+    error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
     if (ec)
       return make_unexpected(ec);
     if (rdbtype == RDB_TYPE_ZSET_2) {
@@ -1722,7 +1721,7 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
       LOG(ERROR) << "Zset with NAN score detected";
       return Unexpected(errc::rdb_file_corrupted);
     }
-    load_trace->arr[0][i].score = score;
+    load_trace->arr[i].score = score;
   }
 
   // If there are still unread elements, cache the number of remaining
@@ -1762,11 +1761,10 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
     return Unexpected(errc::empty_key);
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.resize(1);
   // Lists pack multiple entries into each list node (8Kb by default),
   // therefore using a smaller segment length than kMaxBlobLen.
   size_t n = std::min<size_t>(len, 512);
-  load_trace->arr[0].resize(n);
+  load_trace->arr.resize(n);
   for (size_t i = 0; i < n; ++i) {
     uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
     if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
@@ -1787,8 +1785,8 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
     if (StrLen(var) == 0) {
       return Unexpected(errc::rdb_file_corrupted);
     }
-    load_trace->arr[0][i].rdb_var = std::move(var);
-    load_trace->arr[0][i].encoding = container;
+    load_trace->arr[i].rdb_var = std::move(var);
+    load_trace->arr[i].encoding = container;
   }
 
   // If there are still unread elements, cache the number of remaining
@@ -1803,16 +1801,21 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
-  uint64_t listpacks;
-  SET_OR_UNEXPECT(LoadLen(nullptr), listpacks);
+  size_t listpacks;
+  if (pending_read_.remaining > 0) {
+    listpacks = pending_read_.remaining;
+  } else {
+    SET_OR_UNEXPECT(LoadLen(NULL), listpacks);
+  }
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
-  load_trace->arr.emplace_back();
-  auto& blob_arr = load_trace->arr.back();
-  blob_arr.resize(listpacks * 2);
+  // Streams pack multiple entries into each stream node (4Kb or 100
+  // entries), therefore using a smaller segment length than kMaxBlobLen.
+  size_t n = std::min<size_t>(listpacks, 512);
+  load_trace->arr.resize(n * 2);
 
   error_code ec;
-  for (size_t i = 0; i < listpacks; ++i) {
+  for (size_t i = 0; i < n; ++i) {
     /* Get the master ID, the one we'll use as key of the radix tree
      * node: the entries inside the listpack itself are delta-encoded
      * relatively to this ID. */
@@ -1834,9 +1837,23 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
       return Unexpected(errc::rdb_file_corrupted);
     }
 
-    blob_arr[2 * i].rdb_var = std::move(stream_id);
-    blob_arr[2 * i + 1].rdb_var = std::move(blob);
+    load_trace->arr[2 * i].rdb_var = std::move(stream_id);
+    load_trace->arr[2 * i + 1].rdb_var = std::move(blob);
   }
+
+  // If there are still unread elements, cache the number of remaining
+  // elements, or clear if the full object has been read.
+  //
+  // We only load the stream metadata and consumer groups in the final read,
+  // so if there are still unread elements return the partial stream.
+  if (listpacks > n) {
+    pending_read_.remaining = listpacks - n;
+    return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
+  } else if (pending_read_.remaining > 0) {
+    pending_read_.remaining = 0;
+  }
+
+  // Load stream metadata.
 
   load_trace->stream_trace.reset(new StreamTrace);
 
@@ -2088,6 +2105,12 @@ RdbLoader::~RdbLoader() {
       break;
     delete item;
   }
+
+  // Decommit local memory.
+  // We create an RdbLoader for each thread, so each one will Decommit for itself after
+  // full sync ends (since we explicitly reset the RdbLoader).
+  auto* tlocal = ServerState::tlocal();
+  tlocal->DecommitMemory(ServerState::kAllMemory);
 }
 
 error_code RdbLoader::Load(io::Source* src) {
@@ -2281,6 +2304,16 @@ error_code RdbLoader::Load(io::Source* src) {
     if (type == RDB_OPCODE_JOURNAL_BLOB) {
       FlushAllShards();  // Always flush before applying incremental on top
       RETURN_ON_ERR(HandleJournalBlob(service_));
+      continue;
+    }
+
+    if (type == RDB_OPCODE_SLOT_INFO) {
+      [[maybe_unused]] uint64_t slot_id;
+      SET_OR_RETURN(LoadLen(nullptr), slot_id);
+      [[maybe_unused]] uint64_t slot_size;
+      SET_OR_RETURN(LoadLen(nullptr), slot_size);
+      [[maybe_unused]] uint64_t expires_slot_size;
+      SET_OR_RETURN(LoadLen(nullptr), expires_slot_size);
       continue;
     }
 
@@ -2723,6 +2756,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   std::string key;
   SET_OR_RETURN(ReadKey(), key);
 
+  bool streamed = false;
   do {
     // If there is a cached Item in the free pool, take it, otherwise allocate
     // a new Item (LoadItemsBuffer returns free items).
@@ -2749,11 +2783,13 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
     if (pending_read_.remaining > 0) {
       item->key = key;
+      streamed = true;
     } else {
       // Avoid copying the key if this is the last read of the object.
       item->key = std::move(key);
     }
 
+    item->load_config.streamed = streamed;
     item->load_config.reserve = pending_read_.reserve;
     // Clear 'reserve' as we must only set when the object is first
     // initialized.

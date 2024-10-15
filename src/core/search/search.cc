@@ -13,6 +13,7 @@
 #include <type_traits>
 #include <variant>
 
+#include "absl/container/flat_hash_set.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "core/search/ast_expr.h"
@@ -118,6 +119,7 @@ struct ProfileBuilder {
     Overloaded node_info{
         [](monostate) -> string { return ""s; },
         [](const AstTermNode& n) { return absl::StrCat("Term{", n.term, "}"); },
+        [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.prefix, "}"); },
         [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
         [](const AstLogicalNode& n) {
           auto op = n.op == AstLogicalNode::AND ? "and" : "or";
@@ -267,6 +269,28 @@ struct BasicSearch {
     auto mapping = [&node](TextIndex* index) { return index->Matching(node.term); };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
+  }
+
+  IndexResult Search(const AstPrefixNode& node, string_view active_field) {
+    vector<TextIndex*> indices;
+    if (!active_field.empty()) {
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        indices = {index};
+      else
+        return IndexResult{};
+    } else {
+      indices = indices_->GetAllTextIndices();
+    }
+
+    auto mapping = [&node, this](TextIndex* index) {
+      IndexResult result{};
+      index->MatchingPrefix(node.prefix, [&result, this](const auto* c) {
+        Merge(IndexResult{c}, &result, LogicOp::OR);
+      });
+      return result;
+    };
+
+    return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
   }
 
   // [range]: access field's numeric index
@@ -454,8 +478,18 @@ string_view Schema::LookupAlias(string_view alias) const {
   return alias;
 }
 
-FieldIndices::FieldIndices(Schema schema, PMR_NS::memory_resource* mr)
-    : schema_{std::move(schema)}, all_ids_{}, indices_{} {
+IndicesOptions::IndicesOptions() {
+  static absl::flat_hash_set<std::string> kDefaultStopwords{
+      "a",    "is",    "the",  "an",    "and",   "are",  "as",   "at", "be",  "but",  "by",
+      "for",  "if",    "in",   "into",  "it",    "no",   "not",  "of", "on",  "or",   "such",
+      "that", "their", "then", "there", "these", "they", "this", "to", "was", "will", "with"};
+
+  stopwords = kDefaultStopwords;
+}
+
+FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
+                           PMR_NS::memory_resource* mr)
+    : schema_{schema}, options_{options} {
   CreateIndices(mr);
   CreateSortIndices(mr);
 }
@@ -467,7 +501,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
 
     switch (field_info.type) {
       case SchemaField::TEXT:
-        indices_[field_ident] = make_unique<TextIndex>(mr);
+        indices_[field_ident] = make_unique<TextIndex>(mr, &options_.stopwords);
         break;
       case SchemaField::NUMERIC:
         indices_[field_ident] = make_unique<NumericIndex>(mr);
@@ -546,7 +580,7 @@ BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
 
 std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
   vector<TextIndex*> out;
-  for (auto& [field_name, field_info] : schema_.fields) {
+  for (const auto& [field_name, field_info] : schema_.fields) {
     if (field_info.type != SchemaField::TEXT || (field_info.flags & SchemaField::NOINDEX) > 0)
       continue;
     auto* index = dynamic_cast<TextIndex*>(GetIndex(field_name));

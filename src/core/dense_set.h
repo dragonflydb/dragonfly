@@ -208,9 +208,14 @@ class DenseSet {
 
  public:
   using MemoryResource = PMR_NS::memory_resource;
+  static constexpr uint32_t kMaxBatchLen = 32;
 
   explicit DenseSet(MemoryResource* mr = PMR_NS::get_default_resource());
   virtual ~DenseSet();
+
+  void Clear() {
+    ClearInternal(0, entries_.size());
+  }
 
   // Returns the number of elements in the map. Note that it might be that some of these elements
   // have expired and can't be accessed.
@@ -300,7 +305,7 @@ class DenseSet {
   // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
   // in the set may point to. This function only frees the allocated DenseLinkKeys created by
   // DenseSet. All data allocated by a derived class should be freed before calling this
-  void ClearInternal();
+  uint32_t ClearInternal(uint32_t start, uint32_t count);
 
   void IncreaseMallocUsed(size_t delta) {
     obj_malloc_used_ += delta;
@@ -310,19 +315,14 @@ class DenseSet {
     obj_malloc_used_ -= delta;
   }
 
-  // Returns previous if the equivalent object already exists,
-  // Returns nullptr if obj was added.
-  void* AddOrFindObj(void* obj, bool has_ttl) {
-    DensePtr* ptr = AddOrFindDense(obj, has_ttl);
-    return ptr ? ptr->GetObject() : nullptr;
-  }
-
   // Returns the previous object if it has been replaced.
   // nullptr, if obj was added.
   void* AddOrReplaceObj(void* obj, bool has_ttl);
 
   // Assumes that the object does not exist in the set.
   void AddUnique(void* obj, bool has_ttl, uint64_t hashcode);
+
+  void Prefetch(uint64_t hash);
 
  private:
   DenseSet(const DenseSet&) = delete;
@@ -331,13 +331,15 @@ class DenseSet {
   bool Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const;
 
   struct CloneItem {
-    const DenseLinkKey* link = nullptr;
+    DensePtr ptr;
     void* obj = nullptr;
     bool has_ttl = false;
-    bool fetch_tail = false;
   };
 
   void CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const;
+
+  using ClearItem = CloneItem;
+  void ClearBatch(unsigned len, ClearItem* items);
 
   MemoryResource* mr() {
     return entries_.get_allocator().resource();
@@ -366,10 +368,6 @@ class DenseSet {
 
   void* PopDataFront(ChainVectorIterator);
   DensePtr PopPtrFront(ChainVectorIterator);
-
-  // Returns DensePtr if the object with such key already exists,
-  // Returns null if obj was added.
-  DensePtr* AddOrFindDense(void* obj, bool has_ttl);
 
   // ============ Pseudo Linked List in DenseSet end ==================
 

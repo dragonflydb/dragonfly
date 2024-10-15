@@ -120,6 +120,7 @@ struct DocIndex {
   bool Matches(std::string_view key, unsigned obj_code) const;
 
   search::Schema schema;
+  search::IndicesOptions options{};
   std::string prefix{};
   DataType type{HASH};
 };
@@ -156,7 +157,7 @@ class ShardDocIndex {
 
  public:
   // Index must be rebuilt at least once after intialization
-  ShardDocIndex(std::shared_ptr<DocIndex> index);
+  ShardDocIndex(std::shared_ptr<const DocIndex> index);
 
   // Perform search on all indexed documents and return results.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
@@ -182,9 +183,8 @@ class ShardDocIndex {
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
  private:
-  bool was_built_ = false;
   std::shared_ptr<const DocIndex> base_;
-  search::FieldIndices indices_;
+  std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
 };
 
@@ -198,7 +198,8 @@ class ShardDocIndices {
 
   // Init index: create shard local state for given index with given name.
   // Build if instance is in active state.
-  void InitIndex(const OpArgs& op_args, std::string_view name, std::shared_ptr<DocIndex> index);
+  void InitIndex(const OpArgs& op_args, std::string_view name,
+                 std::shared_ptr<const DocIndex> index);
 
   // Drop index, return true if it existed and was dropped
   bool DropIndex(std::string_view name);

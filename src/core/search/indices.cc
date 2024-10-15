@@ -39,10 +39,13 @@ string ToLower(string_view word) {
 }
 
 // Get all words from text as matched by the ICU library
-absl::flat_hash_set<std::string> TokenizeWords(std::string_view text) {
+absl::flat_hash_set<std::string> TokenizeWords(std::string_view text,
+                                               const TextIndex::StopWords& stopwords) {
   absl::flat_hash_set<std::string> words;
-  for (std::string_view word : una::views::word_only::utf8(text))
-    words.insert(una::cases::to_lowercase_utf8(word));
+  for (std::string_view word : una::views::word_only::utf8(text)) {
+    if (std::string word_lc = una::cases::to_lowercase_utf8(word); !stopwords.contains(word_lc))
+      words.insert(std::move(word_lc));
+  }
   return words;
 }
 
@@ -121,6 +124,15 @@ const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(strin
 }
 
 template <typename C>
+void BaseStringIndex<C>::MatchingPrefix(std::string_view prefix,
+                                        absl::FunctionRef<void(const Container*)> cb) const {
+  for (auto it = entries_.lower_bound(prefix);
+       it != entries_.end() && (*it).first.rfind(prefix, 0) == 0; ++it) {
+    cb(&(*it).second);
+  }
+}
+
+template <typename C>
 typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_view word) {
   auto* mr = entries_.get_allocator().resource();
   return &entries_.try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */).first->second;
@@ -166,7 +178,7 @@ template struct BaseStringIndex<CompressedSortedSet>;
 template struct BaseStringIndex<SortedVector>;
 
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
-  return TokenizeWords(value);
+  return TokenizeWords(value, *stopwords_);
 }
 
 absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) const {

@@ -62,7 +62,6 @@ extern "C" {
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/aws/aws.h"
-#include "util/fibers/fiber_file.h"
 
 using namespace std;
 
@@ -916,7 +915,15 @@ void ServerFamily::LoadFromSnapshot() {
   if (load_path_result) {
     const std::string load_path = *load_path_result;
     if (!load_path.empty()) {
-      load_result_ = Load(load_path, LoadExistingKeys::kFail);
+      auto future = Load(load_path, LoadExistingKeys::kFail);
+      load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
+        // Wait for load to finish in a dedicated fiber.
+        // Failure to load on start causes Dragonfly to exit with an error code.
+        if (!future.has_value() || future->Get()) {
+          // Error was already printed to log at this point.
+          exit(1);
+        }
+      });
     }
   } else {
     if (std::error_code(load_path_result.error()) == std::errc::no_such_file_or_directory) {
@@ -938,9 +945,7 @@ void ServerFamily::JoinSnapshotSchedule() {
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
-  if (load_result_) {
-    std::exchange(load_result_, std::nullopt)->Get();
-  }
+  load_fiber_.JoinIfNeeded();
 
   JoinSnapshotSchedule();
 
@@ -1121,7 +1126,9 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
     if (aggregated_result->first_error) {
       LOG(ERROR) << "Rdb load failed. " << (*aggregated_result->first_error).message();
-      exit(1);
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      future.Resolve(*aggregated_result->first_error);
+      return;
     }
 
     RdbLoader::PerformPostLoad(&service_);
@@ -1646,6 +1653,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
+  VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   {
     util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
@@ -2432,7 +2440,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);
     append("tx_inline_runs_total", m.coordinator_stats.tx_inline_runs);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
-
+    append("tx_batch_scheduled_items_total", m.shard_stats.tx_batch_scheduled_items_total);
+    append("tx_batch_schedule_calls_total", m.shard_stats.tx_batch_schedule_calls_total);
     append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
 

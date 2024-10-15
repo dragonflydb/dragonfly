@@ -21,6 +21,19 @@ def test_getbit_wrong_type(r: redis.Redis):
         r.getbit("foo", 1)
 
 
+@pytest.mark.min_server("7")
+def test_bitcount_error(r: redis.Redis):
+    with pytest.raises(redis.ResponseError) as e:
+        raw_command(r, b"BITCOUNT", b"", b"", b"")
+    assert str(e.value) == "value is not an integer or out of range"
+
+
+@pytest.mark.min_server("7")
+def test_bitcount_does_not_exist(r: redis.Redis):
+    res = raw_command(r, b"BITCOUNT", b"", 0, 0)
+    assert res == 0
+
+
 def test_multiple_bits_set(r: redis.Redis):
     r.setbit("foo", 1, 1)
     r.setbit("foo", 3, 1)
@@ -373,10 +386,7 @@ def test_bitfield_incr_sat(r: redis.Redis):
     r.set(key, b"\xff\xf0\x00")
     assert r.bitfield(key, "SAT").incrby("u8", 4, 0x123).incrby(
         "u8", 8, 0x55
-    ).execute() == [
-        0xFF,
-        0xFF,
-    ]
+    ).execute() == [0xFF, 0xFF]
     assert r.get(key) == b"\xff\xff\x00"
     assert r.bitfield(key, "SAT").incrby("u12", 0, -1).incrby("u1", 1, 2).execute() == [
         0xFFE,
@@ -406,17 +416,11 @@ def test_bitfield_incr_fail(r: redis.Redis):
     r.set(key, b"\xff\xf0\x00")
     assert r.bitfield(key, "FAIL").incrby("u8", 4, 0x123).incrby(
         "u8", 8, 0x55
-    ).execute() == [
-        None,
-        None,
-    ]
+    ).execute() == [None, None]
     assert r.get(key) == b"\xff\xf0\x00"
     assert r.bitfield(key, "FAIL").incrby("u12", 0, -1).incrby(
         "u1", 1, 2
-    ).execute() == [
-        0xFFE,
-        None,
-    ]
+    ).execute() == [0xFFE, None]
     assert r.get(key) == b"\xff\xe0\x00"
     assert r.bitfield(key, "FAIL").incrby("i4", 0, 8).incrby("i4", 4, 7).execute() == [
         7,

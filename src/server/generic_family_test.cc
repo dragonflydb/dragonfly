@@ -795,6 +795,38 @@ TEST_F(GenericFamilyTest, JsonType) {
   ASSERT_THAT(vec, ElementsAre("json"));
 }
 
+TEST_F(GenericFamilyTest, FieldExpireSet) {
+  Run({"SADD", "key", "a", "b", "c"});
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b", "c"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"SMEMBERS", "key"}), RespArray(ElementsAre()));
+}
+
+TEST_F(GenericFamilyTest, FieldExpireHset) {
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(CheckedInt({"HSET", "key", absl::StrCat("k", i), "v"}), 1);
+  }
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "k0", "k1", "k2"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
+  AdvanceTime(10'000);
+  EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(ElementsAre()));
+}
+
+TEST_F(GenericFamilyTest, FieldExpireNoSuchField) {
+  EXPECT_EQ(CheckedInt({"SADD", "key", "a"}), 1);
+  EXPECT_EQ(CheckedInt({"HSET", "key2", "k0", "v0"}), 1);
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(-2))));
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key2", "10", "k0", "b"}),
+              RespArray(ElementsAre(IntArg(1), IntArg(-2))));
+}
+
+TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}),
+              RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+}
+
 TEST_F(GenericFamilyTest, ExpireTime) {
   EXPECT_EQ(-2, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(-2, CheckedInt({"PEXPIRETIME", "foo"}));

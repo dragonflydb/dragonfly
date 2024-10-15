@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <functional>
 #include <memory>
@@ -61,11 +62,20 @@ struct Schema {
   std::string_view LookupAlias(std::string_view alias) const;
 };
 
+struct IndicesOptions {
+  IndicesOptions();
+  explicit IndicesOptions(absl::flat_hash_set<std::string> stopwords)
+      : stopwords{std::move(stopwords)} {
+  }
+
+  absl::flat_hash_set<std::string> stopwords;
+};
+
 // Collection of indices for all fields in schema
 class FieldIndices {
  public:
-  // Create indices based on schema
-  FieldIndices(Schema schema, PMR_NS::memory_resource* mr);
+  // Create indices based on schema and options. Both must outlive the indices
+  FieldIndices(const Schema& schema, const IndicesOptions& options, PMR_NS::memory_resource* mr);
 
   void Add(DocId doc, DocumentAccessor* access);
   void Remove(DocId doc, DocumentAccessor* access);
@@ -84,8 +94,8 @@ class FieldIndices {
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices(PMR_NS::memory_resource* mr);
 
- private:
-  Schema schema_;
+  const Schema& schema_;
+  const IndicesOptions& options_;
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string, std::unique_ptr<BaseSortIndex>> sort_indices_;

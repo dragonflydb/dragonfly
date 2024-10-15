@@ -485,6 +485,14 @@ void SearchFamily::FtCreate(CmdArgList args, ConnectionContext* cntx) {
       continue;
     }
 
+    // STOWORDS count [words...]
+    if (parser.Check("STOPWORDS")) {
+      index.options.stopwords.clear();
+      for (size_t num = parser.Next<size_t>(); num > 0; num--)
+        index.options.stopwords.emplace(parser.Next());
+      continue;
+    }
+
     // SCHEMA
     if (parser.Check("SCHEMA")) {
       auto schema = ParseSchemaOrReply(index.type, parser.Tail(), cntx);

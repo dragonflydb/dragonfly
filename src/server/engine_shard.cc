@@ -210,15 +210,20 @@ ShardId Shard(string_view v, ShardId shard_num) {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 48);
+  static_assert(sizeof(Stats) == 64);
 
-  defrag_attempt_total += o.defrag_attempt_total;
-  defrag_realloc_total += o.defrag_realloc_total;
-  defrag_task_invocation_total += o.defrag_task_invocation_total;
-  poll_execution_total += o.poll_execution_total;
-  tx_ooo_total += o.tx_ooo_total;
-  tx_optimistic_total += o.tx_optimistic_total;
+#define ADD(x) x += o.x
 
+  ADD(defrag_attempt_total);
+  ADD(defrag_realloc_total);
+  ADD(defrag_task_invocation_total);
+  ADD(poll_execution_total);
+  ADD(tx_ooo_total);
+  ADD(tx_optimistic_total);
+  ADD(tx_batch_schedule_calls_total);
+  ADD(tx_batch_scheduled_items_total);
+
+#undef ADD
   return *this;
 }
 

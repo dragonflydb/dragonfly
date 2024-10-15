@@ -93,8 +93,24 @@ struct StringSetWrapper {
 
   unsigned Add(const NewEntries& entries, uint32_t ttl_sec) const {
     unsigned res = 0;
-    for (string_view member : EntriesRange(entries))
-      res += ss->Add(member, ttl_sec);
+    string_view members[StringSet::kMaxBatchLen];
+    size_t entries_len = std::visit([](const auto& e) { return e.size(); }, entries);
+    unsigned len = 0;
+    if (ss->BucketCount() < entries_len) {
+      ss->Reserve(entries_len);
+    }
+    for (string_view member : EntriesRange(entries)) {
+      members[len++] = member;
+      if (len == StringSet::kMaxBatchLen) {
+        res += ss->AddMany(absl::MakeSpan(members, StringSet::kMaxBatchLen), ttl_sec);
+        len = 0;
+      }
+    }
+
+    if (len) {
+      res += ss->AddMany(absl::MakeSpan(members, len), ttl_sec);
+    }
+
     return res;
   }
 
@@ -1527,6 +1543,24 @@ int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue
 
   SetType st{pv.RObjPtr(), pv.Encoding()};
   return GetExpiry(db_context, st, field);
+}
+
+vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
+                                            CmdArgList values, PrimeValue* pv) {
+  DCHECK_EQ(OBJ_SET, pv->ObjType());
+
+  if (pv->Encoding() == kEncodingIntSet) {
+    // a valid result can never be a intset, since it doesnt keep ttl
+    intset* is = (intset*)pv->RObjPtr();
+    StringSet* ss = SetFamily::ConvertToStrSet(is, intsetLen(is));
+    if (!ss) {
+      std::vector<long> out(values.size(), -2);
+      return out;
+    }
+    pv->InitRobj(OBJ_SET, kEncodingStrMap2, ss);
+  }
+
+  return ExpireElements((StringSet*)pv->RObjPtr(), values, ttl_sec);
 }
 
 }  // namespace dfly

@@ -179,27 +179,43 @@ void* DenseSet::PopDataFront(DenseSet::ChainVectorIterator it) {
   return ret;
 }
 
-void DenseSet::ClearInternal() {
-  for (auto it = entries_.begin(); it != entries_.end(); ++it) {
-    while (!it->IsEmpty()) {
-      bool has_ttl = it->HasTtl();
-      bool is_displ = it->IsDisplaced();
-      void* obj = PopDataFront(it);
-      int32_t delta = int32_t(BucketId(obj, 0)) - int32_t(it - entries_.begin());
-      if (is_displ) {
-        DCHECK(delta < 2 || delta > -2);
-      } else {
-        DCHECK_EQ(delta, 0);
-      }
-      ObjDelete(obj, has_ttl);
+uint32_t DenseSet::ClearInternal(uint32_t start, uint32_t count) {
+  constexpr unsigned kArrLen = 32;
+  ClearItem arr[kArrLen];
+  unsigned len = 0;
+
+  size_t end = min<size_t>(entries_.size(), start + count);
+  for (size_t i = start; i < end; ++i) {
+    DensePtr ptr = entries_[i];
+    if (ptr.IsEmpty())
+      continue;
+
+    auto& dest = arr[len++];
+    dest.has_ttl = ptr.HasTtl();
+
+    PREFETCH_READ(ptr.Raw());
+    if (ptr.IsObject()) {
+      dest.obj = ptr.Raw();
+      dest.ptr.Reset();
+    } else {
+      dest.ptr = ptr;
+      dest.obj = nullptr;
+    }
+    if (len == kArrLen) {
+      ClearBatch(kArrLen, arr);
+      len = 0;
     }
   }
 
-  entries_.clear();
-  num_used_buckets_ = 0;
-  num_links_ = 0;
-  size_ = 0;
-  expiration_used_ = false;
+  ClearBatch(len, arr);
+
+  if (size_ == 0) {
+    entries_.clear();
+    num_used_buckets_ = 0;
+    num_links_ = 0;
+    expiration_used_ = false;
+  }
+  return end;
 }
 
 bool DenseSet::Equal(DensePtr dptr, const void* ptr, uint32_t cookie) const {
@@ -214,6 +230,14 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
   // We handle a batch of items to minimize data dependencies when accessing memory for a single
   // item. We prefetch the memory for entire batch before actually reading data from any of the
   // elements.
+
+  auto clone = [this](void* obj, bool has_ttl, DenseSet* other) {
+    // The majority of the CPU is spent in this block.
+    void* new_obj = other->ObjectClone(obj, has_ttl, false);
+    uint64_t hash = this->Hash(obj, 0);
+    other->AddUnique(new_obj, has_ttl, hash);
+  };
+
   while (len) {
     unsigned dest_id = 0;
     // we walk "len" linked lists in parallel, and prefetch their next, obj pointers
@@ -221,34 +245,23 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
     for (unsigned i = 0; i < len; ++i) {
       auto& src = items[i];
       if (src.obj) {
-        // The majority of the CPU is spent in this block.
-        void* new_obj = other->ObjectClone(src.obj, src.has_ttl, false);
-        uint64_t hash = Hash(src.obj, 0);
-        other->AddUnique(new_obj, src.has_ttl, hash);
+        clone(src.obj, src.has_ttl, other);
         src.obj = nullptr;
       }
 
-      const DenseLinkKey* link = src.link;
-      if (link) {
-        src.link = nullptr;
+      if (src.ptr.IsEmpty()) {
+        continue;
+      }
+
+      if (src.ptr.IsObject()) {
+        clone(src.ptr.Raw(), src.has_ttl, other);
+      } else {
         auto& dest = items[dest_id++];
-        DCHECK(!link->next.IsEmpty());
-        if (src.fetch_tail) {
-          // switch to the final state.
-          DCHECK(link->next.IsObject());
-          dest.obj = link->next.Raw();
-          src.fetch_tail = false;
-        } else {
-          dest.obj = link->Raw();
-          if (link->next.IsObject()) {
-            // next state - pre-terminal, fetch the final object.
-            dest.fetch_tail = true;
-            dest.link = link;
-          } else {
-            dest.link = link->next.AsLink();
-            PREFETCH_READ(dest.link);
-          }
-        }
+        DenseLinkKey* link = src.ptr.AsLink();
+        dest.obj = link->Raw();
+        dest.has_ttl = link->HasTtl();
+        dest.ptr = link->next;
+        PREFETCH_READ(dest.ptr.Raw());
         PREFETCH_READ(dest.obj);
       }
     }
@@ -258,6 +271,41 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
   }
 }
 
+void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
+  while (len) {
+    unsigned dest_id = 0;
+    // we walk "len" linked lists in parallel, and prefetch their next, obj pointers
+    // before actually processing them.
+    for (unsigned i = 0; i < len; ++i) {
+      auto& src = items[i];
+      if (src.obj) {
+        ObjDelete(src.obj, src.has_ttl);
+        --size_;
+        src.obj = nullptr;
+      }
+
+      if (src.ptr.IsEmpty())
+        continue;
+
+      if (src.ptr.IsObject()) {
+        ObjDelete(src.ptr.Raw(), src.has_ttl);
+        --size_;
+      } else {
+        auto& dest = items[dest_id++];
+        DenseLinkKey* link = src.ptr.AsLink();
+        dest.obj = link->Raw();
+        dest.has_ttl = link->HasTtl();
+        dest.ptr = link->next;
+        PREFETCH_READ(dest.ptr.Raw());
+        PREFETCH_READ(dest.obj);
+        FreeLink(link);
+      }
+    }
+
+    // update the length of the batch for the next iteration.
+    len = dest_id;
+  }
+}
 bool DenseSet::NoItemBelongsBucket(uint32_t bid) const {
   auto& entries = const_cast<DenseSet*>(this)->entries_;
   DensePtr* curr = &entries[bid];
@@ -334,26 +382,27 @@ void DenseSet::Fill(DenseSet* other) const {
   unsigned len = 0;
 
   for (auto it = entries_.begin(); it != entries_.end(); ++it) {
-    const DensePtr* ptr = &(*it);
+    DensePtr ptr = *it;
 
-    if (!ptr->IsEmpty()) {
-      arr[len].has_ttl = ptr->HasTtl();
+    if (ptr.IsEmpty())
+      continue;
 
-      if (ptr->IsObject()) {
-        arr[len].link = nullptr;
-        arr[len].obj = ptr->Raw();
-        PREFETCH_READ(arr[len].obj);
-      } else {
-        arr[len].link = ptr->AsLink();
-        arr[len].obj = nullptr;
-        PREFETCH_READ(arr[len].link);
-      }
+    auto& item = arr[len++];
+    item.has_ttl = ptr.HasTtl();
 
-      ++len;
-      if (len == kArrLen) {
-        CloneBatch(kArrLen, arr, other);
-        len = 0;
-      }
+    if (ptr.IsObject()) {
+      item.ptr.Reset();
+      item.obj = ptr.Raw();
+      PREFETCH_READ(item.obj);
+    } else {
+      item.ptr = ptr;
+      item.obj = nullptr;
+      PREFETCH_READ(item.ptr.Raw());
+    }
+
+    if (len == kArrLen) {
+      CloneBatch(kArrLen, arr, other);
+      len = 0;
     }
   }
   CloneBatch(len, arr, other);
@@ -433,32 +482,6 @@ void DenseSet::Grow(size_t prev_size) {
   }
 }
 
-auto DenseSet::AddOrFindDense(void* ptr, bool has_ttl) -> DensePtr* {
-  uint64_t hc = Hash(ptr, 0);
-
-  if (entries_.empty()) {
-    capacity_log_ = kMinSizeShift;
-    entries_.resize(kMinSize);
-    uint32_t bucket_id = BucketId(hc);
-    auto e = entries_.begin() + bucket_id;
-    obj_malloc_used_ += PushFront(e, ptr, has_ttl);
-    ++size_;
-    ++num_used_buckets_;
-
-    return nullptr;
-  }
-
-  // if the value is already in the set exit early
-  uint32_t bucket_id = BucketId(hc);
-  DensePtr* dptr = Find(ptr, bucket_id, 0).second;
-  if (dptr != nullptr) {
-    return dptr;
-  }
-
-  AddUnique(ptr, has_ttl, hc);
-  return nullptr;
-}
-
 // Assumes that the object does not exist in the set.
 void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   if (entries_.empty()) {
@@ -531,6 +554,11 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   ++size_;
 }
 
+void DenseSet::Prefetch(uint64_t hash) {
+  uint32_t bid = BucketId(hash);
+  PREFETCH_READ(&entries_[bid]);
+}
+
 auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
     -> tuple<size_t, DensePtr*, DensePtr*> {
   DCHECK_LT(bid, entries_.size());
@@ -545,19 +573,23 @@ auto DenseSet::Find2(const void* ptr, uint32_t bid, uint32_t cookie)
   // first look for displaced nodes since this is quicker than iterating a potential long chain
   if (bid > 0) {
     curr = &entries_[bid - 1];
-    ExpireIfNeeded(nullptr, curr);
+    if (curr->IsDisplaced() && curr->GetDisplacedDirection() == -1) {
+      ExpireIfNeeded(nullptr, curr);
 
-    if (Equal(*curr, ptr, cookie)) {
-      return {bid - 1, nullptr, curr};
+      if (Equal(*curr, ptr, cookie)) {
+        return {bid - 1, nullptr, curr};
+      }
     }
   }
 
   if (bid + 1 < entries_.size()) {
     curr = &entries_[bid + 1];
-    ExpireIfNeeded(nullptr, curr);
+    if (curr->IsDisplaced() && curr->GetDisplacedDirection() == 1) {
+      ExpireIfNeeded(nullptr, curr);
 
-    if (Equal(*curr, ptr, cookie)) {
-      return {bid + 1, nullptr, curr};
+      if (Equal(*curr, ptr, cookie)) {
+        return {bid + 1, nullptr, curr};
+      }
     }
   }
 
@@ -641,22 +673,25 @@ void* DenseSet::PopInternal() {
 }
 
 void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
-  DensePtr* ptr = AddOrFindDense(obj, has_ttl);
-  if (!ptr)
-    return nullptr;
+  uint64_t hc = Hash(obj, 0);
+  DensePtr* dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
 
-  if (ptr->IsLink()) {
-    ptr = ptr->AsLink();
+  if (dptr) {  // replace
+    if (dptr->IsLink())
+      dptr = dptr->AsLink();
+
+    void* res = dptr->Raw();
+    obj_malloc_used_ -= ObjectAllocSize(res);
+    obj_malloc_used_ += ObjectAllocSize(obj);
+
+    dptr->SetObject(obj);
+    dptr->SetTtl(has_ttl);
+
+    return res;
   }
 
-  void* res = ptr->Raw();
-  obj_malloc_used_ -= ObjectAllocSize(res);
-  obj_malloc_used_ += ObjectAllocSize(obj);
-
-  ptr->SetObject(obj);
-  ptr->SetTtl(has_ttl);
-
-  return res;
+  AddUnique(obj, has_ttl, hc);
+  return nullptr;
 }
 
 /**
