@@ -530,6 +530,8 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, ConnectionContext* cntx) 
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
     return cntx->SendError("Invalid cluster configuration.");
+  } else if (tl_cluster_config && tl_cluster_config->GetConfig() == new_config->GetConfig()) {
+    return cntx->SendOk();
   }
 
   PreparedToRemoveOutgoingMigrations outgoing_migrations;  // should be removed without mutex lock
