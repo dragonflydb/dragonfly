@@ -635,18 +635,24 @@ error_code Replica::ConsumeRedisStream() {
     }
 
     if (!LastResponseArgs().empty()) {
-      VLOG(2) << "Got command " << absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()))
-              << "\n consumed: " << response->total_read;
+      string_view cmd = absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()));
 
-      if (LastResponseArgs()[0].GetBuf()[0] == '\r') {
-        for (const auto& arg : LastResponseArgs()) {
-          LOG(INFO) << absl::CHexEscape(ToSV(arg.GetBuf()));
+      // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
+      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply
+      // ignore MULTI/EXEC and execute their inner commands individually.
+      if (!absl::EqualsIgnoreCase(cmd, "MULTI") && !absl::EqualsIgnoreCase(cmd, "EXEC")) {
+        VLOG(2) << "Got command " << cmd << "\n consumed: " << response->total_read;
+
+        if (LastResponseArgs()[0].GetBuf()[0] == '\r') {
+          for (const auto& arg : LastResponseArgs()) {
+            LOG(INFO) << absl::CHexEscape(ToSV(arg.GetBuf()));
+          }
         }
-      }
 
-      facade::RespExpr::VecToArgList(LastResponseArgs(), &args_vector);
-      CmdArgList arg_list{args_vector.data(), args_vector.size()};
-      service_.DispatchCommand(arg_list, &conn_context);
+        facade::RespExpr::VecToArgList(LastResponseArgs(), &args_vector);
+        CmdArgList arg_list{args_vector.data(), args_vector.size()};
+        service_.DispatchCommand(arg_list, &conn_context);
+      }
     }
 
     io_buf.ConsumeInput(response->left_in_buffer);
