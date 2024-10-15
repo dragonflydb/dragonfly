@@ -5,6 +5,9 @@ on:
     - cron: "0 9 * * *" # run at 6 AM UTC
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   benchmark:
     strategy:
