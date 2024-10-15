@@ -1107,7 +1107,7 @@ async def test_flushall_in_full_sync(df_factory):
     c_replica = replica.client()
 
     # Fill master with test data
-    seeder = SeederV2(key_target=30_000)
+    seeder = SeederV2(key_target=100_000)
     await seeder.run(c_master, target_deviation=0.1)
 
     # Start replication and wait for full sync
