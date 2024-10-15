@@ -23,7 +23,7 @@ jobs:
         run: |
           python -m venv venv
           source venv/bin/activate
-          python -m install pre-commit
+          python -m pip install pre-commit
           lsblk -l
           echo "sda rotational = $(cat /sys/block/sda/queue/rotational)"
           echo "sdb rotational = $(cat /sys/block/sdb/queue/rotational)"
