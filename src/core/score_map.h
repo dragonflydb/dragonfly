@@ -122,10 +122,6 @@ class ScoreMap : public DenseSet {
   }
 
  private:
-  // Reallocate key and/or value if their pages are underutilized.
-  // Returns new pointer (stays same if key utilization is enough) and if reallocation happened.
-  std::pair<sds, bool> ReallocIfNeeded(void* obj, float ratio);
-
   uint64_t Hash(const void* obj, uint32_t cookie) const final;
   bool ObjEqual(const void* left, const void* right, uint32_t right_cookie) const final;
   size_t ObjectAllocSize(const void* obj) const final;
