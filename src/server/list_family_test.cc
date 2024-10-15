@@ -420,6 +420,35 @@ TEST_F(ListFamilyTest, LPop) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+// Add LMPOP
+TEST_F(ListFamilyTest, LMPOP) {
+  // Set up initial conditions for the test
+  Run({"rpush", "mylist", "a", "b", "c", "d"});
+
+  // Test LMPOP for popping two elements from the left
+  auto resp = Run({"LMPOP", "mylist", "2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("d", "c")));  // Verify popped elements
+  // Check the remaining elements in the list
+  resp = Run({"LRANGE", "mylist", "0", "-1"});
+  EXPECT_THAT(resp, ElementsAre("b", "a"));  // Remaining elements should be "b" and "a"
+
+  // Test LMPOP when count exceeds the list length
+  resp = Run({"LMPOP", "mylist", "5"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("b", "a")));  // Only two elements should be returned
+  // Check that the list is now empty
+  resp = Run({"LLEN", "mylist"});
+  EXPECT_EQ(resp, "0");  // Length should be zero
+
+  // Test LMPOP on an empty list
+  resp = Run({"LMPOP", "mylist", "2"});
+  EXPECT_THAT(resp, RespArray(ElementsAre()));  // Should return empty array for empty list
+
+  // Test LMPOP with an invalid count
+  resp = Run({"LMPOP", "mylist", "-1"});
+  EXPECT_THAT(resp, ErrArg("count must be a positive integer"));  // Check for error on negative count
+}
+
+
 TEST_F(ListFamilyTest, LPos) {
   auto resp = Run({"rpush", kKey1, "1", "a", "b", "1", "1", "a", "1"});
   ASSERT_THAT(resp, IntArg(7));

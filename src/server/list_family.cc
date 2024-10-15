@@ -151,7 +151,8 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
 
-  std::string value = ListPop(dir, ql);
+  // Replicate single pop behavior with LMPOP using COUNT 1
+  std::string value = ListPop(dir, ql);  // Assuming this handles the actual list pop logic
   it_res->post_updater.Run();
 
   OpArgs op_args = t->GetOpArgs(shard);
@@ -161,12 +162,18 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   }
 
   if (op_args.shard->journal()) {
-    string command = dir == ListDir::LEFT ? "LPOP" : "RPOP";
-    RecordJournal(op_args, command, ArgSlice{key}, 1);
+    // Convert to LMPOP with appropriate direction and COUNT
+    string direction = dir == ListDir::LEFT ? "LEFT" : "RIGHT";
+    string command = "LMPOP";
+    int count = 1;  // We are popping 1 element
+
+    // LMPOP format: LMPOP numkeys [LEFT|RIGHT] key [COUNT count]
+    RecordJournal(op_args, command, ArgSlice{to_string(1), direction, key, "COUNT", to_string(count)}, 1);
   }
 
   return value;
 }
+
 
 OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, string_view dest,
                                    ListDir src_dir, ListDir dest_dir) {
@@ -343,12 +350,19 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
     CHECK(db_slice.Del(op_args.db_cntx, it));
   }
 
+  // Convert journal recording to LMPOP
   if (op_args.shard->journal() && journal_rewrite) {
-    string command = dir == ListDir::LEFT ? "LPOP" : "RPOP";
-    RecordJournal(op_args, command, ArgSlice{key}, 2);
+    // LMPOP command
+    string direction = dir == ListDir::LEFT ? "LEFT" : "RIGHT";
+    string command = "LMPOP";
+
+    // LMPOP format: LMPOP numkeys [LEFT|RIGHT] key [COUNT count]
+    RecordJournal(op_args, command, ArgSlice{to_string(1), direction, key, "COUNT", to_string(count)}, 2);
   }
+
   return res;
 }
+
 
 OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view dest,
                                ListDir src_dir, ListDir dest_dir, bool conclude_on_error) {
@@ -878,9 +892,15 @@ void ListFamily::LPushX(CmdArgList args, ConnectionContext* cntx) {
   return PushGeneric(ListDir::LEFT, true, std::move(args), cntx);
 }
 
-void ListFamily::LPop(CmdArgList args, ConnectionContext* cntx) {
-  return PopGeneric(ListDir::LEFT, std::move(args), cntx);
+void ListFamily::LMPop(CmdArgList args, ConnectionContext* cntx) {
+  // LMPOP requires specifying the direction (LEFT or RIGHT) and COUNT.
+  // Since this replaces LPOP, we default to LEFT direction here.
+  ListDir direction = ListDir::LEFT;
+
+  // Forward the args and context to PopGeneric with multiple pop capabilities.
+  PopGeneric(direction, std::move(args), cntx);
 }
+
 
 void ListFamily::RPush(CmdArgList args, ConnectionContext* cntx) {
   return PushGeneric(ListDir::RIGHT, false, std::move(args), cntx);
@@ -1290,7 +1310,8 @@ void ListFamily::Register(CommandRegistry* registry) {
       << CI{"LREM", CO::WRITE, 4, 1, 1, acl::kLRem}.HFUNC(LRem)
       << CI{"LMOVE", CO::WRITE | CO::NO_AUTOJOURNAL, 5, 1, 2, acl::kLMove}.HFUNC(LMove)
       << CI{"BLMOVE", CO::WRITE | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2, acl::kBLMove}
-             .SetHandler(BLMove);
+             .SetHandler(BLMove)
+      << CI{"LMPOP", CO::WRITE | CO::FAST, -4, 1, -1, acl::kLMPop}.HFUNC(LMPop);  // Added LMPOP command
 }
 
 }  // namespace dfly
