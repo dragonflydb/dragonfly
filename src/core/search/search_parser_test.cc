@@ -73,8 +73,10 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_TERM, string, "cd");
   NEXT_TOK(TOK_YYEOF);
 
-  SetInput("(5a 6) ");
+  SetInput("*");
+  NEXT_TOK(TOK_STAR);
 
+  SetInput("(5a 6) ");
   NEXT_TOK(TOK_LPAREN);
   NEXT_EQ(TOK_TERM, string, "5a");
   NEXT_EQ(TOK_UINT32, string, "6");
@@ -151,6 +153,36 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_EQ(TOK_TAG_VAL, string, "blue]1#-");
   NEXT_TOK(TOK_RCURLBR);
 
+  // Prefix simple
+  SetInput("pre*");
+  NEXT_EQ(TOK_PREFIX, string, "pre*");
+
+  // TODO: uncomment when we support escaped terms
+  // Prefix escaped (redis doesn't support quoted prefix matches)
+  // SetInput("pre\\**");
+  // NEXT_EQ(TOK_PREFIX, string, "pre*");
+
+  // Prefix in tag
+  SetInput("@color:{prefix*}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_PREFIX, string, "prefix*");
+  NEXT_TOK(TOK_RCURLBR);
+
+  // Prefix escaped star
+  SetInput("@color:{\"prefix*\"}");
+  NEXT_EQ(TOK_FIELD, string, "@color");
+  NEXT_TOK(TOK_COLON);
+  NEXT_TOK(TOK_LCURLBR);
+  NEXT_EQ(TOK_TERM, string, "prefix*");
+  NEXT_TOK(TOK_RCURLBR);
+
+  // Prefix spaced with star
+  SetInput("pre *");
+  NEXT_EQ(TOK_TERM, string, "pre");
+  NEXT_TOK(TOK_STAR);
+
   SetInput("почтальон Печкин");
   NEXT_EQ(TOK_TERM, string, "почтальон");
   NEXT_EQ(TOK_TERM, string, "Печкин");
@@ -172,6 +204,12 @@ TEST_F(SearchParserTest, Parse) {
   EXPECT_EQ(1, Parse(" foo:bar "));
   EXPECT_EQ(1, Parse(" @foo:@bar "));
   EXPECT_EQ(1, Parse(" @foo: "));
+
+  // We don't support suffix/any other position for now
+  EXPECT_EQ(1, Parse("*pre"));
+  EXPECT_EQ(1, Parse("*pre*"));
+
+  EXPECT_EQ(1, Parse("pre***"));
 }
 
 TEST_F(SearchParserTest, ParseParams) {

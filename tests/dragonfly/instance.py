@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import subprocess
+import random
 import aiohttp
 import logging
 from dataclasses import dataclass
@@ -455,8 +456,9 @@ class RedisServer:
         self.proc = None
 
     def start(self, **kwargs):
+        servers = ["redis-server-6.2.11", "redis-server-7.2.2", "valkey-server-8.0.1"]
         command = [
-            "redis-server-6.2.11",
+            random.choice(servers),
             f"--port {self.port}",
             "--save ''",
             "--appendonly no",

@@ -17,6 +17,7 @@ from .instance import DflyInstanceFactory, DflyInstance
 from .seeder import Seeder as SeederV2
 from . import dfly_args
 from .proxy import Proxy
+from .seeder import StaticSeeder
 
 ADMIN_PORT = 1211
 
@@ -1107,8 +1108,8 @@ async def test_flushall_in_full_sync(df_factory):
     c_replica = replica.client()
 
     # Fill master with test data
-    seeder = SeederV2(key_target=30_000)
-    await seeder.run(c_master, target_deviation=0.1)
+    seeder = StaticSeeder(key_target=100_000)
+    await seeder.run(c_master)
 
     # Start replication and wait for full sync
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")

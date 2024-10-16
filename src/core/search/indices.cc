@@ -124,6 +124,15 @@ const typename BaseStringIndex<C>::Container* BaseStringIndex<C>::Matching(strin
 }
 
 template <typename C>
+void BaseStringIndex<C>::MatchingPrefix(std::string_view prefix,
+                                        absl::FunctionRef<void(const Container*)> cb) const {
+  for (auto it = entries_.lower_bound(prefix);
+       it != entries_.end() && (*it).first.rfind(prefix, 0) == 0; ++it) {
+    cb(&(*it).second);
+  }
+}
+
+template <typename C>
 typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_view word) {
   auto* mr = entries_.get_allocator().resource();
   return &entries_.try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */).first->second;

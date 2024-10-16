@@ -74,6 +74,7 @@ tag_val_char {term_char}|\\[,.<>{}\[\]\\\"\':;!@#$%^&*()\-+=~\/ ]
 
 "$"{term_char}+ return ParseParam(str(), loc());
 "@"{term_char}+ return Parser::make_FIELD(str(), loc());
+{term_char}+"*" return Parser::make_PREFIX(str(), loc());
 
 {term_char}+ return Parser::make_TERM(str(), loc());
 {tag_val_char}+   return make_TagVal(str(), loc());
