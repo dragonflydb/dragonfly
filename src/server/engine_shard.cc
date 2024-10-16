@@ -433,7 +433,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
 void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
   if (string backing_prefix = GetFlag(FLAGS_tiered_prefix); !backing_prefix.empty()) {
     LOG_IF(FATAL, pb->GetKind() != ProactorBase::IOURING)
-        << "Only ioring based backing storage is supported. Exiting...";
+        << "Only io_uring based backing storage is supported. Exiting...";
 
     // TODO: enable tiered storage on non-default namespace
     DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
