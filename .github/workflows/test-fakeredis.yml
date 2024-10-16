@@ -20,7 +20,7 @@ jobs:
     name: "Run tests: "
     permissions:
       pull-requests: write
-      checks: write
+      checks: read
     # services:
     #   redis:
     #     image: docker.dragonflydb.io/dragonflydb/dragonfly:${{ matrix.DRAGONFLY_VERSION }}
