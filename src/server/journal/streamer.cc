@@ -47,31 +47,25 @@ JournalStreamer::~JournalStreamer() {
 void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
   CHECK(dest_ == nullptr && dest != nullptr);
   dest_ = dest;
-  journal_cb_id_ =
-      journal_->RegisterOnChange([this, send_lsn](const JournalItem& item, bool allow_await) {
-        if (allow_await) {
-          ThrottleIfNeeded();
-          // No record to write, just await if data was written so consumer will read the data.
-          if (item.opcode == Op::NOOP)
-            return;
-        }
+  journal_cb_id_ = journal_->RegisterOnChange([this, send_lsn](const JournalItem& item) {
+    ThrottleIfNeeded();
 
-        if (!ShouldWrite(item)) {
-          return;
-        }
+    if (!ShouldWrite(item)) {
+      return;
+    }
 
-        Write(item.data);
-        time_t now = time(nullptr);
+    Write(item.data);
+    time_t now = time(nullptr);
 
-        // TODO: to chain it to the previous Write call.
-        if (send_lsn && now - last_lsn_time_ > 3) {
-          last_lsn_time_ = now;
-          io::StringSink sink;
-          JournalWriter writer(&sink);
-          writer.Write(Entry{journal::Op::LSN, item.lsn});
-          Write(sink.str());
-        }
-      });
+    // TODO: to chain it to the previous Write call.
+    if (send_lsn && now - last_lsn_time_ > 3) {
+      last_lsn_time_ = now;
+      io::StringSink sink;
+      JournalWriter writer(&sink);
+      writer.Write(Entry{journal::Op::LSN, item.lsn});
+      Write(sink.str());
+    }
+  });
 }
 
 void JournalStreamer::Cancel() {
