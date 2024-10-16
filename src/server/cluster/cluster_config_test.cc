@@ -105,14 +105,15 @@ TEST_F(ClusterConfigTest, ConfigSetInvalidMissingSlots) {
 
 TEST_F(ClusterConfigTest, ConfigSetInvalidDoubleBookedSlot) {
   EXPECT_EQ(ClusterConfig::CreateFromConfig(
-                kMyId, {{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF}}),
-                         .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
-                         .replicas = {},
-                         .migrations = {}},
-                        {.slot_ranges = SlotRanges({{.start = 0, .end = 0}}),
-                         .master = {.id = "other2", .ip = "192.168.0.101", .port = 7001},
-                         .replicas = {},
-                         .migrations = {}}}),
+                kMyId,
+                ClusterShardInfos({{.slot_ranges = SlotRanges({{.start = 0, .end = 0x3FFF}}),
+                                    .master = {.id = "other", .ip = "192.168.0.100", .port = 7000},
+                                    .replicas = {},
+                                    .migrations = {}},
+                                   {.slot_ranges = SlotRanges({{.start = 0, .end = 0}}),
+                                    .master = {.id = "other2", .ip = "192.168.0.101", .port = 7001},
+                                    .replicas = {},
+                                    .migrations = {}}})),
             nullptr);
 }
 
@@ -150,18 +151,19 @@ TEST_F(ClusterConfigTest, ConfigSetOkWithReplica) {
 
 TEST_F(ClusterConfigTest, ConfigSetMultipleInstances) {
   auto config = ClusterConfig::CreateFromConfig(
-      kMyId, {{.slot_ranges = SlotRanges({{.start = 0, .end = 5'000}}),
-               .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
-               .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}},
-               .migrations = {}},
-              {.slot_ranges = SlotRanges({{.start = 5'001, .end = 10'000}}),
-               .master = {.id = kMyId, .ip = "192.168.0.102", .port = 7002},
-               .replicas = {{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003}},
-               .migrations = {}},
-              {.slot_ranges = SlotRanges({{.start = 10'001, .end = 0x3FFF}}),
-               .master = {.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
-               .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}},
-               .migrations = {}}});
+      kMyId, ClusterShardInfos(
+                 {{.slot_ranges = SlotRanges({{.start = 0, .end = 5'000}}),
+                   .master = {.id = "other-master", .ip = "192.168.0.100", .port = 7000},
+                   .replicas = {{.id = "other-replica", .ip = "192.168.0.101", .port = 7001}},
+                   .migrations = {}},
+                  {.slot_ranges = SlotRanges({{.start = 5'001, .end = 10'000}}),
+                   .master = {.id = kMyId, .ip = "192.168.0.102", .port = 7002},
+                   .replicas = {{.id = "other-replica2", .ip = "192.168.0.103", .port = 7003}},
+                   .migrations = {}},
+                  {.slot_ranges = SlotRanges({{.start = 10'001, .end = 0x3FFF}}),
+                   .master = {.id = "other-master3", .ip = "192.168.0.104", .port = 7004},
+                   .replicas = {{.id = "other-replica3", .ip = "192.168.0.105", .port = 7005}},
+                   .migrations = {}}}));
   EXPECT_NE(config, nullptr);
   SlotSet owned_slots = config->GetOwnedSlots();
   EXPECT_EQ(owned_slots.ToSlotRanges().Size(), 1);
@@ -607,6 +609,100 @@ TEST_F(ClusterConfigTest, SlotSetAPI) {
               SlotRanges({{0, 1000}, {5000, 5049}, {5051, 5089}}));
     EXPECT_EQ(ss1.GetRemovedSlots(ss).ToSlotRanges(), SlotRanges());
   }
+}
+
+TEST_F(ClusterConfigTest, ConfigComparison) {
+  auto config1 = ClusterConfig::CreateFromConfig("id0", R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 8000 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000 },
+      "replicas": [],
+      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
+                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id1" }]
+    },
+    {
+      "slot_ranges": [ { "start": 8001, "end": 16383 } ],
+      "master": { "id": "id1", "ip": "localhost", "port": 3001 },
+      "replicas": []
+    }
+  ])json");
+
+  EXPECT_EQ(config1->GetConfig(), config1->GetConfig());
+
+  auto config2 = ClusterConfig::CreateFromConfig("id0", R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 16383 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000 },
+      "replicas": [],
+      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
+                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id1" }]
+    }
+  ])json");
+  EXPECT_NE(config1->GetConfig(), config2->GetConfig());
+  EXPECT_EQ(config2->GetConfig(), config2->GetConfig());
+
+  auto config3 = ClusterConfig::CreateFromConfig("id0", R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 8000 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000 },
+      "replicas": [],
+      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
+                     , "ip": "127.0.0.1", "port" : 9002, "node_id": "id1" }]
+    },
+    {
+      "slot_ranges": [ { "start": 8001, "end": 16383 } ],
+      "master": { "id": "id1", "ip": "localhost", "port": 3001 },
+      "replicas": []
+    }
+  ])json");
+  EXPECT_NE(config1->GetConfig(), config3->GetConfig());
+  EXPECT_NE(config2->GetConfig(), config3->GetConfig());
+  EXPECT_EQ(config3->GetConfig(), config3->GetConfig());
+
+  auto config4 = ClusterConfig::CreateFromConfig("id0", R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 8000 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000 },
+      "replicas": [],
+      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
+                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id2" }]
+    },
+    {
+      "slot_ranges": [ { "start": 8001, "end": 16383 } ],
+      "master": { "id": "id1", "ip": "localhost", "port": 3001 },
+      "replicas": []
+    }
+  ])json");
+
+  EXPECT_NE(config1->GetConfig(), config4->GetConfig());
+  EXPECT_NE(config2->GetConfig(), config4->GetConfig());
+  EXPECT_NE(config3->GetConfig(), config4->GetConfig());
+  EXPECT_EQ(config4->GetConfig(), config4->GetConfig());
+
+  auto config5 = ClusterConfig::CreateFromConfig("id0", R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 8000 } ],
+      "master": { "id": "id2", "ip": "localhost", "port": 3000 },
+      "replicas": [],
+      "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ]
+                     , "ip": "127.0.0.1", "port" : 9001, "node_id": "id1" }]
+    },
+    {
+      "slot_ranges": [ { "start": 8001, "end": 16383 } ],
+      "master": { "id": "id1", "ip": "localhost", "port": 3001 },
+      "replicas": []
+    }
+  ])json");
+  EXPECT_NE(config1->GetConfig(), config5->GetConfig());
+  EXPECT_NE(config2->GetConfig(), config5->GetConfig());
+  EXPECT_NE(config3->GetConfig(), config5->GetConfig());
+  EXPECT_NE(config4->GetConfig(), config5->GetConfig());
+  EXPECT_EQ(config5->GetConfig(), config5->GetConfig());
 }
 
 }  // namespace dfly::cluster

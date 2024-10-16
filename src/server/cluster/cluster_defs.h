@@ -90,6 +90,10 @@ struct ClusterNodeInfo {
   bool operator==(const ClusterNodeInfo& r) const noexcept {
     return port == r.port && ip == r.ip && id == r.id;
   }
+
+  bool operator<(const ClusterNodeInfo& r) const noexcept {
+    return id < r.id;
+  }
 };
 
 struct MigrationInfo {
@@ -100,6 +104,10 @@ struct MigrationInfo {
     return node_info == r.node_info && slot_ranges == r.slot_ranges;
   }
 
+  bool operator<(const MigrationInfo& r) const noexcept {
+    return node_info < r.node_info;
+  }
+
   std::string ToString() const;
 };
 
@@ -108,9 +116,48 @@ struct ClusterShardInfo {
   ClusterNodeInfo master;
   std::vector<ClusterNodeInfo> replicas;
   std::vector<MigrationInfo> migrations;
+
+  bool operator==(const ClusterShardInfo& r) const;
+
+  bool operator<(const ClusterShardInfo& r) const noexcept {
+    return master < r.master;
+  }
 };
 
-using ClusterShardInfos = std::vector<ClusterShardInfo>;
+class ClusterShardInfos {
+ public:
+  ClusterShardInfos() = default;
+  ClusterShardInfos(std::vector<ClusterShardInfo> infos);
+  ClusterShardInfos(ClusterShardInfo info) : infos_({info}) {
+  }
+
+  auto begin() const noexcept {
+    return infos_.cbegin();
+  }
+
+  auto end() const noexcept {
+    return infos_.cend();
+  }
+
+  auto size() const noexcept {
+    return infos_.size();
+  }
+
+  bool empty() const noexcept {
+    return infos_.empty();
+  }
+
+  bool operator==(const ClusterShardInfos& r) const noexcept {
+    return infos_ == r.infos_;
+  }
+
+  bool operator!=(const ClusterShardInfos& r) const noexcept {
+    return infos_ != r.infos_;
+  }
+
+ private:
+  std::vector<ClusterShardInfo> infos_;
+};
 
 // MigrationState constants are ordered in state changing order
 enum class MigrationState : uint8_t {

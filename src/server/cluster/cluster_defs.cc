@@ -49,6 +49,26 @@ std::string MigrationInfo::ToString() const {
                       slot_ranges.ToString(), ")");
 }
 
+bool ClusterShardInfo::operator==(const ClusterShardInfo& r) const {
+  if (slot_ranges == r.slot_ranges && master == r.master) {
+    auto lreplicas = replicas;
+    auto lmigrations = migrations;
+    auto rreplicas = r.replicas;
+    auto rmigrations = r.migrations;
+    std::sort(lreplicas.begin(), lreplicas.end());
+    std::sort(lmigrations.begin(), lmigrations.end());
+    std::sort(rreplicas.begin(), rreplicas.end());
+    std::sort(rmigrations.begin(), rmigrations.end());
+    return lreplicas == rreplicas && lmigrations == rmigrations;
+  }
+  return false;
+}
+
+ClusterShardInfos::ClusterShardInfos(std::vector<ClusterShardInfo> infos)
+    : infos_(std::move(infos)) {
+  std::sort(infos_.begin(), infos_.end());
+}
+
 namespace {
 enum class ClusterMode {
   kUninitialized,
