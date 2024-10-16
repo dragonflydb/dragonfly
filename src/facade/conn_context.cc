@@ -19,6 +19,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
   if (owner) {
     protocol_ = owner->protocol();
   }
+  thread_index_ = util::fb2::ProactorBase::me()->GetPoolIndex();
 
   if (stream) {
     switch (protocol_) {

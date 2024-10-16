@@ -1244,6 +1244,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
   ServerState& etl = *ServerState::tlocal();
+  DCHECK_EQ(etl.thread_index(), cntx->thread_index());
 
   ToUpper(&args[0]);
   const auto [cid, args_no_cmd] = FindCmd(args);
