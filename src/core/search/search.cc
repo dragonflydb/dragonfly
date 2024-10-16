@@ -119,6 +119,7 @@ struct ProfileBuilder {
     Overloaded node_info{
         [](monostate) -> string { return ""s; },
         [](const AstTermNode& n) { return absl::StrCat("Term{", n.term, "}"); },
+        [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.prefix, "}"); },
         [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
         [](const AstLogicalNode& n) {
           auto op = n.op == AstLogicalNode::AND ? "and" : "or";
@@ -268,6 +269,28 @@ struct BasicSearch {
     auto mapping = [&node](TextIndex* index) { return index->Matching(node.term); };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
+  }
+
+  IndexResult Search(const AstPrefixNode& node, string_view active_field) {
+    vector<TextIndex*> indices;
+    if (!active_field.empty()) {
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        indices = {index};
+      else
+        return IndexResult{};
+    } else {
+      indices = indices_->GetAllTextIndices();
+    }
+
+    auto mapping = [&node, this](TextIndex* index) {
+      IndexResult result{};
+      index->MatchingPrefix(node.prefix, [&result, this](const auto* c) {
+        Merge(IndexResult{c}, &result, LogicOp::OR);
+      });
+      return result;
+    };
+
+    return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
   }
 
   // [range]: access field's numeric index

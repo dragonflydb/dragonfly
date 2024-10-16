@@ -17,6 +17,7 @@ from .instance import DflyInstanceFactory, DflyInstance
 from .seeder import Seeder as SeederV2
 from . import dfly_args
 from .proxy import Proxy
+from .seeder import StaticSeeder
 
 ADMIN_PORT = 1211
 
@@ -1107,8 +1108,8 @@ async def test_flushall_in_full_sync(df_factory):
     c_replica = replica.client()
 
     # Fill master with test data
-    seeder = SeederV2(key_target=30_000)
-    await seeder.run(c_master, target_deviation=0.1)
+    seeder = StaticSeeder(key_target=100_000)
+    await seeder.run(c_master)
 
     # Start replication and wait for full sync
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
@@ -2316,7 +2317,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
 
     await c_replica.execute_command(
         "debug replica pause"
-    )  # puase replica to trigger reconnect on master
+    )  # pause replica to trigger reconnect on master
 
     await asyncio.sleep(1)
 
@@ -2625,3 +2626,50 @@ async def test_replica_of_replica(df_factory):
         await c_replica2.execute_command(f"REPLICAOF localhost {replica.port}")
 
     assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+
+
+@pytest.mark.asyncio
+async def test_replication_timeout_on_full_sync_heartbeat_expiry(
+    df_factory: DflyInstanceFactory, df_seeder_factory
+):
+    # setting replication_timeout to a very small value to force the replica to timeout
+    master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2")
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("debug", "populate", "200000", "foo", "5000")
+    seeder = df_seeder_factory.create(port=master.port)
+    seeder_task = asyncio.create_task(seeder.run())
+
+    await asyncio.sleep(0.5)  # wait for seeder running
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # wait for full sync
+    async with async_timeout.timeout(3):
+        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.05)
+
+    for i in range(1, 1000000):
+        await c_master.execute_command(f"SET key{i} val{i} EX 2")
+
+    await c_replica.execute_command("debug replica pause")
+
+    # Dragonfly will get stack here. The journal writes to a channel which will block on write.
+    # Hearbeat will be called and will get stack while it tries to evict an expired item (because
+    # it will try to write that item to the journal which in turn will block while it writes to
+    # the channel). BreakStalledFlows() will never be called and the reconnect count will stay 0.
+
+    await asyncio.sleep(2)
+
+    await c_replica.execute_command("debug replica resume")  # resume replication
+
+    await asyncio.sleep(1)  # replica will start resync
+    seeder.stop()
+    await seeder_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await assert_replica_reconnections(replica, 0)

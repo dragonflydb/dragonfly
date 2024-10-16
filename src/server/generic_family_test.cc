@@ -24,6 +24,8 @@ using namespace util;
 using namespace boost;
 using absl::StrCat;
 
+ABSL_DECLARE_FLAG(bool, list_rdb_encode_v2);
+
 namespace dfly {
 
 class GenericFamilyTest : public BaseFamilyTest {};
@@ -564,6 +566,7 @@ TEST_F(GenericFamilyTest, Persist) {
 
 TEST_F(GenericFamilyTest, Dump) {
   ASSERT_THAT(RDB_SER_VERSION, 9);
+  absl::SetFlag(&FLAGS_list_rdb_encode_v2, false);
   uint8_t EXPECTED_STRING_DUMP[13] = {0x00, 0xc0, 0x13, 0x09, 0x00, 0x23, 0x13,
                                       0x6f, 0x4d, 0x68, 0xf6, 0x35, 0x6e};
   uint8_t EXPECTED_HASH_DUMP[] = {0x0d, 0x12, 0x12, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,

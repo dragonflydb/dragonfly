@@ -548,6 +548,8 @@ void BitPos(CmdArgList args, ConnectionContext* cntx) {
 
   if (!absl::SimpleAtoi(ArgS(args, 1), &value)) {
     return cntx->SendError(kInvalidIntErr);
+  } else if (value != 0 && value != 1) {
+    return cntx->SendError("The bit argument must be 1 or 0");
   }
 
   if (args.size() >= 3) {
@@ -1011,20 +1013,20 @@ nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* pa
 // Returns the CommandList if the parsing completed succefully or std::string
 // to indicate an error
 nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, bool read_only) {
-  enum class Cmds { OVERFLOW, GET, SET, INCRBY };
+  enum class Cmds { OVERFLOW_OPT, GET_OPT, SET_OPT, INCRBY_OPT };
   CommandList result;
 
   using nonstd::make_unexpected;
 
   CmdArgParser parser(args);
   while (parser.HasNext()) {
-    auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW, "GET", Cmds::GET, "SET", Cmds::SET,
-                              "INCRBY", Cmds::INCRBY);
+    auto cmd = parser.MapNext("OVERFLOW", Cmds::OVERFLOW_OPT, "GET", Cmds::GET_OPT, "SET",
+                              Cmds::SET_OPT, "INCRBY", Cmds::INCRBY_OPT);
     if (parser.Error()) {
       return make_unexpected(kSyntaxErr);
     }
 
-    if (cmd == Cmds::OVERFLOW) {
+    if (cmd == Cmds::OVERFLOW_OPT) {
       if (read_only) {
         make_unexpected("BITFIELD_RO only supports the GET subcommand");
       }
@@ -1045,7 +1047,7 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
     }
 
     auto attr = maybe_attr.value();
-    if (cmd == Cmds::GET) {
+    if (cmd == Cmds::GET_OPT) {
       result.push_back(Command(Get(attr)));
       continue;
     }
@@ -1058,12 +1060,12 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
     if (parser.Error()) {
       return make_unexpected(kSyntaxErr);
     }
-    if (cmd == Cmds::SET) {
+    if (cmd == Cmds::SET_OPT) {
       result.push_back(Command(Set(attr, value)));
       continue;
     }
 
-    if (cmd == Cmds::INCRBY) {
+    if (cmd == Cmds::INCRBY_OPT) {
       result.push_back(Command(IncrBy(attr, value)));
       continue;
     }
@@ -1340,11 +1342,15 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view 
                                         int64_t start, int64_t end, bool as_bit) {
   OpResult<std::string> value = ReadValue(op_args.db_cntx, key, op_args.shard);
 
-  std::string_view value_str;
-  if (value) {  // non-existent keys are treated as empty strings, per Redis
-    value_str = value.value();
+  // non-existent keys are handled exactly as in Redis's implementation,
+  // even though it contradicts its docs:
+  //     If a clear bit isn't found in the specified range, the function returns -1
+  //     as the user specified a clear range and there are no 0 bits in that range
+  if (!value) {
+    return bit_value ? -1 : 0;
   }
 
+  std::string_view value_str = value.value();
   int64_t size = value_str.size();
   if (as_bit) {
     size *= OFFSET_FACTOR;

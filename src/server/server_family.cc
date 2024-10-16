@@ -62,7 +62,6 @@ extern "C" {
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/aws/aws.h"
-#include "util/fibers/fiber_file.h"
 
 using namespace std;
 
@@ -861,6 +860,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_ca_cert_dir");
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
+  config_registry.RegisterMutable("list_rdb_encode_v2");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1654,6 +1654,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
+  VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   {
     util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
@@ -2440,7 +2441,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);
     append("tx_inline_runs_total", m.coordinator_stats.tx_inline_runs);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
-
+    append("tx_batch_scheduled_items_total", m.shard_stats.tx_batch_scheduled_items_total);
+    append("tx_batch_schedule_calls_total", m.shard_stats.tx_batch_schedule_calls_total);
     append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
 

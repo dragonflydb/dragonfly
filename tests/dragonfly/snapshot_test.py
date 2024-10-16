@@ -150,7 +150,14 @@ async def test_dbfilenames(
 
 
 @pytest.mark.asyncio
-@dfly_args({**BASIC_ARGS, "proactor_threads": 4, "dbfilename": "test-redis-load-rdb"})
+@dfly_args(
+    {
+        **BASIC_ARGS,
+        "proactor_threads": 4,
+        "dbfilename": "test-redis-load-rdb",
+        "list_rdb_encode_v2": "false",  # Needed for compatibility with Redis 6
+    }
+)
 async def test_redis_load_snapshot(
     async_client: aioredis.Redis, df_server, redis_local_server: RedisServer, tmp_dir: Path
 ):
@@ -160,6 +167,8 @@ async def test_redis_load_snapshot(
     await StaticSeeder(
         **LIGHTWEIGHT_SEEDER_ARGS, types=["STRING", "LIST", "SET", "HASH", "ZSET"]
     ).run(async_client)
+
+    await async_client.lpush("list", "A" * 10_000)
 
     await async_client.execute_command("SAVE", "rdb")
     dbsize = await async_client.dbsize()

@@ -55,12 +55,15 @@ FileSnapshotStorage::FileSnapshotStorage(fb2::FiberQueueThreadPool* fq_threadpoo
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> FileSnapshotStorage::OpenWriteFile(
     const std::string& path) {
   if (fq_threadpool_) {  // EPOLL
-    auto res = OpenFiberWriteFile(path, fq_threadpool_);
+    FiberWriteOptions opts;
+    opts.direct = true;
+
+    auto res = OpenFiberWriteFile(path, fq_threadpool_, opts);
     if (!res) {
       return nonstd::make_unexpected(GenericError(res.error(), "Couldn't open file for writing"));
     }
 
-    return std::pair(*res, FileType::FILE);
+    return std::pair(*res, FileType::FILE | FileType::DIRECT);
   } else {
 #ifdef __linux__
     auto res = fb2::OpenLinux(path, kRdbWriteFlags, 0666);

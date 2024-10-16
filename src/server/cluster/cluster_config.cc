@@ -221,7 +221,7 @@ optional<std::vector<MigrationInfo>> ParseMigrations(const JsonType& json) {
 }
 
 optional<ClusterShardInfos> BuildClusterConfigFromJson(const JsonType& json) {
-  ClusterShardInfos config;
+  std::vector<ClusterShardInfo> config;
 
   if (!json.is_array()) {
     LOG(WARNING) << kInvalidConfigPrefix << "not an array " << json;
@@ -271,7 +271,7 @@ optional<ClusterShardInfos> BuildClusterConfigFromJson(const JsonType& json) {
     config.push_back(std::move(shard));
   }
 
-  return config;
+  return ClusterShardInfos(config);
 }
 }  // namespace
 

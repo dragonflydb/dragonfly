@@ -733,12 +733,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
     if (ec_)
       return false;
 
+    uint8_t* lp = nullptr;
     if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
-      quicklistAppendPlainNode(ql, (uint8_t*)sv.data(), sv.size());
+      lp = (uint8_t*)zmalloc(sv.size());
+      ::memcpy(lp, (uint8_t*)sv.data(), sv.size());
+      quicklistAppendPlainNode(ql, lp, sv.size());
       return true;
     }
-
-    uint8_t* lp = nullptr;
 
     if (rdb_type_ == RDB_TYPE_LIST_QUICKLIST_2) {
       uint8_t* src = (uint8_t*)sv.data();
