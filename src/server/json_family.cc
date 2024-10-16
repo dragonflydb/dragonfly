@@ -583,7 +583,7 @@ size_t CountJsonFields(const JsonType& j) {
 
 struct EvaluateOperationOptions {
   bool return_nil_if_key_not_found = false;
-  CallbackResultOptions cb_result_options;
+  CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultEvaluateOptions();
 };
 
 template <typename T>
@@ -604,7 +604,7 @@ OpResult<JsonCallbackResult<T>> JsonEvaluateOperation(const OpArgs& op_args, std
 
 struct MutateOperationOptions {
   JsonReplaceVerify verify_op;
-  CallbackResultOptions cb_result_options;
+  CallbackResultOptions cb_result_options = CallbackResultOptions::DefaultMutateOptions();
 };
 
 template <typename T>
@@ -684,8 +684,8 @@ OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
   auto cb = [](std::string_view, const JsonType& val) { return val; };
 
   const bool legacy_mode_is_enabled = LegacyModeIsEnabled(paths);
-  CallbackResultOptions cb_options{legacy_mode_is_enabled ? JsonPathType::kLegacy
-                                                          : JsonPathType::kV2};
+  CallbackResultOptions cb_options = CallbackResultOptions::DefaultEvaluateOptions();
+  cb_options.path_type = legacy_mode_is_enabled ? JsonPathType::kLegacy : JsonPathType::kV2;
 
   auto eval_wrapped = [&](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
     auto eval_result = json_path.Evaluate<JsonType>(&json_entry, cb, cb_options);
@@ -729,7 +729,7 @@ auto OpType(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
   auto cb = [](const string_view&, const JsonType& val) -> std::string {
     return JsonTypeToName(val);
   };
-  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {true, {}});
+  return JsonEvaluateOperation<std::string>(op_args, key, json_path, std::move(cb), {true});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_view key,
@@ -742,8 +742,7 @@ OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_vie
     }
   };
 
-  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb),
-                                        {true, CallbackResultOptions{SavingOrder::kSaveFirst}});
+  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb), {true});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_view key,
@@ -755,9 +754,8 @@ OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(
-      op_args, key, json_path, std::move(cb),
-      {json_path.IsLegacyModePath(), CallbackResultOptions{SavingOrder::kSaveFirst}});
+  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb),
+                                        {json_path.IsLegacyModePath()});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_view key,
@@ -769,8 +767,7 @@ OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_vie
       return std::nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb),
-                                        {true, CallbackResultOptions{SavingOrder::kSaveFirst}});
+  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb), {true});
 }
 
 template <typename T>
@@ -930,7 +927,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
     return {};
   };
 
-  auto res = json_path.Mutate<Nothing>(json_val, std::move(cb));
+  auto res = json_path.Mutate<Nothing>(json_val, std::move(cb),
+                                       CallbackResultOptions::DefaultMutateOptions());
   RETURN_ON_BAD_STATUS(res);
 
   if (deletion_items.empty()) {
@@ -974,9 +972,8 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
     return vec;
   };
 
-  return JsonEvaluateOperation<StringVec>(
-      op_args, key, json_path, std::move(cb),
-      {json_path.IsLegacyModePath(), CallbackResultOptions{SavingOrder::kSaveFirst}});
+  return JsonEvaluateOperation<StringVec>(op_args, key, json_path, std::move(cb),
+                                          {json_path.IsLegacyModePath()});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_view key,
@@ -1045,9 +1042,9 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     val->erase(it);
     return {false, std::move(str)};
   };
-  return JsonMutateOperation<std::string>(
-      op_args, key, path, std::move(cb),
-      MutateOperationOptions{{}, CallbackResultOptions{OnEmpty::kSendNil}});
+  MutateOperationOptions mutate_options{};
+  mutate_options.cb_result_options.on_empty = OnEmpty::kSendNil;
+  return JsonMutateOperation<std::string>(op_args, key, path, std::move(cb), mutate_options);
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -1201,9 +1198,10 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     return pos;
   };
 
-  return JsonEvaluateOperation<std::optional<long>>(
-      op_args, key, json_path, std::move(cb),
-      {false, CallbackResultOptions{CallbackResultOptions::OnEmpty::kSendWrongType}});
+  auto cb_options = CallbackResultOptions::DefaultEvaluateOptions();
+  cb_options.on_empty = CallbackResultOptions::OnEmpty::kSendWrongType;
+  return JsonEvaluateOperation<std::optional<long>>(op_args, key, json_path, std::move(cb),
+                                                    {false, cb_options});
 }
 
 // Returns string vector that represents the query result of each supplied key.
@@ -1228,7 +1226,8 @@ std::vector<std::optional<std::string>> OpJsonMGet(const WrappedJsonPath& json_p
 
     auto eval_wrapped = [&json_val,
                          &cb](const WrappedJsonPath& json_path) -> std::optional<JsonType> {
-      auto eval_result = json_path.Evaluate<JsonType>(json_val, std::move(cb));
+      auto eval_result = json_path.Evaluate<JsonType>(
+          json_val, std::move(cb), CallbackResultOptions::DefaultEvaluateOptions());
 
       if (eval_result.IsV1()) {
         return eval_result.AsV1();
@@ -1361,7 +1360,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // existing json keys use copy assign, so we don't really need to account for the memory
   // allocated by ShardJsonFromString above since it's not being moved here at all.
   auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb),
-                                          MutateOperationOptions{std::move(inserter), {}});
+                                          MutateOperationOptions{std::move(inserter)});
   RETURN_ON_BAD_STATUS(res);
 
   return operation_result;

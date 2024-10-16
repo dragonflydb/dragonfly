@@ -64,35 +64,29 @@ struct CallbackResultOptions {
   enum class SavingOrder { kSaveFirst, kSaveLast };
   enum class OnEmpty { kSendNil, kSendWrongType };
 
-  static constexpr OnEmpty kDefaultOnEmpty = OnEmpty::kSendWrongType;
-
-  CallbackResultOptions() = default;
-
-  explicit CallbackResultOptions(JsonPathType path_type_) : path_type(path_type_) {
+  // Default configuration for the WrappedJsonPath::Evaluate function
+  static CallbackResultOptions DefaultEvaluateOptions() {
+    return {SavingOrder::kSaveFirst, OnEmpty::kSendNil};
   }
 
-  explicit CallbackResultOptions(SavingOrder saving_order_) : saving_order(saving_order_) {
-  }
-
-  explicit CallbackResultOptions(OnEmpty on_empty_) : on_empty(on_empty_) {
+  // Default configuration for the WrappedJsonPath::Mutate function
+  static CallbackResultOptions DefaultMutateOptions() {
+    return {SavingOrder::kSaveLast, OnEmpty::kSendWrongType};
   }
 
   CallbackResultOptions(JsonPathType path_type_, SavingOrder saving_order_, OnEmpty on_empty_)
       : path_type(path_type_), saving_order(saving_order_), on_empty(on_empty_) {
   }
 
-  void InitializeEmptyOptions(JsonPathType default_path_type, OnEmpty default_on_empty) {
-    if (!path_type) {
-      path_type = default_path_type;
-    }
-    if (!on_empty) {
-      on_empty = default_on_empty;
-    }
+ private:
+  CallbackResultOptions(SavingOrder saving_order_, OnEmpty on_empty_)
+      : saving_order(saving_order_), on_empty(on_empty_) {
   }
 
+ public:
   std::optional<JsonPathType> path_type;
-  SavingOrder saving_order = SavingOrder::kSaveLast;
-  std::optional<OnEmpty> on_empty;
+  SavingOrder saving_order;
+  OnEmpty on_empty;
 };
 
 template <typename T> class JsonCallbackResult {
@@ -104,11 +98,11 @@ template <typename T> class JsonCallbackResult {
   using SavingOrder = CallbackResultOptions::SavingOrder;
   using OnEmpty = CallbackResultOptions::OnEmpty;
 
-  JsonCallbackResult() {
-    options_.InitializeEmptyOptions(kDefaultJsonPathType, CallbackResultOptions::kDefaultOnEmpty);
+  JsonCallbackResult()
+      : options_(kDefaultJsonPathType, SavingOrder::kSaveLast, OnEmpty::kSendWrongType) {
   }
 
-  explicit JsonCallbackResult(CallbackResultOptions options) : options_(std::move(options)) {
+  explicit JsonCallbackResult(CallbackResultOptions options) : options_(options) {
   }
 
   void AddValue(T value) {
@@ -173,9 +167,7 @@ class WrappedJsonPath {
 
   template <typename T>
   JsonCallbackResult<T> Evaluate(const JsonType* json_entry, JsonPathEvaluateCallback<T> cb,
-                                 CallbackResultOptions options = {}) const {
-    // Default configuration for the Evaluate function
-    options.InitializeEmptyOptions(path_type_, CallbackResultOptions::OnEmpty::kSendNil);
+                                 CallbackResultOptions options) const {
     JsonCallbackResult<T> eval_result{options};
 
     auto eval_callback = [&cb, &eval_result](std::string_view path, const JsonType& val) {
@@ -200,9 +192,7 @@ class WrappedJsonPath {
   template <typename T>
   OpResult<JsonCallbackResult<std::optional<T>>> Mutate(JsonType* json_entry,
                                                         JsonPathMutateCallback<T> cb,
-                                                        CallbackResultOptions options = {}) const {
-    // Default configuration for the Mutate function
-    options.InitializeEmptyOptions(path_type_, CallbackResultOptions::kDefaultOnEmpty);
+                                                        CallbackResultOptions options) const {
     JsonCallbackResult<std::optional<T>> mutate_result{options};
 
     auto mutate_callback = [&cb, &mutate_result](std::optional<std::string_view> path,
