@@ -442,7 +442,7 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
   }
 
   void StartAggregate() override {
-    aggregators_.emplace_back(SinkReplyBuilder2::ReplyAggregator(this));
+    aggregators_.emplace_back(this);
   }
 
   void StopAggregate() override {
