@@ -2295,7 +2295,9 @@ async def test_announce_ip_port(df_factory):
 @pytest.mark.asyncio
 async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # setting replication_timeout to a very small value to force the replica to timeout
-    master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2")
+    master = df_factory.create(
+        proactor_threads=2, replication_timeout=100, vmodule="replica=2,dflycmd=2"
+    )
     replica = df_factory.create()
 
     df_factory.start_all([master, replica])
@@ -2317,9 +2319,9 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
 
     await c_replica.execute_command(
         "debug replica pause"
-    )  # puase replica to trigger reconnect on master
+    )  # pause replica to trigger reconnect on master
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(10)
 
     await c_replica.execute_command("debug replica resume")  # resume replication
 
@@ -2626,3 +2628,73 @@ async def test_replica_of_replica(df_factory):
         await c_replica2.execute_command(f"REPLICAOF localhost {replica.port}")
 
     assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+
+
+@pytest.mark.asyncio
+async def test_replication_timeout_on_full_sync_heartbeat_expiry(
+    df_factory: DflyInstanceFactory, df_seeder_factory
+):
+    # Timeout set to 3 seconds because we must first saturate the socket such that subsequent
+    # writes block. Otherwise, we will break the flows before Heartbeat actually deadlocks.
+    master = df_factory.create(
+        proactor_threads=2, replication_timeout=3000, vmodule="replica=2,dflycmd=2"
+    )
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("debug", "populate", "100000", "foo", "5000")
+
+    class ExpirySeeder:
+        def __init__(self):
+            self.stop_flag = False
+            self.i = 0
+
+        async def run(self, client):
+            while not self.stop_flag:
+                await client.execute_command(f"SET tmp{self.i} bar{self.i} EX 4")
+                self.i = self.i + 1
+
+        async def wait_until(self, count):
+            while not self.i > count:
+                await asyncio.sleep(0.5)
+
+        def stop(self):
+            self.stop_flag = True
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    seeder = ExpirySeeder()
+    seeder_task = asyncio.create_task(seeder.run(c_master))
+    await seeder.wait_until(50000)
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # wait for full sync
+    async with async_timeout.timeout(3):
+        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.05)
+
+    await c_replica.execute_command("debug replica pause")
+
+    # Dragonfly will get stuck here. The journal writes to a channel which will block on write.
+    # Hearbeat() will be called and will get stuck while it tries to evict an expired item (because
+    # it will try to write that item to the journal which in turn will block while it pushes to
+    # the channel). BreakStalledFlows() will never be called and the reconnect count will stay 0.
+    # Furthermore, that's why we pick 3 seconds for the replica to timeout. If it was less,
+    # we would not reach this state because the flow would break before the channel gets filled
+    # (even though the write to sink from the channel is blocked).
+
+    await asyncio.sleep(6)
+
+    await c_replica.execute_command("debug replica resume")  # resume replication
+
+    await asyncio.sleep(1)  # replica will start resync
+    seeder.stop()
+    await seeder_task
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await assert_replica_reconnections(replica, 0)
