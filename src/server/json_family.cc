@@ -741,8 +741,9 @@ OpResult<JsonCallbackResult<OptSize>> OpStrLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-
-  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb), {true});
+  return JsonEvaluateOperation<OptSize>(
+      op_args, key, json_path, std::move(cb),
+      {true, CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_view key,
@@ -754,8 +755,10 @@ OpResult<JsonCallbackResult<OptSize>> OpObjLen(const OpArgs& op_args, string_vie
       return nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb),
-                                        {json_path.IsLegacyModePath()});
+  return JsonEvaluateOperation<OptSize>(
+      op_args, key, json_path, std::move(cb),
+      {json_path.IsLegacyModePath(),
+       CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_view key,
@@ -767,7 +770,9 @@ OpResult<JsonCallbackResult<OptSize>> OpArrLen(const OpArgs& op_args, string_vie
       return std::nullopt;
     }
   };
-  return JsonEvaluateOperation<OptSize>(op_args, key, json_path, std::move(cb), {true});
+  return JsonEvaluateOperation<OptSize>(
+      op_args, key, json_path, std::move(cb),
+      {true, CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
 }
 
 template <typename T>
@@ -971,9 +976,10 @@ auto OpObjKeys(const OpArgs& op_args, string_view key, const WrappedJsonPath& js
     }
     return vec;
   };
-
-  return JsonEvaluateOperation<StringVec>(op_args, key, json_path, std::move(cb),
-                                          {json_path.IsLegacyModePath()});
+  return JsonEvaluateOperation<StringVec>(
+      op_args, key, json_path, std::move(cb),
+      {json_path.IsLegacyModePath(),
+       CallbackResultOptions::DefaultEvaluateOptions(SavingOrder::kSaveFirst)});
 }
 
 OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_view key,
@@ -987,7 +993,6 @@ OpResult<JsonCallbackResult<OptSize>> OpStrAppend(const OpArgs& op_args, string_
     *val = std::move(new_val);
     return {false, len};  // do not delete, new value len
   };
-
   return JsonMutateOperation<size_t>(op_args, key, path, std::move(cb));
 }
 
@@ -1042,9 +1047,8 @@ auto OpArrPop(const OpArgs& op_args, string_view key, WrappedJsonPath& path, int
     val->erase(it);
     return {false, std::move(str)};
   };
-  MutateOperationOptions mutate_options{};
-  mutate_options.cb_result_options.on_empty = OnEmpty::kSendNil;
-  return JsonMutateOperation<std::string>(op_args, key, path, std::move(cb), mutate_options);
+  return JsonMutateOperation<std::string>(op_args, key, path, std::move(cb),
+                                          {{}, CallbackResultOptions{OnEmpty::kSendNil}});
 }
 
 // Returns numeric vector that represents the new length of the array at each path.
@@ -1198,10 +1202,9 @@ auto OpArrIndex(const OpArgs& op_args, string_view key, const WrappedJsonPath& j
     return pos;
   };
 
-  auto cb_options = CallbackResultOptions::DefaultEvaluateOptions();
-  cb_options.on_empty = CallbackResultOptions::OnEmpty::kSendWrongType;
-  return JsonEvaluateOperation<std::optional<long>>(op_args, key, json_path, std::move(cb),
-                                                    {false, cb_options});
+  return JsonEvaluateOperation<std::optional<long>>(
+      op_args, key, json_path, std::move(cb),
+      {false, CallbackResultOptions{CallbackResultOptions::OnEmpty::kSendWrongType}});
 }
 
 // Returns string vector that represents the query result of each supplied key.
@@ -1260,7 +1263,6 @@ auto OpFields(const OpArgs& op_args, string_view key, const WrappedJsonPath& jso
   auto cb = [](const string_view&, const JsonType& val) -> std::optional<std::size_t> {
     return CountJsonFields(val);
   };
-
   return JsonEvaluateOperation<std::optional<std::size_t>>(op_args, key, json_path, std::move(cb));
 }
 
