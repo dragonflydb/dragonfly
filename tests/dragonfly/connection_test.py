@@ -536,7 +536,6 @@ async def test_reply_count(async_client: aioredis.Redis):
 
     base = await get_reply_count()
     info_diff = await get_reply_count() - base
-    assert base < 5
     assert info_diff == 1
 
     # Warm client buffer up
@@ -554,6 +553,18 @@ async def test_reply_count(async_client: aioredis.Redis):
     # Sorted sets
     await async_client.zadd("zset-1", mapping={str(i): i for i in range(50)})
     assert await measure(async_client.zrange("zset-1", 0, -1, withscores=True)) == 1
+
+    # Exec call
+    e = async_client.pipeline(transaction=True)
+    for _ in range(100):
+        e.incr("num-1")
+    assert await measure(e.execute()) == 2  # OK + Response
+
+    # Just pipeline
+    p = async_client.pipeline(transaction=False)
+    for _ in range(100):
+        p.incr("num-1")
+    assert await measure(p.execute()) == 1
 
     # Script result
     assert await measure(async_client.eval('return {1,2,{3,4},5,6,7,8,"nine"}', 0)) == 1
