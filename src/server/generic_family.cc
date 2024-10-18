@@ -223,7 +223,7 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
 //            [FREQ frequency], in any order
 OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
   RestoreArgs out_args;
-  std::string_view cur_arg = ArgS(args, 1);  // extract ttl
+  string cur_arg{ArgS(args, 1)};  // extract ttl
   if (!absl::SimpleAtoi(cur_arg, &out_args.expiration_) || (out_args.expiration_ < 0)) {
     return OpStatus::INVALID_INT;
   }
@@ -236,8 +236,7 @@ OpResult<RestoreArgs> RestoreArgs::TryFrom(const CmdArgList& args) {
   int64_t idle_time = 0;
 
   for (size_t i = 3; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-    cur_arg = ArgS(args, i);
+    cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
     bool additional = args.size() - i - 1 >= 1;
     if (cur_arg == "REPLACE") {
       out_args.replace_ = true;
@@ -982,8 +981,7 @@ void GenericFamily::Persist(CmdArgList args, ConnectionContext* cntx) {
 std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, ConnectionContext* cntx) {
   int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
   for (auto& arg : args) {
-    ToUpper(&arg);
-    auto arg_sv = ToSV(arg);
+    string arg_sv = absl::AsciiStrToUpper(ToSV(arg));
     if (arg_sv == "NX") {
       flags |= ExpireFlags::EXPIRE_NX;
     } else if (arg_sv == "XX") {
@@ -1304,9 +1302,7 @@ void GenericFamily::Sort(CmdArgList args, ConnectionContext* cntx) {
   std::optional<std::pair<size_t, size_t>> bounds;
 
   for (size_t i = 1; i < args.size(); i++) {
-    ToUpper(&args[i]);
-
-    std::string_view arg = ArgS(args, i);
+    string arg = absl::AsciiStrToUpper(ArgS(args, i));
     if (arg == "ALPHA") {
       alpha = true;
     } else if (arg == "DESC") {

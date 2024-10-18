@@ -134,8 +134,7 @@ DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 
 void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1u);
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "THREAD") {
     return Thread(args, cntx);

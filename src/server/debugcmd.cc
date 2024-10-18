@@ -481,8 +481,7 @@ void DebugCmd::Reload(CmdArgList args) {
   bool save = true;
 
   for (size_t i = 1; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-    string_view opt = ArgS(args, i);
+    string_view opt = absl::AsciiStrToUpper(ArgS(args, i));
     VLOG(1) << "opt " << opt;
 
     if (opt == "NOSAVE") {
@@ -520,8 +519,8 @@ void DebugCmd::Reload(CmdArgList args) {
 
 void DebugCmd::Replica(CmdArgList args) {
   args.remove_prefix(1);
-  ToUpper(&args[0]);
-  string_view opt = ArgS(args, 0);
+
+  string opt = absl::AsciiStrToUpper(ArgS(args, 0));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   if (opt == "PAUSE" || opt == "RESUME") {
@@ -568,8 +567,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
   }
 
   for (size_t index = 4; args.size() > index; ++index) {
-    ToUpper(&args[index]);
-    std::string_view str = ArgS(args, index);
+    string str = absl::AsciiStrToUpper(ArgS(args, index));
     if (str == "RAND") {
       options.populate_random_values = true;
     } else if (str == "TYPE") {
@@ -577,8 +575,8 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
         cntx_->SendError(kSyntaxErr);
         return nullopt;
       }
-      ToUpper(&args[++index]);
-      options.type = ArgS(args, index);
+      ++index;
+      options.type = absl::AsciiStrToUpper(ArgS(args, index));
     } else if (str == "ELEMENTS") {
       if (args.size() < index + 2) {
         cntx_->SendError(kSyntaxErr);
