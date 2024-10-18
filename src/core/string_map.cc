@@ -300,9 +300,11 @@ detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {
 bool StringMap::iterator::ReallocIfNeeded(float ratio) {
   // Unwrap all links to correctly call SetObject()
   auto* ptr = curr_entry_;
-  while (ptr->IsLink())
+  if (ptr->IsLink()) {
     ptr = ptr->AsLink();
+  }
 
+  // Note: we do not iterate over the links. Although we could that...
   auto* obj = ptr->GetObject();
   auto [new_obj, realloced] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio);
   ptr->SetObject(new_obj);
