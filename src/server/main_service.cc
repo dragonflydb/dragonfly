@@ -1250,7 +1250,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.subspan(1));
 
   if (cid == nullptr) {
-    return cntx->SendError(ReportUnknownCmd(ArgS(args, 0)));
+    return cntx->SendError(ReportUnknownCmd(cmd));
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
