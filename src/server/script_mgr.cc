@@ -68,7 +68,7 @@ ScriptMgr::ScriptKey::ScriptKey(string_view sha) : array{} {
 }
 
 void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
-  string_view subcmd = ArgS(args, 0);
+  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (subcmd == "HELP") {
     string_view kHelp[] = {

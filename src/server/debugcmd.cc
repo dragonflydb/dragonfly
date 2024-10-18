@@ -370,7 +370,7 @@ DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), 
 }
 
 void DebugCmd::Run(CmdArgList args) {
-  string_view subcmd = ArgS(args, 0);
+  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
   if (subcmd == "HELP") {
     string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
