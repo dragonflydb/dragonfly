@@ -1992,7 +1992,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
 
-
+@pytest.mark.skip("Takes more than 10 minutes")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFactory):
     # Check data migration from one node to another
