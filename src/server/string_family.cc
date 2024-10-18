@@ -48,6 +48,82 @@ enum class ExpT { EX, PX, EXAT, PXAT };
 
 constexpr uint32_t kMaxStrLen = 1 << 28;
 
+// Stores a string, the pending result of a tiered read or nothing
+struct StringValue {
+  StringValue() : v_{} {
+  }
+  StringValue(std::string s) : v_{std::move(s)} {
+  }
+  StringValue(util::fb2::Future<std::string> f) : v_{std::move(f)} {
+  }
+
+  // Get and consume value. If backed by a future, blocks until resolved.
+  std::string Get() &&;
+
+  // If no value is stored
+  bool IsEmpty() const;
+
+  // Read string from prime value - either from memory or issue tiered storage read
+  static StringValue Read(DbIndex dbid, std::string_view key, const PrimeValue& pv,
+                          EngineShard* es);
+
+  bool IsFuturized() const {
+    return std::holds_alternative<util::fb2::Future<std::string>>(v_);
+  }
+
+ private:
+  std::variant<std::monostate, std::string, util::fb2::Future<std::string>> v_;
+};
+
+// Helper for performing SET operations with various options
+class SetCmd {
+ public:
+  explicit SetCmd(OpArgs op_args, bool manual_journal)
+      : op_args_(op_args), manual_journal_{manual_journal} {
+  }
+
+  enum SetFlags {
+    SET_ALWAYS = 0,
+    SET_IF_NOTEXIST = 1 << 0,     /* NX: Set if key not exists. */
+    SET_IF_EXISTS = 1 << 1,       /* XX: Set if key exists. */
+    SET_KEEP_EXPIRE = 1 << 2,     /* KEEPTTL: Set and keep the ttl */
+    SET_GET = 1 << 3,             /* GET: Set if want to get key before set */
+    SET_EXPIRE_AFTER_MS = 1 << 4, /* EX,PX,EXAT,PXAT: Expire after ms. */
+    SET_STICK = 1 << 5,           /* Set STICK flag */
+  };
+
+  struct SetParams {
+    uint16_t flags = SET_ALWAYS;
+    uint32_t memcache_flags = 0;
+    uint64_t expire_after_ms = 0;     // Relative value based on now. 0 means no expiration.
+    StringValue* prev_val = nullptr;  // If set, previous value is stored at pointer
+
+    constexpr bool IsConditionalSet() const {
+      return flags & SET_IF_NOTEXIST || flags & SET_IF_EXISTS;
+    }
+  };
+
+  OpStatus Set(const SetParams& params, std::string_view key, std::string_view value);
+
+ private:
+  OpStatus SetExisting(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
+                       std::string_view key, std::string_view value);
+
+  void AddNew(const SetParams& params, DbSlice::Iterator it, DbSlice::ExpIterator e_it,
+              std::string_view key, std::string_view value);
+
+  // Called at the end of AddNew of SetExisting
+  void PostEdit(const SetParams& params, std::string_view key, std::string_view value,
+                PrimeValue* pv);
+
+  void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
+
+  OpStatus CachePrevIfNeeded(const SetParams& params, DbSlice::Iterator it);
+
+  const OpArgs op_args_;
+  bool manual_journal_;
+};
+
 void CopyValueToBuffer(const PrimeValue& pv, char* dest) {
   DCHECK_EQ(pv.ObjType(), OBJ_STRING);
   DCHECK(!pv.IsExternal());
@@ -569,6 +645,115 @@ struct GetReplies {
   RedisReplyBuilder* rb;
 };
 
+void ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view value = ArgS(args, 1);
+  VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
+
+  if (cntx->protocol() == Protocol::REDIS) {
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpExtend(t->GetOpArgs(shard), key, value, prepend);
+    };
+
+    auto res = cntx->transaction->ScheduleSingleHopT(cb);
+    if (!res)
+      return cntx->SendError(res.status());
+    cntx->SendLong(GetResult(std::move(res.value())));
+  } else {
+    // Memcached skips if key is missing
+    DCHECK(cntx->protocol() == Protocol::MEMCACHE);
+
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
+    };
+
+    OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+    SinkReplyBuilder* builder = cntx->reply_builder();
+
+    if (result.value_or(false)) {
+      return builder->SendStored();
+    }
+
+    builder->SendSetSkipped();
+  }
+}
+
+// Wrapper to call SetCmd::Set in ScheduleSingleHop
+OpStatus SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams, string_view key,
+                    string_view value) {
+  DCHECK(cntx->transaction);
+
+  bool manual_journal = cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  return cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
+    return SetCmd(t->GetOpArgs(shard), manual_journal).Set(sparams, key, value);
+  });
+}
+
+/// (P)SETEX key seconds value
+void SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view ex = ArgS(args, 1);
+  string_view value = ArgS(args, 2);
+  int64_t unit_vals;
+
+  if (!absl::SimpleAtoi(ex, &unit_vals)) {
+    return cntx->SendError(kInvalidIntErr, kSyntaxErrType);
+  }
+
+  if (unit_vals < 1) {
+    return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
+  }
+
+  DbSlice::ExpireParams expiry{
+      .value = unit_vals,
+      .unit = seconds ? TimeUnit::SEC : TimeUnit::MSEC,
+      .absolute = false,
+  };
+
+  int64_t now_ms = GetCurrentTimeMs();
+  auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
+  if (abs_ms < 0)
+    return cntx->SendError(InvalidExpireTime("set"));
+
+  SetCmd::SetParams sparams;
+  sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+  sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
+
+  cntx->SendError(SetGeneric(cntx, sparams, key, value));
+}
+
+void IncrByGeneric(string_view key, int64_t val, ConnectionContext* cntx) {
+  bool skip_on_missing = cntx->protocol() == Protocol::MEMCACHE;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
+    return res;
+  };
+
+  OpResult<int64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* builder = cntx->reply_builder();
+
+  DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
+
+  switch (result.status()) {
+    case OpStatus::OK:
+      builder->SendLong(result.value());
+      break;
+    case OpStatus::INVALID_VALUE:
+      cntx->SendError(kInvalidIntErr);
+      break;
+    case OpStatus::OUT_OF_RANGE:
+      cntx->SendError(kIncrOverflow);
+      break;
+    case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
+      reinterpret_cast<MCReplyBuilder*>(builder)->SendNotFound();
+      break;
+    default:
+      reinterpret_cast<RedisReplyBuilder*>(builder)->SendError(result.status());
+      break;
+  }
+}
+
 }  // namespace
 
 StringValue StringValue::Read(DbIndex dbid, string_view key, const PrimeValue& pv,
@@ -745,17 +930,6 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   *params.prev_val =
       StringValue::Read(op_args_.db_cntx.db_index, it.key(), it->second, EngineShard::tlocal());
   return OpStatus::OK;
-}
-
-// Wrapper to call SetCmd::Set in ScheduleSingleHop
-OpStatus SetGeneric(ConnectionContext* cntx, const SetCmd::SetParams& sparams, string_view key,
-                    string_view value) {
-  DCHECK(cntx->transaction);
-
-  bool manual_journal = cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  return cntx->transaction->ScheduleSingleHop([&](Transaction* t, EngineShard* shard) {
-    return SetCmd(t->GetOpArgs(shard), manual_journal).Set(sparams, key, value);
-  });
 }
 
 void StringFamily::Set(CmdArgList args, ConnectionContext* cntx) {
@@ -943,39 +1117,6 @@ void StringFamily::Prepend(CmdArgList args, ConnectionContext* cntx) {
   ExtendGeneric(args, true, cntx);
 }
 
-void StringFamily::ExtendGeneric(CmdArgList args, bool prepend, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view value = ArgS(args, 1);
-  VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
-
-  if (cntx->protocol() == Protocol::REDIS) {
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return OpExtend(t->GetOpArgs(shard), key, value, prepend);
-    };
-
-    auto res = cntx->transaction->ScheduleSingleHopT(cb);
-    if (!res)
-      return cntx->SendError(res.status());
-    cntx->SendLong(GetResult(std::move(res.value())));
-  } else {
-    // Memcached skips if key is missing
-    DCHECK(cntx->protocol() == Protocol::MEMCACHE);
-
-    auto cb = [&](Transaction* t, EngineShard* shard) {
-      return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
-    };
-
-    OpResult<bool> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-    SinkReplyBuilder* builder = cntx->reply_builder();
-
-    if (result.value_or(false)) {
-      return builder->SendStored();
-    }
-
-    builder->SendSetSkipped();
-  }
-}
-
 void StringFamily::GetEx(CmdArgList args, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
@@ -1101,71 +1242,6 @@ void StringFamily::DecrBy(CmdArgList args, ConnectionContext* cntx) {
   }
 
   return IncrByGeneric(key, -val, cntx);
-}
-
-void StringFamily::IncrByGeneric(string_view key, int64_t val, ConnectionContext* cntx) {
-  bool skip_on_missing = cntx->protocol() == Protocol::MEMCACHE;
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
-    return res;
-  };
-
-  OpResult<int64_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* builder = cntx->reply_builder();
-
-  DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
-
-  switch (result.status()) {
-    case OpStatus::OK:
-      builder->SendLong(result.value());
-      break;
-    case OpStatus::INVALID_VALUE:
-      cntx->SendError(kInvalidIntErr);
-      break;
-    case OpStatus::OUT_OF_RANGE:
-      cntx->SendError(kIncrOverflow);
-      break;
-    case OpStatus::KEY_NOTFOUND:  // Relevant only for MC
-      reinterpret_cast<MCReplyBuilder*>(builder)->SendNotFound();
-      break;
-    default:
-      reinterpret_cast<RedisReplyBuilder*>(builder)->SendError(result.status());
-      break;
-  }
-}
-
-/// (P)SETEX key seconds value
-void StringFamily::SetExGeneric(bool seconds, CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view ex = ArgS(args, 1);
-  string_view value = ArgS(args, 2);
-  int64_t unit_vals;
-
-  if (!absl::SimpleAtoi(ex, &unit_vals)) {
-    return cntx->SendError(kInvalidIntErr, kSyntaxErrType);
-  }
-
-  if (unit_vals < 1) {
-    return cntx->SendError(InvalidExpireTime(cntx->cid->name()));
-  }
-
-  DbSlice::ExpireParams expiry{
-      .value = unit_vals,
-      .unit = seconds ? TimeUnit::SEC : TimeUnit::MSEC,
-      .absolute = false,
-  };
-
-  int64_t now_ms = GetCurrentTimeMs();
-  auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
-  if (abs_ms < 0)
-    return cntx->SendError(InvalidExpireTime("set"));
-
-  SetCmd::SetParams sparams;
-  sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-  sparams.expire_after_ms = expiry.Calculate(now_ms, true).first;
-
-  cntx->SendError(SetGeneric(cntx, sparams, key, value));
 }
 
 void StringFamily::MGet(CmdArgList args, ConnectionContext* cntx) {

@@ -37,6 +37,7 @@ extern "C" {
 #include "server/acl/validator.h"
 #include "server/bitops_family.h"
 #include "server/bloom_family.h"
+#include "server/channel_store.h"
 #include "server/cluster/cluster_family.h"
 #include "server/cluster/cluster_utility.h"
 #include "server/conn_context.h"
