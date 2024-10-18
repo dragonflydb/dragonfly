@@ -14,10 +14,14 @@
 #include "base/function2.hpp"
 #include "facade/command_id.h"
 
+namespace facade {
+class SinkReplyBuilder;
+}  // namespace facade
+
 namespace dfly {
 
 class ConnectionContext;
-
+class Transaction;
 namespace CO {
 
 enum CommandOpt : uint32_t {
@@ -117,6 +121,15 @@ class CommandId : public facade::CommandId {
     handler_ = std::move(f);
     return std::move(*this);
   }
+
+  using Handler2 =
+      fu2::function_base<true, true, fu2::capacity_default, false, false,
+                         void(CmdArgList, Transaction*, facade::SinkReplyBuilder*) const>;
+  using Handler3 = fu2::function_base<true, true, fu2::capacity_default, false, false,
+                                      void(CmdArgList, Transaction*, facade::SinkReplyBuilder*,
+                                           ConnectionContext*) const>;
+  CommandId&& SetHandler(Handler2 f) &&;
+  CommandId&& SetHandler(Handler3 f) &&;
 
   CommandId&& SetValidator(ArgValidator f) && {
     validator_ = std::move(f);
