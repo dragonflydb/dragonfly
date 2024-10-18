@@ -1241,16 +1241,16 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
   absl::Cleanup clear_last_error(
       [cntx]() { std::ignore = cntx->reply_builder()->ConsumeLastError(); });
-  CHECK(!args.empty());
+  DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
   ServerState& etl = *ServerState::tlocal();
 
-  ToUpper(&args[0]);
-  const auto [cid, args_no_cmd] = FindCmd(args);
+  string cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.subspan(1));
 
   if (cid == nullptr) {
-    return cntx->SendError(ReportUnknownCmd(ArgS(args, 0)));
+    return cntx->SendError(ReportUnknownCmd(cmd));
   }
 
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
@@ -1264,7 +1264,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
   }
 
   // Don't interrupt running multi commands or admin connections.
-  if (!dispatching_in_multi && cntx->conn() && !cntx->conn()->IsPrivileged()) {
+  if (etl.IsPaused() && !dispatching_in_multi && cntx->conn() && !cntx->conn()->IsPrivileged()) {
     bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
@@ -1535,8 +1535,8 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     return 0;
 
   for (auto args : args_list) {
-    ToUpper(&args[0]);
-    const auto [cid, tail_args] = FindCmd(args);
+    string cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+    const auto [cid, tail_args] = registry_.FindExtended(cmd, args.subspan(1));
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
@@ -1850,10 +1850,10 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 
   if (ca.async) {
     auto& info = cntx->conn_state.script_info;
-    ToUpper(&ca.args[0]);
+    string cmd = absl::AsciiStrToUpper(ArgS(ca.args, 0));
 
     // Full command verification happens during squashed execution
-    if (auto* cid = registry_.Find(ArgS(ca.args, 0)); cid != nullptr) {
+    if (auto* cid = registry_.Find(cmd); cid != nullptr) {
       auto replies = ca.error_abort ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
@@ -1993,35 +1993,6 @@ optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptPa
   };
 
   return false;
-}
-
-static std::string FullAclCommandFromArgs(CmdArgList args, std::string_view name) {
-  ToUpper(&args[1]);
-  auto res = absl::StrCat(name, " ", ArgS(args, 1));
-  return res;
-}
-
-std::pair<const CommandId*, CmdArgList> Service::FindCmd(CmdArgList args) const {
-  const std::string_view command = facade::ToSV(args[0]);
-  std::string_view acl = "ACL";
-  if (command == registry_.RenamedOrOriginal(acl)) {
-    if (args.size() == 1) {
-      return {registry_.Find(ArgS(args, 0)), args};
-    }
-    return {registry_.Find(FullAclCommandFromArgs(args, command)), args.subspan(2)};
-  }
-
-  const CommandId* res = registry_.Find(ArgS(args, 0));
-  if (!res)
-    return {nullptr, args};
-
-  // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.
-  if (args.size() == 2 && res->name() == "XGROUP") {
-    if (absl::EqualsIgnoreCase(ArgS(args, 1), "HELP")) {
-      res = registry_.Find("_XGROUP_HELP");
-    }
-  }
-  return {res, args.subspan(1)};
 }
 
 static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::ScriptParams& params,
@@ -2426,8 +2397,7 @@ void Service::PUnsubscribe(CmdArgList args, ConnectionContext* cntx) {
 // Not a real implementation. Serves as a decorator to accept some function commands
 // for testing.
 void Service::Function(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "FLUSH") {
     return cntx->SendOk();
@@ -2475,8 +2445,7 @@ void Service::Pubsub(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  ToUpper(&args[0]);
-  string_view subcmd = ArgS(args, 0);
+  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (subcmd == "HELP") {
     string_view help_arr[] = {
@@ -2552,8 +2521,7 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
     return;
   }
 
-  ToUpper(&args[0]);
-  string_view subcmd = ArgS(args, 0);
+  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   // COUNT
   if (subcmd == "COUNT") {
@@ -2562,8 +2530,7 @@ void Service::Command(CmdArgList args, ConnectionContext* cntx) {
 
   // INFO [cmd]
   if (subcmd == "INFO" && args.size() == 2) {
-    ToUpper(&args[1]);
-    string_view cmd = ArgS(args, 1);
+    string cmd = absl::AsciiStrToUpper(ArgS(args, 1));
 
     if (const auto* cid = registry_.Find(cmd); cid) {
       rb->StartArray(1);

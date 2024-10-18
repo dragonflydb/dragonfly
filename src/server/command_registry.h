@@ -190,6 +190,9 @@ class CommandRegistry {
   using FamiliesVec = std::vector<std::vector<std::string>>;
   FamiliesVec GetFamilies();
 
+  std::pair<const CommandId*, facade::CmdArgList> FindExtended(std::string_view cmd,
+                                                               facade::CmdArgList tail_args) const;
+
  private:
   absl::flat_hash_map<std::string, CommandId> cmd_map_;
   absl::flat_hash_map<std::string, std::string> cmd_rename_map_;
