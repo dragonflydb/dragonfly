@@ -7,11 +7,7 @@
 #include <optional>
 #include <string>
 
-#include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
-#include "facade/redis_parser.h"
-#include "facade/reply_builder.h"
-#include "server/channel_store.h"
 #include "server/detail/save_stages_controller.h"
 #include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
@@ -20,9 +16,6 @@
 #include "server/server_state.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/future.h"
-
-void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
-                std::string_view sub_cmd);
 
 namespace util {
 
@@ -45,6 +38,7 @@ std::string GetPassword();
 namespace journal {
 class Journal;
 }  // namespace journal
+
 namespace cluster {
 class ClusterFamily;
 }
@@ -378,5 +372,8 @@ class ServerFamily {
 std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                       facade::Connection* conn, ClientPause pause_state,
                                       std::function<bool()> is_pause_in_progress);
+
+void SlowLogGet(CmdArgList args, ConnectionContext* cntx, std::string_view sub_cmd,
+                util::ProactorPool* pp);
 
 }  // namespace dfly

@@ -7,13 +7,9 @@
 #include "base/flags.h"
 #include "facade/facade_types.h"
 #include "server/common.h"
-#include "server/table.h"
+#include "server/tx_base.h"
 
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
-
-namespace util {
-class ProactorPool;
-}  // namespace util
 
 namespace dfly {
 
@@ -78,12 +74,6 @@ class GenericFamily {
 
   static void ExpireTimeGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
   static void TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
-
-  static OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, std::string_view key);
-  static OpResult<uint64_t> OpTtl(Transaction* t, EngineShard* shard, std::string_view key);
-  static OpResult<void> OpRen(const OpArgs& op_args, std::string_view from, std::string_view to,
-                              bool destination_should_not_exist);
-  static OpStatus OpMove(const OpArgs& op_args, std::string_view key, DbIndex target_db);
 };
 
 }  // namespace dfly
