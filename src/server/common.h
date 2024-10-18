@@ -109,18 +109,6 @@ std::ostream& operator<<(std::ostream& os, const GlobalState& state);
 
 enum class TimeUnit : uint8_t { SEC, MSEC };
 
-inline void ToUpper(const MutableSlice* val) {
-  for (auto& c : *val) {
-    c = absl::ascii_toupper(c);
-  }
-}
-
-inline void ToLower(const MutableSlice* val) {
-  for (auto& c : *val) {
-    c = absl::ascii_tolower(c);
-  }
-}
-
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
 bool ParseDouble(std::string_view src, double* value);
 

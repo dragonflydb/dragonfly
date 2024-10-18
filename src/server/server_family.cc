@@ -476,8 +476,7 @@ void ClientSetInfo(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("No connection");
   }
 
-  ToUpper(&args[0]);
-  string_view type = ArgS(args, 0);
+  string type = absl::AsciiStrToUpper(ArgS(args, 0));
   string_view val = ArgS(args, 1);
 
   if (type == "LIB-NAME") {
@@ -510,8 +509,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, Connec
       };
     }
   } else if (args.size() == 2) {
-    ToUpper(&args[0]);
-    string_view filter_type = ArgS(args, 0);
+    string filter_type = absl::AsciiStrToUpper(ArgS(args, 0));
     string_view filter_value = ArgS(args, 1);
     if (filter_type == "ADDR") {
       evaluator = [filter_value](facade::Connection* conn) {
@@ -1842,8 +1840,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   CmdArgList sub_args = args.subspan(1);
 
   if (sub_cmd == "SETNAME") {
@@ -1871,8 +1868,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {
@@ -1896,8 +1892,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       return cntx->SendError(WrongNumArgsError("config|set"));
     }
 
-    ToLower(&args[1]);
-    string_view param = ArgS(args, 1);
+    string param = absl::AsciiStrToLower(ArgS(args, 1));
 
     ConfigRegistry::SetResult result = config_registry.Set(param, ArgS(args, 2));
 
@@ -1954,16 +1949,12 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-
   DebugCmd dbg_cmd{this, cntx};
 
   return dbg_cmd.Run(args);
 }
 
 void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-
   MemoryCmd mem_cmd{this, cntx};
 
   return mem_cmd.Run(args);
@@ -1986,8 +1977,7 @@ std::optional<ServerFamily::VersionBasename> ServerFamily::GetVersionAndBasename
   bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
 
   if (args.size() >= 1) {
-    ToUpper(&args[0]);
-    string_view sub_cmd = ArgS(args, 0);
+    string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
     if (sub_cmd == "DF") {
       new_version = true;
     } else if (sub_cmd == "RDB") {
@@ -2185,11 +2175,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kSyntaxErr);
   }
 
-  string_view section;
+  string section;
 
   if (args.size() == 1) {
-    ToUpper(&args[0]);
-    section = ArgS(args, 0);
+    section = absl::AsciiStrToUpper(ArgS(args, 0));
   }
 
   string info;
@@ -2867,9 +2856,8 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
 
   for (unsigned i = 0; i < args.size(); i += 2) {
     DCHECK_LT(i + 1, args.size());
-    ToUpper(&args[i]);
 
-    std::string_view cmd = ArgS(args, i);
+    string cmd = absl::AsciiStrToUpper(ArgS(args, i));
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
@@ -2994,8 +2982,6 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args.front());
-
   script_mgr_->Run(std::move(args), cntx);
 }
 
@@ -3010,8 +2996,7 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "LATEST") {
     return rb->SendEmptyArray();
@@ -3050,8 +3035,7 @@ void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "HELP") {
     string_view help[] = {
@@ -3095,8 +3079,8 @@ void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Module(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  if (ArgS(args, 0) != "LIST")
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  if (sub_cmd != "LIST")
     return cntx->SendError(kSyntaxErr);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());

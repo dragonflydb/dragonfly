@@ -1898,8 +1898,7 @@ void Service::Eval(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void Service::EvalSha(CmdArgList args, ConnectionContext* cntx) {
-  ToLower(&args[0]);
-  string_view sha = ArgS(args, 0);
+  string sha = absl::AsciiStrToLower(ArgS(args, 0));
 
   BorrowedInterpreter interpreter{cntx};
   CallSHA(args, sha, interpreter, cntx);
