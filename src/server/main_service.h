@@ -64,7 +64,6 @@ class Service : public facade::ServiceInterface {
   facade::ConnectionContext* CreateContext(util::FiberSocketBase* peer,
                                            facade::Connection* owner) final;
 
-  std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
   const CommandId* FindCmd(std::string_view) const;
 
   CommandRegistry* mutable_registry() {
