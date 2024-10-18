@@ -28,14 +28,14 @@ using namespace std;
 
 namespace {
 
-using ShardStringResults = std::vector<OpResult<std::string>>;
+using ShardStringResults = vector<OpResult<string>>;
 const int32_t OFFSET_FACTOR = 8;  // number of bits in byte
 const char* OR_OP_NAME = "OR";
 const char* XOR_OP_NAME = "XOR";
 const char* AND_OP_NAME = "AND";
 const char* NOT_OP_NAME = "NOT";
 
-using BitsStrVec = std::vector<std::string>;
+using BitsStrVec = vector<string>;
 
 // The following is the list of the functions that would handle the
 // commands that handle the bit operations
@@ -47,48 +47,30 @@ void BitOp(CmdArgList args, ConnectionContext* cntx);
 void GetBit(CmdArgList args, ConnectionContext* cntx);
 void SetBit(CmdArgList args, ConnectionContext* cntx);
 
-OpResult<std::string> ReadValue(const DbContext& context, std::string_view key, EngineShard* shard);
-OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, uint32_t offset);
-OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, std::string_view key, int64_t start,
+OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShard* shard);
+OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset);
+OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, string_view key, int64_t start,
                                         int64_t end, bool bit_value);
-OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view key, bool value,
+OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, bool value,
                                         int64_t start, int64_t end, bool as_bit);
-std::string GetString(const PrimeValue& pv);
-bool SetBitValue(uint32_t offset, bool bit_value, std::string* entry);
-std::size_t CountBitSetByByteIndices(std::string_view at, std::size_t start, std::size_t end);
-std::size_t CountBitSet(std::string_view str, int64_t start, int64_t end, bool bits);
-std::size_t CountBitSetByBitIndices(std::string_view at, std::size_t start, std::size_t end);
-std::string RunBitOperationOnValues(std::string_view op, const BitsStrVec& values);
+string GetString(const PrimeValue& pv);
+bool SetBitValue(uint32_t offset, bool bit_value, string* entry);
+std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::size_t end);
+std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits);
+std::size_t CountBitSetByBitIndices(string_view at, std::size_t start, std::size_t end);
+string RunBitOperationOnValues(string_view op, const BitsStrVec& values);
 
 // ------------------------------------------------------------------------- //
 
-// Converts `args[i] to uppercase, then sets `*as_bit` to true if `args[i]` equals "BIT", false if
-// `args[i]` equals "BYTE", or returns false if `args[i]` has some other invalid value.
-bool ToUpperAndGetAsBit(CmdArgList args, size_t i, bool* as_bit) {
-  CHECK_NOTNULL(as_bit);
-  ToUpper(&args[i]);
-  std::string_view arg = ArgS(args, i);
-  if (arg == "BIT") {
-    *as_bit = true;
-    return true;
-  } else if (arg == "BYTE") {
-    *as_bit = false;
-    return true;
-  } else {
-    return false;
-  }
-}
-
 // This function can be used for any case where we allowing out of bound
 // access where the default in this case would be 0 -such as bitop
-uint8_t GetByteAt(std::string_view s, std::size_t at) {
+uint8_t GetByteAt(string_view s, std::size_t at) {
   return at >= s.size() ? 0 : s[at];
 }
 
 // For XOR, OR, AND operations on a collection of bytes
 template <typename BitOp, typename SkipOp>
-std::string BitOpString(BitOp operation_f, SkipOp skip_f, const BitsStrVec& values,
-                        std::string new_value) {
+string BitOpString(BitOp operation_f, SkipOp skip_f, const BitsStrVec& values, string new_value) {
   // at this point, values are not empty
   std::size_t max_size = new_value.size();
 
@@ -137,7 +119,7 @@ constexpr uint8_t XorOp(uint8_t left, uint8_t right) {
   return left ^ right;
 }
 
-std::string BitOpNotString(std::string from) {
+string BitOpNotString(string from) {
   std::transform(from.begin(), from.end(), from.begin(), [](auto c) { return ~c; });
   return from;
 }
@@ -155,7 +137,7 @@ constexpr int32_t GetByteIndex(uint32_t offset) noexcept {
   return offset / OFFSET_FACTOR;
 }
 
-uint8_t GetByteValue(std::string_view str, uint32_t offset) {
+uint8_t GetByteValue(string_view str, uint32_t offset) {
   return static_cast<uint8_t>(str[GetByteIndex(offset)]);
 }
 
@@ -173,7 +155,7 @@ constexpr std::uint8_t CountBitsRange(std::uint8_t byte, std::uint8_t from, uint
 
 // Count the number of bits that are on, on bytes boundaries: i.e. Start and end are the indices for
 // bytes locations inside str CountBitSetByByteIndices
-std::size_t CountBitSetByByteIndices(std::string_view at, std::size_t start, std::size_t end) {
+std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::size_t end) {
   if (start >= end) {
     return 0;
   }
@@ -186,7 +168,7 @@ std::size_t CountBitSetByByteIndices(std::string_view at, std::size_t start, std
 
 // Count the number of bits that are on, on bits boundaries: i.e. Start and end are the indices for
 // bits locations inside str
-std::size_t CountBitSetByBitIndices(std::string_view at, std::size_t start, std::size_t end) {
+std::size_t CountBitSetByBitIndices(string_view at, std::size_t start, std::size_t end) {
   auto first_byte_index = GetByteIndex(start);
   auto last_byte_index = GetByteIndex(end);
   if (start % OFFSET_FACTOR == 0 && end % OFFSET_FACTOR == 0) {
@@ -219,7 +201,7 @@ int64_t NormalizedOffset(int64_t size, int64_t offset) {
 // The parameters for start, end and bits are defaulted to the start of the string,
 // end of the string and bits are false.
 // Note that when bits is false, it means that we are looking on byte boundaries.
-std::size_t CountBitSet(std::string_view str, int64_t start, int64_t end, bool bits) {
+std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits) {
   const int64_t strlen = bits ? str.size() * OFFSET_FACTOR : str.size();
 
   if (start < 0)
@@ -241,13 +223,13 @@ std::size_t CountBitSet(std::string_view str, int64_t start, int64_t end, bool b
 }
 
 // return true if bit is on
-bool GetBitValue(const std::string& entry, uint32_t offset) {
+bool GetBitValue(const string& entry, uint32_t offset) {
   const auto byte_val{GetByteValue(entry, offset)};
   const auto index{GetNormalizedBitIndex(offset)};
   return CheckBitStatus(byte_val, index);
 }
 
-bool GetBitValueSafe(const std::string& entry, uint32_t offset) {
+bool GetBitValueSafe(const string& entry, uint32_t offset) {
   return ((entry.size() * OFFSET_FACTOR) > offset) ? GetBitValue(entry, offset) : false;
 }
 
@@ -259,7 +241,7 @@ constexpr uint8_t TurnBitOff(uint8_t on, uint32_t offset) {
   return on &= ~(1 << offset);
 }
 
-bool SetBitValue(uint32_t offset, bool bit_value, std::string* entry) {
+bool SetBitValue(uint32_t offset, bool bit_value, string* entry) {
   // we need to return the old value after setting the value for offset
   const auto old_value{GetBitValue(*entry, offset)};  // save this as the return value
   auto byte{GetByteValue(*entry, offset)};
@@ -274,7 +256,7 @@ bool SetBitValue(uint32_t offset, bool bit_value, std::string* entry) {
 class ElementAccess {
   bool added_ = false;
   DbSlice::Iterator element_iter_;
-  std::string_view key_;
+  string_view key_;
   DbContext context_;
   EngineShard* shard_ = nullptr;
   mutable DbSlice::AutoUpdater post_updater_;
@@ -282,7 +264,7 @@ class ElementAccess {
   void SetFields(EngineShard* shard, DbSlice::AddOrFindResult res);
 
  public:
-  ElementAccess(std::string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
+  ElementAccess(string_view key, const OpArgs& args) : key_{key}, context_{args.db_cntx} {
   }
 
   OpStatus Find(EngineShard* shard);
@@ -299,9 +281,9 @@ class ElementAccess {
     return context_.db_index;
   }
 
-  std::string Value() const;
+  string Value() const;
 
-  void Commit(std::string_view new_value) const;
+  void Commit(string_view new_value) const;
 
   // return nullopt when key exists but it's not encoded as string
   // return true if key exists and false if it doesn't
@@ -345,16 +327,16 @@ OpStatus ElementAccess::FindAllowWrongType(EngineShard* shard) {
   return OpStatus::OK;
 }
 
-std::string ElementAccess::Value() const {
+string ElementAccess::Value() const {
   CHECK_NOTNULL(shard_);
   if (!added_) {  // Exist entry - return it
     return GetString(element_iter_->second);
   } else {  // we only have reference to the new entry but no value
-    return std::string{};
+    return string{};
   }
 }
 
-void ElementAccess::Commit(std::string_view new_value) const {
+void ElementAccess::Commit(string_view new_value) const {
   if (shard_) {
     if (new_value.empty()) {
       if (!IsNewEntry()) {
@@ -374,8 +356,7 @@ void ElementAccess::Commit(std::string_view new_value) const {
 // =============================================
 // Set a new value to a given bit
 
-OpResult<bool> BitNewValue(const OpArgs& args, std::string_view key, uint32_t offset,
-                           bool bit_value) {
+OpResult<bool> BitNewValue(const OpArgs& args, string_view key, uint32_t offset, bool bit_value) {
   EngineShard* shard = args.shard;
   ElementAccess element_access{key, args};
   auto& db_slice = args.GetDbSlice();
@@ -389,12 +370,12 @@ OpResult<bool> BitNewValue(const OpArgs& args, std::string_view key, uint32_t of
   }
 
   if (element_access.IsNewEntry()) {
-    std::string new_entry(GetByteIndex(offset) + 1, 0);
+    string new_entry(GetByteIndex(offset) + 1, 0);
     old_value = SetBitValue(offset, bit_value, &new_entry);
     element_access.Commit(new_entry);
   } else {
     bool reset = false;
-    std::string existing_entry{element_access.Value()};
+    string existing_entry{element_access.Value()};
     if ((existing_entry.size() * OFFSET_FACTOR) <= offset) {
       existing_entry.resize(GetByteIndex(offset) + 1, 0);
       reset = true;
@@ -409,7 +390,7 @@ OpResult<bool> BitNewValue(const OpArgs& args, std::string_view key, uint32_t of
 
 // ---------------------------------------------------------
 
-std::string RunBitOperationOnValues(std::string_view op, const BitsStrVec& values) {
+string RunBitOperationOnValues(string_view op, const BitsStrVec& values) {
   // This function accept an operation (either OR, XOR, NOT or OR), and run bit operation
   // on all the values we got from the database. Note that in case that one of the values
   // is shorter than the other it would return a 0 and the operation would continue
@@ -419,22 +400,22 @@ std::string RunBitOperationOnValues(std::string_view op, const BitsStrVec& value
 
   const auto BitOperation = [&]() {
     if (op == OR_OP_NAME) {
-      std::string default_str{values[max_len_index]};
+      string default_str{values[max_len_index]};
       return BitOpString(OrOp, SkipOr, std::move(values), std::move(default_str));
     } else if (op == XOR_OP_NAME) {
-      return BitOpString(XorOp, SkipXor, std::move(values), std::string(max_len, 0));
+      return BitOpString(XorOp, SkipXor, std::move(values), string(max_len, 0));
     } else if (op == AND_OP_NAME) {
-      return BitOpString(AndOp, SkipAnd, std::move(values), std::string(max_len, 0));
+      return BitOpString(AndOp, SkipAnd, std::move(values), string(max_len, 0));
     } else if (op == NOT_OP_NAME) {
       return BitOpNotString(values[0]);
     } else {
       LOG(FATAL) << "Operation not supported '" << op << "'";
-      return std::string{};  // otherwise we will have warning of not returning value
+      return string{};  // otherwise we will have warning of not returning value
     }
   };
 
   if (values.empty()) {  // this is ok in case we don't have the src keys
-    return std::string{};
+    return string{};
   }
   // The new result is the max length input
   max_len = values[0].size();
@@ -447,7 +428,7 @@ std::string RunBitOperationOnValues(std::string_view op, const BitsStrVec& value
   return BitOperation();
 }
 
-OpResult<std::string> CombineResultOp(ShardStringResults result, std::string_view op) {
+OpResult<string> CombineResultOp(ShardStringResults result, string_view op) {
   // take valid result for each shard
   BitsStrVec values;
   for (auto&& res : result) {
@@ -467,7 +448,7 @@ OpResult<std::string> CombineResultOp(ShardStringResults result, std::string_vie
 }
 
 // For bitop not - we cannot accumulate
-OpResult<std::string> RunBitOpNot(const OpArgs& op_args, string_view key) {
+OpResult<string> RunBitOpNot(const OpArgs& op_args, string_view key) {
   // if we found the value, just return, if not found then skip, otherwise report an error
   DbSlice& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
@@ -480,8 +461,8 @@ OpResult<std::string> RunBitOpNot(const OpArgs& op_args, string_view key) {
 
 // Read only operation where we are running the bit operation on all the
 // values that belong to same shard.
-OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args,
-                                      ShardArgs::Iterator start, ShardArgs::Iterator end) {
+OpResult<string> RunBitOpOnShard(string_view op, const OpArgs& op_args, ShardArgs::Iterator start,
+                                 ShardArgs::Iterator end) {
   DCHECK(start != end);
   if (op == NOT_OP_NAME) {
     return RunBitOpNot(op_args, *start);
@@ -504,7 +485,7 @@ OpResult<std::string> RunBitOpOnShard(std::string_view op, const OpArgs& op_args
     }
   }
   // Run the operation on all the values that we found
-  std::string op_result = RunBitOperationOnValues(op, values);
+  string op_result = RunBitOperationOnValues(op, values);
   return op_result;
 }
 
@@ -539,7 +520,7 @@ void BitPos(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kSyntaxErr);
   }
 
-  std::string_view key = ArgS(args, 0);
+  string_view key = ArgS(args, 0);
 
   int32_t value{0};
   int64_t start = 0;
@@ -556,13 +537,19 @@ void BitPos(CmdArgList args, ConnectionContext* cntx) {
     if (!absl::SimpleAtoi(ArgS(args, 2), &start)) {
       return cntx->SendError(kInvalidIntErr);
     }
+
     if (args.size() >= 4) {
       if (!absl::SimpleAtoi(ArgS(args, 3), &end)) {
         return cntx->SendError(kInvalidIntErr);
       }
 
       if (args.size() >= 5) {
-        if (!ToUpperAndGetAsBit(args, 4, &as_bit)) {
+        string arg = absl::AsciiStrToUpper(ArgS(args, 4));
+        if (arg == "BIT") {
+          as_bit = true;
+        } else if (arg == "BYTE") {
+          as_bit = false;
+        } else {
           return cntx->SendError(kSyntaxErr);
         }
       }
@@ -730,13 +717,13 @@ class Get {
   // Apply the GET subcommand to the bitfield bytes.
   // Return either the subcommand result (int64_t) or empty optional if failed because of
   // Policy:FAIL
-  ResultType ApplyTo(Overflow ov, const std::string* bitfield);
+  ResultType ApplyTo(Overflow ov, const string* bitfield);
 
  private:
   CommonAttributes attr_;
 };
 
-ResultType Get::ApplyTo(Overflow ov, const std::string* bitfield) {
+ResultType Get::ApplyTo(Overflow ov, const string* bitfield) {
   const auto& bytes = *bitfield;
   const int32_t total_bytes = static_cast<int32_t>(bytes.size());
   const size_t offset = attr_.offset;
@@ -774,7 +761,7 @@ class Set {
   // Apply the SET subcommand to the bitfield value.
   // Return either the subcommand result (int64_t) or empty optional if failed because of
   // Policy:FAIL Updates the bitfield to contain the new value
-  ResultType ApplyTo(Overflow ov, std::string* bitfield);
+  ResultType ApplyTo(Overflow ov, string* bitfield);
 
  private:
   // Helper function that delegates overflow checking to the Overflow object
@@ -784,8 +771,8 @@ class Set {
   int64_t set_value_;
 };
 
-ResultType Set::ApplyTo(Overflow ov, std::string* bitfield) {
-  std::string& bytes = *bitfield;
+ResultType Set::ApplyTo(Overflow ov, string* bitfield) {
+  string& bytes = *bitfield;
   const int32_t total_bytes = static_cast<int32_t>(bytes.size());
   auto last_byte_offset = GetByteIndex(attr_.offset + attr_.encoding_bit_size - 1) + 1;
   if (last_byte_offset > total_bytes) {
@@ -830,7 +817,7 @@ class IncrBy {
   // Apply the INCRBY subcommand to the bitfield value.
   // Return either the subcommand result (int64_t) or empty optional if failed because of
   // Policy:FAIL Updates the bitfield to contain the new incremented value
-  ResultType ApplyTo(Overflow ov, std::string* bitfield);
+  ResultType ApplyTo(Overflow ov, string* bitfield);
 
  private:
   // Helper function that delegates overflow checking to the Overflow object
@@ -840,8 +827,8 @@ class IncrBy {
   int64_t incr_value_;
 };
 
-ResultType IncrBy::ApplyTo(Overflow ov, std::string* bitfield) {
-  std::string& bytes = *bitfield;
+ResultType IncrBy::ApplyTo(Overflow ov, string* bitfield) {
+  string& bytes = *bitfield;
   Get get(attr_);
   auto res = get.ApplyTo(ov, &bytes);
 
@@ -876,7 +863,7 @@ using Result = std::optional<ResultType>;
 // Visitor for all the subcommand variants. Calls ApplyTo, to execute the subcommand
 class CommandApplyVisitor {
  public:
-  explicit CommandApplyVisitor(std::string bitfield) : bitfield_(std::move(bitfield)) {
+  explicit CommandApplyVisitor(string bitfield) : bitfield_(std::move(bitfield)) {
   }
 
   Result operator()(Get get) {
@@ -893,7 +880,7 @@ class CommandApplyVisitor {
     return {};
   }
 
-  std::string_view Bitfield() const {
+  string_view Bitfield() const {
     return bitfield_;
   }
 
@@ -906,14 +893,14 @@ class CommandApplyVisitor {
   // policy changes stick among different subcommands
   Overflow overflow_;
   // This will be commited if it was updated
-  std::string bitfield_;
+  string bitfield_;
   // If either of the subcommands SET|INCRBY is used we should persist the changes.
   // Otherwise, we only used a read only subcommand (GET)
   bool should_commit_ = false;
 };
 
 // A lit of subcommands used in BITFIELD command
-using CommandList = std::vector<Command>;
+using CommandList = vector<Command>;
 
 // Helper class used in the shard cb that abstracts away the iteration and execution of subcommands
 class StateExecutor {
@@ -925,25 +912,25 @@ class StateExecutor {
   //  Iterates over all of the parsed subcommands and executes them one by one. At the end,
   //  if an update subcommand SET|INCRBY was used, commit back the changes via the ElementAccess
   //  object
-  OpResult<std::vector<ResultType>> Execute(const CommandList& commands);
+  OpResult<vector<ResultType>> Execute(const CommandList& commands);
 
  private:
   ElementAccess access_;
   EngineShard* shard_;
 };
 
-OpResult<std::vector<ResultType>> StateExecutor::Execute(const CommandList& commands) {
+OpResult<vector<ResultType>> StateExecutor::Execute(const CommandList& commands) {
   auto res = access_.Exists(shard_);
   if (!res) {
     return {OpStatus::WRONG_TYPE};
   }
-  std::string value;
+  string value;
   if (*res) {
     access_.Find(shard_);
     value = access_.Value();
   }
 
-  std::vector<ResultType> results;
+  vector<ResultType> results;
   CommandApplyVisitor visitor(std::move(value));
   for (auto& command : commands) {
     auto res = std::visit(visitor, command);
@@ -960,7 +947,7 @@ OpResult<std::vector<ResultType>> StateExecutor::Execute(const CommandList& comm
   return results;
 }
 
-nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* parser) {
+nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser) {
   CommonAttributes parsed;
   using nonstd::make_unexpected;
 
@@ -977,7 +964,7 @@ nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* pa
     return make_unexpected(kSyntaxErr);
   }
 
-  std::string_view bits = encoding.substr(1);
+  string_view bits = encoding.substr(1);
 
   if (!absl::SimpleAtoi(bits, &parsed.encoding_bit_size)) {
     return make_unexpected(kSyntaxErr);
@@ -1010,9 +997,9 @@ nonstd::expected<CommonAttributes, std::string> ParseCommonAttr(CmdArgParser* pa
 }
 
 // Parses a list of arguments (without key) to a CommandList.
-// Returns the CommandList if the parsing completed succefully or std::string
+// Returns the CommandList if the parsing completed succefully or string
 // to indicate an error
-nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, bool read_only) {
+nonstd::expected<CommandList, string> ParseToCommandList(CmdArgList args, bool read_only) {
   enum class Cmds { OVERFLOW_OPT, GET_OPT, SET_OPT, INCRBY_OPT };
   CommandList result;
 
@@ -1076,7 +1063,7 @@ nonstd::expected<CommandList, std::string> ParseToCommandList(CmdArgList args, b
   return result;
 }
 
-void SendResults(const std::vector<ResultType>& results, ConnectionContext* cntx) {
+void SendResults(const vector<ResultType>& results, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   const size_t total = results.size();
   if (total == 0) {
@@ -1110,14 +1097,13 @@ void BitFieldGeneric(CmdArgList args, bool read_only, ConnectionContext* cntx) {
   }
   CommandList cmd_list = std::move(maybe_ops_list.value());
 
-  auto cb = [&cmd_list, &key](Transaction* t,
-                              EngineShard* shard) -> OpResult<std::vector<ResultType>> {
+  auto cb = [&cmd_list, &key](Transaction* t, EngineShard* shard) -> OpResult<vector<ResultType>> {
     StateExecutor executor(ElementAccess(key, t->GetOpArgs(shard)), shard);
     return executor.Execute(cmd_list);
   };
 
   Transaction* trans = cntx->transaction;
-  OpResult<std::vector<ResultType>> res = trans->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<ResultType>> res = trans->ScheduleSingleHopT(std::move(cb));
 
   if (res == OpStatus::WRONG_TYPE) {
     cntx->SendError(kWrongTypeErr);
@@ -1140,11 +1126,10 @@ void BitFieldRo(CmdArgList args, ConnectionContext* cntx) {
 #endif
 
 void BitOp(CmdArgList args, ConnectionContext* cntx) {
-  static const std::array<std::string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
-                                                              NOT_OP_NAME};
-  ToUpper(&args[0]);
-  std::string_view op = ArgS(args, 0);
-  std::string_view dest_key = ArgS(args, 1);
+  static const std::array<string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
+                                                         NOT_OP_NAME};
+  string op = absl::AsciiStrToUpper(ArgS(args, 0));
+  string_view dest_key = ArgS(args, 1);
   bool illegal = std::none_of(BITOP_OP_NAMES.begin(), BITOP_OP_NAMES.end(),
                               [&op](auto val) { return op == val; });
 
@@ -1218,7 +1203,7 @@ void GetBit(CmdArgList args, ConnectionContext* cntx) {
   // see https://redis.io/commands/getbit/
 
   uint32_t offset{0};
-  std::string_view key = ArgS(args, 0);
+  string_view key = ArgS(args, 0);
 
   if (!absl::SimpleAtoi(ArgS(args, 1), &offset)) {
     return cntx->SendError(kInvalidIntErr);
@@ -1253,14 +1238,14 @@ void SetBit(CmdArgList args, ConnectionContext* cntx) {
 
 // ------------------------------------------------------------------------- //
 // This are the "callbacks" that we're using from above
-std::string GetString(const PrimeValue& pv) {
-  std::string res;
+string GetString(const PrimeValue& pv) {
+  string res;
   pv.GetString(&res);
   return res;
 }
 
-OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, uint32_t offset) {
-  OpResult<std::string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
+OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset) {
+  OpResult<string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
   if (result) {
     return GetBitValueSafe(result.value(), offset);
   } else {
@@ -1268,8 +1253,7 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, std::string_view key, ui
   }
 }
 
-OpResult<std::string> ReadValue(const DbContext& context, std::string_view key,
-                                EngineShard* shard) {
+OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShard* shard) {
   DbSlice& db_slice = context.GetDbSlice(shard->shard_id());
   auto it_res = db_slice.FindReadOnly(context, key, OBJ_STRING);
   if (!it_res.ok()) {
@@ -1281,9 +1265,9 @@ OpResult<std::string> ReadValue(const DbContext& context, std::string_view key,
   return GetString(pv);
 }
 
-OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, std::string_view key, int64_t start,
+OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, string_view key, int64_t start,
                                         int64_t end, bool bit_value) {
-  OpResult<std::string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
+  OpResult<string> result = ReadValue(op_args.db_cntx, key, op_args.shard);
 
   if (result) {  // if this is not found, just return 0 - per Redis
     return CountBitSet(result.value(), start, end, bit_value);
@@ -1302,7 +1286,7 @@ std::size_t GetFirstBitWithValueInByte(uint8_t byte, bool value) {
   }
 }
 
-int64_t FindFirstBitWithValueAsBit(std::string_view value_str, bool bit_value, int64_t start,
+int64_t FindFirstBitWithValueAsBit(string_view value_str, bool bit_value, int64_t start,
                                    int64_t end) {
   for (int64_t i = start; i <= end; ++i) {
     if (static_cast<size_t>(GetByteIndex(i)) >= value_str.size()) {
@@ -1320,7 +1304,7 @@ int64_t FindFirstBitWithValueAsBit(std::string_view value_str, bool bit_value, i
   return -1;
 }
 
-int64_t FindFirstBitWithValueAsByte(std::string_view value_str, bool bit_value, int64_t start,
+int64_t FindFirstBitWithValueAsByte(string_view value_str, bool bit_value, int64_t start,
                                     int64_t end) {
   for (int64_t i = start; i <= end; ++i) {
     if (static_cast<size_t>(i) >= value_str.size()) {
@@ -1338,9 +1322,9 @@ int64_t FindFirstBitWithValueAsByte(std::string_view value_str, bool bit_value, 
   return -1;
 }
 
-OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view key, bool bit_value,
+OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, bool bit_value,
                                         int64_t start, int64_t end, bool as_bit) {
-  OpResult<std::string> value = ReadValue(op_args.db_cntx, key, op_args.shard);
+  OpResult<string> value = ReadValue(op_args.db_cntx, key, op_args.shard);
 
   // non-existent keys are handled exactly as in Redis's implementation,
   // even though it contradicts its docs:
@@ -1350,7 +1334,7 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, std::string_view 
     return bit_value ? -1 : 0;
   }
 
-  std::string_view value_str = value.value();
+  string_view value_str = value.value();
   int64_t size = value_str.size();
   if (as_bit) {
     size *= OFFSET_FACTOR;
