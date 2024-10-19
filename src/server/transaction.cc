@@ -474,7 +474,7 @@ void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList 
   if (!skip_scheduling)
     ScheduleInternal();
 
-  full_args_ = {nullptr, 0};  // InitBase set it to temporary keys, now we reset it.
+  full_args_ = {};  // InitBase set it to temporary keys, now we reset it.
 }
 
 void Transaction::StartMultiNonAtomic() {

@@ -43,7 +43,7 @@ using SetType = pair<void*, unsigned>;
 namespace {
 
 // Possible sources of new set entries
-using NewEntries = std::variant<CmdArgList, ArgSlice, absl::flat_hash_set<std::string_view>>;
+using NewEntries = std::variant<ArgSlice, absl::flat_hash_set<std::string_view>>;
 
 auto EntriesRange(const NewEntries& entries) {
   return base::it::Wrap(facade::kToSV, entries);

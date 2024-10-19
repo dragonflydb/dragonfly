@@ -17,7 +17,6 @@
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
-#include "core/uring.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/memcache_parser.h"
@@ -28,6 +27,10 @@
 
 #ifdef DFLY_USE_SSL
 #include "util/tls/tls_socket.h"
+#endif
+
+#ifdef __linux__
+#include "util/fibers/uring_file.h"
 #endif
 
 using namespace std;
@@ -1341,7 +1344,7 @@ bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
 void Connection::SquashPipeline() {
   DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
 
-  vector<CmdArgList> squash_cmds;
+  vector<ArgSlice> squash_cmds;
   squash_cmds.reserve(dispatch_q_.size());
 
   for (auto& msg : dispatch_q_) {

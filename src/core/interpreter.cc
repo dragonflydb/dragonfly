@@ -244,7 +244,7 @@ optional<int> FetchKey(lua_State* lua, const char* key) {
   return type;
 }
 
-void SetGlobalArrayInternal(lua_State* lua, const char* name, MutSliceSpan args) {
+void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::SliceSpan args) {
   lua_createtable(lua, args.size(), 0);
   for (size_t j = 0; j < args.size(); j++) {
     lua_pushlstring(lua, args[j].data(), args[j].size());
@@ -652,7 +652,7 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
   return err == 0 ? RUN_OK : RUN_ERR;
 }
 
-void Interpreter::SetGlobalArray(const char* name, MutSliceSpan args) {
+void Interpreter::SetGlobalArray(const char* name, SliceSpan args) {
   SetGlobalArrayInternal(lua_, name, args);
 }
 
@@ -952,7 +952,7 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplore
   }
 
   char name_buffer[32];  // backing storage for cmd name
-  absl::FixedArray<absl::Span<char>, 4> args(argc);
+  absl::FixedArray<string_view, 4> args(argc);
 
   // Copy command name to name_buffer and set it as first arg.
   unsigned name_len = lua_rawlen(lua_, 1);
@@ -1004,7 +1004,7 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplore
     explorer = &*translator;
   }
 
-  redis_func_(CallArgs{MutSliceSpan{args}, &buffer_, explorer, async, raise_error, &raise_error});
+  redis_func_(CallArgs{SliceSpan{args}, &buffer_, explorer, async, raise_error, &raise_error});
   cmd_depth_--;
 
   // Shrink reusable buffer if it's too big.

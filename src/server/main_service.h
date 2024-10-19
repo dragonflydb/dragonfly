@@ -37,10 +37,10 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
+  void DispatchCommand(ArgSlice args, facade::ConnectionContext* cntx) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  size_t DispatchManyCommands(absl::Span<CmdArgList> args_list,
+  size_t DispatchManyCommands(absl::Span<ArgSlice> args_list,
                               facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
@@ -55,7 +55,7 @@ class Service : public facade::ServiceInterface {
   // Verify command prepares excution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
-  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
+  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, ArgSlice tail_args,
                                                        const ConnectionContext& cntx);
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
