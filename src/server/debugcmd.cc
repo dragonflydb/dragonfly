@@ -9,6 +9,7 @@ extern "C" {
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <zstd.h>
 
@@ -413,6 +414,8 @@ void DebugCmd::Run(CmdArgList args) {
         "TRAFFIC <path> | [STOP]",
         "    Starts traffic logging to the specified path. If path is not specified,"
         "    traffic logging is stopped.",
+        "RECVSIZE [<tid> | ENABLE | DISABLE]",
+        "    Prints the histogram of the received request sizes on the given thread",
         "HELP",
         "    Prints this help.",
     };
@@ -466,6 +469,10 @@ void DebugCmd::Run(CmdArgList args) {
 
   if (subcmd == "TRAFFIC") {
     return LogTraffic(args.subspan(1));
+  }
+
+  if (subcmd == "RECVSIZE" && args.size() == 2) {
+    return RecvSize(ArgS(args, 1));
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -955,6 +962,31 @@ void DebugCmd::Shards() {
 #undef MAXMIN_STAT
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   rb->SendVerbatimString(out);
+}
+
+void DebugCmd::RecvSize(string_view param) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  uint8_t enable = 2;
+  if (absl::EqualsIgnoreCase(param, "ENABLE"))
+    enable = 1;
+  else if (absl::EqualsIgnoreCase(param, "DISABLE"))
+    enable = 0;
+
+  if (enable < 2) {
+    shard_set->pool()->AwaitBrief(
+        [enable](auto, auto*) { facade::Connection::TrackRequestSize(enable == 1); });
+    return rb->SendOk();
+  }
+
+  unsigned tid;
+  if (!absl::SimpleAtoi(param, &tid) || tid >= shard_set->pool()->size()) {
+    return rb->SendError(kUintErr);
+  }
+
+  string hist;
+  shard_set->pool()->at(tid)->AwaitBrief(
+      [&]() { facade::Connection::GetRequestSizeHistogramThreadLocal(&hist); });
+  rb->SendVerbatimString(hist);
 }
 
 }  // namespace dfly

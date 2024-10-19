@@ -48,6 +48,7 @@ class DebugCmd {
   void Stacktrace();
   void Shards();
   void LogTraffic(CmdArgList);
+  void RecvSize(std::string_view param);
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;
