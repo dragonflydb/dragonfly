@@ -98,10 +98,6 @@ void SinkReplyBuilder::CloseConnection() {
     ec_ = std::make_error_code(std::errc::connection_aborted);
 }
 
-void SinkReplyBuilder::ResetThreadLocalStats() {
-  tl_facade_stats->reply_stats = {};
-}
-
 void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   has_replied_ = true;
   DCHECK(sink_);

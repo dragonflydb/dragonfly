@@ -312,6 +312,8 @@ class Connection : public util::Connection {
 
   // Sets max queue length locally in the calling thread.
   static void SetMaxQueueLenThreadLocal(uint32_t val);
+  static void GetRequestSizeHistogramThreadLocal(std::string* hist);
+  static void TrackRequestSize(bool enable);
 
  protected:
   void OnShutdown() override;
@@ -388,7 +390,10 @@ class Connection : public util::Connection {
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
-  size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
+  uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
+
+  // how many bytes of the current request have been consumed
+  size_t request_consumed_bytes_ = 0;
 
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
@@ -441,14 +446,19 @@ class Connection : public util::Connection {
   // Per-thread queue backpressure structs.
   static thread_local QueueBackpressure tl_queue_backpressure_;
 
-  // a flag indicating whether the client has turned on client tracking.
-  bool tracking_enabled_ : 1;
-  bool skip_next_squashing_ : 1;  // Forcefully skip next squashing
+  union {
+    uint16_t flags_;
+    struct {
+      // a flag indicating whether the client has turned on client tracking.
+      bool tracking_enabled_ : 1;
+      bool skip_next_squashing_ : 1;  // Forcefully skip next squashing
 
-  // Connection migration vars, see RequestAsyncMigration() above.
-  bool migration_enabled_ : 1;
-  bool migration_in_process_ : 1;
-  bool is_http_ : 1;
+      // Connection migration vars, see RequestAsyncMigration() above.
+      bool migration_enabled_ : 1;
+      bool migration_in_process_ : 1;
+      bool is_http_ : 1;
+    };
+  };
 };
 
 }  // namespace facade

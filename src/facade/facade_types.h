@@ -193,6 +193,8 @@ constexpr inline unsigned long long operator""_KB(unsigned long long x) {
 
 extern __thread FacadeStats* tl_facade_stats;
 
+void ResetStats();
+
 }  // namespace facade
 
 namespace std {

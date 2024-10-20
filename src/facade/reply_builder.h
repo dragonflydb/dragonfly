@@ -147,8 +147,6 @@ class SinkReplyBuilder {
     return tl_facade_stats->reply_stats;
   }
 
-  static void ResetThreadLocalStats();
-
   virtual void StartAggregate();
   virtual void StopAggregate();
 
@@ -235,10 +233,6 @@ class SinkReplyBuilder2 {
 
   static const ReplyStats& GetThreadLocalStats() {
     return tl_facade_stats->reply_stats;
-  }
-
-  static void ResetThreadLocalStats() {
-    tl_facade_stats->reply_stats = {};
   }
 
  public:  // High level interface

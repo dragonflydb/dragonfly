@@ -2050,23 +2050,8 @@ void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
       [registry = service_.mutable_registry(), this, ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
-        SinkReplyBuilder::ResetThreadLocalStats();
-        auto& stats = tl_facade_stats->conn_stats;
-        stats.command_cnt = 0;
-        stats.pipelined_cmd_cnt = 0;
-
         ns->GetCurrentDbSlice().ResetEvents();
-        tl_facade_stats->conn_stats.conn_received_cnt = 0;
-        tl_facade_stats->conn_stats.pipelined_cmd_cnt = 0;
-        tl_facade_stats->conn_stats.command_cnt = 0;
-        tl_facade_stats->conn_stats.io_read_cnt = 0;
-        tl_facade_stats->conn_stats.io_read_bytes = 0;
-
-        tl_facade_stats->reply_stats.io_write_bytes = 0;
-        tl_facade_stats->reply_stats.io_write_cnt = 0;
-        tl_facade_stats->reply_stats.send_stats = {};
-        tl_facade_stats->reply_stats.script_error_count = 0;
-        tl_facade_stats->reply_stats.err_count.clear();
+        facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
       });
 }
