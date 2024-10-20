@@ -13,7 +13,6 @@
 #include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/generic_family.h"
 #include "server/journal/journal.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
