@@ -286,24 +286,16 @@ class InterpreterReplier : public RedisReplyBuilder {
   }
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
-  void SendStored() final;
 
+  void SendBulkString(std::string_view str) final;
   void SendSimpleString(std::string_view str) final;
-  void SendMGetResponse(MGetResponse resp) final;
-  void SendSimpleStrArr(StrSpan arr) final;
+
   void SendNullArray() final;
-
-  void SendStringArr(StrSpan arr, CollectionType type) final;
   void SendNull() final;
-
   void SendLong(long val) final;
   void SendDouble(double val) final;
 
-  void SendBulkString(std::string_view str) final;
-
   void StartCollection(unsigned len, CollectionType type) final;
-  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                       bool with_scores) final;
 
  private:
   void PostItem();
@@ -398,11 +390,6 @@ void InterpreterReplier::SendError(string_view str, std::string_view type) {
   explr_->OnError(str);
 }
 
-void InterpreterReplier::SendStored() {
-  DCHECK(array_len_.empty());
-  SendSimpleString("OK");
-}
-
 void InterpreterReplier::SendSimpleString(string_view str) {
   if (array_len_.empty())
     explr_->OnStatus(str);
@@ -411,37 +398,8 @@ void InterpreterReplier::SendSimpleString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::SendMGetResponse(MGetResponse resp) {
-  DCHECK(array_len_.empty());
-
-  explr_->OnArrayStart(resp.resp_arr.size());
-  for (uint32_t i = 0; i < resp.resp_arr.size(); ++i) {
-    if (resp.resp_arr[i].has_value()) {
-      explr_->OnString(resp.resp_arr[i]->value);
-    } else {
-      explr_->OnNil();
-    }
-  }
-  explr_->OnArrayEnd();
-}
-
-void InterpreterReplier::SendSimpleStrArr(StrSpan arr) {
-  explr_->OnArrayStart(arr.Size());
-  for (string_view str : arr)
-    explr_->OnString(str);
-  explr_->OnArrayEnd();
-}
-
 void InterpreterReplier::SendNullArray() {
   SendSimpleStrArr(ArgSlice{});
-  PostItem();
-}
-
-void InterpreterReplier::SendStringArr(StrSpan arr, CollectionType) {
-  explr_->OnArrayStart(arr.Size());
-  for (string_view str : arr)
-    explr_->OnString(str);
-  explr_->OnArrayEnd();
   PostItem();
 }
 
@@ -474,31 +432,6 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
   } else {
     array_len_.emplace_back(num_elems_ + 1, len);
     num_elems_ = 0;
-  }
-}
-
-void InterpreterReplier::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                                         bool with_scores) {
-  if (with_scores) {
-    if (IsResp3()) {
-      StartCollection(arr.size(), CollectionType::ARRAY);
-      for (size_t i = 0; i < arr.size(); ++i) {
-        StartArray(2);
-        SendBulkString(arr[i].first);
-        SendDouble(arr[i].second);
-      }
-    } else {
-      StartCollection(arr.size() * 2, CollectionType::ARRAY);
-      for (size_t i = 0; i < arr.size(); ++i) {
-        SendBulkString(arr[i].first);
-        SendDouble(arr[i].second);
-      }
-    }
-  } else {
-    StartCollection(arr.size(), CollectionType::ARRAY);
-    for (size_t i = 0; i < arr.size(); ++i) {
-      SendBulkString(arr[i].first);
-    }
   }
 }
 
@@ -1239,8 +1172,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 }
 
 void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
-  absl::Cleanup clear_last_error(
-      [cntx]() { std::ignore = cntx->reply_builder()->ConsumeLastError(); });
+  // absl::Cleanup clear_last_error(
+  //     [cntx]() { std::ignore = cntx->reply_builder()->ConsumeLastError(); });
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
@@ -1362,17 +1295,18 @@ class ReplyGuard {
     const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
       builder_ = cntx->reply_builder();
-      builder_->ExpectReply();
+      bytes_sent_ = builder_->BytesSent();
     }
   }
 
   ~ReplyGuard() {
     if (builder_) {
-      DCHECK(builder_->HasReplied());
+      DCHECK_GT(builder_->BytesSent(), bytes_sent_);
     }
   }
 
  private:
+  size_t bytes_sent_ = 0;
   SinkReplyBuilder* builder_ = nullptr;
 };
 
@@ -1409,7 +1343,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
       return true;
     }
     cntx->SendError(std::move(*err));
-    std::ignore = cntx->reply_builder()->ConsumeLastError();
+    // std::ignore = cntx->reply_builder()->ConsumeLastError();
     return true;  // return false only for internal error aborts
   }
 
@@ -1444,8 +1378,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   ReplyGuard reply_guard(cntx, cid->name());
 #endif
   uint64_t invoke_time_usec = 0;
-  auto last_error = cntx->reply_builder()->ConsumeLastError();
-  DCHECK(last_error.empty());
+  // auto last_error = cntx->reply_builder()->ConsumeLastError();
+  // DCHECK(last_error.empty());
   try {
     invoke_time_usec = cid->Invoke(tail_args, cntx);
   } catch (std::exception& e) {
@@ -1453,7 +1387,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
     return false;
   }
 
-  std::string reason = cntx->reply_builder()->ConsumeLastError();
+  // std::string reason = cntx->reply_builder()->ConsumeLastError();
+  std::string reason;
 
   if (!reason.empty()) {
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
@@ -2408,7 +2343,7 @@ void Service::Function(CmdArgList args, ConnectionContext* cntx) {
 
 void Service::PubsubChannels(string_view pattern, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendStringArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
+  rb->SendBulkStrArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
 }
 
 void Service::PubsubPatterns(ConnectionContext* cntx) {

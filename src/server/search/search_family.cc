@@ -694,7 +694,7 @@ void SearchFamily::FtList(CmdArgList args, ConnectionContext* cntx) {
     return OpStatus::OK;
   });
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendStringArr(names);
+  rb->SendBulkStrArr(names);
 }
 
 void SearchFamily::FtSearch(CmdArgList args, ConnectionContext* cntx) {
@@ -849,7 +849,7 @@ void SearchFamily::FtTagVals(CmdArgList args, ConnectionContext* cntx) {
   vector<string> vec(result_set.begin(), result_set.end());
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  rb->SendStringArr(vec, RedisReplyBuilder::SET);
+  rb->SendBulkStrArr(vec, RedisReplyBuilder::SET);
 }
 
 void SearchFamily::FtAggregate(CmdArgList args, ConnectionContext* cntx) {

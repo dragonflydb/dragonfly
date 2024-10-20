@@ -518,6 +518,7 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_ms, reset_after_ms};
 }
 
+/*
 // fetch_mask values
 constexpr uint8_t FETCH_MCFLAG = 0x1;
 constexpr uint8_t FETCH_MCVER = 0x2;
@@ -584,6 +585,8 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_
 
   return response;
 }
+
+*/
 
 // Extend key with value, either prepend or append. Return size of stored string
 // after modification
@@ -1252,6 +1255,7 @@ void StringFamily::DecrBy(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
 
 void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                         ConnectionContext* cntx) {
+  /*
   DCHECK_GE(args.size(), 1U);
   std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_set->size());
 
@@ -1302,7 +1306,9 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     }
   }
 
-  return builder->SendMGetResponse(std::move(res));
+  */
+
+  // return cntx->reply_builder()->SendMGetResponse(std::move(res));
 }
 
 void StringFamily::MSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
