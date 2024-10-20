@@ -204,7 +204,7 @@ template <typename I> void Send(I begin, I end, RedisReplyBuilder* rb) {
     rb->SendEmptyArray();
   } else {
     if constexpr (is_same_v<decltype(*begin), const string>) {
-      rb->SendStringArr(facade::OwnedArgSlice{begin, end});
+      rb->SendBulkStrArr(facade::OwnedArgSlice{begin, end});
     } else {
       rb->StartArray(end - begin);
       for (auto i = begin; i != end; ++i) {
