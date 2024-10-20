@@ -67,7 +67,9 @@ class SinkReplyBuilder {
   SinkReplyBuilder(const SinkReplyBuilder&) = delete;
   void operator=(const SinkReplyBuilder&) = delete;
 
-  explicit SinkReplyBuilder(::io::Sink* sink);
+  enum Type { REDIS, MC };
+
+  explicit SinkReplyBuilder(::io::Sink* sink, Type t);
 
   virtual ~SinkReplyBuilder() {
   }
@@ -154,6 +156,10 @@ class SinkReplyBuilder {
     return std::exchange(last_error_, std::string{});
   }
 
+  Type type() const {
+    return type_;
+  }
+
  protected:
   void SendRaw(std::string_view str);  // Sends raw without any formatting.
 
@@ -172,6 +178,7 @@ class SinkReplyBuilder {
   bool should_aggregate_ : 1;
   bool has_replied_ : 1;
   bool send_active_ : 1;
+  Type type_;
 };
 
 // Base class for all reply builders. Offer a simple high level interface for controlling output

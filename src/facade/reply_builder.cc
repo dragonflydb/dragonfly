@@ -85,12 +85,13 @@ SinkReplyBuilder::MGetResponse::~MGetResponse() {
   }
 }
 
-SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink)
+SinkReplyBuilder::SinkReplyBuilder(::io::Sink* sink, Type t)
     : sink_(sink),
       should_batch_(false),
       should_aggregate_(false),
       has_replied_(true),
-      send_active_(false) {
+      send_active_(false),
+      type_(t) {
 }
 
 void SinkReplyBuilder::CloseConnection() {
@@ -336,7 +337,7 @@ void SinkReplyBuilder2::NextVec(std::string_view str) {
   vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
 }
 
-MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
+MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink, MC), noreply_(false) {
 }
 
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
@@ -462,7 +463,7 @@ char* RedisReplyBuilder::FormatDouble(double val, char* dest, unsigned dest_len)
   return sb.Finalize();
 }
 
-RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
+RedisReplyBuilder::RedisReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink, REDIS) {
 }
 
 void RedisReplyBuilder::SetResp3(bool is_resp3) {
