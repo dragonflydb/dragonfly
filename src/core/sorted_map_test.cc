@@ -265,4 +265,59 @@ TEST_F(SortedMapTest, MemoryUsage) {
   zslFree(zsl);
 }
 
+uint64_t total_wasted_memory = 0;
+
+TEST_F(SortedMapTest, ReallocIfNeeded) {
+  auto build_str = [](size_t i) { return to_string(i) + string(131, 'a'); };
+
+  auto count_waste = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
+                        size_t block_size, void* arg) {
+    size_t used = block_size * area->used;
+    total_wasted_memory += area->committed - used;
+    return true;
+  };
+
+  for (size_t i = 0; i < 10'000; i++) {
+    int out_flags;
+    double new_val;
+    auto str = build_str(i);
+    sds ele = sdsnew(str.c_str());
+    sm_.Add(i, ele, 0, &out_flags, &new_val);
+    sdsfree(ele);
+  }
+
+  for (size_t i = 0; i < 10'000; i++) {
+    if (i % 10 == 0)
+      continue;
+    auto str = build_str(i);
+    sds ele = sdsnew(str.c_str());
+    sm_.Delete(ele);
+    sdsfree(ele);
+  }
+
+  mi_heap_collect(mi_heap_get_backing(), true);
+  mi_heap_visit_blocks(mi_heap_get_backing(), false, count_waste, nullptr);
+  size_t wasted_before = total_wasted_memory;
+
+  ASSERT_TRUE(sm_.DefragIfNeeded(9));
+
+  total_wasted_memory = 0;
+  mi_heap_collect(mi_heap_get_backing(), true);
+  mi_heap_visit_blocks(mi_heap_get_backing(), false, count_waste, nullptr);
+  size_t wasted_after = total_wasted_memory;
+
+  // Check we waste significanlty less now
+  EXPECT_GT(wasted_before, wasted_after * 2);
+
+  ASSERT_EQ(sm_.Size(), 1000);
+  auto cb = [i = 0, build_str](sds ele, double score) mutable -> bool {
+    EXPECT_EQ(std::string_view(ele), build_str(i * 10));
+    EXPECT_EQ((size_t)score, i * 10);
+    ++i;
+    return true;
+  };
+
+  sm_.Iterate(0, 10000, false, cb);
+}
+
 }  // namespace dfly
