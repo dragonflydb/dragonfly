@@ -9,21 +9,24 @@ from . import dfly_args
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",
     [
-        ("JSON", 300_000, 100, 100),
-        ("SET", 500_000, 100, 100),
-        ("HASH", 400_000, 100, 100),
-        ("ZSET", 400_000, 100, 100),
-        ("LIST", 500_000, 100, 100),
-        ("STRING", 6_000_000, 1000, 1),
+        ("JSON", 200_000, 100, 100),
+        ("SET", 280_000, 100, 100),
+        ("HASH", 250_000, 100, 100),
+        ("ZSET", 250_000, 100, 100),
+        ("LIST", 300_000, 100, 100),
+        ("STRING", 3_500_000, 1000, 1),
     ],
 )
 async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
     # Create a Dragonfly and fill it up with `type` until it reaches `min_rss`, then make sure that
     # the gap between used_memory and rss is no more than `max_unaccounted_ratio`.
-    min_rss = 5 * 1024 * 1024 * 1024  # 5gb
+    min_rss = 3 * 1024 * 1024 * 1024  # 3gb
     max_unaccounted = 200 * 1024 * 1024  # 200mb
 
-    df_server = df_factory.create()
+    # We limit to 5gb just in case to sanity check the gh runner. Otherwise, if we ask for too much
+    # memory it might force the gh runner to run out of memory (since OOM killer might not even
+    # get a chance to run).
+    df_server = df_factory.create(maxmemory="5gb")
     df_factory.start_all([df_server])
     client = df_server.client()
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
