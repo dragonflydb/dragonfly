@@ -90,6 +90,8 @@ class FieldIndices {
   // Extract values stored in sort indices
   std::vector<std::pair<std::string, SortableValue>> ExtractStoredValues(DocId doc) const;
 
+  // std::vector<std::string_view> GetIndicesNames() const;
+
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices(PMR_NS::memory_resource* mr);
