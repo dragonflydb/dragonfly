@@ -192,7 +192,7 @@ void SinkReplyBuilder::NextVec(std::string_view str) {
   vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
 }
 
-MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink, MC), noreply_(false) {
+MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
 }
 
 void MCReplyBuilder::SendValue(std::string_view key, std::string_view value, uint64_t mc_ver,

@@ -1357,7 +1357,7 @@ void Connection::SquashPipeline() {
   size_t dispatched = service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
 
   if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
-    // reply_builder_->FlushBatch();
+    reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
   }
 
@@ -1478,7 +1478,7 @@ void Connection::ExecutionFiber() {
       // last command to reply and flush. If it doesn't reply (i.e. is a control message like
       // migrate), we have to flush manually.
       if (dispatch_q_.empty() && !msg.IsReplying()) {
-        // reply_builder_->FlushBatch();
+        reply_builder_->Flush();
       }
 
       if (ShouldEndDispatchFiber(msg)) {
