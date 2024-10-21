@@ -27,11 +27,10 @@ struct FlowInfo;
 // Used for storing MULTI/EXEC commands.
 class StoredCmd {
  public:
-  StoredCmd(const CommandId* cid, CmdArgList args,
-            facade::ReplyMode mode = facade::ReplyMode::FULL);
+  StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode = facade::ReplyMode::FULL);
 
   // Create on top of already filled tightly-packed buffer.
-  StoredCmd(std::string&& buffer, const CommandId* cid, CmdArgList args,
+  StoredCmd(std::string&& buffer, const CommandId* cid, ArgSlice args,
             facade::ReplyMode mode = facade::ReplyMode::FULL);
 
   size_t NumArgs() const;
@@ -40,7 +39,7 @@ class StoredCmd {
 
   // Fill the arg list with stored arguments, it should be at least of size NumArgs().
   // Between filling and invocation, cmd should NOT be moved.
-  void Fill(CmdArgList args);
+  void Fill(absl::Span<std::string_view> args);
 
   void Fill(CmdArgVec* dest) {
     dest->resize(sizes_.size());

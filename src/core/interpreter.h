@@ -4,11 +4,12 @@
 
 #pragma once
 
+#include <absl/types/span.h>
+
 #include <functional>
 #include <optional>
 #include <string_view>
 
-#include "core/core_types.h"
 #include "util/fibers/synchronization.h"
 
 typedef struct lua_State lua_State;
@@ -40,10 +41,12 @@ class ObjectExplorer {
 
 class Interpreter {
  public:
+  using SliceSpan = absl::Span<const std::string_view>;
+
   // Arguments received from redis.call
   struct CallArgs {
     // Full arguments, including cmd name.
-    MutSliceSpan args;
+    SliceSpan args;
 
     // Pointer to backing storage for args (excluding cmd name).
     // Moving can invalidate arg slice pointers. Moved by async to re-use buffer.
@@ -93,7 +96,7 @@ class Interpreter {
     RUN_ERR = 2,
   };
 
-  void SetGlobalArray(const char* name, MutSliceSpan args);
+  void SetGlobalArray(const char* name, SliceSpan args);
 
   // Runs already added function sha returned by a successful call to AddFunction().
   // Returns: true if the call succeeded, otherwise fills error and returns false.

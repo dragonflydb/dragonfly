@@ -219,9 +219,9 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   for (size_t i = 0; i < vec.size(); ++i) {
     cmd_args.push_back(vec[i].AsString().c_str());
   }
-  vector<facade::MutableSlice> cmd_slices(cmd_args.size());
+  vector<string_view> cmd_slices(cmd_args.size());
   for (size_t i = 0; i < cmd_args.size(); ++i) {
-    cmd_slices[i] = absl::MakeSpan(cmd_args[i]);
+    cmd_slices[i] = cmd_args[i];
   }
 
   facade::ConnectionContext* context = (facade::ConnectionContext*)http_cntx->user_data();

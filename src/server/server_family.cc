@@ -246,7 +246,7 @@ struct CmdArgListFormatter {
 
 string UnknownCmd(string cmd, CmdArgList args) {
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
-                      StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
+                      absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
 bool IsCloudPath(string_view path) {

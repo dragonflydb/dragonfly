@@ -18,7 +18,7 @@ extern "C" {
 namespace dfly::acl {
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
-                                                CmdArgList tail_args) {
+                                                ArgSlice tail_args) {
   if (cntx.skip_acl_validation) {
     return true;
   }

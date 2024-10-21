@@ -73,6 +73,7 @@ class TestSerializer : public ObjectExplorer {
   }
 };
 
+using SliceSpan = Interpreter::SliceSpan;
 class InterpreterTest : public ::testing::Test {
  protected:
   InterpreterTest() {
@@ -99,12 +100,12 @@ class InterpreterTest : public ::testing::Test {
 };
 
 void InterpreterTest::SetGlobalArray(const char* name, const vector<string_view>& vec) {
-  vector<MutableSlice> slices(vec.size());
+  vector<string_view> slices(vec.size());
   for (size_t i = 0; i < vec.size(); ++i) {
     strings_.emplace_back(new string(vec[i]));
-    slices[i] = MutableSlice{*strings_.back()};
+    slices[i] = string_view{*strings_.back()};
   }
-  intptr_.SetGlobalArray(name, MutSliceSpan{slices});
+  intptr_.SetGlobalArray(name, SliceSpan{slices});
 }
 
 bool InterpreterTest::Execute(string_view script) {
@@ -329,7 +330,7 @@ TEST_F(InterpreterTest, CallArray) {
 
 TEST_F(InterpreterTest, ArgKeys) {
   vector<string> vec_arr{};
-  vector<MutableSlice> slices;
+  vector<string_view> slices;
   SetGlobalArray("ARGV", {"foo", "bar"});
   SetGlobalArray("KEYS", {"key1", "key2"});
   EXPECT_TRUE(Execute("return {ARGV[1], KEYS[1], KEYS[2]}"));

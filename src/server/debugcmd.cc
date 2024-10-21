@@ -145,7 +145,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   local_tx->StartMultiNonAtomic();
   boost::intrusive_ptr<Transaction> stub_tx =
       new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
-  absl::InlinedVector<MutableSlice, 5> args_view;
+  absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx, stub_tx.get(), &crb};
 
@@ -162,7 +162,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
 
     args_view.clear();
     for (auto& arg : args) {
-      args_view.push_back(absl::MakeSpan(arg));
+      args_view.push_back(arg);
     }
     auto args_span = absl::MakeSpan(args_view);
 

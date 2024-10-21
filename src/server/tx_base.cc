@@ -75,15 +75,6 @@ void TriggerJournalWriteToSink() {
   journal->RecordEntry(0, journal::Op::NOOP, 0, 0, nullopt, {}, true);
 }
 
-std::ostream& operator<<(std::ostream& os, ArgSlice list) {
-  os << "[";
-  if (!list.empty()) {
-    std::for_each(list.begin(), list.end() - 1, [&os](const auto& val) { os << val << ", "; });
-    os << (*(list.end() - 1));
-  }
-  return os << "]";
-}
-
 LockTag::LockTag(std::string_view key) {
   if (LockTagOptions::instance().enabled)
     str_ = LockTagOptions::instance().Tag(key);
