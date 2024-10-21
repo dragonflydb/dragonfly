@@ -238,12 +238,15 @@ std::string_view ParseField(CmdArgParser* parser) {
   return field;
 }
 
-std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
+std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
   std::string_view field = parser->Next();
   if (field.front() != '@') {
-    return std::nullopt;  // if we expect @, but it's not there, return nullopt
+    // Temporary warning until we can throw an error
+    LOG(WARNING) << "bad arguments: Field name '" << field << "' should start with '@'. '@" << field
+                 << "' is expected";
+  } else {
+    field.remove_prefix(1);  // remove leading @
   }
-  field.remove_prefix(1);  // remove leading @
   return field;
 }
 
@@ -273,12 +276,17 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
       vector<string_view> fields(parser.Next<size_t>());
       for (string_view& field : fields) {
         auto parsed_field = ParseFieldWithAtSign(&parser);
+
+        /*
+        TODO: Throw an error if the field has no '@' sign at the beginning
+
         if (!parsed_field) {
           cntx->SendError(absl::StrCat("bad arguments for GROUPBY: Unknown property '", field,
                                        "'. Did you mean '@", field, "`?"));
           return nullopt;
-        }
-        field = parsed_field.value();
+        } */
+
+        field = parsed_field;
       }
 
       vector<aggregate::Reducer> reducers;
