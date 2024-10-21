@@ -90,6 +90,11 @@ DenseSet::DenseSet(MemoryResource* mr) : entries_(mr) {
 }
 
 DenseSet::~DenseSet() {
+  while (cached_link_num) {
+    mr()->deallocate(cached_links[--cached_link_num], sizeof(DenseLinkKey), alignof(DenseLinkKey));
+    --num_links_;
+  }
+
   // We can not call Clear from the base class because it internally calls ObjDelete which is
   // a virtual function. Therefore, destructor of the derived classes must clean up the table.
   CHECK(entries_.empty());
@@ -306,6 +311,73 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
     len = dest_id;
   }
 }
+
+void DenseSet::GrowBatch(uint32_t len, GrowItem* items,
+                         std::vector<DensePtr, DensePtrAllocator>* new_entries) {
+  while (len) {
+    unsigned dest_id = 0;
+    for (uint32_t i = 0; i < len; ++i) {
+      auto& item = items[i];
+      if (!item.obj.IsEmpty()) {
+        DensePtr* curr = &item.obj;
+
+        if (ExpireIfNeeded(nullptr, curr)) {
+          // if curr has disappeared due to expiry and prev was converted from Link to a
+          // regular DensePtr
+        }
+
+        if (curr->IsEmpty())
+          continue;
+        void* ptr = curr->GetObject();
+
+        DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
+
+        uint32_t bid = BucketId(ptr, 0);
+
+        // if the item does not move from the current chain, ensure
+        // it is not marked as displaced and move to the next item in the chain
+
+        auto dest = new_entries->begin() + bid;
+        DensePtr dptr = *curr;
+
+        if (curr->IsObject()) {
+          curr->Reset();  // reset the original placeholder (.next or root)
+
+          DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
+          DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
+          PushFront(dest, dptr);
+
+          dest->ClearDisplaced();
+
+          continue;
+        }  // if IsObject
+
+        *curr = *dptr.Next();
+        if (curr->IsLink()) {
+          PREFETCH_READ(curr->AsLink());
+        }
+
+        PREFETCH_READ(curr->Raw());
+        DCHECK(!curr->IsEmpty());
+
+        PushFront(dest, dptr);
+        dest->ClearDisplaced();
+      } else {
+        auto link = item.ptr.AsLink();
+        PREFETCH_READ(link->next.Raw());
+        PREFETCH_READ(link->Raw());
+
+        item.obj = item.ptr;
+        item.ptr.Reset();
+      }
+
+      items[dest_id++] = {item.ptr, item.obj};
+    }
+    // update the length of the batch for the next iteration.
+    len = dest_id;
+  }
+}
+
 bool DenseSet::NoItemBelongsBucket(uint32_t bid) const {
   auto& entries = const_cast<DenseSet*>(this)->entries_;
   DensePtr* curr = &entries[bid];
@@ -365,10 +437,8 @@ void DenseSet::Reserve(size_t sz) {
 
   sz = absl::bit_ceil(sz);
   if (sz > entries_.size()) {
-    size_t prev_size = entries_.size();
-    entries_.resize(sz);
-    capacity_log_ = absl::bit_width(sz) - 1;
-    Grow(prev_size);
+    capacity_log_ = absl::bit_width(sz) - 1;  // TODO move into Grow()
+    Grow(sz);
   }
 }
 
@@ -408,78 +478,35 @@ void DenseSet::Fill(DenseSet* other) const {
   CloneBatch(len, arr, other);
 }
 
-void DenseSet::Grow(size_t prev_size) {
+void DenseSet::Grow(size_t new_size) {
+  decltype(entries_) ne(new_size, entries_.get_allocator());
+  const auto kMaxBatchLen = 32;
+  GrowItem items[kMaxBatchLen];
+  uint32_t len = 0;
   // perform rehashing of items in the set
-  for (long i = prev_size - 1; i >= 0; --i) {
-    DensePtr* curr = &entries_[i];
-    DensePtr* prev = nullptr;
-
-    while (true) {
-      if (ExpireIfNeeded(prev, curr)) {
-        // if curr has disappeared due to expiry and prev was converted from Link to a
-        // regular DensePtr
-        if (prev && !prev->IsLink())
-          break;
+  for (auto& entry : entries_) {
+    PREFETCH_READ(entry.Raw());
+    if (!entry.IsEmpty()) {
+      auto& item = items[len++];
+      if (entry.IsLink()) {
+        item.ptr = entry;
+        item.obj.Reset();
+      } else {
+        item.ptr.Reset();
+        item.obj = entry;
       }
 
-      if (curr->IsEmpty())
-        break;
-      void* ptr = curr->GetObject();
-
-      DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
-
-      uint32_t bid = BucketId(ptr, 0);
-
-      // if the item does not move from the current chain, ensure
-      // it is not marked as displaced and move to the next item in the chain
-      if (bid == i) {
-        curr->ClearDisplaced();
-        prev = curr;
-        curr = curr->Next();
-        if (curr == nullptr)
-          break;
-      } else {
-        // if the entry is in the wrong chain remove it and
-        // add it to the correct chain. This will also correct
-        // displaced entries
-        auto dest = entries_.begin() + bid;
-        DensePtr dptr = *curr;
-
-        if (curr->IsObject()) {
-          curr->Reset();  // reset the original placeholder (.next or root)
-
-          if (prev) {
-            DCHECK(prev->IsLink());
-
-            DenseLinkKey* plink = prev->AsLink();
-            DCHECK(&plink->next == curr);
-
-            // we want to make *prev a DensePtr instead of DenseLink and we
-            // want to deallocate the link.
-            DensePtr tmp = DensePtr::From(plink);
-            DCHECK(ObjectAllocSize(tmp.GetObject()));
-
-            FreeLink(plink);
-            *prev = tmp;
-          }
-
-          DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
-          DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
-          PushFront(dest, dptr);
-
-          dest->ClearDisplaced();
-
-          break;
-        }  // if IsObject
-
-        *curr = *dptr.Next();
-        DCHECK(!curr->IsEmpty());
-
-        PushFront(dest, dptr);
-        dest->ClearDisplaced();
+      if (len == kMaxBatchLen) {
+        GrowBatch(len, items, &ne);
+        len = 0;
       }
     }
   }
+  if (len) {
+    GrowBatch(len, items, &ne);
+  }
+  // TODO add DCHECK that entries_ is empty
+  entries_ = std::move(ne);
 }
 
 // Assumes that the object does not exist in the set.
@@ -511,11 +538,8 @@ void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
       break;
     }
 
-    size_t prev_size = entries_.size();
-    entries_.resize(prev_size * 2);
-    ++capacity_log_;
-
-    Grow(prev_size);
+    ++capacity_log_;  // TODO move into Grow()
+    Grow(entries_.size() * 2);
     bucket_id = BucketId(hashcode);
   }
 
@@ -779,13 +803,18 @@ uint32_t DenseSet::Scan(uint32_t cursor, const ItemCb& cb) const {
 }
 
 auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
-  LinkAllocator la(mr());
-  DenseLinkKey* lk = la.allocate(1);
-  la.construct(lk);
+  DenseLinkKey* lk = nullptr;
+  if (cached_link_num) {
+    lk = cached_links[--cached_link_num];
+  } else {
+    LinkAllocator la(mr());
+    lk = la.allocate(1);
+    la.construct(lk);
+    ++num_links_;
+  }
 
   lk->next = next;
   lk->SetObject(data);
-  ++num_links_;
 
   return lk;
 }
