@@ -161,7 +161,7 @@ void SinkReplyBuilder::Send() {
 }
 
 void SinkReplyBuilder::FinishScope() {
-  bytes_sent_ += total_size_;
+  replies_recorded_++;
 
   if (!batched_ || total_size_ * 2 >= kMaxBufferSize)
     return Flush();
@@ -203,8 +203,9 @@ void MCReplyBuilder::SendValue(std::string_view key, std::string_view value, uin
     WritePieces(" ", mc_ver);
 
   if (value.size() <= kMaxInlineSize) {
-    WritePieces(value, kCRLF);
+    WritePieces(kCRLF, value, kCRLF);
   } else {
+    WritePieces(kCRLF);
     WriteRef(value);
     WritePieces(kCRLF);
   }

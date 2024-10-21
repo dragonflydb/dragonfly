@@ -1285,7 +1285,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
 class ReplyGuard {
  public:
-  ReplyGuard(ConnectionContext* cntx, std::string_view cid_name) {
+  ReplyGuard(ConnectionContext* cntx, std::string_view cid_name) : cid_name_(cid_name) {
     const bool is_script = bool(cntx->conn_state.script_info);
     const bool is_one_of =
         absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY"}).contains(cid_name);
@@ -1295,18 +1295,20 @@ class ReplyGuard {
     const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
       builder_ = cntx->reply_builder();
-      bytes_sent_ = builder_->BytesSent();
+      replies_recorded_ = builder_->RepliesRecorded();
     }
   }
 
   ~ReplyGuard() {
     if (builder_) {
-      DCHECK_GT(builder_->BytesSent(), bytes_sent_);
+      DCHECK_GT(builder_->RepliesRecorded(), replies_recorded_)
+          << cid_name_ << " " << typeid(*builder_).name();
     }
   }
 
  private:
-  size_t bytes_sent_ = 0;
+  size_t replies_recorded_ = 0;
+  std::string_view cid_name_;
   SinkReplyBuilder* builder_ = nullptr;
 };
 

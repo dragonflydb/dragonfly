@@ -68,8 +68,8 @@ class SinkReplyBuilder {
     return buffer_.Capacity();
   }
 
-  size_t BytesSent() const {
-    return bytes_sent_;
+  size_t RepliesRecorded() const {
+    return replies_recorded_;
   }
 
   bool IsSendActive() const {
@@ -111,6 +111,9 @@ class SinkReplyBuilder {
 
   void Send();
 
+ protected:
+  size_t replies_recorded_ = 0;
+
  private:
   io::Sink* sink_;
   std::error_code ec_;
@@ -120,8 +123,6 @@ class SinkReplyBuilder {
 
   size_t total_size_ = 0;  // sum of vec_ lengths
   base::IoBuf buffer_;     // backing buffer for pieces
-
-  size_t bytes_sent_ = 0;
 
   // Stores iovecs for a single writev call. Can reference either the buffer (WritePiece) or
   // external data (WriteRef). Validity is ensured by FinishScope that either flushes before ref

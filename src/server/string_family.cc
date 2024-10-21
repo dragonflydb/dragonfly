@@ -558,7 +558,7 @@ MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask, cons
   }
 
   // Allocate enough for all values
-  response.storage.resize(total_size);
+  response.storage.resize(max(size_t(27), total_size));
   char* next = response.storage.data();
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
@@ -665,7 +665,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
   string_view value = ArgS(args, 1);
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
-  if (builder->type() == Protocol::REDIS) {
+  if (dynamic_cast<RedisReplyBuilder*>(builder)) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
@@ -677,7 +677,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
     rb->SendLong(GetResult(std::move(res.value())));
   } else {
     // Memcached skips if key is missing
-    DCHECK(builder->type() == Protocol::MC);
+    DCHECK(dynamic_cast<MCReplyBuilder*>(builder));
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
@@ -738,7 +738,7 @@ void SetExGeneric(bool seconds, CmdArgList args, const CommandId* cid, Transacti
 }
 
 void IncrByGeneric(string_view key, int64_t val, Transaction* tx, SinkReplyBuilder* builder) {
-  bool skip_on_missing = builder->type() == Protocol::MC;
+  bool skip_on_missing = dynamic_cast<MCReplyBuilder*>(builder);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
@@ -989,7 +989,7 @@ void StringFamily::Set(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
 
       // Remove existed key if the key is expired already
       if (rel_ms < 0) {
-        tx->ScheduleSingleHop([key](const Transaction* tx, EngineShard* es) {
+        tx->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
           ShardArgs args = tx->GetShardArgs(es->shard_id());
           GenericFamily::OpDel(tx->GetOpArgs(es), args);
           return OpStatus::OK;
@@ -1268,10 +1268,9 @@ void StringFamily::DecrBy(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
 void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                         ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1U);
-  std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_set->size());
 
   uint8_t fetch_mask = 0;
-  if (builder->type() == Protocol::MC) {
+  if (dynamic_cast<MCReplyBuilder*>(builder)) {
     fetch_mask |= FETCH_MCFLAG;
     if (cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
       fetch_mask |= FETCH_MCVER;
@@ -1299,7 +1298,7 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
       continue;
 
     auto& src = mget_resp[sid];
-    ShardArgs shard_args = transaction->GetShardArgs(sid);
+    ShardArgs shard_args = tx->GetShardArgs(sid);
     unsigned src_indx = 0;
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
       if (!src.resp_arr[src_indx])
@@ -1308,15 +1307,15 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
       uint32_t indx = it.index();
 
       res[indx] = std::move(src.resp_arr[src_indx]);
-      if (cntx->protocol() == Protocol::MEMCACHE) {
+      if (dynamic_cast<MCReplyBuilder*>(builder)) {
         res[indx]->key = *it;
       }
     }
   }
 
-  SinkReplyBuilder::ReplyScope scope(cntx->reply_builder());
-  if (cntx->protocol() == Protocol::MEMCACHE) {
-    auto* rb = static_cast<MCReplyBuilder*>(cntx->reply_builder());
+  SinkReplyBuilder::ReplyScope scope(builder);
+  if (dynamic_cast<MCReplyBuilder*>(builder)) {
+    auto* rb = static_cast<MCReplyBuilder*>(builder);
     for (const auto& entry : res) {
       if (!entry)
         continue;
@@ -1324,7 +1323,7 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     }
     rb->SendSimpleString("END");
   } else {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->StartArray(res.size());
     for (const auto& entry : res) {
       if (entry)
