@@ -470,8 +470,8 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   }
   arr[i++] = pub_msg.channel;
   arr[i++] = pub_msg.message;
-  rbuilder->SendStringArr(absl::Span<string_view>{arr.data(), i},
-                          RedisReplyBuilder::CollectionType::PUSH);
+  rbuilder->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
+                           RedisReplyBuilder::CollectionType::PUSH);
 }
 
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
@@ -507,7 +507,7 @@ void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) 
     rbuilder->SendNull();
   } else {
     std::string_view keys[] = {msg.key};
-    rbuilder->SendStringArr(keys);
+    rbuilder->SendBulkStrArr(keys);
   }
 }
 
@@ -1357,7 +1357,7 @@ void Connection::SquashPipeline() {
   size_t dispatched = service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
 
   if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
-    reply_builder_->FlushBatch();
+    reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
   }
 
@@ -1478,7 +1478,7 @@ void Connection::ExecutionFiber() {
       // last command to reply and flush. If it doesn't reply (i.e. is a control message like
       // migrate), we have to flush manually.
       if (dispatch_q_.empty() && !msg.IsReplying()) {
-        reply_builder_->FlushBatch();
+        reply_builder_->Flush();
       }
 
       if (ShouldEndDispatchFiber(msg)) {

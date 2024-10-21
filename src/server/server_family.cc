@@ -1606,7 +1606,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   absl::StrAppend(&info, "END\r\n");
 
   MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
-  builder->SendRaw(info);
+  // builder->SendRaw(info);
 
 #undef ADD_LINE
 }
@@ -1937,7 +1937,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       }
     }
     auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    return rb->SendStringArr(res, RedisReplyBuilder::MAP);
+    return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
   }
 
   if (sub_cmd == "RESETSTAT") {
