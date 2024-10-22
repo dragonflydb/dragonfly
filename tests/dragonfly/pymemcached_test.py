@@ -55,7 +55,7 @@ def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     so all the commands are pipelined. Assert pipelines work correctly and the
     succeeding regular command receives a reply (it should join the pipeline as last).
     """
-    keys = [f"k{i}" for i in range(200)]
+    keys = [f"k{i}" for i in range(2000)]
     values = [f"d{i}" for i in range(len(keys))]
 
     for k, v in zip(keys, values):
