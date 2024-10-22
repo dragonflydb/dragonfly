@@ -150,6 +150,8 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendSimpleString(std::string_view str) final;
   void SendProtocolError(std::string_view str) final;
 
+  void SendRaw(std::string_view str);
+
   void SetNoreply(bool noreply) {
     noreply_ = noreply;
   }

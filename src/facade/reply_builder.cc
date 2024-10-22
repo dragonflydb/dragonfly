@@ -247,6 +247,11 @@ void MCReplyBuilder::SendNotFound() {
   SendSimpleString("NOT_FOUND");
 }
 
+void MCReplyBuilder::SendRaw(std::string_view str) {
+  ReplyScope scope(this);
+  WriteRef(str);
+}
+
 void RedisReplyBuilderBase::SendNull() {
   ReplyScope scope(this);
   resp3_ ? WritePieces(kNullStringR3) : WritePieces(kNullStringR2);

@@ -1606,7 +1606,7 @@ void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* 
   absl::StrAppend(&info, "END\r\n");
 
   MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
-  // builder->SendRaw(info);
+  builder->SendRaw(info);
 
 #undef ADD_LINE
 }
