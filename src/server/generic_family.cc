@@ -1025,7 +1025,7 @@ void GenericFamily::Ping(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
     }
 
     string_view resp[2] = {"pong", msg};
-    return rb->SendStringArr(resp);
+    return rb->SendBulkStrArr(resp);
   }
 
   if (args.size() == 0) {
