@@ -287,7 +287,6 @@ uint64_t Listener::RefusedConnectionMaxClientsCount() {
 }
 
 void Listener::PreAcceptLoop(util::ProactorBase* pb) {
-  per_thread_.resize(pool()->size());
 }
 
 bool Listener::IsPrivilegedInterface() const {
@@ -319,51 +318,15 @@ void Listener::PostShutdown() {
 }
 
 void Listener::OnConnectionStart(util::Connection* conn) {
-  unsigned id = conn->socket()->proactor()->GetPoolIndex();
-  DCHECK_LT(id, per_thread_.size());
-
   facade::Connection* facade_conn = static_cast<facade::Connection*>(conn);
   VLOG(1) << "Opening connection " << facade_conn->GetClientId();
 
   facade_conn->OnConnectionStart();
-
-  absl::base_internal::SpinLockHolder lock{&mutex_};
-  int32_t prev_cnt = per_thread_[id].num_connections++;
-  ++conn_cnt_;
-
-  if (id == min_cnt_thread_id_) {
-    DCHECK_EQ(min_cnt_, prev_cnt);
-    ++min_cnt_;
-    for (unsigned i = 0; i < per_thread_.size(); ++i) {
-      auto cnt = per_thread_[i].num_connections;
-      if (cnt < min_cnt_) {
-        min_cnt_ = cnt;
-        min_cnt_thread_id_ = i;
-        break;
-      }
-    }
-  }
 }
 
 void Listener::OnConnectionClose(util::Connection* conn) {
-  // TODO: We do not account for connections migrated to other threads. This is a rare case.
-  unsigned id = conn->socket()->proactor()->GetPoolIndex();
-  DCHECK_LT(id, per_thread_.size());
-  auto& pth = per_thread_[id];
-
-  facade::Connection* facade_conn = static_cast<facade::Connection*>(conn);
+  Connection* facade_conn = static_cast<Connection*>(conn);
   VLOG(1) << "Closing connection " << facade_conn->GetClientId();
-
-  absl::base_internal::SpinLockHolder lock{&mutex_};
-  int32_t cur_cnt = --pth.num_connections;
-  --conn_cnt_;
-
-  auto mincnt = min_cnt_;
-  if (mincnt > cur_cnt) {
-    min_cnt_ = cur_cnt;
-    min_cnt_thread_id_ = id;
-    return;
-  }
 }
 
 void Listener::OnMaxConnectionsReached(util::FiberSocketBase* sock) {
@@ -396,22 +359,19 @@ ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
       }
 
       if (GetFlag(FLAGS_conn_use_incoming_cpu)) {
+        // We choose a thread that is running on the incoming CPU. Usually there is
+        // a single thread per CPU. SO_INCOMING_CPU returns the CPU that the kernel
+        // uses to steer the packets to. In order to make
+        // conn_use_incoming_cpu effective, we should make sure that the receive packets are
+        // steered to enough CPUs. This can be done by setting the RPS mask in
+        // /sys/class/net/<dev>/queues/rx-<n>/rps_cpus. For more details, see
+        // https://docs.kernel.org/networking/scaling.html#rps-configuration
+        // Please note that if conn_use_incoming_cpu is true, connections will be handled only
+        // on the CPUs that handle the softirqs for the incoming packets.
+        // To avoid imbalance in CPU load, RPS tuning is strongly advised.
         const vector<unsigned>& ids = pool()->MapCpuToThreads(cpu);
-
-        absl::base_internal::SpinLockHolder lock{&mutex_};
-        for (auto id : ids) {
-          DCHECK_LT(id, per_thread_.size());
-          if (per_thread_[id].num_connections < min_cnt_ + 5) {
-            VLOG(1) << "using thread " << id << " for cpu " << cpu;
-            res_id = id;
-            break;
-          }
-        }
-
-        if (res_id == kuint32max) {
-          VLOG(1) << "choosing a thread with minimum conns " << min_cnt_thread_id_ << " instead of "
-                  << cpu;
-          res_id = min_cnt_thread_id_;
+        if (!ids.empty()) {
+          res_id = ids[0];
         }
       }
     }
