@@ -708,22 +708,22 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   return created;
 }
 
-void HGetGeneric(CmdArgList args, ConnectionContext* cntx, uint8_t getall_mask) {
+void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpGetAll(t->GetOpArgs(shard), key, getall_mask);
   };
 
-  OpResult<vector<string>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<string>> result = tx->ScheduleSingleHopT(std::move(cb));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (result) {
     bool is_map = (getall_mask == (VALUES | FIELDS));
     rb->SendStringArr(absl::Span<const string>{*result},
                       is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
@@ -745,7 +745,7 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
 }
 
 // HSETEX key [NX] tll_sec field value field value ...
-void HSetEx(CmdArgList args, ConnectionContext* cntx) {
+void HSetEx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
   CmdArgParser parser{args};
 
   string_view key = parser.Next();
@@ -757,13 +757,13 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
   constexpr uint32_t kMaxTtl = (1UL << 26);
 
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return cntx->SendError(kInvalidIntErr);
+    return builder->SendError(kInvalidIntErr);
   }
 
   CmdArgList fields = parser.Tail();
 
   if (fields.size() % 2 != 0) {
-    return cntx->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
+    return builder->SendError(facade::WrongNumArgsError(cntx->cid->name()), kSyntaxErrType);
   }
 
   OpSetParams op_sp{skip_if_exists, ttl_sec};
@@ -772,17 +772,17 @@ void HSetEx(CmdArgList args, ConnectionContext* cntx) {
     return OpSet(t->GetOpArgs(shard), key, fields, op_sp);
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cntx->SendLong(*result);
+    builder->SendLong(*result);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
 }  // namespace
 
-void HSetFamily::HDel(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HDel(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
 
   args.remove_prefix(1);
@@ -790,28 +790,28 @@ void HSetFamily::HDel(CmdArgList args, ConnectionContext* cntx) {
     return OpDel(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    cntx->SendLong(*result);
+    builder->SendLong(*result);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void HSetFamily::HLen(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cntx->SendLong(*result);
+    builder->SendLong(*result);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HExists(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
 
@@ -819,46 +819,46 @@ void HSetFamily::HExists(CmdArgList args, ConnectionContext* cntx) {
     return OpExist(t->GetOpArgs(shard), key, field);
   };
 
-  OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<int> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cntx->SendLong(*result);
+    builder->SendLong(*result);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HExpire(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
   string_view ttl_str = parser.Next();
   uint32_t ttl_sec;
   constexpr uint32_t kMaxTtl = (1UL << 26);
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return cntx->SendError(kInvalidIntErr);
+    return builder->SendError(kInvalidIntErr);
   }
   if (!static_cast<bool>(parser.Check("FIELDS"sv))) {
-    return cntx->SendError("Mandatory argument FIELDS is missing or not at the right position",
-                           kSyntaxErrType);
+    return builder->SendError("Mandatory argument FIELDS is missing or not at the right position",
+                              kSyntaxErrType);
   }
 
   string_view numFieldsStr = parser.Next();
   uint32_t numFields;
   if (!absl::SimpleAtoi(numFieldsStr, &numFields) || numFields == 0) {
-    return cntx->SendError(kInvalidIntErr);
+    return builder->SendError(kInvalidIntErr);
   }
 
   CmdArgList fields = parser.Tail();
   if (fields.size() != numFields) {
-    return cntx->SendError("The `numfields` parameter must match the number of arguments",
-                           kSyntaxErrType);
+    return builder->SendError("The `numfields` parameter must match the number of arguments",
+                              kSyntaxErrType);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpHExpire(t->GetOpArgs(shard), key, ttl_sec, fields);
   };
 
-  OpResult<vector<long>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  OpResult<vector<long>> result = tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (result) {
     rb->StartArray(result->size());
     const auto& array = result.value();
@@ -866,11 +866,11 @@ void HSetFamily::HExpire(CmdArgList args, ConnectionContext* cntx) {
       rb->SendLong(v);
     }
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HMGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
 
   args.remove_prefix(1);
@@ -878,12 +878,12 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
     return OpHMGet(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult<vector<OptStr>> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<vector<OptStr>> result = tx->ScheduleSingleHopT(std::move(cb));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (result) {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    SinkReplyBuilder::ReplyAggregator agg(builder);
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->StartArray(result->size());
     for (const auto& val : *result) {
       if (val) {
@@ -893,18 +893,18 @@ void HSetFamily::HMGet(CmdArgList args, ConnectionContext* cntx) {
       }
     }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
+    SinkReplyBuilder::ReplyAggregator agg(builder);
 
     rb->StartArray(args.size());
     for (unsigned i = 0; i < args.size(); ++i) {
       rb->SendNull();
     }
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
 
@@ -912,27 +912,27 @@ void HSetFamily::HGet(CmdArgList args, ConnectionContext* cntx) {
     return OpGet(t->GetOpArgs(shard), key, field);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<string> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendBulkString(*result);
   } else {
     if (result.status() == OpStatus::KEY_NOTFOUND) {
       rb->SendNull();
     } else {
-      cntx->SendError(result.status());
+      builder->SendError(result.status());
     }
   }
 }
 
-void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HIncrBy(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
   string_view incrs = ArgS(args, 2);
   int64_t ival = 0;
 
   if (!absl::SimpleAtoi(incrs, &ival)) {
-    return cntx->SendError(kInvalidIntErr);
+    return builder->SendError(kInvalidIntErr);
   }
 
   IncrByParam param{ival};
@@ -941,33 +941,33 @@ void HSetFamily::HIncrBy(CmdArgList args, ConnectionContext* cntx) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
-  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpStatus status = tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    cntx->SendLong(get<int64_t>(param));
+    builder->SendLong(get<int64_t>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
-        cntx->SendError("hash value is not an integer");
+        builder->SendError("hash value is not an integer");
         break;
       case OpStatus::OUT_OF_RANGE:
-        cntx->SendError(kIncrOverflow);
+        builder->SendError(kIncrOverflow);
         break;
       default:
-        cntx->SendError(status);
+        builder->SendError(status);
         break;
     }
   }
 }
 
-void HSetFamily::HIncrByFloat(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HIncrByFloat(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
   string_view incrs = ArgS(args, 2);
   double dval = 0;
 
   if (!absl::SimpleAtod(incrs, &dval)) {
-    return cntx->SendError(kInvalidFloatErr);
+    return builder->SendError(kInvalidFloatErr);
   }
 
   IncrByParam param{dval};
@@ -976,55 +976,55 @@ void HSetFamily::HIncrByFloat(CmdArgList args, ConnectionContext* cntx) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
   };
 
-  OpStatus status = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpStatus status = tx->ScheduleSingleHop(std::move(cb));
 
   if (status == OpStatus::OK) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->SendDouble(get<double>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
-        cntx->SendError("hash value is not a float");
+        builder->SendError("hash value is not a float");
         break;
       default:
-        cntx->SendError(status);
+        builder->SendError(status);
         break;
     }
   }
 }
 
-void HSetFamily::HKeys(CmdArgList args, ConnectionContext* cntx) {
-  HGetGeneric(args, cntx, FIELDS);
+void HSetFamily::HKeys(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  HGetGeneric(args, FIELDS, tx, builder);
 }
 
-void HSetFamily::HVals(CmdArgList args, ConnectionContext* cntx) {
-  HGetGeneric(args, cntx, VALUES);
+void HSetFamily::HVals(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  HGetGeneric(args, VALUES, tx, builder);
 }
 
-void HSetFamily::HGetAll(CmdArgList args, ConnectionContext* cntx) {
-  HGetGeneric(args, cntx, GetAllMode::FIELDS | GetAllMode::VALUES);
+void HSetFamily::HGetAll(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  HGetGeneric(args, GetAllMode::FIELDS | GetAllMode::VALUES, tx, builder);
 }
 
-void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HScan(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   std::string_view key = ArgS(args, 0);
   std::string_view token = ArgS(args, 1);
 
   uint64_t cursor = 0;
 
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return cntx->SendError("invalid cursor");
+    return builder->SendError("invalid cursor");
   }
 
   // HSCAN key cursor [MATCH pattern] [COUNT count]
   if (args.size() > 6) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
-    return cntx->SendError(kSyntaxErr);
+    return builder->SendError(kSyntaxErr);
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "HScan invalid args - return " << ops << " to the user";
-    return cntx->SendError(ops.status());
+    return builder->SendError(ops.status());
   }
 
   ScanOpts scan_op = ops.value();
@@ -1033,8 +1033,8 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     rb->StartArray(2);
     rb->SendBulkString(absl::StrCat(cursor));
@@ -1043,17 +1043,18 @@ void HSetFamily::HScan(CmdArgList args, ConnectionContext* cntx) {
       rb->SendBulkString(k);
     }
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                      ConnectionContext* cntx) {
   string_view key = ArgS(args, 0);
 
   string_view cmd{cntx->cid->name()};
 
   if (args.size() % 2 != 1) {
-    return cntx->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
+    return builder->SendError(facade::WrongNumArgsError(cmd), kSyntaxErrType);
   }
 
   args.remove_prefix(1);
@@ -1061,16 +1062,16 @@ void HSetFamily::HSet(CmdArgList args, ConnectionContext* cntx) {
     return OpSet(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
 
   if (result && cmd == "HSET") {
-    cntx->SendLong(*result);
+    builder->SendLong(*result);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HSetNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
 
   args.remove_prefix(1);
@@ -1078,15 +1079,15 @@ void HSetFamily::HSetNx(CmdArgList args, ConnectionContext* cntx) {
     return OpSet(t->GetOpArgs(shard), key, args, OpSetParams{.skip_if_exists = true});
   };
 
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cntx->SendLong(*result);
+    builder->SendLong(*result);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HStrLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
   string_view field = ArgS(args, 1);
 
@@ -1094,11 +1095,11 @@ void HSetFamily::HStrLen(CmdArgList args, ConnectionContext* cntx) {
     return OpStrLen(t->GetOpArgs(shard), key, field);
   };
 
-  OpResult<size_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<size_t> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cntx->SendLong(*result);
+    builder->SendLong(*result);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
@@ -1110,10 +1111,10 @@ void StrVecEmplaceBack(StringVec& str_vec, const listpackEntry& lp) {
   str_vec.emplace_back(absl::StrCat(lp.lval));
 }
 
-void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
+void HSetFamily::HRandField(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   if (args.size() > 3) {
     DVLOG(1) << "Wrong number of command arguments: " << args.size();
-    return cntx->SendError(kSyntaxErr);
+    return builder->SendError(kSyntaxErr);
   }
 
   string_view key = ArgS(args, 0);
@@ -1121,19 +1122,19 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   bool with_values = false;
 
   if ((args.size() > 1) && (!SimpleAtoi(ArgS(args, 1), &count))) {
-    return cntx->SendError("count value is not an integer", kSyntaxErrType);
+    return builder->SendError("count value is not an integer", kSyntaxErrType);
   }
 
   if (args.size() == 3) {
     string arg = absl::AsciiStrToUpper(ArgS(args, 2));
     if (arg != "WITHVALUES")
-      return cntx->SendError(kSyntaxErr);
+      return builder->SendError(kSyntaxErr);
     else
       with_values = true;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
-    auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+    auto& db_slice = t->GetDbSlice(shard->shard_id());
     DbContext db_context = t->GetDbContext();
     auto it_res = db_slice.FindReadOnly(db_context, key, OBJ_HASH);
 
@@ -1213,8 +1214,8 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     return str_vec;
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
     if ((result->size() == 1) && (args.size() == 1))
       rb->SendBulkString(result->front());
@@ -1226,7 +1227,7 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
     else
       rb->SendEmptyArray();
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 

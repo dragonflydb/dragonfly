@@ -12,9 +12,9 @@
 
 namespace dfly {
 
-class ConnectionContext;
 class CommandRegistry;
 class StringMap;
+class Transaction;
 
 using facade::OpResult;
 using facade::OpStatus;
@@ -34,24 +34,25 @@ class HSetFamily {
                                                PrimeValue* pv);
 
  private:
-  // TODO: to move it to anonymous namespace in cc file.
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void HExpire(CmdArgList args, ConnectionContext* cntx);
-  static void HDel(CmdArgList args, ConnectionContext* cntx);
-  static void HLen(CmdArgList args, ConnectionContext* cntx);
-  static void HExists(CmdArgList args, ConnectionContext* cntx);
-  static void HGet(CmdArgList args, ConnectionContext* cntx);
-  static void HMGet(CmdArgList args, ConnectionContext* cntx);
-  static void HIncrBy(CmdArgList args, ConnectionContext* cntx);
-  static void HKeys(CmdArgList args, ConnectionContext* cntx);
-  static void HVals(CmdArgList args, ConnectionContext* cntx);
-  static void HGetAll(CmdArgList args, ConnectionContext* cntx);
-  static void HIncrByFloat(CmdArgList args, ConnectionContext* cntx);
-  static void HScan(CmdArgList args, ConnectionContext* cntx);
-  static void HSet(CmdArgList args, ConnectionContext* cntx);
-  static void HSetNx(CmdArgList args, ConnectionContext* cntx);
-  static void HStrLen(CmdArgList args, ConnectionContext* cntx);
-  static void HRandField(CmdArgList args, ConnectionContext* cntx);
+  static void HExpire(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HDel(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HExists(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HMGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HIncrBy(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HKeys(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HVals(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HGetAll(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HIncrByFloat(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HScan(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                   ConnectionContext* cntx);
+  static void HSetNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HStrLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void HRandField(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 };
 
 }  // namespace dfly
