@@ -206,19 +206,11 @@ class EngineShard {
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
 
-  void StartPeriodicFiber(util::ProactorBase* pb, std::function<void()> shard_handler);
-  void StartPeriodicFiberWithoutHeartbeat(util::ProactorBase* pb,
-                                          std::function<void()> shard_handler);
-  void StartPeriodicFiberImpl(util::ProactorBase* pb, std::function<void()> shard_handler,
-                              bool heartbeat);
+  void StartPeriodicHeartbeatFiber(util::ProactorBase* pb);
+  void StartPeriodicShardHandlerFiber(util::ProactorBase* pb, std::function<void()> shard_handler);
 
   void Heartbeat();
   void RetireExpiredAndEvict();
-
-  void RunHeartbeatPeriodic(std::chrono::milliseconds period_ms,
-                            std::function<void()> shard_handler);
-  void RunShardHandlerPeriodic(std::chrono::milliseconds period_ms,
-                               std::function<void()> shard_handler);
 
   void CacheStats();
 

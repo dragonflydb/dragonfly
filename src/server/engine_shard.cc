@@ -408,36 +408,55 @@ void EngineShard::StopPeriodicFiber() {
   }
 }
 
-void EngineShard::StartPeriodicFiberImpl(util::ProactorBase* pb,
-                                         std::function<void()> shard_handler, bool heartbeat) {
+static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds period_ms,
+                             std::string_view error_msg, util::fb2::Done* waiter) {
+  int64_t last_heartbeat_ms = INT64_MAX;
+
+  while (true) {
+    if (waiter->WaitFor(period_ms)) {
+      VLOG(2) << "finished running engine shard periodic task";
+      return;
+    }
+
+    int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+    if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
+      VLOG(1) << "This " << error_msg << " step took " << now_ms - last_heartbeat_ms << "ms";
+    }
+    f();
+    last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+  }
+}
+
+void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   uint32_t clock_cycle_ms = 1000 / std::max<uint32_t>(1, GetFlag(FLAGS_hz));
   if (clock_cycle_ms == 0)
     clock_cycle_ms = 1;
 
-  if (heartbeat) {
-    fiber_heartbeat_periodic_ =
-        MakeFiber([this, index = pb->GetPoolIndex(), period_ms = clock_cycle_ms,
-                   handler = std::move(shard_handler)]() mutable {
-          ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
-          RunHeartbeatPeriodic(std::chrono::milliseconds(period_ms), std::move(handler));
-        });
-  } else {
-    fiber_shard_handler_periodic_ =
-        MakeFiber([this, index = pb->GetPoolIndex(), period_ms = clock_cycle_ms,
-                   handler = std::move(shard_handler)]() mutable {
-          ThisFiber::SetName(absl::StrCat("shard_handler_periodic", index));
-          RunShardHandlerPeriodic(std::chrono::milliseconds(period_ms), std::move(handler));
-        });
-  }
+  auto heartbeat = [this]() { Heartbeat(); };
+
+  std::chrono::milliseconds period_ms(clock_cycle_ms);
+
+  fiber_heartbeat_periodic_ =
+      MakeFiber([this, index = pb->GetPoolIndex(), period_ms, heartbeat]() mutable {
+        ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
+        RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
+      });
 }
 
-void EngineShard::StartPeriodicFiber(util::ProactorBase* pb, std::function<void()> shard_handler) {
-  StartPeriodicFiberImpl(pb, std::move(shard_handler), true);
-}
+void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
+                                                 std::function<void()> shard_handler) {
+  uint32_t clock_cycle_ms = 1000 / std::max<uint32_t>(1, GetFlag(FLAGS_hz));
+  if (clock_cycle_ms == 0)
+    clock_cycle_ms = 1;
 
-void EngineShard::StartPeriodicFiberWithoutHeartbeat(util::ProactorBase* pb,
-                                                     std::function<void()> shard_handler) {
-  StartPeriodicFiberImpl(pb, std::move(shard_handler), false);
+  // Minimum 100ms
+  std::chrono::milliseconds period_ms(std::max((uint32_t)100, clock_cycle_ms));
+  fiber_shard_handler_periodic_ = MakeFiber(
+      [this, index = pb->GetPoolIndex(), period_ms, handler = std::move(shard_handler)]() mutable {
+        ThisFiber::SetName(absl::StrCat("shard_handler_periodic", index));
+        RunFPeriodically(std::move(handler), period_ms, "shard handler",
+                         &fiber_shard_handler_periodic_done_);
+      });
 }
 
 void EngineShard::InitThreadLocal(ProactorBase* pb) {
@@ -716,57 +735,6 @@ void EngineShard::RetireExpiredAndEvict() {
   // Trigger write to socket when loop finishes.
   if (auto journal = EngineShard::tlocal()->journal(); journal) {
     TriggerJournalWriteToSink();
-  }
-}
-
-void EngineShard::RunHeartbeatPeriodic(std::chrono::milliseconds period_ms,
-                                       std::function<void()> shard_handler) {
-  VLOG(1) << "RunPeriodic with period " << period_ms.count() << "ms";
-
-  int64_t last_heartbeat_ms = INT64_MAX;
-  int64_t last_handler_ms = 0;
-
-  while (true) {
-    if (fiber_heartbeat_periodic_done_.WaitFor(period_ms)) {
-      VLOG(2) << "finished running engine shard periodic task";
-      return;
-    }
-
-    int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
-    if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
-      VLOG(1) << "This heartbeat-sleep took " << now_ms - last_heartbeat_ms << "ms";
-    }
-    Heartbeat();
-    last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
-    if (shard_handler && last_handler_ms + 100 < last_heartbeat_ms) {
-      last_handler_ms = last_heartbeat_ms;
-      shard_handler();
-    }
-  }
-}
-
-void EngineShard::RunShardHandlerPeriodic(std::chrono::milliseconds period_ms,
-                                          std::function<void()> shard_handler) {
-  VLOG(1) << "RunShardHandlerPeriodic with period " << period_ms.count() << "ms";
-
-  int64_t last_handler_ms = INT64_MAX;
-
-  while (true) {
-    if (fiber_shard_handler_periodic_done_.WaitFor(period_ms)) {
-      VLOG(2) << "finished running engine shard periodic task";
-      return;
-    }
-
-    int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
-    if (now_ms - 5 * period_ms.count() > last_handler_ms) {
-      VLOG(1) << "This shard handler/sleep without heartbeat took " << now_ms - last_handler_ms
-              << "ms";
-    }
-    last_handler_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
-    // We need to check cause some tests pass an empty shard_handler
-    if (shard_handler) {
-      shard_handler();
-    }
   }
 }
 
