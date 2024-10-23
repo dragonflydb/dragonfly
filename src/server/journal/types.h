@@ -40,7 +40,7 @@ struct Entry : public EntryBase {
   struct Payload {
     std::string_view cmd;
     std::variant<ShardArgs,  // Shard parts.
-                 ArgSlice>
+                 ArgSlice>   // Parts of a full command.
         args;
 
     Payload() = default;

@@ -57,10 +57,6 @@ inline std::string_view ArgS(ArgSlice args, size_t i) {
   return args[i];
 }
 
-inline auto ArgS(CmdArgList args) {
-  return base::it::Transform(kToSV, base::it::Range{args.begin(), args.end()});
-}
-
 struct ArgRange {
   ArgRange(ArgRange&&) = default;
   ArgRange(const ArgRange&) = default;

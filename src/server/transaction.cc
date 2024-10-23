@@ -296,7 +296,7 @@ void Transaction::PrepareMultiFps(CmdArgList keys) {
   auto& tag_fps = multi_->tag_fps;
 
   tag_fps.reserve(keys.size());
-  for (string_view str : ArgS(keys)) {
+  for (string_view str : keys) {
     ShardId sid = Shard(str, shard_set->size());
     tag_fps.emplace(sid, LockTag(str).Fingerprint());
   }

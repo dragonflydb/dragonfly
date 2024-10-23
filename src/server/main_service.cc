@@ -1793,7 +1793,7 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
-  for (std::string_view key : ArgS(args)) {
+  for (string_view key : args) {
     exec_info.watched_keys.emplace_back(cntx->db_index(), key);
   }
 
@@ -2421,7 +2421,7 @@ void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(args.size() * 2);
 
-  for (string_view channel : ArgS(args)) {
+  for (string_view channel : args) {
     rb->SendBulkString(channel);
     rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
   }
