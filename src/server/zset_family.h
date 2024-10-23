@@ -90,15 +90,6 @@ class ZSetFamily {
   static void ZUnion(CmdArgList args, ConnectionContext* cntx);
   static void ZUnionStore(CmdArgList args, ConnectionContext* cntx);
 
-  static void ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, RangeParams range_params);
-  static void ZRemRangeGeneric(std::string_view key, const ZRangeSpec& range_spec,
-                               ConnectionContext* cntx);
-  static void ZRangeInternal(CmdArgList args, RangeParams range_params, ConnectionContext* cntx);
-  static void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx);
-  static bool ParseRangeByScoreParams(CmdArgList args, RangeParams* params);
-  static void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx);
-  static OpResult<MScoreResponse> ZGetMembers(CmdArgList args, ConnectionContext* cntx);
-
   static void GeoAdd(CmdArgList args, ConnectionContext* cntx);
   static void GeoHash(CmdArgList args, ConnectionContext* cntx);
   static void GeoPos(CmdArgList args, ConnectionContext* cntx);
