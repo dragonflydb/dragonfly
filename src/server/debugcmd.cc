@@ -9,6 +9,7 @@ extern "C" {
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <zstd.h>
 
@@ -370,7 +371,7 @@ DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), 
 }
 
 void DebugCmd::Run(CmdArgList args) {
-  string_view subcmd = ArgS(args, 0);
+  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
   if (subcmd == "HELP") {
     string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -413,6 +414,8 @@ void DebugCmd::Run(CmdArgList args) {
         "TRAFFIC <path> | [STOP]",
         "    Starts traffic logging to the specified path. If path is not specified,"
         "    traffic logging is stopped.",
+        "RECVSIZE [<tid> | ENABLE | DISABLE]",
+        "    Prints the histogram of the received request sizes on the given thread",
         "HELP",
         "    Prints this help.",
     };
@@ -468,6 +471,10 @@ void DebugCmd::Run(CmdArgList args) {
     return LogTraffic(args.subspan(1));
   }
 
+  if (subcmd == "RECVSIZE" && args.size() == 2) {
+    return RecvSize(ArgS(args, 1));
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
   return cntx_->SendError(reply, kSyntaxErrType);
 }
@@ -481,8 +488,7 @@ void DebugCmd::Reload(CmdArgList args) {
   bool save = true;
 
   for (size_t i = 1; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-    string_view opt = ArgS(args, i);
+    string_view opt = absl::AsciiStrToUpper(ArgS(args, i));
     VLOG(1) << "opt " << opt;
 
     if (opt == "NOSAVE") {
@@ -520,8 +526,8 @@ void DebugCmd::Reload(CmdArgList args) {
 
 void DebugCmd::Replica(CmdArgList args) {
   args.remove_prefix(1);
-  ToUpper(&args[0]);
-  string_view opt = ArgS(args, 0);
+
+  string opt = absl::AsciiStrToUpper(ArgS(args, 0));
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   if (opt == "PAUSE" || opt == "RESUME") {
@@ -568,8 +574,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
   }
 
   for (size_t index = 4; args.size() > index; ++index) {
-    ToUpper(&args[index]);
-    std::string_view str = ArgS(args, index);
+    string str = absl::AsciiStrToUpper(ArgS(args, index));
     if (str == "RAND") {
       options.populate_random_values = true;
     } else if (str == "TYPE") {
@@ -577,8 +582,8 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
         cntx_->SendError(kSyntaxErr);
         return nullopt;
       }
-      ToUpper(&args[++index]);
-      options.type = ArgS(args, index);
+      ++index;
+      options.type = absl::AsciiStrToUpper(ArgS(args, index));
     } else if (str == "ELEMENTS") {
       if (args.size() < index + 2) {
         cntx_->SendError(kSyntaxErr);
@@ -957,6 +962,31 @@ void DebugCmd::Shards() {
 #undef MAXMIN_STAT
   auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   rb->SendVerbatimString(out);
+}
+
+void DebugCmd::RecvSize(string_view param) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  uint8_t enable = 2;
+  if (absl::EqualsIgnoreCase(param, "ENABLE"))
+    enable = 1;
+  else if (absl::EqualsIgnoreCase(param, "DISABLE"))
+    enable = 0;
+
+  if (enable < 2) {
+    shard_set->pool()->AwaitBrief(
+        [enable](auto, auto*) { facade::Connection::TrackRequestSize(enable == 1); });
+    return rb->SendOk();
+  }
+
+  unsigned tid;
+  if (!absl::SimpleAtoi(param, &tid) || tid >= shard_set->pool()->size()) {
+    return rb->SendError(kUintErr);
+  }
+
+  string hist;
+  shard_set->pool()->at(tid)->AwaitBrief(
+      [&]() { facade::Connection::GetRequestSizeHistogramThreadLocal(&hist); });
+  rb->SendVerbatimString(hist);
 }
 
 }  // namespace dfly

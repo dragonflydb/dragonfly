@@ -67,7 +67,9 @@ class SinkReplyBuilder {
   SinkReplyBuilder(const SinkReplyBuilder&) = delete;
   void operator=(const SinkReplyBuilder&) = delete;
 
-  explicit SinkReplyBuilder(::io::Sink* sink);
+  enum Type { REDIS, MC };
+
+  explicit SinkReplyBuilder(::io::Sink* sink, Type t);
 
   virtual ~SinkReplyBuilder() {
   }
@@ -147,13 +149,15 @@ class SinkReplyBuilder {
     return tl_facade_stats->reply_stats;
   }
 
-  static void ResetThreadLocalStats();
-
   virtual void StartAggregate();
   virtual void StopAggregate();
 
   std::string ConsumeLastError() {
     return std::exchange(last_error_, std::string{});
+  }
+
+  Type type() const {
+    return type_;
   }
 
  protected:
@@ -174,6 +178,7 @@ class SinkReplyBuilder {
   bool should_aggregate_ : 1;
   bool has_replied_ : 1;
   bool send_active_ : 1;
+  Type type_;
 };
 
 // Base class for all reply builders. Offer a simple high level interface for controlling output
@@ -235,10 +240,6 @@ class SinkReplyBuilder2 {
 
   static const ReplyStats& GetThreadLocalStats() {
     return tl_facade_stats->reply_stats;
-  }
-
-  static void ResetThreadLocalStats() {
-    tl_facade_stats->reply_stats = {};
   }
 
  public:  // High level interface
@@ -442,7 +443,7 @@ class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilde
   }
 
   void StartAggregate() override {
-    aggregators_.emplace_back(SinkReplyBuilder2::ReplyAggregator(this));
+    aggregators_.emplace_back(this);
   }
 
   void StopAggregate() override {

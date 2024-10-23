@@ -19,7 +19,7 @@ class DebugCmd {
     std::string_view prefix{"key"};
     uint32_t val_size = 16;
     bool populate_random_values = false;
-    std::string_view type{"STRING"};
+    std::string type{"STRING"};
     uint32_t elements = 1;
 
     std::optional<cluster::SlotRange> slot_range;
@@ -48,6 +48,7 @@ class DebugCmd {
   void Stacktrace();
   void Shards();
   void LogTraffic(CmdArgList);
+  void RecvSize(std::string_view param);
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;

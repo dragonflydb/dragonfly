@@ -13,6 +13,7 @@
 #include <variant>
 
 #include "base/flags.h"
+#include "base/histogram.h"
 #include "base/io_buf.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
@@ -153,7 +154,8 @@ bool TrafficLogger::Write(iovec* blobs, size_t len) {
   return true;
 }
 
-thread_local TrafficLogger tl_traffic_logger{};  // nullopt while disabled
+thread_local TrafficLogger tl_traffic_logger{};
+thread_local base::Histogram* io_req_size_hist = nullptr;
 
 void OpenTrafficLogger(string_view base_path) {
   unique_lock lk{tl_traffic_logger.mutex};
@@ -528,11 +530,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
       http_listener_(http_listener),
       ssl_ctx_(ctx),
       service_(service),
-      tracking_enabled_(false),
-      skip_next_squashing_(false),
-      migration_enabled_(false),
-      migration_in_process_(false),
-      is_http_(false) {
+      flags_(0) {
   static atomic_uint32_t next_id{1};
 
   protocol_ = protocol;
@@ -1084,11 +1082,14 @@ Connection::ParserStatus Connection::ParseRedis() {
 
   do {
     result = redis_parser_->Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
-
+    request_consumed_bytes_ += consumed;
     if (result == RedisParser::OK && !parse_args.empty()) {
       if (RespExpr& first = parse_args.front(); first.type == RespExpr::STRING)
         DVLOG(2) << "Got Args with first token " << ToSV(first.GetBuf());
 
+      if (io_req_size_hist)
+        io_req_size_hist->Add(request_consumed_bytes_);
+      request_consumed_bytes_ = 0;
       bool has_more = consumed < io_buf_.InputLen();
 
       if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
@@ -1824,6 +1825,20 @@ void Connection::SetMaxQueueLenThreadLocal(uint32_t val) {
   tl_queue_backpressure_.pipeline_queue_max_len = val;
 }
 
+void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {
+  if (io_req_size_hist)
+    *hist = io_req_size_hist->ToString();
+}
+
+void Connection::TrackRequestSize(bool enable) {
+  if (enable && !io_req_size_hist) {
+    io_req_size_hist = new base::Histogram;
+  } else if (!enable && io_req_size_hist) {
+    delete io_req_size_hist;
+    io_req_size_hist = nullptr;
+  }
+}
+
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure,
                              unsigned thread, uint32_t client_id)
     : ptr_{ptr}, backpressure_{backpressure}, thread_{thread}, client_id_{client_id} {
@@ -1868,6 +1883,22 @@ bool Connection::WeakRef::operator<(const WeakRef& other) {
 
 bool Connection::WeakRef::operator==(const WeakRef& other) const {
   return client_id_ == other.client_id_;
+}
+
+void ResetStats() {
+  auto& cstats = tl_facade_stats->conn_stats;
+  cstats.command_cnt = 0;
+  cstats.pipelined_cmd_cnt = 0;
+  cstats.conn_received_cnt = 0;
+  cstats.pipelined_cmd_cnt = 0;
+  cstats.command_cnt = 0;
+  cstats.io_read_cnt = 0;
+  cstats.io_read_bytes = 0;
+
+  tl_facade_stats->reply_stats = {};
+
+  if (io_req_size_hist)
+    io_req_size_hist->Clear();
 }
 
 }  // namespace facade

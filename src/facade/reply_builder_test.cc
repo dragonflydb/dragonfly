@@ -84,7 +84,7 @@ class RedisReplyBuilderTest : public testing::Test {
   void SetUp() {
     sink_.Clear();
     builder_.reset(new RedisReplyBuilder2(&sink_));
-    SinkReplyBuilder2::ResetThreadLocalStats();
+    ResetStats();
   }
 
   static void SetUpTestSuite() {

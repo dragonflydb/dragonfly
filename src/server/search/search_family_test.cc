@@ -894,6 +894,22 @@ TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("avg_price", "20")));
 }
 
+TEST_F(SearchFamilyTest, JsonAggregateGroupByWithoutAtSign) {
+  Run({"HSET", "h1", "group", "first", "value", "1"});
+  Run({"HSET", "h2", "group", "second", "value", "2"});
+  Run({"HSET", "h3", "group", "first", "value", "3"});
+
+  auto resp =
+      Run({"FT.CREATE", "index", "ON", "HASH", "SCHEMA", "group", "TAG", "value", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  // TODO: Throw an error when no '@' is provided in the GROUPBY option
+  resp = Run({"FT.AGGREGATE", "index", "*", "GROUPBY", "1", "group", "REDUCE", "COUNT", "0", "AS",
+              "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("count", "2", "group", "first"),
+                                         IsMap("group", "second", "count", "1")));
+}
+
 TEST_F(SearchFamilyTest, AggregateGroupByReduceSort) {
   for (size_t i = 0; i < 101; i++) {  // 51 even, 50 odd
     Run({"hset", absl::StrCat("k", i), "even", (i % 2 == 0) ? "true" : "false", "value",

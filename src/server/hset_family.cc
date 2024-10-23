@@ -1125,8 +1125,8 @@ void HSetFamily::HRandField(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (args.size() == 3) {
-    ToUpper(&args[2]);
-    if (ArgS(args, 2) != "WITHVALUES")
+    string arg = absl::AsciiStrToUpper(ArgS(args, 2));
+    if (arg != "WITHVALUES")
       return cntx->SendError(kSyntaxErr);
     else
       with_values = true;

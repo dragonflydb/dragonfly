@@ -523,6 +523,59 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
         pass
 
 
+async def test_reply_count(async_client: aioredis.Redis):
+    """Make sure reply aggregations reduce reply counts for common cases"""
+
+    async def get_reply_count():
+        return (await async_client.info("STATS"))["reply_count"]
+
+    async def measure(aw):
+        before = await get_reply_count()
+        await aw
+        return await get_reply_count() - before - 1
+
+    base = await get_reply_count()
+    info_diff = await get_reply_count() - base
+    assert info_diff == 1
+
+    # Warm client buffer up
+    await async_client.lpush("warmup", *(i for i in range(500)))
+    await async_client.lrange("warmup", 0, -1)
+
+    # Integer list
+    await async_client.lpush("list-1", *(i for i in range(100)))
+    assert await measure(async_client.lrange("list-1", 0, -1)) == 1
+
+    # Integer set
+    await async_client.sadd("set-1", *(i for i in range(100)))
+    assert await measure(async_client.smembers("set-1")) == 1
+
+    # Sorted sets
+    await async_client.zadd("zset-1", mapping={str(i): i for i in range(50)})
+    assert await measure(async_client.zrange("zset-1", 0, -1, withscores=True)) == 1
+
+    # Exec call
+    e = async_client.pipeline(transaction=True)
+    for _ in range(100):
+        e.incr("num-1")
+    assert await measure(e.execute()) == 2  # OK + Response
+
+    # Just pipeline
+    p = async_client.pipeline(transaction=False)
+    for _ in range(100):
+        p.incr("num-1")
+    assert await measure(p.execute()) == 1
+
+    # Script result
+    assert await measure(async_client.eval('return {1,2,{3,4},5,6,7,8,"nine"}', 0)) == 1
+
+    # Search results
+    await async_client.execute_command("FT.CREATE i1 SCHEMA name text")
+    for i in range(50):
+        await async_client.hset(f"key-{i}", "name", f"name number {i}")
+    assert await measure(async_client.ft("i1").search("*")) == 1
+
+
 async def test_big_command(df_server, size=8 * 1024):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
 

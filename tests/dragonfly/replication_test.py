@@ -2675,3 +2675,34 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
     await check_all_replicas_finished([c_replica], c_master)
     await assert_replica_reconnections(replica, 0)
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_big_containers(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    logging.debug("Fill master with test data")
+    seeder = StaticSeeder(
+        key_target=20,
+        data_size=4000000,
+        collection_size=1000,
+        variance=100,
+        samples=1,
+        types=["LIST", "SET", "ZSET", "HASH"],
+    )
+    await seeder.run(c_master)
+
+    logging.debug("Start replication and wait for full sync")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    # Check replica data consisten
+    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await StaticSeeder.capture(c_master)
+    assert master_data == replica_data
