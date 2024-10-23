@@ -2556,12 +2556,19 @@ void StreamFamily::XPending(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void StreamFamily::XRange(CmdArgList args, ConnectionContext* cntx) {
-  XRangeGeneric(std::move(args), false, cntx);
+  string_view key = args[0];
+  string_view start = args[1];
+  string_view end = args[2];
+
+  XRangeGeneric(key, start, end, args.subspan(3), false, cntx);
 }
 
 void StreamFamily::XRevRange(CmdArgList args, ConnectionContext* cntx) {
-  swap(args[1], args[2]);
-  XRangeGeneric(std::move(args), true, cntx);
+  string_view key = args[0];
+  string_view start = args[1];
+  string_view end = args[2];
+
+  XRangeGeneric(key, end, start, args.subspan(3), true, cntx);
 }
 
 std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
@@ -3048,10 +3055,8 @@ void StreamFamily::XTrim(CmdArgList args, ConnectionContext* cntx) {
   return cntx->SendError(trim_result.status());
 }
 
-void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view start = ArgS(args, 1);
-  string_view end = ArgS(args, 2);
+void StreamFamily::XRangeGeneric(std::string_view key, std::string_view start, std::string_view end,
+                                 CmdArgList args, bool is_rev, ConnectionContext* cntx) {
   RangeOpts range_opts;
   RangeId rs, re;
   if (!ParseRangeId(start, &rs) || !ParseRangeId(end, &re)) {
@@ -3066,13 +3071,13 @@ void StreamFamily::XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext
     return cntx->SendError("invalid end ID for the interval", kSyntaxErrType);
   }
 
-  if (args.size() > 3) {
-    if (args.size() != 5) {
+  if (args.size() > 0) {
+    if (args.size() != 2) {
       return cntx->SendError(WrongNumArgsError("XRANGE"), kSyntaxErrType);
     }
 
-    string opt = absl::AsciiStrToUpper(ArgS(args, 3));
-    string_view val = ArgS(args, 4);
+    string opt = absl::AsciiStrToUpper(ArgS(args, 0));
+    string_view val = ArgS(args, 1);
 
     if (opt != "COUNT" || !absl::SimpleAtoi(val, &range_opts.count)) {
       return cntx->SendError(kSyntaxErr);

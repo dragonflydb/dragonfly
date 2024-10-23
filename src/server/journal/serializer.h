@@ -26,10 +26,6 @@ class JournalWriter {
 
  private:
   void Write(std::string_view sv);  // Write string.
-  void Write(facade::MutableSlice slice) {
-    Write(facade::ToSV(slice));
-  }
-
   void Write(const journal::Entry::Payload& payload);
 
  private:
@@ -58,7 +54,7 @@ struct JournalReader {
   template <typename UT> io::Result<UT> ReadUInt();
 
   // Read and copy to buffer, return size.
-  io::Result<size_t> ReadString(MutableSlice buffer);
+  io::Result<size_t> ReadString(io::MutableBytes buffer);
 
   // Read argument array into string buffer.
   std::error_code ReadCommand(journal::ParsedEntry::CmdData* entry);

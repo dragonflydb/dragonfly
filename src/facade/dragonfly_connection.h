@@ -91,7 +91,7 @@ class Connection : public util::Connection {
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
     using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
 
-    absl::InlinedVector<MutableSlice, 6> args;
+    absl::InlinedVector<std::string_view, 6> args;
     StorageType storage;
   };
 

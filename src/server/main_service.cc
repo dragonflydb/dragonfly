@@ -1092,7 +1092,7 @@ optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_i
 
 static optional<ErrorReply> VerifyConnectionAclStatus(const CommandId* cid,
                                                       const ConnectionContext* cntx,
-                                                      string_view error_msg, CmdArgList tail_args) {
+                                                      string_view error_msg, ArgSlice tail_args) {
   // If we are on a squashed context we need to use the owner, because the
   // context we are operating on is a stub and the acl username is not copied
   // See: MultiCommandSquasher::SquashedHopCb
@@ -1238,7 +1238,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) {
+void Service::DispatchCommand(ArgSlice args, facade::ConnectionContext* cntx) {
   absl::Cleanup clear_last_error(
       [cntx]() { std::ignore = cntx->reply_builder()->ConsumeLastError(); });
   DCHECK(!args.empty());
@@ -1246,7 +1246,7 @@ void Service::DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) 
 
   ServerState& etl = *ServerState::tlocal();
 
-  string cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  string cmd = absl::AsciiStrToUpper(args[0]);
   const auto [cid, args_no_cmd] = registry_.FindExtended(cmd, args.subspan(1));
 
   if (cid == nullptr) {
@@ -1793,7 +1793,7 @@ void Service::Watch(CmdArgList args, ConnectionContext* cntx) {
 
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
-  for (std::string_view key : ArgS(args)) {
+  for (string_view key : args) {
     exec_info.watched_keys.emplace_back(cntx->db_index(), key);
   }
 
@@ -1840,7 +1840,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 
 void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca) {
   DCHECK(cntx->transaction);
-  DVLOG(2) << "CallFromScript " << ArgS(ca.args, 0);
+  DVLOG(2) << "CallFromScript " << ca.args[0];
 
   InterpreterReplier replier(ca.translator);
   facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
@@ -1850,7 +1850,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 
   if (ca.async) {
     auto& info = cntx->conn_state.script_info;
-    string cmd = absl::AsciiStrToUpper(ArgS(ca.args, 0));
+    string cmd = absl::AsciiStrToUpper(ca.args[0]);
 
     // Full command verification happens during squashed execution
     if (auto* cid = registry_.Find(cmd); cid != nullptr) {
@@ -1858,7 +1858,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
       info->async_cmds.emplace_back(std::move(*ca.buffer), cid, ca.args.subspan(1), replies);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
     } else if (ca.error_abort) {  // If we don't abort on errors, we can ignore it completely
-      findcmd_err = ReportUnknownCmd(ArgS(ca.args, 0));
+      findcmd_err = ReportUnknownCmd(ca.args[0]);
     }
   }
 
@@ -2421,7 +2421,7 @@ void Service::PubsubNumSub(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
   rb->StartArray(args.size() * 2);
 
-  for (string_view channel : ArgS(args)) {
+  for (string_view channel : args) {
     rb->SendBulkString(channel);
     rb->SendLong(ServerState::tlocal()->channel_store()->FetchSubscribers(channel).size());
   }

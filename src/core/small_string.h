@@ -6,8 +6,6 @@
 #include <cstdint>
 #include <string_view>
 
-#include "core/core_types.h"
-
 namespace dfly {
 
 // blob strings of upto ~256B. Small sizes are probably predominant

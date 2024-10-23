@@ -189,8 +189,8 @@ CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
   return std::move(family_of_commands_);
 }
 
-std::pair<const CommandId*, CmdArgList> CommandRegistry::FindExtended(string_view cmd,
-                                                                      CmdArgList tail_args) const {
+std::pair<const CommandId*, ArgSlice> CommandRegistry::FindExtended(string_view cmd,
+                                                                    ArgSlice tail_args) const {
   if (cmd == RenamedOrOriginal("ACL"sv)) {
     if (tail_args.empty()) {
       return {Find(cmd), {}};

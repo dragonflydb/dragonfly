@@ -29,7 +29,8 @@ class StreamFamily {
   static void XReadGroup(CmdArgList args, ConnectionContext* cntx);
   static void XSetId(CmdArgList args, ConnectionContext* cntx);
   static void XTrim(CmdArgList args, ConnectionContext* cntx);
-  static void XRangeGeneric(CmdArgList args, bool is_rev, ConnectionContext* cntx);
+  static void XRangeGeneric(std::string_view key, std::string_view start, std::string_view end,
+                            CmdArgList args, bool is_rev, ConnectionContext* cntx);
   static void XAck(CmdArgList args, ConnectionContext* cntx);
   static void XAutoClaim(CmdArgList args, ConnectionContext* cntx);
 };

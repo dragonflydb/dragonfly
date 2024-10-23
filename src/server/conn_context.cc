@@ -21,7 +21,7 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 
-StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, facade::ReplyMode mode)
+StoredCmd::StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode)
     : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
   size_t total_size = 0;
   for (auto args : args) {
@@ -38,7 +38,7 @@ StoredCmd::StoredCmd(const CommandId* cid, CmdArgList args, facade::ReplyMode mo
   }
 }
 
-StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args, facade::ReplyMode mode)
+StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, ArgSlice args, facade::ReplyMode mode)
     : cid_{cid}, buffer_{std::move(buffer)}, sizes_(args.size()), reply_mode_{mode} {
   for (unsigned i = 0; i < args.size(); i++) {
     // Assume tightly packed list.
@@ -47,7 +47,7 @@ StoredCmd::StoredCmd(string&& buffer, const CommandId* cid, CmdArgList args, fac
   }
 }
 
-void StoredCmd::Fill(CmdArgList args) {
+void StoredCmd::Fill(absl::Span<std::string_view> args) {
   DCHECK_GE(args.size(), sizes_.size());
 
   unsigned offset = 0;
@@ -162,7 +162,7 @@ vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add,
 
   // Gather all the channels we need to subscribe to / remove.
   size_t i = 0;
-  for (string_view channel : ArgS(args)) {
+  for (string_view channel : args) {
     if (to_add && local_store.emplace(channel).second)
       csu.Record(channel);
     else if (!to_add && local_store.erase(channel) > 0)

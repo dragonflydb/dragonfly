@@ -230,6 +230,6 @@ void RecordExpiry(DbIndex dbid, std::string_view key);
 // Must be called from shard thread of journal to sink.
 void TriggerJournalWriteToSink();
 
-std::ostream& operator<<(std::ostream& os, ArgSlice list);
+// std::ostream& operator<<(std::ostream& os, ArgSlice list);
 
 }  // namespace dfly

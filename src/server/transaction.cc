@@ -296,7 +296,7 @@ void Transaction::PrepareMultiFps(CmdArgList keys) {
   auto& tag_fps = multi_->tag_fps;
 
   tag_fps.reserve(keys.size());
-  for (string_view str : ArgS(keys)) {
+  for (string_view str : keys) {
     ShardId sid = Shard(str, shard_set->size());
     tag_fps.emplace(sid, LockTag(str).Fingerprint());
   }
@@ -474,7 +474,7 @@ void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList 
   if (!skip_scheduling)
     ScheduleInternal();
 
-  full_args_ = {nullptr, 0};  // InitBase set it to temporary keys, now we reset it.
+  full_args_ = {};  // InitBase set it to temporary keys, now we reset it.
 }
 
 void Transaction::StartMultiNonAtomic() {

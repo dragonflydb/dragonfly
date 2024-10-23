@@ -39,14 +39,12 @@ struct Entry : public EntryBase {
   // Payload represents a non-owning view into a command executed on the shard.
   struct Payload {
     std::string_view cmd;
-    std::variant<CmdArgList,  // Parts of a full command.
-                 ShardArgs,   // Shard parts.
-                 ArgSlice>
+    std::variant<ShardArgs,  // Shard parts.
+                 ArgSlice>   // Parts of a full command.
         args;
 
     Payload() = default;
-    Payload(std::string_view c, CmdArgList a) : cmd(c), args(a) {
-    }
+
     Payload(std::string_view c, const ShardArgs& a) : cmd(c), args(a) {
     }
     Payload(std::string_view c, ArgSlice a) : cmd(c), args(a) {
@@ -81,7 +79,7 @@ struct Entry : public EntryBase {
 
 struct ParsedEntry : public EntryBase {
   struct CmdData {
-    std::unique_ptr<char[]> command_buf;
+    std::unique_ptr<uint8_t[]> command_buf;
     CmdArgVec cmd_args;  // represents the parsed command.
   };
   CmdData cmd;

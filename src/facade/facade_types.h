@@ -35,15 +35,11 @@ constexpr size_t kSanitizerOverhead = 0u;
 
 enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };
 
-using MutableSlice = absl::Span<char>;
-using CmdArgList = absl::Span<MutableSlice>;
-using CmdArgVec = std::vector<MutableSlice>;
+using MutableSlice = std::string_view;
+using CmdArgList = absl::Span<const std::string_view>;
+using CmdArgVec = std::vector<std::string_view>;
 using ArgSlice = absl::Span<const std::string_view>;
 using OwnedArgSlice = absl::Span<const std::string>;
-
-inline std::string_view ToSV(MutableSlice slice) {
-  return std::string_view{slice.data(), slice.size()};
-}
 
 inline std::string_view ToSV(std::string_view slice) {
   return slice;
@@ -57,13 +53,8 @@ inline std::string_view ToSV(std::string&& slice) = delete;
 
 constexpr auto kToSV = [](auto&& v) { return ToSV(std::forward<decltype(v)>(v)); };
 
-inline std::string_view ArgS(CmdArgList args, size_t i) {
-  auto arg = args[i];
-  return {arg.data(), arg.size()};
-}
-
-inline auto ArgS(CmdArgList args) {
-  return base::it::Transform(kToSV, base::it::Range{args.begin(), args.end()});
+inline std::string_view ArgS(ArgSlice args, size_t i) {
+  return args[i];
 }
 
 struct ArgRange {
@@ -95,7 +86,7 @@ struct ArgRange {
     return std::visit([idx](const auto& span) { return facade::ToSV(span[idx]); }, span);
   }
 
-  std::variant<CmdArgList, ArgSlice, OwnedArgSlice> span;
+  std::variant<ArgSlice, OwnedArgSlice> span;
 };
 struct ConnectionStats {
   size_t read_buf_capacity = 0;                // total capacity of input buffers
@@ -178,10 +169,6 @@ struct ErrorReply {
   std::string_view kind;
   std::optional<OpStatus> status{std::nullopt};
 };
-
-inline MutableSlice ToMSS(absl::Span<uint8_t> span) {
-  return MutableSlice{reinterpret_cast<char*>(span.data()), span.size()};
-}
 
 constexpr inline unsigned long long operator""_MB(unsigned long long x) {
   return 1024L * 1024L * x;
