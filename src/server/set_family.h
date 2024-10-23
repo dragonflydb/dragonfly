@@ -5,8 +5,8 @@
 #pragma once
 
 #include "facade/op_status.h"
-#include "server/common.h"
 #include "server/table.h"
+#include "server/tx_base.h"
 
 typedef struct intset intset;
 
@@ -14,9 +14,7 @@ namespace dfly {
 
 using facade::OpResult;
 
-class ConnectionContext;
 class CommandRegistry;
-class EngineShard;
 class StringSet;
 
 class SetFamily {
