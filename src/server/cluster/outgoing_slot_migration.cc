@@ -207,9 +207,11 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
-      VLOG(2) << "Received non-OK response, retrying";
-      if (!CheckRespIsSimpleReply(kUnknownMigration)) {
-        VLOG(2) << "Target node does not recognize migration";
+      if (CheckRespIsSimpleReply(kUnknownMigration)) {
+        VLOG(2) << "Target node does not recognize migration; retrying";
+        ThisFiber::SleepFor(1000ms);
+      } else {
+        VLOG(1) << "Unable to initialize migration";
         cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
       }
       continue;
