@@ -6,28 +6,22 @@
 
 #include "base/flags.h"
 #include "facade/facade_types.h"
-#include "server/common.h"
 #include "server/tx_base.h"
 
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 
+namespace facade {
+class SinkReplyBuilder;
+};
+
 namespace dfly {
 
-using facade::ErrorReply;
+using facade::CmdArgList;
 using facade::OpResult;
-using facade::OpStatus;
 
 class ConnectionContext;
 class CommandRegistry;
-class EngineShard;
-
-enum ExpireFlags {
-  EXPIRE_ALWAYS = 0,
-  EXPIRE_NX = 1 << 0,  // Set expiry only when key has no expiry
-  EXPIRE_XX = 1 << 2,  // Set expiry only when the key has expiry
-  EXPIRE_GT = 1 << 3,  // GT: Set expiry only when the new expiry is greater than current one
-  EXPIRE_LT = 1 << 4,  // LT: Set expiry only when the new expiry is less than current one
-};
+class Transaction;
 
 class GenericFamily {
  public:
@@ -38,42 +32,43 @@ class GenericFamily {
   static OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys);
 
  private:
-  static void Del(CmdArgList args, ConnectionContext* cntx);
-  static void Ping(CmdArgList args, ConnectionContext* cntx);
-  static void Exists(CmdArgList args, ConnectionContext* cntx);
-  static void Expire(CmdArgList args, ConnectionContext* cntx);
-  static void ExpireAt(CmdArgList args, ConnectionContext* cntx);
-  static void Persist(CmdArgList args, ConnectionContext* cntx);
-  static void Keys(CmdArgList args, ConnectionContext* cntx);
-  static void PexpireAt(CmdArgList args, ConnectionContext* cntx);
-  static void Pexpire(CmdArgList args, ConnectionContext* cntx);
-  static void Stick(CmdArgList args, ConnectionContext* cntx);
-  static void Sort(CmdArgList args, ConnectionContext* cntx);
-  static void Move(CmdArgList args, ConnectionContext* cntx);
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Rename(CmdArgList args, ConnectionContext* cntx);
-  static void RenameNx(CmdArgList args, ConnectionContext* cntx);
-  static void ExpireTime(CmdArgList args, ConnectionContext* cntx);
-  static void PExpireTime(CmdArgList args, ConnectionContext* cntx);
-  static void Ttl(CmdArgList args, ConnectionContext* cntx);
-  static void Pttl(CmdArgList args, ConnectionContext* cntx);
+  static void Del(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Ping(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                   ConnectionContext* cntx);
+  static void Exists(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Expire(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ExpireAt(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Persist(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Keys(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                   ConnectionContext* cntx);
+  static void PexpireAt(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Pexpire(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Stick(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Sort(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Move(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 
-  static void Echo(CmdArgList args, ConnectionContext* cntx);
-  static void Select(CmdArgList args, ConnectionContext* cntx);
-  static void Scan(CmdArgList args, ConnectionContext* cntx);
-  static void Time(CmdArgList args, ConnectionContext* cntx);
-  static void Type(CmdArgList args, ConnectionContext* cntx);
-  static void Dump(CmdArgList args, ConnectionContext* cntx);
-  static void Restore(CmdArgList args, ConnectionContext* cntx);
-  static void RandomKey(CmdArgList args, ConnectionContext* cntx);
-  static void FieldTtl(CmdArgList args, ConnectionContext* cntx);
-  static void FieldExpire(CmdArgList args, ConnectionContext* cntx);
+  static void Rename(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void RenameNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ExpireTime(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void PExpireTime(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Ttl(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Pttl(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 
-  static ErrorReply RenameGeneric(CmdArgList args, bool destination_should_not_exist,
-                                  ConnectionContext* cntx);
-
-  static void ExpireTimeGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
-  static void TtlGeneric(CmdArgList args, ConnectionContext* cntx, TimeUnit unit);
+  static void Echo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Select(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                     ConnectionContext* cntx);
+  static void Scan(CmdArgList args, Transaction*, SinkReplyBuilder* builder,
+                   ConnectionContext* cntx);
+  static void Time(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Type(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Dump(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Restore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void RandomKey(CmdArgList args, Transaction*, SinkReplyBuilder* builder,
+                        ConnectionContext* cntx);
+  static void FieldTtl(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void FieldExpire(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 };
 
 }  // namespace dfly
