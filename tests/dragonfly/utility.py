@@ -735,8 +735,6 @@ class ExpirySeeder:
 
     async def run(self, client):
         while not self.stop_flag:
-            # await client.execute_command(f"SET tmp{self.i} bar{self.i} EX 4")
-            # self.i = self.i + 1
             pipeline = client.pipeline(transaction=True)
             for i in range(0, self.batch_size):
                 pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX 3")
