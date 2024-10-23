@@ -236,7 +236,7 @@ void MCReplyBuilder::SendProtocolError(std::string_view str) {
 }
 
 void MCReplyBuilder::SendClientError(string_view str) {
-  SendSimpleString(absl::StrCat("CLIENT_ERROR", str));
+  SendSimpleString(absl::StrCat("CLIENT_ERROR ", str));
 }
 
 void MCReplyBuilder::SendSetSkipped() {
