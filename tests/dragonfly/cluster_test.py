@@ -1992,17 +1992,19 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
 
+
 @pytest.mark.skip("Takes more than 10 minutes")
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 12, "cluster_mode": "yes"})
 async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFactory):
     # Check data migration from one node to another
     instances = [
         df_factory.create(
+            maxmemory="15G",
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
             vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
         )
-        for i in range(3)
+        for i in range(2)
     ]
 
     replica = df_factory.create(
@@ -2011,27 +2013,37 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
         vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
     )
 
-    df_factory.start_all(instances)
-    df_factory.start_all([replica])
+    df_factory.start_all(instances + [replica])
 
     nodes = [(await create_node_info(instance)) for instance in instances]
     nodes[0].slots = [(0, 16383)]
-    nodes[1].slots = []
-    nodes[2].slots = []
+    for i in range(1, len(instances)):
+        nodes[i].slots = []
+
     await replica.admin_client().execute_command(f"replicaof localhost {nodes[0].instance.port}")
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    await nodes[0].client.execute_command("DEBUG POPULATE 2250000 test 1000 RAND SLOTS 0 16383")
+    await nodes[0].client.execute_command("DEBUG POPULATE 22500000 test 1000 RAND SLOTS 0 16383")
 
     await asyncio.sleep(2)
 
-    nodes[0].migrations.append(
-        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 8000)], nodes[1].id)
-    )
-    nodes[0].migrations.append(
-        MigrationInfo("127.0.0.1", nodes[2].instance.admin_port, [(8001, 16383)], nodes[2].id)
-    )
+    migration_nodes = len(instances) - 1
+    slot_step = 16384 // migration_nodes
+    ranges = []
+    for i in range(0, migration_nodes):
+        ranges.append(i * slot_step)
+    ranges.append(16384)
+
+    for i in range(1, len(instances)):
+        nodes[0].migrations.append(
+            MigrationInfo(
+                "127.0.0.1",
+                nodes[i].instance.admin_port,
+                [(ranges[i - 1], ranges[i] - 1)],
+                nodes[i].id,
+            )
+        )
 
     logging.debug("Start migration")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
@@ -2040,8 +2052,8 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 
     nodes[0].migrations = []
     nodes[0].slots = []
-    nodes[1].slots = [(0, 8000)]
-    nodes[2].slots = [(8001, 16383)]
+    for i in range(1, len(instances)):
+        nodes[i].slots = [(ranges[i - 1], ranges[i] - 1)]
     logging.debug("remove finished migrations")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
