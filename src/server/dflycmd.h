@@ -141,9 +141,9 @@ class DflyCmd {
  public:
   DflyCmd(ServerFamily* server_family);
 
-  void Run(CmdArgList args, ConnectionContext* cntx);
+  void Run(CmdArgList args, facade::RedisReplyBuilder* rb, ConnectionContext* cntx);
 
-  void OnClose(ConnectionContext* cntx);
+  void OnClose(unsigned sync_id);
 
   // Stop all background processes so we can exit in orderly manner.
   void Shutdown();
@@ -166,42 +166,44 @@ class DflyCmd {
   void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
  private:
+  using RedisReplyBuilder = facade::RedisReplyBuilder;
+
   // JOURNAL [START/STOP]
   // Start or stop journaling.
   // void Journal(CmdArgList args, ConnectionContext* cntx);
 
   // THREAD [to_thread]
   // Return connection thread index or migrate to another thread.
-  void Thread(CmdArgList args, ConnectionContext* cntx);
+  void Thread(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
   // FLOW <masterid> <syncid> <flowid> [<seqid>]
   // Register connection as flow for sync session.
   // If seqid is given, it means the client wants to try partial sync.
   // If it is possible, return Ok and prepare for a partial sync, else
   // return error and ask the replica to execute FLOW again.
-  void Flow(CmdArgList args, ConnectionContext* cntx);
+  void Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
   // SYNC <syncid>
   // Initiate full sync.
-  void Sync(CmdArgList args, ConnectionContext* cntx);
+  void Sync(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
   // STARTSTABLE <syncid>
   // Switch to stable state replication.
-  void StartStable(CmdArgList args, ConnectionContext* cntx);
+  void StartStable(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
   // TAKEOVER <syncid>
   // Shut this master down atomically with replica promotion.
-  void TakeOver(CmdArgList args, ConnectionContext* cntx);
+  void TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
   // EXPIRE
   // Check all keys for expiry.
-  void Expire(CmdArgList args, ConnectionContext* cntx);
+  void Expire(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
   // REPLICAOFFSET
   // Return journal records num sent for each flow of replication.
-  void ReplicaOffset(CmdArgList args, ConnectionContext* cntx);
+  void ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
-  void Load(CmdArgList args, ConnectionContext* cntx);
+  void Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
   // Start full sync in thread. Start FullSyncFb. Called for each flow.
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);

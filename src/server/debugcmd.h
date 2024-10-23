@@ -52,6 +52,7 @@ class DebugCmd {
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;
+  facade::SinkReplyBuilder* builder_;
 };
 
 }  // namespace dfly

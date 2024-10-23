@@ -1563,7 +1563,7 @@ optional<Replica::Summary> ServerFamily::GetReplicaSummary() const {
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
-  dfly_cmd_->OnClose(cntx);
+  dfly_cmd_->OnClose(cntx->conn_state.replication_info.repl_session_id);
 }
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
@@ -3016,7 +3016,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
-  dfly_cmd_->Run(args, cntx);
+  dfly_cmd_->Run(args, static_cast<RedisReplyBuilder*>(cntx->reply_builder()), cntx);
 }
 
 void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {

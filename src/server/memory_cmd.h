@@ -25,6 +25,7 @@ class MemoryCmd {
 
   ConnectionContext* cntx_;
   ServerFamily* owner_;
+  facade::SinkReplyBuilder* builder_;
 };
 
 }  // namespace dfly
