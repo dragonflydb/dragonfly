@@ -195,9 +195,8 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
     return std::nullopt;
   }
 
-  auto res = db_slice.AddNew(cntx, key, std::move(pv), args.ExpirationTime());
-  res->it->first.SetSticky(args.Sticky());
-  if (res) {
+  if (auto res = db_slice.AddNew(cntx, key, std::move(pv), args.ExpirationTime()); res) {
+    res->it->first.SetSticky(args.Sticky());
     shard->search_indices()->AddDoc(key, cntx, res->it->second);
     return std::move(res.value());
   }
