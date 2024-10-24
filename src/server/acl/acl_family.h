@@ -18,6 +18,10 @@
 #include "server/command_registry.h"
 #include "server/common.h"
 
+namespace facade {
+class SinkReplyBuilder;
+}  // namespace facade
+
 namespace dfly {
 
 class ConnectionContext;
@@ -31,21 +35,23 @@ class AclFamily final {
   void Init(facade::Listener* listener, UserRegistry* registry);
 
  private:
-  void Acl(CmdArgList args, ConnectionContext* cntx);
-  void List(CmdArgList args, ConnectionContext* cntx);
-  void SetUser(CmdArgList args, ConnectionContext* cntx);
-  void DelUser(CmdArgList args, ConnectionContext* cntx);
-  void WhoAmI(CmdArgList args, ConnectionContext* cntx);
-  void Save(CmdArgList args, ConnectionContext* cntx);
-  void Load(CmdArgList args, ConnectionContext* cntx);
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
+
+  void Acl(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void List(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void SetUser(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void DelUser(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void WhoAmI(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Save(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void Load(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
   // Helper function for bootstrap
   bool Load();
-  void Log(CmdArgList args, ConnectionContext* cntx);
-  void Users(CmdArgList args, ConnectionContext* cntx);
-  void Cat(CmdArgList args, ConnectionContext* cntx);
-  void GetUser(CmdArgList args, ConnectionContext* cntx);
-  void DryRun(CmdArgList args, ConnectionContext* cntx);
-  void GenPass(CmdArgList args, ConnectionContext* cntx);
+  void Log(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void Users(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void Cat(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void GetUser(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void DryRun(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void GenPass(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads
@@ -62,7 +68,7 @@ class AclFamily final {
   void EvictOpenConnectionsOnAllProactorsWithRegistry(const UserRegistry::RegistryType& registry);
 
   // Helper function that loads the acl state of an acl file into the user registry
-  GenericError LoadToRegistryFromFile(std::string_view full_path, ConnectionContext* init);
+  GenericError LoadToRegistryFromFile(std::string_view full_path, SinkReplyBuilder* builder);
 
   // Serializes the whole registry into a string
   std::string RegistryToString() const;

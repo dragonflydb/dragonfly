@@ -2967,7 +2967,7 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
-  script_mgr_->Run(std::move(args), cntx);
+  script_mgr_->Run(std::move(args), cntx->transaction, cntx->reply_builder());
 }
 
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
