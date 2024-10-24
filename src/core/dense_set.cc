@@ -47,14 +47,16 @@ DenseSet::IteratorBase::IteratorBase(const DenseSet* owner, bool is_end)
 }
 
 void DenseSet::IteratorBase::SetExpiryTime(uint32_t ttl_sec) {
+  DensePtr* ptr = curr_entry_->IsLink() ? curr_entry_->AsLink() : curr_entry_;
+  void* src = ptr->GetObject();
   if (!HasExpiry()) {
-    auto src = curr_entry_->GetObject();
     void* new_obj = owner_->ObjectClone(src, false, true);
-    curr_entry_->SetObject(new_obj);
+    ptr->SetObject(new_obj);
     curr_entry_->SetTtl(true);
     owner_->ObjDelete(src, false);
+    src = new_obj;
   }
-  owner_->ObjUpdateExpireTime(curr_entry_->GetObject(), ttl_sec);
+  owner_->ObjUpdateExpireTime(src, ttl_sec);
 }
 
 void DenseSet::IteratorBase::Advance() {

@@ -146,6 +146,28 @@ TEST_F(StringMapTest, SetFieldExpireNoHasExpiry) {
   EXPECT_EQ(k.ExpiryTime(), 1);
 }
 
+TEST_F(StringMapTest, Bug3973) {
+  for (unsigned i = 0; i < 8; i++) {
+    EXPECT_TRUE(sm_->AddOrUpdate(to_string(i), "val"));
+  }
+  for (unsigned i = 0; i < 8; i++) {
+    auto k = sm_->Find(to_string(i));
+    ASSERT_FALSE(k.HasExpiry());
+    k.SetExpiryTime(1);
+    EXPECT_EQ(k.ExpiryTime(), 1);
+  }
+  for (unsigned i = 100; i < 1000; i++) {
+    EXPECT_TRUE(sm_->AddOrUpdate(to_string(i), "val"));
+  }
+
+  // make sure the first 8 keys have expiry set
+  for (unsigned i = 0; i < 8; i++) {
+    auto k = sm_->Find(to_string(i));
+    ASSERT_TRUE(k.HasExpiry());
+    EXPECT_EQ(k.ExpiryTime(), 1);
+  }
+}
+
 unsigned total_wasted_memory = 0;
 
 TEST_F(StringMapTest, ReallocIfNeeded) {
