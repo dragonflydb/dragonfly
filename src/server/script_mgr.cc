@@ -67,7 +67,7 @@ ScriptMgr::ScriptKey::ScriptKey(string_view sha) : array{} {
   memcpy(data(), sha.data(), size());
 }
 
-void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
+void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (subcmd == "HELP") {
@@ -93,37 +93,37 @@ void ScriptMgr::Run(CmdArgList args, ConnectionContext* cntx) {
         "   Invokes garbage collection on all unused interpreter instances.",
         "HELP",
         "   Prints this help."};
-    auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    auto rb = static_cast<RedisReplyBuilder*>(builder);
     return rb->SendSimpleStrArr(kHelp);
   }
 
   if (subcmd == "EXISTS" && args.size() > 1)
-    return ExistsCmd(args, cntx);
+    return ExistsCmd(args, tx, builder);
 
   if (subcmd == "FLUSH")
-    return FlushCmd(args, cntx);
+    return FlushCmd(args, tx, builder);
 
   if (subcmd == "LIST")
-    return ListCmd(cntx);
+    return ListCmd(tx, builder);
 
   if (subcmd == "LATENCY")
-    return LatencyCmd(cntx);
+    return LatencyCmd(tx, builder);
 
   if (subcmd == "LOAD" && args.size() == 2)
-    return LoadCmd(args, cntx);
+    return LoadCmd(args, tx, builder);
 
   if (subcmd == "FLAGS" && args.size() > 2)
-    return ConfigCmd(args, cntx);
+    return ConfigCmd(args, tx, builder);
 
   if (subcmd == "GC")
-    return GCCmd(cntx);
+    return GCCmd(tx, builder);
 
   string err = absl::StrCat("Unknown subcommand or wrong number of arguments for '", subcmd,
                             "'. Try SCRIPT HELP.");
-  cntx->SendError(err, kSyntaxErrType);
+  builder->SendError(err, kSyntaxErrType);
 }
 
-void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
+void ScriptMgr::ExistsCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) const {
   vector<uint8_t> res(args.size() - 1, 0);
   for (size_t i = 1; i < args.size(); ++i) {
     if (string_view sha = ArgS(args, i); Find(sha)) {
@@ -131,22 +131,22 @@ void ScriptMgr::ExistsCmd(CmdArgList args, ConnectionContext* cntx) const {
     }
   }
 
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartArray(res.size());
   for (uint8_t v : res) {
     rb->SendLong(v);
   }
 }
 
-void ScriptMgr::FlushCmd(CmdArgList args, ConnectionContext* cntx) {
+void ScriptMgr::FlushCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   FlushAllScript();
 
-  return cntx->SendOk();
+  return builder->SendOk();
 }
 
-void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
+void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view body = ArgS(args, 1);
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(builder);
   if (body.empty()) {
     char sha[41];
     Interpreter::FuncSha1(body, sha);
@@ -159,35 +159,35 @@ void ScriptMgr::LoadCmd(CmdArgList args, ConnectionContext* cntx) {
 
   auto res = Insert(body, interpreter);
   if (!res)
-    return cntx->SendError(res.error().Format());
+    return builder->SendError(res.error().Format());
 
   // Schedule empty callback inorder to journal command via transaction framework.
-  cntx->transaction->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
+  tx->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
 
   return rb->SendBulkString(res.value());
 }
 
-void ScriptMgr::ConfigCmd(CmdArgList args, ConnectionContext* cntx) {
+void ScriptMgr::ConfigCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   lock_guard lk{mu_};
   ScriptKey key{ArgS(args, 1)};
   auto& data = db_[key];
 
   for (auto flag : args.subspan(2)) {
     if (auto err = ScriptParams::ApplyFlags(facade::ToSV(flag), &data); err)
-      return cntx->SendError("Invalid config format: " + err.Format());
+      return builder->SendError("Invalid config format: " + err.Format());
   }
 
   UpdateScriptCaches(key, data);
 
   // Schedule empty callback inorder to journal command via transaction framework.
-  cntx->transaction->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
+  tx->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
 
-  return cntx->SendOk();
+  return builder->SendOk();
 }
 
-void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
+void ScriptMgr::ListCmd(Transaction* tx, SinkReplyBuilder* builder) const {
   vector<pair<string, ScriptData>> scripts = GetAll();
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartArray(scripts.size());
   for (const auto& [sha, data] : scripts) {
     rb->StartArray(2);
@@ -196,7 +196,7 @@ void ScriptMgr::ListCmd(ConnectionContext* cntx) const {
   }
 }
 
-void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
+void ScriptMgr::LatencyCmd(Transaction* tx, SinkReplyBuilder* builder) const {
   absl::flat_hash_map<std::string, base::Histogram> result;
   fb2::Mutex mu;
 
@@ -209,7 +209,7 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
     mu.unlock();
   });
 
-  auto rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartArray(result.size());
   for (const auto& k_v : result) {
     rb->StartArray(2);
@@ -218,14 +218,14 @@ void ScriptMgr::LatencyCmd(ConnectionContext* cntx) const {
   }
 }
 
-void ScriptMgr::GCCmd(ConnectionContext* cntx) const {
+void ScriptMgr::GCCmd(Transaction* tx, SinkReplyBuilder* builder) const {
   auto cb = [](Interpreter* ir) {
     ir->RunGC();
     ThisFiber::Yield();
   };
   shard_set->pool()->AwaitFiberOnAll(
       [cb](auto* pb) { ServerState::tlocal()->AlterInterpreters(cb); });
-  return cntx->SendOk();
+  return builder->SendOk();
 }
 
 // Check if script starts with lua flags instructions (--df flags=...).

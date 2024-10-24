@@ -9,10 +9,15 @@
 #include "facade/op_status.h"
 #include "server/common.h"
 
+namespace facade {
+class SinkReplyBuilder;
+}  // namespace facade
+
 namespace dfly {
 
 class ConnectionContext;
 class CommandRegistry;
+class Transaction;
 
 class ZSetFamily {
  public:
@@ -55,47 +60,50 @@ class ZSetFamily {
 
  private:
   template <typename T> using OpResult = facade::OpResult<T>;
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void BZPopMin(CmdArgList args, ConnectionContext* cntx);
-  static void BZPopMax(CmdArgList args, ConnectionContext* cntx);
+  static void BZPopMin(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                       ConnectionContext* cntx);
+  static void BZPopMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                       ConnectionContext* cntx);
 
-  static void ZAdd(CmdArgList args, ConnectionContext* cntx);
-  static void ZCard(CmdArgList args, ConnectionContext* cntx);
-  static void ZCount(CmdArgList args, ConnectionContext* cntx);
-  static void ZDiff(CmdArgList args, ConnectionContext* cntx);
-  static void ZIncrBy(CmdArgList args, ConnectionContext* cntx);
-  static void ZInterStore(CmdArgList args, ConnectionContext* cntx);
-  static void ZInter(CmdArgList args, ConnectionContext* cntx);
-  static void ZInterCard(CmdArgList args, ConnectionContext* cntx);
-  static void ZLexCount(CmdArgList args, ConnectionContext* cntx);
-  static void ZPopMax(CmdArgList args, ConnectionContext* cntx);
-  static void ZPopMin(CmdArgList args, ConnectionContext* cntx);
-  static void ZRange(CmdArgList args, ConnectionContext* cntx);
-  static void ZRank(CmdArgList args, ConnectionContext* cntx);
-  static void ZRem(CmdArgList args, ConnectionContext* cntx);
-  static void ZRandMember(CmdArgList args, ConnectionContext* cntx);
-  static void ZScore(CmdArgList args, ConnectionContext* cntx);
-  static void ZMScore(CmdArgList args, ConnectionContext* cntx);
-  static void ZRangeByLex(CmdArgList args, ConnectionContext* cntx);
-  static void ZRevRangeByLex(CmdArgList args, ConnectionContext* cntx);
-  static void ZRangeByScore(CmdArgList args, ConnectionContext* cntx);
-  static void ZRangeStore(CmdArgList args, ConnectionContext* cntx);
-  static void ZRemRangeByRank(CmdArgList args, ConnectionContext* cntx);
-  static void ZRemRangeByScore(CmdArgList args, ConnectionContext* cntx);
-  static void ZRemRangeByLex(CmdArgList args, ConnectionContext* cntx);
-  static void ZRevRange(CmdArgList args, ConnectionContext* cntx);
-  static void ZRevRangeByScore(CmdArgList args, ConnectionContext* cntx);
-  static void ZRevRank(CmdArgList args, ConnectionContext* cntx);
-  static void ZScan(CmdArgList args, ConnectionContext* cntx);
-  static void ZUnion(CmdArgList args, ConnectionContext* cntx);
-  static void ZUnionStore(CmdArgList args, ConnectionContext* cntx);
+  static void ZAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZCard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZCount(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZDiff(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZIncrBy(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZInterStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZInter(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZInterCard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZLexCount(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZPopMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZPopMin(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRank(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRem(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRandMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZScore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZMScore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRangeByLex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRevRangeByLex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRangeByScore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRangeStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRemRangeByRank(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRemRangeByScore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRemRangeByLex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRevRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRevRangeByScore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZRevRank(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZScan(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZUnion(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void ZUnionStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 
-  static void GeoAdd(CmdArgList args, ConnectionContext* cntx);
-  static void GeoHash(CmdArgList args, ConnectionContext* cntx);
-  static void GeoPos(CmdArgList args, ConnectionContext* cntx);
-  static void GeoDist(CmdArgList args, ConnectionContext* cntx);
-  static void GeoSearch(CmdArgList args, ConnectionContext* cntx);
-  static void GeoRadiusByMember(CmdArgList args, ConnectionContext* cntx);
+  static void GeoAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void GeoHash(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void GeoPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void GeoDist(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void GeoSearch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void GeoRadiusByMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 };
 
 }  // namespace dfly
