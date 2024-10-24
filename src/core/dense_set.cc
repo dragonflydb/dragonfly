@@ -4,6 +4,7 @@
 
 #include "core/dense_set.h"
 
+#include <absl/container/inlined_vector.h>
 #include <absl/numeric/bits.h>
 
 #include <cstddef>
@@ -102,6 +103,7 @@ size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data, bool ha
   if (it->IsEmpty()) {
     it->SetObject(data);
   } else {
+    DCHECK(!it->IsDisplaced());
     // otherwise make a new link and connect it to the front of the list
     it->SetLink(NewLink(data, *it));
   }
@@ -116,6 +118,7 @@ size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data, bool ha
 void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr ptr) {
   DVLOG(2) << "PushFront to " << distance(entries_.begin(), it) << ", "
            << ObjectAllocSize(ptr.GetObject());
+  DCHECK(!it->IsDisplaced());
 
   if (it->IsEmpty()) {
     it->SetObject(ptr.GetObject());
@@ -261,7 +264,10 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
         auto& dest = items[dest_id++];
         DenseLinkKey* link = src.ptr.AsLink();
         dest.obj = link->Raw();
-        dest.has_ttl = link->HasTtl();
+        DCHECK(!link->HasTtl());
+
+        // ttl is attached to the wrapping pointer.
+        dest.has_ttl = src.ptr.HasTtl();
         dest.ptr = link->next;
         PREFETCH_READ(dest.ptr.Raw());
         PREFETCH_READ(dest.obj);
@@ -295,8 +301,9 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
       } else {
         auto& dest = items[dest_id++];
         DenseLinkKey* link = src.ptr.AsLink();
+        DCHECK(!link->HasTtl());
         dest.obj = link->Raw();
-        dest.has_ttl = link->HasTtl();
+        dest.has_ttl = src.ptr.HasTtl();
         dest.ptr = link->next;
         PREFETCH_READ(dest.ptr.Raw());
         PREFETCH_READ(dest.obj);
@@ -308,6 +315,112 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
     len = dest_id;
   }
 }
+
+void DenseSet::GrowBatch(unsigned len, GrowItem* items) {
+  absl::InlinedVector<GrowItem, 32> delayed_pushes;
+
+  while (len) {
+    unsigned dest_id = 0;
+
+    for (unsigned i = 0; i < len; ++i) {
+      auto& src = items[i];
+
+      if (!src.obj) {
+        DCHECK(src.chain.curr->IsLink());
+        src.obj = src.chain.curr->GetObject();
+        src.new_bid = UINT32_MAX;
+        items[dest_id++] = src;
+
+        PREFETCH_READ(src.obj);
+        continue;
+      }
+
+      if (src.new_bid == UINT32_MAX) {
+        if (ExpireIfNeeded(src.chain.prev, src.chain.curr)) {
+          src.obj = nullptr;
+          if (src.chain.prev && src.chain.prev->IsLink()) {
+            // curr has been updated by ExpireIfNeeded with the next in chain.
+            src.obj = src.chain.curr->GetObject();
+            items[dest_id++] = src;
+            PREFETCH_READ(src.obj);
+          }
+          continue;
+        }
+
+        uint32_t bid = BucketId(src.obj, 0);
+        DCHECK(src.chain.curr->GetObject() == src.obj);
+        if (src.bid != bid) {
+          src.new_bid = bid;
+          items[dest_id++] = src;
+          /*if (src.chain.curr->IsLink()) {
+            PREFETCH_READ(src.chain.curr->AsLink()->Raw());
+          }*/
+          PREFETCH_READ(&entries_[bid]);
+
+          continue;
+        }
+
+        // Edge case when curr was the first in the chain and
+        // was displaced by one but now it's actually correct place.
+        src.chain.curr->ClearDisplaced();
+
+        if (src.chain.curr->IsLink()) {
+          src.chain.Shift();
+          src.SyncObj();
+          PREFETCH_READ(src.chain.curr->Raw());
+
+          items[dest_id++] = src;
+        }
+
+        continue;
+      }
+
+      DCHECK_NE(src.new_bid, UINT32_MAX);
+
+      // Move curr to src.bid
+      DVLOG(2) << " Pushing to " << src.new_bid << " " << src.obj;
+      DCHECK_EQ(BucketId(src.obj, 0), src.new_bid);
+
+      bool has_ttl = src.chain.curr->HasTtl();
+
+      auto& next = entries_[src.new_bid];
+      if (next.IsEmpty()) {
+        next.SetObject(src.obj);
+        if (has_ttl) {
+          next.SetTtl(true);
+        }
+      } else {
+        GrowItem delayed = src;
+        delayed.has_ttl = has_ttl;
+        delayed_pushes.push_back(std::move(delayed));
+      }
+
+      if (src.chain.curr->IsObject()) {
+        src.obj = nullptr;
+        DenseLinkKey* plink = src.chain.Trim();
+        if (plink) {
+          FreeLink(plink);
+        }
+
+        continue;
+      }
+
+      DCHECK(src.chain.curr->IsLink());
+      DenseLinkKey* plink = src.chain.PullCurrentLink();
+      src.new_bid = UINT32_MAX;
+      src.SyncObj();
+      PREFETCH_READ(src.chain.curr->Raw());
+      FreeLink(plink);
+      items[dest_id++] = src;  // continue with this chain.
+    }                          // for
+    // update the length of the batch for the next iteration.
+    len = dest_id;
+  }
+  for (auto& item : delayed_pushes) {
+    PushFront(entries_.begin() + item.new_bid, item.obj, item.has_ttl);
+  }
+}
+
 bool DenseSet::NoItemBelongsBucket(uint32_t bid) const {
   auto& entries = const_cast<DenseSet*>(this)->entries_;
   DensePtr* curr = &entries[bid];
@@ -410,13 +523,41 @@ void DenseSet::Fill(DenseSet* other) const {
   CloneBatch(len, arr, other);
 }
 
+#if 0
 void DenseSet::Grow(size_t prev_size) {
+  constexpr unsigned kArrLen = 32;
+  GrowItem arr[kArrLen];
+  unsigned len = 0;
+
   // perform rehashing of items in the set
   for (long i = prev_size - 1; i >= 0; --i) {
     DensePtr* curr = &entries_[i];
+    if (curr->IsEmpty())
+      continue;
+
+    auto& item = arr[len++];
+    item.Init(i, curr);
+
+    PREFETCH_READ(curr->Raw());
+
+    if (len == kArrLen) {
+      GrowBatch(kArrLen, arr);
+      len = 0;
+    }
+  }
+  GrowBatch(len, arr);
+}
+#else
+void DenseSet::Grow(size_t prev_size) {
+  vector<pair<uint32_t, DensePtr> > delayed_pushes;
+
+  // perform rehashing of items in the set
+  // for (long i = prev_size - 1; i >= 0; --i) {
+  for (size_t i = 0; i < prev_size; ++i) {
+    DensePtr* curr = &entries_[i];
     DensePtr* prev = nullptr;
 
-    while (true) {
+    do {
       if (ExpireIfNeeded(prev, curr)) {
         // if curr has disappeared due to expiry and prev was converted from Link to a
         // regular DensePtr
@@ -448,8 +589,6 @@ void DenseSet::Grow(size_t prev_size) {
         DensePtr dptr = *curr;
 
         if (curr->IsObject()) {
-          curr->Reset();  // reset the original placeholder (.next or root)
-
           if (prev) {
             DCHECK(prev->IsLink());
 
@@ -459,31 +598,41 @@ void DenseSet::Grow(size_t prev_size) {
             // we want to make *prev a DensePtr instead of DenseLink and we
             // want to deallocate the link.
             DensePtr tmp = DensePtr::From(plink);
+
+            // Important to transfer the ttl flag.
+            tmp.SetTtl(prev->HasTtl());
             DCHECK(ObjectAllocSize(tmp.GetObject()));
 
-            FreeLink(plink);
+            FreeLink(plink);  // we deallocated the link, curr is invalid now.
+            curr = nullptr;
             *prev = tmp;
+          } else {
+            curr->Reset();  // reset the root placeholder.
           }
+        } else {  // if IsObject
+          *curr = *dptr.Next();
+          DCHECK(!curr->IsEmpty());
+        }
 
+        if (dest->IsDisplaced()) {
+          delayed_pushes.emplace_back(bid, dptr);
+        } else {
           DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
           DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
           PushFront(dest, dptr);
-
-          dest->ClearDisplaced();
-
-          break;
-        }  // if IsObject
-
-        *curr = *dptr.Next();
-        DCHECK(!curr->IsEmpty());
-
-        PushFront(dest, dptr);
-        dest->ClearDisplaced();
+        }
       }
-    }
+    } while (curr);
+  }
+  // DCHECK_LT(delayed_pushes.size(), 5);
+
+  for (auto [bid, dptr] : delayed_pushes) {
+    DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
+    DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
+    PushFront(entries_.begin() + bid, dptr);
   }
 }
-
+#endif
 // Assumes that the object does not exist in the set.
 void DenseSet::AddUnique(void* obj, bool has_ttl, uint64_t hashcode) {
   if (entries_.empty()) {

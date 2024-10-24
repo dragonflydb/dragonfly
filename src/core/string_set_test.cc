@@ -135,27 +135,27 @@ static string random_string(mt19937& rand, unsigned len) {
 
 TEST_F(StringSetTest, Resizing) {
   constexpr size_t num_strs = 4096;
-  vector<string> strs;
+  unordered_set<string> strs;
   while (strs.size() != num_strs) {
     auto str = random_string(generator_, 10);
-    if (find(strs.begin(), strs.end(), str) != strs.end()) {
-      continue;
-    }
-
-    strs.push_back(random_string(generator_, 10));
+    strs.insert(str);
   }
 
-  for (size_t i = 0; i < num_strs; ++i) {
-    EXPECT_TRUE(ss_->Add(strs[i]));
-    EXPECT_EQ(ss_->UpperBoundSize(), i + 1);
+  unsigned size = 0;
+  for (auto it = strs.begin(); it != strs.end(); ++it) {
+    const auto& str = *it;
+    EXPECT_TRUE(ss_->Add(str));
+    EXPECT_EQ(ss_->UpperBoundSize(), size + 1);
 
     // make sure we haven't lost any items after a grow
     // which happens every power of 2
-    if (i != 0 && (ss_->UpperBoundSize() & (ss_->UpperBoundSize() - 1)) == 0) {
-      for (size_t j = 0; j < i; ++j) {
-        EXPECT_TRUE(ss_->Contains(strs[j]));
+    if ((size & (size - 1)) == 0) {
+      for (auto j = strs.begin(); j != it; ++j) {
+        const auto& str = *j;
+        ASSERT_TRUE(ss_->Contains(str)) << size << " " << str;
       }
     }
+    ++size;
   }
 }
 
@@ -235,7 +235,7 @@ TEST_F(StringSetTest, IntOnly) {
   }
 
   for (size_t i = 0; i < num_ints; ++i) {
-    EXPECT_FALSE(ss_->Add(to_string(i)));
+    ASSERT_FALSE(ss_->Add(to_string(i)));
   }
 
   size_t num_remove = generator_() % 4096;
@@ -573,5 +573,33 @@ void BM_AddMany(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_AddMany);
+
+void BM_Grow(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  StringSet src;
+  unsigned elems = 1 << 18;
+  for (size_t i = 0; i < elems; ++i) {
+    src.Add(random_string(generator, 16), UINT32_MAX);
+    strs.push_back(random_string(generator, 16));
+  }
+
+  while (state.KeepRunning()) {
+    state.PauseTiming();
+    StringSet tmp;
+    src.Fill(&tmp);
+    CHECK_EQ(tmp.BucketCount(), elems);
+    state.ResumeTiming();
+    for (const auto& str : strs) {
+      tmp.Add(str);
+      if (tmp.BucketCount() > elems) {
+        break;  // we grew
+      }
+    }
+
+    CHECK_GT(tmp.BucketCount(), elems);
+  }
+}
+BENCHMARK(BM_Grow);
 
 }  // namespace dfly

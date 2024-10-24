@@ -158,13 +158,12 @@ TEST_F(StringMapTest, Bug3973) {
   }
   for (unsigned i = 100; i < 1000; i++) {
     EXPECT_TRUE(sm_->AddOrUpdate(to_string(i), "val"));
-  }
-
-  // make sure the first 8 keys have expiry set
-  for (unsigned i = 0; i < 8; i++) {
-    auto k = sm_->Find(to_string(i));
-    ASSERT_TRUE(k.HasExpiry());
-    EXPECT_EQ(k.ExpiryTime(), 1);
+    // make sure the first 8 keys have expiry set
+    for (unsigned j = 0; j < 8; j++) {
+      auto k = sm_->Find(to_string(j));
+      ASSERT_TRUE(k.HasExpiry()) << j << " " << i;
+      EXPECT_EQ(k.ExpiryTime(), 1);
+    }
   }
 }
 

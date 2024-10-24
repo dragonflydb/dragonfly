@@ -342,6 +342,64 @@ class DenseSet {
   using ClearItem = CloneItem;
   void ClearBatch(unsigned len, ClearItem* items);
 
+  struct GrowItem {
+    union {
+      struct {
+        DensePtr* curr = nullptr;
+        DensePtr* prev = nullptr;
+
+        void Shift() {
+          prev = curr;
+          curr = &curr->AsLink()->next;
+        }
+
+        // Discards current and updates prev to be the end
+        // of the chain.
+        DenseLinkKey* Trim() {
+          curr->Reset();
+          if (!prev)
+            return nullptr;
+
+          DenseLinkKey* plink = prev->AsLink();
+          // we want to make *prev a DensePtr instead of DenseLink and we
+          // want to deallocate the link.
+          DensePtr tmp = DensePtr::From(plink);
+          *prev = tmp;
+          return plink;
+        }
+
+        DenseLinkKey* PullCurrentLink() {
+          DenseLinkKey* plink = curr->AsLink();
+          *curr = plink->next;
+          return plink;
+        }
+      } chain;
+      bool has_ttl;
+    };
+
+    GrowItem() {
+      chain.prev = chain.curr = nullptr;
+    }
+
+    void Init(uint32_t b, DensePtr* p) {
+      chain.prev = nullptr;
+      chain.curr = p;
+      bid = b;
+      new_bid = UINT32_MAX;
+      obj = p->IsObject() ? p->Raw() : nullptr;
+    }
+
+    void* obj = nullptr;
+    uint32_t bid = 0;
+    uint32_t new_bid = UINT32_MAX;
+
+    void SyncObj() {
+      obj = chain.curr->IsObject() ? chain.curr->Raw() : nullptr;
+    }
+  };
+
+  void GrowBatch(unsigned len, GrowItem* items);
+
   MemoryResource* mr() {
     return entries_.get_allocator().resource();
   }
