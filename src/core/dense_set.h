@@ -130,6 +130,7 @@ class DenseSet {
 
     // Sets pointer but preserves tagging info
     void SetObject(void* obj) {
+      assert(IsObject());
       ptr_ = (void*)((uptr() & kTagMask) | (uintptr_t(obj) & ~kTagMask));
     }
 
