@@ -574,4 +574,26 @@ void BM_AddMany(benchmark::State& state) {
 }
 BENCHMARK(BM_AddMany);
 
+void BM_Grow(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  StringSet ss;
+  unsigned elems = 2 << 15;
+  for (size_t i = 0; i < elems; ++i) {
+    strs.push_back(random_string(generator, 16));
+  }
+  ss.Reserve(elems);
+
+  while (state.KeepRunning()) {
+    state.PauseTiming();
+    ss.Clear();
+    ss.Reserve(elems);
+    ss.AddMany(absl::MakeSpan(strs), UINT32_MAX);
+    CHECK_EQ(ss.UpperBoundSize(), elems);
+    state.ResumeTiming();
+    ss.Add(random_string(generator, 16));
+  }
+}
+BENCHMARK(BM_Grow);
+
 }  // namespace dfly

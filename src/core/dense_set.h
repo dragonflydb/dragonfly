@@ -342,6 +342,13 @@ class DenseSet {
   using ClearItem = CloneItem;
   void ClearBatch(unsigned len, ClearItem* items);
 
+  struct GrowItem {
+    DensePtr ptr;
+    DensePtr obj;
+  };
+  void GrowBatch(uint32_t len, GrowItem* items,
+                 std::vector<DensePtr, DensePtrAllocator>* new_entries);
+
   MemoryResource* mr() {
     return entries_.get_allocator().resource();
   }
@@ -361,7 +368,7 @@ class DenseSet {
   // Return if bucket has no item which is not displaced and right/left bucket has no displaced item
   // belong to given bid
   bool NoItemBelongsBucket(uint32_t bid) const;
-  void Grow(size_t prev_size);
+  void Grow(size_t new_size);
 
   // ============ Pseudo Linked List Functions for interacting with Chains ==================
   size_t PushFront(ChainVectorIterator, void* obj, bool has_ttl);
@@ -384,9 +391,13 @@ class DenseSet {
   DenseLinkKey* NewLink(void* data, DensePtr next);
 
   inline void FreeLink(DenseLinkKey* plink) {
-    // deallocate the link if it is no longer a link as it is now in an empty list
-    mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
-    --num_links_;
+    if (cached_link_num < max_cached_links) {
+      cached_links[cached_link_num++] = plink;
+    } else {
+      // deallocate the link if it is no longer a link as it is now in an empty list
+      mr()->deallocate(plink, sizeof(DenseLinkKey), alignof(DenseLinkKey));
+      --num_links_;
+    }
   }
 
   // Returns true if *node was deleted.
@@ -414,6 +425,10 @@ class DenseSet {
   uint32_t time_now_ = 0;
 
   mutable bool expiration_used_ = false;
+
+  static constexpr uint32_t max_cached_links = 8;
+  DenseLinkKey* cached_links[max_cached_links];
+  uint32_t cached_link_num = 0;
 };
 
 inline void* DenseSet::FindInternal(const void* obj, uint64_t hashcode, uint32_t cookie) const {
