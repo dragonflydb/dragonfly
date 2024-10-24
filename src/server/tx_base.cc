@@ -53,13 +53,13 @@ size_t ShardArgs::Size() const {
 void RecordJournal(const OpArgs& op_args, string_view cmd, const ShardArgs& args,
                    uint32_t shard_cnt) {
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
-  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, false);
+  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, true);
 }
 
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice args,
                    uint32_t shard_cnt) {
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
-  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, false);
+  op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, true);
 }
 
 void RecordExpiry(DbIndex dbid, string_view key) {
