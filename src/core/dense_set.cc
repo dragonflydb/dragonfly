@@ -52,6 +52,8 @@ void DenseSet::IteratorBase::SetExpiryTime(uint32_t ttl_sec) {
   if (!HasExpiry()) {
     void* new_obj = owner_->ObjectClone(src, false, true);
     ptr->SetObject(new_obj);
+
+    // Important: we set the ttl bit on the wrapping pointer.
     curr_entry_->SetTtl(true);
     owner_->ObjDelete(src, false);
     src = new_obj;
@@ -678,8 +680,12 @@ void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
   uint64_t hc = Hash(obj, 0);
   DensePtr* dptr = entries_.empty() ? nullptr : Find(obj, BucketId(hc), 0).second;
 
-  if (dptr) {  // replace
-    if (dptr->IsLink())
+  if (dptr) {  // replace existing object.
+    // A bit confusing design: ttl bit is located on the wrapping pointer,
+    // therefore we must set ttl bit before unrapping below.
+    dptr->SetTtl(has_ttl);
+
+    if (dptr->IsLink())  // unwrap the pointer.
       dptr = dptr->AsLink();
 
     void* res = dptr->Raw();
@@ -687,7 +693,6 @@ void* DenseSet::AddOrReplaceObj(void* obj, bool has_ttl) {
     obj_malloc_used_ += ObjectAllocSize(obj);
 
     dptr->SetObject(obj);
-    dptr->SetTtl(has_ttl);
 
     return res;
   }
