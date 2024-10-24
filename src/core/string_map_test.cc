@@ -168,6 +168,22 @@ TEST_F(StringMapTest, Bug3973) {
   }
 }
 
+TEST_F(StringMapTest, Bug3984) {
+  for (unsigned i = 0; i < 6; i++) {
+    EXPECT_TRUE(sm_->AddOrUpdate(to_string(i), "val"));
+  }
+  for (unsigned i = 0; i < 6; i++) {
+    auto k = sm_->Find(to_string(i));
+    ASSERT_FALSE(k.HasExpiry());
+    k.SetExpiryTime(1);
+    EXPECT_EQ(k.ExpiryTime(), 1);
+  }
+
+  for (unsigned i = 0; i < 6; i++) {
+    EXPECT_FALSE(sm_->AddOrUpdate(to_string(i), "val"));
+  }
+}
+
 unsigned total_wasted_memory = 0;
 
 TEST_F(StringMapTest, ReallocIfNeeded) {
