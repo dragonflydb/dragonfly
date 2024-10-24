@@ -66,20 +66,11 @@ class Listener : public util::ListenerInterface {
 
   ServiceInterface* service_;
 
-  struct PerThread {
-    int32_t num_connections{0};
-    unsigned napi_id = 0;
-  };
-  std::vector<PerThread> per_thread_;
-
   std::atomic_uint32_t next_id_{0};
 
   Role role_;
 
   uint32_t conn_cnt_{0};
-  uint32_t min_cnt_thread_id_{0};
-  int32_t min_cnt_{0};
-  absl::base_internal::SpinLock mutex_;
 
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
