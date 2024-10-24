@@ -3,6 +3,7 @@
 #include <cassert>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -72,7 +73,7 @@ template <typename V> struct RaxTreeMap {
   };
 
   // Result of find() call. Inherits from pair to mimic iterator interface, not incrementable.
-  struct FindIterator : public std::optional<std::pair<std::string_view, V&>> {
+  struct FindIterator : public std::optional<std::pair<std::string, V&>> {
     bool operator==(const SeekIterator& rhs) const {
       if (this->has_value() != !bool(rhs.it_.flags & RAX_ITER_EOF))
         return false;
@@ -92,6 +93,11 @@ template <typename V> struct RaxTreeMap {
   }
 
   ~RaxTreeMap() {
+    for (auto it = begin(); it != end(); ++it) {
+      V* ptr = &(*it).second;
+      std::allocator_traits<decltype(alloc_)>::destroy(alloc_, ptr);
+      alloc_.deallocate(ptr, 1);
+    }
     raxFree(tree_);
   }
 
@@ -113,7 +119,8 @@ template <typename V> struct RaxTreeMap {
 
   FindIterator find(std::string_view key) const {
     if (void* ptr = raxFind(tree_, to_key_ptr(key), key.size()); ptr != raxNotFound)
-      return FindIterator{std::pair<std::string_view, V&>(key, *reinterpret_cast<V*>(ptr))};
+      return FindIterator{std::pair<std::string, V&>(std::string(key), *reinterpret_cast<V*>(ptr))};
+
     return FindIterator{std::nullopt};
   }
 
@@ -155,8 +162,8 @@ std::pair<typename RaxTreeMap<V>::FindIterator, bool> RaxTreeMap<V>::try_emplace
   raxInsert(tree_, to_key_ptr(key), key.size(), ptr, reinterpret_cast<void**>(&old));
   assert(old == nullptr);
 
-  auto it = std::make_optional(std::pair<std::string_view, V&>(key, *ptr));
-  return std::make_pair(FindIterator{it}, true);
+  auto it = std::make_optional(std::pair<std::string, V&>(std::string(key), *ptr));
+  return std::make_pair(std::move(FindIterator{it}), true);
 }
 
 }  // namespace dfly::search
