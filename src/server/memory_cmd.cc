@@ -89,6 +89,7 @@ size_t MemoryUsage(PrimeIterator it) {
 }  // namespace
 
 MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : cntx_(cntx), owner_(owner) {
+  builder_ = cntx_->reply_builder();
 }
 
 void MemoryCmd::Run(CmdArgList args) {
@@ -130,7 +131,7 @@ void MemoryCmd::Run(CmdArgList args) {
         "        Returns whether <address> is known to be allocated internally by any of the "
         "backing heaps",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(builder_);
     return rb->SendSimpleStrArr(help_arr);
   };
 
@@ -146,7 +147,7 @@ void MemoryCmd::Run(CmdArgList args) {
   if (sub_cmd == "DECOMMIT") {
     shard_set->pool()->AwaitBrief(
         [](unsigned, auto* pb) { ServerState::tlocal()->DecommitMemory(ServerState::kAllMemory); });
-    return cntx_->SendSimpleString("OK");
+    return builder_->SendSimpleString("OK");
   }
 
   if (sub_cmd == "MALLOC-STATS") {
@@ -167,11 +168,11 @@ void MemoryCmd::Run(CmdArgList args) {
       if (auto* shard = EngineShard::tlocal(); shard)
         shard->ForceDefrag();
     });
-    return cntx_->SendSimpleString("OK");
+    return builder_->SendSimpleString("OK");
   }
 
   string err = UnknownSubCmd(sub_cmd, "MEMORY");
-  return cntx_->SendError(err, kSyntaxErrType);
+  return builder_->SendError(err, kSyntaxErrType);
 }
 
 namespace {
@@ -262,7 +263,7 @@ void MemoryCmd::Stats() {
                            connection_memory.replication_connection_size,
                        &stats);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   rb->StartCollection(stats.size(), RedisReplyBuilder::MAP);
   for (const auto& [k, v] : stats) {
     rb->SendBulkString(k);
@@ -294,7 +295,7 @@ void MemoryCmd::MallocStats() {
   mi_stats_print_out(MiStatsCallback, &report);
   absl::StrAppend(&report, "___ End mimalloc stats ___\n\n");
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   return rb->SendVerbatimString(report);
 }
 
@@ -307,7 +308,7 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
 
     if (sub_cmd == "SHOW") {
       if (args.size() != 2)
-        return cntx_->SendError(kSyntaxErr, kSyntaxErrType);
+        return builder_->SendError(kSyntaxErr, kSyntaxErrType);
       show_arenas = true;
     } else {
       unsigned tid_indx = 1;
@@ -317,29 +318,29 @@ void MemoryCmd::ArenaStats(CmdArgList args) {
         backing = true;
       }
       if (args.size() > tid_indx && !absl::SimpleAtoi(ArgS(args, tid_indx), &tid)) {
-        return cntx_->SendError(kInvalidIntErr);
+        return builder_->SendError(kInvalidIntErr);
       }
     }
   }
 
   if (show_arenas) {
     mi_debug_show_arenas(true, true, true);
-    return cntx_->reply_builder()->SendOk();
+    return builder_->SendOk();
   }
 
   if (backing && tid >= shard_set->pool()->size()) {
-    return cntx_->SendError(
+    return builder_->SendError(
         absl::StrCat("Thread id must be less than ", shard_set->pool()->size()));
   }
 
   if (!backing && tid >= shard_set->size()) {
-    return cntx_->SendError(absl::StrCat("Thread id must be less than ", shard_set->size()));
+    return builder_->SendError(absl::StrCat("Thread id must be less than ", shard_set->size()));
   }
 
   string mi_malloc_info =
       shard_set->pool()->at(tid)->AwaitBrief([=] { return MallocStatsCb(backing, tid); });
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   return rb->SendVerbatimString(mi_malloc_info);
 }
 
@@ -356,7 +357,7 @@ void MemoryCmd::Usage(std::string_view key) {
     }
   });
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   if (memory_usage < 0)
     return rb->SendNull();
   rb->SendLong(memory_usage);
@@ -364,7 +365,7 @@ void MemoryCmd::Usage(std::string_view key) {
 
 void MemoryCmd::Track(CmdArgList args) {
 #ifndef DFLY_ENABLE_MEMORY_TRACKING
-  return cntx_->SendError("MEMORY TRACK must be enabled at build time.");
+  return builder_->SendError("MEMORY TRACK must be enabled at build time.");
 #endif
 
   CmdArgParser parser(args);
@@ -374,7 +375,7 @@ void MemoryCmd::Track(CmdArgList args) {
     std::tie(tracking_info.lower_bound, tracking_info.upper_bound, tracking_info.sample_odds) =
         parser.Next<size_t, size_t, double>();
     if (parser.HasError()) {
-      return cntx_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.Error()->MakeReply());
     }
 
     atomic_bool error{false};
@@ -385,16 +386,16 @@ void MemoryCmd::Track(CmdArgList args) {
     });
 
     if (error.load()) {
-      return cntx_->SendError("Unable to add tracker");
+      return builder_->SendError("Unable to add tracker");
     } else {
-      return cntx_->SendOk();
+      return builder_->SendOk();
     }
   }
 
   if (parser.Check("REMOVE")) {
     auto [lower_bound, upper_bound] = parser.Next<size_t, size_t>();
     if (parser.HasError()) {
-      return cntx_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.Error()->MakeReply());
     }
 
     atomic_bool error{false};
@@ -405,20 +406,20 @@ void MemoryCmd::Track(CmdArgList args) {
     });
 
     if (error.load()) {
-      return cntx_->SendError("Unable to remove tracker");
+      return builder_->SendError("Unable to remove tracker");
     } else {
-      return cntx_->SendOk();
+      return builder_->SendOk();
     }
   }
 
   if (parser.Check("CLEAR")) {
     shard_set->pool()->AwaitBrief([&](unsigned index, auto*) { AllocationTracker::Get().Clear(); });
-    return cntx_->SendOk();
+    return builder_->SendOk();
   }
 
   if (parser.Check("GET")) {
     auto ranges = AllocationTracker::Get().GetRanges();
-    auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx_->reply_builder());
+    auto* rb = static_cast<facade::RedisReplyBuilder*>(builder_);
     rb->StartArray(ranges.size());
     for (const auto& range : ranges) {
       rb->SendSimpleString(
@@ -430,12 +431,12 @@ void MemoryCmd::Track(CmdArgList args) {
   if (parser.Check("ADDRESS")) {
     string_view ptr_str = parser.Next();
     if (parser.HasError()) {
-      return cntx_->SendError(parser.Error()->MakeReply());
+      return builder_->SendError(parser.Error()->MakeReply());
     }
 
     size_t ptr = 0;
     if (!absl::SimpleHexAtoi(ptr_str, &ptr)) {
-      return cntx_->SendError("Address must be hex number");
+      return builder_->SendError("Address must be hex number");
     }
 
     atomic_bool found{false};
@@ -445,10 +446,10 @@ void MemoryCmd::Track(CmdArgList args) {
       }
     });
 
-    return cntx_->SendSimpleString(found.load() ? "FOUND" : "NOT-FOUND");
+    return builder_->SendSimpleString(found.load() ? "FOUND" : "NOT-FOUND");
   }
 
-  return cntx_->SendError(kSyntaxErrType);
+  return builder_->SendError(kSyntaxErrType);
 }
 
 }  // namespace dfly

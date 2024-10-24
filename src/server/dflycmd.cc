@@ -132,40 +132,40 @@ void DflyCmd::ReplicaInfo::Cancel() {
 DflyCmd::DflyCmd(ServerFamily* server_family) : sf_(server_family) {
 }
 
-void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
+void DflyCmd::Run(CmdArgList args, facade::RedisReplyBuilder* rb, ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1u);
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "THREAD") {
-    return Thread(args, cntx);
+    return Thread(args, rb, cntx);
   }
 
   if (sub_cmd == "FLOW" && (args.size() == 4 || args.size() == 5)) {
-    return Flow(args, cntx);
+    return Flow(args, rb, cntx);
   }
 
   if (sub_cmd == "SYNC" && args.size() == 2) {
-    return Sync(args, cntx);
+    return Sync(args, rb, cntx);
   }
 
   if (sub_cmd == "STARTSTABLE" && args.size() == 2) {
-    return StartStable(args, cntx);
+    return StartStable(args, rb, cntx);
   }
 
   if (sub_cmd == "TAKEOVER" && (args.size() == 3 || args.size() == 4)) {
-    return TakeOver(args, cntx);
+    return TakeOver(args, rb, cntx);
   }
 
   if (sub_cmd == "EXPIRE") {
-    return Expire(args, cntx);
+    return Expire(args, rb, cntx);
   }
 
   if (sub_cmd == "REPLICAOFFSET" && args.size() == 1) {
-    return ReplicaOffset(args, cntx);
+    return ReplicaOffset(args, rb, cntx);
   }
 
   if (sub_cmd == "LOAD") {
-    return Load(args, cntx);
+    return Load(args, rb, cntx);
   }
 
   if (sub_cmd == "HELP") {
@@ -187,15 +187,13 @@ void DflyCmd::Run(CmdArgList args, ConnectionContext* cntx) {
         "HELP",
         "    Prints this help.",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
     return rb->SendSimpleStrArr(help_arr);
   }
 
-  cntx->SendError(kSyntaxErr);
+  rb->SendError(kSyntaxErr);
 }
 
-void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+void DflyCmd::Thread(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   util::ProactorPool* pool = shard_set->pool();
 
   if (args.size() == 1) {  // DFLY THREAD : returns connection thread index and number of threads.
@@ -209,7 +207,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
   string_view arg = ArgS(args, 1);
   unsigned num_thread;
   if (!absl::SimpleAtoi(arg, &num_thread)) {
-    return cntx->SendError(kSyntaxErr);
+    return rb->SendError(kSyntaxErr);
   }
 
   if (num_thread < pool->size()) {
@@ -217,7 +215,7 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
       if (!cntx->conn()->Migrate(pool->at(num_thread))) {
         // Listener::PreShutdown() triggered
         if (cntx->conn()->socket()->IsOpen()) {
-          return cntx->SendError(kInvalidState);
+          return rb->SendError(kInvalidState);
         }
         return;
       }
@@ -226,11 +224,10 @@ void DflyCmd::Thread(CmdArgList args, ConnectionContext* cntx) {
     return rb->SendOk();
   }
 
-  return cntx->SendError(kInvalidIntErr);
+  return rb->SendError(kInvalidIntErr);
 }
 
-void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   string_view master_id = ArgS(args, 1);
   string_view sync_id_str = ArgS(args, 2);
   string_view flow_id_str = ArgS(args, 3);
@@ -239,7 +236,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   if (args.size() == 5) {
     seqid.emplace();
     if (!absl::SimpleAtoi(ArgS(args, 4), &seqid.value())) {
-      return cntx->SendError(facade::kInvalidIntErr);
+      return rb->SendError(facade::kInvalidIntErr);
     }
   }
 
@@ -247,12 +244,12 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
           << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1);
 
   if (master_id != sf_->master_replid()) {
-    return cntx->SendError(kBadMasterId);
+    return rb->SendError(kBadMasterId);
   }
 
   unsigned flow_id;
   if (!absl::SimpleAtoi(flow_id_str, &flow_id) || flow_id >= shard_set->size()) {
-    return cntx->SendError(facade::kInvalidIntErr);
+    return rb->SendError(facade::kInvalidIntErr);
   }
 
   auto [sync_id, replica_ptr] = GetReplicaInfoOrReply(sync_id_str, rb);
@@ -264,7 +261,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
     auto lk = replica_ptr->GetExclusiveLock();
 
     if (replica_ptr->replica_state != SyncState::PREPARATION)
-      return cntx->SendError(kInvalidState);
+      return rb->SendError(kInvalidState);
 
     // Set meta info on connection.
     cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
@@ -283,7 +280,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   if (!cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
     // Listener::PreShutdown() triggered
     if (cntx->conn()->socket()->IsOpen()) {
-      return cntx->SendError(kInvalidState);
+      return rb->SendError(kInvalidState);
     }
     return;
   }
@@ -315,8 +312,7 @@ void DflyCmd::Flow(CmdArgList args, ConnectionContext* cntx) {
   rb->SendSimpleString(eof_token);
 }
 
-void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+void DflyCmd::Sync(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   string_view sync_id_str = ArgS(args, 1);
 
   VLOG(1) << "Got DFLY SYNC " << sync_id_str;
@@ -343,7 +339,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
 
     // TODO: Send better error
     if (*status != OpStatus::OK)
-      return cntx->SendError(kInvalidState);
+      return rb->SendError(kInvalidState);
   }
 
   LOG(INFO) << "Started sync with replica " << replica_ptr->address << ":"
@@ -354,8 +350,7 @@ void DflyCmd::Sync(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendOk();
 }
 
-void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+void DflyCmd::StartStable(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   string_view sync_id_str = ArgS(args, 1);
 
   VLOG(1) << "Got DFLY STARTSTABLE " << sync_id_str;
@@ -381,7 +376,7 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
     shard_set->RunBlockingInParallel(std::move(cb));
 
     if (*status != OpStatus::OK)
-      return cntx->SendError(kInvalidState);
+      return rb->SendError(kInvalidState);
   }
 
   LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->address << ":"
@@ -394,14 +389,13 @@ void DflyCmd::StartStable(CmdArgList args, ConnectionContext* cntx) {
 // DFLY TAKEOVER <timeout_sec> [SAVE] <sync_id>
 // timeout_sec - number of seconds to wait for TAKEOVER to converge.
 // SAVE option is used only by tests.
-void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   parser.Next();
   float timeout = std::ceil(parser.Next<float>());
   if (timeout < 0) {
     // allow 0s timeout for tests.
-    return cntx->SendError("timeout is negative");
+    return rb->SendError("timeout is negative");
   }
 
   bool save_flag = static_cast<bool>(parser.Check("SAVE"));
@@ -409,7 +403,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   string_view sync_id_str = parser.Next<std::string_view>();
 
   if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
+    return rb->SendError(err->MakeReply());
 
   VLOG(1) << "Got DFLY TAKEOVER " << sync_id_str << " time out:" << timeout;
 
@@ -425,7 +419,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
     auto new_state = sf_->service().SwitchState(GlobalState::ACTIVE, GlobalState::TAKEN_OVER);
     if (new_state != GlobalState::TAKEN_OVER) {
       LOG(WARNING) << new_state << " in progress, could not take over";
-      return cntx->SendError("Takeover failed!");
+      return rb->SendError("Takeover failed!");
     }
   }
 
@@ -481,10 +475,10 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
 
   if (*status != OpStatus::OK || !catchup_success.load()) {
     sf_->service().SwitchState(GlobalState::TAKEN_OVER, GlobalState::ACTIVE);
-    return cntx->SendError("Takeover failed!");
+    return rb->SendError("Takeover failed!");
   }
 
-  cntx->SendOk();
+  rb->SendOk();
 
   if (save_flag) {
     VLOG(1) << "Save snapshot after Takeover.";
@@ -498,8 +492,7 @@ void DflyCmd::TakeOver(CmdArgList args, ConnectionContext* cntx) {
   return sf_->ShutdownCmd(CmdArgList(&sargs, 1), cntx);
 }
 
-void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+void DflyCmd::Expire(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   cntx->transaction->ScheduleSingleHop([](Transaction* t, EngineShard* shard) {
     t->GetDbSlice(shard->shard_id()).ExpireAllIfNeeded();
     return OpStatus::OK;
@@ -508,9 +501,7 @@ void DflyCmd::Expire(CmdArgList args, ConnectionContext* cntx) {
   return rb->SendOk();
 }
 
-void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-
+void DflyCmd::ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   rb->StartArray(shard_set->size());
   std::vector<LSN> lsns(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
@@ -523,7 +514,7 @@ void DflyCmd::ReplicaOffset(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-void DflyCmd::Load(CmdArgList args, ConnectionContext* cntx) {
+void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx) {
   CmdArgParser parser{args};
   parser.ExpectTag("LOAD");
   string_view filename = parser.Next();
@@ -539,7 +530,7 @@ void DflyCmd::Load(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (parser.HasError()) {
-    return cntx->SendError(kSyntaxErr);
+    return rb->SendError(kSyntaxErr);
   }
 
   if (existing_keys == ServerFamily::LoadExistingKeys::kFail) {
@@ -551,11 +542,11 @@ void DflyCmd::Load(CmdArgList args, ConnectionContext* cntx) {
     if (ec) {
       string msg = ec.Format();
       LOG(WARNING) << "Could not load file " << msg;
-      return cntx->SendError(msg);
+      return rb->SendError(msg);
     }
   }
 
-  cntx->SendOk();
+  rb->SendOk();
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
@@ -692,8 +683,7 @@ auto DflyCmd::GetReplicaInfoFromConnection(ConnectionContext* cntx)
   return it->second;
 }
 
-void DflyCmd::OnClose(ConnectionContext* cntx) {
-  unsigned sync_id = cntx->conn_state.replication_info.repl_session_id;
+void DflyCmd::OnClose(unsigned sync_id) {
   if (!sync_id)
     return;
   StopReplication(sync_id);

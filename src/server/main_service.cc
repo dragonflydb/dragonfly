@@ -1282,7 +1282,7 @@ void Service::DispatchCommand(ArgSlice args, facade::ConnectionContext* cntx) {
     // Bonus points because this allows to continue replication with ACL users who got
     // their access revoked and reinstated
     if (cid->name() == "REPLCONF" && absl::EqualsIgnoreCase(ArgS(args_no_cmd, 0), "ACK")) {
-      server_family_.GetDflyCmd()->OnClose(dfly_cntx);
+      server_family_.GetDflyCmd()->OnClose(dfly_cntx->conn_state.replication_info.repl_session_id);
       return;
     }
     dfly_cntx->SendError(std::move(*err));
