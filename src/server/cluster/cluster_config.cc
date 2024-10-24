@@ -99,7 +99,9 @@ shared_ptr<ClusterConfig> ClusterConfig::CreateFromConfig(string_view my_id,
                               [&](const ClusterNodeInfo& node) { return node.id == my_id; });
     if (owned_by_me) {
       result->my_slots_.Set(shard.slot_ranges, true);
-      result->my_outgoing_migrations_ = shard.migrations;
+      if (shard.master.id == my_id) {
+        result->my_outgoing_migrations_ = shard.migrations;
+      }
     } else {
       for (const auto& m : shard.migrations) {
         if (my_id == m.node_info.id) {
