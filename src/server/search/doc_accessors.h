@@ -25,17 +25,18 @@ class StringMap;
 // Field string_view's are only valid until the next is requested.
 struct BaseAccessor : public search::DocumentAccessor {
   // Serialize all fields
-  virtual SearchDocData Serialize(const search::Schema& schema) const = 0;
+  virtual std::optional<SearchDocData> Serialize(const search::Schema& schema) const = 0;
 
   // Serialize selected fields
-  virtual SearchDocData Serialize(const search::Schema& schema, const FieldsList& fields) const;
+  virtual std::optional<SearchDocData> Serialize(const search::Schema& schema,
+                                                 const FieldsList& fields) const;
 
   /*
   Serialize the whole type, the default implementation is to serialize all fields.
   For JSON in FT.SEARCH we need to get answer as {"$", <the whole document>}, but it is not an
   indexed field
   */
-  virtual SearchDocData SerializeDocument(const search::Schema& schema) const;
+  virtual std::optional<SearchDocData> SerializeDocument(const search::Schema& schema) const;
 };
 
 // Accessor for hashes stored with listpack
@@ -47,7 +48,7 @@ struct ListPackAccessor : public BaseAccessor {
 
   StringList GetStrings(std::string_view field) const override;
   VectorInfo GetVector(std::string_view field) const override;
-  SearchDocData Serialize(const search::Schema& schema) const override;
+  std::optional<SearchDocData> Serialize(const search::Schema& schema) const override;
 
  private:
   mutable std::array<uint8_t, 33> intbuf_[2];
@@ -61,7 +62,7 @@ struct StringMapAccessor : public BaseAccessor {
 
   StringList GetStrings(std::string_view field) const override;
   VectorInfo GetVector(std::string_view field) const override;
-  SearchDocData Serialize(const search::Schema& schema) const override;
+  std::optional<SearchDocData> Serialize(const search::Schema& schema) const override;
 
  private:
   StringMap* hset_;
@@ -78,13 +79,17 @@ struct JsonAccessor : public BaseAccessor {
   VectorInfo GetVector(std::string_view field) const override;
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
-  SearchDocData Serialize(const search::Schema& schema, const FieldsList& fields) const override;
-  SearchDocData Serialize(const search::Schema& schema) const override;
-  SearchDocData SerializeDocument(const search::Schema& schema) const override;
+  std::optional<SearchDocData> Serialize(const search::Schema& schema,
+                                         const FieldsList& fields) const override;
+  std::optional<SearchDocData> Serialize(const search::Schema& schema) const override;
+  std::optional<SearchDocData> SerializeDocument(const search::Schema& schema) const override;
 
   static void RemoveFieldFromCache(std::string_view field);
 
  private:
+  // Used in SerializeDocument to check if the json field types correspond to the schema types
+  bool JsonMatches(const search::Schema& schema) const;
+
   /// Parses `field` into a JSON path. Caches the results internally.
   JsonPathContainer* GetPath(std::string_view field) const;
 
