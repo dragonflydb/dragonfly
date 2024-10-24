@@ -489,7 +489,7 @@ void DebugCmd::Reload(CmdArgList args) {
   bool save = true;
 
   for (size_t i = 1; i < args.size(); ++i) {
-    string_view opt = absl::AsciiStrToUpper(ArgS(args, i));
+    string opt = absl::AsciiStrToUpper(ArgS(args, i));
     VLOG(1) << "opt " << opt;
 
     if (opt == "NOSAVE") {
