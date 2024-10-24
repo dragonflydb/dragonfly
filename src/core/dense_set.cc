@@ -261,7 +261,9 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
         auto& dest = items[dest_id++];
         DenseLinkKey* link = src.ptr.AsLink();
         dest.obj = link->Raw();
-        dest.has_ttl = link->HasTtl();
+        DCHECK(!link->HasTtl());
+        // ttl is attached to the wrapping pointer.
+        dest.has_ttl = src.ptr.HasTtl();
         dest.ptr = link->next;
         PREFETCH_READ(dest.ptr.Raw());
         PREFETCH_READ(dest.obj);
@@ -295,8 +297,9 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
       } else {
         auto& dest = items[dest_id++];
         DenseLinkKey* link = src.ptr.AsLink();
+        DCHECK(!link->HasTtl());
         dest.obj = link->Raw();
-        dest.has_ttl = link->HasTtl();
+        dest.has_ttl = src.ptr.HasTtl();
         dest.ptr = link->next;
         PREFETCH_READ(dest.ptr.Raw());
         PREFETCH_READ(dest.obj);
@@ -308,6 +311,112 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
     len = dest_id;
   }
 }
+
+void DenseSet::GrowBatch(unsigned len, GrowItem* items) {
+  while (len) {
+    unsigned dest_id = 0;
+
+    for (unsigned i = 0; i < len; ++i) {
+      auto& src = items[i];
+
+      if (!src.obj) {
+        src.obj = src.curr->GetObject();
+        src.action = GrowItem::FIND_NEW_BID;
+        items[dest_id++] = src;
+
+        PREFETCH_READ(src.obj);
+        continue;
+      }
+
+      DCHECK(src.obj);
+      if (src.action == GrowItem::FIND_NEW_BID) {
+        if (ExpireIfNeeded(src.prev, src.curr)) {
+          src.obj = nullptr;
+          if (src.prev && src.prev->IsLink()) {
+            // curr has been updated with the next in chain.
+            src.obj = src.curr->GetObject();
+            items[dest_id++] = src;
+            PREFETCH_READ(src.obj);
+          }
+          continue;
+        }
+        uint32_t bid = BucketId(src.obj, 0);
+        DCHECK(src.curr->GetObject() == src.obj);
+        if (src.bid != bid) {
+          DCHECK_GT(bid, src.bid);
+          src.action = GrowItem::MOVE;
+          src.bid = bid;
+          items[dest_id++] = src;
+          if (src.curr->IsLink()) {
+            PREFETCH_READ(src.curr->AsLink()->Raw());
+          }
+          PREFETCH_READ(&entries_[bid]);
+
+          continue;
+        }
+
+        // Edge case when curr was the first in the chain and
+        // was displaced by one but now it's actually correct place.
+        src.curr->ClearDisplaced();
+        src.obj = nullptr;
+        if (src.curr->IsLink()) {
+          src.prev = src.curr;
+          src.curr = &src.curr->AsLink()->next;
+          PREFETCH_READ(src.curr->Raw());
+          items[dest_id++] = src;
+        }
+
+        continue;
+      }
+
+      DCHECK(src.action == GrowItem::MOVE);
+
+      // Move curr to src.bid
+      DensePtr dptr = *src.curr;
+
+      DVLOG(2) << " Pushing to " << src.bid << " " << src.obj;
+      DCHECK_EQ(BucketId(src.obj, 0), src.bid);
+
+      auto& next = entries_[src.bid];
+      if (next.IsEmpty()) {
+        next.SetObject(src.obj);
+        if (dptr.HasTtl()) {
+          next.SetTtl(true);
+        }
+        next.ClearDisplaced();
+      } else {
+        LOG(FATAL) << "TBD";
+      }
+
+      if (src.curr->IsObject()) {
+        src.obj = nullptr;
+        src.curr->Reset();
+        if (src.prev) {
+          DCHECK(src.prev->IsLink());
+          DenseLinkKey* plink = src.prev->AsLink();
+          DCHECK(&plink->next == src.curr);
+
+          // we want to make *prev a DensePtr instead of DenseLink and we
+          // want to deallocate the link.
+          DensePtr tmp = DensePtr::From(plink);
+          FreeLink(plink);
+          *src.prev = tmp;
+        }
+
+        continue;
+      }
+      DCHECK(src.curr->IsLink());
+      DenseLinkKey* plink = src.curr->AsLink();
+      *src.curr = plink->next;
+      PREFETCH_READ(src.curr->Raw());
+      src.obj = nullptr;
+      FreeLink(plink);
+    }  // for
+    // update the length of the batch for the next iteration.
+    len = dest_id;
+  }
+}
+
 bool DenseSet::NoItemBelongsBucket(uint32_t bid) const {
   auto& entries = const_cast<DenseSet*>(this)->entries_;
   DensePtr* curr = &entries[bid];
@@ -411,77 +520,35 @@ void DenseSet::Fill(DenseSet* other) const {
 }
 
 void DenseSet::Grow(size_t prev_size) {
+  constexpr unsigned kArrLen = 32;
+  GrowItem arr[kArrLen];
+  unsigned len = 0;
+
   // perform rehashing of items in the set
   for (long i = prev_size - 1; i >= 0; --i) {
     DensePtr* curr = &entries_[i];
-    DensePtr* prev = nullptr;
+    if (curr->IsEmpty())
+      continue;
 
-    while (true) {
-      if (ExpireIfNeeded(prev, curr)) {
-        // if curr has disappeared due to expiry and prev was converted from Link to a
-        // regular DensePtr
-        if (prev && !prev->IsLink())
-          break;
-      }
+    auto& item = arr[len++];
+    item.bid = i;
+    item.curr = curr;
+    item.prev = nullptr;
+    item.action = GrowItem::FIND_NEW_BID;
 
-      if (curr->IsEmpty())
-        break;
-      void* ptr = curr->GetObject();
+    if (curr->IsObject()) {
+      item.obj = curr->Raw();
+    } else {
+      item.obj = nullptr;
+    }
+    PREFETCH_READ(curr->Raw());
 
-      DCHECK(ptr != nullptr && ObjectAllocSize(ptr));
-
-      uint32_t bid = BucketId(ptr, 0);
-
-      // if the item does not move from the current chain, ensure
-      // it is not marked as displaced and move to the next item in the chain
-      if (bid == i) {
-        curr->ClearDisplaced();
-        prev = curr;
-        curr = curr->Next();
-        if (curr == nullptr)
-          break;
-      } else {
-        // if the entry is in the wrong chain remove it and
-        // add it to the correct chain. This will also correct
-        // displaced entries
-        auto dest = entries_.begin() + bid;
-        DensePtr dptr = *curr;
-
-        if (curr->IsObject()) {
-          curr->Reset();  // reset the original placeholder (.next or root)
-
-          if (prev) {
-            DCHECK(prev->IsLink());
-
-            DenseLinkKey* plink = prev->AsLink();
-            DCHECK(&plink->next == curr);
-
-            // we want to make *prev a DensePtr instead of DenseLink and we
-            // want to deallocate the link.
-            DensePtr tmp = DensePtr::From(plink);
-            DCHECK(ObjectAllocSize(tmp.GetObject()));
-
-            FreeLink(plink);
-            *prev = tmp;
-          }
-
-          DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
-          DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
-          PushFront(dest, dptr);
-
-          dest->ClearDisplaced();
-
-          break;
-        }  // if IsObject
-
-        *curr = *dptr.Next();
-        DCHECK(!curr->IsEmpty());
-
-        PushFront(dest, dptr);
-        dest->ClearDisplaced();
-      }
+    if (len == kArrLen) {
+      GrowBatch(kArrLen, arr);
+      len = 0;
     }
   }
+  GrowBatch(len, arr);
 }
 
 // Assumes that the object does not exist in the set.

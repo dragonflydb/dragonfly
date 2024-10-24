@@ -342,6 +342,15 @@ class DenseSet {
   using ClearItem = CloneItem;
   void ClearBatch(unsigned len, ClearItem* items);
 
+  struct GrowItem {
+    DensePtr *curr = nullptr, *prev = nullptr;
+    void* obj = nullptr;
+    uint32_t bid = 0;
+    enum Action : uint8_t { FIND_NEW_BID, MOVE } action = FIND_NEW_BID;
+  };
+
+  void GrowBatch(unsigned len, GrowItem* items);
+
   MemoryResource* mr() {
     return entries_.get_allocator().resource();
   }
