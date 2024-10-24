@@ -91,6 +91,10 @@ template <typename V> struct RaxTreeMap {
   explicit RaxTreeMap(PMR_NS::memory_resource* mr) : tree_(raxNew()), alloc_(mr) {
   }
 
+  ~RaxTreeMap() {
+    raxFree(tree_);
+  }
+
   size_t size() const {
     return raxSize(tree_);
   }
