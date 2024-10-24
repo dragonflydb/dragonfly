@@ -38,11 +38,14 @@ string_view SdsToSafeSv(sds str) {
   return str != nullptr ? string_view{str, sdslen(str)} : ""sv;
 }
 
-search::SortableValue FieldToSortableValue(search::SchemaField::FieldType type, string_view value) {
+using FieldValue = std::optional<search::SortableValue>;
+
+FieldValue ToSortableValue(const search::SchemaField::FieldType type, string_view value) {
   if (type == search::SchemaField::NUMERIC) {
     double value_as_double = 0;
     if (!absl::SimpleAtod(value, &value_as_double)) {  // temporary convert to double
-      LOG(DFATAL) << "Failed to convert " << value << " to double";
+      LOG(WARNING) << "Failed to convert " << value << " to double";
+      return std::nullopt;
     }
     return value_as_double;
   }
@@ -53,42 +56,36 @@ search::SortableValue FieldToSortableValue(search::SchemaField::FieldType type, 
   return string{value};
 }
 
-search::SortableValue JsonToSortableValue(const search::SchemaField::FieldType type,
-                                          const JsonType& json) {
-  if (type == search::SchemaField::NUMERIC) {
-    return json.as_double();
-  }
-  return json.to_string();
-}
-
-search::SortableValue ExtractSortableValue(const search::Schema& schema, string_view key,
-                                           string_view value) {
+FieldValue ExtractSortableValue(const search::Schema& schema, string_view key, string_view value) {
   auto it = schema.fields.find(key);
   if (it == schema.fields.end())
-    return FieldToSortableValue(search::SchemaField::TEXT, value);
-  return FieldToSortableValue(it->second.type, value);
+    return ToSortableValue(search::SchemaField::TEXT, value);
+  return ToSortableValue(it->second.type, value);
 }
 
-search::SortableValue ExtractSortableValueFromJson(const search::Schema& schema, string_view key,
-                                                   const JsonType& json) {
-  auto it = schema.fields.find(key);
-  if (it == schema.fields.end())
-    return JsonToSortableValue(search::SchemaField::TEXT, json);
-  return JsonToSortableValue(it->second.type, json);
+FieldValue ExtractSortableValueFromJson(const search::Schema& schema, string_view key,
+                                        const JsonType& json) {
+  auto json_as_string = json.to_string();
+  return ExtractSortableValue(schema, key, json_as_string);
 }
 
 }  // namespace
 
-SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
-                                      const FieldsList& fields) const {
+std::optional<SearchDocData> BaseAccessor::Serialize(const search::Schema& schema,
+                                                     const FieldsList& fields) const {
   SearchDocData out{};
   for (const auto& [fident, fname] : fields) {
-    out[fname] = ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident), ","));
+    auto as_sortable_value =
+        ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident), ","));
+    if (!as_sortable_value) {
+      return std::nullopt;
+    }
+    out[fname] = std::move(as_sortable_value).value();
   }
   return out;
 }
 
-SearchDocData BaseAccessor::SerializeDocument(const search::Schema& schema) const {
+std::optional<SearchDocData> BaseAccessor::SerializeDocument(const search::Schema& schema) const {
   return Serialize(schema);
 }
 
@@ -102,7 +99,7 @@ BaseAccessor::VectorInfo ListPackAccessor::GetVector(string_view active_field) c
   return strlist.empty() ? VectorInfo{} : search::BytesToFtVector(strlist.front());
 }
 
-SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
+std::optional<SearchDocData> ListPackAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
 
   uint8_t* fptr = lpFirst(lp_);
@@ -114,7 +111,11 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
     string_view v = container_utils::LpGetView(fptr, intbuf_[1].data());
     fptr = lpNext(lp_, fptr);
 
-    out[k] = ExtractSortableValue(schema, k, v);
+    auto as_sortable_value = ExtractSortableValue(schema, k, v);
+    if (!as_sortable_value) {
+      return std::nullopt;
+    }
+    out[k] = std::move(as_sortable_value).value();
   }
 
   return out;
@@ -130,11 +131,15 @@ BaseAccessor::VectorInfo StringMapAccessor::GetVector(string_view active_field) 
   return strlist.empty() ? VectorInfo{} : search::BytesToFtVector(strlist.front());
 }
 
-SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
+std::optional<SearchDocData> StringMapAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
-  for (const auto& [kptr, vptr] : *hset_)
-    out[SdsToSafeSv(kptr)] = ExtractSortableValue(schema, SdsToSafeSv(kptr), SdsToSafeSv(vptr));
-
+  for (const auto& [kptr, vptr] : *hset_) {
+    auto as_sortable_value = ExtractSortableValue(schema, SdsToSafeSv(kptr), SdsToSafeSv(vptr));
+    if (!as_sortable_value) {
+      return std::nullopt;
+    }
+    out[SdsToSafeSv(kptr)] = std::move(as_sortable_value).value();
+  }
   return out;
 }
 
@@ -247,27 +252,48 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
   return path;
 }
 
-SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
+std::optional<SearchDocData> JsonAccessor::Serialize(const search::Schema& schema) const {
   FieldsList fields{};
   for (const auto& [fname, fident] : schema.field_names)
     fields.emplace_back(fident, fname);
   return Serialize(schema, fields);
 }
 
-SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
-                                      const FieldsList& fields) const {
+std::optional<SearchDocData> JsonAccessor::Serialize(const search::Schema& schema,
+                                                     const FieldsList& fields) const {
   SearchDocData out{};
   for (const auto& [ident, name] : fields) {
     if (auto* path = GetPath(ident); path) {
-      if (auto res = path->Evaluate(json_); !res.empty())
-        out[name] = ExtractSortableValueFromJson(schema, ident, res[0]);
+      if (auto res = path->Evaluate(json_); !res.empty()) {
+        auto as_sortable_value = ExtractSortableValueFromJson(schema, ident, res[0]);
+        if (!as_sortable_value) {
+          return std::nullopt;
+        }
+        out[name] = std::move(as_sortable_value).value();
+      }
     }
   }
   return out;
 }
 
-SearchDocData JsonAccessor::SerializeDocument(const search::Schema& schema) const {
-  return {{"$", json_.to_string()}};
+bool JsonAccessor::JsonMatches(const search::Schema& schema) const {
+  for (const auto& [fname, fident] : schema.field_names) {
+    if (auto* path = GetPath(fident); path) {
+      if (auto res = path->Evaluate(json_); !res.empty()) {
+        if (!ExtractSortableValueFromJson(schema, fident, res[0]).has_value()) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+std::optional<SearchDocData> JsonAccessor::SerializeDocument(const search::Schema& schema) const {
+  if (!JsonMatches(schema)) {
+    return std::nullopt;
+  }
+  return SearchDocData{{"$", json_.to_string()}};
 }
 
 void JsonAccessor::RemoveFieldFromCache(string_view field) {

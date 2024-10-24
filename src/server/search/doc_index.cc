@@ -222,19 +222,19 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   vector<SerializedSearchDoc> out;
   out.reserve(search_results.ids.size());
 
-  size_t expired_count = 0;
+  size_t unvalid_indexes = 0;
   for (size_t i = 0; i < search_results.ids.size(); i++) {
     auto key = key_index_.Get(search_results.ids[i]);
     auto it = db_slice.FindReadOnly(op_args.db_cntx, key, base_->GetObjCode());
 
     if (!it || !IsValid(*it)) {  // Item must have expired
-      expired_count++;
+      unvalid_indexes++;
       continue;
     }
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
 
-    SearchDocData doc_data;
+    std::optional<SearchDocData> doc_data;
     if (params.return_fields.ShouldReturnAllFields()) {
       /*
       In this case we need to load the whole document.
@@ -246,11 +246,16 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       doc_data = accessor->Serialize(base_->schema, params.return_fields.GetFields());
     }
 
+    if (!doc_data) {
+      unvalid_indexes++;
+      continue;
+    }
+
     auto score = search_results.scores.empty() ? monostate{} : std::move(search_results.scores[i]);
-    out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data), std::move(score)});
+    out.push_back(SerializedSearchDoc{string{key}, std::move(doc_data).value(), std::move(score)});
   }
 
-  return SearchResult{search_results.total - expired_count, std::move(out),
+  return SearchResult{search_results.total - unvalid_indexes, std::move(out),
                       std::move(search_results.profile)};
 }
 
@@ -274,7 +279,7 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
     auto extracted = indices_->ExtractStoredValues(doc);
 
-    SearchDocData loaded;
+    std::optional<SearchDocData> loaded;
     if (params.load_fields.ShouldReturnAllFields()) {
       // Load all fields
       loaded = accessor->Serialize(base_->schema);
@@ -283,8 +288,13 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
       loaded = accessor->Serialize(base_->schema, params.load_fields.GetFields());
     }
 
+    if (!loaded) {
+      continue;
+    }
+
     out.emplace_back(make_move_iterator(extracted.begin()), make_move_iterator(extracted.end()));
-    out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
+    out.back().insert(make_move_iterator(loaded.value().begin()),
+                      make_move_iterator(loaded.value().end()));
   }
 
   return out;
