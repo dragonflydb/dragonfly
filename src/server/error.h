@@ -47,14 +47,14 @@ using facade::kWrongTypeErr;
 
 #ifndef GET_OR_SEND_UNEXPECTED
 
-#define GET_OR_SEND_UNEXPECTED(expr)     \
-  ({                                     \
-    auto expr_res = (expr);              \
-    if (!expr_res) {                     \
-      cntx->SendError(expr_res.error()); \
-      return;                            \
-    }                                    \
-    std::move(expr_res).value();         \
+#define GET_OR_SEND_UNEXPECTED(expr)        \
+  ({                                        \
+    auto expr_res = (expr);                 \
+    if (!expr_res) {                        \
+      builder->SendError(expr_res.error()); \
+      return;                               \
+    }                                       \
+    std::move(expr_res).value();            \
   })
 
 #endif  // GET_OR_SEND_UNEXPECTED
