@@ -1798,6 +1798,221 @@ void ZBooleanOperation(CmdArgList args, ConnectionContext* cntx, bool is_union, 
   }
 }
 
+void ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+
+  ZSetFamily::RangeParams range_params;
+  range_params.reverse = reverse;
+  range_params.with_scores = true;
+  ZSetFamily::ZRangeSpec range_spec;
+  range_spec.params = range_params;
+
+  ZSetFamily::TopNScored sc = 1;
+  if (args.size() > 1) {
+    string_view count = ArgS(args, 1);
+    if (!SimpleAtoi(count, &sc)) {
+      return cntx->SendError(kUintErr);
+    }
+  }
+
+  range_spec.interval = sc;
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpPopCount(range_spec, t->GetOpArgs(shard), key);
+  };
+
+  OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OutputScoredArrayResult(result, range_params, cntx);
+}
+
+OpResult<MScoreResponse> ZGetMembers(CmdArgList args, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  auto members = args.subspan(1);
+  auto cb = [key, members](Transaction* t, EngineShard* shard) {
+    return OpMScore(t->GetOpArgs(shard), key, members);
+  };
+
+  return cntx->transaction->ScheduleSingleHopT(std::move(cb));
+}
+
+void ZRangeInternal(CmdArgList args, ZSetFamily::RangeParams range_params,
+                    ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view min_s = ArgS(args, 1);
+  string_view max_s = ArgS(args, 2);
+
+  ZSetFamily::ZRangeSpec range_spec;
+  range_spec.params = range_params;
+  using RP = ZSetFamily::RangeParams;
+
+  switch (range_params.interval_type) {
+    case RP::IntervalType::SCORE: {
+      ZSetFamily::ScoreInterval si;
+      if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
+        return cntx->SendError(kFloatRangeErr);
+      }
+      range_spec.interval = si;
+      break;
+    }
+    case RP::IntervalType::LEX: {
+      ZSetFamily::LexInterval li;
+      if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
+        return cntx->SendError(kLexRangeErr);
+      }
+      range_spec.interval = li;
+      break;
+    }
+    case RP::IntervalType::RANK: {
+      ZSetFamily::IndexInterval ii;
+      if (!SimpleAtoi(min_s, &ii.first) || !SimpleAtoi(max_s, &ii.second)) {
+        cntx->SendError(kInvalidIntErr);
+        return;
+      }
+      range_spec.interval = ii;
+      break;
+    }
+  }
+
+  OpResult<ScoredArray> range_result;
+  ShardId src_shard = Shard(key, shard_set->size());
+  auto range_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() != src_shard) {
+      // Only run ZRANGE on the source shard.
+      return OpStatus::OK;
+    }
+    range_result = OpRange(range_spec, t->GetOpArgs(shard), key);
+    return OpStatus::OK;
+  };
+  // Don't conclude the transaction if we're storing the result.
+  cntx->transaction->Execute(std::move(range_cb), !range_params.store_key);
+
+  if (range_result.status() == OpStatus::WRONG_TYPE) {
+    if (range_params.store_key) {
+      cntx->transaction->Conclude();
+    }
+    return cntx->SendError(kWrongTypeErr);
+  }
+  LOG_IF(WARNING, !range_result && range_result.status() != OpStatus::KEY_NOTFOUND)
+      << "Unexpected status " << range_result.status();
+
+  if (!range_params.store_key) {
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    rb->SendScoredArray(range_result.value(), range_params.with_scores);
+    return;
+  }
+
+  OpResult<AddResult> add_result;
+  ShardId dest_shard = Shard(*range_params.store_key, shard_set->size());
+  auto add_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() != dest_shard) {
+      // Only write the result on the target shard.
+      return OpStatus::OK;
+    }
+
+    std::vector<ScoredMemberView> mvec(range_result->size());
+    size_t i = 0;
+    for (const auto& [str, score] : *range_result) {
+      mvec[i++] = {score, str};
+    }
+
+    add_result =
+        OpAdd(t->GetOpArgs(shard), ZParams{.override = true}, *range_params.store_key, mvec);
+
+    return OpStatus::OK;
+  };
+  cntx->transaction->Execute(std::move(add_cb), true);
+
+  if (add_result.status() == OpStatus::OUT_OF_MEMORY) {
+    return cntx->SendError(add_result.status());
+  }
+  LOG_IF(WARNING, !add_result) << "Unexpected status " << add_result.status();
+
+  return cntx->SendLong(range_result->size());
+}
+
+void ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, ZSetFamily::RangeParams range_params) {
+  facade::CmdArgParser parser{args.subspan(3)};
+  using RP = ZSetFamily::RangeParams;
+
+  while (true) {
+    if (auto err = parser.Error(); err)
+      return cntx->SendError(err->MakeReply());
+
+    if (!parser.HasNext())
+      break;
+
+    if (parser.Check("BYSCORE")) {
+      if (exchange(range_params.interval_type, RP::SCORE) == RP::LEX)
+        return cntx->SendError("BYSCORE and BYLEX options are not compatible");
+      continue;
+    }
+
+    if (parser.Check("BYLEX")) {
+      if (exchange(range_params.interval_type, RP::LEX) == RP::SCORE)
+        return cntx->SendError("BYSCORE and BYLEX options are not compatible");
+      continue;
+    }
+    if (parser.Check("REV")) {
+      range_params.reverse = true;
+      continue;
+    }
+    if (parser.Check("WITHSCORES")) {
+      range_params.with_scores = true;
+      continue;
+    }
+
+    if (parser.Check("LIMIT")) {
+      auto [offset, limit] = parser.Next<int32_t, int32_t>();
+
+      range_params.limit = limit < 0 ? UINT32_MAX : static_cast<uint32_t>(limit);
+      range_params.offset = offset < 0 ? UINT32_MAX : static_cast<uint32_t>(offset);
+      continue;
+    }
+
+    return cntx->SendError(absl::StrCat("unsupported option ", parser.Peek()));
+  }
+
+  if (range_params.offset == UINT32_MAX) {
+    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+    return rb->SendEmptyArray();
+  }
+
+  ZRangeInternal(args.subspan(0, 3), range_params, cntx);
+}
+
+void ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx) {
+  string_view key = ArgS(args, 0);
+  string_view member = ArgS(args, 1);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpRank(t->GetOpArgs(shard), key, member, reverse);
+  };
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    rb->SendLong(*result);
+  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
+    rb->SendNull();
+  } else {
+    cntx->SendError(result.status());
+  }
+}
+
+void ZRemRangeGeneric(string_view key, const ZSetFamily::ZRangeSpec& range_spec,
+                      ConnectionContext* cntx) {
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpRemRange(t->GetOpArgs(shard), key, range_spec);
+  };
+
+  OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  if (result.status() == OpStatus::WRONG_TYPE) {
+    cntx->SendError(kWrongTypeErr);
+  } else {
+    cntx->SendLong(*result);
+  }
+}
+
 }  // namespace
 
 void ZSetFamily::BZPopMin(CmdArgList args, ConnectionContext* cntx) {
@@ -2124,54 +2339,6 @@ void ZSetFamily::ZRange(CmdArgList args, ConnectionContext* cntx) {
   ZRangeGeneric(args, cntx, RangeParams{});
 }
 
-void ZSetFamily::ZRangeGeneric(CmdArgList args, ConnectionContext* cntx, RangeParams range_params) {
-  facade::CmdArgParser parser{args.subspan(3)};
-  while (true) {
-    if (auto err = parser.Error(); err)
-      return cntx->SendError(err->MakeReply());
-
-    if (!parser.HasNext())
-      break;
-
-    if (parser.Check("BYSCORE")) {
-      if (exchange(range_params.interval_type, RangeParams::SCORE) == RangeParams::LEX)
-        return cntx->SendError("BYSCORE and BYLEX options are not compatible");
-      continue;
-    }
-
-    if (parser.Check("BYLEX")) {
-      if (exchange(range_params.interval_type, RangeParams::LEX) == RangeParams::SCORE)
-        return cntx->SendError("BYSCORE and BYLEX options are not compatible");
-      continue;
-    }
-    if (parser.Check("REV")) {
-      range_params.reverse = true;
-      continue;
-    }
-    if (parser.Check("WITHSCORES")) {
-      range_params.with_scores = true;
-      continue;
-    }
-
-    if (parser.Check("LIMIT")) {
-      auto [offset, limit] = parser.Next<int32_t, int32_t>();
-
-      range_params.limit = limit < 0 ? UINT32_MAX : static_cast<uint32_t>(limit);
-      range_params.offset = offset < 0 ? UINT32_MAX : static_cast<uint32_t>(offset);
-      continue;
-    }
-
-    return cntx->SendError(absl::StrCat("unsupported option ", parser.Peek()));
-  }
-
-  if (range_params.offset == UINT32_MAX) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    return rb->SendEmptyArray();
-  }
-
-  ZRangeInternal(args.subspan(0, 3), range_params, cntx);
-}
-
 void ZSetFamily::ZRank(CmdArgList args, ConnectionContext* cntx) {
   ZRankGeneric(std::move(args), false, cntx);
 }
@@ -2385,170 +2552,6 @@ void ZSetFamily::ZUnion(CmdArgList args, ConnectionContext* cntx) {
 
 void ZSetFamily::ZUnionStore(CmdArgList args, ConnectionContext* cntx) {
   ZBooleanOperation(args, cntx, true, true);
-}
-
-void ZSetFamily::ZRemRangeGeneric(string_view key, const ZRangeSpec& range_spec,
-                                  ConnectionContext* cntx) {
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRemRange(t->GetOpArgs(shard), key, range_spec);
-  };
-
-  OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result.status() == OpStatus::WRONG_TYPE) {
-    cntx->SendError(kWrongTypeErr);
-  } else {
-    cntx->SendLong(*result);
-  }
-}
-
-void ZSetFamily::ZRangeInternal(CmdArgList args, RangeParams range_params,
-                                ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view min_s = ArgS(args, 1);
-  string_view max_s = ArgS(args, 2);
-
-  ZRangeSpec range_spec;
-  range_spec.params = range_params;
-
-  switch (range_params.interval_type) {
-    case RangeParams::IntervalType::SCORE: {
-      ScoreInterval si;
-      if (!ParseBound(min_s, &si.first) || !ParseBound(max_s, &si.second)) {
-        return cntx->SendError(kFloatRangeErr);
-      }
-      range_spec.interval = si;
-      break;
-    }
-    case RangeParams::IntervalType::LEX: {
-      LexInterval li;
-      if (!ParseLexBound(min_s, &li.first) || !ParseLexBound(max_s, &li.second)) {
-        return cntx->SendError(kLexRangeErr);
-      }
-      range_spec.interval = li;
-      break;
-    }
-    case RangeParams::IntervalType::RANK: {
-      IndexInterval ii;
-      if (!SimpleAtoi(min_s, &ii.first) || !SimpleAtoi(max_s, &ii.second)) {
-        cntx->SendError(kInvalidIntErr);
-        return;
-      }
-      range_spec.interval = ii;
-      break;
-    }
-  }
-
-  OpResult<ScoredArray> range_result;
-  ShardId src_shard = Shard(key, shard_set->size());
-  auto range_cb = [&](Transaction* t, EngineShard* shard) {
-    if (shard->shard_id() != src_shard) {
-      // Only run ZRANGE on the source shard.
-      return OpStatus::OK;
-    }
-    range_result = OpRange(range_spec, t->GetOpArgs(shard), key);
-    return OpStatus::OK;
-  };
-  // Don't conclude the transaction if we're storing the result.
-  cntx->transaction->Execute(std::move(range_cb), !range_params.store_key);
-
-  if (range_result.status() == OpStatus::WRONG_TYPE) {
-    if (range_params.store_key) {
-      cntx->transaction->Conclude();
-    }
-    return cntx->SendError(kWrongTypeErr);
-  }
-  LOG_IF(WARNING, !range_result && range_result.status() != OpStatus::KEY_NOTFOUND)
-      << "Unexpected status " << range_result.status();
-
-  if (!range_params.store_key) {
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-    rb->SendScoredArray(range_result.value(), range_params.with_scores);
-    return;
-  }
-
-  OpResult<AddResult> add_result;
-  ShardId dest_shard = Shard(*range_params.store_key, shard_set->size());
-  auto add_cb = [&](Transaction* t, EngineShard* shard) {
-    if (shard->shard_id() != dest_shard) {
-      // Only write the result on the target shard.
-      return OpStatus::OK;
-    }
-
-    std::vector<ScoredMemberView> mvec(range_result->size());
-    size_t i = 0;
-    for (const auto& [str, score] : *range_result) {
-      mvec[i++] = {score, str};
-    }
-
-    add_result =
-        OpAdd(t->GetOpArgs(shard), ZParams{.override = true}, *range_params.store_key, mvec);
-
-    return OpStatus::OK;
-  };
-  cntx->transaction->Execute(std::move(add_cb), true);
-
-  if (add_result.status() == OpStatus::OUT_OF_MEMORY) {
-    return cntx->SendError(add_result.status());
-  }
-  LOG_IF(WARNING, !add_result) << "Unexpected status " << add_result.status();
-
-  return cntx->SendLong(range_result->size());
-}
-
-void ZSetFamily::ZRankGeneric(CmdArgList args, bool reverse, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  string_view member = ArgS(args, 1);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRank(t->GetOpArgs(shard), key, member, reverse);
-  };
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  OpResult<unsigned> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    rb->SendLong(*result);
-  } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    rb->SendNull();
-  } else {
-    cntx->SendError(result.status());
-  }
-}
-
-void ZSetFamily::ZPopMinMax(CmdArgList args, bool reverse, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-
-  RangeParams range_params;
-  range_params.reverse = reverse;
-  range_params.with_scores = true;
-  ZRangeSpec range_spec;
-  range_spec.params = range_params;
-
-  TopNScored sc = 1;
-  if (args.size() > 1) {
-    string_view count = ArgS(args, 1);
-    if (!SimpleAtoi(count, &sc)) {
-      return cntx->SendError(kUintErr);
-    }
-  }
-
-  range_spec.interval = sc;
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPopCount(range_spec, t->GetOpArgs(shard), key);
-  };
-
-  OpResult<ScoredArray> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  OutputScoredArrayResult(result, range_params, cntx);
-}
-
-OpResult<MScoreResponse> ZSetFamily::ZGetMembers(CmdArgList args, ConnectionContext* cntx) {
-  string_view key = ArgS(args, 0);
-  auto members = args.subspan(1);
-  auto cb = [key, members](Transaction* t, EngineShard* shard) {
-    return OpMScore(t->GetOpArgs(shard), key, members);
-  };
-
-  return cntx->transaction->ScheduleSingleHopT(std::move(cb));
 }
 
 void ZSetFamily::GeoAdd(CmdArgList args, ConnectionContext* cntx) {

@@ -129,11 +129,11 @@ class BPopPusher {
 
   // Returns WRONG_TYPE, OK.
   // If OK is returned then use result() to fetch the value.
-  OpResult<string> Run(ConnectionContext* cntx, unsigned limit_ms);
+  OpResult<string> Run(unsigned limit_ms, Transaction* tx, ConnectionContext* cntx);
 
  private:
-  OpResult<string> RunSingle(ConnectionContext* cntx, time_point tp);
-  OpResult<string> RunPair(ConnectionContext* cntx, time_point tp);
+  OpResult<string> RunSingle(time_point tp, Transaction* tx, ConnectionContext* cntx);
+  OpResult<string> RunPair(time_point tp, Transaction* tx, ConnectionContext* cntx);
 
   string_view pop_key_, push_key_;
   ListDir popdir_, pushdir_;
@@ -675,21 +675,21 @@ OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long st
   return str_vec;
 }
 
-void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, ListDir src_dir,
-                 ListDir dest_dir) {
+void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir dest_dir,
+                 Transaction* tx, SinkReplyBuilder* builder) {
   OpResult<string> result;
 
-  if (cntx->transaction->GetUniqueShardCnt() == 1) {
-    cntx->transaction->ReviveAutoJournal();  // On single shard we can use the auto journal flow.
+  if (tx->GetUniqueShardCnt() == 1) {
+    tx->ReviveAutoJournal();  // On single shard we can use the auto journal flow.
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpMoveSingleShard(t->GetOpArgs(shard), src, dest, src_dir, dest_dir);
     };
-    result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+    result = tx->ScheduleSingleHopT(std::move(cb));
   } else {
-    result = MoveTwoShards(cntx->transaction, src, dest, src_dir, dest_dir, true);
+    result = MoveTwoShards(tx, src, dest, src_dir, dest_dir, true);
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (result) {
     return rb->SendBulkString(*result);
   }
@@ -700,33 +700,34 @@ void MoveGeneric(ConnectionContext* cntx, string_view src, string_view dest, Lis
       break;
 
     default:
-      cntx->SendError(result.status());
+      builder->SendError(result.status());
       break;
   }
 }
 
-void RPopLPush(CmdArgList args, ConnectionContext* cntx) {
+void RPopLPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
 
-  MoveGeneric(cntx, src, dest, ListDir::RIGHT, ListDir::LEFT);
+  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, tx, builder);
 }
 
-void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
+void BRPopLPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   float timeout = parser.Next<float>();
 
   if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
+    return builder->SendError(err->MakeReply());
 
   if (timeout < 0)
-    return cntx->SendError("timeout is negative");
+    return builder->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
-  OpResult<string> op_res = bpop_pusher.Run(cntx, unsigned(timeout * 1000));
+  OpResult<string> op_res = bpop_pusher.Run(unsigned(timeout * 1000), tx, cntx);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (op_res) {
     return rb->SendBulkString(*op_res);
   }
@@ -738,12 +739,12 @@ void BRPopLPush(CmdArgList args, ConnectionContext* cntx) {
       break;
 
     default:
-      return cntx->SendError(op_res.status());
+      return builder->SendError(op_res.status());
       break;
   }
 }
 
-void BLMove(CmdArgList args, ConnectionContext* cntx) {
+void BLMove(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
@@ -751,15 +752,15 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
   float timeout = parser.Next<float>();
 
   if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
+    return builder->SendError(err->MakeReply());
 
   if (timeout < 0)
-    return cntx->SendError("timeout is negative");
+    return builder->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
-  OpResult<string> op_res = bpop_pusher.Run(cntx, unsigned(timeout * 1000));
+  OpResult<string> op_res = bpop_pusher.Run(unsigned(timeout * 1000), tx, cntx);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (op_res) {
     return rb->SendBulkString(*op_res);
   }
@@ -771,7 +772,7 @@ void BLMove(CmdArgList args, ConnectionContext* cntx) {
       break;
 
     default:
-      return cntx->SendError(op_res.status());
+      return builder->SendError(op_res.status());
       break;
   }
 }
@@ -780,21 +781,20 @@ BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir
     : pop_key_(pop_key), push_key_(push_key), popdir_(popdir), pushdir_(pushdir) {
 }
 
-OpResult<string> BPopPusher::Run(ConnectionContext* cntx, unsigned limit_ms) {
+OpResult<string> BPopPusher::Run(unsigned limit_ms, Transaction* tx, ConnectionContext* cntx) {
   time_point tp =
       limit_ms ? chrono::steady_clock::now() + chrono::milliseconds(limit_ms) : time_point::max();
 
-  if (cntx->transaction->GetUniqueShardCnt() == 1) {
-    return RunSingle(cntx, tp);
+  if (tx->GetUniqueShardCnt() == 1) {
+    return RunSingle(tp, tx, cntx);
   }
 
-  return RunPair(cntx, tp);
+  return RunPair(tp, tx, cntx);
 }
 
-OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
-  Transaction* t = cntx->transaction;
+OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, ConnectionContext* cntx) {
   OpResult<string> op_res;
-  bool is_multi = t->IsMulti();
+  bool is_multi = tx->IsMulti();
   auto cb_move = [&](Transaction* t, EngineShard* shard) {
     OpArgs op_args = t->GetOpArgs(shard);
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
@@ -803,7 +803,7 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
         std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
         RecordJournal(op_args, "LMOVE", arr, 1);
       }
-      auto blocking_controller = cntx->ns->GetBlockingController(shard->shard_id());
+      auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
       if (blocking_controller) {
         string tmp;
 
@@ -813,13 +813,13 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
 
     return OpStatus::OK;
   };
-  t->Execute(cb_move, false);
+  tx->Execute(cb_move, false);
 
   if (is_multi || op_res.status() != OpStatus::KEY_NOTFOUND) {
     if (op_res.status() == OpStatus::KEY_NOTFOUND) {
       op_res = OpStatus::TIMED_OUT;
     }
-    t->Conclude();
+    tx->Conclude();
     return op_res;
   }
 
@@ -830,18 +830,17 @@ OpResult<string> BPopPusher::RunSingle(ConnectionContext* cntx, time_point tp) {
     return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };
   // Block
-  auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &(cntx->blocked), &(cntx->paused));
+  auto status = tx->WaitOnWatch(tp, std::move(wcb), key_checker, &(cntx->blocked), &(cntx->paused));
   if (status != OpStatus::OK)
     return status;
 
-  t->Execute(cb_move, true);
+  tx->Execute(cb_move, true);
   return op_res;
 }
 
-OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
-  Transaction* t = cntx->transaction;
-  bool is_multi = t->IsMulti();
-  OpResult<string> op_res = MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, false);
+OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionContext* cntx) {
+  bool is_multi = tx->IsMulti();
+  OpResult<string> op_res = MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, false);
 
   if (is_multi || op_res.status() != OpStatus::KEY_NOTFOUND) {
     if (op_res.status() == OpStatus::KEY_NOTFOUND) {
@@ -861,53 +860,156 @@ OpResult<string> BPopPusher::RunPair(ConnectionContext* cntx, time_point tp) {
     return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };
 
-  if (auto status = t->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked, &cntx->paused);
+  if (auto status = tx->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked, &cntx->paused);
       status != OpStatus::OK)
     return status;
 
-  return MoveTwoShards(t, pop_key_, push_key_, popdir_, pushdir_, true);
+  return MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, true);
+}
+
+void PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args, Transaction* tx,
+                 SinkReplyBuilder* builder) {
+  std::string_view key = ArgS(args, 0);
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
+  };
+
+  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  if (result) {
+    return builder->SendLong(result.value());
+  }
+
+  return builder->SendError(result.status());
+}
+
+void PopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  facade::CmdArgParser parser{args};
+  string_view key = parser.Next();
+
+  uint32_t count = 1;
+  bool return_arr = false;
+  if (parser.HasNext()) {
+    count = parser.Next<uint32_t>();
+    return_arr = true;
+  }
+
+  if (auto err = parser.Error(); err)
+    return builder->SendError(err->MakeReply());
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
+  };
+
+  OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  switch (result.status()) {
+    case OpStatus::KEY_NOTFOUND:
+      return rb->SendNull();
+    case OpStatus::WRONG_TYPE:
+      return builder->SendError(kWrongTypeErr);
+    default:;
+  }
+
+  if (return_arr) {
+    rb->StartArray(result->size());
+    for (const auto& k : *result) {
+      rb->SendBulkString(k);
+    }
+  } else {
+    DCHECK_EQ(1u, result->size());
+    rb->SendBulkString(result->front());
+  }
+}
+
+void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                 ConnectionContext* cntx) {
+  DCHECK_GE(args.size(), 2u);
+
+  float timeout;
+  auto timeout_str = ArgS(args, args.size() - 1);
+  if (!absl::SimpleAtof(timeout_str, &timeout)) {
+    return builder->SendError("timeout is not a float or out of range");
+  }
+  if (timeout < 0) {
+    return builder->SendError("timeout is negative");
+  }
+  VLOG(1) << "BPop timeout(" << timeout << ")";
+
+  std::string popped_value;
+  auto cb = [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
+    popped_value = OpBPop(t, shard, key, dir);
+  };
+
+  OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
+      tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  if (popped_key) {
+    DVLOG(1) << "BPop " << tx->DebugId() << " popped from key " << popped_key;  // key.
+    std::string_view str_arr[2] = {*popped_key, popped_value};
+    return rb->SendStringArr(str_arr);
+  }
+
+  DVLOG(1) << "result for " << tx->DebugId() << " is " << popped_key.status();
+
+  switch (popped_key.status()) {
+    case OpStatus::WRONG_TYPE:
+      return builder->SendError(kWrongTypeErr);
+    case OpStatus::CANCELLED:
+    case OpStatus::TIMED_OUT:
+      return rb->SendNullArray();
+    case OpStatus::KEY_MOVED: {
+      auto error = cluster::SlotOwnershipErrorStr(*tx->GetUniqueSlotId());
+      CHECK(error.has_value());
+      return builder->SendError(std::move(*error));
+    }
+    default:
+      LOG(ERROR) << "Unexpected error " << popped_key.status();
+  }
+  return rb->SendNullArray();
 }
 
 }  // namespace
 
-void ListFamily::LPush(CmdArgList args, ConnectionContext* cntx) {
-  return PushGeneric(ListDir::LEFT, false, std::move(args), cntx);
+void ListFamily::LPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  return PushGeneric(ListDir::LEFT, false, std::move(args), tx, builder);
 }
 
-void ListFamily::LPushX(CmdArgList args, ConnectionContext* cntx) {
-  return PushGeneric(ListDir::LEFT, true, std::move(args), cntx);
+void ListFamily::LPushX(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  return PushGeneric(ListDir::LEFT, true, std::move(args), tx, builder);
 }
 
-void ListFamily::LPop(CmdArgList args, ConnectionContext* cntx) {
-  return PopGeneric(ListDir::LEFT, std::move(args), cntx);
+void ListFamily::LPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  return PopGeneric(ListDir::LEFT, std::move(args), tx, builder);
 }
 
-void ListFamily::RPush(CmdArgList args, ConnectionContext* cntx) {
-  return PushGeneric(ListDir::RIGHT, false, std::move(args), cntx);
+void ListFamily::RPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  return PushGeneric(ListDir::RIGHT, false, std::move(args), tx, builder);
 }
 
-void ListFamily::RPushX(CmdArgList args, ConnectionContext* cntx) {
-  return PushGeneric(ListDir::RIGHT, true, std::move(args), cntx);
+void ListFamily::RPushX(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  return PushGeneric(ListDir::RIGHT, true, std::move(args), tx, builder);
 }
 
-void ListFamily::RPop(CmdArgList args, ConnectionContext* cntx) {
-  return PopGeneric(ListDir::RIGHT, std::move(args), cntx);
+void ListFamily::RPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+  return PopGeneric(ListDir::RIGHT, std::move(args), tx, builder);
 }
 
-void ListFamily::LLen(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   auto key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    cntx->SendLong(result.value());
+    builder->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    cntx->SendLong(0);
+    builder->SendLong(0);
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   facade::CmdArgParser parser{args};
   auto [key, elem] = parser.Next<string_view, string_view>();
 
@@ -937,25 +1039,25 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (rank == 0)
-    return cntx->SendError(kInvalidIntErr);
+    return builder->SendError(kInvalidIntErr);
 
   if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
+    return builder->SendError(err->MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
   };
 
-  Transaction* trans = cntx->transaction;
+  Transaction* trans = tx;
   OpResult<vector<uint32_t>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
-    return cntx->SendError(result.status());
+    return builder->SendError(result.status());
   } else if (result.status() == OpStatus::INVALID_VALUE) {
-    return cntx->SendError(result.status());
+    return builder->SendError(result.status());
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (skip_count) {
     if (result->empty()) {
       rb->SendNull();
@@ -963,7 +1065,7 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
       rb->SendLong((*result)[0]);
     }
   } else {
-    SinkReplyBuilder::ReplyAggregator agg(cntx->reply_builder());
+    SinkReplyBuilder::ReplyAggregator agg(builder);
     rb->StartArray(result->size());
     const auto& array = result.value();
     for (const auto& v : array) {
@@ -972,12 +1074,12 @@ void ListFamily::LPos(CmdArgList args, ConnectionContext* cntx) {
   }
 }
 
-void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LIndex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   int32_t index;
   if (!absl::SimpleAtoi(index_str, &index)) {
-    cntx->SendError(kInvalidIntErr);
+    builder->SendError(kInvalidIntErr);
     return;
   }
 
@@ -985,26 +1087,26 @@ void ListFamily::LIndex(CmdArgList args, ConnectionContext* cntx) {
     return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  OpResult<string> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<string> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   } else {
     rb->SendNull();
   }
 }
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
-void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LInsert(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
   InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
 
   if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
+    return builder->SendError(err->MakeReply());
 
   DCHECK(pivot.data() && elem.data());
 
@@ -1012,42 +1114,42 @@ void ListFamily::LInsert(CmdArgList args, ConnectionContext* cntx) {
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
   };
 
-  OpResult<int> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<int> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
-    return cntx->SendLong(result.value_or(0));
+    return builder->SendLong(result.value_or(0));
   }
 
-  cntx->SendError(result.status());
+  builder->SendError(result.status());
 }
 
-void ListFamily::LTrim(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LTrim(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
   string_view s_str = ArgS(args, 1);
   string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    cntx->SendError(kInvalidIntErr);
+    builder->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
-  OpStatus st = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpStatus st = tx->ScheduleSingleHop(std::move(cb));
   if (st == OpStatus::KEY_NOTFOUND)
     st = OpStatus::OK;
-  cntx->SendError(st);
+  builder->SendError(st);
 }
 
-void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   std::string_view key = ArgS(args, 0);
   std::string_view s_str = ArgS(args, 1);
   std::string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    cntx->SendError(kInvalidIntErr);
+    builder->SendError(kInvalidIntErr);
     return;
   }
 
@@ -1055,182 +1157,79 @@ void ListFamily::LRange(CmdArgList args, ConnectionContext* cntx) {
     return OpRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  auto res = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  auto res = tx->ScheduleSingleHopT(std::move(cb));
   if (!res && res.status() != OpStatus::KEY_NOTFOUND) {
-    return cntx->SendError(res.status());
+    return builder->SendError(res.status());
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendStringArr(*res);
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
-void ListFamily::LRem(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LRem(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
-    cntx->SendError(kInvalidIntErr);
+    builder->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
-    return cntx->SendLong(result.value_or(0));
+    return builder->SendLong(result.value_or(0));
   }
-  cntx->SendError(result.status());
+  builder->SendError(result.status());
 }
 
-void ListFamily::LSet(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
-    cntx->SendError(kInvalidIntErr);
+    builder->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<void> result = cntx->transaction->ScheduleSingleHop(std::move(cb));
+  OpResult<void> result = tx->ScheduleSingleHop(std::move(cb));
   if (result) {
-    cntx->SendOk();
+    builder->SendOk();
   } else {
-    cntx->SendError(result.status());
+    builder->SendError(result.status());
   }
 }
 
-void ListFamily::BLPop(CmdArgList args, ConnectionContext* cntx) {
-  BPopGeneric(ListDir::LEFT, std::move(args), cntx);
+void ListFamily::BLPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                       ConnectionContext* cntx) {
+  BPopGeneric(ListDir::LEFT, std::move(args), tx, builder, cntx);
 }
 
-void ListFamily::BRPop(CmdArgList args, ConnectionContext* cntx) {
-  BPopGeneric(ListDir::RIGHT, std::move(args), cntx);
+void ListFamily::BRPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                       ConnectionContext* cntx) {
+  BPopGeneric(ListDir::RIGHT, std::move(args), tx, builder, cntx);
 }
 
-void ListFamily::LMove(CmdArgList args, ConnectionContext* cntx) {
+void ListFamily::LMove(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
 
   if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
+    return builder->SendError(err->MakeReply());
 
-  MoveGeneric(cntx, src, dest, src_dir, dest_dir);
-}
-
-void ListFamily::BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {
-  DCHECK_GE(args.size(), 2u);
-
-  float timeout;
-  auto timeout_str = ArgS(args, args.size() - 1);
-  if (!absl::SimpleAtof(timeout_str, &timeout)) {
-    return cntx->SendError("timeout is not a float or out of range");
-  }
-  if (timeout < 0) {
-    return cntx->SendError("timeout is negative");
-  }
-  VLOG(1) << "BPop timeout(" << timeout << ")";
-
-  Transaction* transaction = cntx->transaction;
-
-  std::string popped_value;
-  auto cb = [dir, &popped_value](Transaction* t, EngineShard* shard, std::string_view key) {
-    popped_value = OpBPop(t, shard, key, dir);
-  };
-
-  OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      transaction, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
-      &cntx->paused);
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  if (popped_key) {
-    DVLOG(1) << "BPop " << transaction->DebugId() << " popped from key " << popped_key;  // key.
-    std::string_view str_arr[2] = {*popped_key, popped_value};
-    return rb->SendStringArr(str_arr);
-  }
-
-  DVLOG(1) << "result for " << transaction->DebugId() << " is " << popped_key.status();
-
-  switch (popped_key.status()) {
-    case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
-    case OpStatus::CANCELLED:
-    case OpStatus::TIMED_OUT:
-      return rb->SendNullArray();
-    case OpStatus::KEY_MOVED: {
-      auto error = cluster::SlotOwnershipErrorStr(*transaction->GetUniqueSlotId());
-      CHECK(error.has_value());
-      return cntx->SendError(std::move(*error));
-    }
-    default:
-      LOG(ERROR) << "Unexpected error " << popped_key.status();
-  }
-  return rb->SendNullArray();
-}
-
-void ListFamily::PushGeneric(ListDir dir, bool skip_notexists, CmdArgList args,
-                             ConnectionContext* cntx) {
-  std::string_view key = ArgS(args, 0);
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPush(t->GetOpArgs(shard), key, dir, skip_notexists, args.subspan(1), false);
-  };
-
-  OpResult<uint32_t> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  if (result) {
-    return cntx->SendLong(result.value());
-  }
-
-  return cntx->SendError(result.status());
-}
-
-void ListFamily::PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx) {
-  facade::CmdArgParser parser{args};
-  string_view key = parser.Next();
-
-  uint32_t count = 1;
-  bool return_arr = false;
-  if (parser.HasNext()) {
-    count = parser.Next<uint32_t>();
-    return_arr = true;
-  }
-
-  if (auto err = parser.Error(); err)
-    return cntx->SendError(err->MakeReply());
-
-  auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpPop(t->GetOpArgs(shard), key, dir, count, true, false);
-  };
-
-  OpResult<StringVec> result = cntx->transaction->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  switch (result.status()) {
-    case OpStatus::KEY_NOTFOUND:
-      return rb->SendNull();
-    case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
-    default:;
-  }
-
-  if (return_arr) {
-    rb->StartArray(result->size());
-    for (const auto& k : *result) {
-      rb->SendBulkString(k);
-    }
-  } else {
-    DCHECK_EQ(1u, result->size());
-    rb->SendBulkString(result->front());
-  }
+  MoveGeneric(src, dest, src_dir, dest_dir, tx, builder);
 }
 
 using CI = CommandId;
