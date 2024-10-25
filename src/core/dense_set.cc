@@ -101,6 +101,7 @@ DenseSet::~DenseSet() {
 
 size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data, bool has_ttl) {
   // if this is an empty list assign the value to the empty placeholder pointer
+  DCHECK(!it->IsDisplaced());
   if (it->IsEmpty()) {
     it->SetObject(data);
   } else {
@@ -118,6 +119,7 @@ size_t DenseSet::PushFront(DenseSet::ChainVectorIterator it, void* data, bool ha
 void DenseSet::PushFront(DenseSet::ChainVectorIterator it, DenseSet::DensePtr ptr) {
   DVLOG(2) << "PushFront to " << distance(entries_.begin(), it) << ", "
            << ObjectAllocSize(ptr.GetObject());
+  DCHECK(!it->IsDisplaced());
 
   if (it->IsEmpty()) {
     it->SetObject(ptr.GetObject());
@@ -159,28 +161,11 @@ auto DenseSet::PopPtrFront(DenseSet::ChainVectorIterator it) -> DensePtr {
     it->Reset();
   } else {
     DCHECK(it->IsLink());
-
-    // since a DenseLinkKey could be at the end of a chain and have a nullptr for next
-    // avoid dereferencing a nullptr and just reset the pointer to this DenseLinkKey
-    if (it->Next() == nullptr) {
-      it->Reset();
-    } else {
-      *it = *it->Next();
-    }
+    DenseLinkKey* link = it->AsLink();
+    *it = link->next;
   }
 
   return front;
-}
-
-void* DenseSet::PopDataFront(DenseSet::ChainVectorIterator it) {
-  DensePtr front = PopPtrFront(it);
-  void* ret = front.GetObject();
-
-  if (front.IsLink()) {
-    FreeLink(front.AsLink());
-  }
-
-  return ret;
 }
 
 uint32_t DenseSet::ClearInternal(uint32_t start, uint32_t count) {
@@ -263,7 +248,10 @@ void DenseSet::CloneBatch(unsigned len, CloneItem* items, DenseSet* other) const
         auto& dest = items[dest_id++];
         DenseLinkKey* link = src.ptr.AsLink();
         dest.obj = link->Raw();
-        dest.has_ttl = link->HasTtl();
+        DCHECK(!link->HasTtl());
+
+        // ttl is attached to the wrapping pointer.
+        dest.has_ttl = src.ptr.HasTtl();
         dest.ptr = link->next;
         PREFETCH_READ(dest.ptr.Raw());
         PREFETCH_READ(dest.obj);
@@ -297,8 +285,9 @@ void DenseSet::ClearBatch(unsigned len, ClearItem* items) {
       } else {
         auto& dest = items[dest_id++];
         DenseLinkKey* link = src.ptr.AsLink();
+        DCHECK(!link->HasTtl());
         dest.obj = link->Raw();
-        dest.has_ttl = link->HasTtl();
+        dest.has_ttl = src.ptr.HasTtl();
         dest.ptr = link->next;
         PREFETCH_READ(dest.ptr.Raw());
         PREFETCH_READ(dest.obj);
@@ -413,12 +402,24 @@ void DenseSet::Fill(DenseSet* other) const {
 }
 
 void DenseSet::Grow(size_t prev_size) {
-  // perform rehashing of items in the set
+  DensePtr first;
+
+  // Corner case. Usually elements are moved to higher buckets during rehashing.
+  // By moving upper elements first we make sure that there are no displaced elements
+  // when we move the lower elements.
+  // However the (displaced) elements at bucket_id=1 can move to bucket 0, and
+  // bucket 0 can host displaced elements from bucket 1. To avoid this situation, we
+  // stash the displaced element from bucket 0 and move it to the correct bucket at the end.
+  if (entries_.front().IsDisplaced()) {
+    first = PopPtrFront(entries_.begin());
+  }
+
+  // perform rehashing of items in the array, chain by chain.
   for (long i = prev_size - 1; i >= 0; --i) {
     DensePtr* curr = &entries_[i];
     DensePtr* prev = nullptr;
 
-    while (true) {
+    do {
       if (ExpireIfNeeded(prev, curr)) {
         // if curr has disappeared due to expiry and prev was converted from Link to a
         // regular DensePtr
@@ -450,8 +451,6 @@ void DenseSet::Grow(size_t prev_size) {
         DensePtr dptr = *curr;
 
         if (curr->IsObject()) {
-          curr->Reset();  // reset the original placeholder (.next or root)
-
           if (prev) {
             DCHECK(prev->IsLink());
 
@@ -461,28 +460,34 @@ void DenseSet::Grow(size_t prev_size) {
             // we want to make *prev a DensePtr instead of DenseLink and we
             // want to deallocate the link.
             DensePtr tmp = DensePtr::From(plink);
+
+            // Important to transfer the ttl flag.
+            tmp.SetTtl(prev->HasTtl());
             DCHECK(ObjectAllocSize(tmp.GetObject()));
 
             FreeLink(plink);
+            // we deallocated the link, curr is invalid now.
+            curr = nullptr;
             *prev = tmp;
+          } else {
+            // prev == nullptr
+            curr->Reset();  // reset the root placeholder.
           }
+        } else {
+          // !curr.IsObject
+          *curr = *dptr.Next();
+          DCHECK(!curr->IsEmpty());
+        }
 
-          DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
-          DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
-          PushFront(dest, dptr);
-
-          dest->ClearDisplaced();
-
-          break;
-        }  // if IsObject
-
-        *curr = *dptr.Next();
-        DCHECK(!curr->IsEmpty());
-
+        DVLOG(2) << " Pushing to " << bid << " " << dptr.GetObject();
+        DCHECK_EQ(BucketId(dptr.GetObject(), 0), bid);
         PushFront(dest, dptr);
-        dest->ClearDisplaced();
       }
-    }
+    } while (curr);
+  }
+  if (!first.IsEmpty()) {
+    uint32_t bid = BucketId(first.GetObject(), 0);
+    PushFront(entries_.begin() + bid, first);
   }
 }
 
@@ -670,7 +675,13 @@ void* DenseSet::PopInternal() {
 
   // unlink the first node in the first non-empty chain
   obj_malloc_used_ -= ObjectAllocSize(bucket_iter->GetObject());
-  void* ret = PopDataFront(bucket_iter);
+
+  DensePtr front = PopPtrFront(bucket_iter);
+  void* ret = front.GetObject();
+
+  if (front.IsLink()) {
+    FreeLink(front.AsLink());
+  }
 
   --size_;
   return ret;

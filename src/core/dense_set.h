@@ -367,7 +367,6 @@ class DenseSet {
   size_t PushFront(ChainVectorIterator, void* obj, bool has_ttl);
   void PushFront(ChainVectorIterator, DensePtr);
 
-  void* PopDataFront(ChainVectorIterator);
   DensePtr PopPtrFront(ChainVectorIterator);
 
   // ============ Pseudo Linked List in DenseSet end ==================
