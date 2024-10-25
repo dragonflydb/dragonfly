@@ -392,6 +392,19 @@ TEST_F(SearchTest, CheckTag) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
+TEST_F(SearchTest, CheckTagPrefix) {
+  PrepareSchema({{"color", SchemaField::TAG}});
+  PrepareQuery("@color:{green* | orange | yellow*}");
+
+  ExpectAll(Map{{"color", "green"}}, Map{{"color", "yellow"}}, Map{{"color", "greenish"}},
+            Map{{"color", "yellowish"}}, Map{{"color", "green-forestish"}},
+            Map{{"color", "yellowsunish"}}, Map{{"color", "orange"}});
+  ExpectNone(Map{{"color", "red"}}, Map{{"color", "blue"}}, Map{{"color", "orangeish"}},
+             Map{{"color", "darkgreen"}}, Map{{"color", "light-yellow"}});
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
 TEST_F(SearchTest, IntegerTerms) {
   PrepareSchema({{"status", SchemaField::TAG}, {"title", SchemaField::TEXT}});
 
