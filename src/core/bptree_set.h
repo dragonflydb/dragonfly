@@ -591,7 +591,7 @@ template <typename T, typename Policy> void BPTree<T, Policy>::DestroyNode(BPTre
 
 template <typename T, typename Policy> void BPTree<T, Policy>::ForceUpdate(KeyT old, KeyT new_obj) {
   BPTreePath path;
-  bool found = Locate(old, &path);
+  [[maybe_unused]] bool found = Locate(old, &path);
 
   assert(path.Depth() > 0u);
   assert(found);
