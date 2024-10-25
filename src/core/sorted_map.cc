@@ -770,10 +770,7 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
 }
 
 bool SortedMap::DefragIfNeeded(float ratio) {
-  auto cb = [this](sds old_obj, sds new_obj) {
-    score_tree->Delete(old_obj);
-    score_tree->Insert(new_obj);
-  };
+  auto cb = [this](sds old_obj, sds new_obj) { score_tree->ForceUpdate(old_obj, new_obj); };
   bool reallocated = false;
 
   for (auto it = score_map->begin(); it != score_map->end(); ++it) {

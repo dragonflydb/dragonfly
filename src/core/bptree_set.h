@@ -104,6 +104,10 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
   /// @param path
   void Delete(BPTreePath path);
 
+  /// @brief Forces an update to the key. Assumes key has the same value.
+  /// Replaces old with new_obj.
+  void ForceUpdate(KeyT old, KeyT new_obj);
+
  private:
   BPTreeNode* CreateNode(bool leaf);
 
@@ -583,6 +587,17 @@ template <typename T, typename Policy> void BPTree<T, Policy>::DestroyNode(BPTre
   void* ptr = node;
   mr_->deallocate(ptr, detail::kBPNodeSize, 8);
   num_nodes_--;
+}
+
+template <typename T, typename Policy> void BPTree<T, Policy>::ForceUpdate(KeyT old, KeyT new_obj) {
+  BPTreePath path;
+  bool found = Locate(old, &path);
+
+  assert(path.Depth() > 0u);
+  assert(found);
+
+  BPTreeNode* node = path.Last().first;
+  node->SetKey(path.Last().second, new_obj);
 }
 
 }  // namespace dfly
