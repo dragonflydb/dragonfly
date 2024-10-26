@@ -5,6 +5,9 @@ on:
   workflow_dispatch:
   pull_request:
 
+permissions:
+  contents: read 
+
 concurrency:
   group: dragonfly-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
