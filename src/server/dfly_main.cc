@@ -73,6 +73,9 @@ ABSL_FLAG(string, unixsocketperm, "", "Set permissions for unixsocket, in octal 
 ABSL_FLAG(bool, force_epoll, false,
           "If true - uses linux epoll engine underneath. "
           "Can fit for kernels older than 5.10.");
+ABSL_FLAG(
+    string, allocation_tracker, "",
+    "Logs stack trace of memory allocation within these ranges. Format is min:max,min:max,....");
 
 ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
@@ -561,6 +564,42 @@ bool UpdateResourceLimitsIfInsideContainer(io::MemInfoData* mdata, size_t* max_t
 
 #endif
 
+void SetupAllocationTracker(ProactorPool* pool) {
+#ifdef DFLY_ENABLE_MEMORY_TRACKING
+  string flag = absl::GetFlag(FLAGS_allocation_tracker);
+  vector<pair<size_t, size_t>> track_ranges;
+  for (string_view entry : absl::StrSplit(flag, ",", absl::SkipEmpty())) {
+    auto separator = entry.find(":");
+    if (separator == entry.npos) {
+      LOG(ERROR) << "Can't find ':' in element";
+      exit(-1);
+    }
+
+    pair<size_t, size_t> p;
+    if (!absl::SimpleAtoi(entry.substr(0, separator), &p.first)) {
+      LOG(ERROR) << "Can't parse first number in pair";
+      exit(-1);
+    }
+    if (!absl::SimpleAtoi(entry.substr(separator + 1), &p.second)) {
+      LOG(ERROR) << "Can't parse second number in pair";
+      exit(-1);
+    }
+
+    track_ranges.push_back(p);
+  }
+
+  pool->AwaitBrief([&](unsigned, ProactorBase*) {
+    for (auto range : track_ranges) {
+      if (!AllocationTracker::Get().Add(
+              {.lower_bound = range.first, .upper_bound = range.second, .sample_odds = 1.0})) {
+        LOG(ERROR) << "Unable to track allocation range";
+        exit(-1);
+      }
+    }
+  });
+#endif
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -746,6 +785,8 @@ Usage: dragonfly [FLAGS]
 #endif
 
   pool->Run();
+
+  SetupAllocationTracker(pool.get());
 
   AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
   acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));

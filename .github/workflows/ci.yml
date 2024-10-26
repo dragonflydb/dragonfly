@@ -21,8 +21,9 @@ jobs:
       - uses: actions/setup-python@v5
       - name: Install dependencies
         run: |
+          python -m venv venv
+          source venv/bin/activate
           python -m pip install pre-commit
-          python -m pip freeze --local
           lsblk -l
           echo "sda rotational = $(cat /sys/block/sda/queue/rotational)"
           echo "sdb rotational = $(cat /sys/block/sdb/queue/rotational)"
@@ -31,7 +32,9 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Run pre-commit checks
-        run: pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
+        run:
+          source venv/bin/activate
+          pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
         shell: bash
   build:
     strategy:

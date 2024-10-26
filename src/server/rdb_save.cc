@@ -49,6 +49,9 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 ABSL_FLAG(int, compression_level, 2, "The compression level to use on zstd/lz4 compression");
+ABSL_FLAG(bool, list_rdb_encode_v2, true,
+          "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
+          "enconding of list uses ziplist encoding compatible with redis 6");
 
 namespace dfly {
 
@@ -164,8 +167,12 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
     case OBJ_LIST:
-      if (compact_enc == OBJ_ENCODING_QUICKLIST)
+      if (compact_enc == OBJ_ENCODING_QUICKLIST) {
+        if (absl::GetFlag(FLAGS_list_rdb_encode_v2))
+          return RDB_TYPE_LIST_QUICKLIST_2;
         return RDB_TYPE_LIST_QUICKLIST;
+      }
+
       break;
     case OBJ_SET:
       if (compact_enc == kEncodingIntSet)
@@ -439,7 +446,9 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
 
-    if (QL_NODE_IS_PLAIN(node)) {
+    if (absl::GetFlag(FLAGS_list_rdb_encode_v2)) {
+      // Use listpack encoding
+      SaveLen(node->container);
       if (quicklistNodeIsCompressed(node)) {
         void* data;
         size_t compress_len = quicklistGetLzf(node, &data);
@@ -453,28 +462,33 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
         FlushIfNeeded(flush_state);
       }
     } else {
-      // listpack
-      uint8_t* lp = node->entry;
-      uint8_t* decompressed = NULL;
+      // Use ziplist encoding
+      if (QL_NODE_IS_PLAIN(node)) {
+        RETURN_ON_ERR(SavePlainNodeAsZiplist(node));
+      } else {
+        // listpack node
+        uint8_t* lp = node->entry;
+        uint8_t* decompressed = NULL;
 
-      if (quicklistNodeIsCompressed(node)) {
-        void* data;
-        size_t compress_len = quicklistGetLzf(node, &data);
-        decompressed = (uint8_t*)zmalloc(node->sz);
+        if (quicklistNodeIsCompressed(node)) {
+          void* data;
+          size_t compress_len = quicklistGetLzf(node, &data);
+          decompressed = (uint8_t*)zmalloc(node->sz);
 
-        if (lzf_decompress(data, compress_len, decompressed, node->sz) == 0) {
-          /* Someone requested decompress, but we can't decompress.  Not good. */
-          zfree(decompressed);
-          return make_error_code(errc::illegal_byte_sequence);
+          if (lzf_decompress(data, compress_len, decompressed, node->sz) == 0) {
+            /* Someone requested decompress, but we can't decompress.  Not good. */
+            zfree(decompressed);
+            return make_error_code(errc::illegal_byte_sequence);
+          }
+          lp = decompressed;
         }
-        lp = decompressed;
-      }
 
-      auto cleanup = absl::MakeCleanup([=] {
-        if (decompressed)
-          zfree(decompressed);
-      });
-      RETURN_ON_ERR(SaveListPackAsZiplist(lp));
+        auto cleanup = absl::MakeCleanup([=] {
+          if (decompressed)
+            zfree(decompressed);
+        });
+        RETURN_ON_ERR(SaveListPackAsZiplist(lp));
+      }
     }
     node = node->next;
   }
@@ -737,6 +751,17 @@ error_code RdbSerializer::SaveListPackAsZiplist(uint8_t* lp) {
     zl = ziplistPush(zl, entry, entry_len, ZIPLIST_TAIL);
     lpfield = lpNext(lp, lpfield);
   }
+  size_t ziplen = ziplistBlobLen(zl);
+  error_code ec = SaveString(string_view{reinterpret_cast<char*>(zl), ziplen});
+  zfree(zl);
+
+  return ec;
+}
+
+error_code RdbSerializer::SavePlainNodeAsZiplist(quicklistNode* node) {
+  uint8_t* zl = ziplistNew();
+  zl = ziplistPush(zl, node->entry, node->sz, ZIPLIST_TAIL);
+
   size_t ziplen = ziplistBlobLen(zl);
   error_code ec = SaveString(string_view{reinterpret_cast<char*>(zl), ziplen});
   zfree(zl);

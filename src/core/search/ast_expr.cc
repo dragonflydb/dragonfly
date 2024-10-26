@@ -16,7 +16,11 @@ using namespace std;
 
 namespace dfly::search {
 
-AstTermNode::AstTermNode(string term) : term{term} {
+AstTermNode::AstTermNode(string term) : term{std::move(term)} {
+}
+
+AstPrefixNode::AstPrefixNode(string prefix) : prefix{std::move(prefix)} {
+  this->prefix.pop_back();
 }
 
 AstRangeNode::AstRangeNode(double lo, bool lo_excl, double hi, bool hi_excl)
@@ -45,11 +49,11 @@ AstFieldNode::AstFieldNode(string field, AstNode&& node)
     : field{field.substr(1)}, node{make_unique<AstNode>(std::move(node))} {
 }
 
-AstTagsNode::AstTagsNode(std::string tag) {
+AstTagsNode::AstTagsNode(TagValue tag) {
   tags = {std::move(tag)};
 }
 
-AstTagsNode::AstTagsNode(AstExpr&& l, std::string tag) {
+AstTagsNode::AstTagsNode(AstExpr&& l, TagValue tag) {
   DCHECK(holds_alternative<AstTagsNode>(l));
   auto& tags_node = get<AstTagsNode>(l);
 
@@ -76,6 +80,10 @@ AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
 
 namespace std {
 ostream& operator<<(ostream& os, optional<size_t> o) {
+  return os;
+}
+
+ostream& operator<<(ostream& os, dfly::search::AstTagsNode::TagValueProxy o) {
   return os;
 }
 }  // namespace std

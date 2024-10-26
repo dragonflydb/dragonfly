@@ -155,10 +155,6 @@ void ServerState::AwaitPauseState(bool is_write) {
   });
 }
 
-bool ServerState::IsPaused() const {
-  return (client_pauses_[0] + client_pauses_[1]) > 0;
-}
-
 void ServerState::DecommitMemory(uint8_t flags) {
   if (flags & kDataHeap) {
     mi_heap_collect(data_heap(), true);

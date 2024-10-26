@@ -24,9 +24,15 @@ struct AstStarNode {};
 
 // Matches terms in text fields
 struct AstTermNode {
-  AstTermNode(std::string term);
+  explicit AstTermNode(std::string term);
 
   std::string term;
+};
+
+struct AstPrefixNode {
+  explicit AstPrefixNode(std::string prefix);
+
+  std::string prefix;
 };
 
 // Matches numeric range
@@ -64,10 +70,22 @@ struct AstFieldNode {
 
 // Stores a list of tags for a tag query
 struct AstTagsNode {
-  AstTagsNode(std::string tag);
-  AstTagsNode(AstNode&& l, std::string tag);
+  using TagValue = std::variant<AstTermNode, AstPrefixNode>;
 
-  std::vector<std::string> tags;
+  struct TagValueProxy
+      : public AstTagsNode::TagValue {  // bison needs it to be default constructible
+    TagValueProxy() : AstTagsNode::TagValue(AstTermNode("")) {
+    }
+    TagValueProxy(AstPrefixNode tv) : AstTagsNode::TagValue(std::move(tv)) {
+    }
+    TagValueProxy(AstTermNode tv) : AstTagsNode::TagValue(std::move(tv)) {
+    }
+  };
+
+  AstTagsNode(TagValue);
+  AstTagsNode(AstNode&& l, TagValue);
+
+  std::vector<TagValue> tags;
 };
 
 // Applies nearest neighbor search to the final result set
@@ -97,8 +115,8 @@ struct AstSortNode {
 };
 
 using NodeVariants =
-    std::variant<std::monostate, AstStarNode, AstTermNode, AstRangeNode, AstNegateNode,
-                 AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
+    std::variant<std::monostate, AstStarNode, AstTermNode, AstPrefixNode, AstRangeNode,
+                 AstNegateNode, AstLogicalNode, AstFieldNode, AstTagsNode, AstKnnNode, AstSortNode>;
 
 struct AstNode : public NodeVariants {
   using variant::variant;
@@ -119,4 +137,5 @@ using AstExpr = AstNode;
 
 namespace std {
 ostream& operator<<(ostream& os, optional<size_t> o);
-}
+ostream& operator<<(ostream& os, dfly::search::AstTagsNode::TagValueProxy o);
+}  // namespace std

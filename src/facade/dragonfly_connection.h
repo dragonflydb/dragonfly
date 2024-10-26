@@ -91,7 +91,7 @@ class Connection : public util::Connection {
     // The capacity is chosen so that we allocate a fully utilized (256 bytes) block.
     using StorageType = absl::InlinedVector<char, kReqStorageSize, mi_stl_allocator<char>>;
 
-    absl::InlinedVector<MutableSlice, 6> args;
+    absl::InlinedVector<std::string_view, 6> args;
     StorageType storage;
   };
 
@@ -312,6 +312,8 @@ class Connection : public util::Connection {
 
   // Sets max queue length locally in the calling thread.
   static void SetMaxQueueLenThreadLocal(uint32_t val);
+  static void GetRequestSizeHistogramThreadLocal(std::string* hist);
+  static void TrackRequestSize(bool enable);
 
  protected:
   void OnShutdown() override;
@@ -331,14 +333,13 @@ class Connection : public util::Connection {
   void HandleRequests() final;
 
   // Start dispatch fiber and run IoLoop.
-  void ConnectionFlow(util::FiberSocketBase* peer);
+  void ConnectionFlow();
 
   // Main loop reading client messages and passing requests to dispatch queue.
-  std::variant<std::error_code, ParserStatus> IoLoop(util::FiberSocketBase* peer,
-                                                     SinkReplyBuilder* orig_builder);
+  std::variant<std::error_code, ParserStatus> IoLoop();
 
   // Returns true if HTTP header is detected.
-  io::Result<bool> CheckForHttpProto(util::FiberSocketBase* peer);
+  io::Result<bool> CheckForHttpProto();
 
   // Dispatches a single (Redis or MC) command.
   // `has_more` should indicate whether the io buffer has more commands
@@ -348,7 +349,7 @@ class Connection : public util::Connection {
                       absl::FunctionRef<MessageHandle()> cmd_msg_cb);
 
   // Handles events from dispatch queue.
-  void ExecutionFiber(util::FiberSocketBase* peer);
+  void ExecutionFiber();
 
   void SendAsync(MessageHandle msg);
 
@@ -358,7 +359,7 @@ class Connection : public util::Connection {
   // Create new pipeline request, re-use from pool when possible.
   PipelineMessagePtr FromArgs(RespVec args, mi_heap_t* heap);
 
-  ParserStatus ParseRedis(SinkReplyBuilder* orig_builder);
+  ParserStatus ParseRedis();
   ParserStatus ParseMemcache();
 
   void OnBreakCb(int32_t mask);
@@ -373,8 +374,9 @@ class Connection : public util::Connection {
   bool ShouldEndDispatchFiber(const MessageHandle& msg);
 
   void LaunchDispatchFiberIfNeeded();  // Dispatch fiber is started lazily
+
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
-  void SquashPipeline(facade::SinkReplyBuilder*);
+  void SquashPipeline();
 
   // Clear pipelined messages, disaptching only intrusive ones.
   void ClearPipelinedMessages();
@@ -388,7 +390,10 @@ class Connection : public util::Connection {
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
   util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
 
-  size_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
+  uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
+
+  // how many bytes of the current request have been consumed
+  size_t request_consumed_bytes_ = 0;
 
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
@@ -398,6 +403,9 @@ class Connection : public util::Connection {
   Protocol protocol_;
   ConnectionStats* stats_ = nullptr;
 
+  // cc_->reply_builder may change during the lifetime of the connection, due to injections.
+  // This is a pointer to the original, socket based reply builder that never changes.
+  SinkReplyBuilder* reply_builder_ = nullptr;
   util::HttpListenerBase* http_listener_;
   SSL_CTX* ssl_ctx_;
 
@@ -438,14 +446,19 @@ class Connection : public util::Connection {
   // Per-thread queue backpressure structs.
   static thread_local QueueBackpressure tl_queue_backpressure_;
 
-  // a flag indicating whether the client has turned on client tracking.
-  bool tracking_enabled_ : 1;
-  bool skip_next_squashing_ : 1;  // Forcefully skip next squashing
+  union {
+    uint16_t flags_;
+    struct {
+      // a flag indicating whether the client has turned on client tracking.
+      bool tracking_enabled_ : 1;
+      bool skip_next_squashing_ : 1;  // Forcefully skip next squashing
 
-  // Connection migration vars, see RequestAsyncMigration() above.
-  bool migration_enabled_ : 1;
-  bool migration_in_process_ : 1;
-  bool is_http_ : 1;
+      // Connection migration vars, see RequestAsyncMigration() above.
+      bool migration_enabled_ : 1;
+      bool migration_in_process_ : 1;
+      bool is_http_ : 1;
+    };
+  };
 };
 
 }  // namespace facade

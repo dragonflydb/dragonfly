@@ -23,13 +23,13 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
   vector<string> raw_parts{absl::StrCat(std::forward<Ts>(parts))...};
 
   auto cmd_str = accumulate(raw_parts.begin(), raw_parts.end(), std::string{});
-  auto buf = make_unique<char[]>(cmd_str.size());
+  auto buf = make_unique<uint8_t[]>(cmd_str.size());
   memcpy(buf.get(), cmd_str.data(), cmd_str.size());
 
-  CmdArgVec slice_parts{};
+  CmdArgVec slice_parts;
   size_t start = 0;
   for (const auto& part : raw_parts) {
-    slice_parts.emplace_back(buf.get() + start, part.size());
+    slice_parts.emplace_back(reinterpret_cast<char*>(buf.get()) + start, part.size());
     start += part.size();
   }
 

@@ -11,6 +11,10 @@
 
 #include "server/conn_context.h"
 
+namespace facade {
+class SinkReplyBuilder;
+}  // namespace facade
+
 namespace dfly {
 
 class EngineShardSet;
@@ -40,9 +44,11 @@ class ScriptMgr {
   };
 
  public:
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
+
   ScriptMgr();
 
-  void Run(CmdArgList args, ConnectionContext* cntx);
+  void Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 
   // Insert script and return sha. Get possible error from compilation or parsing script flags.
   io::Result<std::string, GenericError> Insert(std::string_view body, Interpreter* interpreter);
@@ -61,13 +67,13 @@ class ScriptMgr {
   void OnScriptError(std::string_view sha, std::string_view error);
 
  private:
-  void ExistsCmd(CmdArgList args, ConnectionContext* cntx) const;
-  void FlushCmd(CmdArgList args, ConnectionContext* cntx);
-  void LoadCmd(CmdArgList args, ConnectionContext* cntx);
-  void ConfigCmd(CmdArgList args, ConnectionContext* cntx);
-  void ListCmd(ConnectionContext* cntx) const;
-  void LatencyCmd(ConnectionContext* cntx) const;
-  void GCCmd(ConnectionContext* cntx) const;
+  void ExistsCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) const;
+  void FlushCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void ConfigCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void ListCmd(Transaction* tx, SinkReplyBuilder* builder) const;
+  void LatencyCmd(Transaction* tx, SinkReplyBuilder* builder) const;
+  void GCCmd(Transaction* tx, SinkReplyBuilder* builder) const;
 
   void UpdateScriptCaches(ScriptKey sha, ScriptParams params) const;
 

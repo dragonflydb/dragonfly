@@ -9,6 +9,7 @@ extern "C" {
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <zstd.h>
 
@@ -144,7 +145,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   local_tx->StartMultiNonAtomic();
   boost::intrusive_ptr<Transaction> stub_tx =
       new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
-  absl::InlinedVector<MutableSlice, 5> args_view;
+  absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx, stub_tx.get(), &crb};
 
@@ -161,7 +162,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
 
     args_view.clear();
     for (auto& arg : args) {
-      args_view.push_back(absl::MakeSpan(arg));
+      args_view.push_back(arg);
     }
     auto args_span = absl::MakeSpan(args_view);
 
@@ -367,10 +368,11 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
+  builder_ = cntx->reply_builder();
 }
 
 void DebugCmd::Run(CmdArgList args) {
-  string_view subcmd = ArgS(args, 0);
+  string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
   if (subcmd == "HELP") {
     string_view help_arr[] = {
         "DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
@@ -413,10 +415,12 @@ void DebugCmd::Run(CmdArgList args) {
         "TRAFFIC <path> | [STOP]",
         "    Starts traffic logging to the specified path. If path is not specified,"
         "    traffic logging is stopped.",
+        "RECVSIZE [<tid> | ENABLE | DISABLE]",
+        "    Prints the histogram of the received request sizes on the given thread",
         "HELP",
         "    Prints this help.",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+    auto* rb = static_cast<RedisReplyBuilder*>(builder_);
     return rb->SendSimpleStrArr(help_arr);
   }
 
@@ -468,8 +472,12 @@ void DebugCmd::Run(CmdArgList args) {
     return LogTraffic(args.subspan(1));
   }
 
+  if (subcmd == "RECVSIZE" && args.size() == 2) {
+    return RecvSize(ArgS(args, 1));
+  }
+
   string reply = UnknownSubCmd(subcmd, "DEBUG");
-  return cntx_->SendError(reply, kSyntaxErrType);
+  return builder_->SendError(reply, kSyntaxErrType);
 }
 
 void DebugCmd::Shutdown() {
@@ -481,14 +489,13 @@ void DebugCmd::Reload(CmdArgList args) {
   bool save = true;
 
   for (size_t i = 1; i < args.size(); ++i) {
-    ToUpper(&args[i]);
-    string_view opt = ArgS(args, i);
+    string opt = absl::AsciiStrToUpper(ArgS(args, i));
     VLOG(1) << "opt " << opt;
 
     if (opt == "NOSAVE") {
       save = false;
     } else {
-      return cntx_->SendError("DEBUG RELOAD only supports the NOSAVE options.");
+      return builder_->SendError("DEBUG RELOAD only supports the NOSAVE options.");
     }
   }
 
@@ -498,7 +505,7 @@ void DebugCmd::Reload(CmdArgList args) {
 
     GenericError ec = sf_.DoSave();
     if (ec) {
-      return cntx_->SendError(ec.Format());
+      return builder_->SendError(ec.Format());
     }
   }
 
@@ -511,19 +518,19 @@ void DebugCmd::Reload(CmdArgList args) {
     if (ec) {
       string msg = ec.Format();
       LOG(WARNING) << "Could not load file " << msg;
-      return cntx_->SendError(msg);
+      return builder_->SendError(msg);
     }
   }
 
-  cntx_->SendOk();
+  builder_->SendOk();
 }
 
 void DebugCmd::Replica(CmdArgList args) {
   args.remove_prefix(1);
-  ToUpper(&args[0]);
-  string_view opt = ArgS(args, 0);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  string opt = absl::AsciiStrToUpper(ArgS(args, 0));
+
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   if (opt == "PAUSE" || opt == "RESUME") {
     sf_.PauseReplication(opt == "PAUSE");
     return rb->SendOk();
@@ -538,21 +545,21 @@ void DebugCmd::Replica(CmdArgList args) {
       }
       return;
     } else {
-      return cntx_->SendError("I am master");
+      return builder_->SendError("I am master");
     }
   }
-  return cntx_->SendError(UnknownSubCmd("replica", "DEBUG"));
+  return builder_->SendError(UnknownSubCmd("replica", "DEBUG"));
 }
 
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args) {
   if (args.size() < 2) {
-    cntx_->SendError(UnknownSubCmd("populate", "DEBUG"));
+    builder_->SendError(UnknownSubCmd("populate", "DEBUG"));
     return nullopt;
   }
 
   PopulateOptions options;
   if (!absl::SimpleAtoi(ArgS(args, 1), &options.total_count)) {
-    cntx_->SendError(kUintErr);
+    builder_->SendError(kUintErr);
     return nullopt;
   }
 
@@ -562,35 +569,34 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
 
   if (args.size() > 3) {
     if (!absl::SimpleAtoi(ArgS(args, 3), &options.val_size)) {
-      cntx_->SendError(kUintErr);
+      builder_->SendError(kUintErr);
       return nullopt;
     }
   }
 
   for (size_t index = 4; args.size() > index; ++index) {
-    ToUpper(&args[index]);
-    std::string_view str = ArgS(args, index);
+    string str = absl::AsciiStrToUpper(ArgS(args, index));
     if (str == "RAND") {
       options.populate_random_values = true;
     } else if (str == "TYPE") {
       if (args.size() < index + 2) {
-        cntx_->SendError(kSyntaxErr);
+        builder_->SendError(kSyntaxErr);
         return nullopt;
       }
-      ToUpper(&args[++index]);
-      options.type = ArgS(args, index);
+      ++index;
+      options.type = absl::AsciiStrToUpper(ArgS(args, index));
     } else if (str == "ELEMENTS") {
       if (args.size() < index + 2) {
-        cntx_->SendError(kSyntaxErr);
+        builder_->SendError(kSyntaxErr);
         return nullopt;
       }
       if (!absl::SimpleAtoi(ArgS(args, ++index), &options.elements)) {
-        cntx_->SendError(kSyntaxErr);
+        builder_->SendError(kSyntaxErr);
         return nullopt;
       }
     } else if (str == "SLOTS") {
       if (args.size() < index + 3) {
-        cntx_->SendError(kSyntaxErr);
+        builder_->SendError(kSyntaxErr);
         return nullopt;
       }
 
@@ -607,19 +613,19 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
 
       auto start = parse_slot(ArgS(args, ++index));
       if (start.status() != facade::OpStatus::OK) {
-        cntx_->SendError(start.status());
+        builder_->SendError(start.status());
         return nullopt;
       }
       auto end = parse_slot(ArgS(args, ++index));
       if (end.status() != facade::OpStatus::OK) {
-        cntx_->SendError(end.status());
+        builder_->SendError(end.status());
         return nullopt;
       }
       options.slot_range = cluster::SlotRange{.start = static_cast<cluster::SlotId>(start.value()),
                                               .end = static_cast<cluster::SlotId>(end.value())};
 
     } else {
-      cntx_->SendError(kSyntaxErr);
+      builder_->SendError(kSyntaxErr);
       return nullopt;
     }
   }
@@ -655,7 +661,7 @@ void DebugCmd::Populate(CmdArgList args) {
   for (auto& fb : fb_arr)
     fb.Join();
 
-  cntx_->SendOk();
+  builder_->SendOk();
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
@@ -744,7 +750,7 @@ void DebugCmd::Exec() {
   }
   StrAppend(&res, "--------------------------\n");
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   rb->SendVerbatimString(res);
 }
 
@@ -763,7 +769,7 @@ void DebugCmd::LogTraffic(CmdArgList args) {
     else
       facade::Connection::StopTrafficLogging();
   });
-  cntx_->SendOk();
+  builder_->SendOk();
 }
 
 void DebugCmd::Inspect(string_view key, CmdArgList args) {
@@ -778,7 +784,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
     auto cb = [&] { return EstimateCompression(cntx_, key); };
     auto res = ess.Await(sid, std::move(cb));
     if (!res) {
-      cntx_->SendError(res.status());
+      builder_->SendError(res.status());
       return;
     }
     StrAppend(&resp, "raw_size: ", res->raw_size, ", compressed_size: ", res->compressed_size);
@@ -791,7 +797,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
     ObjInfo res = ess.Await(sid, std::move(cb));
 
     if (!res.found) {
-      cntx_->SendError(kKeyNotFoundErr);
+      builder_->SendError(kKeyNotFoundErr);
       return;
     }
 
@@ -810,7 +816,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
       StrAppend(&resp, " lock:", res.lock_status == ObjInfo::X ? "x" : "s");
     }
   }
-  cntx_->SendSimpleString(resp);
+  builder_->SendSimpleString(resp);
 }
 
 void DebugCmd::Watched() {
@@ -832,7 +838,7 @@ void DebugCmd::Watched() {
     }
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
@@ -861,7 +867,7 @@ void DebugCmd::TxAnalysis() {
     StrAppend(&result, "  max contention score: ", info.max_contention_score,
               ",lock_name:", info.max_contention_lock, "\n");
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   rb->SendVerbatimString(result);
 }
 
@@ -889,7 +895,7 @@ void DebugCmd::ObjHist() {
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   rb->SendVerbatimString(result);
 }
 
@@ -900,7 +906,7 @@ void DebugCmd::Stacktrace() {
     fb2::detail::FiberInterface::PrintAllFiberStackTraces();
   });
   base::FlushLogs();
-  cntx_->SendOk();
+  builder_->SendOk();
 }
 
 void DebugCmd::Shards() {
@@ -955,8 +961,33 @@ void DebugCmd::Shards() {
 
 #undef ADD_STAT
 #undef MAXMIN_STAT
-  auto* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
   rb->SendVerbatimString(out);
+}
+
+void DebugCmd::RecvSize(string_view param) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+  uint8_t enable = 2;
+  if (absl::EqualsIgnoreCase(param, "ENABLE"))
+    enable = 1;
+  else if (absl::EqualsIgnoreCase(param, "DISABLE"))
+    enable = 0;
+
+  if (enable < 2) {
+    shard_set->pool()->AwaitBrief(
+        [enable](auto, auto*) { facade::Connection::TrackRequestSize(enable == 1); });
+    return rb->SendOk();
+  }
+
+  unsigned tid;
+  if (!absl::SimpleAtoi(param, &tid) || tid >= shard_set->pool()->size()) {
+    return rb->SendError(kUintErr);
+  }
+
+  string hist;
+  shard_set->pool()->at(tid)->AwaitBrief(
+      [&]() { facade::Connection::GetRequestSizeHistogramThreadLocal(&hist); });
+  rb->SendVerbatimString(hist);
 }
 
 }  // namespace dfly

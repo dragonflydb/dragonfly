@@ -62,7 +62,6 @@ extern "C" {
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
 #include "util/aws/aws.h"
-#include "util/fibers/fiber_file.h"
 
 using namespace std;
 
@@ -247,7 +246,7 @@ struct CmdArgListFormatter {
 
 string UnknownCmd(string cmd, CmdArgList args) {
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
-                      StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
+                      absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
 bool IsCloudPath(string_view path) {
@@ -305,82 +304,6 @@ std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   }
 
   return std::nullopt;
-}
-
-void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, dfly::Service& service,
-                std::string_view sub_cmd) {
-  size_t requested_slow_log_length = UINT32_MAX;
-  size_t argc = args.size();
-  if (argc >= 3) {
-    cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
-    return;
-  } else if (argc == 2) {
-    string_view length = facade::ArgS(args, 1);
-    int64_t num;
-    if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
-      cntx->SendError("count should be greater than or equal to -1");
-      return;
-    }
-    if (num >= 0) {
-      requested_slow_log_length = num;
-    }
-  }
-
-  // gather all the individual slowlogs from all the fibers and sort them by their timestamp
-  std::vector<boost::circular_buffer<SlowLogEntry>> entries(service.proactor_pool().size());
-  service.proactor_pool().AwaitFiberOnAll([&](auto index, auto* context) {
-    auto shard_entries = ServerState::tlocal()->GetSlowLog().Entries();
-    entries[index] = shard_entries;
-  });
-  std::vector<std::pair<SlowLogEntry, unsigned>> merged_slow_log;
-  for (size_t i = 0; i < entries.size(); ++i) {
-    for (const auto& log_item : entries[i]) {
-      merged_slow_log.emplace_back(log_item, i);
-    }
-  }
-
-  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
-    return e1.first.unix_ts_usec > e2.first.unix_ts_usec;
-  });
-
-  requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
-
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
-  rb->StartArray(requested_slow_log_length);
-  for (size_t i = 0; i < requested_slow_log_length; ++i) {
-    const auto& entry = merged_slow_log[i].first;
-    const auto& args = entry.cmd_args;
-
-    rb->StartArray(6);
-
-    rb->SendLong(entry.entry_id * service.proactor_pool().size() + merged_slow_log[i].second);
-    rb->SendLong(entry.unix_ts_usec / 1000000);
-    rb->SendLong(entry.exec_time_usec);
-
-    // if we truncated the args, there is one pseudo-element containing the number of truncated
-    // args that we must add, so the result length is increased by 1
-    size_t len = args.size() + int(args.size() < entry.original_length);
-
-    rb->StartArray(len);
-
-    for (const auto& arg : args) {
-      if (arg.second > 0) {
-        auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
-        auto cmd_arg = arg.first.substr(0, kMaximumSlowlogArgLength - suffix.length());
-        rb->SendBulkString(absl::StrCat(cmd_arg, suffix));
-      } else {
-        rb->SendBulkString(arg.first);
-      }
-    }
-    // if we truncated arguments - add a special string to indicate that.
-    if (args.size() < entry.original_length) {
-      rb->SendBulkString(
-          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
-    }
-
-    rb->SendBulkString(entry.client_ip);
-    rb->SendBulkString(entry.client_name);
-  }
 }
 
 void ClientSetName(CmdArgList args, ConnectionContext* cntx) {
@@ -553,8 +476,7 @@ void ClientSetInfo(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError("No connection");
   }
 
-  ToUpper(&args[0]);
-  string_view type = ArgS(args, 0);
+  string type = absl::AsciiStrToUpper(ArgS(args, 0));
   string_view val = ArgS(args, 1);
 
   if (type == "LIB-NAME") {
@@ -587,8 +509,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, Connec
       };
     }
   } else if (args.size() == 2) {
-    ToUpper(&args[0]);
-    string_view filter_type = ArgS(args, 0);
+    string filter_type = absl::AsciiStrToUpper(ArgS(args, 0));
     string_view filter_value = ArgS(args, 1);
     if (filter_type == "ADDR") {
       evaluator = [filter_value](facade::Connection* conn) {
@@ -708,6 +629,83 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, ConnectionCo
 }
 
 }  // namespace
+
+void SlowLogGet(dfly::CmdArgList args, dfly::ConnectionContext* cntx, std::string_view sub_cmd,
+                util::ProactorPool* pp) {
+  size_t requested_slow_log_length = UINT32_MAX;
+  size_t argc = args.size();
+  if (argc >= 3) {
+    cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
+    return;
+  } else if (argc == 2) {
+    string_view length = facade::ArgS(args, 1);
+    int64_t num;
+    if ((!absl::SimpleAtoi(length, &num)) || (num < -1)) {
+      cntx->SendError("count should be greater than or equal to -1");
+      return;
+    }
+    if (num >= 0) {
+      requested_slow_log_length = num;
+    }
+  }
+
+  // gather all the individual slowlogs from all the fibers and sort them by their timestamp
+  std::vector<boost::circular_buffer<SlowLogEntry>> entries(pp->size());
+  pp->AwaitFiberOnAll([&](auto index, auto* context) {
+    auto shard_entries = ServerState::tlocal()->GetSlowLog().Entries();
+    entries[index] = shard_entries;
+  });
+
+  std::vector<std::pair<SlowLogEntry, unsigned>> merged_slow_log;
+  for (size_t i = 0; i < entries.size(); ++i) {
+    for (const auto& log_item : entries[i]) {
+      merged_slow_log.emplace_back(log_item, i);
+    }
+  }
+
+  std::sort(merged_slow_log.begin(), merged_slow_log.end(), [](const auto& e1, const auto& e2) {
+    return e1.first.unix_ts_usec > e2.first.unix_ts_usec;
+  });
+
+  requested_slow_log_length = std::min(merged_slow_log.size(), requested_slow_log_length);
+
+  auto* rb = static_cast<facade::RedisReplyBuilder*>(cntx->reply_builder());
+  rb->StartArray(requested_slow_log_length);
+  for (size_t i = 0; i < requested_slow_log_length; ++i) {
+    const auto& entry = merged_slow_log[i].first;
+    const auto& args = entry.cmd_args;
+
+    rb->StartArray(6);
+
+    rb->SendLong(entry.entry_id * pp->size() + merged_slow_log[i].second);
+    rb->SendLong(entry.unix_ts_usec / 1000000);
+    rb->SendLong(entry.exec_time_usec);
+
+    // if we truncated the args, there is one pseudo-element containing the number of truncated
+    // args that we must add, so the result length is increased by 1
+    size_t len = args.size() + int(args.size() < entry.original_length);
+
+    rb->StartArray(len);
+
+    for (const auto& arg : args) {
+      if (arg.second > 0) {
+        auto suffix = absl::StrCat("... (", arg.second, " more bytes)");
+        auto cmd_arg = arg.first.substr(0, kMaximumSlowlogArgLength - suffix.length());
+        rb->SendBulkString(absl::StrCat(cmd_arg, suffix));
+      } else {
+        rb->SendBulkString(arg.first);
+      }
+    }
+    // if we truncated arguments - add a special string to indicate that.
+    if (args.size() < entry.original_length) {
+      rb->SendBulkString(
+          absl::StrCat("... (", entry.original_length - args.size(), " more arguments)"));
+    }
+
+    rb->SendBulkString(entry.client_ip);
+    rb->SendBulkString(entry.client_name);
+  }
+}
 
 std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                 facade::Connection* conn, ClientPause pause_state,
@@ -861,6 +859,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("tls_ca_cert_dir");
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
+  config_registry.RegisterMutable("list_rdb_encode_v2");
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -1564,7 +1563,7 @@ optional<Replica::Summary> ServerFamily::GetReplicaSummary() const {
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
-  dfly_cmd_->OnClose(cntx);
+  dfly_cmd_->OnClose(cntx->conn_state.replication_info.repl_session_id);
 }
 
 void ServerFamily::StatsMC(std::string_view section, facade::ConnectionContext* cntx) {
@@ -1654,6 +1653,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   save_controller_->WaitAllSnapshots();
   detail::SaveInfo save_info;
 
+  VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   {
     util::fb2::LockGuard lk(save_mu_);
     save_info = save_controller_->Finalize();
@@ -1840,8 +1840,7 @@ void ServerFamily::Auth(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   CmdArgList sub_args = args.subspan(1);
 
   if (sub_cmd == "SETNAME") {
@@ -1869,8 +1868,7 @@ void ServerFamily::Client(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "HELP") {
     string_view help_arr[] = {
@@ -1894,8 +1892,7 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
       return cntx->SendError(WrongNumArgsError("config|set"));
     }
 
-    ToLower(&args[1]);
-    string_view param = ArgS(args, 1);
+    string param = absl::AsciiStrToLower(ArgS(args, 1));
 
     ConfigRegistry::SetResult result = config_registry.Set(param, ArgS(args, 2));
 
@@ -1952,16 +1949,12 @@ void ServerFamily::Config(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Debug(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-
   DebugCmd dbg_cmd{this, cntx};
 
   return dbg_cmd.Run(args);
 }
 
 void ServerFamily::Memory(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-
   MemoryCmd mem_cmd{this, cntx};
 
   return mem_cmd.Run(args);
@@ -1984,8 +1977,7 @@ std::optional<ServerFamily::VersionBasename> ServerFamily::GetVersionAndBasename
   bool new_version = absl::GetFlag(FLAGS_df_snapshot_format);
 
   if (args.size() >= 1) {
-    ToUpper(&args[0]);
-    string_view sub_cmd = ArgS(args, 0);
+    string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
     if (sub_cmd == "DF") {
       new_version = true;
     } else if (sub_cmd == "RDB") {
@@ -2058,23 +2050,8 @@ void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
       [registry = service_.mutable_registry(), this, ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
-        SinkReplyBuilder::ResetThreadLocalStats();
-        auto& stats = tl_facade_stats->conn_stats;
-        stats.command_cnt = 0;
-        stats.pipelined_cmd_cnt = 0;
-
         ns->GetCurrentDbSlice().ResetEvents();
-        tl_facade_stats->conn_stats.conn_received_cnt = 0;
-        tl_facade_stats->conn_stats.pipelined_cmd_cnt = 0;
-        tl_facade_stats->conn_stats.command_cnt = 0;
-        tl_facade_stats->conn_stats.io_read_cnt = 0;
-        tl_facade_stats->conn_stats.io_read_bytes = 0;
-
-        tl_facade_stats->reply_stats.io_write_bytes = 0;
-        tl_facade_stats->reply_stats.io_write_cnt = 0;
-        tl_facade_stats->reply_stats.send_stats = {};
-        tl_facade_stats->reply_stats.script_error_count = 0;
-        tl_facade_stats->reply_stats.err_count.clear();
+        facade::ResetStats();
         ServerState::tlocal()->exec_freq_count.clear();
       });
 }
@@ -2183,11 +2160,10 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     return cntx->SendError(kSyntaxErr);
   }
 
-  string_view section;
+  string section;
 
   if (args.size() == 1) {
-    ToUpper(&args[0]);
-    section = ArgS(args, 0);
+    section = absl::AsciiStrToUpper(ArgS(args, 0));
   }
 
   string info;
@@ -2440,7 +2416,8 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("tx_normal_total", m.coordinator_stats.tx_normal_cnt);
     append("tx_inline_runs_total", m.coordinator_stats.tx_inline_runs);
     append("tx_schedule_cancel_total", m.coordinator_stats.tx_schedule_cancel_cnt);
-
+    append("tx_batch_scheduled_items_total", m.shard_stats.tx_batch_scheduled_items_total);
+    append("tx_batch_schedule_calls_total", m.shard_stats.tx_batch_schedule_calls_total);
     append("tx_with_freq", absl::StrJoin(m.coordinator_stats.tx_width_freq_arr, ","));
     append("tx_queue_len", m.tx_queue_len);
 
@@ -2864,9 +2841,8 @@ void ServerFamily::ReplConf(CmdArgList args, ConnectionContext* cntx) {
 
   for (unsigned i = 0; i < args.size(); i += 2) {
     DCHECK_LT(i + 1, args.size());
-    ToUpper(&args[i]);
 
-    std::string_view cmd = ArgS(args, i);
+    string cmd = absl::AsciiStrToUpper(ArgS(args, i));
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
@@ -2991,9 +2967,7 @@ void ServerFamily::Role(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Script(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args.front());
-
-  script_mgr_->Run(std::move(args), cntx);
+  script_mgr_->Run(std::move(args), cntx->transaction, cntx->reply_builder());
 }
 
 void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
@@ -3007,8 +2981,7 @@ void ServerFamily::LastSave(CmdArgList args, ConnectionContext* cntx) {
 
 void ServerFamily::Latency(CmdArgList args, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "LATEST") {
     return rb->SendEmptyArray();
@@ -3043,12 +3016,11 @@ void ServerFamily::ShutdownCmd(CmdArgList args, ConnectionContext* cntx) {
 }
 
 void ServerFamily::Dfly(CmdArgList args, ConnectionContext* cntx) {
-  dfly_cmd_->Run(args, cntx);
+  dfly_cmd_->Run(args, static_cast<RedisReplyBuilder*>(cntx->reply_builder()), cntx);
 }
 
 void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  string_view sub_cmd = ArgS(args, 0);
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "HELP") {
     string_view help[] = {
@@ -3086,14 +3058,14 @@ void ServerFamily::SlowLog(CmdArgList args, ConnectionContext* cntx) {
   }
 
   if (sub_cmd == "GET") {
-    return SlowLogGet(args, cntx, service_, sub_cmd);
+    return SlowLogGet(args, cntx, sub_cmd, &service_.proactor_pool());
   }
   cntx->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
 void ServerFamily::Module(CmdArgList args, ConnectionContext* cntx) {
-  ToUpper(&args[0]);
-  if (ArgS(args, 0) != "LIST")
+  string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
+  if (sub_cmd != "LIST")
     return cntx->SendError(kSyntaxErr);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cntx->reply_builder());

@@ -69,7 +69,7 @@ double toDouble(string_view src);
 
 // Needed 0 at the end to satisfy bison 3.5.1
 %token YYEOF 0
-%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field"
+%token <std::string> TERM "term" TAG_VAL "tag_val" PARAM "param" FIELD "field" PREFIX "prefix"
 
 %precedence TERM TAG_VAL
 %left OR_OP
@@ -83,7 +83,7 @@ double toDouble(string_view src);
 %nterm <bool> opt_lparen
 %nterm <AstExpr> final_query filter search_expr search_unary_expr search_or_expr search_and_expr numeric_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
-%nterm <std::string> tag_list_element
+%nterm <AstTagsNode::TagValueProxy> tag_list_element
 
 %nterm <AstKnnNode> knn_query
 %nterm <std::string> opt_knn_alias
@@ -132,6 +132,7 @@ search_unary_expr:
   LPAREN search_expr RPAREN           { $$ = std::move($2); }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2)); }
   | TERM                              { $$ = AstTermNode(std::move($1)); }
+  | PREFIX                            { $$ = AstPrefixNode(std::move($1)); }
   | UINT32                            { $$ = AstTermNode(std::move($1)); }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
@@ -178,10 +179,11 @@ tag_list:
   | tag_list OR_OP tag_list_element      { $$ = AstTagsNode(std::move($1), std::move($3)); }
 
 tag_list_element:
-  TERM { $$ = std::move($1); }
-  | UINT32 { $$ = std::move($1); }
-  | DOUBLE { $$ = std::move($1); }
-  | TAG_VAL { $$ = std::move($1); }
+  TERM        { $$ = AstTermNode(std::move($1)); }
+  | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
+  | UINT32    { $$ = AstTermNode(std::move($1)); }
+  | DOUBLE    { $$ = AstTermNode(std::move($1)); }
+  | TAG_VAL   { $$ = AstTermNode(std::move($1)); }
 
 
 %%

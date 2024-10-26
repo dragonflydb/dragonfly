@@ -11,6 +11,7 @@
 #include <absl/strings/str_split.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <mimalloc.h>
 
 #include <algorithm>
 #include <memory_resource>
@@ -21,6 +22,10 @@
 #include "core/search/base.h"
 #include "core/search/query_driver.h"
 #include "core/search/vector_utils.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 namespace dfly {
 namespace search {
@@ -80,6 +85,11 @@ Schema MakeSimpleSchema(initializer_list<pair<string_view, SchemaField::FieldTyp
 
 class SearchTest : public ::testing::Test {
  protected:
+  static void SetUpTestSuite() {
+    auto* tlh = mi_heap_get_backing();
+    init_zmalloc_threadlocal(tlh);
+  }
+
   SearchTest() {
     PrepareSchema({{"field", SchemaField::TEXT}});
   }
@@ -260,6 +270,25 @@ TEST_F(SearchTest, CheckParenthesisPriority) {
   }
 }
 
+TEST_F(SearchTest, CheckPrefix) {
+  {
+    PrepareQuery("pre*");
+
+    ExpectAll("pre", "prepre", "preachers", "prepared", "pRetty", "PRedators", "prEcisely!");
+    ExpectNone("pristine", "represent", "repair", "depreciation");
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+  {
+    PrepareQuery("new*");
+
+    ExpectAll("new", "New York", "Newham", "newbie", "news", "Welcome to Newark!");
+    ExpectNone("ne", "renew", "nev", "ne-w", "notnew", "casino in neVada");
+
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
 using Map = MockedDocument::Map;
 
 TEST_F(SearchTest, MatchField) {
@@ -359,6 +388,19 @@ TEST_F(SearchTest, CheckTag) {
             Map{{"f1", "green, blue"}, {"f2", "circle"}});
   ExpectNone(Map{{"f1", "green"}, {"f2", "square"}}, Map{{"f1", "green"}, {"f2", "circle"}},
              Map{{"f1", "red"}, {"f2", "triangle"}}, Map{{"f1", "blue"}, {"f2", "line, triangle"}});
+
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, CheckTagPrefix) {
+  PrepareSchema({{"color", SchemaField::TAG}});
+  PrepareQuery("@color:{green* | orange | yellow*}");
+
+  ExpectAll(Map{{"color", "green"}}, Map{{"color", "yellow"}}, Map{{"color", "greenish"}},
+            Map{{"color", "yellowish"}}, Map{{"color", "green-forestish"}},
+            Map{{"color", "yellowsunish"}}, Map{{"color", "orange"}});
+  ExpectNone(Map{{"color", "red"}}, Map{{"color", "blue"}}, Map{{"color", "orangeish"}},
+             Map{{"color", "darkgreen"}}, Map{{"color", "light-yellow"}});
 
   EXPECT_TRUE(Check()) << GetError();
 }

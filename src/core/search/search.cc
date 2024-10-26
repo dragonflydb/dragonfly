@@ -116,15 +116,29 @@ struct IndexResult {
 
 struct ProfileBuilder {
   string GetNodeInfo(const AstNode& node) {
+    struct NodeFormatter {
+      void operator()(std::string* out, const AstPrefixNode& node) const {
+        out->append(node.prefix);
+      }
+      void operator()(std::string* out, const AstTermNode& node) const {
+        out->append(node.term);
+      }
+      void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
+        visit([this, out](const auto& n) { this->operator()(out, n); }, value);
+      }
+    };
     Overloaded node_info{
         [](monostate) -> string { return ""s; },
         [](const AstTermNode& n) { return absl::StrCat("Term{", n.term, "}"); },
+        [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.prefix, "}"); },
         [](const AstRangeNode& n) { return absl::StrCat("Range{", n.lo, "<>", n.hi, "}"); },
         [](const AstLogicalNode& n) {
           auto op = n.op == AstLogicalNode::AND ? "and" : "or";
           return absl::StrCat("Logical{n=", n.nodes.size(), ",o=", op, "}");
         },
-        [](const AstTagsNode& n) { return absl::StrCat("Tags{", absl::StrJoin(n.tags, ","), "}"); },
+        [](const AstTagsNode& n) {
+          return absl::StrCat("Tags{", absl::StrJoin(n.tags, ",", NodeFormatter()), "}");
+        },
         [](const AstFieldNode& n) { return absl::StrCat("Field{", n.field, "}"); },
         [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
         [](const AstNegateNode& n) { return absl::StrCat("Negate{}"); },
@@ -247,6 +261,14 @@ struct BasicSearch {
     return out;
   }
 
+  template <typename C>
+  IndexResult CollectPrefixMatches(BaseStringIndex<C>* index, std::string_view prefix) {
+    IndexResult result{};
+    index->MatchingPrefix(
+        prefix, [&result, this](const auto* c) { Merge(IndexResult{c}, &result, LogicOp::OR); });
+    return result;
+  }
+
   IndexResult Search(monostate, string_view) {
     return vector<DocId>{};
   }
@@ -268,6 +290,23 @@ struct BasicSearch {
     auto mapping = [&node](TextIndex* index) { return index->Matching(node.term); };
 
     return UnifyResults(GetSubResults(selected_indices, mapping), LogicOp::OR);
+  }
+
+  IndexResult Search(const AstPrefixNode& node, string_view active_field) {
+    vector<TextIndex*> indices;
+    if (!active_field.empty()) {
+      if (auto* index = GetIndex<TextIndex>(active_field); index)
+        indices = {index};
+      else
+        return IndexResult{};
+    } else {
+      indices = indices_->GetAllTextIndices();
+    }
+
+    auto mapping = [&node, this](TextIndex* index) {
+      return CollectPrefixMatches(index, node.prefix);
+    };
+    return UnifyResults(GetSubResults(indices, mapping), LogicOp::OR);
   }
 
   // [range]: access field's numeric index
@@ -307,11 +346,18 @@ struct BasicSearch {
 
   // {tags | ...}: Unify results for all tags
   IndexResult Search(const AstTagsNode& node, string_view active_field) {
-    if (auto* tag_index = GetIndex<TagIndex>(active_field); tag_index) {
-      auto mapping = [tag_index](string_view tag) { return tag_index->Matching(tag); };
-      return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
-    }
-    return IndexResult{};
+    auto* tag_index = GetIndex<TagIndex>(active_field);
+    if (!tag_index)
+      return IndexResult{};
+
+    Overloaded ov{[tag_index](const AstTermNode& term) -> IndexResult {
+                    return tag_index->Matching(term.term);
+                  },
+                  [tag_index, this](const AstPrefixNode& prefix) {
+                    return CollectPrefixMatches(tag_index, prefix.prefix);
+                  }};
+    auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
+    return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
   // SORTBY field [DESC]: Sort by field. Part of params and not "core query".

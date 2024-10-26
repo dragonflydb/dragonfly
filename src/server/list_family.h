@@ -7,42 +7,44 @@
 #include "facade/op_status.h"
 #include "server/common.h"
 
+namespace facade {
+class SinkReplyBuilder;
+}  // namespace facade
+
 namespace dfly {
 
 using facade::OpResult;
 
 class ConnectionContext;
 class CommandRegistry;
-class EngineShard;
+class Transaction;
 
 class ListFamily {
  public:
   static void Register(CommandRegistry* registry);
 
  private:
-  static void LPush(CmdArgList args, ConnectionContext* cntx);
-  static void LPushX(CmdArgList args, ConnectionContext* cntx);
-  static void RPush(CmdArgList args, ConnectionContext* cntx);
-  static void RPushX(CmdArgList args, ConnectionContext* cntx);
-  static void LPop(CmdArgList args, ConnectionContext* cntx);
-  static void RPop(CmdArgList args, ConnectionContext* cntx);
-  static void BLPop(CmdArgList args, ConnectionContext* cntx);
-  static void BRPop(CmdArgList args, ConnectionContext* cntx);
-  static void LLen(CmdArgList args, ConnectionContext* cntx);
-  static void LPos(CmdArgList args, ConnectionContext* cntx);
-  static void LIndex(CmdArgList args, ConnectionContext* cntx);
-  static void LInsert(CmdArgList args, ConnectionContext* cntx);
-  static void LTrim(CmdArgList args, ConnectionContext* cntx);
-  static void LRange(CmdArgList args, ConnectionContext* cntx);
-  static void LRem(CmdArgList args, ConnectionContext* cntx);
-  static void LSet(CmdArgList args, ConnectionContext* cntx);
-  static void LMove(CmdArgList args, ConnectionContext* cntx);
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void PopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
-  static void PushGeneric(ListDir dir, bool skip_notexist, CmdArgList args,
-                          ConnectionContext* cntx);
-
-  static void BPopGeneric(ListDir dir, CmdArgList args, ConnectionContext* cntx);
+  static void LPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LPushX(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void RPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void RPushX(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void RPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void BLPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                    ConnectionContext* cntx);
+  static void BRPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                    ConnectionContext* cntx);
+  static void LLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LIndex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LInsert(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LTrim(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LRem(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LMove(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 };
 
 }  // namespace dfly

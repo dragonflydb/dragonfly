@@ -14,7 +14,6 @@
 #include <vector>
 
 #include "base/pmr/memory_resource.h"
-#include "core/core_types.h"
 #include "core/string_map.h"
 
 namespace dfly::search {

@@ -37,10 +37,10 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  void DispatchCommand(CmdArgList args, facade::ConnectionContext* cntx) final;
+  void DispatchCommand(ArgSlice args, facade::ConnectionContext* cntx) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  size_t DispatchManyCommands(absl::Span<CmdArgList> args_list,
+  size_t DispatchManyCommands(absl::Span<ArgSlice> args_list,
                               facade::ConnectionContext* cntx) final;
 
   // Check VerifyCommandExecution and invoke command with args
@@ -55,7 +55,7 @@ class Service : public facade::ServiceInterface {
   // Verify command prepares excution in correct state.
   // It's usually called before command execution. Only for multi/exec transactions it's checked
   // when the command is queued for execution, not before the execution itself.
-  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, CmdArgList tail_args,
+  std::optional<facade::ErrorReply> VerifyCommandState(const CommandId* cid, ArgSlice tail_args,
                                                        const ConnectionContext& cntx);
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
@@ -64,7 +64,6 @@ class Service : public facade::ServiceInterface {
   facade::ConnectionContext* CreateContext(util::FiberSocketBase* peer,
                                            facade::Connection* owner) final;
 
-  std::pair<const CommandId*, CmdArgList> FindCmd(CmdArgList args) const;
   const CommandId* FindCmd(std::string_view) const;
 
   CommandRegistry* mutable_registry() {
@@ -120,29 +119,45 @@ class Service : public facade::ServiceInterface {
   const acl::AclFamily* TestInit();
 
  private:
-  static void Quit(CmdArgList args, ConnectionContext* cntx);
-  static void Multi(CmdArgList args, ConnectionContext* cntx);
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Watch(CmdArgList args, ConnectionContext* cntx);
-  static void Unwatch(CmdArgList args, ConnectionContext* cntx);
+  static void Quit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                   ConnectionContext* cntx);
+  static void Multi(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                    ConnectionContext* cntx);
 
-  void Discard(CmdArgList args, ConnectionContext* cntx);
-  void Eval(CmdArgList args, ConnectionContext* cntx);
-  void EvalSha(CmdArgList args, ConnectionContext* cntx);
-  void Exec(CmdArgList args, ConnectionContext* cntx);
-  void Publish(CmdArgList args, ConnectionContext* cntx);
-  void Subscribe(CmdArgList args, ConnectionContext* cntx);
-  void Unsubscribe(CmdArgList args, ConnectionContext* cntx);
-  void PSubscribe(CmdArgList args, ConnectionContext* cntx);
-  void PUnsubscribe(CmdArgList args, ConnectionContext* cntx);
-  void Function(CmdArgList args, ConnectionContext* cntx);
-  void Monitor(CmdArgList args, ConnectionContext* cntx);
-  void Pubsub(CmdArgList args, ConnectionContext* cntx);
-  void Command(CmdArgList args, ConnectionContext* cntx);
+  static void Watch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                    ConnectionContext* cntx);
+  static void Unwatch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                      ConnectionContext* cntx);
 
-  void PubsubChannels(std::string_view pattern, ConnectionContext* cntx);
-  void PubsubPatterns(ConnectionContext* cntx);
-  void PubsubNumSub(CmdArgList channels, ConnectionContext* cntx);
+  void Discard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
+  void Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
+  void Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Publish(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
+  void Subscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                 ConnectionContext* cntx);
+  void Unsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                   ConnectionContext* cntx);
+  void PSubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                  ConnectionContext* cntx);
+  void PUnsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                    ConnectionContext* cntx);
+  void Function(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                ConnectionContext* cntx);
+  void Monitor(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
+  void Pubsub(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
+
+  void PubsubChannels(std::string_view pattern, SinkReplyBuilder* builder);
+  void PubsubPatterns(SinkReplyBuilder* builder);
+  void PubsubNumSub(CmdArgList channels, SinkReplyBuilder* builder);
 
   struct EvalArgs {
     std::string_view sha;  // only one of them is defined.

@@ -121,6 +121,58 @@ TEST_F(StringSetTest, StandardAddErase) {
   EXPECT_TRUE(ss_->Erase("AAAAAAAAAAAAAAA@"));
 }
 
+TEST_F(StringSetTest, DisplacedBug) {
+  string_view vals[] = {"imY", "OVl", "NhH", "BCe", "YDL", "lpb",
+                        "nhF", "xod", "zYR", "PSa", "hce", "cTR"};
+  ss_->AddMany(absl::MakeSpan(vals), UINT32_MAX);
+
+  ss_->Add("fIc");
+  ss_->Erase("YDL");
+  ss_->Add("fYs");
+  ss_->Erase("hce");
+  ss_->Erase("nhF");
+  ss_->Add("dye");
+  ss_->Add("xZT");
+  ss_->Add("LVK");
+  ss_->Erase("zYR");
+  ss_->Erase("fYs");
+  ss_->Add("ueB");
+  ss_->Erase("PSa");
+  ss_->Erase("OVl");
+  ss_->Add("cga");
+  ss_->Add("too");
+  ss_->Erase("ueB");
+  ss_->Add("HZe");
+  ss_->Add("oQn");
+  ss_->Erase("too");
+  ss_->Erase("HZe");
+  ss_->Erase("xZT");
+  ss_->Erase("cga");
+  ss_->Erase("cTR");
+  ss_->Erase("BCe");
+  ss_->Add("eua");
+  ss_->Erase("lpb");
+  ss_->Add("OXK");
+  ss_->Add("QmO");
+  ss_->Add("SzV");
+  ss_->Erase("QmO");
+  ss_->Add("jbe");
+  ss_->Add("BPN");
+  ss_->Add("OfH");
+  ss_->Add("Muf");
+  ss_->Add("CwP");
+  ss_->Erase("Muf");
+  ss_->Erase("xod");
+  ss_->Add("Cis");
+  ss_->Add("Xvd");
+  ss_->Erase("SzV");
+  ss_->Erase("eua");
+  ss_->Add("DGb");
+  ss_->Add("leD");
+  ss_->Add("MVX");
+  ss_->Add("HPq");
+}
+
 static string random_string(mt19937& rand, unsigned len) {
   const string_view alpanum = "1234567890abcdefghijklmnopqrstuvwxyz";
   string ret;
@@ -135,27 +187,30 @@ static string random_string(mt19937& rand, unsigned len) {
 
 TEST_F(StringSetTest, Resizing) {
   constexpr size_t num_strs = 4096;
-  vector<string> strs;
+  unordered_set<string> strs;
   while (strs.size() != num_strs) {
     auto str = random_string(generator_, 10);
-    if (find(strs.begin(), strs.end(), str) != strs.end()) {
-      continue;
-    }
-
-    strs.push_back(random_string(generator_, 10));
+    strs.insert(str);
   }
 
-  for (size_t i = 0; i < num_strs; ++i) {
-    EXPECT_TRUE(ss_->Add(strs[i]));
-    EXPECT_EQ(ss_->UpperBoundSize(), i + 1);
+  unsigned size = 0;
+  for (auto it = strs.begin(); it != strs.end(); ++it) {
+    const auto& str = *it;
+    EXPECT_TRUE(ss_->Add(str, 1));
+    EXPECT_EQ(ss_->UpperBoundSize(), size + 1);
 
     // make sure we haven't lost any items after a grow
     // which happens every power of 2
-    if (i != 0 && (ss_->UpperBoundSize() & (ss_->UpperBoundSize() - 1)) == 0) {
-      for (size_t j = 0; j < i; ++j) {
-        EXPECT_TRUE(ss_->Contains(strs[j]));
+    if ((size & (size - 1)) == 0) {
+      for (auto j = strs.begin(); j != it; ++j) {
+        const auto& str = *j;
+        auto it = ss_->Find(str);
+        ASSERT_TRUE(it != ss_->end());
+        EXPECT_TRUE(it.HasExpiry());
+        EXPECT_EQ(it.ExpiryTime(), ss_->time_now() + 1);
       }
     }
+    ++size;
   }
 }
 
@@ -235,7 +290,7 @@ TEST_F(StringSetTest, IntOnly) {
   }
 
   for (size_t i = 0; i < num_ints; ++i) {
-    EXPECT_FALSE(ss_->Add(to_string(i)));
+    ASSERT_FALSE(ss_->Add(to_string(i)));
   }
 
   size_t num_remove = generator_() % 4096;
@@ -573,5 +628,33 @@ void BM_AddMany(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_AddMany);
+
+void BM_Grow(benchmark::State& state) {
+  vector<string> strs;
+  mt19937 generator(0);
+  StringSet src;
+  unsigned elems = 1 << 18;
+  for (size_t i = 0; i < elems; ++i) {
+    src.Add(random_string(generator, 16), UINT32_MAX);
+    strs.push_back(random_string(generator, 16));
+  }
+
+  while (state.KeepRunning()) {
+    state.PauseTiming();
+    StringSet tmp;
+    src.Fill(&tmp);
+    CHECK_EQ(tmp.BucketCount(), elems);
+    state.ResumeTiming();
+    for (const auto& str : strs) {
+      tmp.Add(str);
+      if (tmp.BucketCount() > elems) {
+        break;  // we grew
+      }
+    }
+
+    CHECK_GT(tmp.BucketCount(), elems);
+  }
+}
+BENCHMARK(BM_Grow);
 
 }  // namespace dfly

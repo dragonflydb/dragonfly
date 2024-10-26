@@ -94,6 +94,22 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
   return nullopt;
 }
 
+CommandId&& CommandId::SetHandler(Handler2 f) && {
+  handler_ = [f = std::move(f)](CmdArgList args, ConnectionContext* cntx) {
+    f(args, cntx->transaction, cntx->reply_builder());
+  };
+
+  return std::move(*this);
+}
+
+CommandId&& CommandId::SetHandler(Handler3 f) && {
+  handler_ = [f = std::move(f)](CmdArgList args, ConnectionContext* cntx) {
+    f(args, cntx->transaction, cntx->reply_builder(), cntx);
+  };
+
+  return std::move(*this);
+}
+
 CommandRegistry::CommandRegistry() {
   vector<string> rename_command = GetFlag(FLAGS_rename_command);
 
@@ -163,7 +179,7 @@ void CommandRegistry::StartFamily() {
 }
 
 std::string_view CommandRegistry::RenamedOrOriginal(std::string_view orig) const {
-  if (cmd_rename_map_.contains(orig)) {
+  if (!cmd_rename_map_.empty() && cmd_rename_map_.contains(orig)) {
     return cmd_rename_map_.find(orig)->second;
   }
   return orig;
@@ -171,6 +187,32 @@ std::string_view CommandRegistry::RenamedOrOriginal(std::string_view orig) const
 
 CommandRegistry::FamiliesVec CommandRegistry::GetFamilies() {
   return std::move(family_of_commands_);
+}
+
+std::pair<const CommandId*, ArgSlice> CommandRegistry::FindExtended(string_view cmd,
+                                                                    ArgSlice tail_args) const {
+  if (cmd == RenamedOrOriginal("ACL"sv)) {
+    if (tail_args.empty()) {
+      return {Find(cmd), {}};
+    }
+
+    auto second_cmd = absl::AsciiStrToUpper(ArgS(tail_args, 0));
+    string full_cmd = absl::StrCat(cmd, " ", second_cmd);
+
+    return {Find(full_cmd), tail_args.subspan(1)};
+  }
+
+  const CommandId* res = Find(cmd);
+  if (!res)
+    return {nullptr, {}};
+
+  // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.
+  if (tail_args.size() == 1 && res->name() == "XGROUP") {
+    if (absl::EqualsIgnoreCase(ArgS(tail_args, 0), "HELP")) {
+      res = Find("_XGROUP_HELP");
+    }
+  }
+  return {res, tail_args};
 }
 
 namespace CO {

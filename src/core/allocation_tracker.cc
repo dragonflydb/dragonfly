@@ -19,7 +19,7 @@ AllocationTracker& AllocationTracker::Get() {
 }
 
 bool AllocationTracker::Add(const TrackingInfo& info) {
-  if (tracking_.size() >= tracking_.max_size()) {
+  if (tracking_.size() >= tracking_.capacity()) {
     return false;
   }
 

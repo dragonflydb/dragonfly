@@ -17,6 +17,7 @@ from .instance import DflyInstanceFactory, DflyInstance
 from .seeder import Seeder as SeederV2
 from . import dfly_args
 from .proxy import Proxy
+from .seeder import StaticSeeder
 
 ADMIN_PORT = 1211
 
@@ -1107,8 +1108,8 @@ async def test_flushall_in_full_sync(df_factory):
     c_replica = replica.client()
 
     # Fill master with test data
-    seeder = SeederV2(key_target=30_000)
-    await seeder.run(c_master, target_deviation=0.1)
+    seeder = StaticSeeder(key_target=100_000)
+    await seeder.run(c_master)
 
     # Start replication and wait for full sync
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
@@ -2625,3 +2626,34 @@ async def test_replica_of_replica(df_factory):
         await c_replica2.execute_command(f"REPLICAOF localhost {replica.port}")
 
     assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+
+
+@pytest.mark.asyncio
+@pytest.mark.slow
+async def test_big_containers(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=4)
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    logging.debug("Fill master with test data")
+    seeder = StaticSeeder(
+        key_target=20,
+        data_size=4000000,
+        collection_size=1000,
+        variance=100,
+        samples=1,
+        types=["LIST", "SET", "ZSET", "HASH"],
+    )
+    await seeder.run(c_master)
+
+    logging.debug("Start replication and wait for full sync")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    # Check replica data consisten
+    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await StaticSeeder.capture(c_master)
+    assert master_data == replica_data

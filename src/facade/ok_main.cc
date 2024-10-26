@@ -21,11 +21,11 @@ namespace {
 
 class OkService : public ServiceInterface {
  public:
-  void DispatchCommand(CmdArgList args, ConnectionContext* cntx) final {
+  void DispatchCommand(ArgSlice args, ConnectionContext* cntx) final {
     cntx->SendOk();
   }
 
-  size_t DispatchManyCommands(absl::Span<CmdArgList> args_lists, ConnectionContext* cntx) final {
+  size_t DispatchManyCommands(absl::Span<ArgSlice> args_lists, ConnectionContext* cntx) final {
     for (auto args : args_lists)
       DispatchCommand(args, cntx);
     return args_lists.size();

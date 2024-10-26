@@ -276,12 +276,11 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
   ScanOpts scan_opts;
 
   for (unsigned i = 0; i < args.size(); i += 2) {
-    ToUpper(&args[i]);
-    string_view opt = ArgS(args, i);
     if (i + 1 == args.size()) {
       return facade::OpStatus::SYNTAX_ERR;
     }
 
+    string opt = absl::AsciiStrToUpper(ArgS(args, i));
     if (opt == "COUNT") {
       if (!absl::SimpleAtoi(ArgS(args, i + 1), &scan_opts.limit)) {
         return facade::OpStatus::INVALID_INT;

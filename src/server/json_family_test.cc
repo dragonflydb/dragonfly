@@ -2342,6 +2342,9 @@ TEST_F(JsonFamilyTest, ArrIndexLegacy) {
   resp = Run({"JSON.ARRINDEX", "json", ".children", R"("DoesNotExist")"});
   EXPECT_THAT(resp, IntArg(-1));
 
+  resp = Run({"JSON.ARRINDEX", "json", ".children.[0].notexist", "3"});
+  EXPECT_THAT(resp.type, RespExpr::ERROR);
+
   json = R"(
     {"a":"b"}
   )";

@@ -1991,3 +1991,70 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     await c_replica.execute_command("REPLICAOF NO ONE")
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
+
+
+@pytest.mark.skip("Takes more than 10 minutes")
+@dfly_args({"proactor_threads": 12, "cluster_mode": "yes"})
+async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFactory):
+    # Check data migration from one node to another
+    instances = [
+        df_factory.create(
+            maxmemory="15G",
+            port=BASE_PORT + i,
+            admin_port=BASE_PORT + i + 1000,
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+        )
+        for i in range(2)
+    ]
+
+    replica = df_factory.create(
+        port=BASE_PORT + 3,
+        admin_port=BASE_PORT + 3 + 1000,
+        vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+    )
+
+    df_factory.start_all(instances + [replica])
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    for i in range(1, len(instances)):
+        nodes[i].slots = []
+
+    await replica.admin_client().execute_command(f"replicaof localhost {nodes[0].instance.port}")
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await nodes[0].client.execute_command("DEBUG POPULATE 22500000 test 1000 RAND SLOTS 0 16383")
+
+    await asyncio.sleep(2)
+
+    migration_nodes = len(instances) - 1
+    slot_step = 16384 // migration_nodes
+    ranges = []
+    for i in range(0, migration_nodes):
+        ranges.append(i * slot_step)
+    ranges.append(16384)
+
+    for i in range(1, len(instances)):
+        nodes[0].migrations.append(
+            MigrationInfo(
+                "127.0.0.1",
+                nodes[i].instance.admin_port,
+                [(ranges[i - 1], ranges[i] - 1)],
+                nodes[i].id,
+            )
+        )
+
+    logging.debug("Start migration")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", 1000)
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    for i in range(1, len(instances)):
+        nodes[i].slots = [(ranges[i - 1], ranges[i] - 1)]
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await check_for_no_state_status([node.admin_client for node in nodes])
