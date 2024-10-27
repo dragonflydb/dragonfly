@@ -309,9 +309,9 @@ optional<unsigned> SortedMap::GetRank(sds ele, bool reverse) const {
   if (obj == nullptr)
     return std::nullopt;
 
-  optional rank = score_tree->GetRank(obj);
+  optional rank = score_tree->GetRank(obj, reverse);
   DCHECK(rank);
-  return reverse ? score_map->UpperBoundSize() - *rank - 1 : *rank;
+  return *rank;
 }
 
 SortedMap::ScoredArray SortedMap::GetRange(const zrangespec& range, unsigned offset, unsigned limit,
@@ -783,5 +783,15 @@ bool SortedMap::DefragIfNeeded(float ratio) {
   return reallocated;
 }
 
+std::optional<SortedMap::RankAndScore> SortedMap::GetRankAndScore(sds ele, bool reverse) const {
+  ScoreSds obj = score_map->FindObj(ele);
+  if (obj == nullptr)
+    return std::nullopt;
+
+  optional rank = score_tree->GetRank(obj, reverse);
+  DCHECK(rank);
+
+  return SortedMap::RankAndScore{*rank, GetObjScore(obj)};
+}
 }  // namespace detail
 }  // namespace dfly

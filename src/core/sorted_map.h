@@ -35,6 +35,7 @@ class SortedMap {
   using ScoredMember = std::pair<std::string, double>;
   using ScoredArray = std::vector<ScoredMember>;
   using ScoreSds = void*;
+  using RankAndScore = std::pair<unsigned, double>;
 
   SortedMap(PMR_NS::memory_resource* res);
   ~SortedMap();
@@ -72,6 +73,7 @@ class SortedMap {
 
   std::optional<double> GetScore(sds ele) const;
   std::optional<unsigned> GetRank(sds ele, bool reverse) const;
+  std::optional<RankAndScore> GetRankAndScore(sds ele, bool reverse) const;
   ScoredArray GetRange(const zrangespec& r, unsigned offs, unsigned len, bool rev) const;
   ScoredArray GetLexRange(const zlexrangespec& r, unsigned o, unsigned l, bool rev) const;
 

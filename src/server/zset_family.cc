@@ -1387,8 +1387,13 @@ OpResult<unsigned> OpRemRange(const OpArgs& op_args, string_view key,
   return iv.removed();
 }
 
-OpResult<unsigned> OpRank(const OpArgs& op_args, string_view key, string_view member,
-                          bool reverse) {
+struct RankResult {
+  unsigned rank;
+  double score = 0;
+};
+
+OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view member,
+                            bool reverse, bool with_score) {
   auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_ZSET);
   if (!res_it)
     return res_it.status();
@@ -1417,18 +1422,34 @@ OpResult<unsigned> OpRank(const OpArgs& op_args, string_view key, string_view me
     if (eptr == NULL)
       return OpStatus::KEY_NOTFOUND;
 
-    if (reverse) {
-      return lpLength(zl) / 2 - rank;
+    RankResult res{};
+    res.rank = reverse ? lpLength(zl) / 2 - rank : rank - 1;
+    if (with_score) {
+      res.score = zzlGetScore(sptr);
     }
-    return rank - 1;
+    return res;
   }
   DCHECK_EQ(robj_wrapper->encoding(), OBJ_ENCODING_SKIPLIST);
   detail::SortedMap* ss = (detail::SortedMap*)robj_wrapper->inner_obj();
-  std::optional<unsigned> rank = ss->GetRank(WrapSds(member), reverse);
-  if (!rank)
-    return OpStatus::KEY_NOTFOUND;
 
-  return *rank;
+  RankResult res{};
+
+  if (with_score) {
+    auto rankAndScore = ss->GetRankAndScore(WrapSds(member), reverse);
+    if (!rankAndScore) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+    res.rank = rankAndScore->first;
+    res.score = rankAndScore->second;
+  } else {
+    std::optional<unsigned> rank = ss->GetRank(WrapSds(member), reverse);
+    if (!rank) {
+      return OpStatus::KEY_NOTFOUND;
+    }
+    res.rank = *rank;
+  }
+
+  return res;
 }
 
 OpResult<unsigned> OpCount(const OpArgs& op_args, std::string_view key,
@@ -1979,17 +2000,40 @@ void ZRangeGeneric(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
 }
 
 void ZRankGeneric(CmdArgList args, bool reverse, Transaction* tx, SinkReplyBuilder* builder) {
-  string_view key = ArgS(args, 0);
-  string_view member = ArgS(args, 1);
+  // send this error exact as redis does, it checks number of arguments first
+  if (args.size() > 3) {
+    return builder->SendError(WrongNumArgsError(reverse ? "ZREVRANK" : "ZRANK"));
+  }
+
+  facade::CmdArgParser parser(args);
+
+  string_view key = parser.Next();
+  string_view member = parser.Next();
+  bool with_score = false;
+
+  if (parser.HasNext()) {
+    parser.ExpectTag("WITHSCORE");
+    with_score = true;
+  }
+
+  if (!parser.Finalize()) {
+    return builder->SendError(parser.Error()->MakeReply());
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpRank(t->GetOpArgs(shard), key, member, reverse);
+    return OpRank(t->GetOpArgs(shard), key, member, reverse, with_score);
   };
 
+  OpResult<RankResult> result = tx->ScheduleSingleHopT(std::move(cb));
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  OpResult<unsigned> result = tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    rb->SendLong(*result);
+    if (with_score) {
+      rb->StartArray(2);
+      rb->SendLong(result->rank);
+      rb->SendDouble(result->score);
+    } else {
+      rb->SendLong(result->rank);
+    }
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     rb->SendNull();
   } else {
@@ -2340,7 +2384,7 @@ void ZSetFamily::ZRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 }
 
 void ZSetFamily::ZRank(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  ZRankGeneric(std::move(args), false, tx, builder);
+  ZRankGeneric(args, false, tx, builder);
 }
 
 void ZSetFamily::ZRevRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
@@ -2362,7 +2406,7 @@ void ZSetFamily::ZRevRangeByScore(CmdArgList args, Transaction* tx, SinkReplyBui
 }
 
 void ZSetFamily::ZRevRank(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  ZRankGeneric(std::move(args), true, tx, builder);
+  ZRankGeneric(args, true, tx, builder);
 }
 
 void ZSetFamily::ZRangeByLex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
@@ -3213,7 +3257,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZREM", CO::FAST | CO::WRITE, -3, 1, 1, acl::kZRem}.HFUNC(ZRem)
       << CI{"ZRANGE", CO::READONLY, -4, 1, 1, acl::kZRange}.HFUNC(ZRange)
       << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1, acl::kZRandMember}.HFUNC(ZRandMember)
-      << CI{"ZRANK", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZRank}.HFUNC(ZRank)
+      << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZRank}.HFUNC(ZRank)
       << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1, acl::kZRangeByLex}.HFUNC(ZRangeByLex)
       << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1, acl::kZRangeByScore}.HFUNC(ZRangeByScore)
       << CI{"ZRANGESTORE", CO::WRITE | CO::DENYOOM, -5, 1, 2, acl::kZRangeStore}.HFUNC(ZRangeStore)
@@ -3226,7 +3270,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"ZREVRANGEBYLEX", CO::READONLY, -4, 1, 1, acl::kZRevRangeByLex}.HFUNC(ZRevRangeByLex)
       << CI{"ZREVRANGEBYSCORE", CO::READONLY, -4, 1, 1, acl::kZRevRangeByScore}.HFUNC(
              ZRevRangeByScore)
-      << CI{"ZREVRANK", CO::READONLY | CO::FAST, 3, 1, 1, acl::kZRevRank}.HFUNC(ZRevRank)
+      << CI{"ZREVRANK", CO::READONLY | CO::FAST, -3, 1, 1, acl::kZRevRank}.HFUNC(ZRevRank)
       << CI{"ZSCAN", CO::READONLY, -3, 1, 1, acl::kZScan}.HFUNC(ZScan)
       << CI{"ZUNION", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2, acl::kZUnion}.HFUNC(ZUnion)
       << CI{"ZUNIONSTORE", kStoreMask, -4, 3, 3, acl::kZUnionStore}.HFUNC(ZUnionStore)

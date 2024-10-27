@@ -279,13 +279,43 @@ TEST_F(ZSetFamilyTest, ZRangeRank) {
   EXPECT_EQ(2, CheckedInt({"zcount", "x", "1.1", "2.1"}));
   EXPECT_EQ(1, CheckedInt({"zcount", "x", "(1.1", "2.1"}));
   EXPECT_EQ(0, CheckedInt({"zcount", "y", "(1.1", "2.1"}));
+}
 
+TEST_F(ZSetFamilyTest, ZRank) {
+  Run({"zadd", "x", "1.1", "a", "2.1", "b"});
   EXPECT_EQ(0, CheckedInt({"zrank", "x", "a"}));
   EXPECT_EQ(1, CheckedInt({"zrank", "x", "b"}));
   EXPECT_EQ(1, CheckedInt({"zrevrank", "x", "a"}));
   EXPECT_EQ(0, CheckedInt({"zrevrank", "x", "b"}));
   EXPECT_THAT(Run({"zrevrank", "x", "c"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"zrank", "y", "c"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"zrevrank", "x", "c", "WITHSCORE"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"zrank", "y", "c", "WITHSCORE"}), ArgType(RespExpr::NIL));
+
+  auto resp = Run({"zrank", "x", "a", "WITHSCORE"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), "1.1"));
+
+  resp = Run({"zrank", "x", "b", "WITHSCORE"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(1), "2.1"));
+
+  resp = Run({"zrevrank", "x", "a", "WITHSCORE"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(1), "1.1"));
+
+  resp = Run({"zrevrank", "x", "b", "WITHSCORE"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), "2.1"));
+
+  resp = Run({"zrank", "x", "a", "WITHSCORES"});
+  ASSERT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"zrank", "x", "a", "WITHSCORES", "42"});
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments for 'zrank' command"));
+
+  resp = Run({"zrevrank", "x", "a", "WITHSCORES", "42"});
+  ASSERT_THAT(resp, ErrArg("wrong number of arguments for 'zrevrank' command"));
 }
 
 TEST_F(ZSetFamilyTest, LargeSet) {
