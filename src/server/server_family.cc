@@ -816,12 +816,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   LOG_FIRST_N(INFO, 1) << "Host OS: " << os_string << " with " << shard_set->pool()->size()
                        << " threads";
   SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
-  config_registry.RegisterMutable("maxclients", [this](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<uint32_t>();
-    if (res.has_value())
-      SetMaxClients(listeners_, res.value());
-    return res.has_value();
-  });
+  config_registry.RegisterSetter<uint32_t>(
+      "maxclients", [this](uint32_t val) { SetMaxClients(listeners_, val); });
 
   SetSlowLogThreshold(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_log_slower_than));
   config_registry.RegisterMutable("slowlog_log_slower_than",
@@ -832,12 +828,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
                                     return res.has_value();
                                   });
   SetSlowLogMaxLen(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_max_len));
-  config_registry.RegisterMutable("slowlog_max_len", [this](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<uint32_t>();
-    if (res.has_value())
-      SetSlowLogMaxLen(service_.proactor_pool(), res.value());
-    return res.has_value();
-  });
+  config_registry.RegisterSetter<uint32_t>(
+      "slowlog_max_len", [this](uint32_t val) { SetSlowLogMaxLen(service_.proactor_pool(), val); });
 
   // We only reconfigure TLS when the 'tls' config key changes. Therefore to
   // update TLS certs, first update tls_cert_file, then set 'tls true'.

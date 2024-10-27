@@ -312,6 +312,7 @@ class Connection : public util::Connection {
 
   // Sets max queue length locally in the calling thread.
   static void SetMaxQueueLenThreadLocal(uint32_t val);
+  static void SetPipelineBufferLimit(size_t val);
   static void GetRequestSizeHistogramThreadLocal(std::string* hist);
   static void TrackRequestSize(bool enable);
 

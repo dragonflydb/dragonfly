@@ -1836,6 +1836,12 @@ void Connection::BreakOnce(uint32_t ev_mask) {
 
 void Connection::SetMaxQueueLenThreadLocal(uint32_t val) {
   tl_queue_backpressure_.pipeline_queue_max_len = val;
+  tl_queue_backpressure_.pipeline_cnd.notify_all();
+}
+
+void Connection::SetPipelineBufferLimit(size_t val) {
+  tl_queue_backpressure_.pipeline_buffer_limit = val;
+  tl_queue_backpressure_.pipeline_cnd.notify_all();
 }
 
 void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {

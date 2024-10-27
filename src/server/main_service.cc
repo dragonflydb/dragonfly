@@ -883,14 +883,8 @@ Service::~Service() {
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
 
-  config_registry.RegisterMutable("maxmemory", [](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<MemoryBytesFlag>();
-    if (!res)
-      return false;
-
-    max_memory_limit = res->value;
-    return true;
-  });
+  config_registry.RegisterSetter<MemoryBytesFlag>(
+      "maxmemory", [](const MemoryBytesFlag& flag) { max_memory_limit = flag.value; });
 
   config_registry.RegisterMutable("dbfilename");
   config_registry.Register("dbnum");  // equivalent to databases in redis.
@@ -901,32 +895,24 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
 
-  config_registry.RegisterMutable("oom_deny_ratio", [](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<double>();
-    if (res.has_value()) {
-      SetOomDenyRatioOnAllThreads(*res);
-    }
-    return res.has_value();
+  config_registry.RegisterSetter<double>("oom_deny_ratio",
+                                         [](double val) { SetOomDenyRatioOnAllThreads(val); });
+
+  config_registry.RegisterSetter<double>("rss_oom_deny_ratio",
+                                         [](double val) { SetRssOomDenyRatioOnAllThreads(val); });
+
+  config_registry.RegisterMutable("pipeline_squash");
+
+  config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
+    shard_set->pool()->AwaitBrief(
+        [val](unsigned, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(val); });
   });
 
-  config_registry.RegisterMutable("rss_oom_deny_ratio", [](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<double>();
-    if (res.has_value()) {
-      SetRssOomDenyRatioOnAllThreads(*res);
-    }
-    return res.has_value();
+  config_registry.RegisterSetter<size_t>("pipeline_buffer_limit", [](size_t val) {
+    shard_set->pool()->AwaitBrief(
+        [val](unsigned, auto*) { facade::Connection::SetPipelineBufferLimit(val); });
   });
-  config_registry.RegisterMutable("pipeline_squash");
-  config_registry.RegisterMutable("pipeline_queue_limit",
-                                  [pool = &pp_](const absl::CommandLineFlag& flag) {
-                                    auto res = flag.TryGet<uint32_t>();
-                                    if (res.has_value()) {
-                                      pool->AwaitBrief([val = *res](unsigned, auto*) {
-                                        facade::Connection::SetMaxQueueLenThreadLocal(val);
-                                      });
-                                    }
-                                    return res.has_value();
-                                  });
+
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("table_growth_margin");
@@ -950,6 +936,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
         return true;
       });
+
+  config_registry.RegisterMutable("aclfile");
+  config_registry.RegisterSetter<uint32_t>("acllog_max_len", [](uint32_t val) {
+    shard_set->pool()->AwaitFiberOnAll(
+        [val](auto index, auto* context) { ServerState::tlocal()->acl_log.SetTotalEntries(val); });
+  });
 
   serialization_max_chunk_size = GetFlag(FLAGS_serialization_max_chunk_size);
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
