@@ -183,6 +183,39 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 #pragma GCC diagnostic pop
 #endif
 
+std::string_view ParseField(CmdArgParser* parser) {
+  std::string_view field = parser->Next();
+  if (!field.empty() && field.front() == '@') {
+    field.remove_prefix(1);  // remove leading @ if exists
+  }
+  return field;
+}
+
+std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
+  std::string_view field = parser->Next();
+  if (!field.empty() && field.front() == '@') {
+    field.remove_prefix(1);  // remove leading @
+  } else {
+    // Temporary warning until we can throw an error
+    LOG(WARNING) << "bad arguments: Field name '" << field << "' should start with '@'. '@" << field
+                 << "' is expected";
+  }
+  return field;
+}
+
+void ParseLoadFields(CmdArgParser* parser, std::optional<OwnedSearchFieldsList>* load_fields) {
+  size_t num_fields = parser->Next<size_t>();
+  if (!load_fields->has_value()) {
+    load_fields->emplace();
+  }
+
+  while (num_fields--) {
+    string_view field = ParseField(parser);
+    string_view alias = parser->Check("AS") ? parser->Next() : field;
+    load_fields->value().emplace_back(field, alias);
+  }
+}
+
 search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   search::QueryParams params;
   size_t num_args = parser->Next<size_t>();
@@ -201,17 +234,30 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
     if (parser.Check("LIMIT")) {
       params.limit_offset = parser.Next<size_t>();
       params.limit_total = parser.Next<size_t>();
+    } else if (parser.Check("LOAD")) {
+      if (params.return_fields) {
+        cntx->SendError("LOAD cannot be applied after RETURN");
+        return std::nullopt;
+      }
+
+      ParseLoadFields(&parser, &params.load_fields);
     } else if (parser.Check("RETURN")) {
+      if (params.load_fields) {
+        cntx->SendError("RETURN cannot be applied after LOAD");
+        return std::nullopt;
+      }
+
       // RETURN {num} [{ident} AS {name}...]
       size_t num_fields = parser.Next<size_t>();
-      params.return_fields.fields.emplace();
+      params.return_fields.emplace();
       while (params.return_fields->size() < num_fields) {
         string_view ident = parser.Next();
         string_view alias = parser.Check("AS") ? parser.Next() : ident;
         params.return_fields->emplace_back(ident, alias);
       }
     } else if (parser.Check("NOCONTENT")) {  // NOCONTENT
-      params.return_fields.fields.emplace();
+      params.load_fields.emplace();
+      params.return_fields.emplace();
     } else if (parser.Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(&parser);
     } else if (parser.Check("SORTBY")) {
@@ -230,26 +276,6 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, ConnectionC
   return params;
 }
 
-std::string_view ParseField(CmdArgParser* parser) {
-  std::string_view field = parser->Next();
-  if (field.front() == '@') {
-    field.remove_prefix(1);  // remove leading @ if exists
-  }
-  return field;
-}
-
-std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
-  std::string_view field = parser->Next();
-  if (field.front() != '@') {
-    // Temporary warning until we can throw an error
-    LOG(WARNING) << "bad arguments: Field name '" << field << "' should start with '@'. '@" << field
-                 << "' is expected";
-  } else {
-    field.remove_prefix(1);  // remove leading @
-  }
-  return field;
-}
-
 optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
                                                        ConnectionContext* cntx) {
   AggregateParams params;
@@ -258,16 +284,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   // Parse LOAD count field [field ...]
   // LOAD options are at the beginning of the query, so we need to parse them first
   while (parser.HasNext() && parser.Check("LOAD")) {
-    size_t num_fields = parser.Next<size_t>();
-    if (!params.load_fields.fields) {
-      params.load_fields.fields.emplace();
-    }
-
-    while (num_fields--) {
-      string_view field = ParseField(&parser);
-      string_view alias = parser.Check("AS") ? parser.Next() : field;
-      params.load_fields->emplace_back(field, alias);
-    }
+    ParseLoadFields(&parser, &params.load_fields);
   }
 
   while (parser.HasNext()) {

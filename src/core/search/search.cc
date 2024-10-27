@@ -629,6 +629,15 @@ vector<pair<string, SortableValue>> FieldIndices::ExtractStoredValues(DocId doc)
   return out;
 }
 
+absl::flat_hash_set<std::string_view> FieldIndices::GetSortIndiciesFields() const {
+  absl::flat_hash_set<std::string_view> fields_idents;
+  fields_idents.reserve(sort_indices_.size());
+  for (const auto& [ident, _] : sort_indices_) {
+    fields_idents.insert(ident);
+  }
+  return fields_idents;
+}
+
 SearchAlgorithm::SearchAlgorithm() = default;
 SearchAlgorithm::~SearchAlgorithm() = default;
 

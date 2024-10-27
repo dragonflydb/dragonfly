@@ -52,36 +52,10 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
-using FieldsList = std::vector<std::pair<std::string /*identifier*/, std::string /*short name*/>>;
+template <typename T> using SearchField = std::pair<T /*identifier*/, T /*short name*/>;
 
-struct SelectedFields {
-  /*
-  1. If not set -> return all fields
-  2. If set but empty -> no fields should be returned
-  3. If set and not empty -> return only these fields
-  */
-  std::optional<FieldsList> fields;
-
-  bool ShouldReturnAllFields() const {
-    return !fields.has_value();
-  }
-
-  bool ShouldReturnNoFields() const {
-    return fields && fields->empty();
-  }
-
-  FieldsList* operator->() {
-    return &fields.value();
-  }
-
-  const FieldsList* operator->() const {
-    return &fields.value();
-  }
-
-  const FieldsList& GetFields() const {
-    return fields.value();
-  }
-};
+using SearchFieldsList = std::vector<SearchField<std::string_view>>;
+using OwnedSearchFieldsList = std::vector<SearchField<std::string>>;
 
 struct SearchParams {
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
@@ -89,13 +63,29 @@ struct SearchParams {
   size_t limit_offset = 0;
   size_t limit_total = 10;
 
-  // Set but empty means no fields should be returned
-  SelectedFields return_fields;
+  /*
+  1. If not set -> return all fields
+  2. If set but empty -> no fields should be returned
+  3. If set and not empty -> return only these fields
+  */
+  std::optional<OwnedSearchFieldsList> return_fields;
+
+  /*
+    Fields that should be also loaded from the document.
+
+    Only one of load_fields and return_fields should be set.
+  */
+  std::optional<OwnedSearchFieldsList> load_fields;
+
   std::optional<search::SortOption> sort_option;
   search::QueryParams query_params;
 
+  bool ShouldReturnAllFields() const {
+    return !return_fields.has_value();
+  }
+
   bool IdsOnly() const {
-    return return_fields.ShouldReturnNoFields();
+    return return_fields && return_fields->empty();
   }
 
   bool ShouldReturnField(std::string_view field) const;
@@ -105,7 +95,7 @@ struct AggregateParams {
   std::string_view index, query;
   search::QueryParams params;
 
-  SelectedFields load_fields;
+  std::optional<OwnedSearchFieldsList> load_fields;
   std::vector<aggregate::PipelineStep> steps;
 };
 
@@ -179,6 +169,11 @@ class ShardDocIndex {
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
  private:
+  // Returns the fields that are the union of the already indexed fields and load_fields, excluding
+  // skip_fields Load_fields should not be destroyed while the result of this function is being used
+  SearchFieldsList GetFieldsToLoad(const std::optional<OwnedSearchFieldsList>& load_fields,
+                                   const absl::flat_hash_set<std::string_view>& skip_fields) const;
+
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
