@@ -79,8 +79,8 @@ search::SortableValue ExtractSortableValueFromJson(const search::Schema& schema,
 
 }  // namespace
 
-SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
-                                      const FieldsList& fields) const {
+SearchDocData BaseAccessor::Serialize(
+    const search::Schema& schema, absl::Span<const SearchField<std::string_view>> fields) const {
   SearchDocData out{};
   for (const auto& [fident, fname] : fields) {
     out[fname] = ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident), ","));
@@ -248,14 +248,14 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
 }
 
 SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
-  FieldsList fields{};
+  SearchFieldsList fields{};
   for (const auto& [fname, fident] : schema.field_names)
     fields.emplace_back(fident, fname);
   return Serialize(schema, fields);
 }
 
-SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
-                                      const FieldsList& fields) const {
+SearchDocData JsonAccessor::Serialize(
+    const search::Schema& schema, absl::Span<const SearchField<std::string_view>> fields) const {
   SearchDocData out{};
   for (const auto& [ident, name] : fields) {
     if (auto* path = GetPath(ident); path) {
