@@ -1619,7 +1619,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       strcpy(cmd_name, "QUIT");
       break;
     case MemcacheParser::STATS:
-      server_family_.StatsMC(cmd.key, cntx);
+      server_family_.StatsMC(cmd.key, mc_builder);
       return;
     case MemcacheParser::VERSION:
       mc_builder->SendSimpleString("VERSION 1.5.0 DF");

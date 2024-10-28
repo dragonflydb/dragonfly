@@ -90,18 +90,18 @@ Replica::~Replica() {
 
 static const char kConnErr[] = "could not connect to master: ";
 
-error_code Replica::Start(ConnectionContext* cntx) {
+error_code Replica::Start(facade::SinkReplyBuilder* builder) {
   VLOG(1) << "Starting replication";
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
-  auto check_connection_error = [this, &cntx](error_code ec, const char* msg) -> error_code {
+  auto check_connection_error = [this, builder](error_code ec, const char* msg) -> error_code {
     if (cntx_.IsCancelled()) {
-      cntx->SendError("replication cancelled");
+      builder->SendError("replication cancelled");
       return std::make_error_code(errc::operation_canceled);
     }
     if (ec) {
-      cntx->SendError(absl::StrCat(msg, ec.message()));
+      builder->SendError(absl::StrCat(msg, ec.message()));
       cntx_.Cancel();
     }
     return ec;
@@ -131,17 +131,17 @@ error_code Replica::Start(ConnectionContext* cntx) {
   // 4. Spawn main coordination fiber.
   sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
 
-  cntx->SendOk();
+  builder->SendOk();
   return {};
 }
 
-void Replica::EnableReplication(ConnectionContext* cntx) {
+void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
   VLOG(1) << "Enabling replication";
 
   state_mask_.store(R_ENABLED);                             // set replica state to enabled
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);  // call replication fiber
 
-  cntx->SendOk();
+  builder->SendOk();
 }
 
 void Replica::Stop() {
