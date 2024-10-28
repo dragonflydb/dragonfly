@@ -12,7 +12,7 @@ class ServerFamily;
 
 class MemoryCmd {
  public:
-  MemoryCmd(ServerFamily* owner, ConnectionContext* cntx);
+  MemoryCmd(ServerFamily* owner, facade::SinkReplyBuilder* builder, ConnectionContext* cntx);
 
   void Run(CmdArgList args);
 
