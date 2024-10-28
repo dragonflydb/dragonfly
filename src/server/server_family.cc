@@ -1061,7 +1061,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
     return future;
   }
 
-  auto paths_result = snapshot_storage_->LoadPaths(path);
+  auto paths_result = snapshot_storage_->ExpandSnapshot(path);
   if (!paths_result) {
     LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
 

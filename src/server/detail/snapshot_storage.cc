@@ -30,23 +30,49 @@ namespace dfly {
 namespace detail {
 
 using namespace util;
+using namespace std;
 
-std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_view path) {
+// Returns bucket_name, obj_path for an s3 path.
+optional<pair<string, string>> GetBucketPath(string_view path) {
   std::string_view clean = absl::StripPrefix(path, kS3Prefix);
 
   size_t pos = clean.find('/');
-  if (pos == std::string_view::npos) {
-    return std::make_pair(std::string(clean), "");
+  if (pos == string_view::npos) {
+    return make_pair(string(clean), "");
   }
 
-  std::string bucket_name{clean.substr(0, pos)};
-  std::string obj_path{clean.substr(pos + 1)};
+  string bucket_name{clean.substr(0, pos)};
+  string obj_path{clean.substr(pos + 1)};
   return std::make_pair(std::move(bucket_name), std::move(obj_path));
 }
 
 #ifdef __linux__
 const int kRdbWriteFlags = O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC | O_DIRECT;
 #endif
+
+io::Result<vector<string>, GenericError> SnapshotStorage::ExpandSnapshot(const string& load_path) {
+  if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
+    return nonstd::make_unexpected(
+        GenericError(std::make_error_code(std::errc::invalid_argument), "Bad filename extension"));
+  }
+
+  error_code ec = CheckPath(load_path);
+  if (ec) {
+    return nonstd::make_unexpected(GenericError(ec, "File not found"));
+  }
+
+  vector<string> paths{{load_path}};
+
+  // Collect all other files in case we're loading dfs.
+  if (absl::EndsWith(load_path, "summary.dfs")) {
+    auto res = ExpandFromPath(load_path);
+    if (!res) {
+      return res;
+    }
+    paths.insert(paths.end(), res->begin(), res->end());
+  }
+  return paths;
+}
 
 FileSnapshotStorage::FileSnapshotStorage(fb2::FiberQueueThreadPool* fq_threadpool)
     : fq_threadpool_{fq_threadpool} {
@@ -143,41 +169,27 @@ io::Result<std::string, GenericError> FileSnapshotStorage::LoadPath(std::string_
       std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
 }
 
-io::Result<std::vector<std::string>, GenericError> FileSnapshotStorage::LoadPaths(
-    const std::string& load_path) {
-  if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
-    return nonstd::make_unexpected(
-        GenericError(std::make_error_code(std::errc::invalid_argument), "Bad filename extension"));
+io::Result<vector<string>, GenericError> FileSnapshotStorage::ExpandFromPath(const string& path) {
+  string glob = absl::StrReplaceAll(path, {{"summary", "????"}});
+  io::Result<io::StatShortVec> files = io::StatFiles(glob);
+
+  if (!files || files->size() == 0) {
+    return nonstd::make_unexpected(GenericError(make_error_code(errc::no_such_file_or_directory),
+                                                "Cound not find DFS shard files"));
   }
 
-  std::vector<std::string> paths{{load_path}};
-
-  // Collect all other files in case we're loading dfs.
-  if (absl::EndsWith(load_path, "summary.dfs")) {
-    std::string glob = absl::StrReplaceAll(load_path, {{"summary", "????"}});
-    io::Result<io::StatShortVec> files = io::StatFiles(glob);
-
-    if (files && files->size() == 0) {
-      return nonstd::make_unexpected(
-          GenericError(std::make_error_code(std::errc::no_such_file_or_directory),
-                       "Cound not find DFS shard files"));
-    }
-
-    for (auto& fstat : *files) {
-      paths.push_back(std::move(fstat.name));
-    }
-  }
-
-  // Check all paths are valid.
-  for (const auto& path : paths) {
-    std::error_code ec;
-    (void)fs::canonical(path, ec);
-    if (ec) {
-      return nonstd::make_unexpected(ec);
-    }
+  vector<string> paths;
+  for (auto& fstat : *files) {
+    paths.push_back(std::move(fstat.name));
   }
 
   return paths;
+}
+
+error_code FileSnapshotStorage::CheckPath(const string& path) {
+  error_code ec;
+  std::ignore = fs::canonical(path, ec);
+  return ec;
 }
 
 #ifdef WITH_AWS
@@ -288,54 +300,48 @@ io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string
       });
 }
 
-io::Result<std::vector<std::string>, GenericError> AwsS3SnapshotStorage::LoadPaths(
-    const std::string& load_path) {
-  if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
+io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
+    const string& load_path) {
+  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+  optional<pair<string, string>> bucket_path = GetBucketPath(load_path);
+  if (!bucket_path) {
     return nonstd::make_unexpected(
-        GenericError(std::make_error_code(std::errc::invalid_argument), "Bad filename extension"));
+        GenericError{std::make_error_code(std::errc::invalid_argument), "Invalid S3 path"});
+  }
+  const auto [bucket_name, obj_path] = *bucket_path;
+  const std::regex re(absl::StrReplaceAll(obj_path, {{"summary", "[0-9]{4}"}}));
+
+  // Limit prefix to objects in the same 'directory' as load_path.
+  const size_t pos = obj_path.find_last_of('/');
+  const std::string prefix = (pos == std::string_view::npos) ? "" : obj_path.substr(0, pos);
+
+  auto paths = proactor->Await([&]() -> io::Result<vector<string>, GenericError> {
+    const io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
+    if (!keys) {
+      return nonstd::make_unexpected(keys.error());
+    }
+    vector<string> res;
+    for (const SnapStat& key : *keys) {
+      std::smatch m;
+      if (std::regex_match(key.name, m, re)) {
+        res.push_back(std::string(kS3Prefix) + bucket_name + "/" + key.name);
+      }
+    }
+
+    return res;
+  });
+
+  if (!paths || paths->empty()) {
+    return nonstd::make_unexpected(
+        GenericError{std::make_error_code(std::errc::no_such_file_or_directory),
+                     "Cound not find DFS snapshot shard files"});
   }
 
-  // Find snapshot shard files if we're loading DFS.
-  if (absl::EndsWith(load_path, "summary.dfs")) {
-    fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-    return proactor->Await([&]() -> io::Result<std::vector<std::string>, GenericError> {
-      std::vector<std::string> paths{{load_path}};
+  return *paths;
+}
 
-      std::optional<std::pair<std::string, std::string>> bucket_path = GetBucketPath(load_path);
-      if (!bucket_path) {
-        return nonstd::make_unexpected(
-            GenericError{std::make_error_code(std::errc::invalid_argument), "Invalid S3 path"});
-      }
-      const auto [bucket_name, obj_path] = *bucket_path;
-
-      const std::regex re(absl::StrReplaceAll(obj_path, {{"summary", "[0-9]{4}"}}));
-
-      // Limit prefix to objects in the same 'directory' as load_path.
-      const size_t pos = obj_path.find_last_of('/');
-      const std::string prefix = (pos == std::string_view::npos) ? "" : obj_path.substr(0, pos);
-      const io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
-      if (!keys) {
-        return nonstd::make_unexpected(keys.error());
-      }
-
-      for (const SnapStat& key : *keys) {
-        std::smatch m;
-        if (std::regex_match(key.name, m, re)) {
-          paths.push_back(std::string(kS3Prefix) + bucket_name + "/" + key.name);
-        }
-      }
-
-      if (paths.size() <= 1) {
-        return nonstd::make_unexpected(
-            GenericError{std::make_error_code(std::errc::no_such_file_or_directory),
-                         "Cound not find DFS snapshot shard files"});
-      }
-
-      return paths;
-    });
-  }
-
-  return std::vector<std::string>{{load_path}};
+error_code AwsS3SnapshotStorage::CheckPath(const std::string& path) {
+  return {};
 }
 
 io::Result<std::vector<AwsS3SnapshotStorage::SnapStat>, GenericError>
