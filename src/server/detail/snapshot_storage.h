@@ -14,6 +14,8 @@
 
 #include "io/io.h"
 #include "server/common.h"
+#include "util/cloud/gcp/gcp_creds_provider.h"
+#include "util/cloud/gcp/gcs.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/uring_file.h"
 
@@ -23,6 +25,7 @@ namespace detail {
 namespace fs = std::filesystem;
 
 constexpr std::string_view kS3Prefix = "s3://";
+constexpr std::string_view kGCSPrefix = "gs://";
 
 const size_t kBucketConnectMs = 2000;
 
@@ -75,6 +78,29 @@ class FileSnapshotStorage : public SnapshotStorage {
 
   std::error_code CheckPath(const std::string& path) final;
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
+};
+
+class GcsSnapshotStorage : public SnapshotStorage {
+ public:
+  ~GcsSnapshotStorage();
+
+  std::error_code Init(unsigned connect_ms);
+
+  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(
+      const std::string& path) override;
+
+  io::ReadonlyFileOrError OpenReadFile(const std::string& path) override;
+
+  io::Result<std::string, GenericError> LoadPath(std::string_view dir,
+                                                 std::string_view dbfilename) override;
+
+ private:
+  io::Result<std::vector<std::string>, GenericError> ExpandFromPath(const std::string& path) final;
+
+  std::error_code CheckPath(const std::string& path) final;
+
+  util::cloud::GCPCredsProvider creds_provider_;
+  SSL_CTX* ctx_ = NULL;
 };
 
 #ifdef WITH_AWS

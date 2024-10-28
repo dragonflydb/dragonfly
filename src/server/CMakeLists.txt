@@ -84,7 +84,7 @@ endif()
 
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float)
 cxx_link(dragonfly_lib dfly_transaction dfly_facade redis_lib ${AWS_LIB} jsonpath
-         strings_lib html_lib
+         strings_lib html_lib gcp_lib
          http_client_lib absl::random_random TRDP::jsoncons ${ZSTD_LIB} TRDP::lz4
          TRDP::croncpp TRDP::flatbuffers)
 
