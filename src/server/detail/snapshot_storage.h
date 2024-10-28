@@ -48,9 +48,14 @@ class SnapshotStorage {
   virtual io::Result<std::string, GenericError> LoadPath(std::string_view dir,
                                                          std::string_view dbfilename) = 0;
 
-  // Returns the snapshot paths given the RDB file or DFS summary file path.
-  virtual io::Result<std::vector<std::string>, GenericError> LoadPaths(
-      const std::string& load_path) = 0;
+  // Searches for all the relevant snapshot files given the RDB file or DFS summary file path.
+  io::Result<std::vector<std::string>, GenericError> ExpandSnapshot(const std::string& load_path);
+
+ protected:
+  virtual io::Result<std::vector<std::string>, GenericError> ExpandFromPath(
+      const std::string& path) = 0;
+
+  virtual std::error_code CheckPath(const std::string& path) = 0;
 };
 
 class FileSnapshotStorage : public SnapshotStorage {
@@ -65,10 +70,10 @@ class FileSnapshotStorage : public SnapshotStorage {
   io::Result<std::string, GenericError> LoadPath(std::string_view dir,
                                                  std::string_view dbfilename) override;
 
-  io::Result<std::vector<std::string>, GenericError> LoadPaths(
-      const std::string& load_path) override;
-
  private:
+  io::Result<std::vector<std::string>, GenericError> ExpandFromPath(const std::string& path) final;
+
+  std::error_code CheckPath(const std::string& path) final;
   util::fb2::FiberQueueThreadPool* fq_threadpool_;
 };
 
@@ -86,10 +91,11 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
   io::Result<std::string, GenericError> LoadPath(std::string_view dir,
                                                  std::string_view dbfilename) override;
 
-  io::Result<std::vector<std::string>, GenericError> LoadPaths(
-      const std::string& load_path) override;
-
  private:
+  io::Result<std::vector<std::string>, GenericError> ExpandFromPath(const std::string& path) final;
+
+  std::error_code CheckPath(const std::string& path) final;
+
   struct SnapStat {
     SnapStat(std::string file_name, int64_t ts)
         : name(std::move(file_name)), last_modified(std::move(ts)) {
@@ -105,8 +111,6 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
   std::shared_ptr<Aws::S3::S3Client> s3_;
 };
 
-// Returns bucket_name, obj_path for an s3 path.
-std::optional<std::pair<std::string, std::string>> GetBucketPath(std::string_view path);
 #endif
 
 #ifdef __linux__
