@@ -368,10 +368,9 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
-  builder_ = cntx->reply_builder();
 }
 
-void DebugCmd::Run(CmdArgList args) {
+void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
   string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
   if (subcmd == "HELP") {
     string_view help_arr[] = {
@@ -420,64 +419,64 @@ void DebugCmd::Run(CmdArgList args) {
         "HELP",
         "    Prints this help.",
     };
-    auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
     return rb->SendSimpleStrArr(help_arr);
   }
 
   VLOG(1) << "subcmd " << subcmd;
 
   if (subcmd == "POPULATE") {
-    return Populate(args);
+    return Populate(args, builder);
   }
 
   if (subcmd == "RELOAD") {
-    return Reload(args);
+    return Reload(args, builder);
   }
 
   if (subcmd == "REPLICA" && args.size() == 2) {
-    return Replica(args);
+    return Replica(args, builder);
   }
 
   if (subcmd == "WATCHED") {
-    return Watched();
+    return Watched(builder);
   }
 
   if (subcmd == "OBJECT" && args.size() >= 2) {
     string_view key = ArgS(args, 1);
     args.remove_prefix(2);
-    return Inspect(key, args);
+    return Inspect(key, args, builder);
   }
 
   if (subcmd == "TX") {
-    return TxAnalysis();
+    return TxAnalysis(builder);
   }
 
   if (subcmd == "OBJHIST") {
-    return ObjHist();
+    return ObjHist(builder);
   }
 
   if (subcmd == "STACKTRACE") {
-    return Stacktrace();
+    return Stacktrace(builder);
   }
 
   if (subcmd == "SHARDS") {
-    return Shards();
+    return Shards(builder);
   }
 
   if (subcmd == "EXEC") {
-    return Exec();
+    return Exec(builder);
   }
 
   if (subcmd == "TRAFFIC") {
-    return LogTraffic(args.subspan(1));
+    return LogTraffic(args.subspan(1), builder);
   }
 
   if (subcmd == "RECVSIZE" && args.size() == 2) {
-    return RecvSize(ArgS(args, 1));
+    return RecvSize(ArgS(args, 1), builder);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
-  return builder_->SendError(reply, kSyntaxErrType);
+  return builder->SendError(reply, kSyntaxErrType);
 }
 
 void DebugCmd::Shutdown() {
@@ -485,7 +484,7 @@ void DebugCmd::Shutdown() {
   shard_set->pool()->AwaitFiberOnAll([](auto*) { facade::Connection::StopTrafficLogging(); });
 }
 
-void DebugCmd::Reload(CmdArgList args) {
+void DebugCmd::Reload(CmdArgList args, facade::SinkReplyBuilder* builder) {
   bool save = true;
 
   for (size_t i = 1; i < args.size(); ++i) {
@@ -495,7 +494,7 @@ void DebugCmd::Reload(CmdArgList args) {
     if (opt == "NOSAVE") {
       save = false;
     } else {
-      return builder_->SendError("DEBUG RELOAD only supports the NOSAVE options.");
+      return builder->SendError("DEBUG RELOAD only supports the NOSAVE options.");
     }
   }
 
@@ -505,7 +504,7 @@ void DebugCmd::Reload(CmdArgList args) {
 
     GenericError ec = sf_.DoSave();
     if (ec) {
-      return builder_->SendError(ec.Format());
+      return builder->SendError(ec.Format());
     }
   }
 
@@ -518,19 +517,19 @@ void DebugCmd::Reload(CmdArgList args) {
     if (ec) {
       string msg = ec.Format();
       LOG(WARNING) << "Could not load file " << msg;
-      return builder_->SendError(msg);
+      return builder->SendError(msg);
     }
   }
 
-  builder_->SendOk();
+  builder->SendOk();
 }
 
-void DebugCmd::Replica(CmdArgList args) {
+void DebugCmd::Replica(CmdArgList args, facade::SinkReplyBuilder* builder) {
   args.remove_prefix(1);
 
   string opt = absl::AsciiStrToUpper(ArgS(args, 0));
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (opt == "PAUSE" || opt == "RESUME") {
     sf_.PauseReplication(opt == "PAUSE");
     return rb->SendOk();
@@ -545,21 +544,22 @@ void DebugCmd::Replica(CmdArgList args) {
       }
       return;
     } else {
-      return builder_->SendError("I am master");
+      return builder->SendError("I am master");
     }
   }
-  return builder_->SendError(UnknownSubCmd("replica", "DEBUG"));
+  return builder->SendError(UnknownSubCmd("replica", "DEBUG"));
 }
 
-optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args) {
+optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
+                                                                facade::SinkReplyBuilder* builder) {
   if (args.size() < 2) {
-    builder_->SendError(UnknownSubCmd("populate", "DEBUG"));
+    builder->SendError(UnknownSubCmd("populate", "DEBUG"));
     return nullopt;
   }
 
   PopulateOptions options;
   if (!absl::SimpleAtoi(ArgS(args, 1), &options.total_count)) {
-    builder_->SendError(kUintErr);
+    builder->SendError(kUintErr);
     return nullopt;
   }
 
@@ -569,7 +569,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
 
   if (args.size() > 3) {
     if (!absl::SimpleAtoi(ArgS(args, 3), &options.val_size)) {
-      builder_->SendError(kUintErr);
+      builder->SendError(kUintErr);
       return nullopt;
     }
   }
@@ -580,23 +580,23 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
       options.populate_random_values = true;
     } else if (str == "TYPE") {
       if (args.size() < index + 2) {
-        builder_->SendError(kSyntaxErr);
+        builder->SendError(kSyntaxErr);
         return nullopt;
       }
       ++index;
       options.type = absl::AsciiStrToUpper(ArgS(args, index));
     } else if (str == "ELEMENTS") {
       if (args.size() < index + 2) {
-        builder_->SendError(kSyntaxErr);
+        builder->SendError(kSyntaxErr);
         return nullopt;
       }
       if (!absl::SimpleAtoi(ArgS(args, ++index), &options.elements)) {
-        builder_->SendError(kSyntaxErr);
+        builder->SendError(kSyntaxErr);
         return nullopt;
       }
     } else if (str == "SLOTS") {
       if (args.size() < index + 3) {
-        builder_->SendError(kSyntaxErr);
+        builder->SendError(kSyntaxErr);
         return nullopt;
       }
 
@@ -613,27 +613,27 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args)
 
       auto start = parse_slot(ArgS(args, ++index));
       if (start.status() != facade::OpStatus::OK) {
-        builder_->SendError(start.status());
+        builder->SendError(start.status());
         return nullopt;
       }
       auto end = parse_slot(ArgS(args, ++index));
       if (end.status() != facade::OpStatus::OK) {
-        builder_->SendError(end.status());
+        builder->SendError(end.status());
         return nullopt;
       }
       options.slot_range = cluster::SlotRange{.start = static_cast<cluster::SlotId>(start.value()),
                                               .end = static_cast<cluster::SlotId>(end.value())};
 
     } else {
-      builder_->SendError(kSyntaxErr);
+      builder->SendError(kSyntaxErr);
       return nullopt;
     }
   }
   return options;
 }
 
-void DebugCmd::Populate(CmdArgList args) {
-  optional<PopulateOptions> options = ParsePopulateArgs(args);
+void DebugCmd::Populate(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  optional<PopulateOptions> options = ParsePopulateArgs(args, builder);
   if (!options.has_value()) {
     return;
   }
@@ -661,7 +661,7 @@ void DebugCmd::Populate(CmdArgList args) {
   for (auto& fb : fb_arr)
     fb.Join();
 
-  builder_->SendOk();
+  builder->SendOk();
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
@@ -732,7 +732,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   });
 }
 
-void DebugCmd::Exec() {
+void DebugCmd::Exec(facade::SinkReplyBuilder* builder) {
   EngineShardSet& ess = *shard_set;
   fb2::Mutex mu;
   std::map<string, unsigned> freq_cnt;
@@ -750,11 +750,11 @@ void DebugCmd::Exec() {
   }
   StrAppend(&res, "--------------------------\n");
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendVerbatimString(res);
 }
 
-void DebugCmd::LogTraffic(CmdArgList args) {
+void DebugCmd::LogTraffic(CmdArgList args, facade::SinkReplyBuilder* builder) {
   optional<string> path;
   if (args.size() == 1 && absl::AsciiStrToUpper(facade::ToSV(args.front())) != "STOP"sv) {
     path = ArgS(args, 0);
@@ -769,10 +769,10 @@ void DebugCmd::LogTraffic(CmdArgList args) {
     else
       facade::Connection::StopTrafficLogging();
   });
-  builder_->SendOk();
+  builder->SendOk();
 }
 
-void DebugCmd::Inspect(string_view key, CmdArgList args) {
+void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilder* builder) {
   EngineShardSet& ess = *shard_set;
   ShardId sid = Shard(key, ess.size());
   VLOG(1) << "DebugCmd::Inspect " << key;
@@ -784,7 +784,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
     auto cb = [&] { return EstimateCompression(cntx_, key); };
     auto res = ess.Await(sid, std::move(cb));
     if (!res) {
-      builder_->SendError(res.status());
+      builder->SendError(res.status());
       return;
     }
     StrAppend(&resp, "raw_size: ", res->raw_size, ", compressed_size: ", res->compressed_size);
@@ -797,7 +797,7 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
     ObjInfo res = ess.Await(sid, std::move(cb));
 
     if (!res.found) {
-      builder_->SendError(kKeyNotFoundErr);
+      builder->SendError(kKeyNotFoundErr);
       return;
     }
 
@@ -816,10 +816,10 @@ void DebugCmd::Inspect(string_view key, CmdArgList args) {
       StrAppend(&resp, " lock:", res.lock_status == ObjInfo::X ? "x" : "s");
     }
   }
-  builder_->SendSimpleString(resp);
+  builder->SendSimpleString(resp);
 }
 
-void DebugCmd::Watched() {
+void DebugCmd::Watched(facade::SinkReplyBuilder* builder) {
   fb2::Mutex mu;
 
   vector<string> watched_keys;
@@ -838,7 +838,7 @@ void DebugCmd::Watched() {
     }
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
@@ -847,7 +847,7 @@ void DebugCmd::Watched() {
   rb->SendStringArr(watched_keys);
 }
 
-void DebugCmd::TxAnalysis() {
+void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {
   vector<EngineShard::TxQueueInfo> shard_info(shard_set->size());
 
   auto cb = [&](EngineShard* shard) {
@@ -867,11 +867,11 @@ void DebugCmd::TxAnalysis() {
     StrAppend(&result, "  max contention score: ", info.max_contention_score,
               ",lock_name:", info.max_contention_lock, "\n");
   }
-  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendVerbatimString(result);
 }
 
-void DebugCmd::ObjHist() {
+void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
   vector<ObjHistMap> obj_hist_map_arr(shard_set->size());
 
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
@@ -895,21 +895,21 @@ void DebugCmd::ObjHist() {
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
-  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendVerbatimString(result);
 }
 
-void DebugCmd::Stacktrace() {
+void DebugCmd::Stacktrace(facade::SinkReplyBuilder* builder) {
   fb2::Mutex m;
   shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
     std::unique_lock lk(m);
     fb2::detail::FiberInterface::PrintAllFiberStackTraces();
   });
   base::FlushLogs();
-  builder_->SendOk();
+  builder->SendOk();
 }
 
-void DebugCmd::Shards() {
+void DebugCmd::Shards(facade::SinkReplyBuilder* builder) {
   struct ShardInfo {
     size_t used_memory = 0;
     size_t key_count = 0;
@@ -961,12 +961,12 @@ void DebugCmd::Shards() {
 
 #undef ADD_STAT
 #undef MAXMIN_STAT
-  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendVerbatimString(out);
 }
 
-void DebugCmd::RecvSize(string_view param) {
-  auto* rb = static_cast<RedisReplyBuilder*>(builder_);
+void DebugCmd::RecvSize(string_view param, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   uint8_t enable = 2;
   if (absl::EqualsIgnoreCase(param, "ENABLE"))
     enable = 1;

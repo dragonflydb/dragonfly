@@ -1959,12 +1959,12 @@ void ServerFamily::Debug(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
                          ConnectionContext* cntx) {
   DebugCmd dbg_cmd{this, cntx};
 
-  return dbg_cmd.Run(args);
+  return dbg_cmd.Run(args, builder);
 }
 
 void ServerFamily::Memory(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                           ConnectionContext* cntx) {
-  MemoryCmd mem_cmd{this, cntx};
+  MemoryCmd mem_cmd{this, builder, cntx};
 
   return mem_cmd.Run(args);
 }

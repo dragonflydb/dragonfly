@@ -236,14 +236,14 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser parser, SinkReplyBu
       params.limit_total = parser.Next<size_t>();
     } else if (parser.Check("LOAD")) {
       if (params.return_fields) {
-        cntx->SendError("LOAD cannot be applied after RETURN");
+        builder->SendError("LOAD cannot be applied after RETURN");
         return std::nullopt;
       }
 
       ParseLoadFields(&parser, &params.load_fields);
     } else if (parser.Check("RETURN")) {
       if (params.load_fields) {
-        cntx->SendError("RETURN cannot be applied after LOAD");
+        builder->SendError("RETURN cannot be applied after LOAD");
         return std::nullopt;
       }
 
