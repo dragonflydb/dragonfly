@@ -706,16 +706,6 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
     return;
   }
   registry_->Init(&CategoryToIdx(), &reverse_cat_table_, &CategoryToCommandsIndex());
-  config_registry.RegisterMutable("aclfile");
-  config_registry.RegisterMutable("acllog_max_len", [this](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<size_t>();
-    if (res.has_value()) {
-      pool_->AwaitFiberOnAll([&res](auto index, auto* context) {
-        ServerState::tlocal()->acl_log.SetTotalEntries(res.value());
-      });
-    }
-    return res.has_value();
-  });
 }
 
 std::string AclFamily::AclCatToString(uint32_t acl_category, User::Sign sign) const {

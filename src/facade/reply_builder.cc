@@ -126,7 +126,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   send_active_ = true;
   tl_facade_stats->reply_stats.io_write_cnt++;
   tl_facade_stats->reply_stats.io_write_bytes += bsize;
-  DVLOG(2) << "Writing " << bsize << " bytes of len " << len;
+  DVLOG(2) << "Writing " << bsize + batch_.size() << " bytes of len " << len;
 
   if (batch_.empty()) {
     ec = sink_->Write(v, len);

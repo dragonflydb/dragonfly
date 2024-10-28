@@ -816,12 +816,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   LOG_FIRST_N(INFO, 1) << "Host OS: " << os_string << " with " << shard_set->pool()->size()
                        << " threads";
   SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
-  config_registry.RegisterMutable("maxclients", [this](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<uint32_t>();
-    if (res.has_value())
-      SetMaxClients(listeners_, res.value());
-    return res.has_value();
-  });
+  config_registry.RegisterSetter<uint32_t>(
+      "maxclients", [this](uint32_t val) { SetMaxClients(listeners_, val); });
 
   SetSlowLogThreshold(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_log_slower_than));
   config_registry.RegisterMutable("slowlog_log_slower_than",
@@ -832,12 +828,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
                                     return res.has_value();
                                   });
   SetSlowLogMaxLen(service_.proactor_pool(), absl::GetFlag(FLAGS_slowlog_max_len));
-  config_registry.RegisterMutable("slowlog_max_len", [this](const absl::CommandLineFlag& flag) {
-    auto res = flag.TryGet<uint32_t>();
-    if (res.has_value())
-      SetSlowLogMaxLen(service_.proactor_pool(), res.value());
-    return res.has_value();
-  });
+  config_registry.RegisterSetter<uint32_t>(
+      "slowlog_max_len", [this](uint32_t val) { SetSlowLogMaxLen(service_.proactor_pool(), val); });
 
   // We only reconfigure TLS when the 'tls' config key changes. Therefore to
   // update TLS certs, first update tls_cert_file, then set 'tls true'.
@@ -1280,6 +1272,8 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("pipeline_throttle_total", "", conn_stats.pipeline_throttle_count,
+                            MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_commands_total", "", conn_stats.pipelined_cmd_cnt,
@@ -2298,6 +2292,7 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("instantaneous_ops_per_sec", m.qps);
     append("total_pipelined_commands", conn_stats.pipelined_cmd_cnt);
     append("total_pipelined_squashed_commands", m.coordinator_stats.squashed_commands);
+    append("pipeline_throttle_total", conn_stats.pipeline_throttle_count);
     append("pipelined_latency_usec", conn_stats.pipelined_cmd_latency);
     append("total_net_input_bytes", conn_stats.io_read_bytes);
     append("connection_migrations", conn_stats.num_migrations);
@@ -2327,9 +2322,13 @@ void ServerFamily::Info(CmdArgList args, ConnectionContext* cntx) {
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
     append("reply_count", reply_stats.send_stats.count);
     append("reply_latency_usec", reply_stats.send_stats.total_duration);
+
+    // Number of connections that are currently blocked on grabbing interpreter.
     append("blocked_on_interpreter", m.coordinator_stats.blocked_on_interpreter);
     append("lua_interpreter_cnt", m.lua_stats.interpreter_cnt);
-    append("lua_blocked", m.lua_stats.blocked_cnt);
+
+    // Total number of events of when a connection was blocked on grabbing interpreter.
+    append("lua_blocked_total", m.lua_stats.blocked_cnt);
   }
 
   if (should_enter("TIERED", true)) {

@@ -31,7 +31,7 @@ ABSL_DECLARE_FLAG(string, dbfilename);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
-ABSL_DECLARE_FLAG(size_t, acllog_max_len);
+ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 namespace dfly {
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {

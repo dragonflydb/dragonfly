@@ -12,7 +12,7 @@
 #include "facade/dragonfly_connection.h"
 #include "server/conn_context.h"
 
-ABSL_FLAG(size_t, acllog_max_len, 32,
+ABSL_FLAG(uint32_t, acllog_max_len, 32,
           "Specify the number of log entries. Logs are kept locally for each thread "
           "and therefore the total number of entries are acllog_max_len * threads");
 
