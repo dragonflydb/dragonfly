@@ -725,3 +725,25 @@ def assert_eventually(wrapped=None, *, times=100):
 def skip_if_not_in_github():
     if os.getenv("GITHUB_ACTIONS") == None:
         pytest.skip("Redis server not found")
+
+
+class ExpirySeeder:
+    def __init__(self):
+        self.stop_flag = False
+        self.i = 0
+        self.batch_size = 200
+
+    async def run(self, client):
+        while not self.stop_flag:
+            pipeline = client.pipeline(transaction=True)
+            for i in range(0, self.batch_size):
+                pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX 3")
+                self.i = self.i + 1
+            await pipeline.execute()
+
+    async def wait_until_n_inserts(self, count):
+        while not self.i > count:
+            await asyncio.sleep(0.5)
+
+    def stop(self):
+        self.stop_flag = True
