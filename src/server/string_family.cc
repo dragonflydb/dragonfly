@@ -970,7 +970,7 @@ void StringFamily::Set(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
       int64_t now_ms = GetCurrentTimeMs();
       auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
       if (abs_ms < 0)
-        return cntx->SendError(InvalidExpireTime("set"));
+        return builder->SendError(InvalidExpireTime("set"));
 
       // Remove existed key if the key is expired already
       if (rel_ms < 0) {

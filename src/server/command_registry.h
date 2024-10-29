@@ -88,13 +88,18 @@ class CommandId : public facade::CommandId {
   using Handler =
       fu2::function_base<true /*owns*/, true /*copyable*/, fu2::capacity_default,
                          false /* non-throwing*/, false /* strong exceptions guarantees*/,
-                         void(CmdArgList, ConnectionContext*) const>;
+                         void(CmdArgList, Transaction*, facade::SinkReplyBuilder*,
+                              ConnectionContext*) const>;
+  using Handler2 =
+      fu2::function_base<true, true, fu2::capacity_default, false, false,
+                         void(CmdArgList, Transaction*, facade::SinkReplyBuilder*) const>;
 
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
   // Returns the invoke time in usec.
-  uint64_t Invoke(CmdArgList args, ConnectionContext* cntx) const;
+  uint64_t Invoke(CmdArgList args, Transaction*, facade::SinkReplyBuilder*,
+                  ConnectionContext* cntx) const;
 
   // Returns error if validation failed, otherwise nullopt
   std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;
@@ -122,14 +127,7 @@ class CommandId : public facade::CommandId {
     return std::move(*this);
   }
 
-  using Handler2 =
-      fu2::function_base<true, true, fu2::capacity_default, false, false,
-                         void(CmdArgList, Transaction*, facade::SinkReplyBuilder*) const>;
-  using Handler3 = fu2::function_base<true, true, fu2::capacity_default, false, false,
-                                      void(CmdArgList, Transaction*, facade::SinkReplyBuilder*,
-                                           ConnectionContext*) const>;
   CommandId&& SetHandler(Handler2 f) &&;
-  CommandId&& SetHandler(Handler3 f) &&;
 
   CommandId&& SetValidator(ArgValidator f) && {
     validator_ = std::move(f);

@@ -2884,7 +2884,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   string ft_create = "FT.CREATE";
   arg_vec.insert(arg_vec.begin(), MutableSlice{ft_create.data(), ft_create.size()});
 
-  service_->DispatchCommand(absl::MakeSpan(arg_vec), &cntx);
+  service_->DispatchCommand(absl::MakeSpan(arg_vec), &crb, &cntx);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {

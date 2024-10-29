@@ -233,7 +233,7 @@ constexpr string_view kS3Prefix = "s3://"sv;
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, Transaction* tx,
                                           SinkReplyBuilder* builder, ConnectionContext* cntx);
 
-inline CommandId::Handler3 HandlerFunc(ServerFamily* se, EngineFunc f) {
+inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFunc f) {
   return [=](CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
     return (se->*f)(args, tx, builder, cntx);
   };
@@ -498,10 +498,10 @@ void ClientSetInfo(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext
 
 void ClientId(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx) {
   if (args.size() != 0) {
-    return cntx->SendError(kSyntaxErr);
+    return builder->SendError(kSyntaxErr);
   }
 
-  return cntx->SendLong(cntx->conn()->GetClientId());
+  return builder->SendLong(cntx->conn()->GetClientId());
 }
 
 void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkReplyBuilder* builder,
@@ -536,7 +536,7 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
   }
 
   if (!evaluator) {
-    return cntx->SendError(kSyntaxErr);
+    return builder->SendError(kSyntaxErr);
   }
 
   const bool is_admin_request = cntx->conn()->IsPrivileged();
@@ -560,11 +560,11 @@ void ClientKill(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
   }
 
   if (kill_errors.load() == 0) {
-    return cntx->SendLong(killed_connections.load());
+    return builder->SendLong(killed_connections.load());
   } else {
-    return cntx->SendError(absl::StrCat("Killed ", killed_connections.load(),
-                                        " client(s), but unable to kill ", kill_errors.load(),
-                                        " admin client(s)."));
+    return builder->SendError(absl::StrCat("Killed ", killed_connections.load(),
+                                           " client(s), but unable to kill ", kill_errors.load(),
+                                           " admin client(s)."));
   }
 }
 
@@ -1811,7 +1811,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
 void ServerFamily::Auth(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                         ConnectionContext* cntx) {
   if (args.size() > 2) {
-    return cntx->SendError(kSyntaxErr);
+    return builder->SendError(kSyntaxErr);
   }
 
   // non admin port auth
@@ -1821,16 +1821,16 @@ void ServerFamily::Auth(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     const size_t index = one_arg ? 0 : 1;
     std::string_view password = facade::ToSV(args[index]);
     if (DoAuth(cntx, username, password)) {
-      return cntx->SendOk();
+      return builder->SendOk();
     }
     auto& log = ServerState::tlocal()->acl_log;
     using Reason = acl::AclLog::Reason;
     log.Add(*cntx, "AUTH", Reason::AUTH, std::string(username));
-    return cntx->SendError(facade::kAuthRejected);
+    return builder->SendError(facade::kAuthRejected);
   }
 
   if (!cntx->req_auth) {
-    return cntx->SendError(
+    return builder->SendError(
         "AUTH <password> called without any password configured for "
         "admin port. Are you sure your configuration is correct?");
   }
@@ -1838,9 +1838,9 @@ void ServerFamily::Auth(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   string_view pass = ArgS(args, 0);
   if (pass == GetPassword()) {
     cntx->authenticated = true;
-    cntx->SendOk();
+    builder->SendOk();
   } else {
-    cntx->SendError(facade::kAuthRejected);
+    builder->SendError(facade::kAuthRejected);
   }
 }
 
@@ -2888,7 +2888,7 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     } else if (cmd == "LISTENING-PORT") {
       uint32_t replica_listening_port;
       if (!absl::SimpleAtoi(arg, &replica_listening_port)) {
-        cntx->SendError(kInvalidIntErr);
+        builder->SendError(kInvalidIntErr);
         return;
       }
       cntx->conn_state.replication_info.repl_listening_port = replica_listening_port;
@@ -2908,7 +2908,7 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     } else if (cmd == "CLIENT-VERSION" && args.size() == 2) {
       unsigned version;
       if (!absl::SimpleAtoi(arg, &version)) {
-        return cntx->SendError(kInvalidIntErr);
+        return builder->SendError(kInvalidIntErr);
       }
       dfly_cmd_->SetDflyClientVersion(cntx, DflyVersion(version));
     } else if (cmd == "ACK" && args.size() == 2) {
@@ -2928,17 +2928,13 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
       VLOG(2) << "Received client ACK=" << ack;
       cntx->replication_flow->last_acked_lsn = ack;
       return;
-    } else if (cmd == "ACL-CHECK") {
-      // TODO(kostasrim): Remove this branch 20/6/2024
-      cntx->SendOk();
-      return;
     } else {
       VLOG(1) << "Error " << cmd << " " << arg << " " << args.size();
       return err_cb();
     }
   }
 
-  return cntx->SendOk();
+  return builder->SendOk();
 }
 
 void ServerFamily::Role(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -2998,7 +2994,7 @@ void ServerFamily::LastSave(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     util::fb2::LockGuard lk(save_mu_);
     save_time = last_save_info_.save_time;
   }
-  cntx->SendLong(save_time);
+  builder->SendLong(save_time);
 }
 
 void ServerFamily::Latency(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -3011,13 +3007,13 @@ void ServerFamily::Latency(CmdArgList args, Transaction* tx, SinkReplyBuilder* b
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
-  cntx->SendError(kSyntaxErr);
+  builder->SendError(kSyntaxErr);
 }
 
 void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                                ConnectionContext* cntx) {
   if (args.size() > 1) {
-    cntx->SendError(kSyntaxErr);
+    builder->SendError(kSyntaxErr);
     return;
   }
 
@@ -3027,7 +3023,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilde
     } else if (absl::EqualsIgnoreCase(sub_cmd, "NOSAVE")) {
       save_on_shutdown_ = false;
     } else {
-      cntx->SendError(kSyntaxErr);
+      builder->SendError(kSyntaxErr);
       return;
     }
   }
@@ -3036,7 +3032,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilde
       [](ProactorBase* pb) { ServerState::tlocal()->EnterLameDuck(); });
 
   CHECK_NOTNULL(acceptor_)->Stop();
-  cntx->SendOk();
+  builder->SendOk();
 }
 
 void ServerFamily::Dfly(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -3074,26 +3070,26 @@ void ServerFamily::SlowLog(CmdArgList args, Transaction* tx, SinkReplyBuilder* b
       lengths[index] = ServerState::tlocal()->GetSlowLog().Length();
     });
     int sum = std::accumulate(lengths.begin(), lengths.end(), 0);
-    return cntx->SendLong(sum);
+    return builder->SendLong(sum);
   }
 
   if (sub_cmd == "RESET") {
     service_.proactor_pool().AwaitFiberOnAll(
         [](auto index, auto* context) { ServerState::tlocal()->GetSlowLog().Reset(); });
-    return cntx->SendOk();
+    return builder->SendOk();
   }
 
   if (sub_cmd == "GET") {
     return SlowLogGet(args, sub_cmd, &service_.proactor_pool(), builder);
   }
-  cntx->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
+  builder->SendError(UnknownSubCmd(sub_cmd, "SLOWLOG"), kSyntaxErrType);
 }
 
 void ServerFamily::Module(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                           ConnectionContext* cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   if (sub_cmd != "LIST")
-    return cntx->SendError(kSyntaxErr);
+    return builder->SendError(kSyntaxErr);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartArray(2);

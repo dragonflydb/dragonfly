@@ -58,9 +58,10 @@ bool CommandId::IsMultiTransactional() const {
   return CO::IsTransKind(name()) || CO::IsEvalKind(name());
 }
 
-uint64_t CommandId::Invoke(CmdArgList args, ConnectionContext* cntx) const {
+uint64_t CommandId::Invoke(CmdArgList args, Transaction* tx, facade::SinkReplyBuilder* builder,
+                           ConnectionContext* cntx) const {
   int64_t before = absl::GetCurrentTimeNanos();
-  handler_(args, cntx);
+  handler_(args, tx, builder, cntx);
   int64_t after = absl::GetCurrentTimeNanos();
 
   ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
@@ -95,17 +96,8 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 }
 
 CommandId&& CommandId::SetHandler(Handler2 f) && {
-  handler_ = [f = std::move(f)](CmdArgList args, ConnectionContext* cntx) {
-    f(args, cntx->transaction, cntx->reply_builder());
-  };
-
-  return std::move(*this);
-}
-
-CommandId&& CommandId::SetHandler(Handler3 f) && {
-  handler_ = [f = std::move(f)](CmdArgList args, ConnectionContext* cntx) {
-    f(args, cntx->transaction, cntx->reply_builder(), cntx);
-  };
+  handler_ = [f = std::move(f)](CmdArgList args, Transaction* tx, facade::SinkReplyBuilder* builder,
+                                facade::ConnectionContext*) { f(args, tx, builder); };
 
   return std::move(*this);
 }

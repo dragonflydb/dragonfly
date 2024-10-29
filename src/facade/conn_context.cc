@@ -52,16 +52,4 @@ size_t ConnectionContext::UsedMemory() const {
   return dfly::HeapSize(rbuilder_) + dfly::HeapSize(authed_username) + dfly::HeapSize(acl_commands);
 }
 
-void ConnectionContext::SendError(std::string_view str, std::string_view type) {
-  rbuilder_->SendError(str, type);
-}
-
-void ConnectionContext::SendError(ErrorReply error) {
-  rbuilder_->SendError(error);
-}
-
-void ConnectionContext::SendError(OpStatus status) {
-  rbuilder_->SendError(status);
-}
-
 }  // namespace facade

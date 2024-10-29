@@ -593,12 +593,14 @@ error_code Replica::InitiateDflySync() {
 
 error_code Replica::ConsumeRedisStream() {
   base::IoBuf io_buf(16_KB);
-  io::NullSink null_sink;  // we never reply back on the commands.
-  ConnectionContext conn_context{&null_sink, nullptr, {}};
+  ConnectionContext conn_context{static_cast<io::Sink*>(nullptr), nullptr, {}};
   conn_context.is_replicating = true;
   conn_context.journal_emulated = true;
   conn_context.skip_acl_validation = true;
   conn_context.ns = &namespaces.GetDefaultNamespace();
+
+  // we never reply back on the commands.
+  facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};
   ResetParser(true);
 
   // Master waits for this command in order to start sending replication stream.
@@ -651,7 +653,7 @@ error_code Replica::ConsumeRedisStream() {
 
         facade::RespExpr::VecToArgList(LastResponseArgs(), &args_vector);
         CmdArgList arg_list{args_vector.data(), args_vector.size()};
-        service_.DispatchCommand(arg_list, &conn_context);
+        service_.DispatchCommand(arg_list, &null_builder, &conn_context);
       }
     }
 

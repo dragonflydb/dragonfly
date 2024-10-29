@@ -1232,8 +1232,8 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-void Service::DispatchCommand(ArgSlice args, facade::ConnectionContext* cntx) {
-  auto* builder = cntx->reply_builder();
+void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+                              facade::ConnectionContext* cntx) {
   absl::Cleanup clear_last_error([builder]() { std::ignore = builder->ConsumeLastError(); });
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
@@ -1334,7 +1334,7 @@ void Service::DispatchCommand(ArgSlice args, facade::ConnectionContext* cntx) {
 
   dfly_cntx->cid = cid;
 
-  if (!InvokeCmd(cid, args_no_cmd, dfly_cntx)) {
+  if (!InvokeCmd(cid, args_no_cmd, builder, dfly_cntx)) {
     builder->SendError("Internal Error");
     builder->CloseConnection();
   }
@@ -1391,10 +1391,10 @@ OpResult<void> OpTrackKeys(const OpArgs slice_args, const facade::Connection::We
   return OpStatus::OK;
 }
 
-bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionContext* cntx) {
+bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBuilder* builder,
+                        ConnectionContext* cntx) {
   DCHECK(cid);
   DCHECK(!cid->Validate(tail_args));
-  auto* builder = cntx->reply_builder();
 
   if (auto err = VerifyCommandExecution(cid, cntx, tail_args); err) {
     // We need to skip this because ACK's should not be replied to
@@ -1441,7 +1441,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   auto last_error = builder->ConsumeLastError();
   DCHECK(last_error.empty());
   try {
-    invoke_time_usec = cid->Invoke(tail_args, cntx);
+    invoke_time_usec = cid->Invoke(tail_args, tx, builder, cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
     return false;
@@ -1491,10 +1491,11 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, ConnectionCo
   return true;
 }
 
-size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
+size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReplyBuilder* builder,
                                      facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
+  DCHECK_EQ(builder->type(), SinkReplyBuilder::REDIS);
 
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
@@ -1515,7 +1516,9 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
     }
 
     dfly_cntx->transaction = dist_trans.get();
-    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds), dfly_cntx, this, true, false);
+    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
+                                  static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, true,
+                                  false);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
@@ -1559,7 +1562,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
       break;
 
     // Dispatch non squashed command only after all squshed commands were executed and replied
-    DispatchCommand(args, cntx);
+    DispatchCommand(args, builder, cntx);
     dispatched++;
   }
 
@@ -1572,14 +1575,13 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list,
 }
 
 void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                         facade::ConnectionContext* cntx) {
+                         MCReplyBuilder* mc_builder, facade::ConnectionContext* cntx) {
   absl::InlinedVector<MutableSlice, 8> args;
   char cmd_name[16];
   char ttl[16];
   char store_opt[32] = {0};
   char ttl_op[] = "EXAT";
 
-  MCReplyBuilder* mc_builder = static_cast<MCReplyBuilder*>(cntx->reply_builder());
   mc_builder->SetNoreply(cmd.no_reply);
 
   switch (cmd.type) {
@@ -1671,7 +1673,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
     }
   }
 
-  DispatchCommand(CmdArgList{args}, cntx);
+  DispatchCommand(CmdArgList{args}, mc_builder, cntx);
 
   // Reset back.
   dfly_cntx->conn_state.memcache_flag = 0;
@@ -1824,7 +1826,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
 
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
   WithReplies(&crb, cntx, [&] {
-    MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), cntx, this, true, true);
+    MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, true, true);
   });
 
   info->async_cmds_heap_mem = 0;
@@ -1873,7 +1875,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   if (ca.async)
     return;
 
-  DispatchCommand(ca.args, cntx);
+  DispatchCommand(ca.args, &replier, cntx);
 }
 
 void Service::Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -1892,7 +1894,7 @@ void Service::Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
 
   string sha{std::move(res.value())};
 
-  CallSHA(args, sha, interpreter, cntx);
+  CallSHA(args, sha, interpreter, builder, cntx);
 }
 
 void Service::EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -1900,11 +1902,11 @@ void Service::EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
 
   BorrowedInterpreter interpreter{cntx->transaction, cntx};
-  CallSHA(args, sha, interpreter, cntx);
+  CallSHA(args, sha, interpreter, builder, cntx);
 }
 
 void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter,
-                      ConnectionContext* cntx) {
+                      SinkReplyBuilder* builder, ConnectionContext* cntx) {
   uint32_t num_keys;
   CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
 
@@ -1914,7 +1916,7 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ev_args.args = args.subspan(2 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(args, ev_args, interpreter, cntx);
+  EvalInternal(args, ev_args, interpreter, builder, cntx);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
@@ -1954,25 +1956,10 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 
 // Start multi transaction for eval. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
-// Return nullopt if eval runs inside multi and conflicts with multi mode
-optional<bool> StartMultiEval(DbIndex dbid, CmdArgList keys, ScriptMgr::ScriptParams params,
-                              ConnectionContext* cntx) {
+bool StartMultiEval(DbIndex dbid, CmdArgList keys, Transaction::MultiMode script_mode,
+                    ConnectionContext* cntx) {
   Transaction* tx = cntx->transaction;
   Namespace* ns = cntx->ns;
-  SinkReplyBuilder* builder = cntx->reply_builder();
-  Transaction::MultiMode script_mode = DetermineMultiMode(params);
-  Transaction::MultiMode multi_mode = tx->GetMultiMode();
-  // Check if eval is already part of a running multi transaction
-  if (multi_mode != Transaction::NOT_DETERMINED) {
-    if (multi_mode > script_mode) {
-      string err = StrCat(
-          "Multi mode conflict when running eval in multi transaction. Multi mode is: ", multi_mode,
-          " eval mode is: ", script_mode);
-      builder->SendError(err);
-      return nullopt;
-    }
-    return false;
-  }
 
   if (keys.empty() && script_mode == Transaction::LOCK_AHEAD)
     return false;
@@ -2015,9 +2002,8 @@ static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::Scrip
 }
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                           ConnectionContext* cntx) {
+                           SinkReplyBuilder* builder, ConnectionContext* cntx) {
   DCHECK(!eval_args.sha.empty());
-  auto* builder = cntx->reply_builder();
 
   // Sanitizing the input to avoid code injection.
   if (eval_args.sha.size() != 40 || !IsSHA(eval_args.sha)) {
@@ -2097,9 +2083,20 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
       cntx->conn()->RequestAsyncMigration(shard_set->pool()->at(*sid));
     }
   } else {
-    optional<bool> scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, *params, cntx);
-    if (!scheduled) {
-      return;
+    Transaction::MultiMode script_mode = DetermineMultiMode(*params);
+    Transaction::MultiMode tx_mode = tx->GetMultiMode();
+    bool scheduled = false;
+
+    // Check if eval is already part of a running multi transaction
+    if (tx_mode != Transaction::NOT_DETERMINED) {
+      if (tx_mode > script_mode) {
+        string err = StrCat(
+            "Multi mode conflict when running eval in multi transaction. Multi mode is: ", tx_mode,
+            " eval mode is: ", script_mode);
+        return builder->SendError(err);
+      }
+    } else {
+      scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, script_mode, cntx);
     }
 
     ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
@@ -2115,7 +2112,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     }
 
     // Conclude the transaction.
-    if (*scheduled)
+    if (scheduled)
       tx->UnlockMulti();
   }
 
@@ -2312,7 +2309,7 @@ void Service::Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
-      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), cntx, this);
+      MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this);
     } else {
       CmdArgVec arg_vec;
       for (auto& scmd : exec_info.body) {
@@ -2334,7 +2331,7 @@ void Service::Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
           }
         }
 
-        bool ok = InvokeCmd(scmd.Cid(), args, cntx);
+        bool ok = InvokeCmd(scmd.Cid(), args, builder, cntx);
         if (!ok || rb->GetError())  // checks for i/o error, not logical error.
           break;
       }

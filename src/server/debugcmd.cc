@@ -145,6 +145,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   local_tx->StartMultiNonAtomic();
   boost::intrusive_ptr<Transaction> stub_tx =
       new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
+
   absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx, stub_tx.get(), &crb};
@@ -171,7 +172,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
     crb.SetReplyMode(ReplyMode::NONE);
     stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
 
-    sf->service().InvokeCmd(cid, args_span, &local_cntx);
+    sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
   }
 
   local_cntx.Inject(nullptr);

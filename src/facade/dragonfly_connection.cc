@@ -486,14 +486,16 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
-  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
+  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
+                                  self->reply_builder_, self->cc_.get());
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
 }
 
 void Connection::DispatchOperations::operator()(const Connection::MCPipelineMessage& msg) {
-  self->service_->DispatchMC(msg.cmd, msg.value, self->cc_.get());
+  self->service_->DispatchMC(msg.cmd, msg.value, static_cast<MCReplyBuilder*>(self->reply_builder_),
+                             self->cc_.get());
   self->last_interaction_ = time(nullptr);
 }
 
@@ -1087,7 +1089,7 @@ Connection::ParserStatus Connection::ParseRedis() {
 
   auto dispatch_sync = [this, &parse_args, &cmd_vec] {
     RespExpr::VecToArgList(parse_args, &cmd_vec);
-    service_->DispatchCommand(absl::MakeSpan(cmd_vec), cc_.get());
+    service_->DispatchCommand(absl::MakeSpan(cmd_vec), reply_builder_, cc_.get());
   };
   auto dispatch_async = [this, &parse_args, tlh = mi_heap_get_backing()]() -> MessageHandle {
     return {FromArgs(std::move(parse_args), tlh)};
@@ -1131,7 +1133,10 @@ auto Connection::ParseMemcache() -> ParserStatus {
   MemcacheParser::Command cmd;
   string_view value;
 
-  auto dispatch_sync = [this, &cmd, &value] { service_->DispatchMC(cmd, value, cc_.get()); };
+  auto dispatch_sync = [this, &cmd, &value] {
+    service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(reply_builder_), cc_.get());
+  };
+
   auto dispatch_async = [&cmd, &value]() -> MessageHandle {
     return {make_unique<MCPipelineMessage>(std::move(cmd), value)};
   };
@@ -1353,6 +1358,7 @@ bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
 
 void Connection::SquashPipeline() {
   DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
+  DCHECK_EQ(reply_builder_->type(), SinkReplyBuilder::REDIS);  // Only Redis is supported.
 
   vector<ArgSlice> squash_cmds;
   squash_cmds.reserve(dispatch_q_.size());
@@ -1367,7 +1373,8 @@ void Connection::SquashPipeline() {
 
   cc_->async_dispatch = true;
 
-  size_t dispatched = service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
+  size_t dispatched =
+      service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_, cc_.get());
 
   if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
     reply_builder_->FlushBatch();
