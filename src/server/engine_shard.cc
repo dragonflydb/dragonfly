@@ -37,7 +37,7 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
 
-ABSL_FLAG(uint32_t, hz, 100,
+ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
           "Warning: not advised to decrease in production.");
 
@@ -186,6 +186,17 @@ ShardId RoundRobinSharder::next_shard_;
 fb2::Mutex RoundRobinSharder::mutex_;
 
 constexpr size_t kQueueLen = 64;
+
+optional<uint32_t> GetPeriodicCycleMs() {
+  int hz = GetFlag(FLAGS_hz);
+  if (hz <= 0)
+    return nullopt;
+
+  uint32_t clock_cycle_ms = 1000 / hz;
+  if (clock_cycle_ms == 0)
+    clock_cycle_ms = 1;
+  return clock_cycle_ms;
+}
 
 }  // namespace
 
@@ -428,13 +439,13 @@ static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds 
 }
 
 void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
-  uint32_t clock_cycle_ms = 1000 / std::max<uint32_t>(1, GetFlag(FLAGS_hz));
-  if (clock_cycle_ms == 0)
-    clock_cycle_ms = 1;
-
+  auto cycle_ms = GetPeriodicCycleMs();
+  if (!cycle_ms) {
+    return;
+  }
   auto heartbeat = [this]() { Heartbeat(); };
 
-  std::chrono::milliseconds period_ms(clock_cycle_ms);
+  std::chrono::milliseconds period_ms(*cycle_ms);
 
   fiber_heartbeat_periodic_ =
       MakeFiber([this, index = pb->GetPoolIndex(), period_ms, heartbeat]() mutable {
@@ -445,12 +456,13 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
                                                  std::function<void()> shard_handler) {
-  uint32_t clock_cycle_ms = 1000 / std::max<uint32_t>(1, GetFlag(FLAGS_hz));
-  if (clock_cycle_ms == 0)
-    clock_cycle_ms = 1;
+  auto clock_cycle_ms = GetPeriodicCycleMs();
+  if (!clock_cycle_ms) {
+    return;
+  }
 
   // Minimum 100ms
-  std::chrono::milliseconds period_ms(std::max((uint32_t)100, clock_cycle_ms));
+  std::chrono::milliseconds period_ms(std::max(100u, *clock_cycle_ms));
   fiber_shard_handler_periodic_ = MakeFiber(
       [this, index = pb->GetPoolIndex(), period_ms, handler = std::move(shard_handler)]() mutable {
         ThisFiber::SetName(absl::StrCat("shard_handler_periodic", index));
