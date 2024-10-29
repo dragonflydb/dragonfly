@@ -1615,7 +1615,7 @@ void GenericFamily::Select(CmdArgList args, Transaction*, SinkReplyBuilder* buil
   };
   shard_set->RunBriefInParallel(std::move(cb));
 
-  return cntx->SendOk();
+  return builder->SendOk();
 }
 
 void GenericFamily::Dump(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {

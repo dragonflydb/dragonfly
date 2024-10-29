@@ -18,20 +18,23 @@ namespace facade {
 
 class ConnectionContext;
 class Connection;
-struct ConnectionStats;
+class SinkReplyBuilder;
+class MCReplyBuilder;
 
 class ServiceInterface {
  public:
   virtual ~ServiceInterface() {
   }
 
-  virtual void DispatchCommand(ArgSlice args, ConnectionContext* cntx) = 0;
+  virtual void DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
+                               ConnectionContext* cntx) = 0;
 
   // Returns number of processed commands
-  virtual size_t DispatchManyCommands(absl::Span<ArgSlice> args_list, ConnectionContext* cntx) = 0;
+  virtual size_t DispatchManyCommands(absl::Span<ArgSlice> args_list, SinkReplyBuilder* builder,
+                                      ConnectionContext* cntx) = 0;
 
   virtual void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                          ConnectionContext* cntx) = 0;
+                          MCReplyBuilder* builder, ConnectionContext* cntx) = 0;
 
   virtual ConnectionContext* CreateContext(util::FiberSocketBase* peer, Connection* owner) = 0;
 

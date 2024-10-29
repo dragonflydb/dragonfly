@@ -22,9 +22,10 @@ namespace dfly {
 // contains a non-atomic multi transaction to execute squashed commands.
 class MultiCommandSquasher {
  public:
-  static void Execute(absl::Span<StoredCmd> cmds, ConnectionContext* cntx, Service* service,
-                      bool verify_commands = false, bool error_abort = false) {
-    MultiCommandSquasher{cmds, cntx, service, verify_commands, error_abort}.Run();
+  static void Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
+                      ConnectionContext* cntx, Service* service, bool verify_commands = false,
+                      bool error_abort = false) {
+    MultiCommandSquasher{cmds, cntx, service, verify_commands, error_abort}.Run(rb);
   }
 
  private:
@@ -53,16 +54,16 @@ class MultiCommandSquasher {
   SquashResult TrySquash(StoredCmd* cmd);
 
   // Execute separate non-squashed cmd. Return false if aborting on error.
-  bool ExecuteStandalone(StoredCmd* cmd);
+  bool ExecuteStandalone(facade::RedisReplyBuilder* rb, StoredCmd* cmd);
 
   // Callback that runs on shards during squashed hop.
   facade::OpStatus SquashedHopCb(Transaction* parent_tx, EngineShard* es);
 
   // Execute all currently squashed commands. Return false if aborting on error.
-  bool ExecuteSquashed();
+  bool ExecuteSquashed(facade::RedisReplyBuilder* rb);
 
   // Run all commands until completion.
-  void Run();
+  void Run(facade::RedisReplyBuilder* rb);
 
   bool IsAtomic() const;
 

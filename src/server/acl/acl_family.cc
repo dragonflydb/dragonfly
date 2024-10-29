@@ -629,8 +629,8 @@ void AclFamily::DryRun(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
 using MemberFunc2 = void (AclFamily::*)(CmdArgList args, Transaction* tx,
                                         facade::SinkReplyBuilder* builder);
 
-using MemberFunc3 = void (AclFamily::*)(CmdArgList args, Transaction* tx,
-                                        facade::SinkReplyBuilder* builder, ConnectionContext* cntx);
+using MemberFunc = void (AclFamily::*)(CmdArgList args, Transaction* tx,
+                                       facade::SinkReplyBuilder* builder, ConnectionContext* cntx);
 
 CommandId::Handler2 HandlerFunc(AclFamily* acl, MemberFunc2 f) {
   return [=](CmdArgList args, Transaction* tx, facade::SinkReplyBuilder* builder) {
@@ -638,7 +638,7 @@ CommandId::Handler2 HandlerFunc(AclFamily* acl, MemberFunc2 f) {
   };
 }
 
-CommandId::Handler3 HandlerFunc(AclFamily* acl, MemberFunc3 f) {
+CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
   return [=](CmdArgList args, Transaction* tx, facade::SinkReplyBuilder* builder,
              ConnectionContext* cntx) { return (acl->*f)(args, tx, builder, cntx); };
 }

@@ -47,40 +47,6 @@ class ConnectionContext {
     return res;
   }
 
-  virtual void SendError(std::string_view str, std::string_view type = std::string_view{});
-
-  virtual void SendError(ErrorReply error);
-
-  virtual void SendError(OpStatus status);
-
-  void SendStored() {
-    rbuilder_->SendStored();
-  }
-
-  void SendSetSkipped() {
-    rbuilder_->SendSetSkipped();
-  }
-
-  void SendMGetResponse(SinkReplyBuilder::MGetResponse resp) {
-    rbuilder_->SendMGetResponse(std::move(resp));
-  }
-
-  void SendLong(long val) {
-    rbuilder_->SendLong(val);
-  }
-
-  void SendSimpleString(std::string_view str) {
-    rbuilder_->SendSimpleString(str);
-  }
-
-  void SendOk() {
-    rbuilder_->SendOk();
-  }
-
-  void SendProtocolError(std::string_view str) {
-    rbuilder_->SendProtocolError(str);
-  }
-
   virtual size_t UsedMemory() const;
 
   // connection state / properties.

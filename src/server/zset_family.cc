@@ -1235,10 +1235,10 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   float timeout;
   auto timeout_str = ArgS(args, args.size() - 1);
   if (!absl::SimpleAtof(timeout_str, &timeout)) {
-    return cntx->SendError("timeout is not a float or out of range");
+    return builder->SendError("timeout is not a float or out of range");
   }
   if (timeout < 0) {
-    return cntx->SendError("timeout is negative");
+    return builder->SendError("timeout is negative");
   }
   VLOG(1) << "BZPop timeout(" << timeout << ")";
 
@@ -1274,14 +1274,14 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   DVLOG(1) << "result for " << tx->DebugId() << " is " << popped_key.status();
   switch (popped_key.status()) {
     case OpStatus::WRONG_TYPE:
-      return cntx->SendError(kWrongTypeErr);
+      return builder->SendError(kWrongTypeErr);
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipErrorStr(*tx->GetUniqueSlotId());
       CHECK(error.has_value());
-      return cntx->SendError(std::move(*error));
+      return builder->SendError(std::move(*error));
     }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();

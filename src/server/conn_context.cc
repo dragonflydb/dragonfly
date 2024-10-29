@@ -269,29 +269,6 @@ size_t ConnectionContext::UsedMemory() const {
   return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(conn_state);
 }
 
-void ConnectionContext::SendError(std::string_view str, std::string_view type) {
-  string_view name = cid ? cid->name() : string_view{};
-
-  VLOG(1) << "Sending error " << str << " " << type << " during " << name;
-  facade::ConnectionContext::SendError(str, type);
-}
-
-void ConnectionContext::SendError(facade::ErrorReply error) {
-  string_view name = cid ? cid->name() : string_view{};
-
-  VLOG(1) << "Sending error " << error.ToSv() << " during " << name;
-  facade::ConnectionContext::SendError(std::move(error));
-}
-
-void ConnectionContext::SendError(facade::OpStatus status) {
-  if (status != facade::OpStatus::OK) {
-    string_view name = cid ? cid->name() : string_view{};
-    VLOG(1) << "Sending error " << status << " during " << name;
-  }
-
-  facade::ConnectionContext::SendError(status);
-}
-
 void ConnectionState::ExecInfo::Clear() {
   DCHECK(!preborrowed_interpreter);  // Must have been released properly
   state = EXEC_INACTIVE;
