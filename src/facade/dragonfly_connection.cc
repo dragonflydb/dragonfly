@@ -725,7 +725,7 @@ void Connection::HandleRequests() {
   // down and return with an error accordingly.
   if (http_res && socket_->IsOpen()) {
     cc_.reset(service_->CreateContext(socket_.get(), this));
-    reply_builder_ = cc_->reply_builder();
+    reply_builder_ = cc_->reply_builder_old();
 
     if (*http_res) {
       VLOG(1) << "HTTP1.1 identified";
@@ -811,7 +811,7 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
-    DCHECK(cc_->reply_builder() && reply_builder_);
+    DCHECK(reply_builder_);
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
     if (reply_builder_->IsSendActive())
       phase_name = "send";

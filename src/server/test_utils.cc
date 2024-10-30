@@ -390,7 +390,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
 
   DCHECK(context->transaction == nullptr) << id;
 
-  service_->DispatchCommand(CmdArgList{args}, context->reply_builder(), context);
+  service_->DispatchCommand(CmdArgList{args}, context->reply_builder_old(), context);
 
   DCHECK(context->transaction == nullptr);
 
@@ -433,7 +433,8 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
   DCHECK(context->transaction == nullptr);
 
-  service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(context->reply_builder()), context);
+  service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(context->reply_builder_old()),
+                       context);
 
   DCHECK(context->transaction == nullptr);
 
@@ -452,8 +453,8 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResp
 
   auto* context = conn->cmd_cntx();
 
-  service_->DispatchMC(cmd, string_view{}, static_cast<MCReplyBuilder*>(context->reply_builder()),
-                       context);
+  service_->DispatchMC(cmd, string_view{},
+                       static_cast<MCReplyBuilder*>(context->reply_builder_old()), context);
 
   return conn->SplitLines();
 }
@@ -479,8 +480,8 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
 
   auto* context = conn->cmd_cntx();
 
-  service_->DispatchMC(cmd, string_view{}, static_cast<MCReplyBuilder*>(context->reply_builder()),
-                       context);
+  service_->DispatchMC(cmd, string_view{},
+                       static_cast<MCReplyBuilder*>(context->reply_builder_old()), context);
 
   return conn->SplitLines();
 }
