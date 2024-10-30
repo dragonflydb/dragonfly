@@ -228,7 +228,6 @@ using strings::HumanReadableNumBytes;
 namespace {
 
 const auto kRedisVersion = "6.2.11";
-constexpr string_view kS3Prefix = "s3://"sv;
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, Transaction* tx,
                                           SinkReplyBuilder* builder, ConnectionContext* cntx);
@@ -252,8 +251,12 @@ string UnknownCmd(string cmd, CmdArgList args) {
                       absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-bool IsCloudPath(string_view path) {
-  return absl::StartsWith(path, kS3Prefix);
+bool IsS3Path(string_view path) {
+  return absl::StartsWith(path, detail::kS3Prefix);
+}
+
+bool IsGCSPath(string_view path) {
+  return absl::StartsWith(path, detail::kGCSPrefix);
 }
 
 // Check that if TLS is used at least one form of client authentication is
@@ -866,7 +869,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
-  if (IsCloudPath(flag_dir)) {
+  if (IsS3Path(flag_dir)) {
 #ifdef WITH_AWS
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
     snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
@@ -875,6 +878,14 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 #else
     LOG(ERROR) << "Compiled without AWS support";
 #endif
+  } else if (IsGCSPath(flag_dir)) {
+    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
+    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
+      exit(1);
+    }
+    snapshot_storage_ = std::move(gcs);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -1174,6 +1185,8 @@ void ServerFamily::SnapshotScheduling() {
 
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
                                          LoadExistingKeys existing_keys) {
+  VLOG(1) << "Loading data from " << rdb_file;
+
   error_code ec;
   io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
   if (res) {
@@ -1634,6 +1647,8 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+
+    VLOG(1) << "Saving snapshot to " << basename;
 
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
         new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
