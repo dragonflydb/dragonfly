@@ -381,6 +381,9 @@ class ServerFamily {
 
   mutable util::fb2::Mutex loading_stats_mu_;
   LoadingStats loading_stats_ ABSL_GUARDED_BY(loading_stats_mu_);
+
+  mutable util::fb2::Mutex tls_info_mu_;
+  absl::flat_hash_map<std::string, std::string> tls_info_ ABSL_GUARDED_BY(tls_info_mu_);
 };
 
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress

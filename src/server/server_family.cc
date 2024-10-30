@@ -11,13 +11,18 @@
 #include <absl/strings/str_replace.h>
 #include <absl/strings/strip.h>
 #include <croncpp.h>  // cron::cronexpr
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
 #include <sys/resource.h>
 #include <sys/utsname.h>
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <optional>
+#include <sstream>
 
 #include "absl/strings/ascii.h"
 #include "facade/error.h"
@@ -131,6 +136,7 @@ ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
 ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
+ABSL_DECLARE_FLAG(string, tls_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
 ABSL_DECLARE_FLAG(double, oom_deny_ratio);
@@ -817,6 +823,91 @@ void SetSlowLogThreshold(util::ProactorPool& pool, int32_t val) {
   });
 }
 
+absl::flat_hash_map<std::string, std::string> GetCertInfo() {
+  absl::flat_hash_map<std::string, std::string> cert_info;
+  std::ifstream file(absl::GetFlag(FLAGS_tls_cert_file));
+  if (!file.is_open()) {
+    // cert_info.push_back("Error opening certificate file");
+    return cert_info;
+  }
+
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  std::string cert_str = buffer.str();
+  const char* cert_cstr = cert_str.c_str();
+
+  BIO* bio = BIO_new_mem_buf(cert_cstr, -1);
+  if (!bio) {
+    // cert_info.push_back("Error creating BIO");
+    return cert_info;
+  }
+
+  X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+  if (!cert) {
+    BIO_free(bio);
+    // cert_info.push_back("Error reading certificate");
+    return cert_info;
+  }
+
+  // Get CN
+  X509_NAME* subj = X509_get_subject_name(cert);
+  int cn_index = X509_NAME_get_index_by_NID(subj, NID_commonName, -1);
+  if (cn_index >= 0) {
+    X509_NAME_ENTRY* cn_entry = X509_NAME_get_entry(subj, cn_index);
+    ASN1_STRING* cn_asn1 = X509_NAME_ENTRY_get_data(cn_entry);
+    cert_info["cn"] = reinterpret_cast<char*>(ASN1_STRING_data(cn_asn1));
+  } else {
+    // cert_info.push_back("CN not found");
+  }
+
+  // Get SAN
+  std::ostringstream san_stream;
+  STACK_OF(GENERAL_NAME)* san_names =
+      (STACK_OF(GENERAL_NAME)*)X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr);
+  if (san_names) {
+    for (int i = 0; i < sk_GENERAL_NAME_num(san_names); i++) {
+      const GENERAL_NAME* current_name = sk_GENERAL_NAME_value(san_names, i);
+      if (current_name->type == GEN_DNS) {
+        char* dns_name = (char*)ASN1_STRING_data(current_name->d.dNSName);
+        san_stream << dns_name;
+        if (i < sk_GENERAL_NAME_num(san_names) - 1) {
+          san_stream << ", ";
+        }
+      }
+    }
+    sk_GENERAL_NAME_pop_free(san_names, GENERAL_NAME_free);
+  }
+  if (!san_stream.str().empty()) {
+    cert_info["san"] = san_stream.str();
+  }
+  // cert_info.push_back(san_stream.str().empty() ? "SAN not found" : san_stream.str());
+
+  // Get issue date
+  ASN1_TIME* not_before = X509_get_notBefore(cert);
+  BIO* bio_out = BIO_new(BIO_s_mem());
+  ASN1_TIME_print(bio_out, not_before);
+  char* not_before_str;
+  long not_before_len = BIO_get_mem_data(bio_out, &not_before_str);
+  cert_info["issue_date"] = std::string(not_before_str, not_before_len);
+  // cert_info.push_back(std::string(not_before_str, not_before_len));
+  BIO_free(bio_out);
+
+  // Get expiry date
+  ASN1_TIME* not_after = X509_get_notAfter(cert);
+  bio_out = BIO_new(BIO_s_mem());
+  ASN1_TIME_print(bio_out, not_after);
+  char* not_after_str;
+  long not_after_len = BIO_get_mem_data(bio_out, &not_after_str);
+  cert_info["expiry_date"] = std::string(not_after_str, not_after_len);
+  // cert_info.push_back(std::string(not_after_str, not_after_len));
+  BIO_free(bio_out);
+
+  X509_free(cert);
+  BIO_free(bio);
+
+  return cert_info;
+}
+
 void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   CHECK(acceptor_ == nullptr);
   acceptor_ = acceptor;
@@ -847,6 +938,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     if (!ValidateServerTlsFlags()) {
       return false;
     }
+    util::fb2::LockGuard lk{tls_info_mu_};
+    tls_info_ = GetCertInfo();
     for (facade::Listener* l : listeners_) {
       // Must reconfigure in the listener proactor to avoid a race.
       if (!l->socket()->proactor()->Await([l] { return l->ReconfigureTLS(); })) {
@@ -862,6 +955,8 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   config_registry.RegisterMutable("replica_priority");
   config_registry.RegisterMutable("lua_undeclared_keys_shas");
   config_registry.RegisterMutable("list_rdb_encode_v2");
+  util::fb2::LockGuard lk{tls_info_mu_};
+  tls_info_ = GetCertInfo();
 
   pb_task_ = shard_set->pool()->GetNextProactor();
   if (pb_task_->GetKind() == ProactorBase::EPOLL) {
@@ -2232,6 +2327,9 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     size_t uptime = m.uptime;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
+    for (const auto& param : tls_info_) {
+      append(param.first, param.second);
+    }
   }
 
   if (should_enter("CLIENTS")) {
