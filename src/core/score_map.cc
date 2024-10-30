@@ -148,7 +148,7 @@ detail::SdsScorePair ScoreMap::iterator::BreakToPair(void* obj) {
 
 namespace {
 // Does not Release obj. Callers must do so explicitly if a `Reallocation` happened
-pair<sds, bool> ReallocIfNeededGeneric(void* obj, float ratio) {
+pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
 
@@ -173,7 +173,7 @@ bool ScoreMap::iterator::ReallocIfNeeded(float ratio, std::function<void(sds, sd
 
   // Note: we do not iterate over the links. Although we could that...
   auto* obj = ptr->GetObject();
-  auto [new_obj, reallocated] = ReallocIfNeededGeneric(obj, ratio);
+  auto [new_obj, reallocated] = DuplicateEntryIfFragmented(obj, ratio);
   if (reallocated) {
     if (cb) {
       cb((sds)obj, (sds)new_obj);
