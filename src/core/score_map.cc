@@ -164,23 +164,21 @@ pair<sds, bool> ReallocIfNeededGeneric(void* obj, float ratio) {
 }  // namespace
 
 bool ScoreMap::iterator::ReallocIfNeeded(float ratio, std::function<void(sds, sds)> cb) {
-  // Unwrap all links to correctly call SetObject()
-  auto* ptr = curr_entry_;
-
-  if (ptr->IsLink()) {
-    ptr = ptr->AsLink();
-  }
-
-  // Note: we do not iterate over the links. Although we could that...
-  auto* obj = ptr->GetObject();
-  auto [new_obj, reallocated] = ReallocIfNeededGeneric(obj, ratio);
-  if (reallocated) {
-    if (cb) {
-      cb((sds)obj, (sds)new_obj);
+  bool reallocated = false;
+  auto body = [ratio, &cb, &reallocated](auto* ptr) {
+    auto* obj = ptr->GetObject();
+    auto [new_obj, realloc] = ReallocIfNeededGeneric(obj, ratio);
+    if (realloc) {
+      if (cb) {
+        cb((sds)obj, (sds)new_obj);
+      }
+      sdsfree((sds)obj);
+      ptr->SetObject(new_obj);
     }
-    sdsfree((sds)obj);
-    ptr->SetObject(new_obj);
-  }
+    reallocated |= realloc;
+  };
+
+  TraverseApply(curr_entry_, body);
 
   return reallocated;
 }
