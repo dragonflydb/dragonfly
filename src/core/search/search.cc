@@ -501,6 +501,12 @@ string_view Schema::LookupAlias(string_view alias) const {
   return alias;
 }
 
+string_view Schema::LookupIdentifier(string_view identifier) const {
+  if (auto it = fields.find(identifier); it != fields.end())
+    return it->second.short_name;
+  return identifier;
+}
+
 IndicesOptions::IndicesOptions() {
   static absl::flat_hash_set<std::string> kDefaultStopwords{
       "a",    "is",    "the",  "an",    "and",   "are",  "as",   "at", "be",  "but",  "by",
@@ -646,10 +652,14 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
-vector<pair<string, SortableValue>> FieldIndices::ExtractStoredValues(DocId doc) const {
+vector<pair<string, SortableValue>> FieldIndices::ExtractStoredValues(
+    DocId doc, const absl::flat_hash_map<std::string_view, std::string_view>& aliases) const {
   vector<pair<string, SortableValue>> out;
   for (const auto& [ident, index] : sort_indices_) {
-    out.emplace_back(ident, index->Lookup(doc));
+    const auto& it = aliases.find(ident);
+    const auto& name = it == aliases.end() ? schema_.LookupIdentifier(ident) : it->second;
+
+    out.emplace_back(name, index->Lookup(doc));
   }
   return out;
 }

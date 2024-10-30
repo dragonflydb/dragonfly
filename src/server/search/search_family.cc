@@ -183,9 +183,13 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 #pragma GCC diagnostic pop
 #endif
 
+bool StartsWithAtSign(std::string_view field) {
+  return !field.empty() && field.front() == '@';
+}
+
 std::string_view ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (!field.empty() && field.front() == '@') {
+  if (StartsWithAtSign(field)) {
     field.remove_prefix(1);  // remove leading @ if exists
   }
   return field;
@@ -193,7 +197,7 @@ std::string_view ParseField(CmdArgParser* parser) {
 
 std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (!field.empty() && field.front() == '@') {
+  if (StartsWithAtSign(field)) {
     field.remove_prefix(1);  // remove leading @
   } else {
     // Temporary warning until we can throw an error
@@ -204,15 +208,25 @@ std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
 }
 
 void ParseLoadFields(CmdArgParser* parser, std::optional<OwnedSearchFieldsList>* load_fields) {
+  // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
   size_t num_fields = parser->Next<size_t>();
   if (!load_fields->has_value()) {
     load_fields->emplace();
   }
 
   while (num_fields--) {
-    string_view field = ParseField(parser);
-    string_view alias = parser->Check("AS") ? parser->Next() : field;
-    load_fields->value().emplace_back(field, alias);
+    string_view str = parser->Next();
+
+    if (StartsWithAtSign(str)) {
+      str.remove_prefix(1);  // remove leading @
+    }
+
+    if (parser->Check("AS")) {
+      load_fields->value().emplace_back(std::string{str}, NameType::kShortName,
+                                        std::string{parser->Next()});
+    } else {
+      load_fields->value().emplace_back(std::string{str}, NameType::kShortName);
+    }
   }
 }
 
@@ -248,12 +262,18 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
       }
 
       // RETURN {num} [{ident} AS {name}...]
+      /* TODO: Change to num_strings. In Redis strings number is expected. For example: RETURN 3 $.a AS a */
       size_t num_fields = parser->Next<size_t>();
       params.return_fields.emplace();
       while (params.return_fields->size() < num_fields) {
-        string_view ident = parser->Next();
-        string_view alias = parser->Check("AS") ? parser->Next() : ident;
-        params.return_fields->emplace_back(ident, alias);
+        std::string_view str = parser->Next();
+
+        if (parser->Check("AS")) {
+          params.return_fields->emplace_back(std::string{str}, NameType::kShortName,
+                                             std::string{parser->Next()});
+        } else {
+          params.return_fields->emplace_back(std::string{str}, NameType::kShortName);
+        }
       }
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
       params.load_fields.emplace();

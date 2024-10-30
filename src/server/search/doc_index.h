@@ -52,7 +52,102 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
-template <typename T> using SearchField = std::pair<T /*identifier*/, T /*short name*/>;
+enum class NameType : uint8_t { kIdentifier, kShortName, kUndefined };
+
+template <typename T> class SearchField {
+ private:
+  using SingleName = std::pair<T /*identifier or short name*/, NameType>;
+
+  static bool IsJsonPath(const T& name) {
+    if (name.size() < 2) {
+      return false;
+    }
+    return name.front() == '$' && (name[1] == '.' || name[1] == '[');
+  }
+
+ public:
+  SearchField() = default;
+
+  SearchField(T name, NameType name_type) : name_(std::make_pair(std::move(name), name_type)) {
+  }
+
+  SearchField(T name, NameType name_type, T new_alias)
+      : name_(std::make_pair(std::move(name), name_type)), new_alias_(std::move(new_alias)) {
+  }
+
+  template <typename U, typename = std::enable_if_t<std::is_constructible_v<T, U>>>
+  explicit SearchField(const SearchField<U>& other)
+      : name_(std::make_pair(T{other.name_.first}, other.name_.second)) {
+    if (other.HasNewAlias()) {
+      new_alias_ = T{other.new_alias_.value()};
+    } else {
+      new_alias_.reset();
+    }
+  }
+
+  template <typename U, typename = std::enable_if_t<std::is_constructible_v<T, U>>>
+  SearchField& operator=(const SearchField<U>& other) {
+    name_ = std::make_pair(T{other.name_.first}, other.name_.second);
+    if (other.HasNewAlias()) {
+      new_alias_ = T{other.new_alias_.value()};
+    } else {
+      new_alias_.reset();
+    }
+    return *this;
+  }
+
+  ~SearchField() = default;
+
+  std::string_view GetIdentifier(const search::Schema& schema) const {
+    return GetIdentifier(schema, [&](const SingleName& single_name) {
+      return single_name.second == NameType::kIdentifier;
+    });
+  }
+
+  std::string_view GetIdentifier(const search::Schema& schema, bool is_json_field) const {
+    return GetIdentifier(schema, [&](const SingleName& single_name) {
+      return single_name.second == NameType::kIdentifier ||
+             (is_json_field && IsJsonPath(single_name.first));
+    });
+  }
+
+  std::string_view GetShortName() const {
+    if (HasNewAlias()) {
+      return new_alias_.value();
+    }
+    return name_.first;
+  }
+
+  std::string_view GetShortName(const search::Schema& schema) const {
+    if (HasNewAlias()) {
+      return new_alias_.value();
+    }
+
+    if (name_.second == NameType::kShortName) {
+      return name_.first;
+    }
+    return schema.LookupIdentifier(std::string_view{name_.first});
+  }
+
+ private:
+  template <typename Callback>
+  std::string_view GetIdentifier(const search::Schema& schema, Callback is_identifier) const {
+    if (is_identifier(name_)) {
+      return name_.first;
+    }
+    return schema.LookupAlias(std::string_view{name_.first});
+  }
+
+  bool HasNewAlias() const {
+    return new_alias_.has_value();
+  }
+
+  template <typename U> friend class SearchField;
+
+ private:
+  SingleName name_;
+  std::optional<T> new_alias_;
+};
 
 using SearchFieldsList = std::vector<SearchField<std::string_view>>;
 using OwnedSearchFieldsList = std::vector<SearchField<std::string>>;
@@ -88,7 +183,7 @@ struct SearchParams {
     return return_fields && return_fields->empty();
   }
 
-  bool ShouldReturnField(std::string_view field) const;
+  bool ShouldReturnField(std::string_view alias) const;
 };
 
 struct AggregateParams {
@@ -169,8 +264,9 @@ class ShardDocIndex {
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
  private:
-  // Returns the fields that are the union of the already indexed fields and load_fields, excluding
-  // skip_fields Load_fields should not be destroyed while the result of this function is being used
+  /* Returns the fields that are the union of the already indexed fields and load_fields, excluding
+  skip_fields.
+  Load_fields should not be destroyed while the result of this function is being used */
   SearchFieldsList GetFieldsToLoad(const std::optional<OwnedSearchFieldsList>& load_fields,
                                    const absl::flat_hash_set<std::string_view>& skip_fields) const;
 

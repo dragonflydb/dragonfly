@@ -60,6 +60,9 @@ struct Schema {
 
   // Return identifier for alias if found, otherwise return passed value
   std::string_view LookupAlias(std::string_view alias) const;
+
+  // Return alias for identifier if found, otherwise return passed value
+  std::string_view LookupIdentifier(std::string_view identifier) const;
 };
 
 struct IndicesOptions {
@@ -89,7 +92,11 @@ class FieldIndices {
   const Schema& GetSchema() const;
 
   // Extract values stored in sort indices
-  std::vector<std::pair<std::string, SortableValue>> ExtractStoredValues(DocId doc) const;
+  // aliases are specified in addition to the aliases in search::Schema
+  std::vector<std::pair<std::string, SortableValue>> ExtractStoredValues(
+      DocId doc,
+      const absl::flat_hash_map<std::string_view /*identifier*/, std::string_view /*alias*/>&
+          aliases) const;
 
   absl::flat_hash_set<std::string_view> GetSortIndiciesFields() const;
 
