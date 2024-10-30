@@ -332,33 +332,31 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const Pr
   string expire_str = absl::StrCat(expire_ms);
   args.push_back(expire_str);
 
-  io::StringSink value_dump_sink;
-  SerializerBase::DumpObject(pv, &value_dump_sink);
-  args.push_back(value_dump_sink.str());
+  io::StringSink restore_cmd_sink;
+  {  // to destroy extra copy
+    io::StringSink value_dump_sink;
+    SerializerBase::DumpObject(pv, &value_dump_sink);
+    args.push_back(value_dump_sink.str());
 
-  args.push_back("ABSTTL");  // Means expire string is since epoch
+    args.push_back("ABSTTL");  // Means expire string is since epoch
 
-  if (pk.IsSticky()) {
-    args.push_back("STICK");
+    if (pk.IsSticky()) {
+      args.push_back("STICK");
+    }
+
+    journal::Entry entry(0,                     // txid
+                         journal::Op::COMMAND,  // single command
+                         0,                     // db index
+                         1,                     // shard count
+                         0,                     // slot-id, but it is ignored at this level
+                         journal::Entry::Payload("RESTORE", ArgSlice(args)));
+
+    JournalWriter writer{&restore_cmd_sink};
+    writer.Write(entry);
   }
-
-  WriteCommand(journal::Entry::Payload("RESTORE", ArgSlice(args)));
-}
-
-void RestoreStreamer::WriteCommand(journal::Entry::Payload cmd_payload) {
-  journal::Entry entry(0,                     // txid
-                       journal::Op::COMMAND,  // single command
-                       0,                     // db index
-                       1,                     // shard count
-                       0,                     // slot-id, but it is ignored at this level
-                       cmd_payload);
-
-  // TODO: From WriteEntry to till Write we tripple copy the PrimeValue. It's ver in-efficient and
+  // TODO: From DumpObject to till Write we tripple copy the PrimeValue. It's very inefficient and
   // will burn CPU for large values.
-  io::StringSink sink;
-  JournalWriter writer{&sink};
-  writer.Write(entry);
-  Write(sink.str());
+  Write(restore_cmd_sink.str());
 }
 
 }  // namespace dfly
