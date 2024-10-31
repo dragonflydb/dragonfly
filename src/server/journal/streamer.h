@@ -97,7 +97,7 @@ class RestoreStreamer : public JournalStreamer {
   bool ShouldWrite(cluster::SlotId slot_id) const;
 
   // Returns whether anything was written
-  bool WriteBucket(PrimeTable::bucket_iterator it);
+  void WriteBucket(PrimeTable::bucket_iterator it);
   void WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv, uint64_t expire_ms);
 
   DbSlice* db_slice_;
