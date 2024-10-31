@@ -1007,7 +1007,7 @@ using EngineFunc = void (ClusterFamily::*)(CmdArgList args, SinkReplyBuilder* bu
 
 using EngineFunc2 = void (ClusterFamily::*)(CmdArgList args, SinkReplyBuilder* builder);
 
-inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {
+inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
   return [=](CmdArgList args, Transaction*, SinkReplyBuilder* builder, ConnectionContext* cntx) {
     return (se->*f)(args, builder, cntx);
   };

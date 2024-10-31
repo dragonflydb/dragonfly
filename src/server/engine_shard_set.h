@@ -114,7 +114,6 @@ class EngineShardSet {
 
  private:
   void InitThreadLocal(util::ProactorBase* pb);
-
   util::ProactorPool* pp_;
   std::unique_ptr<EngineShard*[]> shards_;
   uint32_t size_ = 0;

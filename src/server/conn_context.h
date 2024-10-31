@@ -300,10 +300,6 @@ class ConnectionContext : public facade::ConnectionContext {
 
   size_t UsedMemory() const override;
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) override;
-  void SendError(facade::ErrorReply error) override;
-  void SendError(facade::OpStatus status) override;
-
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext
   // instance that helps applying commands coming from master.

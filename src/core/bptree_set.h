@@ -48,7 +48,7 @@ template <typename T, typename Policy = BPTreePolicy<T>> class BPTree {
 
   bool Delete(KeyT item);
 
-  std::optional<uint32_t> GetRank(KeyT item) const;
+  std::optional<uint32_t> GetRank(KeyT item, bool reverse = false) const;
 
   size_t Height() const {
     return height_;
@@ -222,7 +222,7 @@ template <typename T, typename Policy> bool BPTree<T, Policy>::Delete(KeyT item)
 }
 
 template <typename T, typename Policy>
-std::optional<uint32_t> BPTree<T, Policy>::GetRank(KeyT item) const {
+std::optional<uint32_t> BPTree<T, Policy>::GetRank(KeyT item, bool reverse) const {
   if (!root_)
     return std::nullopt;
 
@@ -230,6 +230,10 @@ std::optional<uint32_t> BPTree<T, Policy>::GetRank(KeyT item) const {
   bool found = Locate(item, &path);
   if (!found)
     return std::nullopt;
+
+  if (reverse) {
+    return count_ - path.Rank() - 1;
+  }
 
   return path.Rank();
 }

@@ -36,7 +36,7 @@ namespace fs = std::filesystem;
 namespace {
 
 bool IsCloudPath(string_view path) {
-  return absl::StartsWith(path, kS3Prefix);
+  return absl::StartsWith(path, kS3Prefix) || absl::StartsWith(path, kGCSPrefix);
 }
 
 // Create a directory and all its parents if they don't exist.
@@ -240,7 +240,7 @@ RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const
 // Summary file is always last in snapshots array.
 void SaveStagesController::SaveDfs() {
   // Extend all filenames with -{sid} or -summary and append .dfs.tmp
-  const string_view ext = is_cloud_ ? ".dfs" : ".dfs.tmp";
+  const string_view ext = snapshot_storage_->IsCloud() ? ".dfs" : ".dfs.tmp";
   ShardId sid = 0;
   for (auto& [_, filename] : snapshots_) {
     filename = full_path_;
@@ -286,7 +286,7 @@ void SaveStagesController::SaveRdb() {
   filename = full_path_;
   if (!filename.has_extension())
     filename += ".rdb";
-  if (!is_cloud_)
+  if (!snapshot_storage_->IsCloud())
     filename += ".tmp";
 
   if (auto err = snapshot->Start(SaveMode::RDB, filename, RdbSaver::GetGlobalData(service_)); err) {
@@ -342,7 +342,7 @@ void SaveStagesController::InitResources() {
 
 // Remove .tmp extension or delete files in case of error
 GenericError SaveStagesController::FinalizeFileMovement() {
-  if (is_cloud_)
+  if (snapshot_storage_->IsCloud())
     return {};
   DVLOG(1) << "FinalizeFileMovement start";
 
@@ -391,7 +391,7 @@ GenericError SaveStagesController::BuildFullPath() {
   dest_buf.resize(len);
 
   full_path_ = dir_path / dest_buf;
-  is_cloud_ = IsCloudPath(full_path_.string());
+
   return {};
 }
 

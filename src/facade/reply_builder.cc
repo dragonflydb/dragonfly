@@ -126,7 +126,7 @@ void SinkReplyBuilder::Send(const iovec* v, uint32_t len) {
   send_active_ = true;
   tl_facade_stats->reply_stats.io_write_cnt++;
   tl_facade_stats->reply_stats.io_write_bytes += bsize;
-  DVLOG(2) << "Writing " << bsize << " bytes of len " << len;
+  DVLOG(2) << "Writing " << bsize + batch_.size() << " bytes of len " << len;
 
   if (batch_.empty()) {
     ec = sink_->Write(v, len);
@@ -297,13 +297,14 @@ void SinkReplyBuilder2::Send() {
   uint64_t before_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
-
+  DVLOG(2) << "Writing " << total_size_ << " bytes";
   if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
 
   uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
   reply_stats.send_stats.count++;
   reply_stats.send_stats.total_duration += (after_ns - before_ns) / 1'000;
+  DVLOG(2) << "Finished writing " << total_size_ << " bytes";
   send_active_ = false;
 }
 

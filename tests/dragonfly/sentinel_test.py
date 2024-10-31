@@ -8,6 +8,10 @@ import asyncio
 from datetime import datetime
 from sys import stderr
 import logging
+
+from .utility import assert_eventually, wait_available_async
+
+from .instance import DflyInstanceFactory
 from . import dfly_args
 
 
@@ -47,6 +51,12 @@ async def await_for(func, pred, timeout_sec, timeout_msg=""):
         assert timeout_sec > 0, timeout_msg
         timeout_sec = timeout_sec - 1
         await asyncio.sleep(1)
+
+
+@assert_eventually
+async def assert_master_became_replica(client):
+    repl_info = await client.info("replication")
+    assert repl_info["role"] == "slave"
 
 
 class Sentinel:
@@ -140,7 +150,7 @@ def sentinel(tmp_dir, port_picker) -> Sentinel:
 
 @pytest.mark.asyncio
 @pytest.mark.slow
-async def test_failover(df_factory, sentinel, port_picker):
+async def test_failover(df_factory: DflyInstanceFactory, sentinel, port_picker):
     master = df_factory.create(port=sentinel.initial_master_port)
     replica = df_factory.create(port=port_picker.get_available_port())
 
@@ -162,7 +172,6 @@ async def test_failover(df_factory, sentinel, port_picker):
         timeout_sec=15,
         timeout_msg="Timeout waiting for sentinel to pick up replica.",
     )
-
     sentinel.failover()
 
     # Verify sentinel switched.
@@ -176,12 +185,17 @@ async def test_failover(df_factory, sentinel, port_picker):
 
     # Verify we can now write to replica and read replicated value from master.
     assert await replica_client.set("key", "value"), "Failed to set key on promoted replica."
-    logging.info("key was set on promoted replica, awaiting get on promoted replica.")
+
+    logging.info("key was set on promoted replica, awaiting get on promoted replica. ")
+
+    await assert_master_became_replica(master_client)
+    await wait_available_async(master_client)
+
     try:
         await await_for(
             lambda: master_client.get("key"),
             lambda val: val == b"value",
-            15,
+            10,
             "Timeout waiting for key to exist in replica.",
         )
     except AssertionError:

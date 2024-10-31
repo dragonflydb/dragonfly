@@ -52,8 +52,18 @@ ABSL_FLAG(string, admin_bind, "",
 ABSL_FLAG(uint64_t, request_cache_limit, 64_MB,
           "Amount of memory to use for request cache in bytes - per IO thread.");
 
-ABSL_FLAG(uint64_t, pipeline_buffer_limit, 8_MB,
-          "Amount of memory to use for parsing pipeline requests - per IO thread.");
+ABSL_FLAG(uint64_t, pipeline_buffer_limit, 128_MB,
+          "Amount of memory to use for storing pipeline requests - per IO thread."
+          "Please note that clients that send excecissively huge pipelines, "
+          "may deadlock themselves. See https://github.com/dragonflydb/dragonfly/discussions/3997"
+          "for details.");
+
+ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
+          "Pipeline queue max length, the server will stop reading from the client socket"
+          " once its pipeline queue crosses this limit, and will resume once it processes "
+          "excessive requests. This is to prevent OOM states. Users of huge pipelines sizes "
+          "may require increasing this limit to prevent the risk of deadlocking."
+          "See https://github.com/dragonflydb/dragonfly/discussions/3997 for details");
 
 ABSL_FLAG(uint64_t, publish_buffer_limit, 128_MB,
           "Amount of memory to use for storing pub commands in bytes - per IO thread");
@@ -62,10 +72,6 @@ ABSL_FLAG(bool, no_tls_on_admin_port, false, "Allow non-tls connections on admin
 
 ABSL_FLAG(uint32_t, pipeline_squash, 10,
           "Number of queued pipelined commands above which squashing is enabled, 0 means disabled");
-
-ABSL_FLAG(uint32_t, pipeline_queue_limit, 1000,
-          "Pipeline queue max length, the server will stop reading from the client socket"
-          " once the pipeline reaches this limit");
 
 // When changing this constant, also update `test_large_cmd` test in connection_test.py.
 ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
@@ -480,14 +486,16 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
-  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()}, self->cc_.get());
+  self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
+                                  self->reply_builder_, self->cc_.get());
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
 }
 
 void Connection::DispatchOperations::operator()(const Connection::MCPipelineMessage& msg) {
-  self->service_->DispatchMC(msg.cmd, msg.value, self->cc_.get());
+  self->service_->DispatchMC(msg.cmd, msg.value, static_cast<MCReplyBuilder*>(self->reply_builder_),
+                             self->cc_.get());
   self->last_interaction_ = time(nullptr);
 }
 
@@ -1020,6 +1028,10 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
 
   if (optimize_for_async && queue_backpressure_->IsPipelineBufferOverLimit(
                                 stats_->dispatch_queue_bytes, dispatch_q_.size())) {
+    stats_->pipeline_throttle_count++;
+    LOG_EVERY_T(WARNING, 10) << "Pipeline buffer over limit: pipeline_bytes "
+                             << stats_->dispatch_queue_bytes << " queue_size " << dispatch_q_.size()
+                             << ", consider increasing pipeline_buffer_limit/pipeline_queue_limit";
     fb2::NoOpLock noop;
     queue_backpressure_->pipeline_cnd.wait(noop, [this] {
       bool over_limits = queue_backpressure_->IsPipelineBufferOverLimit(
@@ -1077,7 +1089,7 @@ Connection::ParserStatus Connection::ParseRedis() {
 
   auto dispatch_sync = [this, &parse_args, &cmd_vec] {
     RespExpr::VecToArgList(parse_args, &cmd_vec);
-    service_->DispatchCommand(absl::MakeSpan(cmd_vec), cc_.get());
+    service_->DispatchCommand(absl::MakeSpan(cmd_vec), reply_builder_, cc_.get());
   };
   auto dispatch_async = [this, &parse_args, tlh = mi_heap_get_backing()]() -> MessageHandle {
     return {FromArgs(std::move(parse_args), tlh)};
@@ -1121,7 +1133,10 @@ auto Connection::ParseMemcache() -> ParserStatus {
   MemcacheParser::Command cmd;
   string_view value;
 
-  auto dispatch_sync = [this, &cmd, &value] { service_->DispatchMC(cmd, value, cc_.get()); };
+  auto dispatch_sync = [this, &cmd, &value] {
+    service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(reply_builder_), cc_.get());
+  };
+
   auto dispatch_async = [&cmd, &value]() -> MessageHandle {
     return {make_unique<MCPipelineMessage>(std::move(cmd), value)};
   };
@@ -1343,6 +1358,7 @@ bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
 
 void Connection::SquashPipeline() {
   DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
+  DCHECK_EQ(reply_builder_->type(), SinkReplyBuilder::REDIS);  // Only Redis is supported.
 
   vector<ArgSlice> squash_cmds;
   squash_cmds.reserve(dispatch_q_.size());
@@ -1357,7 +1373,8 @@ void Connection::SquashPipeline() {
 
   cc_->async_dispatch = true;
 
-  size_t dispatched = service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), cc_.get());
+  size_t dispatched =
+      service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_, cc_.get());
 
   if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
     reply_builder_->FlushBatch();
@@ -1826,6 +1843,12 @@ void Connection::BreakOnce(uint32_t ev_mask) {
 
 void Connection::SetMaxQueueLenThreadLocal(uint32_t val) {
   tl_queue_backpressure_.pipeline_queue_max_len = val;
+  tl_queue_backpressure_.pipeline_cnd.notify_all();
+}
+
+void Connection::SetPipelineBufferLimit(size_t val) {
+  tl_queue_backpressure_.pipeline_buffer_limit = val;
+  tl_queue_backpressure_.pipeline_cnd.notify_all();
 }
 
 void Connection::GetRequestSizeHistogramThreadLocal(std::string* hist) {

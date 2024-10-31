@@ -26,6 +26,18 @@ class ConfigRegistry {
     return *this;
   }
 
+  template <typename T>
+  ConfigRegistry& RegisterSetter(std::string_view name, std::function<void(const T&)> f) {
+    return RegisterMutable(name, [f](const absl::CommandLineFlag& flag) {
+      auto res = flag.TryGet<T>();
+      if (res.has_value()) {
+        f(*res);
+        return true;
+      }
+      return false;
+    });
+  }
+
   enum class SetResult : uint8_t {
     OK,
     UNKNOWN,

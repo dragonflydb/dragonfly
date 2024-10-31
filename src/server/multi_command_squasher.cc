@@ -112,7 +112,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
   return need_flush ? SquashResult::SQUASHED_FULL : SquashResult::SQUASHED;
 }
 
-bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
+bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, StoredCmd* cmd) {
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
   cmd->Fill(&tmp_keylist_);
@@ -120,8 +120,8 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
 
   if (verify_commands_) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
-      cntx_->SendError(std::move(*err));
-      std::ignore = cntx_->reply_builder()->ConsumeLastError();
+      rb->SendError(std::move(*err));
+      std::ignore = rb->ConsumeLastError();
       return !error_abort_;
     }
   }
@@ -132,7 +132,7 @@ bool MultiCommandSquasher::ExecuteStandalone(StoredCmd* cmd) {
 
   if (cmd->Cid()->IsTransactional())
     tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, args);
-  service_->InvokeCmd(cmd->Cid(), args, cntx_);
+  service_->InvokeCmd(cmd->Cid(), args, rb, cntx_);
 
   return true;
 }
@@ -168,7 +168,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     crb.SetReplyMode(cmd->ReplyMode());
 
     local_tx->InitByArgs(cntx_->ns, local_cntx.conn_state.db_index, args);
-    service_->InvokeCmd(cmd->Cid(), args, &local_cntx);
+    service_->InvokeCmd(cmd->Cid(), args, &crb, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());
 
@@ -186,7 +186,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
   return OpStatus::OK;
 }
 
-bool MultiCommandSquasher::ExecuteSquashed() {
+bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   DCHECK(!cntx_->conn_state.exec_info.IsCollecting());
 
   if (order_.empty())
@@ -235,7 +235,6 @@ bool MultiCommandSquasher::ExecuteSquashed() {
   uint64_t after_hop = proactor->GetMonotonicTimeNs();
   bool aborted = false;
 
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cntx_->reply_builder());
   for (auto idx : order_) {
     auto& replies = sharded_[idx].replies;
     CHECK(!replies.empty());
@@ -259,7 +258,7 @@ bool MultiCommandSquasher::ExecuteSquashed() {
   return !aborted;
 }
 
-void MultiCommandSquasher::Run() {
+void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
   DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
@@ -270,17 +269,17 @@ void MultiCommandSquasher::Run() {
       break;
 
     if (res == SquashResult::NOT_SQUASHED || res == SquashResult::SQUASHED_FULL) {
-      if (!ExecuteSquashed())
+      if (!ExecuteSquashed(rb))
         break;
     }
 
     if (res == SquashResult::NOT_SQUASHED) {
-      if (!ExecuteStandalone(&cmd))
+      if (!ExecuteStandalone(rb, &cmd))
         break;
     }
   }
 
-  ExecuteSquashed();  // Flush leftover
+  ExecuteSquashed(rb);  // Flush leftover
 
   // Set last txid.
   cntx_->last_command_debug.clock = cntx_->transaction->txid();

@@ -4,6 +4,7 @@ from redis import Redis
 import socket
 import random
 import time
+import warnings
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -67,7 +68,9 @@ def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
 
     info = Redis(port=df_server.port).info()
-    assert info["total_pipelined_commands"] > 0  # sometimes CI is slow
+    if info["total_pipelined_commands"] == 0:
+        warnings.warn("No pipelined commands were detected. Info: \n" + str(info))
+        assert False, "No pipelined commands were detected."
 
 
 @dfly_args(DEFAULT_ARGS)
