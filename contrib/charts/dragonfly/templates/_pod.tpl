@@ -111,7 +111,7 @@ containers:
     {{- end }}
         valueFrom:
           secretKeyRef:
-            name: {{ .Values.passwordFromSecret.existingSecret.name }}
+            name: {{ tpl .Values.passwordFromSecret.existingSecret.name $ }}
             key: {{ .Values.passwordFromSecret.existingSecret.key }}
     {{- end }}
 
