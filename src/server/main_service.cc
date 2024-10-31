@@ -1060,9 +1060,8 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info,
-                                       const CommandId* cid, CmdArgList args, Transaction* trans) {
-  Transaction::MultiMode multi_mode = trans->GetMultiMode();
-
+                                       const CommandId* cid, CmdArgList args,
+                                       Transaction::MultiMode multi_mode) {
   // We either scheduled on all shards or re-schedule for each operation,
   // so we are not restricted to any keys.
   if (multi_mode == Transaction::GLOBAL || multi_mode == Transaction::NON_ATOMIC)
@@ -1216,16 +1215,15 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     bool shard_access = (cid->opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
-  }
 
-  if (under_script && cid->IsTransactional()) {
-    auto err =
-        CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, dfly_cntx.transaction);
+    if (cid->IsTransactional()) {
+      auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, mode);
 
-    if (err.has_value()) {
-      VLOG(1) << "CheckKeysDeclared failed with error " << err->ToSv() << " for command "
-              << cid->name();
-      return err.value();
+      if (err.has_value()) {
+        VLOG(1) << "CheckKeysDeclared failed with error " << err->ToSv() << " for command "
+                << cid->name();
+        return err.value();
+      }
     }
   }
 

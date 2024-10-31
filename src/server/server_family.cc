@@ -232,9 +232,18 @@ const auto kRedisVersion = "6.2.11";
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, Transaction* tx,
                                           SinkReplyBuilder* builder, ConnectionContext* cntx);
 
+using EngineFunc2 = void (ServerFamily::*)(CmdArgList args, Transaction* tx,
+                                           SinkReplyBuilder* builder);
+
 inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFunc f) {
   return [=](CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
     return (se->*f)(args, tx, builder, cntx);
+  };
+}
+
+inline auto HandlerFunc(ServerFamily* se, EngineFunc2 f) {
+  return [=](CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+    return (se->*f)(args, tx, builder);
   };
 }
 
@@ -1046,10 +1055,10 @@ struct AggregateLoadResult {
   std::atomic<size_t> keys_read;
 };
 
-void ServerFamily::FlushAll(ConnectionContext* cntx) {
+void ServerFamily::FlushAll(Namespace* ns) {
   const CommandId* cid = service_.FindCmd("FLUSHALL");
   boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
-  flush_trans->InitByArgs(cntx->ns, 0, {});
+  flush_trans->InitByArgs(ns, 0, {});
   VLOG(1) << "Performing flush";
   error_code ec = Drakarys(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
@@ -2880,7 +2889,7 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
-        auto [sid, flow_count] = dfly_cmd_->CreateSyncSession(cntx);
+        auto [sid, flow_count] = dfly_cmd_->CreateSyncSession(&cntx->conn_state);
         cntx->conn()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
@@ -2915,7 +2924,7 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     } else if (cmd == "IP-ADDRESS") {
       cntx->conn_state.replication_info.repl_ip_address = arg;
     } else if (cmd == "CLIENT-ID" && args.size() == 2) {
-      auto info = dfly_cmd_->GetReplicaInfoFromConnection(cntx);
+      auto info = dfly_cmd_->GetReplicaInfoFromConnection(&cntx->conn_state);
       DCHECK(info != nullptr);
       if (info) {
         info->id = arg;
@@ -2925,7 +2934,7 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
       if (!absl::SimpleAtoi(arg, &version)) {
         return builder->SendError(kInvalidIntErr);
       }
-      dfly_cmd_->SetDflyClientVersion(cntx, DflyVersion(version));
+      dfly_cmd_->SetDflyClientVersion(&cntx->conn_state, DflyVersion(version));
     } else if (cmd == "ACK" && args.size() == 2) {
       // Don't send error/Ok back through the socket, because we don't want to interleave with
       // the journal writes that we write into the same socket.
@@ -3025,8 +3034,7 @@ void ServerFamily::Latency(CmdArgList args, Transaction* tx, SinkReplyBuilder* b
   builder->SendError(kSyntaxErr);
 }
 
-void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                               ConnectionContext* cntx) {
+void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   if (args.size() > 1) {
     builder->SendError(kSyntaxErr);
     return;
@@ -3052,7 +3060,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilde
 
 void ServerFamily::Dfly(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                         ConnectionContext* cntx) {
-  dfly_cmd_->Run(args, static_cast<RedisReplyBuilder*>(builder), cntx);
+  dfly_cmd_->Run(args, tx, static_cast<RedisReplyBuilder*>(builder), cntx);
 }
 
 void ServerFamily::SlowLog(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,

@@ -510,7 +510,7 @@ void DebugCmd::Reload(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   string last_save_file = sf_.GetLastSaveInfo().file_name;
 
-  sf_.FlushAll(cntx_);
+  sf_.FlushAll(cntx_->ns);
 
   if (auto fut_ec = sf_.Load(last_save_file, ServerFamily::LoadExistingKeys::kFail); fut_ec) {
     GenericError ec = fut_ec->Get();

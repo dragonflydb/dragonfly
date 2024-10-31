@@ -172,8 +172,7 @@ class ServerFamily {
   void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Public because is used by DflyCmd.
-  void ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
+  void ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 
   Service& service() {
     return service_;
@@ -208,7 +207,7 @@ class ServerFamily {
 
   LastSaveInfo GetLastSaveInfo() const ABSL_LOCKS_EXCLUDED(save_mu_);
 
-  void FlushAll(ConnectionContext* cntx);
+  void FlushAll(Namespace* ns);
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
@@ -246,9 +245,8 @@ class ServerFamily {
   std::optional<Replica::Summary> GetReplicaSummary() const;
 
   // Master-side acces method to replication info of that connection.
-  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfoFromConnection(
-      ConnectionContext* cntx) const {
-    return dfly_cmd_->GetReplicaInfoFromConnection(cntx);
+  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfoFromConnection(ConnectionState* state) const {
+    return dfly_cmd_->GetReplicaInfoFromConnection(state);
   }
 
   void OnClose(ConnectionContext* cntx);
