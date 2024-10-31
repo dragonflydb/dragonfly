@@ -52,8 +52,8 @@ jobs:
         if: ${{matrix.language == 'cpp'}}
         run: |
            echo "Run, Build Application using script"
-           chmod +x /tests/codeql/build.sh
-           ./tests/codeql/build.sh
+           chmod +x tests/codeql/build.sh
+           tests/codeql/build.sh
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
