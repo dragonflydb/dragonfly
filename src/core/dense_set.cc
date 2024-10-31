@@ -854,8 +854,9 @@ size_t DenseSet::IteratorBase::TraverseApply(DensePtr* ptr, std::function<void(D
     ++links_traversed;
   }
 
-  // The ptr in the link always returns ptr->IsLink() = false
+  // The last ptr in the link always returns ptr->IsLink() = false
   DCHECK(!ptr->IsEmpty());
+  DCHECK(ptr->IsObject());
   fun(ptr);
   ++links_traversed;
 
