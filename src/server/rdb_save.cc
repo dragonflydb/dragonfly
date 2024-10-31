@@ -1319,7 +1319,7 @@ void RdbSaver::Impl::FinalizeSnapshotWriting() {
 
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard) {
   auto& s = GetSnapshot(shard);
-  auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
+  auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto on_snapshot_finish = std::bind(&RdbSaver::Impl::FinalizeSnapshotWriting, this);
   auto push_cb = std::bind(&RdbSaver::Impl::PushSnapshotData, this, cntx, std::placeholders::_1);
 
@@ -1333,7 +1333,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, Engin
 
 void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* shard,
                                                   LSN start_lsn) {
-  auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
+  auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
   auto on_finalize_cb = std::bind(&RdbSaver::Impl::FinalizeSnapshotWriting, this);
   auto push_cb = std::bind(&RdbSaver::Impl::PushSnapshotData, this, cntx, std::placeholders::_1);
@@ -1546,9 +1546,9 @@ error_code RdbSaver::SaveBody(Context* cntx) {
 }
 
 void RdbSaver::FillFreqMap(RdbTypeFreqMap* freq_map) {
-  freq_map->clear();
-  impl_->FillFreqMap(freq_map);
-}
+    freq_map->clear();
+    impl_->FillFreqMap(freq_map);
+  }
 
 error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   static_assert(sizeof(void*) == 8, "");

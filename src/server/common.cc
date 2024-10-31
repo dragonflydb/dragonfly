@@ -120,6 +120,7 @@ atomic_uint64_t rss_mem_peak(0);
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
 size_t serialization_max_chunk_size = 0;
+Namespaces* namespaces = nullptr;
 
 const char* GlobalStateName(GlobalState s) {
   switch (s) {

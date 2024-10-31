@@ -309,7 +309,7 @@ bool EngineShard::DoDefrag() {
   const float threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
 
   // TODO: enable tiered storage on non-default db slice
-  DbSlice& slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_->shard_id());
+  DbSlice& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
 
   // If we moved to an invalid db, skip as long as it's not the last one
   while (!slice.IsDbValid(defrag_state_.dbid) && defrag_state_.dbid + 1 < slice.db_array_size())
@@ -339,7 +339,7 @@ bool EngineShard::DoDefrag() {
       }
     });
     traverses_count++;
-  } while (traverses_count < kMaxTraverses && cur && namespaces.IsInitialized());
+  } while (traverses_count < kMaxTraverses && cur && namespaces);
 
   defrag_state_.UpdateScanState(cur.value());
 
@@ -370,7 +370,7 @@ bool EngineShard::DoDefrag() {
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
-  if (!namespaces.IsInitialized()) {
+  if (!namespaces) {
     return util::ProactorBase::kOnIdleMaxLevel;
   }
 
@@ -392,7 +392,6 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
       txq_([](const Transaction* t) { return t->txid(); }),
       mi_resource_(heap),
       shard_id_(pb->GetPoolIndex()) {
-  defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
   queue_.Start(absl::StrCat("shard_queue_", shard_id()));
   queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
 }
@@ -452,6 +451,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
         ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
         RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
       });
+  defrag_task_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
@@ -492,7 +492,7 @@ void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
         << "Only ioring based backing storage is supported. Exiting...";
 
     // TODO: enable tiered storage on non-default namespace
-    DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
     auto* shard = EngineShard::tlocal();
     shard->tiered_storage_ = make_unique<TieredStorage>(max_file_size, &db_slice);
     error_code ec = shard->tiered_storage_->Open(backing_prefix);
@@ -657,7 +657,7 @@ void EngineShard::RemoveContTx(Transaction* tx) {
 
 void EngineShard::Heartbeat() {
   DVLOG(2) << " Hearbeat";
-  DCHECK(namespaces.IsInitialized());
+  DCHECK(namespaces);
 
   CacheStats();
 
@@ -666,7 +666,7 @@ void EngineShard::Heartbeat() {
   }
 
   // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
   // Offset CoolMemoryUsage when consider background offloading.
   // TODO: Another approach could be is to align the approach  similarly to how we do with
@@ -692,7 +692,7 @@ void EngineShard::Heartbeat() {
 
 void EngineShard::RetireExpiredAndEvict() {
   // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   // Some of the functions below might acquire the same lock again so we need to unlock it
   // asap. We won't yield before we relock the mutex again, so the code below is atomic
   // in respect to preemptions of big values. An example of that is the call to
@@ -758,7 +758,7 @@ void EngineShard::CacheStats() {
   cache_stats_time_ = now;
   // Used memory for this shard.
   size_t used_mem = UsedMemory();
-  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
   // delta can wrap if used_memory is smaller than last_cached_used_memory_ and it's fine.
   size_t delta = used_mem - last_cached_used_memory_;
@@ -808,7 +808,7 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   info.tx_total = queue->size();
   unsigned max_db_id = 0;
 
-  auto& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+  auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
 
   {
     auto value = queue->At(cur);

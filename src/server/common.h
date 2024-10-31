@@ -49,6 +49,7 @@ class Transaction;
 class EngineShard;
 class ConnectionState;
 class Interpreter;
+class Namespaces;
 
 struct LockTagOptions {
   bool enabled = false;
@@ -131,6 +132,8 @@ extern std::atomic_uint64_t rss_mem_current;
 extern std::atomic_uint64_t rss_mem_peak;
 
 extern size_t max_memory_limit;
+
+extern Namespaces* namespaces;
 
 // version 5.11 maps to 511 etc.
 // set upon server start.
