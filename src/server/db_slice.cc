@@ -609,8 +609,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (apply_memory_limit && !caching_mode_ && memory_budget_ + memory_offset < 0) {
-    LOG_EVERY_T(ERROR, 1) << "AddOrFind: over limit, budget: " << memory_budget_
-                          << " reclaimed: " << reclaimed << " offset: " << memory_offset;
+    LOG_EVERY_T(WARNING, 1) << "AddOrFind: over limit, budget: " << memory_budget_
+                            << " reclaimed: " << reclaimed << " offset: " << memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
@@ -629,8 +629,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   try {
     it = db.prime.InsertNew(std::move(co_key), PrimeValue{}, evp);
   } catch (bad_alloc& e) {
-    LOG_EVERY_T(ERROR, 1) << "AddOrFind: InsertNew failed, budget: " << memory_budget_
-                          << " reclaimed: " << reclaimed << " offset: " << memory_offset;
+    LOG_EVERY_T(WARNING, 1) << "AddOrFind: InsertNew failed, budget: " << memory_budget_
+                            << " reclaimed: " << reclaimed << " offset: " << memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
