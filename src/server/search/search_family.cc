@@ -749,7 +749,7 @@ void SearchFamily::FtSearch(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
   }
 
   if (auto agg = search_algo.HasAggregation(); agg)
-    ReplySorted(std::move(*agg), *params, absl::MakeSpan(docs), builder);
+    ReplySorted(*agg, *params, absl::MakeSpan(docs), builder);
   else
     ReplyWithResults(*params, absl::MakeSpan(docs), builder);
 }
