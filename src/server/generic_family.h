@@ -48,6 +48,7 @@ class GenericFamily {
   static void Stick(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
   static void Sort(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
   static void Move(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Copy(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 
   static void Rename(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
   static void RenameNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
