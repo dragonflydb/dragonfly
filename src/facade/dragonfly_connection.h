@@ -354,7 +354,7 @@ class Connection : public util::Connection {
 
   void SendAsync(MessageHandle msg);
 
-  // Updates memory stats and pooling, must be called for all used messages
+  // Updates memory stat3s and pooling, must be called for all used messages
   void RecycleMessage(MessageHandle msg);
 
   // Create new pipeline request, re-use from pool when possible.
@@ -372,6 +372,8 @@ class Connection : public util::Connection {
   PipelineMessagePtr GetFromPipelinePool();
 
   void HandleMigrateRequest();
+  std::error_code HandleRecvSocket();
+
   bool ShouldEndDispatchFiber(const MessageHandle& msg);
 
   void LaunchDispatchFiberIfNeeded();  // Dispatch fiber is started lazily
@@ -458,6 +460,8 @@ class Connection : public util::Connection {
       bool migration_enabled_ : 1;
       bool migration_in_process_ : 1;
       bool is_http_ : 1;
+      bool is_tls_ : 1;
+      bool recv_provided_ : 1;
     };
   };
 };

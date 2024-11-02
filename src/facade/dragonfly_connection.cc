@@ -31,6 +31,7 @@
 
 #ifdef __linux__
 #include "util/fibers/uring_file.h"
+#include "util/fibers/uring_proactor.h"
 #endif
 
 using namespace std;
@@ -87,6 +88,7 @@ ABSL_FLAG(bool, migrate_connections, true,
           "happen at most once per connection.");
 
 using namespace util;
+using namespace std;
 using absl::GetFlag;
 using nonstd::make_unexpected;
 
@@ -239,7 +241,7 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
   }
 
   // Write the data itself.
-  std::array<iovec, 16> blobs;
+  array<iovec, 16> blobs;
   unsigned index = 0;
   if (next != stack_buf) {
     blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
@@ -283,7 +285,7 @@ struct Connection::QueueBackpressure {
   // Used by publisher/subscriber actors to make sure we do not publish too many messages
   // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
   util::fb2::EventCount pubsub_ec;
-  std::atomic_size_t subscriber_bytes = 0;
+  atomic_size_t subscriber_bytes = 0;
 
   // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
   // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
@@ -659,6 +661,12 @@ void Connection::OnConnectionStart() {
 
   queue_backpressure_ = &tl_queue_backpressure_;
   stats_ = &tl_facade_stats->conn_stats;
+  if (socket_->proactor()->GetKind() == ProactorBase::IOURING) {
+#ifdef __linux__
+    auto* up = static_cast<fb2::UringProactor*>(socket_->proactor());
+    recv_provided_ = up->BufRingEntrySize(kRecvSockGid) > 0;
+#endif
+  }
 }
 
 void Connection::HandleRequests() {
@@ -705,6 +713,7 @@ void Connection::HandleRequests() {
         LOG(WARNING) << "Error handshaking " << aresult.error().message();
         return;
       }
+      is_tls_ = 1;
       VLOG(1) << "TLS handshake succeeded";
     }
   }
@@ -1243,6 +1252,43 @@ void Connection::HandleMigrateRequest() {
   }
 }
 
+error_code Connection::HandleRecvSocket() {
+  io::MutableBytes append_buf = io_buf_.AppendBuffer();
+  DCHECK(!append_buf.empty());
+
+  phase_ = READ_SOCKET;
+  error_code ec;
+
+  size_t commit_sz = 0;
+  if (!is_tls_ && recv_provided_ && append_buf.size() >= kRecvBufSize) {
+    FiberSocketBase::ProvidedBuffer pb[1];
+    unsigned res = socket_->RecvProvided(1, pb);
+    CHECK_EQ(res, 1u);
+    if (pb[0].buffer.empty()) {
+      return error_code{pb[0].err_no, system_category()};
+    }
+
+    memcpy(append_buf.data(), pb[0].buffer.data(), pb[0].buffer.size());
+    commit_sz = pb[0].buffer.size();
+    socket_->ReturnProvided(pb[0]);
+  } else {
+    ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
+    last_interaction_ = time(nullptr);
+
+    if (!recv_sz) {
+      return recv_sz.error();
+    }
+
+    commit_sz = *recv_sz;
+  }
+
+  io_buf_.CommitWrite(commit_sz);
+  stats_->io_read_bytes += commit_sz;
+  ++stats_->io_read_cnt;
+
+  return ec;
+}
+
 auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
   error_code ec;
   ParserStatus parse_status = OK;
@@ -1252,24 +1298,10 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
 
   do {
     HandleMigrateRequest();
-
-    io::MutableBytes append_buf = io_buf_.AppendBuffer();
-    DCHECK(!append_buf.empty());
-
-    phase_ = READ_SOCKET;
-
-    ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
-    last_interaction_ = time(nullptr);
-
-    if (!recv_sz) {
-      ec = recv_sz.error();
-      parse_status = OK;
-      break;
+    ec = HandleRecvSocket();
+    if (ec) {
+      return ec;
     }
-
-    io_buf_.CommitWrite(*recv_sz);
-    stats_->io_read_bytes += *recv_sz;
-    ++stats_->io_read_cnt;
 
     phase_ = PROCESS;
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
