@@ -1994,7 +1994,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
 
 
 @pytest.mark.skip("Takes more than 10 minutes")
-@dfly_args({"proactor_threads": 12, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFactory):
     # Check data migration from one node to another
     instances = [
@@ -2002,29 +2002,21 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
             maxmemory="15G",
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+            vmodule="streamer=9",
         )
-        for i in range(2)
+        for i in range(3)
     ]
 
-    replica = df_factory.create(
-        port=BASE_PORT + 3,
-        admin_port=BASE_PORT + 3 + 1000,
-        vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
-    )
-
-    df_factory.start_all(instances + [replica])
+    df_factory.start_all(instances)
 
     nodes = [(await create_node_info(instance)) for instance in instances]
     nodes[0].slots = [(0, 16383)]
     for i in range(1, len(instances)):
         nodes[i].slots = []
 
-    await replica.admin_client().execute_command(f"replicaof localhost {nodes[0].instance.port}")
-
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    await nodes[0].client.execute_command("DEBUG POPULATE 22500000 test 1000 RAND SLOTS 0 16383")
+    await nodes[0].client.execute_command("DEBUG POPULATE 5000000 test 1000 RAND SLOTS 0 16383")
 
     await asyncio.sleep(2)
 
