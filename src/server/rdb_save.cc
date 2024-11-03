@@ -1128,6 +1128,7 @@ class RdbSaver::Impl {
   void StopSnapshotting(EngineShard* shard);
   void WaitForSnapshottingFinish(EngineShard* shard);
 
+  // used only for legacy rdb save flows.
   error_code ConsumeChannel(const Cancellation* cll);
 
   void FillFreqMap(RdbTypeFreqMap* dest) const;
@@ -1300,7 +1301,7 @@ void RdbSaver::Impl::PushSnapshotData(Context* cntx, string record) {
   if (cntx->IsCancelled()) {
     return;
   }
-  if (save_mode_ == SaveMode::RDB) {  // Rdb write to channle
+  if (channel_) {  // Rdb write to channel
     channel_->Push(record);
   } else {  // Write directly to socket
     auto ec = WriteRecord(io::Buffer(record));
@@ -1311,7 +1312,7 @@ void RdbSaver::Impl::PushSnapshotData(Context* cntx, string record) {
 }
 
 void RdbSaver::Impl::FinalizeSnapshotWriting() {
-  if (save_mode_ == SaveMode::RDB) {
+  if (channel_) {
     channel_->StartClosing();
   }
 }

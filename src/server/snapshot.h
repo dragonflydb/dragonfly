@@ -36,8 +36,8 @@ struct Entry;
 // │     SerializeEntry       │ ◄────────┤     OnJournalEntry      │
 // └─────────────┬────────────┘          └─────────────────────────┘
 //               │
-//         PushBytes        Default buffer gets flushed on iteration,
-//               │                   temporary on destruction
+//         PushBytes                  Default buffer gets flushed on iteration,
+//               │                    temporary on destruction
 //               ▼
 // ┌──────────────────────────────┐
 // │     push_cb(buffer)       │

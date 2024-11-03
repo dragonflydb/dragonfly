@@ -97,14 +97,14 @@ class RdbSaver {
   // Stops full-sync serialization for replication in the shard's thread.
   std::error_code StopFullSyncInShard(EngineShard* shard);
 
-  // Wait for snapshoting finishe in shard thread. Called from save flows in shard thread.
+  // Wait for snapshoting finish in shard thread. Called from save flows in shard thread.
   std::error_code WaitSnapshotInShard(EngineShard* shard);
 
   // Stores auxiliary (meta) values and header_info
   std::error_code SaveHeader(const GlobalData& header_info);
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
-  // Called only for save rdb flow and save df on summery file.
+  // Called only for save rdb flow and save df on summary file.
   std::error_code SaveBody(Context* cntx);
 
   // Fills freq_map with the histogram of rdb types.
