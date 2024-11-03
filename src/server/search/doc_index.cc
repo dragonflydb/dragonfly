@@ -230,7 +230,7 @@ SearchFieldsList ToSV(const search::Schema& schema,
   if (fields) {
     sv_fields.reserve(fields->size());
     for (const auto& field : fields.value()) {
-      sv_fields.emplace_back(field);
+      sv_fields.push_back(field.View());
     }
   }
   return sv_fields;
@@ -302,7 +302,7 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
   if (params.load_fields) {
     for (const auto& field : params.load_fields.value()) {
-      auto ident = field.GetIdentifier(base_->schema);
+      auto ident = field.GetIdentifier(base_->schema, false);
       if (sort_indicies_fields.contains(ident)) {
         sort_indicies_aliases[ident] = field.GetShortName();
       }
@@ -332,21 +332,20 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
 SearchFieldsList ShardDocIndex::GetFieldsToLoad(
     const std::optional<OwnedSearchFieldsList>& load_fields,
     const absl::flat_hash_set<std::string_view>& skip_fields) const {
-  absl::flat_hash_map<std::string_view, SearchField<std::string_view>> unique_fields;
+  absl::flat_hash_map<std::string_view, SearchField> unique_fields;
   unique_fields.reserve(base_->schema.field_names.size());
 
   for (const auto& [fname, fident] : base_->schema.field_names) {
     if (!skip_fields.contains(fident)) {
-      unique_fields[fident] = {std::string_view{fident}, NameType::kIdentifier,
-                               std::string_view{fname}};
+      unique_fields[fident] = {StringOrView::FromView(fident), true, StringOrView::FromView(fname)};
     }
   }
 
   if (load_fields) {
     for (const auto& field : load_fields.value()) {
-      const auto& fident = field.GetIdentifier(base_->schema);
+      const auto& fident = field.GetIdentifier(base_->schema, false);
       if (!skip_fields.contains(fident)) {
-        unique_fields[fident] = field;
+        unique_fields[fident] = field.View();
       }
     }
   }

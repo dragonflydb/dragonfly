@@ -221,11 +221,12 @@ void ParseLoadFields(CmdArgParser* parser, std::optional<OwnedSearchFieldsList>*
       str.remove_prefix(1);  // remove leading @
     }
 
+    StringOrView name = StringOrView::FromString(std::string{str});
     if (parser->Check("AS")) {
-      load_fields->value().emplace_back(std::string{str}, NameType::kShortName,
-                                        std::string{parser->Next()});
+      load_fields->value().emplace_back(name, true,
+                                        StringOrView::FromString(std::string{parser->Next()}));
     } else {
-      load_fields->value().emplace_back(std::string{str}, NameType::kShortName);
+      load_fields->value().emplace_back(name, true);
     }
   }
 }
@@ -266,13 +267,13 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
       size_t num_fields = parser->Next<size_t>();
       params.return_fields.emplace();
       while (params.return_fields->size() < num_fields) {
-        std::string_view str = parser->Next();
+        StringOrView name = StringOrView::FromString(std::string{parser->Next()});
 
         if (parser->Check("AS")) {
-          params.return_fields->emplace_back(std::string{str}, NameType::kShortName,
-                                             std::string{parser->Next()});
+          params.return_fields->emplace_back(std::move(name), true,
+                                             StringOrView::FromString(std::string{parser->Next()}));
         } else {
-          params.return_fields->emplace_back(std::string{str}, NameType::kShortName);
+          params.return_fields->emplace_back(std::move(name), true);
         }
       }
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT

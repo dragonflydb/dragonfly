@@ -52,13 +52,13 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
-enum class NameType : uint8_t { kIdentifier, kShortName, kUndefined };
-
-template <typename T> class SearchField {
+/* SearchField represents a field that can store combinations of identifiers and aliases in various
+   forms: [identifier and alias], [alias and new_alias], [new identifier and alias] (used for JSON
+   data) This class provides methods to retrieve the actual identifier and alias for a field,
+   handling different naming conventions and resolving names based on the schema. */
+class SearchField {
  private:
-  using SingleName = std::pair<T /*identifier or short name*/, NameType>;
-
-  static bool IsJsonPath(const T& name) {
+  static bool IsJsonPath(std::string_view name) {
     if (name.size() < 2) {
       return false;
     }
@@ -68,89 +68,67 @@ template <typename T> class SearchField {
  public:
   SearchField() = default;
 
-  SearchField(T name, NameType name_type) : name_(std::make_pair(std::move(name), name_type)) {
+  SearchField(StringOrView name, bool is_short_name)
+      : name_(std::move(name)), is_short_name_(is_short_name) {
   }
 
-  SearchField(T name, NameType name_type, T new_alias)
-      : name_(std::make_pair(std::move(name), name_type)), new_alias_(std::move(new_alias)) {
-  }
-
-  template <typename U, typename = std::enable_if_t<std::is_constructible_v<T, U>>>
-  explicit SearchField(const SearchField<U>& other)
-      : name_(std::make_pair(T{other.name_.first}, other.name_.second)) {
-    if (other.HasNewAlias()) {
-      new_alias_ = T{other.new_alias_.value()};
-    } else {
-      new_alias_.reset();
-    }
-  }
-
-  template <typename U, typename = std::enable_if_t<std::is_constructible_v<T, U>>>
-  SearchField& operator=(const SearchField<U>& other) {
-    name_ = std::make_pair(T{other.name_.first}, other.name_.second);
-    if (other.HasNewAlias()) {
-      new_alias_ = T{other.new_alias_.value()};
-    } else {
-      new_alias_.reset();
-    }
-    return *this;
-  }
-
-  ~SearchField() = default;
-
-  std::string_view GetIdentifier(const search::Schema& schema) const {
-    return GetIdentifier(schema, [&](const SingleName& single_name) {
-      return single_name.second == NameType::kIdentifier;
-    });
+  SearchField(StringOrView name, bool is_short_name, StringOrView new_alias)
+      : name_(std::move(name)), is_short_name_(is_short_name), new_alias_(std::move(new_alias)) {
   }
 
   std::string_view GetIdentifier(const search::Schema& schema, bool is_json_field) const {
-    return GetIdentifier(schema, [&](const SingleName& single_name) {
-      return single_name.second == NameType::kIdentifier ||
-             (is_json_field && IsJsonPath(single_name.first));
-    });
+    auto as_view = NameView();
+    if (!is_short_name_ || (is_json_field && IsJsonPath(as_view))) {
+      return as_view;
+    }
+    return schema.LookupAlias(as_view);
   }
 
   std::string_view GetShortName() const {
     if (HasNewAlias()) {
-      return new_alias_.value();
+      return AliasView();
     }
-    return name_.first;
+    return NameView();
   }
 
   std::string_view GetShortName(const search::Schema& schema) const {
     if (HasNewAlias()) {
-      return new_alias_.value();
+      return AliasView();
     }
+    return is_short_name_ ? NameView() : schema.LookupIdentifier(NameView());
+  }
 
-    if (name_.second == NameType::kShortName) {
-      return name_.first;
+  /* Returns a new SearchField instance with name and alias stored as views to the values in this
+   * SearchField */
+  SearchField View() const {
+    if (HasNewAlias()) {
+      return SearchField{StringOrView::FromView(NameView()), is_short_name_,
+                         StringOrView::FromView(AliasView())};
     }
-    return schema.LookupIdentifier(std::string_view{name_.first});
+    return SearchField{StringOrView::FromView(NameView()), is_short_name_};
   }
 
  private:
-  template <typename Callback>
-  std::string_view GetIdentifier(const search::Schema& schema, Callback is_identifier) const {
-    if (is_identifier(name_)) {
-      return name_.first;
-    }
-    return schema.LookupAlias(std::string_view{name_.first});
-  }
-
   bool HasNewAlias() const {
     return new_alias_.has_value();
   }
 
-  template <typename U> friend class SearchField;
+  std::string_view NameView() const {
+    return name_.view();
+  }
+
+  std::string_view AliasView() const {
+    return new_alias_.value().view();
+  }
 
  private:
-  SingleName name_;
-  std::optional<T> new_alias_;
+  StringOrView name_;
+  bool is_short_name_;
+  std::optional<StringOrView> new_alias_;
 };
 
-using SearchFieldsList = std::vector<SearchField<std::string_view>>;
-using OwnedSearchFieldsList = std::vector<SearchField<std::string>>;
+using SearchFieldsList = std::vector<SearchField>;
+using OwnedSearchFieldsList = std::vector<SearchField>;
 
 struct SearchParams {
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
