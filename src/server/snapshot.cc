@@ -32,16 +32,17 @@ using facade::operator""_KB;
 namespace {
 thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 
-constexpr size_t kMinChannelBlobSize = 32_KB;
+constexpr size_t kMinBlobSize = 32_KB;
 
 }  // namespace
 
-size_t SliceSnapshot::DbRecord::size() const {
-  return HeapSize(value);
-}
-
-SliceSnapshot::SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode)
-    : db_slice_(slice), dest_(dest), compression_mode_(compression_mode) {
+SliceSnapshot::SliceSnapshot(DbSlice* slice, CompressionMode compression_mode,
+                             std::function<void(std::string)> on_push_record,
+                             std::function<void()> on_snapshot_finish)
+    : db_slice_(slice),
+      compression_mode_(compression_mode),
+      on_push_(on_push_record),
+      on_snapshot_finish_(on_snapshot_finish) {
   db_array_ = slice->databases();
   tl_slice_snapshots.insert(this);
 }
@@ -53,7 +54,7 @@ SliceSnapshot::~SliceSnapshot() {
 size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
   size_t mem = 0;
   for (SliceSnapshot* snapshot : tl_slice_snapshots) {
-    mem += snapshot->GetBufferCapacity() + snapshot->GetTotalChannelCapacity();
+    mem += snapshot->GetBufferCapacity();
   }
   return mem;
 }
@@ -81,8 +82,8 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
     flush_fun = [this, flush_threshold](size_t bytes_serialized,
                                         RdbSerializer::FlushState flush_state) {
       if (bytes_serialized > flush_threshold) {
-        size_t serialized = FlushChannelRecord(flush_state);
-        VLOG(2) << "FlushedToChannel " << serialized << " bytes";
+        size_t serialized = FlushSerialized(flush_state);
+        VLOG(2) << "FlushSerialized " << serialized << " bytes";
       }
     };
   }
@@ -93,11 +94,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
   snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
     IterateBucketsFb(cll, stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
-    // We stop the channel if we are performing backups (non-streaming).
-    // We keep the channel for replication in order to send jounal changes until we finalize.
-    if (!stream_journal) {
-      CloseRecordChannel();
-    }
+    on_snapshot_finish_();
   });
 }
 
@@ -127,10 +124,8 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   journal->UnregisterOnChange(cb_id);
   if (!cancel) {
     serializer_->SendJournalOffset(journal->GetLsn());
-    PushSerializedToChannel(true);
+    PushSerialized(true);
   }
-
-  CloseRecordChannel();
 }
 
 // The algorithm is to go over all the buckets and serialize those with
@@ -175,7 +170,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
       PrimeTable::Cursor next =
           db_slice_->Traverse(pt, cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
       cursor = next;
-      PushSerializedToChannel(false);
+      PushSerialized(false);
 
       if (stats_.loop_serialized >= last_yield + 100) {
         DVLOG(2) << "Before sleep " << ThisFiber::GetName();
@@ -185,18 +180,18 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
         last_yield = stats_.loop_serialized;
         // Push in case other fibers (writes commands that pushed previous values)
         // filled the buffer.
-        PushSerializedToChannel(false);
+        PushSerialized(false);
       }
     } while (cursor);
 
     DVLOG(2) << "after loop " << ThisFiber::GetName();
-    PushSerializedToChannel(true);
+    PushSerialized(true);
   }  // for (dbindex)
 
   CHECK(!serialize_bucket_running_);
   if (send_full_sync_cut) {
     CHECK(!serializer_->SendFullSyncCut());
-    PushSerializedToChannel(true);
+    PushSerialized(true);
   }
 
   // serialized + side_saved must be equal to the total saved.
@@ -214,7 +209,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
   // The replica sends the LSN of the next entry is wants to receive.
   while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
     serializer_->WriteJournalEntry(journal->GetEntry(lsn));
-    PushSerializedToChannel(false);
+    PushSerialized(false);
     lsn++;
   }
 
@@ -236,7 +231,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
     }
     auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
-    PushSerializedToChannel(true);
+    PushSerialized(true);
   } else {
     // We stopped but we didn't manage to send the whole stream.
     cntx->ReportError(
@@ -321,7 +316,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   }
 }
 
-size_t SliceSnapshot::FlushChannelRecord(SerializerBase::FlushState flush_state) {
+size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   io::StringFile sfile;
   serializer_->FlushToSink(&sfile, flush_state);
 
@@ -331,34 +326,34 @@ size_t SliceSnapshot::FlushChannelRecord(SerializerBase::FlushState flush_state)
 
   uint64_t id = rec_id_++;
   DVLOG(2) << "Pushing " << id;
-  DbRecord db_rec{.id = id, .value = std::move(sfile.val)};
+
   fb2::NoOpLock lk;
 
   // We create a critical section here that ensures that records are pushed in sequential order.
-  // As a result, it is not possible for two fiber producers to push into channel concurrently.
+  // As a result, it is not possible for two fiber producers to push concurrently.
   // If A.id = 5, and then B.id = 6, and both are blocked here, it means that last_pushed_id_ < 4.
   // Once last_pushed_id_ = 4, A will be unblocked, while B will wait until A finishes pushing and
   // update last_pushed_id_ to 5.
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
   // Blocking point.
-  size_t channel_usage = dest_->Push(std::move(db_rec));
+  on_push_(std::move(sfile.val));
+
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;
   seq_cond_.notify_all();
 
-  VLOG(2) << "Pushed with Serialize() " << serialized
-          << " bytes, channel total usage: " << channel_usage;
+  VLOG(2) << "Pushed with Serialize() " << serialized;
 
   return serialized;
 }
 
-bool SliceSnapshot::PushSerializedToChannel(bool force) {
-  if (!force && serializer_->SerializedLen() < kMinChannelBlobSize)
+bool SliceSnapshot::PushSerialized(bool force) {
+  if (!force && serializer_->SerializedLen() < kMinBlobSize)
     return false;
 
   // Flush any of the leftovers to avoid interleavings
-  size_t serialized = FlushChannelRecord(FlushState::kFlushMidEntry);
+  size_t serialized = FlushSerialized(FlushState::kFlushMidEntry);
 
   if (!delayed_entries_.empty()) {
     // Async bucket serialization might have accumulated some delayed values.
@@ -371,7 +366,7 @@ bool SliceSnapshot::PushSerializedToChannel(bool force) {
     } while (!delayed_entries_.empty());
 
     // blocking point.
-    serialized += FlushChannelRecord(FlushState::kFlushMidEntry);
+    serialized += FlushSerialized(FlushState::kFlushMidEntry);
   }
   return serialized > 0;
 }
@@ -400,7 +395,7 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
 void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await) {
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
-  // additional journal change to serialize, it simply invokes PushSerializedToChannel.
+  // additional journal change to serialize, it simply invokes PushSerialized.
   std::unique_lock lk(db_slice_->GetSerializationMutex());
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
@@ -409,19 +404,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   if (await) {
     // This is the only place that flushes in streaming mode
     // once the iterate buckets fiber finished.
-    PushSerializedToChannel(false);
-  }
-}
-
-void SliceSnapshot::CloseRecordChannel() {
-  DCHECK(db_slice_->shard_owner()->IsMyThread());
-  std::unique_lock lk(db_slice_->GetSerializationMutex());
-
-  CHECK(!serialize_bucket_running_);
-  // Make sure we close the channel only once with a CAS check.
-  bool expected = false;
-  if (closed_chan_.compare_exchange_strong(expected, true)) {
-    dest_->StartClosing();
+    PushSerialized(false);
   }
 }
 
@@ -431,10 +414,6 @@ size_t SliceSnapshot::GetBufferCapacity() const {
   }
 
   return serializer_->GetBufferCapacity();
-}
-
-size_t SliceSnapshot::GetTotalChannelCapacity() const {
-  return dest_->GetSize();
 }
 
 size_t SliceSnapshot::GetTempBuffersSize() const {
