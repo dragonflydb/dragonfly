@@ -21,6 +21,17 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 
+static void SendSubscriptionChangedResponse(string_view action, std::optional<string_view> topic,
+                                            unsigned count, RedisReplyBuilder* rb) {
+  rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+  rb->SendBulkString(action);
+  if (topic.has_value())
+    rb->SendBulkString(topic.value());
+  else
+    rb->SendNull();
+  rb->SendLong(count);
+}
+
 StoredCmd::StoredCmd(const CommandId* cid, ArgSlice args, facade::ReplyMode mode)
     : cid_{cid}, buffer_{}, sizes_(args.size()), reply_mode_{mode} {
   size_t total_size = 0;
@@ -98,8 +109,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* own
   }
 }
 
-ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx,
-                                     facade::CapturingReplyBuilder* crb)
+ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx)
     : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
   if (owner) {
     acl_commands = owner->acl_commands;
@@ -115,8 +125,6 @@ ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction
     conn_state.db_index = owner->conn_state.db_index;
     conn_state.squashing_info = {owner};
   }
-  auto* prev_reply_builder = Inject(crb);
-  CHECK_EQ(prev_reply_builder, nullptr);
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {
@@ -137,61 +145,13 @@ void ConnectionContext::ChangeMonitor(bool start) {
   EnableMonitoring(start);
 }
 
-vector<unsigned> ChangeSubscriptions(bool pattern, CmdArgList args, bool to_add, bool to_reply,
-                                     ConnectionContext* conn) {
-  vector<unsigned> result(to_reply ? args.size() : 0, 0);
-
-  auto& conn_state = conn->conn_state;
-  if (!to_add && !conn_state.subscribe_info)
-    return result;
-
-  if (!conn_state.subscribe_info) {
-    DCHECK(to_add);
-
-    conn_state.subscribe_info.reset(new ConnectionState::SubscribeInfo);
-    conn->subscriptions++;
-  }
-
-  auto& sinfo = *conn->conn_state.subscribe_info.get();
-  auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
-
-  int32_t tid = util::ProactorBase::me()->GetPoolIndex();
-  DCHECK_GE(tid, 0);
-
-  ChannelStoreUpdater csu{pattern, to_add, conn, uint32_t(tid)};
-
-  // Gather all the channels we need to subscribe to / remove.
-  size_t i = 0;
-  for (string_view channel : args) {
-    if (to_add && local_store.emplace(channel).second)
-      csu.Record(channel);
-    else if (!to_add && local_store.erase(channel) > 0)
-      csu.Record(channel);
-
-    if (to_reply)
-      result[i++] = sinfo.SubscriptionCount();
-  }
-
-  csu.Apply();
-
-  // Important to reset conn_state.subscribe_info only after all references to it were
-  // removed.
-  if (!to_add && conn_state.subscribe_info->IsEmpty()) {
-    conn_state.subscribe_info.reset();
-    DCHECK_GE(conn->subscriptions, 1u);
-    conn->subscriptions--;
-  }
-
-  return result;
-}
-
-void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args) {
-  vector<unsigned> result = ChangeSubscriptions(false, args, to_add, to_reply, this);
+void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
+                                           facade::RedisReplyBuilder* rb) {
+  vector<unsigned> result = ChangeSubscriptions(args, false, to_add, to_reply);
 
   if (to_reply) {
     for (size_t i = 0; i < result.size(); ++i) {
       const char* action[2] = {"unsubscribe", "subscribe"};
-      auto rb = static_cast<RedisReplyBuilder*>(reply_builder());
       rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
       rb->SendBulkString(action[to_add]);
       rb->SendBulkString(ArgS(args, i));
@@ -200,53 +160,41 @@ void ConnectionContext::ChangeSubscription(bool to_add, bool to_reply, CmdArgLis
   }
 }
 
-void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply, CmdArgList args) {
-  vector<unsigned> result = ChangeSubscriptions(true, args, to_add, to_reply, this);
+void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply, CmdArgList args,
+                                            facade::RedisReplyBuilder* rb) {
+  vector<unsigned> result = ChangeSubscriptions(args, true, to_add, to_reply);
 
   if (to_reply) {
     const char* action[2] = {"punsubscribe", "psubscribe"};
     if (result.size() == 0) {
-      return SendSubscriptionChangedResponse(action[to_add], std::nullopt, 0);
+      return SendSubscriptionChangedResponse(action[to_add], std::nullopt, 0, rb);
     }
 
     for (size_t i = 0; i < result.size(); ++i) {
-      SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i]);
+      SendSubscriptionChangedResponse(action[to_add], ArgS(args, i), result[i], rb);
     }
   }
 }
 
-void ConnectionContext::UnsubscribeAll(bool to_reply) {
+void ConnectionContext::UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb) {
   if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->channels.empty())) {
-    return SendSubscriptionChangedResponse("unsubscribe", std::nullopt, 0);
+    return SendSubscriptionChangedResponse("unsubscribe", std::nullopt, 0, rb);
   }
   StringVec channels(conn_state.subscribe_info->channels.begin(),
                      conn_state.subscribe_info->channels.end());
   CmdArgVec arg_vec(channels.begin(), channels.end());
-  ChangeSubscription(false, to_reply, CmdArgList{arg_vec});
+  ChangeSubscription(false, to_reply, CmdArgList{arg_vec}, rb);
 }
 
-void ConnectionContext::PUnsubscribeAll(bool to_reply) {
+void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb) {
   if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->patterns.empty())) {
-    return SendSubscriptionChangedResponse("punsubscribe", std::nullopt, 0);
+    return SendSubscriptionChangedResponse("punsubscribe", std::nullopt, 0, rb);
   }
 
   StringVec patterns(conn_state.subscribe_info->patterns.begin(),
                      conn_state.subscribe_info->patterns.end());
   CmdArgVec arg_vec(patterns.begin(), patterns.end());
-  ChangePSubscription(false, to_reply, CmdArgList{arg_vec});
-}
-
-void ConnectionContext::SendSubscriptionChangedResponse(string_view action,
-                                                        std::optional<string_view> topic,
-                                                        unsigned count) {
-  auto rb = static_cast<RedisReplyBuilder*>(reply_builder());
-  rb->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
-  rb->SendBulkString(action);
-  if (topic.has_value())
-    rb->SendBulkString(topic.value());
-  else
-    rb->SendNull();
-  rb->SendLong(count);
+  ChangePSubscription(false, to_reply, CmdArgList{arg_vec}, rb);
 }
 
 size_t ConnectionState::ExecInfo::UsedMemory() const {
@@ -267,6 +215,53 @@ size_t ConnectionState::UsedMemory() const {
 
 size_t ConnectionContext::UsedMemory() const {
   return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(conn_state);
+}
+
+vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, bool pattern,
+                                                        bool to_add, bool to_reply) {
+  vector<unsigned> result(to_reply ? channels.size() : 0, 0);
+
+  if (!to_add && !conn_state.subscribe_info)
+    return result;
+
+  if (!conn_state.subscribe_info) {
+    DCHECK(to_add);
+
+    conn_state.subscribe_info.reset(new ConnectionState::SubscribeInfo);
+    subscriptions++;
+  }
+
+  auto& sinfo = *conn_state.subscribe_info.get();
+  auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
+
+  int32_t tid = util::ProactorBase::me()->GetPoolIndex();
+  DCHECK_GE(tid, 0);
+
+  ChannelStoreUpdater csu{pattern, to_add, this, uint32_t(tid)};
+
+  // Gather all the channels we need to subscribe to / remove.
+  size_t i = 0;
+  for (string_view channel : channels) {
+    if (to_add && local_store.emplace(channel).second)
+      csu.Record(channel);
+    else if (!to_add && local_store.erase(channel) > 0)
+      csu.Record(channel);
+
+    if (to_reply)
+      result[i++] = sinfo.SubscriptionCount();
+  }
+
+  csu.Apply();
+
+  // Important to reset conn_state.subscribe_info only after all references to it were
+  // removed.
+  if (!to_add && conn_state.subscribe_info->IsEmpty()) {
+    conn_state.subscribe_info.reset();
+    DCHECK_GE(subscriptions, 1u);
+    subscriptions--;
+  }
+
+  return result;
 }
 
 void ConnectionState::ExecInfo::Clear() {

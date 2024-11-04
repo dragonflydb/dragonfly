@@ -36,15 +36,8 @@ class ConnectionContext {
     return protocol_;
   }
 
-  SinkReplyBuilder* reply_builder() {
+  SinkReplyBuilder* reply_builder_old() {
     return rbuilder_.get();
-  }
-
-  // Allows receiving the output data from the commands called from scripts.
-  SinkReplyBuilder* Inject(SinkReplyBuilder* new_i) {
-    SinkReplyBuilder* res = rbuilder_.release();
-    rbuilder_.reset(new_i);
-    return res;
   }
 
   virtual size_t UsedMemory() const;

@@ -148,7 +148,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
 
   absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{cntx, stub_tx.get(), &crb};
+  ConnectionContext local_cntx{cntx, stub_tx.get()};
 
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
@@ -175,7 +175,6 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
     sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
   }
 
-  local_cntx.Inject(nullptr);
   local_tx->UnlockMulti();
 }
 
