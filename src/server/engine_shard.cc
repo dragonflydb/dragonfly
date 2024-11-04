@@ -795,7 +795,7 @@ bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula 
          (UsedMemory() > tiering_redline + tiered_storage_->CoolMemoryUsage());
 }
 
-auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
+EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   const TxQueue* queue = txq();
 
   ShardId sid = shard_id();
@@ -809,6 +809,12 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
   unsigned max_db_id = 0;
 
   auto& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+
+  {
+    auto value = queue->At(cur);
+    Transaction* trx = std::get<Transaction*>(value);
+    info.head.debug_id_info = trx->DebugId();
+  }
 
   do {
     auto value = queue->At(cur);
