@@ -4,7 +4,7 @@ go 1.18
 
 require (
 	github.com/pterm/pterm v0.12.25
-	github.com/redis/go-redis/v9 v9.5.1
+	github.com/redis/go-redis/v9 v9.7.0
 )
 
 require (
