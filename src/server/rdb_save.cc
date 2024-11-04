@@ -1344,9 +1344,9 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* sh
 
 // called on save flow
 void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
-  auto& snapthot = GetSnapshot(shard);
-  CHECK(snapthot);
-  snapthot->WaitSnapshoting();
+  auto& snapshot = GetSnapshot(shard);
+  CHECK(snapshot);
+  snapshot->WaitSnapshoting();
 }
 
 // called from replication flow
