@@ -59,6 +59,19 @@ class SnapshotStorage {
   }
 
  protected:
+  struct SnapStat {
+    SnapStat(std::string file_name, int64_t ts)
+        : name(std::move(file_name)), last_modified(std::move(ts)) {
+    }
+    std::string name;
+    int64_t last_modified;
+  };
+
+  // Returns empty string if nothing is matched. vector is passed by value on purpose, as it is
+  // been sorted inside.
+  static std::string FindMatchingFile(std::string_view prefix, std::string_view dbfilename,
+                                      std::vector<SnapStat> keys);
+
   virtual io::Result<std::vector<std::string>, GenericError> ExpandFromPath(
       const std::string& path) = 0;
 
@@ -134,13 +147,6 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
 
   std::error_code CheckPath(const std::string& path) final;
 
-  struct SnapStat {
-    SnapStat(std::string file_name, int64_t ts)
-        : name(std::move(file_name)), last_modified(std::move(ts)) {
-    }
-    std::string name;
-    int64_t last_modified;
-  };
   // List the objects in the given bucket with the given prefix. This must
   // run from a proactor.
   io::Result<std::vector<SnapStat>, GenericError> ListObjects(std::string_view bucket_name,
