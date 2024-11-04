@@ -1344,16 +1344,23 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* sh
 
 // called on save flow
 void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
-  GetSnapshot(shard)->WaitSnapshoting();
+  auto& snapthot = GetSnapshot(shard);
+  CHECK(snapthot);
+  snapthot->WaitSnapshoting();
 }
 
 // called from replication flow
 void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
-  GetSnapshot(shard)->FinalizeJournalStream(false);
+  auto& snapthot = GetSnapshot(shard);
+  CHECK(snapthot);
+  snapthot->FinalizeJournalStream(false);
 }
 
 void RdbSaver::Impl::CancelInShard(EngineShard* shard) {
-  GetSnapshot(shard)->FinalizeJournalStream(true);
+  auto& snapthot = GetSnapshot(shard);
+  if (snapthot) {  // Cancel can be called before snapshoting started.
+    snapthot->FinalizeJournalStream(true);
+  }
 }
 
 // This function is called from connection thread when info command is invoked.
