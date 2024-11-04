@@ -1357,9 +1357,9 @@ void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
 }
 
 void RdbSaver::Impl::CancelInShard(EngineShard* shard) {
-  auto& snapthot = GetSnapshot(shard);
-  if (snapthot) {  // Cancel can be called before snapshoting started.
-    snapthot->FinalizeJournalStream(true);
+  auto& snapshot = GetSnapshot(shard);
+  if (snapshot) {  // Cancel can be called before snapshotting started.
+    snapshot->FinalizeJournalStream(true);
   }
 }
 
