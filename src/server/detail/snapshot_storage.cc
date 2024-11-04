@@ -236,9 +236,7 @@ GcsSnapshotStorage::~GcsSnapshotStorage() {
 }
 
 error_code GcsSnapshotStorage::Init(unsigned connect_ms) {
-  fb2::ProactorBase* proactor = fb2::ProactorBase::me();
-  CHECK(proactor);
-  error_code ec = creds_provider_.Init(connect_ms, proactor);
+  error_code ec = creds_provider_.Init(connect_ms);
   if (ec)
     return ec;
 
@@ -282,10 +280,39 @@ io::ReadonlyFileOrError GcsSnapshotStorage::OpenReadFile(const std::string& path
   return cloud::OpenReadGcsFile(bucket, key, opts);
 }
 
-io::Result<std::string, GenericError> GcsSnapshotStorage::LoadPath(std::string_view dir,
-                                                                   std::string_view dbfilename) {
-  LOG(ERROR) << "Load snapshot: Searching for snapshot in GCS path: " << dir << "/" << dbfilename;
-  return nonstd::make_unexpected(GenericError("Not supported"));
+io::Result<std::string, GenericError> GcsSnapshotStorage::LoadPath(string_view dir,
+                                                                   string_view dbfilename) {
+  if (dbfilename.empty())
+    return "";
+
+  auto [bucket_name, prefix] = GetBucketPath(dir);
+
+  fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
+
+  io::Result<vector<SnapStat>, GenericError> keys =
+      proactor->Await([this, proactor, bucket_name = bucket_name,
+                       prefix = prefix]() -> io::Result<vector<SnapStat>, GenericError> {
+        cloud::GCS gcs(&creds_provider_, ctx_, proactor);
+        vector<SnapStat> res;
+        error_code ec =
+            gcs.List(bucket_name, prefix, false, [&res](const cloud::StorageListItem& item) {
+              res.emplace_back(SnapStat{string(item.key), item.mtime_ns});
+            });
+        if (ec)
+          return nonstd::make_unexpected(GenericError(ec, "Failed to list objects"));
+        return res;
+      });
+
+  if (!keys) {
+    return nonstd::make_unexpected(keys.error());
+  }
+
+  auto match_key = FindMatchingFile(prefix, dbfilename, *keys);
+  if (!match_key.empty()) {
+    return absl::StrCat(kGCSPrefix, bucket_name, "/", match_key);
+  }
+  return nonstd::make_unexpected(GenericError(
+      std::make_error_code(std::errc::no_such_file_or_directory), "Snapshot not found"));
 }
 
 io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
