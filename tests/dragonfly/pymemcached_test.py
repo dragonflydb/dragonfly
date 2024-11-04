@@ -1,3 +1,4 @@
+import logging
 import pytest
 from pymemcache.client.base import Client as MCClient
 from redis import Redis
@@ -50,7 +51,7 @@ def test_basic(memcached_client: MCClient):
 
 
 @dfly_args(DEFAULT_ARGS)
-def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
+async def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     """
     With the noreply option the python client doesn't wait for replies,
     so all the commands are pipelined. Assert pipelines work correctly and the
@@ -67,10 +68,17 @@ def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     # check all commands were executed
     assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
 
-    info = Redis(port=df_server.port).info()
+    client = df_server.client()
+    info = await client.info()
     if info["total_pipelined_commands"] == 0:
-        warnings.warn("No pipelined commands were detected. Info: \n" + str(info))
-        assert False, "No pipelined commands were detected."
+        logging.error("No pipelined commands were detected. Info: \n" + str(info))
+
+        # Try again
+        for k, v in zip(keys, values):
+            memcached_client.set(k, v, noreply=True)
+        info = await client.info()
+        logging.error("Second Info: \n" + str(info))
+        assert False
 
 
 @dfly_args(DEFAULT_ARGS)
