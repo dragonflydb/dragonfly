@@ -5,7 +5,7 @@ iniconfig==1.1.1
 packaging==21.3
 pluggy==1.0.0
 py==1.11.0
-pyparsing==3.0.9
+pyparsing==3.2.0
 pytest==7.1.2
 redis==5.0.0
 tomli==2.0.2
