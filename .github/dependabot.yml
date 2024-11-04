@@ -3,18 +3,18 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
 
   - package-ecosystem: "gomod"
     directories:
       - "/contrib/charts/dragonfly"
       - "/tools/replay"
     schedule:
-      interval: "daily"
+      interval: "weekly"
 
   - package-ecosystem: "pip"
     directories:
       - "/tests/dragonfly"
       - "/tools"
     schedule:
-      interval: "daily"
+      interval: "weekly"
