@@ -22,7 +22,8 @@ class SearchFamilyTest : public BaseFamilyTest {
 
 const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
 
-::testing::AssertionResult AssertTwoArrays(const char* expr, const RespExpr& resp) {
+/* Asserts that response is array of two arrays. Used to test FT.PROFILE response */
+::testing::AssertionResult AssertArrayOfTwoArrays(const RespExpr& resp) {
   if (resp.GetVec().size() != 2) {
     return ::testing::AssertionFailure()
            << "Expected response array length to be 2, but was " << resp.GetVec().size();
@@ -40,7 +41,7 @@ const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
   return ::testing::AssertionSuccess();
 }
 
-#define ASSERT_TWO_ARRAYS(resp) ASSERT_PRED_FORMAT1(AssertTwoArrays, resp)
+#define ASSERT_ARRAY_OF_TWO_ARRAYS(resp) ASSERT_PRED1(AssertArrayOfTwoArrays, resp)
 
 MATCHER_P2(DocIds, total, arg_ids, "") {
   if (arg_ids.empty()) {
@@ -810,7 +811,7 @@ TEST_F(SearchFamilyTest, FtProfile) {
   Run({"ft.create", "i1", "schema", "name", "text"});
 
   auto resp = Run({"ft.profile", "i1", "search", "query", "(a | b) c d"});
-  ASSERT_TWO_ARRAYS(resp);
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
 
   const auto& top_level = resp.GetVec();
   EXPECT_THAT(top_level[0], IsMapWithSize());
@@ -831,7 +832,7 @@ TEST_F(SearchFamilyTest, FtProfile) {
 
   // Test LIMITED throws no errors
   resp = Run({"ft.profile", "i1", "search", "limited", "query", "(a | b) c d"});
-  ASSERT_TWO_ARRAYS(resp);
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
 }
 
 TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
@@ -839,7 +840,7 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   Run({"ft.create", "i1", "on", "json", "schema", "$.id", "as", "id", "tag"});
 
   auto resp = Run({"ft.profile", "i1", "search", "query", "@id:[1 1]"});
-  ASSERT_TWO_ARRAYS(resp);
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
 
   EXPECT_THAT(resp.GetVec()[0], IsMapWithSize());
 
