@@ -88,8 +88,9 @@ size_t MemoryUsage(PrimeIterator it) {
 
 }  // namespace
 
-MemoryCmd::MemoryCmd(ServerFamily* owner, ConnectionContext* cntx) : cntx_(cntx), owner_(owner) {
-  builder_ = cntx_->reply_builder();
+MemoryCmd::MemoryCmd(ServerFamily* owner, facade::SinkReplyBuilder* builder,
+                     ConnectionContext* cntx)
+    : cntx_(cntx), owner_(owner), builder_(builder) {
 }
 
 void MemoryCmd::Run(CmdArgList args) {

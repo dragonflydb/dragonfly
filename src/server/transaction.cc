@@ -61,6 +61,7 @@ void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
         absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(), " ",
                         cont_tx->DEBUG_IsArmedInShard(shard->shard_id()) ? " armed" : "");
       }
+      absl::StrAppend(&msg, "\nTxQueue head debug info ", info.head.debug_id_info);
 
       LOG(WARNING) << msg;
     }

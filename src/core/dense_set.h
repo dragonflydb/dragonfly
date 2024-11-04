@@ -202,6 +202,11 @@ class DenseSet {
 
     void Advance();
 
+    // If ptr is a link, it calls fun on all links in the chain.
+    // Otherwise it calls it only once on the object.
+    // ptr must be non empty.
+    size_t TraverseApply(DensePtr* ptr, std::function<void(DensePtr*)> fun);
+
     DenseSet* owner_;
     ChainVectorIterator curr_list_;
     DensePtr* curr_entry_;
@@ -367,7 +372,6 @@ class DenseSet {
   size_t PushFront(ChainVectorIterator, void* obj, bool has_ttl);
   void PushFront(ChainVectorIterator, DensePtr);
 
-  void* PopDataFront(ChainVectorIterator);
   DensePtr PopPtrFront(ChainVectorIterator);
 
   // ============ Pseudo Linked List in DenseSet end ==================

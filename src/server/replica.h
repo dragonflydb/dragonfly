@@ -58,12 +58,12 @@ class Replica : ProtocolClient {
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
   // Returns true if initial link with master has been established or
   // false if it has failed.
-  std::error_code Start(ConnectionContext* cntx);
+  std::error_code Start(facade::SinkReplyBuilder* builder);
 
   // Sets the server state to have replication enabled.
   // It is like Start(), but does not attempt to establish
   // a connection right-away, but instead lets MainReplicationFb do the work.
-  void EnableReplication(ConnectionContext* cntx);
+  void EnableReplication(facade::SinkReplyBuilder* builder);
 
   void Stop();  // thread-safe
 

@@ -228,12 +228,11 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   DCHECK(context);
 
   facade::CapturingReplyBuilder reply_builder;
-  auto* prev = context->Inject(&reply_builder);
+
   // TODO: to finish this.
-  service->DispatchCommand(absl::MakeSpan(cmd_slices), context);
+  service->DispatchCommand(absl::MakeSpan(cmd_slices), &reply_builder, context);
   facade::CapturingReplyBuilder::Payload payload = reply_builder.Take();
 
-  context->Inject(prev);
   auto response = http::MakeStringResponse();
   http::SetMime(http::kJsonMime, &response);
 

@@ -2317,7 +2317,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
 
     await c_replica.execute_command(
         "debug replica pause"
-    )  # puase replica to trigger reconnect on master
+    )  # pause replica to trigger reconnect on master
 
     await asyncio.sleep(1)
 
@@ -2629,8 +2629,60 @@ async def test_replica_of_replica(df_factory):
 
 
 @pytest.mark.asyncio
-@pytest.mark.slow
-async def test_big_containers(df_factory):
+async def test_replication_timeout_on_full_sync_heartbeat_expiry(
+    df_factory: DflyInstanceFactory, df_seeder_factory
+):
+    # Timeout set to 3 seconds because we must first saturate the socket such that subsequent
+    # writes block. Otherwise, we will break the flows before Heartbeat actually deadlocks.
+    master = df_factory.create(
+        proactor_threads=2, replication_timeout=3000, vmodule="replica=2,dflycmd=2"
+    )
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_command("debug", "populate", "100000", "foo", "5000")
+
+    c_master = master.client()
+    c_replica = replica.client()
+
+    seeder = ExpirySeeder()
+    seeder_task = asyncio.create_task(seeder.run(c_master))
+    await seeder.wait_until_n_inserts(50000)
+    seeder.stop()
+    await seeder_task
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # wait for full sync
+    async with async_timeout.timeout(3):
+        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.05)
+
+    await c_replica.execute_command("debug replica pause")
+
+    # Dragonfly would get stuck here without the bug fix. When replica does not read from the
+    # socket, Heartbeat() will block on the journal write for the expired items and shard_handler
+    # would never be called and break replication. More details on #3936.
+
+    await asyncio.sleep(6)
+
+    await c_replica.execute_command("debug replica resume")  # resume replication
+
+    await asyncio.sleep(1)  # replica will start resync
+
+    await check_all_replicas_finished([c_replica], c_master)
+    await assert_replica_reconnections(replica, 0)
+
+
+@pytest.mark.parametrize(
+    "element_size, elements_number",
+    [(16, 20000), (20000, 16)],
+)
+@pytest.mark.asyncio
+async def test_big_containers(df_factory, element_size, elements_number):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
 
@@ -2640,11 +2692,11 @@ async def test_big_containers(df_factory):
 
     logging.debug("Fill master with test data")
     seeder = StaticSeeder(
-        key_target=20,
-        data_size=4000000,
-        collection_size=1000,
-        variance=100,
-        samples=1,
+        key_target=10,
+        data_size=element_size * elements_number,
+        collection_size=elements_number,
+        variance=1,
+        samples=5,
         types=["LIST", "SET", "ZSET", "HASH"],
     )
     await seeder.run(c_master)

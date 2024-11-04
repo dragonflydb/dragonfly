@@ -28,7 +28,8 @@ struct BaseAccessor : public search::DocumentAccessor {
   virtual SearchDocData Serialize(const search::Schema& schema) const = 0;
 
   // Serialize selected fields
-  virtual SearchDocData Serialize(const search::Schema& schema, const FieldsList& fields) const;
+  virtual SearchDocData Serialize(const search::Schema& schema,
+                                  absl::Span<const SearchField<std::string_view>> fields) const;
 
   /*
   Serialize the whole type, the default implementation is to serialize all fields.
@@ -78,7 +79,8 @@ struct JsonAccessor : public BaseAccessor {
   VectorInfo GetVector(std::string_view field) const override;
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
-  SearchDocData Serialize(const search::Schema& schema, const FieldsList& fields) const override;
+  SearchDocData Serialize(const search::Schema& schema,
+                          absl::Span<const SearchField<std::string_view>> fields) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
   SearchDocData SerializeDocument(const search::Schema& schema) const override;
 

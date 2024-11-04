@@ -155,6 +155,10 @@ class EngineShard {
 
   void StopPeriodicFiber();
 
+  struct TxQueueItem {
+    std::string debug_id_info;
+  };
+
   struct TxQueueInfo {
     // Armed - those that the coordinator has armed with callbacks and wants them to run.
     // Runnable - those that could run (they own the locks) but probably can not run due
@@ -174,6 +178,9 @@ class EngineShard {
 
     // the lock fingerprint with maximum contention score.
     uint64_t max_contention_lock;
+
+    // We can use a vector to hold debug info for all items in the txqueue
+    TxQueueItem head;
   };
 
   TxQueueInfo AnalyzeTxQueue() const;
@@ -206,12 +213,11 @@ class EngineShard {
   // blocks the calling fiber.
   void Shutdown();  // called before destructing EngineShard.
 
-  void StartPeriodicFiber(util::ProactorBase* pb, std::function<void()> shard_handler);
+  void StartPeriodicHeartbeatFiber(util::ProactorBase* pb);
+  void StartPeriodicShardHandlerFiber(util::ProactorBase* pb, std::function<void()> shard_handler);
 
   void Heartbeat();
   void RetireExpiredAndEvict();
-
-  void RunPeriodic(std::chrono::milliseconds period_ms, std::function<void()> shard_handler);
 
   void CacheStats();
 
@@ -253,8 +259,11 @@ class EngineShard {
   IntentLock shard_lock_;
 
   uint32_t defrag_task_ = 0;
-  util::fb2::Fiber fiber_periodic_;
-  util::fb2::Done fiber_periodic_done_;
+  util::fb2::Fiber fiber_heartbeat_periodic_;
+  util::fb2::Done fiber_heartbeat_periodic_done_;
+
+  util::fb2::Fiber fiber_shard_handler_periodic_;
+  util::fb2::Done fiber_shard_handler_periodic_done_;
 
   DefragTaskState defrag_state_;
   std::unique_ptr<TieredStorage> tiered_storage_;

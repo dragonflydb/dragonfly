@@ -37,7 +37,7 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
 
-ABSL_FLAG(uint32_t, hz, 100,
+ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
           "Warning: not advised to decrease in production.");
 
@@ -186,6 +186,17 @@ ShardId RoundRobinSharder::next_shard_;
 fb2::Mutex RoundRobinSharder::mutex_;
 
 constexpr size_t kQueueLen = 64;
+
+optional<uint32_t> GetPeriodicCycleMs() {
+  int hz = GetFlag(FLAGS_hz);
+  if (hz <= 0)
+    return nullopt;
+
+  uint32_t clock_cycle_ms = 1000 / hz;
+  if (clock_cycle_ms == 0)
+    clock_cycle_ms = 1;
+  return clock_cycle_ms;
+}
 
 }  // namespace
 
@@ -391,28 +402,73 @@ void EngineShard::Shutdown() {
 
   queue_.Shutdown();
   queue2_.Shutdown();
-  DCHECK(!fiber_periodic_.IsJoinable());
+  DCHECK(!fiber_heartbeat_periodic_.IsJoinable());
+  DCHECK(!fiber_shard_handler_periodic_.IsJoinable());
 
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
 }
 
 void EngineShard::StopPeriodicFiber() {
-  fiber_periodic_done_.Notify();
-  if (fiber_periodic_.IsJoinable()) {
-    fiber_periodic_.Join();
+  fiber_heartbeat_periodic_done_.Notify();
+  if (fiber_heartbeat_periodic_.IsJoinable()) {
+    fiber_heartbeat_periodic_.Join();
+  }
+  fiber_shard_handler_periodic_done_.Notify();
+  if (fiber_shard_handler_periodic_.IsJoinable()) {
+    fiber_shard_handler_periodic_.Join();
   }
 }
 
-void EngineShard::StartPeriodicFiber(util::ProactorBase* pb, std::function<void()> global_handler) {
-  uint32_t clock_cycle_ms = 1000 / std::max<uint32_t>(1, GetFlag(FLAGS_hz));
-  if (clock_cycle_ms == 0)
-    clock_cycle_ms = 1;
+static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds period_ms,
+                             std::string_view error_msg, util::fb2::Done* waiter) {
+  int64_t last_heartbeat_ms = INT64_MAX;
 
-  fiber_periodic_ = MakeFiber([this, index = pb->GetPoolIndex(), period_ms = clock_cycle_ms,
-                               handler = std::move(global_handler)] {
-    ThisFiber::SetName(absl::StrCat("shard_periodic", index));
-    RunPeriodic(std::chrono::milliseconds(period_ms), std::move(handler));
-  });
+  while (true) {
+    if (waiter->WaitFor(period_ms)) {
+      VLOG(2) << "finished running engine shard periodic task";
+      return;
+    }
+
+    int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+    if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
+      VLOG(1) << "This " << error_msg << " step took " << now_ms - last_heartbeat_ms << "ms";
+    }
+    f();
+    last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
+  }
+}
+
+void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
+  auto cycle_ms = GetPeriodicCycleMs();
+  if (!cycle_ms) {
+    return;
+  }
+  auto heartbeat = [this]() { Heartbeat(); };
+
+  std::chrono::milliseconds period_ms(*cycle_ms);
+
+  fiber_heartbeat_periodic_ =
+      MakeFiber([this, index = pb->GetPoolIndex(), period_ms, heartbeat]() mutable {
+        ThisFiber::SetName(absl::StrCat("heartbeat_periodic", index));
+        RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
+      });
+}
+
+void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
+                                                 std::function<void()> shard_handler) {
+  auto clock_cycle_ms = GetPeriodicCycleMs();
+  if (!clock_cycle_ms) {
+    return;
+  }
+
+  // Minimum 100ms
+  std::chrono::milliseconds period_ms(std::max(100u, *clock_cycle_ms));
+  fiber_shard_handler_periodic_ = MakeFiber(
+      [this, index = pb->GetPoolIndex(), period_ms, handler = std::move(shard_handler)]() mutable {
+        ThisFiber::SetName(absl::StrCat("shard_handler_periodic", index));
+        RunFPeriodically(std::move(handler), period_ms, "shard handler",
+                         &fiber_shard_handler_periodic_done_);
+      });
 }
 
 void EngineShard::InitThreadLocal(ProactorBase* pb) {
@@ -694,32 +750,6 @@ void EngineShard::RetireExpiredAndEvict() {
   }
 }
 
-void EngineShard::RunPeriodic(std::chrono::milliseconds period_ms,
-                              std::function<void()> shard_handler) {
-  VLOG(1) << "RunPeriodic with period " << period_ms.count() << "ms";
-
-  int64_t last_heartbeat_ms = INT64_MAX;
-  int64_t last_handler_ms = 0;
-
-  while (true) {
-    if (fiber_periodic_done_.WaitFor(period_ms)) {
-      VLOG(2) << "finished running engine shard periodic task";
-      return;
-    }
-
-    int64_t now_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
-    if (now_ms - 5 * period_ms.count() > last_heartbeat_ms) {
-      VLOG(1) << "This heartbeat-sleep took " << now_ms - last_heartbeat_ms << "ms";
-    }
-    Heartbeat();
-    last_heartbeat_ms = fb2::ProactorBase::GetMonotonicTimeNs() / 1000000;
-    if (shard_handler && last_handler_ms + 100 < last_heartbeat_ms) {
-      last_handler_ms = last_heartbeat_ms;
-      shard_handler();
-    }
-  }
-}
-
 void EngineShard::CacheStats() {
   uint64_t now = fb2::ProactorBase::GetMonotonicTimeNs();
   if (cache_stats_time_ + 1000000 > now)  // 1ms
@@ -765,7 +795,7 @@ bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula 
          (UsedMemory() > tiering_redline + tiered_storage_->CoolMemoryUsage());
 }
 
-auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
+EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   const TxQueue* queue = txq();
 
   ShardId sid = shard_id();
@@ -779,6 +809,12 @@ auto EngineShard::AnalyzeTxQueue() const -> TxQueueInfo {
   unsigned max_db_id = 0;
 
   auto& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+
+  {
+    auto value = queue->At(cur);
+    Transaction* trx = std::get<Transaction*>(value);
+    info.head.debug_id_info = trx->DebugId();
+  }
 
   do {
     auto value = queue->At(cur);

@@ -28,31 +28,31 @@ class DebugCmd {
  public:
   DebugCmd(ServerFamily* owner, ConnectionContext* cntx);
 
-  void Run(CmdArgList args);
+  void Run(CmdArgList args, facade::SinkReplyBuilder* builder);
 
   static void Shutdown();
 
  private:
-  void Populate(CmdArgList args);
-  std::optional<PopulateOptions> ParsePopulateArgs(CmdArgList args);
+  void Populate(CmdArgList args, facade::SinkReplyBuilder* builder);
+  static std::optional<PopulateOptions> ParsePopulateArgs(CmdArgList args,
+                                                          facade::SinkReplyBuilder* builder);
   void PopulateRangeFiber(uint64_t from, uint64_t count, const PopulateOptions& opts);
 
-  void Reload(CmdArgList args);
-  void Replica(CmdArgList args);
+  void Reload(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Replica(CmdArgList args, facade::SinkReplyBuilder* builder);
 
-  void Exec();
-  void Inspect(std::string_view key, CmdArgList args);
-  void Watched();
-  void TxAnalysis();
-  void ObjHist();
-  void Stacktrace();
-  void Shards();
-  void LogTraffic(CmdArgList);
-  void RecvSize(std::string_view param);
+  void Exec(facade::SinkReplyBuilder* builder);
+  void Inspect(std::string_view key, CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Watched(facade::SinkReplyBuilder* builder);
+  void TxAnalysis(facade::SinkReplyBuilder* builder);
+  void ObjHist(facade::SinkReplyBuilder* builder);
+  void Stacktrace(facade::SinkReplyBuilder* builder);
+  void Shards(facade::SinkReplyBuilder* builder);
+  void LogTraffic(CmdArgList, facade::SinkReplyBuilder* builder);
+  void RecvSize(std::string_view param, facade::SinkReplyBuilder* builder);
 
   ServerFamily& sf_;
   ConnectionContext* cntx_;
-  facade::SinkReplyBuilder* builder_;
 };
 
 }  // namespace dfly

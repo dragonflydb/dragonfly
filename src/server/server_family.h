@@ -161,6 +161,8 @@ struct ReplicaOffsetInfo {
 };
 
 class ServerFamily {
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
+
  public:
   explicit ServerFamily(Service* service);
   ~ServerFamily();
@@ -169,7 +171,9 @@ class ServerFamily {
   void Register(CommandRegistry* registry);
   void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
-  void ShutdownCmd(CmdArgList args, ConnectionContext* cntx);
+  // Public because is used by DflyCmd.
+  void ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                   ConnectionContext* cntx);
 
   Service& service() {
     return service_;
@@ -187,7 +191,7 @@ class ServerFamily {
     return script_mgr_.get();
   }
 
-  void StatsMC(std::string_view section, facade::ConnectionContext* cntx);
+  void StatsMC(std::string_view section, SinkReplyBuilder* builder);
 
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   // if basename is not empty it will override dbfilename flag.
@@ -265,29 +269,40 @@ class ServerFamily {
     return shard_set->size();
   }
 
-  void Auth(CmdArgList args, ConnectionContext* cntx);
-  void Client(CmdArgList args, ConnectionContext* cntx);
-  void Config(CmdArgList args, ConnectionContext* cntx);
-  void DbSize(CmdArgList args, ConnectionContext* cntx);
-  void Debug(CmdArgList args, ConnectionContext* cntx);
-  void Dfly(CmdArgList args, ConnectionContext* cntx);
-  void Memory(CmdArgList args, ConnectionContext* cntx);
-  void FlushDb(CmdArgList args, ConnectionContext* cntx);
-  void FlushAll(CmdArgList args, ConnectionContext* cntx);
-  void Info(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(save_mu_, replicaof_mu_);
-  void Hello(CmdArgList args, ConnectionContext* cntx);
-  void LastSave(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(save_mu_);
-  void Latency(CmdArgList args, ConnectionContext* cntx);
-  void ReplicaOf(CmdArgList args, ConnectionContext* cntx);
-  void AddReplicaOf(CmdArgList args, ConnectionContext* cntx);
-  void ReplTakeOver(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void ReplConf(CmdArgList args, ConnectionContext* cntx);
-  void Role(CmdArgList args, ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Save(CmdArgList args, ConnectionContext* cntx);
-  void BgSave(CmdArgList args, ConnectionContext* cntx);
-  void Script(CmdArgList args, ConnectionContext* cntx);
-  void SlowLog(CmdArgList args, ConnectionContext* cntx);
-  void Module(CmdArgList args, ConnectionContext* cntx);
+  void Auth(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Client(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Config(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void DbSize(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Debug(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Dfly(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Memory(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void FlushDb(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
+  void FlushAll(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                ConnectionContext* cntx);
+  void Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx)
+      ABSL_LOCKS_EXCLUDED(save_mu_, replicaof_mu_);
+  void Hello(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void LastSave(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(save_mu_);
+  void Latency(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
+  void ReplicaOf(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                 ConnectionContext* cntx);
+  void AddReplicaOf(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                    ConnectionContext* cntx);
+  void ReplTakeOver(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                    ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                ConnectionContext* cntx);
+  void Role(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx)
+      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Save(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void BgSave(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Script(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void SlowLog(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
+  void Module(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
@@ -298,8 +313,8 @@ class ServerFamily {
   };
 
   // REPLICAOF implementation. See arguments above
-  void ReplicaOfInternal(CmdArgList args, ConnectionContext* cntx, ActionOnConnectionFail on_error)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                         ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Returns the number of loaded keys if successful.
   io::Result<size_t> LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys);
@@ -311,7 +326,7 @@ class ServerFamily {
   // Helper function to retrieve version(true if format is dfs rdb), and basename from args.
   // In case of an error an empty optional is returned.
   using VersionBasename = std::pair<bool, std::string_view>;
-  std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, ConnectionContext* cntx);
+  std::optional<VersionBasename> GetVersionAndBasename(CmdArgList args, SinkReplyBuilder* builder);
 
   void BgSaveFb(boost::intrusive_ptr<Transaction> trans);
 
@@ -322,7 +337,7 @@ class ServerFamily {
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;
   void StopAllClusterReplicas() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
 
-  bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password) const;
+  static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
@@ -372,8 +387,5 @@ class ServerFamily {
 std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                       facade::Connection* conn, ClientPause pause_state,
                                       std::function<bool()> is_pause_in_progress);
-
-void SlowLogGet(CmdArgList args, ConnectionContext* cntx, std::string_view sub_cmd,
-                util::ProactorPool* pp);
 
 }  // namespace dfly

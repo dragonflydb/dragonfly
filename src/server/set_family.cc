@@ -962,10 +962,9 @@ void SendNumeric(OpResult<uint32_t> result, SinkReplyBuilder* builder) {
 }
 
 struct SetReplies {
-  SetReplies(ConnectionContext* cntx)
-      : rb{static_cast<RedisReplyBuilder*>(cntx->reply_builder())},
-        script{cntx->conn_state.script_info} {
-    DCHECK(dynamic_cast<RedisReplyBuilder*>(cntx->reply_builder()));
+  SetReplies(SinkReplyBuilder* builder, bool _script)
+      : rb(static_cast<RedisReplyBuilder*>(builder)), script(_script) {
+    DCHECK(dynamic_cast<RedisReplyBuilder*>(builder));
   }
 
   template <typename T> void Send(vector<T>* sv) {
@@ -1152,7 +1151,7 @@ void SDiff(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, Connecti
 
   tx->ScheduleSingleHop(std::move(cb));
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
-  SetReplies{cntx}.Send(rsv);
+  SetReplies{builder, bool(cntx->conn_state.script_info)}.Send(rsv);
 }
 
 void SDiffStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
@@ -1216,7 +1215,7 @@ void SMembers(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
 
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    SetReplies{cntx}.Send(&result.value());
+    SetReplies{builder, bool(cntx->conn_state.script_info)}.Send(&result.value());
   } else {
     builder->SendError(result.status());
   }
@@ -1266,7 +1265,7 @@ void SInter(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, Connect
   tx->ScheduleSingleHop(std::move(cb));
   OpResult<SvArray> result = InterResultVec(result_set, tx->GetUniqueShardCnt());
   if (result) {
-    SetReplies{cntx}.Send(&*result);
+    SetReplies{builder, bool(cntx->conn_state.script_info)}.Send(&*result);
   } else {
     builder->SendError(result.status());
   }
@@ -1350,7 +1349,7 @@ void SUnion(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, Connect
   tx->ScheduleSingleHop(std::move(cb));
 
   ResultSetView unionset = UnionResultVec(result_set);
-  SetReplies{cntx}.Send(unionset);
+  SetReplies{builder, bool(cntx->conn_state.script_info)}.Send(unionset);
 }
 
 void SUnionStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {

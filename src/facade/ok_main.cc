@@ -21,19 +21,20 @@ namespace {
 
 class OkService : public ServiceInterface {
  public:
-  void DispatchCommand(ArgSlice args, ConnectionContext* cntx) final {
-    cntx->SendOk();
+  void DispatchCommand(ArgSlice args, SinkReplyBuilder* builder, ConnectionContext* cntx) final {
+    builder->SendOk();
   }
 
-  size_t DispatchManyCommands(absl::Span<ArgSlice> args_lists, ConnectionContext* cntx) final {
+  size_t DispatchManyCommands(absl::Span<ArgSlice> args_lists, SinkReplyBuilder* builder,
+                              ConnectionContext* cntx) final {
     for (auto args : args_lists)
-      DispatchCommand(args, cntx);
+      DispatchCommand(args, builder, cntx);
     return args_lists.size();
   }
 
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
-                  ConnectionContext* cntx) final {
-    cntx->SendError("");
+                  MCReplyBuilder* builder, ConnectionContext* cntx) final {
+    builder->SendError("");
   }
 
   ConnectionContext* CreateContext(util::FiberSocketBase* peer, Connection* owner) final {

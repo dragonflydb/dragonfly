@@ -121,7 +121,8 @@ void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
 
       // Must be last, as it accesses objects initialized above.
       // We can not move shard_handler because this code is called multiple times.
-      shard->StartPeriodicFiber(pb, shard_handler);
+      shard->StartPeriodicHeartbeatFiber(pb);
+      shard->StartPeriodicShardHandlerFiber(pb, shard_handler);
     }
   });
 }

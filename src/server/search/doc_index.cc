@@ -62,7 +62,7 @@ bool SerializedSearchDoc::operator>=(const SerializedSearchDoc& other) const {
 
 bool SearchParams::ShouldReturnField(std::string_view field) const {
   auto cb = [field](const auto& entry) { return entry.first == field; };
-  return !return_fields.fields || any_of(return_fields->begin(), return_fields->end(), cb);
+  return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
 string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
@@ -211,6 +211,17 @@ bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
   return base_->Matches(key, obj_code);
 }
 
+SearchFieldsList ToSV(const std::optional<OwnedSearchFieldsList>& fields) {
+  SearchFieldsList sv_fields;
+  if (fields) {
+    sv_fields.reserve(fields->size());
+    for (const auto& [fident, fname] : fields.value()) {
+      sv_fields.emplace_back(fident, fname);
+    }
+  }
+  return sv_fields;
+}
+
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo) const {
   auto& db_slice = op_args.GetDbSlice();
@@ -218,6 +229,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   if (!search_results.error.empty())
     return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
+
+  SearchFieldsList fields_to_load =
+      ToSV(params.ShouldReturnAllFields() ? params.load_fields : params.return_fields);
 
   vector<SerializedSearchDoc> out;
   out.reserve(search_results.ids.size());
@@ -235,15 +249,19 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
 
     SearchDocData doc_data;
-    if (params.return_fields.ShouldReturnAllFields()) {
+    if (params.ShouldReturnAllFields()) {
       /*
-      In this case we need to load the whole document.
+      In this case we need to load the whole document or loaded fields.
       For JSON indexes it would be {"$", <the whole document as string>}
       */
       doc_data = accessor->SerializeDocument(base_->schema);
+
+      SearchDocData loaded_fields = accessor->Serialize(base_->schema, fields_to_load);
+      doc_data.insert(std::make_move_iterator(loaded_fields.begin()),
+                      std::make_move_iterator(loaded_fields.end()));
     } else {
-      /* Load only selected fields */
-      doc_data = accessor->Serialize(base_->schema, params.return_fields.GetFields());
+      /* Load only specific fields */
+      doc_data = accessor->Serialize(base_->schema, fields_to_load);
     }
 
     auto score = search_results.scores.empty() ? monostate{} : std::move(search_results.scores[i]);
@@ -263,6 +281,9 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   if (!search_results.error.empty())
     return {};
 
+  SearchFieldsList fields_to_load =
+      GetFieldsToLoad(params.load_fields, indices_->GetSortIndiciesFields());
+
   vector<absl::flat_hash_map<string, search::SortableValue>> out;
   for (DocId doc : search_results.ids) {
     auto key = key_index_.Get(doc);
@@ -274,20 +295,37 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
     auto extracted = indices_->ExtractStoredValues(doc);
 
-    SearchDocData loaded;
-    if (params.load_fields.ShouldReturnAllFields()) {
-      // Load all fields
-      loaded = accessor->Serialize(base_->schema);
-    } else {
-      // Load only selected fields
-      loaded = accessor->Serialize(base_->schema, params.load_fields.GetFields());
-    }
+    SearchDocData loaded = accessor->Serialize(base_->schema, fields_to_load);
 
     out.emplace_back(make_move_iterator(extracted.begin()), make_move_iterator(extracted.end()));
     out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
   }
 
   return out;
+}
+
+SearchFieldsList ShardDocIndex::GetFieldsToLoad(
+    const std::optional<OwnedSearchFieldsList>& load_fields,
+    const absl::flat_hash_set<std::string_view>& skip_fields) const {
+  // identifier to short name
+  absl::flat_hash_map<std::string_view, std::string_view> unique_fields;
+  unique_fields.reserve(base_->schema.field_names.size());
+
+  for (const auto& [fname, fident] : base_->schema.field_names) {
+    if (!skip_fields.contains(fident)) {
+      unique_fields[fident] = fname;
+    }
+  }
+
+  if (load_fields) {
+    for (const auto& [fident, fname] : load_fields.value()) {
+      if (!skip_fields.contains(fident)) {
+        unique_fields[fident] = fname;
+      }
+    }
+  }
+
+  return {unique_fields.begin(), unique_fields.end()};
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {
