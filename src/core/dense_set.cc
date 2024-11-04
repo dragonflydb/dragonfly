@@ -841,11 +841,6 @@ size_t DenseSet::SizeSlow() {
 }
 
 size_t DenseSet::IteratorBase::TraverseApply(DensePtr* ptr, std::function<void(DensePtr*)> fun) {
-  if (!ptr->IsLink()) {
-    fun(ptr);
-    return 1;
-  }
-
   size_t links_traversed = 0;
   while (ptr->IsLink()) {
     DenseLinkKey* link = ptr->AsLink();
