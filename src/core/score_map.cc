@@ -167,15 +167,15 @@ bool ScoreMap::iterator::ReallocIfNeeded(float ratio, std::function<void(sds, sd
   bool reallocated = false;
   auto body = [ratio, &cb, &reallocated](auto* ptr) {
     auto* obj = ptr->GetObject();
-    auto [new_obj, realloc] = DuplicateEntryIfFragmented(obj, ratio);
-    if (realloc) {
+    auto [new_obj, duplicate] = DuplicateEntryIfFragmented(obj, ratio);
+    if (duplicate) {
       if (cb) {
         cb((sds)obj, (sds)new_obj);
       }
       sdsfree((sds)obj);
       ptr->SetObject(new_obj);
     }
-    reallocated |= realloc;
+    reallocated |= duplicate;
   };
 
   TraverseApply(curr_entry_, body);
