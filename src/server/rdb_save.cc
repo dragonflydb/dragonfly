@@ -1351,9 +1351,9 @@ void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
 
 // called from replication flow
 void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
-  auto& snapthot = GetSnapshot(shard);
-  CHECK(snapthot);
-  snapthot->FinalizeJournalStream(false);
+  auto& snapshot = GetSnapshot(shard);
+  CHECK(snapshot);
+  snapshot->FinalizeJournalStream(false);
 }
 
 void RdbSaver::Impl::CancelInShard(EngineShard* shard) {
