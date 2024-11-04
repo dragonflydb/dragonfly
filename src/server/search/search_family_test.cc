@@ -22,6 +22,27 @@ class SearchFamilyTest : public BaseFamilyTest {
 
 const auto kNoResults = IntArg(0);  // tests auto destruct single element arrays
 
+/* Asserts that response is array of two arrays. Used to test FT.PROFILE response */
+::testing::AssertionResult AssertArrayOfTwoArrays(const RespExpr& resp) {
+  if (resp.GetVec().size() != 2) {
+    return ::testing::AssertionFailure()
+           << "Expected response array length to be 2, but was " << resp.GetVec().size();
+  }
+
+  const auto& vec = resp.GetVec();
+  if (vec[0].type != RespExpr::ARRAY) {
+    return ::testing::AssertionFailure()
+           << "Expected resp[0] to be an array, but was " << vec[0].type;
+  }
+  if (vec[1].type != RespExpr::ARRAY) {
+    return ::testing::AssertionFailure()
+           << "Expected resp[1] to be an array, but was " << vec[1].type;
+  }
+  return ::testing::AssertionSuccess();
+}
+
+#define ASSERT_ARRAY_OF_TWO_ARRAYS(resp) ASSERT_PRED1(AssertArrayOfTwoArrays, resp)
+
 MATCHER_P2(DocIds, total, arg_ids, "") {
   if (arg_ids.empty()) {
     if (auto res = arg.GetInt(); !res || *res != 0) {
@@ -790,20 +811,55 @@ TEST_F(SearchFamilyTest, FtProfile) {
   Run({"ft.create", "i1", "schema", "name", "text"});
 
   auto resp = Run({"ft.profile", "i1", "search", "query", "(a | b) c d"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
 
   const auto& top_level = resp.GetVec();
-  EXPECT_EQ(top_level.size(), shard_set->size() + 1);
+  EXPECT_THAT(top_level[0], IsMapWithSize());
 
-  EXPECT_THAT(top_level[0].GetVec(), ElementsAre("took", _, "hits", _, "serialized", _));
+  const auto& profile_result = top_level[1].GetVec();
+  EXPECT_EQ(profile_result.size(), shard_set->size() + 1);
+
+  EXPECT_THAT(profile_result[0].GetVec(), ElementsAre("took", _, "hits", _, "serialized", _));
 
   for (size_t sid = 0; sid < shard_set->size(); sid++) {
-    const auto& shard_resp = top_level[sid + 1].GetVec();
+    const auto& shard_resp = profile_result[sid + 1].GetVec();
     EXPECT_THAT(shard_resp, ElementsAre("took", _, "tree", _));
 
     const auto& tree = shard_resp[3].GetVec();
     EXPECT_THAT(tree[0].GetString(), HasSubstr("Logical{n=3,o=and}"sv));
     EXPECT_EQ(tree[1].GetVec().size(), 3);
   }
+
+  // Test LIMITED throws no errors
+  resp = Run({"ft.profile", "i1", "search", "limited", "query", "(a | b) c d"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
+}
+
+TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
+  Run({"json.set", "j1", ".", R"({"id":"1"})"});
+  Run({"ft.create", "i1", "on", "json", "schema", "$.id", "as", "id", "tag"});
+
+  auto resp = Run({"ft.profile", "i1", "search", "query", "@id:[1 1]"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
+
+  EXPECT_THAT(resp.GetVec()[0], IsMapWithSize());
+
+  resp = Run({"ft.profile", "i1", "search", "query", "@{invalid13289}"});
+  EXPECT_THAT(resp, ErrArg("query syntax error"));
+}
+
+TEST_F(SearchFamilyTest, FtProfileErrorReply) {
+  Run({"ft.create", "i1", "schema", "name", "text"});
+  ;
+
+  auto resp = Run({"ft.profile", "i1", "not_search", "query", "(a | b) c d"});
+  EXPECT_THAT(resp, ErrArg("no `SEARCH` or `AGGREGATE` provided"));
+
+  resp = Run({"ft.profile", "i1", "search", "not_query", "(a | b) c d"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  resp = Run({"ft.profile", "non_existent_key", "search", "query", "(a | b) c d"});
+  EXPECT_THAT(resp, ErrArg("non_existent_key: no such index"));
 }
 
 TEST_F(SearchFamilyTest, SimpleExpiry) {
