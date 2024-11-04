@@ -7,4 +7,4 @@ redis==4.4.4
 requests>=2.32.0
 aiocsv==1.2.3
 aiofiles==22.1.0
-numpy==1.24.1
+numpy==2.1.3
