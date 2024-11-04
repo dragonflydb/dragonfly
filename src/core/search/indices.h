@@ -53,7 +53,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Pointer is valid as long as index is not mutated. Nullptr if not found
   const Container* Matching(std::string_view str) const;
 
-  // Iterate over all Machting on prefix.
+  // Iterate over all Matching on prefix.
   void MatchingPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
 
   // Returns all the terms that appear as keys in the reverse index.
