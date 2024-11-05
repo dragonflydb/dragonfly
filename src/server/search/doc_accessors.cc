@@ -38,13 +38,13 @@ string_view SdsToSafeSv(sds str) {
   return str != nullptr ? string_view{str, sdslen(str)} : ""sv;
 }
 
-search::SortableValue FieldToSortableValue(search::SchemaField::FieldType type, string_view value) {
+search::SortableValue ToSortableValue(search::SchemaField::FieldType type, string_view value) {
   if (type == search::SchemaField::NUMERIC) {
-    double value_as_double = 0;
-    if (!absl::SimpleAtod(value, &value_as_double)) {  // temporary convert to double
+    auto value_as_double = search::ParseNumericField(value);
+    if (!value_as_double) {  // temporary convert to double
       LOG(DFATAL) << "Failed to convert " << value << " to double";
     }
-    return value_as_double;
+    return value_as_double.value();
   }
   if (type == search::SchemaField::VECTOR) {
     auto [ptr, size] = search::BytesToFtVector(value);
@@ -53,28 +53,18 @@ search::SortableValue FieldToSortableValue(search::SchemaField::FieldType type, 
   return string{value};
 }
 
-search::SortableValue JsonToSortableValue(const search::SchemaField::FieldType type,
-                                          const JsonType& json) {
-  if (type == search::SchemaField::NUMERIC) {
-    return json.as_double();
-  }
-  return json.to_string();
-}
-
 search::SortableValue ExtractSortableValue(const search::Schema& schema, string_view key,
                                            string_view value) {
   auto it = schema.fields.find(key);
   if (it == schema.fields.end())
-    return FieldToSortableValue(search::SchemaField::TEXT, value);
-  return FieldToSortableValue(it->second.type, value);
+    return ToSortableValue(search::SchemaField::TEXT, value);
+  return ToSortableValue(it->second.type, value);
 }
 
 search::SortableValue ExtractSortableValueFromJson(const search::Schema& schema, string_view key,
                                                    const JsonType& json) {
-  auto it = schema.fields.find(key);
-  if (it == schema.fields.end())
-    return JsonToSortableValue(search::SchemaField::TEXT, json);
-  return JsonToSortableValue(it->second.type, json);
+  auto json_as_string = json.to_string();
+  return ExtractSortableValue(schema, key, json_as_string);
 }
 
 }  // namespace
@@ -201,7 +191,7 @@ BaseAccessor::VectorInfo JsonAccessor::GetVector(string_view active_field) const
 
   auto res = path->Evaluate(json_);
   if (res.empty())
-    return {nullptr, 0};
+    return {};
 
   size_t size = res[0].size();
   auto ptr = make_unique<float[]>(size);

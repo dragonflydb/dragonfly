@@ -46,11 +46,16 @@ std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, 
 }
 
 template <typename T>
+bool SimpleValueSortIndex<T>::Matches(DocId id, DocumentAccessor* doc, std::string_view field) {
+  return Get(id, doc, field).has_value();
+}
+
+template <typename T>
 void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_view field) {
   DCHECK_LE(id, values_.size());  // Doc ids grow at most by one
   if (id >= values_.size())
     values_.resize(id + 1);
-  values_[id] = Get(id, doc, field);
+  values_[id] = Get(id, doc, field).value();
 }
 
 template <typename T>
@@ -66,18 +71,23 @@ template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRe
 template struct SimpleValueSortIndex<double>;
 template struct SimpleValueSortIndex<PMR_NS::string>;
 
-double NumericSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
+std::optional<double> NumericSortIndex::Get(DocId id, DocumentAccessor* doc,
+                                            std::string_view field) {
   auto str = doc->GetStrings(field);
   if (str.empty())
-    return 0;
+    return 0.0;
 
-  double v;
-  if (!absl::SimpleAtod(str.front(), &v))
-    return 0;
-  return v;
+  auto value_as_double = ParseNumericField(str.front());
+  if (!value_as_double) {
+    LOG(WARNING) << "Failed to parse numeric value from field: " << field
+                 << " value: " << str.front();
+    return std::nullopt;
+  }
+  return value_as_double.value();
 }
 
-PMR_NS::string StringSortIndex::Get(DocId id, DocumentAccessor* doc, std::string_view field) {
+std::optional<PMR_NS::string> StringSortIndex::Get(DocId id, DocumentAccessor* doc,
+                                                   std::string_view field) {
   auto str = doc->GetStrings(field);
   if (str.empty())
     return "";

@@ -571,23 +571,38 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
   }
 }
 
-void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
+bool FieldIndices::Add(DocId doc, DocumentAccessor* access) {
+  for (auto& [field, index] : indices_) {
+    if (!index->Matches(doc, access, field)) {
+      return false;
+    }
+  }
+  for (auto& [field, index] : sort_indices_) {
+    if (!index->Matches(doc, access, field)) {
+      return false;
+    }
+  }
+
   for (auto& [field, index] : indices_)
     index->Add(doc, access, field);
   for (auto& [field, sort_index] : sort_indices_)
     sort_index->Add(doc, access, field);
 
   all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
+  return true;
 }
 
 void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
+  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
+  if (it == all_ids_.end() || *it != doc) {  // Document wasn't indexed
+    return;
+  }
+
   for (auto& [field, index] : indices_)
     index->Remove(doc, access, field);
   for (auto& [field, sort_index] : sort_indices_)
     sort_index->Remove(doc, access, field);
 
-  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
-  CHECK(it != all_ids_.end() && *it == doc);
   all_ids_.erase(it);
 }
 

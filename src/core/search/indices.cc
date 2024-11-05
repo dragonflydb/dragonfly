@@ -71,19 +71,21 @@ absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensiti
 NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
+bool NumericIndex::Matches(DocId id, DocumentAccessor* doc, string_view field) {
+  auto strings = doc->GetStrings(field);
+  return std::all_of(strings.begin(), strings.end(),
+                     [](const auto& str) { return ParseNumericField(str); });
+}
+
 void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   for (auto str : doc->GetStrings(field)) {
-    double num;
-    if (absl::SimpleAtod(str, &num))
-      entries_.emplace(num, id);
+    entries_.emplace(ConvertToDouble(str), id);
   }
 }
 
 void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
   for (auto str : doc->GetStrings(field)) {
-    double num;
-    if (absl::SimpleAtod(str, &num))
-      entries_.erase({num, id});
+    entries_.erase({ConvertToDouble(str), id});
   }
 }
 
@@ -102,6 +104,14 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
   sort(out.begin(), out.end());
   out.erase(unique(out.begin(), out.end()), out.end());
   return out;
+}
+
+double NumericIndex::ConvertToDouble(std::string_view value) const {
+  auto value_as_double = ParseNumericField(value);
+  if (!value_as_double) {
+    LOG(DFATAL) << "Failed to parse numeric value " << value;
+  }
+  return value_as_double.value();
 }
 
 template <typename C>
@@ -136,6 +146,11 @@ template <typename C>
 typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_view word) {
   auto* mr = entries_.get_allocator().resource();
   return &entries_.try_emplace(PMR_NS::string{word, mr}, mr, 1000 /* block size */).first->second;
+}
+
+template <typename C>
+bool BaseStringIndex<C>::Matches(DocId id, DocumentAccessor* doc, string_view field) {
+  return true;
 }
 
 template <typename C>
@@ -192,6 +207,10 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
   return {dim_, sim_};
 }
 
+bool BaseVectorIndex::Matches(DocId id, DocumentAccessor* doc, string_view field) {
+  return true;
+}
+
 FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
                                  PMR_NS::memory_resource* mr)
     : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
@@ -207,7 +226,7 @@ void FlatVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   // TODO: Let get vector write to buf itself
   auto [ptr, size] = doc->GetVector(field);
 
-  if (size == dim_)
+  if (size == dim_ && ptr)  // ptr can be null
     memcpy(&entries_[id * dim_], ptr.get(), dim_ * sizeof(float));
 }
 
@@ -300,7 +319,7 @@ HnswVectorIndex::~HnswVectorIndex() {
 
 void HnswVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   auto [ptr, size] = doc->GetVector(field);
-  if (size == dim_)
+  if (size == dim_ && ptr)  // ptr can be null
     adapter_->Add(ptr.get(), id);
 }
 

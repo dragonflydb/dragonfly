@@ -77,7 +77,7 @@ class FieldIndices {
   // Create indices based on schema and options. Both must outlive the indices
   FieldIndices(const Schema& schema, const IndicesOptions& options, PMR_NS::memory_resource* mr);
 
-  void Add(DocId doc, DocumentAccessor* access);
+  bool Add(DocId doc, DocumentAccessor* access);
   void Remove(DocId doc, DocumentAccessor* access);
 
   BaseIndex* GetIndex(std::string_view field) const;

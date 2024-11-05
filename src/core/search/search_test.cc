@@ -46,10 +46,16 @@ struct MockedDocument : public DocumentAccessor {
 
   StringList GetStrings(string_view field) const override {
     auto it = fields_.find(field);
-    return {it != fields_.end() ? string_view{it->second} : ""};
+    if (it == fields_.end()) {
+      return {};
+    }
+    return {string_view{it->second}};
   }
 
   VectorInfo GetVector(string_view field) const override {
+    auto strings = GetStrings(field);
+    if (strings.empty())
+      return {};
     return BytesToFtVector(GetStrings(field).front());
   }
 

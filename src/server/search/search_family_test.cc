@@ -1194,8 +1194,8 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
                                          IsMap("foo_total", "10", "word", "item1")));
 
   // Test JSON
-  Run({"JSON.SET", "j1", ".", R"({"word":"item1","foo":"10","text":"first key"})"});
-  Run({"JSON.SET", "j2", ".", R"({"word":"item2","foo":"20","text":"second key"})"});
+  Run({"JSON.SET", "j1", ".", R"({"word":"item1","foo":10,"text":"first key"})"});
+  Run({"JSON.SET", "j2", ".", R"({"word":"item2","foo":20,"text":"second key"})"});
 
   resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.word", "AS", "word", "TAG", "$.foo",
               "AS", "foo", "NUMERIC", "$.text", "AS", "text", "TEXT"});
@@ -1213,5 +1213,35 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
                                          IsMap("foo_total", "10", "word", "\"item1\"")));
 }
 #endif
+
+TEST_F(SearchFamilyTest, WrongFieldType) {
+  Run({"HSET", "h1", "even", "true", "value", "one"});
+  Run({"HSET", "h2", "even", "false", "value", "1"});
+
+  EXPECT_EQ(Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "value", "NUMERIC", "SORTABLE"}), "OK");
+
+  auto resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@value"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("value", "1")));
+
+  resp = Run({"FT.SEARCH", "i1", "*"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "h2", IsMap("even", "false", "value", "1")));
+
+  Run({"JSON.SET", "j1", ".", R"({"even":"true", "value":"one"})"});
+  Run({"JSON.SET", "j2", ".", R"({"even":"false", "value":1})"});
+
+  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC",
+                 "SORTABLE"}),
+            "OK");
+
+  /*
+  Temporary disable. We are not supporting aliases for the JSON documents
+
+  resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "1", "@value"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("value", "1")));
+  */
+
+  resp = Run({"FT.SEARCH", "i2", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2"));
+}
 
 }  // namespace dfly

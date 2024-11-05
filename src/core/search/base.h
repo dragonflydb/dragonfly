@@ -81,6 +81,13 @@ struct DocumentAccessor {
 // query functions. All results for all index types should be sorted.
 struct BaseIndex {
   virtual ~BaseIndex() = default;
+
+  /* Returns true if the field type in the document matches the index and, therefore, the document
+  can be added.
+  TODO: Return the data needed for the Add() function to avoid retrieving the same data twice.*/
+  virtual bool Matches(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
+
+  // Before adding the document make sure that Matches() returns true
   virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
   virtual void Remove(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
 };
@@ -90,5 +97,8 @@ struct BaseSortIndex : BaseIndex {
   virtual SortableValue Lookup(DocId doc) const = 0;
   virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
 };
+
+/* Used for converting field values to double. Returns false if the conversion fails */
+std::optional<double> ParseNumericField(std::string_view value);
 
 }  // namespace dfly::search
