@@ -121,7 +121,6 @@ void DflyCmd::ReplicaInfo::Cancel() {
       flow->cleanup();
     }
     VLOG(2) << "After flow cleanup " << shard->shard_id();
-    flow->full_sync_fb.JoinIfNeeded();
     flow->conn = nullptr;
   });
   // Wait for error handler to quit.
@@ -371,7 +370,7 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
       FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
 
-      StopFullSyncInThread(flow, shard);
+      StopFullSyncInThread(flow, &replica_ptr->cntx, shard);
       status = StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
@@ -551,7 +550,6 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 }
 
 OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
-  DCHECK(!flow->full_sync_fb.IsJoinable());
   DCHECK(shard);
   DCHECK(flow->conn);
 
@@ -569,7 +567,6 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
     // callbacks are blocked on trying to insert to channel.
     flow->TryShutdownSocket();
     flow->saver->CancelInShard(shard);  // stops writing to journal stream to channel
-    flow->full_sync_fb.JoinIfNeeded();  // finishes poping data from channel
     flow->saver.reset();
   };
 
@@ -588,18 +585,24 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   if (flow->start_partial_sync_at.has_value())
     saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
   else
-    saver->StartSnapshotInShard(true, cntx->GetCancellation(), shard);
+    saver->StartSnapshotInShard(true, cntx, shard);
 
-  flow->full_sync_fb = fb2::Fiber("full_sync", &DflyCmd::FullSyncFb, this, flow, cntx);
   return OpStatus::OK;
 }
 
-void DflyCmd::StopFullSyncInThread(FlowInfo* flow, EngineShard* shard) {
+void DflyCmd::StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(shard);
-  flow->saver->StopFullSyncInShard(shard);
+  error_code ec = flow->saver->StopFullSyncInShard(shard);
+  if (ec) {
+    cntx->ReportError(ec);
+    return;
+  }
 
-  // Wait for full sync to finish.
-  flow->full_sync_fb.JoinIfNeeded();
+  ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
+  if (ec) {
+    cntx->ReportError(ec);
+    return;
+  }
 
   // Reset cleanup and saver
   flow->cleanup = []() {};
@@ -624,23 +627,6 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
   };
 
   return OpStatus::OK;
-}
-
-void DflyCmd::FullSyncFb(FlowInfo* flow, Context* cntx) {
-  error_code ec;
-
-  if (ec = flow->saver->SaveBody(cntx, nullptr); ec) {
-    if (!flow->conn->socket()->IsOpen())
-      ec = make_error_code(errc::operation_canceled);  // we cancelled the operation.
-    cntx->ReportError(ec);
-    return;
-  }
-
-  ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
-  if (ec) {
-    cntx->ReportError(ec);
-    return;
-  }
 }
 
 auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, unsigned> {

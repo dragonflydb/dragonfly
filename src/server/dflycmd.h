@@ -39,7 +39,6 @@ struct FlowInfo {
 
   facade::Connection* conn = nullptr;
 
-  util::fb2::Fiber full_sync_fb;              // Full sync fiber.
   std::unique_ptr<RdbSaver> saver;            // Saver for full sync phase.
   std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
@@ -210,13 +209,10 @@ class DflyCmd {
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
   // Stop full sync in thread. Run state switch cleanup.
-  void StopFullSyncInThread(FlowInfo* flow, EngineShard* shard);
+  void StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
   // Start stable sync in thread. Called for each flow.
   facade::OpStatus StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
-
-  // Fiber that runs full sync for each flow.
-  void FullSyncFb(FlowInfo* flow, Context* cntx);
 
   // Get ReplicaInfo by sync_id.
   std::shared_ptr<ReplicaInfo> GetReplicaInfo(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);

@@ -439,7 +439,7 @@ class TestDflySnapshotOnShutdown:
 
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @dfly_args({**BASIC_ARGS, "dbfilename": "info-while-snapshot"})
-async def test_infomemory_while_snapshoting(df_factory, format: str):
+async def test_infomemory_while_snapshotting(df_factory, format: str):
     instance = df_factory.create(dbfilename=f"dump_{tmp_file_name()}")
     instance.start()
     async_client = instance.client()

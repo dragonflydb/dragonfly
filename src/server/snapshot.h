@@ -8,7 +8,6 @@
 #include <bitset>
 
 #include "base/pod_array.h"
-#include "core/size_tracking_channel.h"
 #include "io/file.h"
 #include "server/common.h"
 #include "server/db_slice.h"
@@ -31,35 +30,27 @@ struct Entry;
 // │     SerializeBucket      │        Both might fall back to a temporary serializer
 // └────────────┬─────────────┘        if default is used on another db index
 //              │
-//              |                      Channel is left open in journal streaming mode
+//              |                      Socket is left open in journal streaming mode
 //              ▼
 // ┌──────────────────────────┐          ┌─────────────────────────┐
 // │     SerializeEntry       │ ◄────────┤     OnJournalEntry      │
 // └─────────────┬────────────┘          └─────────────────────────┘
 //               │
-//         PushBytesToChannel        Default buffer gets flushed on iteration,
-//               │                   temporary on destruction
+//         PushBytes                  Default buffer gets flushed on iteration,
+//               │                    temporary on destruction
 //               ▼
 // ┌──────────────────────────────┐
-// │     dest->Push(buffer)       │
+// │     push_cb(buffer)       │
 // └──────────────────────────────┘
 
 // SliceSnapshot is used for iterating over a shard at a specified point-in-time
-// and submitting all values to an output channel.
+// and submitting all values to an output sink.
 // In journal streaming mode, the snapshot continues submitting changes
-// over the channel until explicitly stopped.
+// over the sink until explicitly stopped.
 class SliceSnapshot {
  public:
-  struct DbRecord {
-    uint64_t id;
-    std::string value;
-
-    size_t size() const;
-  };
-
-  using RecordChannel = SizeTrackingChannel<DbRecord, base::mpmc_bounded_queue<DbRecord>>;
-
-  SliceSnapshot(DbSlice* slice, RecordChannel* dest, CompressionMode compression_mode);
+  SliceSnapshot(DbSlice* slice, CompressionMode compression_mode,
+                std::function<void(std::string)> on_push, std::function<void()> on_snapshot_finish);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -85,7 +76,7 @@ class SliceSnapshot {
 
   // Waits for a regular, non journal snapshot to finish.
   // Called only for non-replication, backups usecases.
-  void Join() {
+  void WaitSnapshotting() {
     snapshot_fb_.JoinIfNeeded();
   }
 
@@ -114,18 +105,15 @@ class SliceSnapshot {
   // Journal listener
   void OnJournalEntry(const journal::JournalItem& item, bool unused_await_arg);
 
-  // Close dest channel if not closed yet.
-  void CloseRecordChannel();
-
-  // Push serializer's internal buffer to channel.
+  // Push serializer's internal buffer.
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
-  bool PushSerializedToChannel(bool force);
+  bool PushSerialized(bool force);
 
   // Helper function that flushes the serialized items into the RecordStream.
-  // Can block on the channel.
+  // Can block.
   using FlushState = SerializerBase::FlushState;
-  size_t FlushChannelRecord(FlushState flush_state);
+  size_t FlushSerialized(FlushState flush_state);
 
  public:
   uint64_t snapshot_version() const {
@@ -138,7 +126,6 @@ class SliceSnapshot {
 
   // Get different sizes, in bytes. All disjoint.
   size_t GetBufferCapacity() const;
-  size_t GetTotalChannelCapacity() const;
   size_t GetTempBuffersSize() const;
 
   RdbSaver::SnapshotStats GetCurrentSnapshotProgress() const;
@@ -155,9 +142,6 @@ class SliceSnapshot {
 
   DbSlice* db_slice_;
   DbTableArray db_array_;
-
-  RecordChannel* dest_;
-  std::atomic_bool closed_chan_{false};  // true if dest_->StartClosing was already called
 
   DbIndex current_db_;
 
@@ -184,6 +168,9 @@ class SliceSnapshot {
     size_t savecb_calls = 0;
     size_t keys_total = 0;
   } stats_;
+
+  std::function<void(std::string)> on_push_;
+  std::function<void()> on_snapshot_finish_;
 };
 
 }  // namespace dfly

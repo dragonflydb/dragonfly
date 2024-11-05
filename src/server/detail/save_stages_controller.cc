@@ -124,12 +124,20 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 }
 
 error_code RdbSnapshot::SaveBody() {
-  return saver_->SaveBody(&cntx_, &freq_map_);
+  return saver_->SaveBody(&cntx_);
+}
+
+error_code RdbSnapshot::WaitSnapshotInShard(EngineShard* shard) {
+  return saver_->WaitSnapshotInShard(shard);
 }
 
 size_t RdbSnapshot::GetSaveBuffersSize() {
   CHECK(saver_);
   return saver_->GetTotalBuffersSize();
+}
+
+void RdbSnapshot::FillFreqMap() {
+  saver_->FillFreqMap(&freq_map_);
 }
 
 RdbSaver::SnapshotStats RdbSnapshot::GetCurrentSnapshotProgress() const {
@@ -147,7 +155,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, cntx_.GetCancellation(), shard);
+  saver_->StartSnapshotInShard(false, &cntx_, shard);
   started_shards_.fetch_add(1, memory_order_relaxed);
 }
 
@@ -176,7 +184,12 @@ std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
 }
 
 void SaveStagesController::WaitAllSnapshots() {
-  RunStage(&SaveStagesController::SaveCb);
+  if (use_dfs_format_) {
+    shard_set->RunBlockingInParallel([&](EngineShard* shard) { WaitSnapshotInShard(shard); });
+    SaveBody(shard_set->size());
+  } else {
+    SaveBody(0);
+  }
 }
 
 SaveInfo SaveStagesController::Finalize() {
@@ -395,13 +408,22 @@ GenericError SaveStagesController::BuildFullPath() {
   return {};
 }
 
-void SaveStagesController::SaveCb(unsigned index) {
-  if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted())
+void SaveStagesController::SaveBody(unsigned index) {
+  CHECK(!use_dfs_format_ || index == shard_set->size());  // used in rdb and df summary file
+  if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted()) {
     shared_err_ = snapshot->SaveBody();
+  }
+}
+
+void SaveStagesController::WaitSnapshotInShard(EngineShard* shard) {
+  if (auto& snapshot = snapshots_[shard->shard_id()].first; snapshot && snapshot->HasStarted()) {
+    shared_err_ = snapshot->WaitSnapshotInShard(shard);
+  }
 }
 
 void SaveStagesController::CloseCb(unsigned index) {
   if (auto& snapshot = snapshots_[index].first; snapshot) {
+    snapshot->FillFreqMap();
     shared_err_ = snapshot->Close();
 
     unique_lock lk{rdb_name_map_mu_};
