@@ -76,7 +76,7 @@ class SliceSnapshot {
 
   // Waits for a regular, non journal snapshot to finish.
   // Called only for non-replication, backups usecases.
-  void WaitSnapshoting() {
+  void WaitSnapshotting() {
     snapshot_fb_.JoinIfNeeded();
   }
 

@@ -97,7 +97,7 @@ class RdbSaver {
   // Stops full-sync serialization for replication in the shard's thread.
   std::error_code StopFullSyncInShard(EngineShard* shard);
 
-  // Wait for snapshoting finish in shard thread. Called from save flows in shard thread.
+  // Wait for snapshotting finish in shard thread. Called from save flows in shard thread.
   std::error_code WaitSnapshotInShard(EngineShard* shard);
 
   // Stores auxiliary (meta) values and header_info

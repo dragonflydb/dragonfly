@@ -409,7 +409,7 @@ GenericError SaveStagesController::BuildFullPath() {
 }
 
 void SaveStagesController::SaveBody(unsigned index) {
-  CHECK(!use_dfs_format_ || index == shard_set->size());
+  CHECK(!use_dfs_format_ || index == shard_set->size());  // used in rdb and df summary file
   if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted()) {
     shared_err_ = snapshot->SaveBody();
   }

@@ -1260,7 +1260,7 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   }  // while (channel_.Pop())
 
   for (auto& ptr : shard_snapshots_) {
-    ptr->WaitSnapshoting();
+    ptr->WaitSnapshotting();
   }
   VLOG(1) << "ConsumeChannel finished " << io_error;
 
@@ -1346,7 +1346,7 @@ void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* sh
 void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
   auto& snapshot = GetSnapshot(shard);
   CHECK(snapshot);
-  snapshot->WaitSnapshoting();
+  snapshot->WaitSnapshotting();
 }
 
 // called from replication flow
