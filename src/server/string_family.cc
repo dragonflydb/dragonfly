@@ -677,7 +677,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
     rb->SendLong(GetResult(std::move(res.value())));
   } else {
     // Memcached skips if key is missing
-    DCHECK(dynamic_cast<MCReplyBuilder*>(builder));
+    DCHECK(builder->GetProtocol() == Protocol::MEMCACHE);
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
@@ -1588,7 +1588,7 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
             << CI{"SETRANGE", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
             << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
-                   ClThrottle);
+             ClThrottle);
 }
 
 }  // namespace dfly

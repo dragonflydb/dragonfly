@@ -165,10 +165,6 @@ ostream& operator<<(ostream& os, facade::CmdArgList ras) {
   return os;
 }
 
-ostream& operator<<(ostream& os, facade::Protocol p) {
-  return os << int(p);
-}
-
 ostream& operator<<(ostream& os, const facade::RespExpr& e) {
   using facade::RespExpr;
   using facade::ToSV;
@@ -209,6 +205,19 @@ ostream& operator<<(ostream& os, facade::RespSpan ras) {
     os << ras.back();
   }
   os << "]";
+
+  return os;
+}
+
+ostream& operator<<(ostream& os, facade::Protocol p) {
+  switch (p) {
+    case facade::Protocol::REDIS:
+      os << "REDIS";
+      break;
+    case facade::Protocol::MEMCACHE:
+      os << "MEMCACHE";
+      break;
+  }
 
   return os;
 }

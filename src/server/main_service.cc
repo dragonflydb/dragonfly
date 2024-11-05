@@ -1581,13 +1581,12 @@ bool RequirePrivilegedAuth() {
   return !GetFlag(FLAGS_admin_nopass);
 }
 
-facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
-                                                  facade::Connection* owner) {
+facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   auto cred = user_registry_.GetCredentials("default");
-  ConnectionContext* res = new ConnectionContext{peer, owner, std::move(cred)};
+  ConnectionContext* res = new ConnectionContext{owner, std::move(cred)};
   res->ns = &namespaces->GetOrInsert("");
 
-  if (peer->IsUDS()) {
+  if (owner->socket()->IsUDS()) {
     res->req_auth = false;
     res->skip_acl_validation = true;
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
@@ -1638,7 +1637,7 @@ void Service::Quit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                    ConnectionContext* cntx) {
   if (builder->GetProtocol() == Protocol::REDIS)
     builder->SendOk();
-  using facade::SinkReplyBuilder;
+
   builder->CloseConnection();
 
   DeactivateMonitoring(static_cast<ConnectionContext*>(cntx));

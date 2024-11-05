@@ -33,7 +33,7 @@ constexpr size_t kSanitizerOverhead = 0u;
 #endif
 #endif
 
-enum class Protocol : uint8_t { NONE = 0, MEMCACHE = 1, REDIS = 2 };
+enum class Protocol : uint8_t { MEMCACHE = 1, REDIS = 2 };
 
 using MutableSlice = std::string_view;
 using CmdArgList = absl::Span<const std::string_view>;

@@ -62,8 +62,7 @@ class Service : public facade::ServiceInterface {
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                   facade::MCReplyBuilder* builder, facade::ConnectionContext* cntx) final;
 
-  facade::ConnectionContext* CreateContext(util::FiberSocketBase* peer,
-                                           facade::Connection* owner) final;
+  facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
 
   const CommandId* FindCmd(std::string_view) const;
 

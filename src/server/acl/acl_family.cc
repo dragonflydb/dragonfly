@@ -27,6 +27,7 @@
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "io/file.h"
 #include "io/file_util.h"
@@ -102,14 +103,13 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
   auto update_cb = [&]([[maybe_unused]] size_t id, util::Connection* conn) {
     DCHECK(conn);
     auto connection = static_cast<facade::Connection*>(conn);
-    if (connection->protocol() == facade::Protocol::REDIS && !connection->IsHttp() &&
-        connection->cntx()) {
+    if (!connection->IsHttp() && connection->cntx()) {
       connection->SendAclUpdateAsync(
           facade::Connection::AclUpdateMessage{user, update_commands, update_keys, update_pub_sub});
     }
   };
 
-  if (main_listener_) {
+  if (main_listener_ && main_listener_->protocol() == facade::Protocol::REDIS) {
     main_listener_->TraverseConnections(update_cb);
   }
 }
