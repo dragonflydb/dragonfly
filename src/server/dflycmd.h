@@ -141,7 +141,8 @@ class DflyCmd {
  public:
   DflyCmd(ServerFamily* server_family);
 
-  void Run(CmdArgList args, facade::RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void Run(CmdArgList args, Transaction* tx, facade::RedisReplyBuilder* rb,
+           ConnectionContext* cntx);
 
   void OnClose(unsigned sync_id);
 
@@ -149,10 +150,10 @@ class DflyCmd {
   void Shutdown();
 
   // Create new sync session. Returns (session_id, number of flows)
-  std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(mu_);
+  std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionState* state) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Master side acces method to replication info of that connection.
-  std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionContext* cntx);
+  std::shared_ptr<ReplicaInfo> GetReplicaInfoFromConnection(ConnectionState* state);
 
   // Master-side command. Provides Replica info.
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
@@ -160,7 +161,7 @@ class DflyCmd {
   void GetReplicationMemoryStats(ReplicationMemoryStats* out) const ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
   // Sets metadata.
-  void SetDflyClientVersion(ConnectionContext* cntx, DflyVersion version);
+  void SetDflyClientVersion(ConnectionState* state, DflyVersion version);
 
   // Tries to break those flows that stuck on socket write for too long time.
   void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
@@ -185,11 +186,11 @@ class DflyCmd {
 
   // SYNC <syncid>
   // Initiate full sync.
-  void Sync(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void Sync(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb);
 
   // STARTSTABLE <syncid>
   // Switch to stable state replication.
-  void StartStable(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb);
 
   // TAKEOVER <syncid>
   // Shut this master down atomically with replica promotion.
@@ -197,11 +198,11 @@ class DflyCmd {
 
   // EXPIRE
   // Check all keys for expiry.
-  void Expire(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void Expire(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb);
 
   // REPLICAOFFSET
   // Return journal records num sent for each flow of replication.
-  void ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
+  void ReplicaOffset(CmdArgList args, RedisReplyBuilder* rb);
 
   void Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cntx);
 
