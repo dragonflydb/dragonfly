@@ -15,6 +15,7 @@ from . import dfly_args
         ("ZSET", 250_000, 100, 100),
         ("LIST", 300_000, 100, 100),
         ("STRING", 3_500_000, 1000, 1),
+        ("STREAM", 260_000, 100, 100),
     ],
 )
 async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
