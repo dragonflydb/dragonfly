@@ -584,12 +584,8 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
   string scratch;
-  do {
-    cur = db_slice.Traverse(prime_table, cur, [&](PrimeIterator it) {
-      cnt += ScanCb(op_args, it, scan_opts, &scratch, vec);
-    });
-  } while (cur && cnt < scan_opts.limit);
-
+  cur = prime_table->Traverse(
+      cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
   *cursor = cur.value();
 }

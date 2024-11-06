@@ -106,6 +106,8 @@ class RestoreStreamer : public JournalStreamer {
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
+
+  ConditionFlag bucket_ser_;
 };
 
 }  // namespace dfly

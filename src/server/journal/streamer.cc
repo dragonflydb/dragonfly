@@ -212,8 +212,8 @@ void RestoreStreamer::Run() {
   do {
     if (fiber_cancelled_)
       return;
-
-    cursor = db_slice_->Traverse(pt, cursor, [&](PrimeTable::bucket_iterator it) {
+    cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+      ConditionGuard guard(&bucket_ser_);
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
       WriteBucket(it);
@@ -301,6 +301,8 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
+
+  ConditionGuard guard(&bucket_ser_);
 
   PrimeTable* table = db_slice_->GetTables(0).first;
 

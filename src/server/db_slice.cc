@@ -481,7 +481,6 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   if (caching_mode_ && IsValid(res.it)) {
     if (!change_cb_.empty()) {
       FetchedItemsRestorer fetched_restorer(&fetched_items_);
-      util::fb2::LockGuard lk(local_mu_);
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
@@ -574,7 +573,6 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  util::fb2::LockGuard lk(local_mu_);
 
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
@@ -690,8 +688,6 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 }
 
 bool DbSlice::Del(Context cntx, Iterator it) {
-  util::fb2::LockGuard lk(local_mu_);
-
   if (!IsValid(it)) {
     return false;
   }
@@ -758,7 +754,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   PrimeTable::Cursor cursor;
   uint64_t i = 0;
   do {
-    PrimeTable::Cursor next = Traverse(pt, cursor, del_entry_cb);
+    PrimeTable::Cursor next = pt->Traverse(cursor, del_entry_cb);
     ++i;
     cursor = next;
     if (i % 100 == 0) {
@@ -815,10 +811,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
-  // We should not flush if serialization of a big value is in progress because this
-  // could lead to UB or assertion failures (while DashTable::Traverse is iterating over
-  // a logical bucket).
-  util::fb2::LockGuard lk(local_mu_);
+  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
   // clear client tracking map.
   client_tracking_map_.clear();
 
@@ -840,7 +833,6 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
-  util::fb2::LockGuard lk(local_mu_);
   uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
   auto& db = *db_arr_[db_ind];
   size_t table_before = db.expire.mem_usage();
@@ -850,7 +842,6 @@ void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
-  util::fb2::LockGuard lk(local_mu_);
   if (main_it->second.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
@@ -1078,7 +1069,6 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  util::fb2::LockGuard lk(local_mu_);
   CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
@@ -1180,7 +1170,7 @@ void DbSlice::ExpireAllIfNeeded() {
 
     ExpireTable::Cursor cursor;
     do {
-      cursor = Traverse(&db.expire, cursor, cb);
+      cursor = db.expire.Traverse(cursor, cb);
     } while (cursor);
   }
 }
@@ -1191,6 +1181,7 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
+  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
 
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
@@ -1214,7 +1205,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
-  util::fb2::LockGuard lk(local_mu_);
+  block_counter_.Wait();
   auto it = find_if(change_cb_.begin(), change_cb_.end(),
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
@@ -1375,13 +1366,11 @@ void DbSlice::CreateDb(DbIndex db_ind) {
 void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
                                  ConnectionState::ExecInfo* exec_info) {
   // Because we might insert while another fiber is preempted
-  util::fb2::LockGuard lk(local_mu_);
   db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
 }
 
 void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
   // Because we might remove while another fiber is preempted and miss a notification
-  util::fb2::LockGuard lk(local_mu_);
   for (const auto& [db_indx, key] : exec_info->watched_keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {
@@ -1557,6 +1546,7 @@ void DbSlice::OnCbFinish() {
 }
 
 void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const {
+  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
   if (change_cb_.empty())
     return;
 

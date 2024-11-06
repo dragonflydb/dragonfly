@@ -383,4 +383,55 @@ struct BorrowedInterpreter {
 
 extern size_t serialization_max_chunk_size;
 
+struct ConditionFlag {
+  util::fb2::CondVarAny cond_var;
+  bool flag = false;
+};
+
+// Helper class used to guarantee atomicity between serialization of buckets
+class ConditionGuard {
+ public:
+  explicit ConditionGuard(ConditionFlag* enclosing) : enclosing_(enclosing) {
+    util::fb2::NoOpLock noop_lk_;
+    enclosing_->cond_var.wait(noop_lk_, [this]() { return !enclosing_->flag; });
+    enclosing_->flag = true;
+  }
+
+  ~ConditionGuard() {
+    enclosing_->flag = false;
+    enclosing_->cond_var.notify_one();
+  }
+
+ private:
+  ConditionFlag* enclosing_;
+};
+
+class LocalBlockingCounter {
+ public:
+  void lock() {
+    ++mutating_;
+  }
+
+  void unlock() {
+    DCHECK(mutating_ > 0);
+    --mutating_;
+    if (mutating_ == 0) {
+      cond_var_.notify_one();
+    }
+  }
+
+  void Wait() {
+    util::fb2::NoOpLock noop_lk_;
+    cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
+  }
+
+  bool HasMutating() const {
+    return mutating_ > 0;
+  }
+
+ private:
+  util::fb2::CondVarAny cond_var_;
+  size_t mutating_ = 0;
+};
+
 }  // namespace dfly

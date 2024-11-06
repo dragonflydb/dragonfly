@@ -168,7 +168,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
         return;
 
       PrimeTable::Cursor next =
-          pt->TraverseBuckets(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
+          pt->Traverse(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
       cursor = next;
       PushSerialized(false);
 
@@ -243,6 +243,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
+  ConditionGuard guard(&bucket_ser_);
   ++stats_.savecb_calls;
 
   auto check = [&](auto v) {
@@ -371,6 +372,8 @@ bool SliceSnapshot::PushSerialized(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  ConditionGuard guard(&bucket_ser_);
+
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 
@@ -395,7 +398,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerialized.
-  std::unique_lock lk(db_slice_->GetSerializationMutex());
+  ConditionGuard guard(&bucket_ser_);
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }
