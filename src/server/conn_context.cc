@@ -4,7 +4,6 @@
 
 #include "server/conn_context.h"
 
-#include "absl/strings/match.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "facade/acl_commands_def.h"
