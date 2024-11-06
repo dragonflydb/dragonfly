@@ -72,8 +72,8 @@ NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
 bool NumericIndex::Matches(DocId id, DocumentAccessor* doc, string_view field) {
-  auto strings = doc->GetStrings(field);
-  return std::all_of(strings.begin(), strings.end(),
+  auto strings_list = doc->GetStrings(field);
+  return std::all_of(strings_list.begin(), strings_list.end(),
                      [](const auto& str) { return ParseNumericField(str); });
 }
 

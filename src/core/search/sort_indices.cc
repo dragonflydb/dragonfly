@@ -47,7 +47,9 @@ std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, 
 
 template <typename T>
 bool SimpleValueSortIndex<T>::Matches(DocId id, DocumentAccessor* doc, std::string_view field) {
-  return Get(id, doc, field).has_value();
+  auto strings_list = doc->GetStrings(field);
+  return std::all_of(strings_list.begin(), strings_list.end(),
+                     [&](const auto& str) { return Get(str); });
 }
 
 template <typename T>
@@ -55,13 +57,23 @@ void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_v
   DCHECK_LE(id, values_.size());  // Doc ids grow at most by one
   if (id >= values_.size())
     values_.resize(id + 1);
-  values_[id] = Get(id, doc, field).value();
+  values_[id] = Get(id, doc, field).value();  // TODO: handle multiple values
 }
 
 template <typename T>
 void SimpleValueSortIndex<T>::Remove(DocId id, DocumentAccessor* doc, std::string_view field) {
   DCHECK_LT(id, values_.size());
   values_[id] = T{};
+}
+
+template <typename T>
+std::optional<T> SimpleValueSortIndex<T>::Get(DocId id, DocumentAccessor* doc,
+                                              std::string_view field) {
+  auto strings_list = doc->GetStrings(field);
+  if (strings_list.empty()) {
+    return T{};
+  }
+  return Get(strings_list.front());
 }
 
 template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRes() const {
@@ -71,28 +83,12 @@ template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRe
 template struct SimpleValueSortIndex<double>;
 template struct SimpleValueSortIndex<PMR_NS::string>;
 
-std::optional<double> NumericSortIndex::Get(DocId id, DocumentAccessor* doc,
-                                            std::string_view field) {
-  auto str = doc->GetStrings(field);
-  if (str.empty())
-    return 0.0;
-
-  auto value_as_double = ParseNumericField(str.front());
-  if (!value_as_double) {
-    LOG(WARNING) << "Failed to parse numeric value from field: " << field
-                 << " value: " << str.front();
-    return std::nullopt;
-  }
-  return value_as_double.value();
+std::optional<double> NumericSortIndex::Get(std::string_view field_value) {
+  return ParseNumericField(field_value);
 }
 
-std::optional<PMR_NS::string> StringSortIndex::Get(DocId id, DocumentAccessor* doc,
-                                                   std::string_view field) {
-  auto str = doc->GetStrings(field);
-  if (str.empty())
-    return "";
-
-  return PMR_NS::string{str.front(), GetMemRes()};
+std::optional<PMR_NS::string> StringSortIndex::Get(std::string_view field_value) {
+  return PMR_NS::string{field_value, GetMemRes()};
 }
 
 }  // namespace dfly::search

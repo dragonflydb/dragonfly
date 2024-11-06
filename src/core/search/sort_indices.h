@@ -30,7 +30,8 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
  protected:
-  virtual std::optional<T> Get(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
+  std::optional<T> Get(DocId id, DocumentAccessor* doc, std::string_view field);
+  virtual std::optional<T> Get(std::string_view field_value) = 0;
 
   PMR_NS::memory_resource* GetMemRes() const;
 
@@ -41,15 +42,14 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
 struct NumericSortIndex : public SimpleValueSortIndex<double> {
   NumericSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
 
-  std::optional<double> Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  std::optional<double> Get(std::string_view field_value) override;
 };
 
 // TODO: Map tags to integers for fast sort
 struct StringSortIndex : public SimpleValueSortIndex<PMR_NS::string> {
   StringSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
 
-  std::optional<PMR_NS::string> Get(DocId id, DocumentAccessor* doc,
-                                    std::string_view field) override;
+  std::optional<PMR_NS::string> Get(std::string_view field_value) override;
 };
 
 }  // namespace dfly::search

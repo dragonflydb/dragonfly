@@ -1225,9 +1225,7 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("$.value", "1")));
 
   // Test with two fields. One is loading
-  Run({"JSON.SET", "j3",
-       "."
-       R"({"value":"two","another_value":1})"});
+  Run({"JSON.SET", "j3", ".", R"({"value":"two","another_value":1})"});
   Run({"JSON.SET", "j4", ".", R"({"value":2,"another_value":2})"});
 
   EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC"}),
@@ -1244,6 +1242,24 @@ TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
               IsUnordArrayWithSize(
                   IsMap("$.value", "1", "$.another_value", ArgType(RespExpr::NIL), "count", "1"),
                   IsMap("$.value", "2", "$.another_value", "2", "count", "1")));
+
+  // Test multiple field values
+  Run({"JSON.SET", "j5", ".", R"({"arr":[{"id":1},{"id":"two"}]})"});
+  Run({"JSON.SET", "j6", ".", R"({"arr":[{"id":1},{"id":2}]})"});
+  Run({"JSON.SET", "j7", ".", R"({"arr":[]})"});
+
+  resp = Run({"FT.CREATE", "i3", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "i3", "*"});
+  EXPECT_THAT(resp, AreDocIds("j1", "j2", "j3", "j4", "j6", "j7"));  // Only j5 fails
+
+  resp = Run({"FT.CREATE", "i4", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC",
+              "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "i4", "*"});
+  EXPECT_THAT(resp, AreDocIds("j1", "j2", "j3", "j4", "j6", "j7"));  // Only j5 fails
 }
 
 TEST_F(SearchFamilyTest, WrongFieldTypeHash) {
