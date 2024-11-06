@@ -4,6 +4,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 1
+    groups:
+      actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: "gomod"
     directories:
@@ -11,6 +16,20 @@ updates:
       - "/tools/replay"
     schedule:
       interval: "weekly"
+    open-pull-requests-limit: 1
+    #uncomment it to group dependency updates
+    #groups:
+      #go-mod:
+        #patterns:
+          #- "*"
+    ignore:
+      # Disable all updates except security updates
+      #remove an item from ignore list to get dependency updates of that kind
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
 
   - package-ecosystem: "pip"
     directories:
@@ -18,3 +37,16 @@ updates:
       - "/tools"
     schedule:
       interval: "weekly"
+    #uncomment it to group dependency updates
+    #groups:
+      #py-dep:
+        #patterns:
+          #- "*"
+    ignore:
+      # Disable all updates except security updates
+      #remove an item from ignore list to get dependency updates of that kind
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
