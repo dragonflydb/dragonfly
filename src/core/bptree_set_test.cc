@@ -470,4 +470,49 @@ void RegisterBPTreeBench() {
 
 REGISTER_MODULE_INITIALIZER(Bptree, RegisterBPTreeBench());
 
+TEST_F(BPTreeSetTest, ForceUpdate) {
+  struct Policy {
+    // Similar to how it's used in SortedMap just a little simpler.
+    using KeyT = int*;
+
+    struct KeyCompareTo {
+      int operator()(KeyT a, KeyT b) const {
+        if (*a < *b)
+          return -1;
+        if (*a > *b)
+          return 1;
+        return 0;
+      }
+    };
+  };
+
+  auto gen_vector = []() {
+    std::vector<std::unique_ptr<int>> tmp;
+    for (size_t i = 0; i < 1000; ++i) {
+      tmp.push_back(std::make_unique<int>(i));
+    }
+    return tmp;
+  };
+
+  std::vector<std::unique_ptr<int>> original = gen_vector();
+  std::vector<std::unique_ptr<int>> modified = gen_vector();
+
+  BPTree<int*, Policy> bptree;
+  for (auto& item : original) {
+    bptree.Insert(item.get());
+  }
+
+  for (auto& item : modified) {
+    bptree.ForceUpdate(item.get(), item.get());
+  }
+
+  original.clear();
+  size_t index = 0;
+  bptree.Iterate(0, 1000, [&](int* ptr) {
+    EXPECT_EQ(modified[index].get(), ptr);
+    ++index;
+    return true;
+  });
+}
+
 }  // namespace dfly

@@ -38,9 +38,7 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
 }  // namespace
 
 JournalExecutor::JournalExecutor(Service* service)
-    : service_{service},
-      reply_builder_{facade::ReplyMode::NONE},
-      conn_context_{nullptr, nullptr, &reply_builder_} {
+    : service_{service}, reply_builder_{facade::ReplyMode::NONE}, conn_context_{nullptr, nullptr} {
   conn_context_.is_replicating = true;
   conn_context_.journal_emulated = true;
   conn_context_.skip_acl_validation = true;
@@ -48,7 +46,6 @@ JournalExecutor::JournalExecutor(Service* service)
 }
 
 JournalExecutor::~JournalExecutor() {
-  conn_context_.Inject(nullptr);
 }
 
 void JournalExecutor::Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::CmdData> cmds) {

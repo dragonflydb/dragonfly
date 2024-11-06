@@ -1060,9 +1060,8 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
 // Return OK if all keys are allowed to be accessed: either declared in EVAL or
 // transaction is running in global or non-atomic mode.
 optional<ErrorReply> CheckKeysDeclared(const ConnectionState::ScriptInfo& eval_info,
-                                       const CommandId* cid, CmdArgList args, Transaction* trans) {
-  Transaction::MultiMode multi_mode = trans->GetMultiMode();
-
+                                       const CommandId* cid, CmdArgList args,
+                                       Transaction::MultiMode multi_mode) {
   // We either scheduled on all shards or re-schedule for each operation,
   // so we are not restricted to any keys.
   if (multi_mode == Transaction::GLOBAL || multi_mode == Transaction::NON_ATOMIC)
@@ -1216,16 +1215,15 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     bool shard_access = (cid->opt_mask()) & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL);
     if (shard_access && (mode != Transaction::GLOBAL && mode != Transaction::NON_ATOMIC))
       return ErrorReply("This Redis command is not allowed from script");
-  }
 
-  if (under_script && cid->IsTransactional()) {
-    auto err =
-        CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, dfly_cntx.transaction);
+    if (cid->IsTransactional()) {
+      auto err = CheckKeysDeclared(*dfly_cntx.conn_state.script_info, cid, tail_args, mode);
 
-    if (err.has_value()) {
-      VLOG(1) << "CheckKeysDeclared failed with error " << err->ToSv() << " for command "
-              << cid->name();
-      return err.value();
+      if (err.has_value()) {
+        VLOG(1) << "CheckKeysDeclared failed with error " << err->ToSv() << " for command "
+                << cid->name();
+        return err.value();
+      }
     }
   }
 
@@ -1803,13 +1801,6 @@ void Service::Unwatch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
   return builder->SendOk();
 }
 
-template <typename F> void WithReplies(CapturingReplyBuilder* crb, ConnectionContext* cntx, F&& f) {
-  SinkReplyBuilder* old_rrb = nullptr;
-  old_rrb = cntx->Inject(crb);
-  f();
-  cntx->Inject(old_rrb);
-}
-
 optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionContext* cntx,
                                                                      bool force) {
   auto& info = cntx->conn_state.script_info;
@@ -1825,9 +1816,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   tx->MultiSwitchCmd(eval_cid);
 
   CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
-  WithReplies(&crb, cntx, [&] {
-    MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, true, true);
-  });
+  MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, true, true);
 
   info->async_cmds_heap_mem = 0;
   info->async_cmds.clear();
@@ -1842,9 +1831,6 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
   DVLOG(2) << "CallFromScript " << ca.args[0];
 
   InterpreterReplier replier(ca.translator);
-  facade::SinkReplyBuilder* orig = cntx->Inject(&replier);
-  absl::Cleanup clean = [orig, cntx] { cntx->Inject(orig); };
-
   optional<ErrorReply> findcmd_err;
 
   if (ca.async) {
@@ -2364,7 +2350,8 @@ void Service::Subscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   if (cluster::IsClusterEnabled()) {
     return builder->SendError("SUBSCRIBE is not supported in cluster mode yet");
   }
-  cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args));
+  cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args),
+                           static_cast<RedisReplyBuilder*>(builder));
 }
 
 void Service::Unsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -2373,9 +2360,9 @@ void Service::Unsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
     return builder->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
   }
   if (args.size() == 0) {
-    cntx->UnsubscribeAll(true);
+    cntx->UnsubscribeAll(true, static_cast<RedisReplyBuilder*>(builder));
   } else {
-    cntx->ChangeSubscription(false, true, args);
+    cntx->ChangeSubscription(false, true, args, static_cast<RedisReplyBuilder*>(builder));
   }
 }
 
@@ -2384,7 +2371,7 @@ void Service::PSubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
   if (cluster::IsClusterEnabled()) {
     return builder->SendError("PSUBSCRIBE is not supported in cluster mode yet");
   }
-  cntx->ChangePSubscription(true, true, args);
+  cntx->ChangePSubscription(true, true, args, static_cast<RedisReplyBuilder*>(builder));
 }
 
 void Service::PUnsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -2393,9 +2380,9 @@ void Service::PUnsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* b
     return builder->SendError("PUNSUBSCRIBE is not supported in cluster mode yet");
   }
   if (args.size() == 0) {
-    cntx->PUnsubscribeAll(true);
+    cntx->PUnsubscribeAll(true, static_cast<RedisReplyBuilder*>(builder));
   } else {
-    cntx->ChangePSubscription(false, true, args);
+    cntx->ChangePSubscription(false, true, args, static_cast<RedisReplyBuilder*>(builder));
   }
 }
 
@@ -2653,12 +2640,12 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
     if (!conn_state.subscribe_info->channels.empty()) {
-      server_cntx->UnsubscribeAll(false);
+      server_cntx->UnsubscribeAll(false, nullptr);
     }
 
     if (conn_state.subscribe_info) {
       DCHECK(!conn_state.subscribe_info->patterns.empty());
-      server_cntx->PUnsubscribeAll(false);
+      server_cntx->PUnsubscribeAll(false, nullptr);
     }
 
     DCHECK(!conn_state.subscribe_info);

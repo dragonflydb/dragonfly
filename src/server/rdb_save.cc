@@ -29,6 +29,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/json/json_object.h"
+#include "core/size_tracking_channel.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -834,6 +835,20 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
   return error_code{};
 }
 
+error_code RdbSerializer::SendEofAndChecksum() {
+  VLOG(2) << "SendEof";
+  /* EOF opcode */
+  RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_EOF));
+
+  /* CRC64 checksum. It will be zero if checksum computation is disabled, the
+   * loading code skips the check in this case. */
+  uint8_t buf[8];
+  uint64_t chksum = 0;
+
+  absl::little_endian::Store64(buf, chksum);
+  return WriteRaw(buf);
+}
+
 error_code RdbSerializer::SendJournalOffset(uint64_t journal_offset) {
   VLOG(2) << "SendJournalOffset";
   RETURN_ON_ERR(WriteOpcode(RDB_OPCODE_JOURNAL_OFFSET));
@@ -1107,11 +1122,13 @@ class RdbSaver::Impl {
 
   ~Impl();
 
-  void StartSnapshotting(bool stream_journal, const Cancellation* cll, EngineShard* shard);
+  void StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard);
   void StartIncrementalSnapshotting(Context* cntx, EngineShard* shard, LSN start_lsn);
 
   void StopSnapshotting(EngineShard* shard);
+  void WaitForSnapshottingFinish(EngineShard* shard);
 
+  // used only for legacy rdb save flows.
   error_code ConsumeChannel(const Cancellation* cll);
 
   void FillFreqMap(RdbTypeFreqMap* dest) const;
@@ -1143,6 +1160,8 @@ class RdbSaver::Impl {
   }
 
  private:
+  void PushSnapshotData(Context* cntx, string record);
+  void FinalizeSnapshotWriting();
   error_code WriteRecord(io::Bytes src);
 
   unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
@@ -1152,7 +1171,8 @@ class RdbSaver::Impl {
   vector<unique_ptr<SliceSnapshot>> shard_snapshots_;
   // used for serializing non-body components in the calling fiber.
   RdbSerializer meta_serializer_;
-  SliceSnapshot::RecordChannel channel_;
+  using RecordChannel = SizeTrackingChannel<string, base::mpmc_bounded_queue<string>>;
+  std::optional<RecordChannel> channel_;
   std::optional<AlignedBuffer> aligned_buf_;
 
   // Single entry compression is compatible with redis rdb snapshot
@@ -1170,14 +1190,14 @@ RdbSaver::Impl::Impl(bool align_writes, unsigned producers_len, CompressionMode 
       shard_snapshots_(producers_len),
       meta_serializer_(CompressionMode::NONE),  // Note: I think there is not need for compression
                                                 // at all in meta serializer
-      channel_{kChannelLen, producers_len},
       compression_mode_(compression_mode) {
   if (align_writes) {
     aligned_buf_.emplace(kBufLen, sink);
     sink_ = &aligned_buf_.value();
   }
-
-  DCHECK(producers_len > 0 || channel_.IsClosing());
+  if (sm == SaveMode::RDB) {
+    channel_.emplace(kChannelLen, producers_len);
+  }
   save_mode_ = sm;
 }
 
@@ -1213,13 +1233,13 @@ error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) 
 
 error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   error_code io_error;
-  SliceSnapshot::DbRecord record;
+  string record;
 
   auto& stats = ServerState::tlocal()->stats;
-
+  DCHECK(channel_.has_value());
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
-  while (channel_.Pop(record)) {
+  while (channel_->Pop(record)) {
     if (io_error || cll->IsCancelled())
       continue;
 
@@ -1227,9 +1247,8 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       if (cll->IsCancelled())
         continue;
 
-      DVLOG(2) << "Pulled " << record.id;
       auto start = absl::GetCurrentTimeNanos();
-      io_error = WriteRecord(io::Buffer(record.value));
+      io_error = WriteRecord(io::Buffer(record));
       if (io_error) {
         break;  // from the inner TryPop loop.
       }
@@ -1237,15 +1256,15 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
       auto delta_usec = (absl::GetCurrentTimeNanos() - start) / 1'000;
       stats.rdb_save_usec += delta_usec;
       stats.rdb_save_count++;
-    } while ((channel_.TryPop(record)));
+    } while ((channel_->TryPop(record)));
   }  // while (channel_.Pop())
 
   for (auto& ptr : shard_snapshots_) {
-    ptr->Join();
+    ptr->WaitSnapshotting();
   }
   VLOG(1) << "ConsumeChannel finished " << io_error;
 
-  DCHECK(!channel_.TryPop(record));
+  DCHECK(!channel_->TryPop(record));
 
   return io_error;
 }
@@ -1278,32 +1297,70 @@ error_code RdbSaver::Impl::WriteRecord(io::Bytes src) {
   return ec;
 }
 
-void RdbSaver::Impl::StartSnapshotting(bool stream_journal, const Cancellation* cll,
-                                       EngineShard* shard) {
+void RdbSaver::Impl::PushSnapshotData(Context* cntx, string record) {
+  if (cntx->IsCancelled()) {
+    return;
+  }
+  if (channel_) {  // Rdb write to channel
+    channel_->Push(record);
+  } else {  // Write directly to socket
+    auto ec = WriteRecord(io::Buffer(record));
+    if (ec) {
+      cntx->ReportError(ec);
+    }
+  }
+}
+
+void RdbSaver::Impl::FinalizeSnapshotWriting() {
+  if (channel_) {
+    channel_->StartClosing();
+  }
+}
+
+void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard) {
   auto& s = GetSnapshot(shard);
   auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
-  s = std::make_unique<SliceSnapshot>(&db_slice, &channel_, compression_mode_);
+  auto on_snapshot_finish = std::bind(&RdbSaver::Impl::FinalizeSnapshotWriting, this);
+  auto push_cb = std::bind(&RdbSaver::Impl::PushSnapshotData, this, cntx, std::placeholders::_1);
+
+  s = std::make_unique<SliceSnapshot>(&db_slice, compression_mode_, push_cb, on_snapshot_finish);
 
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
-  s->Start(stream_journal, cll, allow_flush);
+
+  s->Start(stream_journal, cntx->GetCancellation(), allow_flush);
 }
 
 void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* shard,
                                                   LSN start_lsn) {
   auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
-  s = std::make_unique<SliceSnapshot>(&db_slice, &channel_, compression_mode_);
+  auto on_finalize_cb = std::bind(&RdbSaver::Impl::FinalizeSnapshotWriting, this);
+  auto push_cb = std::bind(&RdbSaver::Impl::PushSnapshotData, this, cntx, std::placeholders::_1);
+  s = std::make_unique<SliceSnapshot>(&db_slice, compression_mode_, push_cb, on_finalize_cb);
 
   s->StartIncremental(cntx, start_lsn);
 }
 
+// called on save flow
+void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
+  auto& snapshot = GetSnapshot(shard);
+  CHECK(snapshot);
+  snapshot->WaitSnapshotting();
+}
+
+// called from replication flow
 void RdbSaver::Impl::StopSnapshotting(EngineShard* shard) {
-  GetSnapshot(shard)->FinalizeJournalStream(false);
+  auto& snapshot = GetSnapshot(shard);
+  CHECK(snapshot);
+  snapshot->FinalizeJournalStream(false);
 }
 
 void RdbSaver::Impl::CancelInShard(EngineShard* shard) {
-  GetSnapshot(shard)->FinalizeJournalStream(true);
+  auto& snapshot = GetSnapshot(shard);
+  if (snapshot) {  // Cancel can be called before snapshotting started.
+    snapshot->FinalizeJournalStream(true);
+  }
 }
 
 // This function is called from connection thread when info command is invoked.
@@ -1314,7 +1371,8 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
 
   auto cb = [this, &channel_bytes, &serializer_bytes](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
-    channel_bytes.fetch_add(snapshot->GetTotalChannelCapacity(), memory_order_relaxed);
+    if (channel_.has_value())
+      channel_bytes.fetch_add(channel_->GetSize(), memory_order_relaxed);
     serializer_bytes.store(snapshot->GetBufferCapacity() + snapshot->GetTempBuffersSize(),
                            memory_order_relaxed);
   };
@@ -1437,17 +1495,22 @@ RdbSaver::~RdbSaver() {
   tlocal->DecommitMemory(ServerState::kAllMemory);
 }
 
-void RdbSaver::StartSnapshotInShard(bool stream_journal, const Cancellation* cll,
-                                    EngineShard* shard) {
-  impl_->StartSnapshotting(stream_journal, cll, shard);
+void RdbSaver::StartSnapshotInShard(bool stream_journal, Context* cntx, EngineShard* shard) {
+  impl_->StartSnapshotting(stream_journal, cntx, shard);
 }
 
 void RdbSaver::StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn) {
   impl_->StartIncrementalSnapshotting(cntx, shard, start_lsn);
 }
 
-void RdbSaver::StopFullSyncInShard(EngineShard* shard) {
+error_code RdbSaver::WaitSnapshotInShard(EngineShard* shard) {
+  impl_->WaitForSnapshottingFinish(shard);
+  return SaveEpilog();
+}
+
+error_code RdbSaver::StopFullSyncInShard(EngineShard* shard) {
   impl_->StopSnapshotting(shard);
+  return SaveEpilog();
 }
 
 error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
@@ -1459,16 +1522,14 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
 
   RETURN_ON_ERR(impl_->serializer()->WriteRaw(Bytes{reinterpret_cast<uint8_t*>(magic), sz}));
   RETURN_ON_ERR(SaveAux(std::move(glob_state)));
-
+  RETURN_ON_ERR(impl_->FlushSerializer());
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
+error_code RdbSaver::SaveBody(Context* cntx) {
   RETURN_ON_ERR(impl_->FlushSerializer());
 
-  if (save_mode_ == SaveMode::SUMMARY) {
-    impl_->serializer()->SendFullSyncCut();
-  } else {
+  if (save_mode_ == SaveMode::RDB) {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
     error_code io_error = impl_->ConsumeChannel(cntx->GetCancellation());
     if (io_error) {
@@ -1477,16 +1538,16 @@ error_code RdbSaver::SaveBody(Context* cntx, RdbTypeFreqMap* freq_map) {
     if (cntx->GetError()) {
       return cntx->GetError();
     }
+  } else {
+    DCHECK(save_mode_ == SaveMode::SUMMARY);
   }
 
-  RETURN_ON_ERR(SaveEpilog());
+  return SaveEpilog();
+}
 
-  if (freq_map) {
-    freq_map->clear();
-    impl_->FillFreqMap(freq_map);
-  }
-
-  return error_code{};
+void RdbSaver::FillFreqMap(RdbTypeFreqMap* freq_map) {
+  freq_map->clear();
+  impl_->FillFreqMap(freq_map);
 }
 
 error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
@@ -1523,20 +1584,7 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
 }
 
 error_code RdbSaver::SaveEpilog() {
-  uint8_t buf[8];
-  uint64_t chksum;
-
-  auto& ser = *impl_->serializer();
-
-  /* EOF opcode */
-  RETURN_ON_ERR(ser.WriteOpcode(RDB_OPCODE_EOF));
-
-  /* CRC64 checksum. It will be zero if checksum computation is disabled, the
-   * loading code skips the check in this case. */
-  chksum = 0;
-
-  absl::little_endian::Store64(buf, chksum);
-  RETURN_ON_ERR(ser.WriteRaw(buf));
+  RETURN_ON_ERR(impl_->serializer()->SendEofAndChecksum());
 
   RETURN_ON_ERR(impl_->FlushSerializer());
 

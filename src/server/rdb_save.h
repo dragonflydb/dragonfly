@@ -89,21 +89,26 @@ class RdbSaver {
 
   // Initiates the serialization in the shard's thread.
   // cll allows breaking in the middle.
-  void StartSnapshotInShard(bool stream_journal, const Cancellation* cll, EngineShard* shard);
+  void StartSnapshotInShard(bool stream_journal, Context* cntx, EngineShard* shard);
 
   // Send only the incremental snapshot since start_lsn.
   void StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn);
 
   // Stops full-sync serialization for replication in the shard's thread.
-  void StopFullSyncInShard(EngineShard* shard);
+  std::error_code StopFullSyncInShard(EngineShard* shard);
+
+  // Wait for snapshotting finish in shard thread. Called from save flows in shard thread.
+  std::error_code WaitSnapshotInShard(EngineShard* shard);
 
   // Stores auxiliary (meta) values and header_info
   std::error_code SaveHeader(const GlobalData& header_info);
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
+  // Called only for save rdb flow and save df on summary file.
+  std::error_code SaveBody(Context* cntx);
+
   // Fills freq_map with the histogram of rdb types.
-  // freq_map can optionally be null.
-  std::error_code SaveBody(Context* cntx, RdbTypeFreqMap* freq_map);
+  void FillFreqMap(RdbTypeFreqMap* freq_map);
 
   void CancelInShard(EngineShard* shard);
 
@@ -232,6 +237,7 @@ class RdbSerializer : public SerializerBase {
   std::error_code SendJournalOffset(uint64_t journal_offset);
 
   size_t GetTempBufferSize() const override;
+  std::error_code SendEofAndChecksum();
 
  private:
   // Might preempt if flush_fun_ is used

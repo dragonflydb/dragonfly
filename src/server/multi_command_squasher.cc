@@ -143,7 +143,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
 
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{cntx_, local_tx, &crb};
+  ConnectionContext local_cntx{cntx_, local_tx};
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
   }
@@ -177,10 +177,6 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
     CheckConnStateClean(local_state);
   }
-
-  // ConnectionContext deletes the reply builder upon destruction, so
-  // remove our local pointer from it.
-  local_cntx.Inject(nullptr);
 
   reverse(sinfo.replies.begin(), sinfo.replies.end());
   return OpStatus::OK;

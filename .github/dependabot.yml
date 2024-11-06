@@ -4,11 +4,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
     open-pull-requests-limit: 1
     groups:
       actions:
         patterns:
           - "*"
+
 
   - package-ecosystem: "gomod"
     directories:
@@ -16,6 +18,7 @@ updates:
       - "/tools/replay"
     schedule:
       interval: "weekly"
+
     open-pull-requests-limit: 1
     #uncomment it to group dependency updates
     #groups:
@@ -31,12 +34,15 @@ updates:
           - "version-update:semver-minor"
           - "version-update:semver-patch"
 
+
+
   - package-ecosystem: "pip"
     directories:
       - "/tests/dragonfly"
       - "/tools"
     schedule:
       interval: "weekly"
+
     #uncomment it to group dependency updates
     #groups:
       #py-dep:

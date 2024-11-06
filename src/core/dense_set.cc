@@ -840,4 +840,22 @@ size_t DenseSet::SizeSlow() {
   return size_;
 }
 
+size_t DenseSet::IteratorBase::TraverseApply(DensePtr* ptr, std::function<void(DensePtr*)> fun) {
+  size_t links_traversed = 0;
+  while (ptr->IsLink()) {
+    DenseLinkKey* link = ptr->AsLink();
+    fun(link);
+    ptr = &link->next;
+    ++links_traversed;
+  }
+
+  // The last ptr in the link always returns ptr->IsLink() = false
+  DCHECK(!ptr->IsEmpty());
+  DCHECK(ptr->IsObject());
+  fun(ptr);
+  ++links_traversed;
+
+  return links_traversed;
+}
+
 }  // namespace dfly

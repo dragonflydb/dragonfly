@@ -2856,14 +2856,11 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   facade::CapturingReplyBuilder crb{};
-  ConnectionContext cntx{nullptr, nullptr, &crb};
+  ConnectionContext cntx{nullptr, nullptr};
   cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
   cntx.ns = &namespaces.GetDefaultNamespace();
-
-  // Avoid deleting local crb
-  absl::Cleanup cntx_clean = [&cntx] { cntx.Inject(nullptr); };
 
   uint32_t consumed = 0;
   facade::RespVec resp_vec;

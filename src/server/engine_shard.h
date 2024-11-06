@@ -155,6 +155,10 @@ class EngineShard {
 
   void StopPeriodicFiber();
 
+  struct TxQueueItem {
+    std::string debug_id_info;
+  };
+
   struct TxQueueInfo {
     // Armed - those that the coordinator has armed with callbacks and wants them to run.
     // Runnable - those that could run (they own the locks) but probably can not run due
@@ -174,6 +178,9 @@ class EngineShard {
 
     // the lock fingerprint with maximum contention score.
     uint64_t max_contention_lock;
+
+    // We can use a vector to hold debug info for all items in the txqueue
+    TxQueueItem head;
   };
 
   TxQueueInfo AnalyzeTxQueue() const;
