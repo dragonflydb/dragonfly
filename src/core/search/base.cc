@@ -41,7 +41,7 @@ WrappedStrPtr::operator std::string_view() const {
 
 std::optional<double> ParseNumericField(std::string_view value) {
   double value_as_double;
-  if (absl::SimpleAtod(value, &value_as_double) || value.empty())
+  if (absl::SimpleAtod(value, &value_as_double))
     return value_as_double;
   return std::nullopt;
 }
