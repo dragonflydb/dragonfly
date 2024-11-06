@@ -811,7 +811,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
-  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
+  block_counter_.Wait();
   // clear client tracking map.
   client_tracking_map_.clear();
 
@@ -1370,7 +1370,6 @@ void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
 }
 
 void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
-  // Because we might remove while another fiber is preempted and miss a notification
   for (const auto& [db_indx, key] : exec_info->watched_keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {

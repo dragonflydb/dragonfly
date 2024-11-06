@@ -124,8 +124,11 @@ class DflyInstance:
             if threads > 1:
                 self.args["num_shards"] = threads - 1
 
-        # Add 1 byte limit for big values
-        self.args["serialization_max_chunk_size"] = 1
+        if "disable_serialization_max_chunk_size" not in self.args:
+            # Add 1 byte limit for big values
+            self.args["serialization_max_chunk_size"] = 1
+        else:
+            self.args.pop("disable_serialization_max_chunk_size")
 
     def __del__(self):
         assert self.proc == None
