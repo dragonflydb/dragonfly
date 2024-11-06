@@ -47,7 +47,7 @@ using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 class CommandId;
 class Transaction;
 class EngineShard;
-class ConnectionContext;
+class ConnectionState;
 class Interpreter;
 
 struct LockTagOptions {
@@ -358,7 +358,7 @@ template <typename Mutex> class ABSL_SCOPED_LOCKABLE SharedLock {
 // Ensures availability of an interpreter for EVAL-like commands and it's automatic release.
 // If it's part of MULTI, the preborrowed interpreter is returned, otherwise a new is acquired.
 struct BorrowedInterpreter {
-  BorrowedInterpreter(Transaction* tx, ConnectionContext* cntx);
+  BorrowedInterpreter(Transaction* tx, ConnectionState* state);
 
   ~BorrowedInterpreter();
 

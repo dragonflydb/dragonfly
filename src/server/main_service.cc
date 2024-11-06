@@ -1830,7 +1830,7 @@ void Service::Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
     return rb->SendNull();
   }
 
-  BorrowedInterpreter interpreter{tx, cntx};
+  BorrowedInterpreter interpreter{tx, &cntx->conn_state};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return builder->SendError(res.error().Format(), facade::kScriptErrType);
@@ -1844,7 +1844,7 @@ void Service::EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
                       ConnectionContext* cntx) {
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
 
-  BorrowedInterpreter interpreter{cntx->transaction, cntx};
+  BorrowedInterpreter interpreter{cntx->transaction, &cntx->conn_state};
   CallSHA(args, sha, interpreter, builder, cntx);
 }
 
@@ -2211,12 +2211,13 @@ void Service::Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
 
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
 
-  // The transaction can contain scripts, determine their presence ahead to customize logic below.
+  // The transaction can contain script load script execution, determine their presence ahead to
+  // customize logic below.
   ExecScriptUse state = DetermineScriptPresense(exec_info.body);
 
-  // We borrow a single interpreter for all the EVALs inside. Returned by MultiCleanup
+  // We borrow a single interpreter for all the EVALs/Script load inside. Returned by MultiCleanup
   if (state != ExecScriptUse::NONE) {
-    exec_info.preborrowed_interpreter = BorrowedInterpreter(tx, cntx).Release();
+    exec_info.preborrowed_interpreter = BorrowedInterpreter(tx, &cntx->conn_state).Release();
   }
 
   // Determine according multi mode, not only only flag, but based on presence of global commands

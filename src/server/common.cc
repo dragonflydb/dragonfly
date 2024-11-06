@@ -455,14 +455,14 @@ void ThreadLocalMutex::unlock() {
   }
 }
 
-BorrowedInterpreter::BorrowedInterpreter(Transaction* tx, ConnectionContext* cntx) {
+BorrowedInterpreter::BorrowedInterpreter(Transaction* tx, ConnectionState* state) {
   // Ensure squashing ignores EVAL. We can't run on a stub context, because it doesn't have our
   // preborrowed interpreter (which can't be shared on multiple threads).
-  CHECK(!cntx->conn_state.squashing_info);
+  CHECK(!state->squashing_info);
 
-  if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
+  if (auto borrowed = state->exec_info.preborrowed_interpreter; borrowed) {
     // Ensure a preborrowed interpreter is only set for an already running MULTI transaction.
-    CHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
+    CHECK_EQ(state->exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
 
     interpreter_ = borrowed;
   } else {

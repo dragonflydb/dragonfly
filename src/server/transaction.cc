@@ -399,6 +399,9 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) 
   }
 
   if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
+    // If the transaction should snap on all shards we preparte the transaction to run on all
+    // shards. If its multi transaction we also prepare it to run on all shard to make shure we dont
+    // shring the per shard data array as it still might be read by leftover callbacks.
     if (((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0) || IsActiveMulti()) {
       EnableAllShards();
     } else {

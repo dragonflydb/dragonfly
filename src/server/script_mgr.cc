@@ -155,7 +155,7 @@ void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     return rb->SendBulkString(sha);
   }
 
-  BorrowedInterpreter interpreter{tx, cntx};
+  BorrowedInterpreter interpreter{tx, &cntx->conn_state};
 
   auto res = Insert(body, interpreter);
   if (!res)
