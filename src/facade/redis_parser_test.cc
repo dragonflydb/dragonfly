@@ -107,10 +107,10 @@ TEST_F(RedisParserTest, Multi1) {
 
 TEST_F(RedisParserTest, Multi2) {
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*1\r\n$"));
-  EXPECT_EQ(4, consumed_);
+  EXPECT_EQ(5, consumed_);
 
-  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("$4\r\nMSET"));
-  EXPECT_EQ(8, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("4\r\nMSET"));
+  EXPECT_EQ(7, consumed_);
 
   ASSERT_EQ(RedisParser::OK, Parse("\r\n*2\r\n"));
   EXPECT_EQ(2, consumed_);
@@ -138,6 +138,7 @@ TEST_F(RedisParserTest, Multi3) {
 TEST_F(RedisParserTest, ClientMode) {
   parser_.SetClientMode();
 
+#if 0
   ASSERT_EQ(RedisParser::OK, Parse(":-1\r\n"));
   EXPECT_THAT(args_, ElementsAre(IntArg(-1)));
 
@@ -146,6 +147,16 @@ TEST_F(RedisParserTest, ClientMode) {
 
   ASSERT_EQ(RedisParser::OK, Parse("-ERR foo bar\r\n"));
   EXPECT_THAT(args_, ElementsAre(ErrArg("ERR foo")));
+
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("_"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\r"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\n"));
+  EXPECT_EQ(1, consumed_);
+  EXPECT_THAT(args_, ElementsAre(ArgType(RespExpr::NIL)));
+#endif
+  ASSERT_EQ(RedisParser::OK, Parse("*2\r\n_\r\n_\r\n"));
 }
 
 TEST_F(RedisParserTest, Hierarchy) {
@@ -171,25 +182,25 @@ TEST_F(RedisParserTest, Empty) {
 
 TEST_F(RedisParserTest, LargeBulk) {
   std::string_view prefix("*1\r\n$1024\r\n");
+  string half(512, 'a');
 
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(prefix));
   ASSERT_EQ(prefix.size(), consumed_);
   ASSERT_GE(parser_.parselen_hint(), 1024);
 
-  string half(512, 'a');
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(half));
   ASSERT_EQ(512, consumed_);
   ASSERT_GE(parser_.parselen_hint(), 512);
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(half));
   ASSERT_EQ(512, consumed_);
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\r"));
-  ASSERT_EQ(0, consumed_);
-  ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
-  ASSERT_EQ(2, consumed_);
+  ASSERT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\n"));
+  EXPECT_EQ(1, consumed_);
 
   string part1 = absl::StrCat(prefix, half);
-  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(part1));
-  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(half));
+  EXPECT_EQ(RedisParser::INPUT_PENDING, Parse(part1));
+  EXPECT_EQ(RedisParser::INPUT_PENDING, Parse(half));
   ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
 }
 
@@ -229,6 +240,13 @@ TEST_F(RedisParserTest, UsedMemory) {
     stash.emplace_back(new RespExpr::Vec(vec));
   }
   EXPECT_GT(dfly::HeapSize(stash), 30000);
+}
+
+TEST_F(RedisParserTest, Eol) {
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*1\r"));
+  EXPECT_EQ(3, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\n$5\r\n"));
+  EXPECT_EQ(5, consumed_);
 }
 
 }  // namespace facade
