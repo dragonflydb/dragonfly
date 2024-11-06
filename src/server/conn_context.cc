@@ -4,6 +4,7 @@
 
 #include "server/conn_context.h"
 
+#include "absl/strings/match.h"
 #include "base/logging.h"
 #include "core/heap_size.h"
 #include "facade/acl_commands_def.h"
@@ -70,6 +71,13 @@ void StoredCmd::Fill(absl::Span<std::string_view> args) {
 
 size_t StoredCmd::NumArgs() const {
   return sizes_.size();
+}
+
+std::string StoredCmd::FirstArg() const {
+  if (sizes_.size() == 0) {
+    return "";
+  }
+  return buffer_.substr(0, sizes_[0]);
 }
 
 facade::ReplyMode StoredCmd::ReplyMode() const {

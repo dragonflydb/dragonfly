@@ -399,10 +399,12 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) 
   }
 
   if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
-    if ((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
+    if (((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0) || IsActiveMulti()) {
       EnableAllShards();
-    else
+    } else {
       EnableShard(0);
+    }
+
     return OpStatus::OK;
   }
 

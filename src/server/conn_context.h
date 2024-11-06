@@ -46,6 +46,8 @@ class StoredCmd {
     Fill(absl::MakeSpan(*dest));
   }
 
+  std::string FirstArg() const;
+
   const CommandId* Cid() const;
 
   facade::ReplyMode ReplyMode() const;
