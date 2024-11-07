@@ -30,6 +30,11 @@ class QListTest : public ::testing::Test {
 
 TEST_F(QListTest, Basic) {
   EXPECT_EQ(0, ql_.Size());
+  ql_.Push("abc", QList::HEAD);
+  EXPECT_EQ(1, ql_.Size());
+
+  ql_.Push("def", QList::TAIL);
+  EXPECT_EQ(2, ql_.Size());
 }
 
 };  // namespace dfly

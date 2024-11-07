@@ -49,20 +49,26 @@ class QList {
 
   size_t MallocUsed() const;
 
+  // Peeks at the head or tail of the list. Precondition: list is not empty.
   std::string Peek(Where where) const;
+
   std::optional<std::string> Get(long index) const;
 
   void Iterate(IterateFunc cb, long start, long end) const;
 
  private:
+  bool AllowCompression() const {
+    return compress_ != 0;
+  }
+
   // Returns false if used existing head, true if new head created.
   bool PushHead(std::string_view value);
 
   // Returns false if used existing head, true if new head created.
   bool PushTail(std::string_view value);
   void InsertPlainNode(quicklistNode* old_node, std::string_view, bool after);
-  void InsertNode(quicklist* quicklist, quicklistNode* old_node, quicklistNode* new_node,
-                  bool after);
+  void InsertNode(quicklistNode* old_node, quicklistNode* new_node, bool after);
+  void Compress(quicklistNode* node);
 
   quicklistNode* head_ = nullptr;
   quicklistNode* tail_ = nullptr;
