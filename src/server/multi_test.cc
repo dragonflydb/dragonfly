@@ -1160,6 +1160,11 @@ TEST_F(MultiEvalTest, MultiAndEval) {
 
   Run({"multi"});
   Run({"script", "load", "return '5'"});
+  Run({"mset", "x1", "y1", "x2", "y2"});
+  Run({"exec"});
+
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
   Run({"eval", "return redis.call('set', 'x', 'y')", "1", "x"});
   Run({"get", "x"});
   Run({"exec"});

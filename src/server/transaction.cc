@@ -399,10 +399,7 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) 
   }
 
   if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
-    // If the transaction should snap on all shards we preparte the transaction to run on all
-    // shards. If its multi transaction we also prepare it to run on all shard to make shure we dont
-    // shring the per shard data array as it still might be read by leftover callbacks.
-    if (((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0) || IsActiveMulti()) {
+    if (((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)) {
       EnableAllShards();
     } else {
       EnableShard(0);
@@ -981,7 +978,7 @@ string Transaction::DEBUG_PrintFailState(ShardId sid) const {
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
-  shard_data_.resize(1);
+  shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
   shard_data_.front().local_mask |= ACTIVE;
 }
 
