@@ -1132,11 +1132,6 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
                << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
   }
 
-  // Replicate expiry
-  if (auto journal = owner_->journal(); journal) {
-    RecordExpiry(cntx.db_index, key);
-  }
-
   if (expired_keys_events_recording_)
     db->expired_keys_events_.emplace_back(key);
 
@@ -1148,6 +1143,11 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   const_cast<DbSlice*>(this)->PerformDeletion(Iterator(it, StringOrView::FromView(key)),
                                               ExpIterator(expire_it, StringOrView::FromView(key)),
                                               db.get());
+  // Replicate expiry
+  if (auto journal = owner_->journal(); journal) {
+    RecordExpiry(cntx.db_index, key);
+  }
+
   ++events_.expired_keys;
 
   return {PrimeIterator{}, ExpireIterator{}};

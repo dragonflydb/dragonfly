@@ -416,7 +416,7 @@ class LocalBlockingCounter {
     DCHECK(mutating_ > 0);
     --mutating_;
     if (mutating_ == 0) {
-      cond_var_.notify_one();
+      cond_var_.notify_all();
     }
   }
 
