@@ -37,8 +37,7 @@ TEST_F(QListTest, Basic) {
   auto it = ql_.GetIterator(QList::HEAD);
   ASSERT_TRUE(it.Next());  // Needed to initialize the iterator.
 
-  QList::Entry entry = it.Get();
-  EXPECT_EQ("abc", entry.view());
+  EXPECT_EQ("abc", it.Get().view());
 
   ASSERT_FALSE(it.Next());
 
@@ -47,13 +46,18 @@ TEST_F(QListTest, Basic) {
 
   it = ql_.GetIterator(QList::TAIL);
   ASSERT_TRUE(it.Next());
-  entry = it.Get();
-  EXPECT_EQ("def", entry.view());
-  ASSERT_TRUE(it.Next());
+  EXPECT_EQ("def", it.Get().view());
 
-  entry = it.Get();
-  EXPECT_EQ("abc", entry.view());
+  ASSERT_TRUE(it.Next());
+  EXPECT_EQ("abc", it.Get().view());
   ASSERT_FALSE(it.Next());
+
+  it = ql_.GetIterator(0);
+  ASSERT_TRUE(it.Next());
+  EXPECT_EQ("abc", it.Get().view());
+  it = ql_.GetIterator(-1);
+  ASSERT_TRUE(it.Next());
+  EXPECT_EQ("def", it.Get().view());
 }
 
 };  // namespace dfly

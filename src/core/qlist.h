@@ -55,11 +55,6 @@ class QList {
 
   size_t MallocUsed() const;
 
-  // Peeks at the head or tail of the list. Precondition: list is not empty.
-  std::string Peek(Where where) const;
-
-  std::optional<std::string> Get(long index) const;
-
   void Iterate(IterateFunc cb, long start, long end) const;
 
   class Iterator {
@@ -70,18 +65,25 @@ class QList {
     bool Next();
 
    private:
-    QList* owner_;
-    quicklistNode* current_;
-    unsigned char* zi_; /* points to the current element */
-    long offset_;       /* offset in current listpack */
-    uint8_t direction_;
+    QList* owner_ = nullptr;
+    quicklistNode* current_ = nullptr;
+    unsigned char* zi_ = nullptr; /* points to the current element */
+    long offset_ = 0;             /* offset in current listpack */
+    uint8_t direction_ = 1;
 
     friend class QList;
   };
 
   // Returns an iterator to tail or the head of the list.
-  // To follow the quicklist interface, the iterator is not valid until Next() is called.
+  // To mirror the quicklist interface, the iterator is not valid until Next() is called.
+  // TODO: to fix this.
   Iterator GetIterator(Where where);
+
+  // Returns an iterator at a specific index 'idx',
+  // or Invalid iterator if index is out of range.
+  // negative index - means counting from the tail.
+  // Requires calling subsequent Next() to initialize the iterator.
+  Iterator GetIterator(long idx);
 
  private:
   bool AllowCompression() const {
