@@ -229,6 +229,7 @@ void MCReplyBuilder::SendLong(long val) {
 }
 
 void MCReplyBuilder::SendError(string_view str, std::string_view type) {
+  last_error_ = str;
   SendSimpleString(absl::StrCat("SERVER_ERROR ", str));
 }
 
@@ -323,7 +324,7 @@ void RedisReplyBuilderBase::SendError(std::string_view str, std::string_view typ
       type = kSyntaxErrType;
   }
   tl_facade_stats->reply_stats.err_count[type]++;
-  // last_error_ = str;
+  last_error_ = str;
 
   if (str[0] != '-')
     WritePieces("-ERR ", str, kCRLF);

@@ -18,7 +18,7 @@ namespace facade {
 using namespace std;
 
 void CapturingReplyBuilder::SendError(std::string_view str, std::string_view type) {
-  // last_error_ = str;
+  last_error_ = str;
   SKIP_LESS(ReplyMode::ONLY_ERR);
   Capture(Error{str, type});
 }
@@ -164,7 +164,7 @@ void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
   CaptureVisitor cv{rb};
   visit(cv, std::move(pl));
   // Consumed and printed by InvokeCmd. We just send the actual error here
-  // std::ignore = rb->ConsumeLastError();
+  rb->ConsumeLastError();
 }
 
 void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {

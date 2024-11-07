@@ -1167,10 +1167,10 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
 void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
                               facade::ConnectionContext* cntx) {
-  // absl::Cleanup clear_last_error([builder]() { std::ignore = builder->ConsumeLastError(); });
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
+  absl::Cleanup clear_last_error([builder]() { builder->ConsumeLastError(); });
   ServerState& etl = *ServerState::tlocal();
 
   string cmd = absl::AsciiStrToUpper(args[0]);
@@ -1340,7 +1340,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
       return true;
     }
     builder->SendError(std::move(*err));
-    // std::ignore = builder->ConsumeLastError();
+    builder->ConsumeLastError();
     return true;  // return false only for internal error aborts
   }
 
@@ -1374,8 +1374,8 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   ReplyGuard reply_guard(cid->name(), builder, cntx);
 #endif
   uint64_t invoke_time_usec = 0;
-  // auto last_error = builder->ConsumeLastError();
-  // DCHECK(last_error.empty());
+  auto last_error = builder->ConsumeLastError();
+  DCHECK(last_error.empty());
   try {
     invoke_time_usec = cid->Invoke(tail_args, tx, builder, cntx);
   } catch (std::exception& e) {
@@ -1383,9 +1383,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
     return false;
   }
 
-  std::string reason = {};  // builder->ConsumeLastError();
-
-  if (!reason.empty()) {
+  if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }

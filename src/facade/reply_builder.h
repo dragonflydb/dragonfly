@@ -87,7 +87,7 @@ class SinkReplyBuilder {
   }
 
  public:  // High level interface
-  virtual Protocol GetProtocol() {
+  virtual Protocol GetProtocol() const {
     return Protocol::NONE;
   }
 
@@ -105,6 +105,10 @@ class SinkReplyBuilder {
   void SendError(ErrorReply error);
   virtual void SendProtocolError(std::string_view str) = 0;
 
+  std::string ConsumeLastError() {
+    return std::exchange(last_error_, {});
+  }
+
  protected:
   template <typename... Ts>
   void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
@@ -117,6 +121,7 @@ class SinkReplyBuilder {
 
  protected:
   size_t replies_recorded_ = 0;
+  std::string last_error_;
 
  private:
   io::Sink* sink_;
@@ -141,7 +146,7 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   ~MCReplyBuilder() override = default;
 
-  Protocol GetProtocol() override {
+  Protocol GetProtocol() const final {
     return Protocol::MEMCACHE;
   }
 
@@ -183,7 +188,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 
   ~RedisReplyBuilderBase() override = default;
 
-  Protocol GetProtocol() override {
+  Protocol GetProtocol() const final {
     return Protocol::REDIS;
   }
 
