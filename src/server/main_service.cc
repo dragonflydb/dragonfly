@@ -423,7 +423,9 @@ void InterpreterReplier::SendBulkString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
+void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
+  if (type == MAP)
+    len *= 2;
   explr_->OnArrayStart(len);
 
   if (len == 0) {
