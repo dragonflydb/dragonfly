@@ -74,7 +74,7 @@ class RedisParser {
  private:
   using ResultConsumed = std::pair<Result, uint32_t>;
 
-  void InitStart(uint8_t prefix_b, RespVec* res);
+  void InitStart(char prefix_b, RespVec* res);
   void StashState(RespVec* res);
 
   // Skips the first character (*).
@@ -82,7 +82,6 @@ class RedisParser {
   ResultConsumed ParseArg(Buffer str);
   ResultConsumed ConsumeBulk(Buffer str);
   ResultConsumed ParseInline(Buffer str);
-
   ResultConsumed ParseLen(Buffer str, int64_t* res);
 
   void HandleFinishArg();
@@ -98,7 +97,7 @@ class RedisParser {
   };
 
   State state_ = CMD_COMPLETE_S;
-  bool is_broken_token_ = false;  // whether the last inline string was broken in the middle.
+  bool is_broken_token_ = false;  // true, if a token (inline or bulk) is broken during the parsing.
   bool server_mode_ = true;
 
   uint32_t bulk_len_ = 0;
