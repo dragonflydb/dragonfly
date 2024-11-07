@@ -233,6 +233,8 @@ class DashTable : public detail::DashTableBase {
   // Returns: cursor that is guaranteed to be less than 2^40.
   template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb);
 
+  template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb);
+
   // Takes an iterator pointing to an entry in a dash bucket and traverses all bucket's entries by
   // calling cb(iterator) for every non-empty slot. The iteration goes over a physical bucket.
   template <typename Cb> void TraverseBucket(const_iterator it, Cb&& cb);
@@ -251,6 +253,10 @@ class DashTable : public detail::DashTableBase {
   // Seeks to the first occupied slot if exists in the bucket.
   const_bucket_iterator BucketIt(unsigned segment_id, unsigned bucket_id) const {
     return const_bucket_iterator{this, segment_id, uint8_t(bucket_id)};
+  }
+
+  bucket_iterator BucketIt(unsigned segment_id, unsigned bucket_id) {
+    return bucket_iterator{this, segment_id, uint8_t(bucket_id)};
   }
 
   iterator GetIterator(unsigned segment_id, unsigned bucket_id, unsigned slot_id) {
@@ -951,6 +957,40 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
       ++bid;
 
       if (bid >= Policy::kBucketNum)
+        return 0;  // "End of traversal" cursor.
+    }
+  } while (!fetched);
+
+  return Cursor{global_depth_, sid, bid};
+}
+
+template <typename _Key, typename _Value, typename Policy>
+template <typename Cb>
+auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor curs, Cb&& cb) -> Cursor {
+  if (curs.bucket_id() >= SegmentType::kTotalBuckets)  // sanity.
+    return 0;
+
+  uint32_t sid = curs.segment_id(global_depth_);
+  uint8_t bid = curs.bucket_id();
+
+  bool fetched = false;
+
+  // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
+  do {
+    SegmentType* s = segment_[sid];
+    assert(s);
+
+    const auto& bucket = s->GetBucket(bid);
+    if (bucket.GetBusy()) {  // call cb on bucket only if it has elements.
+      cb(BucketIt(sid, bid));
+      fetched = true;
+    }
+    sid = NextSeg(sid);
+    if (sid >= segment_.size()) {
+      sid = 0;
+      ++bid;
+
+      if (bid >= SegmentType::kTotalBuckets)
         return 0;  // "End of traversal" cursor.
     }
   } while (!fetched);

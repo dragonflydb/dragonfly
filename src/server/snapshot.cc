@@ -168,7 +168,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
         return;
 
       PrimeTable::Cursor next =
-          db_slice_->Traverse(pt, cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
+          pt->TraverseBuckets(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
       cursor = next;
       PushSerialized(false);
 
@@ -242,14 +242,13 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
   }
 }
 
-bool SliceSnapshot::BucketSaveCb(PrimeIterator it) {
+bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
   ++stats_.savecb_calls;
 
   auto check = [&](auto v) {
     if (v >= snapshot_version_) {
       // either has been already serialized or added after snapshotting started.
-      DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << ":" << it.slot_id()
-               << " at " << v;
+      DVLOG(3) << "Skipped " << it.segment_id() << ":" << it.bucket_id() << " at " << v;
       ++stats_.skipped;
       return false;
     }
