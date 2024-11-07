@@ -12,6 +12,7 @@ extern "C" {
 }
 
 namespace dfly {
+using namespace std;
 
 class QListTest : public ::testing::Test {
  protected:
@@ -33,8 +34,26 @@ TEST_F(QListTest, Basic) {
   ql_.Push("abc", QList::HEAD);
   EXPECT_EQ(1, ql_.Size());
 
+  auto it = ql_.GetIterator(QList::HEAD);
+  ASSERT_TRUE(it.Next());  // Needed to initialize the iterator.
+
+  QList::Entry entry = it.Get();
+  EXPECT_EQ("abc", entry.view());
+
+  ASSERT_FALSE(it.Next());
+
   ql_.Push("def", QList::TAIL);
   EXPECT_EQ(2, ql_.Size());
+
+  it = ql_.GetIterator(QList::TAIL);
+  ASSERT_TRUE(it.Next());
+  entry = it.Get();
+  EXPECT_EQ("def", entry.view());
+  ASSERT_TRUE(it.Next());
+
+  entry = it.Get();
+  EXPECT_EQ("abc", entry.view());
+  ASSERT_FALSE(it.Next());
 }
 
 };  // namespace dfly

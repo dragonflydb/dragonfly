@@ -60,6 +60,8 @@ namespace dfly {
 
 namespace {
 
+enum IterDir : uint8_t { FWD = 1, REV = 0 };
+
 /* This is for test suite development purposes only, 0 means disabled. */
 static size_t packed_threshold = 0;
 
@@ -183,8 +185,8 @@ bool CompressNode(quicklistNode* node) {
 
 /* Uncompress the listpack in 'node' and update encoding details.
  * Returns 1 on successful decode, 0 on failure to decode. */
-bool DecompressNode(quicklistNode* node) {
-  node->recompress = 0;
+bool DecompressNode(bool recompress, quicklistNode* node) {
+  node->recompress = int(recompress);
 
   void* decompressed = zmalloc(node->sz);
   quicklistLZF* lzf = (quicklistLZF*)node->entry;
@@ -200,9 +202,9 @@ bool DecompressNode(quicklistNode* node) {
 }
 
 /* Decompress only compressed nodes. */
-void DecompressNodeIfNeeded(quicklistNode* node) {
+void DecompressNodeIfNeeded(bool recompress, quicklistNode* node) {
   if ((node) && (node)->encoding == QUICKLIST_NODE_ENCODING_LZF) {
-    DecompressNode(node);
+    DecompressNode(recompress, node);
   }
 }
 
@@ -391,8 +393,8 @@ void QList::Compress(quicklistNode* node) {
   int depth = 0;
   int in_depth = 0;
   while (depth++ < compress_) {
-    DecompressNodeIfNeeded(forward);
-    DecompressNodeIfNeeded(reverse);
+    DecompressNodeIfNeeded(false, forward);
+    DecompressNodeIfNeeded(false, reverse);
 
     if (forward == node || reverse == node)
       in_depth = 1;
@@ -412,6 +414,89 @@ void QList::Compress(quicklistNode* node) {
   /* At this point, forward and reverse are one node beyond depth */
   CompressNode(forward);
   CompressNode(reverse);
+}
+
+auto QList::GetIterator(Where where) -> Iterator {
+  Iterator it;
+  it.owner_ = this;
+  it.zi_ = NULL;
+  if (where == HEAD) {
+    it.current_ = head_;
+    it.offset_ = 0;
+    it.direction_ = FWD;
+  } else {
+    it.current_ = tail_;
+    it.offset_ = -1;
+    it.direction_ = REV;
+  }
+
+  return it;
+}
+
+bool QList::Iterator::Next() {
+  DCHECK(current_);
+
+  unsigned char* (*nextFn)(unsigned char*, unsigned char*) = NULL;
+  int offset_update = 0;
+
+  int plain = QL_NODE_IS_PLAIN(current_);
+  if (!zi_) {
+    /* If !zi, use current index. */
+    DecompressNodeIfNeeded(true, current_);
+    if (ABSL_PREDICT_FALSE(plain))
+      zi_ = current_->entry;
+    else
+      zi_ = lpSeek(current_->entry, offset_);
+  } else if (ABSL_PREDICT_FALSE(plain)) {
+    zi_ = NULL;
+  } else {
+    /* else, use existing iterator offset and get prev/next as necessary. */
+    if (direction_ == FWD) {
+      nextFn = lpNext;
+      offset_update = 1;
+    } else {
+      DCHECK_EQ(REV, direction_);
+      nextFn = lpPrev;
+      offset_update = -1;
+    }
+    zi_ = nextFn(current_->entry, zi_);
+    offset_ += offset_update;
+  }
+
+  if (zi_)
+    return true;
+
+  // Retry again with the next node.
+  owner_->Compress(current_);
+
+  if (direction_ == FWD) {
+    /* Forward traversal, Jumping to start of next node */
+    current_ = current_->next;
+    offset_ = 0;
+  } else {
+    /* Reverse traversal, Jumping to end of previous node */
+    DCHECK_EQ(REV, direction_);
+
+    current_ = current_->prev;
+    offset_ = -1;
+  }
+
+  return current_ ? Next() : false;
+}
+
+auto QList::Iterator::Get() const -> Entry {
+  int plain = QL_NODE_IS_PLAIN(current_);
+  if (ABSL_PREDICT_FALSE(plain)) {
+    char* str = reinterpret_cast<char*>(current_->entry);
+    return Entry(str, current_->sz);
+  }
+
+  /* Populate value from existing listpack position */
+  unsigned int sz = 0;
+  long long val;
+  uint8_t* ptr = lpGetValue(zi_, &sz, &val);
+
+  return ptr ? Entry(reinterpret_cast<char*>(ptr), sz) : Entry(val);
 }
 
 }  // namespace dfly

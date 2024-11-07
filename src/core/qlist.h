@@ -18,10 +18,16 @@ class QList {
  public:
   enum Where { TAIL, HEAD };
 
+  // Provides wrapper around the references to the listpack entries.
   struct Entry {
     Entry(const char* value, size_t length) : value{value}, length{length} {
     }
     Entry(long long longval) : value{nullptr}, longval{longval} {
+    }
+
+    // Assumes value is not null.
+    std::string_view view() const {
+      return {value, length};
     }
 
     const char* value;
@@ -55,6 +61,27 @@ class QList {
   std::optional<std::string> Get(long index) const;
 
   void Iterate(IterateFunc cb, long start, long end) const;
+
+  class Iterator {
+   public:
+    Entry Get() const;
+
+    // Returns false if no more entries.
+    bool Next();
+
+   private:
+    QList* owner_;
+    quicklistNode* current_;
+    unsigned char* zi_; /* points to the current element */
+    long offset_;       /* offset in current listpack */
+    uint8_t direction_;
+
+    friend class QList;
+  };
+
+  // Returns an iterator to tail or the head of the list.
+  // To follow the quicklist interface, the iterator is not valid until Next() is called.
+  Iterator GetIterator(Where where);
 
  private:
   bool AllowCompression() const {
