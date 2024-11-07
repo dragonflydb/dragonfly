@@ -265,14 +265,6 @@ size_t QList::MallocUsed() const {
   return res + count_ * 16;  // we account for each member 16 bytes.
 }
 
-string QList::Peek(Where where) const {
-  return {};
-}
-
-optional<string> QList::Get(long index) const {
-  return nullopt;
-}
-
 void QList::Iterate(IterateFunc cb, long start, long end) const {
 }
 
@@ -433,11 +425,61 @@ auto QList::GetIterator(Where where) -> Iterator {
   return it;
 }
 
-bool QList::Iterator::Next() {
-  DCHECK(current_);
+auto QList::GetIterator(long idx) -> Iterator {
+  quicklistNode* n;
+  unsigned long long accum = 0;
+  unsigned long long index;
+  int forward = idx < 0 ? 0 : 1; /* < 0 -> reverse, 0+ -> forward */
 
-  unsigned char* (*nextFn)(unsigned char*, unsigned char*) = NULL;
-  int offset_update = 0;
+  index = forward ? idx : (-idx) - 1;
+  if (index >= count_)
+    return {};
+
+  /* Seek in the other direction if that way is shorter. */
+  int seek_forward = forward;
+  unsigned long long seek_index = index;
+  if (index > (count_ - 1) / 2) {
+    seek_forward = !forward;
+    seek_index = count_ - 1 - index;
+  }
+
+  n = seek_forward ? head_ : tail_;
+  while (ABSL_PREDICT_TRUE(n)) {
+    if ((accum + n->count) > seek_index) {
+      break;
+    } else {
+      accum += n->count;
+      n = seek_forward ? n->next : n->prev;
+    }
+  }
+
+  if (!n)
+    return {};
+
+  /* Fix accum so it looks like we seeked in the other direction. */
+  if (seek_forward != forward)
+    accum = count_ - n->count - accum;
+
+  Iterator iter;
+  iter.owner_ = this;
+  iter.direction_ = forward ? FWD : REV;
+  iter.current_ = n;
+
+  if (forward) {
+    /* forward = normal head-to-tail offset. */
+    iter.offset_ = index - accum;
+  } else {
+    /* reverse = need negative offset for tail-to-head, so undo
+     * the result of the original index = (-idx) - 1 above. */
+    iter.offset_ = (-index) - 1 + accum;
+  }
+
+  return iter;
+}
+
+bool QList::Iterator::Next() {
+  if (!current_)
+    return false;
 
   int plain = QL_NODE_IS_PLAIN(current_);
   if (!zi_) {
@@ -450,6 +492,9 @@ bool QList::Iterator::Next() {
   } else if (ABSL_PREDICT_FALSE(plain)) {
     zi_ = NULL;
   } else {
+    unsigned char* (*nextFn)(unsigned char*, unsigned char*) = NULL;
+    int offset_update = 0;
+
     /* else, use existing iterator offset and get prev/next as necessary. */
     if (direction_ == FWD) {
       nextFn = lpNext;
@@ -490,6 +535,8 @@ auto QList::Iterator::Get() const -> Entry {
     char* str = reinterpret_cast<char*>(current_->entry);
     return Entry(str, current_->sz);
   }
+
+  DCHECK(zi_);
 
   /* Populate value from existing listpack position */
   unsigned int sz = 0;
