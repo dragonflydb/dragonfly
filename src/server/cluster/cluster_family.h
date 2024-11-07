@@ -44,6 +44,8 @@ class ClusterFamily {
     return id_;
   }
 
+  void BreakStalledFlowsInShard();
+
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 

@@ -90,9 +90,19 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     return cntx_.GetError();
   }
 
+  auto GetLastWriteTime() const {
+    return streamer_.GetLastWriteTime();
+  }
+
  private:
   RestoreStreamer streamer_;
 };
+
+int64_t OutgoingMigration::GetShardLastWriteTime() const {
+  const auto* shard = EngineShard::tlocal();
+  CHECK(shard);
+  return slot_migrations_[shard->shard_id()]->GetLastWriteTime();
+}
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
     : ProtocolClient(info.node_info.ip, info.node_info.port),

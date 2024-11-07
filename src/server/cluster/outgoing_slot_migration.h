@@ -56,6 +56,8 @@ class OutgoingMigration : private ProtocolClient {
     return last_error_.Format();
   }
 
+  int64_t GetShardLastWriteTime() const;
+
   size_t GetKeyCount() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
   static constexpr long kInvalidAttempt = -1;

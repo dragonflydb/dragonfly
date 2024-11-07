@@ -90,6 +90,10 @@ class RestoreStreamer : public JournalStreamer {
     return snapshot_finished_;
   }
 
+  int64_t GetLastWriteTime() const {
+    return last_write_time_ns_;
+  }
+
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
@@ -106,6 +110,7 @@ class RestoreStreamer : public JournalStreamer {
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
+  int64_t last_write_time_ns_ = -1;  // last write call.
 };
 
 }  // namespace dfly

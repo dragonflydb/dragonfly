@@ -348,6 +348,7 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const Pr
   // TODO: From DumpObject to till Write we tripple copy the PrimeValue. It's very inefficient and
   // will burn CPU for large values.
   Write(restore_cmd_sink.str());
+  last_write_time_ns_ = absl::GetCurrentTimeNanos();
 }
 
 }  // namespace dfly
