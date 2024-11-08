@@ -42,7 +42,10 @@ class QList {
 
   QList();
   QList(int fill, int compress);
+  QList(const QList&) = delete;
   ~QList();
+
+  QList& operator=(const QList&) = delete;
 
   size_t Size() const {
     return count_;
@@ -50,10 +53,13 @@ class QList {
 
   void Push(std::string_view value, Where where);
   void AppendListpack(unsigned char* zl);
-  void AppendPlain(unsigned char* zl);
+  void AppendPlain(unsigned char* zl, size_t sz);
 
   // Returns true if pivot found and elem inserted, false otherwise.
   bool Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
+
+  // Returns true if item was replaced, false if index is out of range.
+  bool Replace(long index, std::string_view elem);
 
   size_t MallocUsed() const;
 
@@ -104,9 +110,14 @@ class QList {
   void InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
   void InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertOpt insert_opt);
   void Insert(Iterator it, std::string_view elem, InsertOpt opt);
+  void Replace(Iterator it, std::string_view elem);
 
   void Compress(quicklistNode* node);
-  void MergeNodes(quicklistNode* node);
+
+  quicklistNode* MergeNodes(quicklistNode* node);
+  quicklistNode* ListpackMerge(quicklistNode* a, quicklistNode* b);
+
+  void DelNode(quicklistNode* node);
 
   quicklistNode* head_ = nullptr;
   quicklistNode* tail_ = nullptr;

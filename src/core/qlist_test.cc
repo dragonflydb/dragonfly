@@ -30,9 +30,22 @@ class QListTest : public ::testing::Test {
     init_zmalloc_threadlocal(tlh);
   }
 
+  vector<string> ToItems() const;
+
   MiMemoryResource mr_;
   QList ql_;
 };
+
+vector<string> QListTest::ToItems() const {
+  vector<string> res;
+  auto cb = [&](const QList::Entry& e) {
+    res.push_back(e.value ? string(e.view()) : to_string(e.longval));
+    return true;
+  };
+
+  ql_.Iterate(cb, 0, ql_.Size());
+  return res;
+}
 
 TEST_F(QListTest, Basic) {
   EXPECT_EQ(0, ql_.Size());
@@ -64,13 +77,7 @@ TEST_F(QListTest, Basic) {
   ASSERT_TRUE(it.Next());
   EXPECT_EQ("def", it.Get().view());
 
-  vector<string> items;
-  ql_.Iterate(
-      [&](const QList::Entry& e) {
-        items.push_back(string(e.view()));
-        return true;
-      },
-      0, 2);
+  vector<string> items = ToItems();
 
   EXPECT_THAT(items, ElementsAre("abc", "def"));
 }
@@ -81,6 +88,17 @@ TEST_F(QListTest, ListPack) {
   uint8_t* lp2 = lpAppend(lpNew(0), (uint8_t*)sv.data(), sv.size());
   ASSERT_EQ(lpBytes(lp1), lpBytes(lp2));
   ASSERT_EQ(0, memcmp(lp1, lp2, lpBytes(lp1)));
+}
+
+TEST_F(QListTest, Insert) {
+  EXPECT_FALSE(ql_.Insert("abc", "def", QList::BEFORE));
+  ql_.Push("abc", QList::HEAD);
+  EXPECT_TRUE(ql_.Insert("abc", "def", QList::BEFORE));
+  auto items = ToItems();
+  EXPECT_THAT(items, ElementsAre("def", "abc"));
+  EXPECT_TRUE(ql_.Insert("abc", "123456", QList::AFTER));
+  items = ToItems();
+  EXPECT_THAT(items, ElementsAre("def", "abc", "123456"));
 }
 
 };  // namespace dfly

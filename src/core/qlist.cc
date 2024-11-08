@@ -111,6 +111,19 @@ bool NodeAllowInsert(const quicklistNode* node, const int fill, const size_t sz)
   return !quicklistNodeExceedsLimit(fill, new_sz, node->count + 1);
 }
 
+bool NodeAllowMerge(const quicklistNode* a, const quicklistNode* b, const int fill) {
+  if (!a || !b)
+    return false;
+
+  if (ABSL_PREDICT_FALSE(QL_NODE_IS_PLAIN(a) || QL_NODE_IS_PLAIN(b)))
+    return false;
+
+  /* approximate merged listpack size (- 7 to remove one listpack
+   * header/trailer, see LP_HDR_SIZE and LP_EOF) */
+  unsigned int merge_sz = a->sz + b->sz - 7;
+  return quicklistNodeExceedsLimit(fill, merge_sz, a->count + b->count);
+}
+
 quicklistNode* CreateNode() {
   quicklistNode* node = (quicklistNode*)zmalloc(sizeof(*node));
   node->entry = NULL;
@@ -243,8 +256,33 @@ bool ElemCompare(const QList::Entry& entry, string_view elem) {
 }
 
 quicklistNode* SplitNode(quicklistNode* node, int offset, bool after) {
-  // TODO: implement this.
-  return nullptr;
+  size_t zl_sz = node->sz;
+
+  quicklistNode* new_node = CreateNode();
+  new_node->entry = (uint8_t*)zmalloc(zl_sz);
+
+  /* Copy original listpack so we can split it */
+  memcpy(new_node->entry, node->entry, zl_sz);
+
+  /* Need positive offset for calculating extent below. */
+  if (offset < 0)
+    offset = node->count + offset;
+
+  /* Ranges to be trimmed: -1 here means "continue deleting until the list ends" */
+  int orig_start = after ? offset + 1 : 0;
+  int orig_extent = after ? -1 : offset;
+  int new_start = after ? 0 : offset;
+  int new_extent = after ? offset + 1 : -1;
+
+  node->entry = lpDeleteRange(node->entry, orig_start, orig_extent);
+  node->count = lpLength(node->entry);
+  NodeUpdateSz(node);
+
+  new_node->entry = lpDeleteRange(new_node->entry, new_start, new_extent);
+  new_node->count = lpLength(new_node->entry);
+  NodeUpdateSz(new_node);
+
+  return new_node;
 }
 
 }  // namespace
@@ -299,7 +337,16 @@ void QList::AppendListpack(unsigned char* zl) {
   count_ += node->count;
 }
 
-void QList::AppendPlain(unsigned char* zl) {
+void QList::AppendPlain(unsigned char* data, size_t sz) {
+  quicklistNode* node = CreateNode();
+
+  node->entry = data;
+  node->count = 1;
+  node->sz = sz;
+  node->container = QUICKLIST_NODE_CONTAINER_PLAIN;
+
+  InsertNode(tail_, node, AFTER);
+  ++count_;
 }
 
 bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt) {
@@ -312,6 +359,15 @@ bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt)
     }
   }
 
+  return false;
+}
+
+bool QList::Replace(long index, std::string_view elem) {
+  Iterator it = GetIterator(index);
+  if (it.Next()) {
+    Replace(it, elem);
+    return true;
+  }
   return false;
 }
 
@@ -542,6 +598,10 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
   count_++;
 }
 
+void QList::Replace(Iterator it, std::string_view elem) {
+  // TODO
+}
+
 /* Force 'quicklist' to meet compression guidelines set by compress depth.
  * The only way to guarantee interior nodes get compressed is to iterate
  * to our "interior" compress depth then compress the next node we find.
@@ -589,8 +649,125 @@ void QList::Compress(quicklistNode* node) {
   CompressNode(reverse);
 }
 
-void QList::MergeNodes(quicklistNode* node) {
-  // TODO: implement this.
+/* Attempt to merge listpacks within two nodes on either side of 'center'.
+ *
+ * We attempt to merge:
+ *   - (center->prev->prev, center->prev)
+ *   - (center->next, center->next->next)
+ *   - (center->prev, center)
+ *   - (center, center->next)
+ *
+ * Returns the new 'center' after merging.
+ */
+quicklistNode* QList::MergeNodes(quicklistNode* center) {
+  quicklistNode *prev = NULL, *prev_prev = NULL, *next = NULL;
+  quicklistNode *next_next = NULL, *target = NULL;
+
+  if (center->prev) {
+    prev = center->prev;
+    if (center->prev->prev)
+      prev_prev = center->prev->prev;
+  }
+
+  if (center->next) {
+    next = center->next;
+    if (center->next->next)
+      next_next = center->next->next;
+  }
+
+  /* Try to merge prev_prev and prev */
+  if (NodeAllowMerge(prev, prev_prev, fill_)) {
+    ListpackMerge(prev_prev, prev);
+    prev_prev = prev = NULL; /* they could have moved, invalidate them. */
+  }
+
+  /* Try to merge next and next_next */
+  if (NodeAllowMerge(next, next_next, fill_)) {
+    ListpackMerge(next, next_next);
+    next = next_next = NULL; /* they could have moved, invalidate them. */
+  }
+
+  /* Try to merge center node and previous node */
+  if (NodeAllowMerge(center, center->prev, fill_)) {
+    target = ListpackMerge(center->prev, center);
+    center = NULL; /* center could have been deleted, invalidate it. */
+  } else {
+    /* else, we didn't merge here, but target needs to be valid below. */
+    target = center;
+  }
+
+  /* Use result of center merge (or original) to merge with next node. */
+  if (NodeAllowMerge(target, target->next, fill_)) {
+    target = ListpackMerge(target, target->next);
+  }
+  return target;
+}
+
+/* Given two nodes, try to merge their listpacks.
+ *
+ * This helps us not have a quicklist with 3 element listpacks if
+ * our fill factor can handle much higher levels.
+ *
+ * Note: 'a' must be to the LEFT of 'b'.
+ *
+ * After calling this function, both 'a' and 'b' should be considered
+ * unusable.  The return value from this function must be used
+ * instead of re-using any of the quicklistNode input arguments.
+ *
+ * Returns the input node picked to merge against or NULL if
+ * merging was not possible. */
+quicklistNode* QList::ListpackMerge(quicklistNode* a, quicklistNode* b) {
+  DecompressNodeIfNeeded(false, a);
+  DecompressNodeIfNeeded(false, b);
+  if ((lpMerge(&a->entry, &b->entry))) {
+    /* We merged listpacks! Now remove the unused quicklistNode. */
+    quicklistNode *keep = NULL, *nokeep = NULL;
+    if (!a->entry) {
+      nokeep = a;
+      keep = b;
+    } else if (!b->entry) {
+      nokeep = b;
+      keep = a;
+    }
+    keep->count = lpLength(keep->entry);
+    NodeUpdateSz(keep);
+    keep->recompress = 0; /* Prevent 'keep' from being recompressed if
+                           * it becomes head or tail after merging. */
+
+    nokeep->count = 0;
+    DelNode(nokeep);
+    quicklistCompress(keep);
+    return keep;
+  } else {
+    /* else, the merge returned NULL and nothing changed. */
+    return NULL;
+  }
+}
+
+void QList::DelNode(quicklistNode* node) {
+  if (node->next)
+    node->next->prev = node->prev;
+  if (node->prev)
+    node->prev->next = node->next;
+
+  if (node == tail_) {
+    tail_ = node->prev;
+  }
+
+  if (node == head_) {
+    head_ = node->next;
+  }
+
+  /* Update len first, so in Compress we know exactly len */
+  len_--;
+  count_ -= node->count;
+
+  /* If we deleted a node within our compress depth, we
+   * now have compressed nodes needing to be decompressed. */
+  Compress(NULL);
+
+  zfree(node->entry);
+  zfree(node);
 }
 
 auto QList::GetIterator(Where where) const -> Iterator {
