@@ -983,19 +983,17 @@ void SearchFamily::Register(CommandRegistry* registry) {
   const uint32_t kReadOnlyMask =
       CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL;
 
-  registry->StartFamily();
-  *registry << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtCreate)
-            << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
-            << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
-                   FtDropIndex)
-            << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtInfo)
+  registry->StartFamily(acl::FT_SEARCH);
+  *registry << CI{"FT.CREATE", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0}.HFUNC(FtCreate)
+            << CI{"FT.ALTER", CO::WRITE | CO::GLOBAL_TRANS, -3, 0, 0}.HFUNC(FtAlter)
+            << CI{"FT.DROPINDEX", CO::WRITE | CO::GLOBAL_TRANS, -2, 0, 0}.HFUNC(FtDropIndex)
+            << CI{"FT.INFO", kReadOnlyMask, 2, 0, 0}.HFUNC(FtInfo)
             // Underscore same as in RediSearch because it's "temporary" (long time already)
-            << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
-            << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
-            << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
-            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
-            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals);
+            << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0}.HFUNC(FtList)
+            << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0}.HFUNC(FtSearch)
+            << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0}.HFUNC(FtAggregate)
+            << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0}.HFUNC(FtProfile)
+            << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0}.HFUNC(FtTagVals);
 }
 
 }  // namespace dfly

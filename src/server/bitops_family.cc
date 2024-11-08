@@ -1360,27 +1360,16 @@ OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, 
 
 }  // namespace
 
-namespace acl {
-constexpr uint32_t kBitPos = READ | BITMAP | SLOW;
-constexpr uint32_t kBitCount = READ | BITMAP | SLOW;
-constexpr uint32_t kBitField = WRITE | BITMAP | SLOW;
-constexpr uint32_t kBitFieldRo = READ | BITMAP | FAST;
-constexpr uint32_t kBitOp = WRITE | BITMAP | SLOW;
-constexpr uint32_t kGetBit = READ | BITMAP | FAST;
-constexpr uint32_t kSetBit = WRITE | BITMAP | SLOW;
-}  // namespace acl
-
 void BitOpsFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
-  registry->StartFamily();
-  *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1, acl::kBitPos}.SetHandler(&BitPos)
-            << CI{"BITCOUNT", CO::READONLY, -2, 1, 1, acl::kBitCount}.SetHandler(&BitCount)
-            << CI{"BITFIELD", CO::WRITE, -3, 1, 1, acl::kBitField}.SetHandler(&BitField)
-            << CI{"BITFIELD_RO", CO::READONLY, -5, 1, 1, acl::kBitFieldRo}.SetHandler(&BitFieldRo)
-            << CI{"BITOP", CO::WRITE | CO::NO_AUTOJOURNAL, -4, 2, -1, acl::kBitOp}.SetHandler(
-                   &BitOp)
-            << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1, acl::kGetBit}.SetHandler(&GetBit)
-            << CI{"SETBIT", CO::WRITE | CO::DENYOOM, 4, 1, 1, acl::kSetBit}.SetHandler(&SetBit);
+  registry->StartFamily(acl::BITMAP);
+  *registry << CI{"BITPOS", CO::CommandOpt::READONLY, -3, 1, 1}.SetHandler(&BitPos)
+            << CI{"BITCOUNT", CO::READONLY, -2, 1, 1}.SetHandler(&BitCount)
+            << CI{"BITFIELD", CO::WRITE, -3, 1, 1}.SetHandler(&BitField)
+            << CI{"BITFIELD_RO", CO::READONLY | CO::FAST, -5, 1, 1}.SetHandler(&BitFieldRo)
+            << CI{"BITOP", CO::WRITE | CO::NO_AUTOJOURNAL, -4, 2, -1}.SetHandler(&BitOp)
+            << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1}.SetHandler(&GetBit)
+            << CI{"SETBIT", CO::WRITE | CO::DENYOOM, 4, 1, 1}.SetHandler(&SetBit);
 }
 
 }  // namespace dfly

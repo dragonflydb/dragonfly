@@ -309,19 +309,12 @@ void PFMerge(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
 
 }  // namespace
 
-namespace acl {
-constexpr uint32_t kPFAdd = WRITE | HYPERLOGLOG | FAST;
-constexpr uint32_t kPFCount = READ | HYPERLOGLOG | SLOW;
-constexpr uint32_t kPFMerge = WRITE | HYPERLOGLOG | SLOW;
-}  // namespace acl
-
 void HllFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
-  registry->StartFamily();
-  *registry << CI{"PFADD", CO::WRITE, -3, 1, 1, acl::kPFAdd}.SetHandler(PFAdd)
-            << CI{"PFCOUNT", CO::READONLY, -2, 1, -1, acl::kPFCount}.SetHandler(PFCount)
-            << CI{"PFMERGE", CO::WRITE | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kPFMerge}.SetHandler(
-                   PFMerge);
+  registry->StartFamily(acl::HYPERLOGLOG);
+  *registry << CI{"PFADD", CO::FAST | CO::WRITE, -3, 1, 1}.SetHandler(PFAdd)
+            << CI{"PFCOUNT", CO::READONLY, -2, 1, -1}.SetHandler(PFCount)
+            << CI{"PFMERGE", CO::WRITE | CO::NO_AUTOJOURNAL, -2, 1, -1}.SetHandler(PFMerge);
 }
 
 const char HllFamily::kInvalidHllErr[] = "Key is not a valid HyperLogLog string value.";

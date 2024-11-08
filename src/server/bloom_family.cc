@@ -192,14 +192,12 @@ using CI = CommandId;
 #define HFUNC(x) SetHandler(&BloomFamily::x)
 
 void BloomFamily::Register(CommandRegistry* registry) {
-  registry->StartFamily();
-
-  *registry << CI{"BF.RESERVE", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::BLOOM}.HFUNC(
-                   Reserve)
-            << CI{"BF.ADD", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Add)
-            << CI{"BF.MADD", CO::WRITE | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MAdd)
-            << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1, acl::BLOOM}.HFUNC(Exists)
-            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1, acl::BLOOM}.HFUNC(MExists);
+  registry->StartFamily(acl::BLOOM);
+  *registry << CI{"BF.RESERVE", CO::WRITE | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(Reserve)
+            << CI{"BF.ADD", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Add)
+            << CI{"BF.MADD", CO::WRITE | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(MAdd)
+            << CI{"BF.EXISTS", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(Exists)
+            << CI{"BF.MEXISTS", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(MExists);
 };
 
 }  // namespace dfly
