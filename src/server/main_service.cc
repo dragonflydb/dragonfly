@@ -2487,8 +2487,8 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
   });
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  auto serialize_command = [&rb](string_view name, const CommandId& cid) {
-    rb->StartArray(6);
+  auto serialize_command = [&rb, this](string_view name, const CommandId& cid) {
+    rb->StartArray(7);
     rb->SendSimpleString(cid.name());
     rb->SendLong(cid.arity());
     rb->StartArray(CommandId::OptCount(cid.opt_mask()));
@@ -2504,6 +2504,17 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     rb->SendLong(cid.first_key_pos());
     rb->SendLong(cid.last_key_pos());
     rb->SendLong(cid.opt_mask() & CO::INTERLEAVED_KEYS ? 2 : 1);
+
+    {
+      const auto& table = acl_family_.GetRevTable();
+      vector<string> cats;
+      for (uint32_t i = 0; i < 32; i++) {
+        if (cid.acl_categories() & (1 << i)) {
+          cats.emplace_back("@" + table[i]);
+        }
+      }
+      rb->SendSimpleStrArr(cats);
+    }
   };
 
   // If no arguments are specified, reply with all commands
