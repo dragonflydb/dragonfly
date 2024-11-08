@@ -51,7 +51,9 @@ class QList {
   void Push(std::string_view value, Where where);
   void AppendListpack(unsigned char* zl);
   void AppendPlain(unsigned char* zl);
-  void Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
+
+  // Returns true if pivot found and elem inserted, false otherwise.
+  bool Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
 
   size_t MallocUsed() const;
 
@@ -65,7 +67,7 @@ class QList {
     bool Next();
 
    private:
-    QList* owner_ = nullptr;
+    const QList* owner_ = nullptr;
     quicklistNode* current_ = nullptr;
     unsigned char* zi_ = nullptr; /* points to the current element */
     long offset_ = 0;             /* offset in current listpack */
@@ -77,13 +79,17 @@ class QList {
   // Returns an iterator to tail or the head of the list.
   // To mirror the quicklist interface, the iterator is not valid until Next() is called.
   // TODO: to fix this.
-  Iterator GetIterator(Where where);
+  Iterator GetIterator(Where where) const;
 
   // Returns an iterator at a specific index 'idx',
   // or Invalid iterator if index is out of range.
   // negative index - means counting from the tail.
   // Requires calling subsequent Next() to initialize the iterator.
-  Iterator GetIterator(long idx);
+  Iterator GetIterator(long idx) const;
+
+  uint32_t noded_count() const {
+    return len_;
+  }
 
  private:
   bool AllowCompression() const {
@@ -95,9 +101,12 @@ class QList {
 
   // Returns false if used existing head, true if new head created.
   bool PushTail(std::string_view value);
-  void InsertPlainNode(quicklistNode* old_node, std::string_view, bool after);
-  void InsertNode(quicklistNode* old_node, quicklistNode* new_node, bool after);
+  void InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
+  void InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertOpt insert_opt);
+  void Insert(Iterator it, std::string_view elem, InsertOpt opt);
+
   void Compress(quicklistNode* node);
+  void MergeNodes(quicklistNode* node);
 
   quicklistNode* head_ = nullptr;
   quicklistNode* tail_ = nullptr;

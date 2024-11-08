@@ -12,6 +12,7 @@ extern "C" {
 
 #include <absl/base/macros.h>
 #include <absl/base/optimization.h>
+#include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
 
@@ -123,6 +124,22 @@ quicklistNode* CreateNode() {
   return node;
 }
 
+uint8_t* LP_FromElem(string_view elem) {
+  return lpPrepend(lpNew(0), uint_ptr(elem), elem.size());
+}
+
+uint8_t* LP_Insert(uint8_t* lp, string_view elem, uint8_t* pos, int lp_where) {
+  return lpInsertString(lp, uint_ptr(elem), elem.size(), pos, lp_where, NULL);
+}
+
+uint8_t* LP_Append(uint8_t* lp, string_view elem) {
+  return lpAppend(lp, uint_ptr(elem), elem.size());
+}
+
+uint8_t* LP_Prepend(uint8_t* lp, string_view elem) {
+  return lpPrepend(lp, uint_ptr(elem), elem.size());
+}
+
 quicklistNode* CreateNode(int container, string_view value) {
   quicklistNode* new_node = CreateNode();
   new_node->container = container;
@@ -134,7 +151,7 @@ quicklistNode* CreateNode(int container, string_view value) {
     new_node->entry = (uint8_t*)zmalloc(new_node->sz);
     memcpy(new_node->entry, value.data(), new_node->sz);
   } else {
-    new_node->entry = lpPrepend(lpNew(0), uint_ptr(value), new_node->sz);
+    new_node->entry = LP_FromElem(value);
   }
 
   return new_node;
@@ -201,11 +218,33 @@ bool DecompressNode(bool recompress, quicklistNode* node) {
   return true;
 }
 
-/* Decompress only compressed nodes. */
+/* Decompress only compressed nodes.
+   recompress: if true, the node will be marked for recompression after decompression.
+*/
 void DecompressNodeIfNeeded(bool recompress, quicklistNode* node) {
   if ((node) && (node)->encoding == QUICKLIST_NODE_ENCODING_LZF) {
     DecompressNode(recompress, node);
   }
+}
+
+void RecompressOnly(quicklistNode* node) {
+  if (node->recompress && !node->dont_compress) {
+    CompressNode(node);
+  }
+}
+
+bool ElemCompare(const QList::Entry& entry, string_view elem) {
+  if (entry.value) {
+    return entry.view() == elem;
+  }
+
+  absl::AlphaNum an(entry.longval);
+  return elem == an.Piece();
+}
+
+quicklistNode* SplitNode(quicklistNode* node, int offset, bool after) {
+  // TODO: implement this.
+  return nullptr;
 }
 
 }  // namespace
@@ -251,12 +290,29 @@ void QList::Push(string_view value, Where where) {
 }
 
 void QList::AppendListpack(unsigned char* zl) {
+  quicklistNode* node = CreateNode();
+  node->entry = zl;
+  node->count = lpLength(node->entry);
+  node->sz = lpBytes(zl);
+
+  InsertNode(tail_, node, AFTER);
+  count_ += node->count;
 }
 
 void QList::AppendPlain(unsigned char* zl) {
 }
 
-void QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt) {
+bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt) {
+  Iterator it = GetIterator(HEAD);
+
+  while (it.Next()) {
+    if (ElemCompare(it.Get(), pivot)) {
+      Insert(it, elem, opt);
+      return true;
+    }
+  }
+
+  return false;
 }
 
 size_t QList::MallocUsed() const {
@@ -266,13 +322,25 @@ size_t QList::MallocUsed() const {
 }
 
 void QList::Iterate(IterateFunc cb, long start, long end) const {
+  long llen = Size();
+  if (llen == 0)
+    return;
+
+  if (end < 0 || end >= long(Size()))
+    end = Size() - 1;
+  Iterator it = GetIterator(start);
+  while (start <= end && it.Next()) {
+    if (!cb(it.Get()))
+      break;
+    start++;
+  }
 }
 
 bool QList::PushHead(string_view value) {
   quicklistNode* orig = head_;
   size_t sz = value.size();
   if (ABSL_PREDICT_FALSE(IsLargeElement(sz, fill_))) {
-    InsertPlainNode(head_, value, false);
+    InsertPlainNode(head_, value, BEFORE);
     return true;
   }
 
@@ -285,10 +353,10 @@ bool QList::PushHead(string_view value) {
     NodeUpdateSz(head_);
   } else {
     quicklistNode* node = CreateNode();
-    node->entry = lpPrepend(lpNew(0), uint_ptr(value), sz);
+    node->entry = LP_FromElem(value);
 
     NodeUpdateSz(node);
-    InsertNode(head_, node, false);
+    InsertNode(head_, node, BEFORE);
   }
 
   head_->count++;
@@ -300,7 +368,7 @@ bool QList::PushTail(string_view value) {
   quicklistNode* orig = tail_;
   size_t sz = value.size();
   if (ABSL_PREDICT_FALSE(IsLargeElement(sz, fill_))) {
-    InsertPlainNode(orig, value, true);
+    InsertPlainNode(orig, value, AFTER);
     return true;
   }
 
@@ -310,23 +378,23 @@ bool QList::PushTail(string_view value) {
     NodeUpdateSz(orig);
   } else {
     quicklistNode* node = CreateNode();
-    node->entry = lpAppend(lpNew(0), uint_ptr(value), sz);
+    node->entry = LP_FromElem(value);
 
     NodeUpdateSz(node);
-    InsertNode(orig, node, true);
+    InsertNode(orig, node, AFTER);
   }
   tail_->count++;
   return (orig != tail_);
 }
 
-void QList::InsertPlainNode(quicklistNode* old_node, string_view value, bool after) {
+void QList::InsertPlainNode(quicklistNode* old_node, string_view value, InsertOpt insert_opt) {
   quicklistNode* new_node = CreateNode(QUICKLIST_NODE_CONTAINER_PLAIN, value);
-  InsertNode(old_node, new_node, after);
+  InsertNode(old_node, new_node, insert_opt);
   count_++;
 }
 
-void QList::InsertNode(quicklistNode* old_node, quicklistNode* new_node, bool after) {
-  if (after) {
+void QList::InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertOpt insert_opt) {
+  if (insert_opt == AFTER) {
     new_node->prev = old_node;
     if (old_node) {
       new_node->next = old_node->next;
@@ -352,13 +420,126 @@ void QList::InsertNode(quicklistNode* old_node, quicklistNode* new_node, bool af
     head_ = tail_ = new_node;
   }
 
-  /* Update len first, so in __quicklistCompress we know exactly len */
+  /* Update len first, so in Compress we know exactly len */
   len_++;
 
   if (old_node)
     quicklistCompress(old_node);
 
   quicklistCompress(new_node);
+}
+
+void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
+  int full = 0, at_tail = 0, at_head = 0, avail_next = 0, avail_prev = 0;
+  quicklistNode* node = it.current_;
+  quicklistNode* new_node = NULL;
+  size_t sz = elem.size();
+  bool after = insert_opt == AFTER;
+
+  if (!node) {
+    /* we have no reference node, so let's create only node in the list */
+    if (ABSL_PREDICT_FALSE(IsLargeElement(sz, fill_))) {
+      InsertPlainNode(tail_, elem, insert_opt);
+      return;
+    }
+    new_node = CreateNode();
+    new_node->entry = LP_FromElem(elem);
+    InsertNode(NULL, new_node, insert_opt);
+    new_node->count++;
+    count_++;
+    return;
+  }
+
+  /* Populate accounting flags for easier boolean checks later */
+  if (!NodeAllowInsert(node, fill_, sz)) {
+    full = 1;
+  }
+
+  if (after && (it.offset_ == node->count - 1 || it.offset_ == -1)) {
+    at_tail = 1;
+    if (NodeAllowInsert(node->next, fill_, sz)) {
+      avail_next = 1;
+    }
+  }
+
+  if (!after && (it.offset_ == 0 || it.offset_ == -(node->count))) {
+    at_head = 1;
+    if (NodeAllowInsert(node->prev, fill_, sz)) {
+      avail_prev = 1;
+    }
+  }
+
+  if (ABSL_PREDICT_FALSE(IsLargeElement(sz, fill_))) {
+    if (QL_NODE_IS_PLAIN(node) || (at_tail && after) || (at_head && !after)) {
+      InsertPlainNode(node, elem, insert_opt);
+    } else {
+      DecompressNodeIfNeeded(true, node);
+      new_node = SplitNode(node, it.offset_, after);
+      quicklistNode* entry_node = CreateNode(QUICKLIST_NODE_CONTAINER_PLAIN, elem);
+      InsertNode(node, entry_node, insert_opt);
+      InsertNode(entry_node, new_node, insert_opt);
+      count_++;
+    }
+    return;
+  }
+
+  /* Now determine where and how to insert the new element */
+  if (!full && after) {
+    DecompressNodeIfNeeded(true, node);
+    node->entry = LP_Insert(node->entry, elem, it.zi_, LP_AFTER);
+    node->count++;
+    NodeUpdateSz(node);
+    RecompressOnly(node);
+  } else if (!full && !after) {
+    DecompressNodeIfNeeded(true, node);
+    node->entry = LP_Insert(node->entry, elem, it.zi_, LP_BEFORE);
+    node->count++;
+    NodeUpdateSz(node);
+    RecompressOnly(node);
+  } else if (full && at_tail && avail_next && after) {
+    /* If we are: at tail, next has free space, and inserting after:
+     *   - insert entry at head of next node. */
+    new_node = node->next;
+    DecompressNodeIfNeeded(true, new_node);
+    new_node->entry = LP_Prepend(new_node->entry, elem);
+    new_node->count++;
+    NodeUpdateSz(new_node);
+    RecompressOnly(new_node);
+    RecompressOnly(node);
+  } else if (full && at_head && avail_prev && !after) {
+    /* If we are: at head, previous has free space, and inserting before:
+     *   - insert entry at tail of previous node. */
+    new_node = node->prev;
+    DecompressNodeIfNeeded(true, new_node);
+    new_node->entry = LP_Append(new_node->entry, elem);
+    new_node->count++;
+    NodeUpdateSz(new_node);
+    RecompressOnly(new_node);
+    RecompressOnly(node);
+  } else if (full && ((at_tail && !avail_next && after) || (at_head && !avail_prev && !after))) {
+    /* If we are: full, and our prev/next has no available space, then:
+     *   - create new node and attach to qlist */
+    new_node = CreateNode();
+    new_node->entry = LP_FromElem(elem);
+    new_node->count++;
+    NodeUpdateSz(new_node);
+    InsertNode(node, new_node, insert_opt);
+  } else if (full) {
+    /* else, node is full we need to split it. */
+    /* covers both after and !after cases */
+    DecompressNodeIfNeeded(true, node);
+    new_node = SplitNode(node, it.offset_, after);
+    if (after)
+      new_node->entry = LP_Prepend(new_node->entry, elem);
+    else
+      new_node->entry = LP_Append(new_node->entry, elem);
+    new_node->count++;
+    NodeUpdateSz(new_node);
+    InsertNode(node, new_node, insert_opt);
+    MergeNodes(node);
+  }
+
+  count_++;
 }
 
 /* Force 'quicklist' to meet compression guidelines set by compress depth.
@@ -408,7 +589,11 @@ void QList::Compress(quicklistNode* node) {
   CompressNode(reverse);
 }
 
-auto QList::GetIterator(Where where) -> Iterator {
+void QList::MergeNodes(quicklistNode* node) {
+  // TODO: implement this.
+}
+
+auto QList::GetIterator(Where where) const -> Iterator {
   Iterator it;
   it.owner_ = this;
   it.zi_ = NULL;
@@ -425,7 +610,7 @@ auto QList::GetIterator(Where where) -> Iterator {
   return it;
 }
 
-auto QList::GetIterator(long idx) -> Iterator {
+auto QList::GetIterator(long idx) const -> Iterator {
   quicklistNode* n;
   unsigned long long accum = 0;
   unsigned long long index;
@@ -512,7 +697,7 @@ bool QList::Iterator::Next() {
     return true;
 
   // Retry again with the next node.
-  owner_->Compress(current_);
+  const_cast<QList*>(owner_)->Compress(current_);
 
   if (direction_ == FWD) {
     /* Forward traversal, Jumping to start of next node */
