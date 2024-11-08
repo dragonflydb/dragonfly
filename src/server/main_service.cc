@@ -813,6 +813,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
+  config_registry.RegisterMutable("migration_timeout");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
 
@@ -868,6 +869,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // Initialize shard_set with a global callback running once in a while in the shard threads.
   shard_set->Init(shard_num, [this] {
     server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
+    cluster_family_.BreakStalledFlowsInShard();
     server_family_.UpdateMemoryGlobalStats();
   });
   Transaction::Init(shard_num);

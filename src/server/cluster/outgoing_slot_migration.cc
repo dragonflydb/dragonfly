@@ -86,10 +86,6 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     streamer_.SendFinalize(attempt);
   }
 
-  void Pause(bool pause) {
-    streamer_.Pause(pause);
-  }
-
   const dfly::GenericError GetError() const {
     return cntx_.GetError();
   }
@@ -105,7 +101,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 int64_t OutgoingMigration::GetShardLastWriteTime() const {
   const auto* shard = EngineShard::tlocal();
   CHECK(shard);
-  return slot_migrations_[shard->shard_id()]->GetLastWriteTime();
+  const auto& migration = slot_migrations_[shard->shard_id()];
+  return migration ? migration->GetLastWriteTime() : -1;
 }
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
@@ -145,9 +142,16 @@ void OutgoingMigration::OnAllShards(
   });
 }
 
-void OutgoingMigration::Finish(bool is_error) {
-  VLOG(1) << "Finish outgoing migration for " << cf_->MyID() << " : "
-          << migration_info_.node_info.id;
+void OutgoingMigration::Finish(bool is_error, std::string error) {
+  if (is_error) {
+    cntx_.ReportError(GenericError(std::move(error)));
+    VLOG(1) << "Finish outgoing migration for " << cf_->MyID() << ": "
+            << migration_info_.node_info.id << "with error: " << error;
+  } else {
+    VLOG(1) << "Finish outgoing migration for " << cf_->MyID() << ": "
+            << migration_info_.node_info.id;
+  }
+
   bool should_cancel_flows = false;
 
   {
@@ -175,14 +179,6 @@ void OutgoingMigration::Finish(bool is_error) {
       migration->Cancel();
     });
   }
-}
-
-void OutgoingMigration::Pause(bool pause) {
-  VLOG(1) << "Pausing migration";
-  OnAllShards([pause](auto& migration) {
-    CHECK(migration != nullptr);
-    migration->Pause(pause);
-  });
 }
 
 MigrationState OutgoingMigration::GetState() const {
@@ -313,7 +309,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt =
-      dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces.GetDefaultNamespace(),
+      dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
                   nullptr, ClientPause::WRITE, is_pause_in_progress);
 
   if (!pause_fb_opt) {

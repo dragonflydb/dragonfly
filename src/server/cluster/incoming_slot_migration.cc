@@ -38,6 +38,10 @@ class ClusterShardMigration {
         bc_(bc) {
   }
 
+  void Pause(bool pause) {
+    pause_ = pause;
+  }
+
   void Start(Context* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
     {
       util::fb2::LockGuard lk(mu_);
@@ -56,6 +60,11 @@ class ClusterShardMigration {
     TransactionReader tx_reader;
 
     while (!cntx->IsCancelled()) {
+      if (pause_) {
+        ThisFiber::SleepFor(100ms);
+        continue;
+      }
+
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
         in_migration_->ReportError(GenericError("No tx data"));
@@ -135,6 +144,7 @@ class ClusterShardMigration {
   IncomingSlotMigration* in_migration_;
   util::fb2::BlockingCounter bc_;
   atomic_long last_attempt_{-1};
+  atomic_bool pause_;
 };
 
 IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
@@ -151,6 +161,13 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 }
 
 IncomingSlotMigration::~IncomingSlotMigration() {
+}
+
+void IncomingSlotMigration::Pause(bool pause) {
+  VLOG(1) << "Pausing migration";
+  for (auto& flow : shard_flows_) {
+    flow->Pause(pause);
+  }
 }
 
 bool IncomingSlotMigration::Join(long attempt) {

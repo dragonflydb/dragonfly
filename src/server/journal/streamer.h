@@ -32,6 +32,10 @@ class JournalStreamer {
 
   size_t GetTotalBufferCapacities() const;
 
+  int64_t GetLastWriteTime() const {
+    return last_write_time_ns_;
+  }
+
  protected:
   // TODO: we copy the string on each write because JournalItem may be passed to multiple
   // streamers so we can not move it. However, if we would either wrap JournalItem in shared_ptr
@@ -68,6 +72,7 @@ class JournalStreamer {
   time_t last_lsn_time_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
+  int64_t last_write_time_ns_ = -1;  // last write call.
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
@@ -90,14 +95,6 @@ class RestoreStreamer : public JournalStreamer {
     return snapshot_finished_;
   }
 
-  int64_t GetLastWriteTime() const {
-    return last_write_time_ns_;
-  }
-
-  void Pause(bool pause) {
-    pause_ = pause;
-  }
-
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
@@ -114,8 +111,6 @@ class RestoreStreamer : public JournalStreamer {
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
-  bool pause_ = false;
-  int64_t last_write_time_ns_ = -1;  // last write call.
 };
 
 }  // namespace dfly

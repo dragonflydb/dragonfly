@@ -1029,18 +1029,16 @@ void ClusterFamily::BreakStalledFlowsInShard() {
       LOG(WARNING) << "Source node detected migration timeout for: "
                    << om->GetMigrationInfo().ToString()
                    << " last_write_ms: " << last_write_ns / 1000'000 << ", now: " << now / 1000'000;
-      // TODO add error string
-      om->Finish(true);
-      om->Start();
+      om->Finish(true, "Detected migration timeout");
     }
   }
 }
 
 void ClusterFamily::PauseMigration(bool pause) {
   util::fb2::LockGuard lk(migration_mu_);
-  CHECK(!outgoing_migration_jobs_.empty());
-  for (auto& om : outgoing_migration_jobs_) {
-    om->Pause(pause);
+  CHECK(!incoming_migrations_jobs_.empty());
+  for (auto& im : incoming_migrations_jobs_) {
+    im->Pause(pause);
   }
 }
 

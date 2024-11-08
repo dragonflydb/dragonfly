@@ -30,11 +30,10 @@ class OutgoingMigration : private ProtocolClient {
   // start migration process, sends INIT command to the target node
   void Start();
 
-  // mark migration as FINISHED and cancel migration if it's not finished yet
+  // if is_error = false mark migration as FINISHED and cancel migration if it's not finished yet
   // can be called from any thread, but only after Start()
-  void Finish(bool is_error = false) ABSL_LOCKS_EXCLUDED(state_mu_);
-
-  void Pause(bool pause);
+  // if is_error = true and migration is in progress it will be restarted otherwise nothing happens
+  void Finish(bool is_error = false, std::string error = "") ABSL_LOCKS_EXCLUDED(state_mu_);
 
   MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
 

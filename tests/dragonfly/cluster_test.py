@@ -2254,3 +2254,56 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await check_for_no_state_status([node.admin_client for node in nodes])
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # setting migration_timeout to a very small value to force the replica to timeout
+    instances = [
+        df_factory.create(
+            port=BASE_PORT + i,
+            admin_port=BASE_PORT + i + 1000,
+            migration_timeout=100,
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+        )
+        for i in range(2)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("source node DEBUG POPULATE")
+    await nodes[0].client.execute_command("debug", "populate", "200000", "foo", "1000")
+
+    seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
+    seeder_task = asyncio.create_task(seeder.run(target_deviation=0.1))
+
+    await asyncio.sleep(0.5)  # wait for seeder running
+
+    logging.debug("Start migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC")
+
+    logging.debug("debug migration pause")
+    await nodes[1].client.execute_command("debug migration pause")
+
+    await asyncio.sleep(1)
+
+    logging.debug("debug migration resume")
+    await nodes[1].client.execute_command("debug migration resume")
+
+    await asyncio.sleep(1)  # migration will start resync
+    seeder.stop()
+    await seeder_task
+
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
