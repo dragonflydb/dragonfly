@@ -2487,7 +2487,7 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
   });
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  auto serialize_command = [&rb](string_view name, const CommandId& cid) {
+  auto serialize_command = [&rb, this](string_view name, const CommandId& cid) {
     rb->StartArray(7);
     rb->SendSimpleString(cid.name());
     rb->SendLong(cid.arity());
