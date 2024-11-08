@@ -4,15 +4,20 @@
 
 #include "core/qlist.h"
 
+#include <gmock/gmock.h>
+
 #include "base/gtest.h"
 #include "core/mi_memory_resource.h"
 
 extern "C" {
+#include "redis/listpack.h"
 #include "redis/zmalloc.h"
 }
 
 namespace dfly {
+
 using namespace std;
+using namespace testing;
 
 class QListTest : public ::testing::Test {
  protected:
@@ -58,6 +63,24 @@ TEST_F(QListTest, Basic) {
   it = ql_.GetIterator(-1);
   ASSERT_TRUE(it.Next());
   EXPECT_EQ("def", it.Get().view());
+
+  vector<string> items;
+  ql_.Iterate(
+      [&](const QList::Entry& e) {
+        items.push_back(string(e.view()));
+        return true;
+      },
+      0, 2);
+
+  EXPECT_THAT(items, ElementsAre("abc", "def"));
+}
+
+TEST_F(QListTest, ListPack) {
+  string_view sv = "abcded"sv;
+  uint8_t* lp1 = lpPrepend(lpNew(0), (uint8_t*)sv.data(), sv.size());
+  uint8_t* lp2 = lpAppend(lpNew(0), (uint8_t*)sv.data(), sv.size());
+  ASSERT_EQ(lpBytes(lp1), lpBytes(lp2));
+  ASSERT_EQ(0, memcmp(lp1, lp2, lpBytes(lp1)));
 }
 
 };  // namespace dfly
