@@ -1538,7 +1538,7 @@ void StringFamily::Register(CommandRegistry* registry) {
   *registry << CI{"SET", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, 1}.HFUNC(Set)
             << CI{"SETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(SetEx)
             << CI{"PSETEX", CO::WRITE | CO::DENYOOM | CO::NO_AUTOJOURNAL, 4, 1, 1}.HFUNC(PSetEx)
-            << CI{"SETNX", CO::WRITE | CO::DENYOOM, 3, 1, 1}.HFUNC(SetNx)
+            << CI{"SETNX", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(SetNx)
             << CI{"APPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Append)
             << CI{"PREPEND", CO::WRITE | CO::DENYOOM | CO::FAST, 3, 1, 1}.HFUNC(Prepend)
             << CI{"INCR", CO::WRITE | CO::FAST, 2, 1, 1}.HFUNC(Incr)
@@ -1555,9 +1555,9 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
             << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
             << CI{"STRLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(StrLen)
-            << CI{"GETRANGE", CO::READONLY | CO::FAST, 4, 1, 1}.HFUNC(GetRange)
-            << CI{"SUBSTR", CO::READONLY | CO::FAST, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
-            << CI{"SETRANGE", CO::WRITE | CO::FAST | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
+            << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)
+            << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
+            << CI{"SETRANGE", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
             << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
                    ClThrottle);
 }
