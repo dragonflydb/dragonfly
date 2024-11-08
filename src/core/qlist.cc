@@ -626,7 +626,63 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
 }
 
 void QList::Replace(Iterator it, std::string_view elem) {
-  // TODO
+  quicklistNode* node = it.current_;
+  unsigned char* newentry;
+  size_t sz = elem.size();
+
+  if (ABSL_PREDICT_TRUE(!QL_NODE_IS_PLAIN(node) && !IsLargeElement(sz, fill_) &&
+                        (newentry = lpReplace(node->entry, &it.zi_, uint_ptr(elem), sz)) != NULL)) {
+    node->entry = newentry;
+    NodeUpdateSz(node);
+    /* quicklistNext() and quicklistGetIteratorEntryAtIdx() provide an uncompressed node */
+    quicklistCompress(node);
+  } else if (QL_NODE_IS_PLAIN(node)) {
+    if (IsLargeElement(sz, fill_)) {
+      zfree(node->entry);
+      node->entry = (uint8_t*)zmalloc(sz);
+      node->sz = sz;
+      memcpy(node->entry, elem.data(), sz);
+      quicklistCompress(node);
+    } else {
+      Insert(it, elem, AFTER);
+      DelNode(node);
+    }
+  } else { /* The node is full or data is a large element */
+    quicklistNode *split_node = NULL, *new_node;
+    node->dont_compress = 1; /* Prevent compression in InsertNode() */
+
+    /* If the entry is not at the tail, split the node at the entry's offset. */
+    if (it.offset_ != node->count - 1 && it.offset_ != -1)
+      split_node = SplitNode(node, it.offset_, 1);
+
+    /* Create a new node and insert it after the original node.
+     * If the original node was split, insert the split node after the new node. */
+    new_node = CreateNode(IsLargeElement(sz, fill_) ? QUICKLIST_NODE_CONTAINER_PLAIN
+                                                    : QUICKLIST_NODE_CONTAINER_PACKED,
+                          elem);
+    InsertNode(node, new_node, AFTER);
+    if (split_node)
+      InsertNode(new_node, split_node, AFTER);
+    count_++;
+
+    /* Delete the replaced element. */
+    if (node->count == 1) {
+      DelNode(node);
+    } else {
+      unsigned char* p = lpSeek(node->entry, -1);
+      DelPackedIndex(node, &p);
+      node->dont_compress = 0; /* Re-enable compression */
+      new_node = MergeNodes(new_node);
+      /* We can't know if the current node and its sibling nodes are correctly compressed,
+       * and we don't know if they are within the range of compress depth, so we need to
+       * use quicklistCompress() for compression, which checks if node is within compress
+       * depth before compressing. */
+      quicklistCompress(new_node);
+      quicklistCompress(new_node->prev);
+      if (new_node->next)
+        quicklistCompress(new_node->next);
+    }
+  }
 }
 
 /* Force 'quicklist' to meet compression guidelines set by compress depth.

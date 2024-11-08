@@ -4,6 +4,7 @@
 
 #include "core/qlist.h"
 
+#include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
 
 #include "base/gtest.h"
@@ -138,6 +139,48 @@ TEST_F(QListTest, InsertDelete) {
   EXPECT_THAT(items, ElementsAre());
   ASSERT_FALSE(it.Next());
   EXPECT_EQ(0, ql_.Size());
+}
+
+using FillCompress = tuple<int, unsigned>;
+
+class PrintToFillCompress {
+ public:
+  std::string operator()(const TestParamInfo<FillCompress>& info) const {
+    int fill = get<0>(info.param);
+    int compress = get<1>(info.param);
+    string fill_str = fill >= 0 ? absl::StrCat("f", fill) : absl::StrCat("fminus", -fill);
+    return absl::StrCat(fill_str, "compress", compress);
+  }
+};
+
+class OptionsTest : public QListTest, public WithParamInterface<FillCompress> {};
+
+INSTANTIATE_TEST_SUITE_P(Matrix, OptionsTest,
+                         Combine(Values(-5, -4, -3, -2, -1, 0, 1, 2, 32, 66, 128, 999),
+                                 Values(0, 1, 2, 3, 4, 5, 6, 10)),
+                         PrintToFillCompress());
+
+TEST_P(OptionsTest, Numbers) {
+  auto [fill, compress] = GetParam();
+  ql_ = QList(fill, compress);
+  array<int64_t, 5000> nums;
+
+  for (unsigned i = 0; i < nums.size(); i++) {
+    nums[i] = -5157318210846258176 + i;
+    string val = absl::StrCat(nums[i]);
+    ql_.Push(val, QList::TAIL);
+  }
+  ql_.Push("xxxxxxxxxxxxxxxxxxxx", QList::TAIL);
+
+  for (unsigned i = 0; i < nums.size(); i++) {
+    auto it = ql_.GetIterator(i);
+    ASSERT_TRUE(it.Next());
+    ASSERT_EQ(nums[i], it.Get().ival()) << i;
+  }
+
+  auto it = ql_.GetIterator(nums.size());
+  ASSERT_TRUE(it.Next());
+  EXPECT_EQ("xxxxxxxxxxxxxxxxxxxx", it.Get().view());
 }
 
 };  // namespace dfly
