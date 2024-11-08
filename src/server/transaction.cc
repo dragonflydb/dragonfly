@@ -176,7 +176,8 @@ void Transaction::Shutdown() {
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   InitTxTime();
   string_view cmd_name(cid_->name());
-  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
+  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVAL_RO" || cmd_name == "EVALSHA" ||
+      cmd_name == "EVALSHA_RO") {
     multi_.reset(new MultiData);
     multi_->mode = NOT_DETERMINED;
     multi_->role = DEFAULT;
