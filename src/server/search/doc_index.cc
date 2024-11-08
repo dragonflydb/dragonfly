@@ -147,14 +147,13 @@ ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
 }
 
 std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_view key) {
-  auto it = ids_.find(key);
-  if (it == ids_.end()) {
+  auto it = ids_.extract(key);
+  if (!it) {
     return std::nullopt;
   }
 
-  DocId id = it->second;
+  const DocId id = it.mapped();
   keys_[id] = "";
-  ids_.erase(key);
   free_ids_.push_back(id);
 
   return id;

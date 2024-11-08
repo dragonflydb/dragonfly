@@ -71,7 +71,7 @@ absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensiti
 NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
-bool NumericIndex::Matches(DocId id, DocumentAccessor* doc, string_view field) {
+bool NumericIndex::IsValidFieldType(DocId id, DocumentAccessor* doc, string_view field) {
   auto strings_list = doc->GetStrings(field);
   return std::all_of(strings_list.begin(), strings_list.end(),
                      [](const auto& str) { return ParseNumericField(str); });
@@ -79,13 +79,13 @@ bool NumericIndex::Matches(DocId id, DocumentAccessor* doc, string_view field) {
 
 void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
   for (auto str : doc->GetStrings(field)) {
-    entries_.emplace(ConvertToDouble(str), id);
+    entries_.emplace(ParseNumericField(str).value(), id);
   }
 }
 
 void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
   for (auto str : doc->GetStrings(field)) {
-    entries_.erase({ConvertToDouble(str), id});
+    entries_.erase({ParseNumericField(str).value(), id});
   }
 }
 
@@ -104,14 +104,6 @@ vector<DocId> NumericIndex::Range(double l, double r) const {
   sort(out.begin(), out.end());
   out.erase(unique(out.begin(), out.end()), out.end());
   return out;
-}
-
-double NumericIndex::ConvertToDouble(std::string_view value) const {
-  auto value_as_double = ParseNumericField(value);
-  if (!value_as_double) {
-    LOG(DFATAL) << "Failed to parse numeric value " << value;
-  }
-  return value_as_double.value();
 }
 
 template <typename C>
@@ -149,7 +141,7 @@ typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_v
 }
 
 template <typename C>
-bool BaseStringIndex<C>::Matches(DocId id, DocumentAccessor* doc, string_view field) {
+bool BaseStringIndex<C>::IsValidFieldType(DocId id, DocumentAccessor* doc, string_view field) {
   return true;
 }
 
@@ -207,7 +199,7 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
   return {dim_, sim_};
 }
 
-bool BaseVectorIndex::Matches(DocId id, DocumentAccessor* doc, string_view field) {
+bool BaseVectorIndex::IsValidFieldType(DocId id, DocumentAccessor* doc, string_view field) {
   return true;
 }
 

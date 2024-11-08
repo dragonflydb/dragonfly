@@ -24,13 +24,12 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
   SortableValue Lookup(DocId doc) const override;
   std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
 
-  bool Matches(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  bool IsValidFieldType(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
 
  protected:
-  std::optional<T> Get(DocId id, DocumentAccessor* doc, std::string_view field);
   virtual std::optional<T> Get(std::string_view field_value) = 0;
 
   PMR_NS::memory_resource* GetMemRes() const;

@@ -85,7 +85,7 @@ struct BaseIndex {
   /* Returns true if the field type in the document matches the index and, therefore, the document
   can be added.
   TODO: Return the data needed for the Add() function to avoid retrieving the same data twice.*/
-  virtual bool Matches(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
+  virtual bool IsValidFieldType(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
 
   // Before adding the document make sure that Matches() returns true
   virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field) = 0;

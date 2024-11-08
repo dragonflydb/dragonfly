@@ -46,7 +46,8 @@ std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, 
 }
 
 template <typename T>
-bool SimpleValueSortIndex<T>::Matches(DocId id, DocumentAccessor* doc, std::string_view field) {
+bool SimpleValueSortIndex<T>::IsValidFieldType(DocId id, DocumentAccessor* doc,
+                                               std::string_view field) {
   auto strings_list = doc->GetStrings(field);
   return std::all_of(strings_list.begin(), strings_list.end(),
                      [&](const auto& str) { return Get(str); });
@@ -57,23 +58,17 @@ void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_v
   DCHECK_LE(id, values_.size());  // Doc ids grow at most by one
   if (id >= values_.size())
     values_.resize(id + 1);
-  values_[id] = Get(id, doc, field).value();  // TODO: handle multiple values
+
+  auto strings_list = doc->GetStrings(field);
+  if (!strings_list.empty()) {
+    values_[id] = Get(strings_list.front()).value();  // TODO: handle multiple values
+  }
 }
 
 template <typename T>
 void SimpleValueSortIndex<T>::Remove(DocId id, DocumentAccessor* doc, std::string_view field) {
   DCHECK_LT(id, values_.size());
   values_[id] = T{};
-}
-
-template <typename T>
-std::optional<T> SimpleValueSortIndex<T>::Get(DocId id, DocumentAccessor* doc,
-                                              std::string_view field) {
-  auto strings_list = doc->GetStrings(field);
-  if (strings_list.empty()) {
-    return T{};
-  }
-  return Get(strings_list.front());
 }
 
 template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRes() const {
