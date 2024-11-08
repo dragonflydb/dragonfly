@@ -34,6 +34,8 @@ class OutgoingMigration : private ProtocolClient {
   // can be called from any thread, but only after Start()
   void Finish(bool is_error = false) ABSL_LOCKS_EXCLUDED(state_mu_);
 
+  void Pause(bool pause);
+
   MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
   const std::string& GetHostIp() const {

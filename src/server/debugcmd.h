@@ -9,6 +9,10 @@
 
 namespace dfly {
 
+namespace cluster {
+class ClusterFamily;
+}
+
 class EngineShardSet;
 class ServerFamily;
 
@@ -26,7 +30,7 @@ class DebugCmd {
   };
 
  public:
-  DebugCmd(ServerFamily* owner, ConnectionContext* cntx);
+  DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx);
 
   void Run(CmdArgList args, facade::SinkReplyBuilder* builder);
 
@@ -40,6 +44,7 @@ class DebugCmd {
 
   void Reload(CmdArgList args, facade::SinkReplyBuilder* builder);
   void Replica(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Migration(CmdArgList args, facade::SinkReplyBuilder* builder);
 
   void Exec(facade::SinkReplyBuilder* builder);
   void Inspect(std::string_view key, CmdArgList args, facade::SinkReplyBuilder* builder);
@@ -52,6 +57,7 @@ class DebugCmd {
   void RecvSize(std::string_view param, facade::SinkReplyBuilder* builder);
 
   ServerFamily& sf_;
+  cluster::ClusterFamily& cf_;
   ConnectionContext* cntx_;
 };
 

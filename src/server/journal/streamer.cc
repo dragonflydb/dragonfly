@@ -210,6 +210,10 @@ void RestoreStreamer::Run() {
   PrimeTable* pt = &db_array_[0]->prime;
 
   do {
+    if (pause_) {
+      ThisFiber::SleepFor(100ms);
+      continue;
+    }
     if (fiber_cancelled_)
       return;
 

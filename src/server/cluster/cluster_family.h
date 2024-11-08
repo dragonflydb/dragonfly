@@ -46,6 +46,8 @@ class ClusterFamily {
 
   void BreakStalledFlowsInShard();
 
+  void PauseMigration(bool pause);
+
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
@@ -66,7 +68,7 @@ class ClusterFamily {
   // Custom Dragonfly commands for cluster management
   void DflyCluster(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
   void DflyClusterConfig(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  ABSL_LOCKS_EXCLUDED(set_config_mu, migration_mu_);
+
   void DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* builder)
       ABSL_LOCKS_EXCLUDED(migration_mu_);
   void DflyClusterFlushSlots(CmdArgList args, SinkReplyBuilder* builder);
