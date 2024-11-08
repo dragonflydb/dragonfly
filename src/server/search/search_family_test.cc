@@ -1292,4 +1292,139 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHash) {
                         IsMap("value", "2", "another_value", "2", "count", "1")));
 }
 
+TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
+  Run({"JSON.SET", "j1", ".", R"({"data":1,"name":"doc_with_int"})"});
+  Run({"JSON.SET", "j2", ".", R"({"data":"1","name":"doc_with_int_as_string"})"});
+  Run({"JSON.SET", "j3", ".", R"({"data":"string","name":"doc_with_string"})"});
+  Run({"JSON.SET", "j4", ".", R"({"name":"no_data"})"});
+  Run({"JSON.SET", "j5", ".", R"({"data":[5,4,3],"name":"doc_with_vector"})"});
+  Run({"JSON.SET", "j6", ".", R"({"data":"[5,4,3]","name":"doc_with_vector_as_string"})"});
+
+  auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run(
+      {"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "NUMERIC", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i3", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "TAG"});
+  EXPECT_EQ(resp, "OK");
+
+  resp =
+      Run({"FT.CREATE", "i4", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "TAG", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i5", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  resp =
+      Run({"FT.CREATE", "i6", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "TEXT", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i7", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "VECTOR", "FLAT",
+              "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "i1", "*"});
+  // Should also be j5. Temporary not supported
+  EXPECT_THAT(resp, AreDocIds("j1", "j4"));
+
+  resp = Run({"FT.SEARCH", "i2", "*"});
+  // Should also be j5. Temporary not supported
+  EXPECT_THAT(resp, AreDocIds("j1", "j4"));
+
+  resp = Run({"FT.SEARCH", "i3", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));
+
+  resp = Run({"FT.SEARCH", "i4", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));
+
+  resp = Run({"FT.SEARCH", "i5", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j3", "j6"));
+
+  resp = Run({"FT.SEARCH", "i6", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j3", "j6"));
+
+  resp = Run({"FT.SEARCH", "i7", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j5"));
+}
+
+TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
+  Run({"HSET", "j1", "data", "1", "name", "doc_with_int"});
+  Run({"HSET", "j2", "data", "1", "name", "doc_with_int_as_string"});
+  Run({"HSET", "j3", "data", "string", "name", "doc_with_string"});
+  Run({"HSET", "j4", "name", "no_data"});
+  Run({"HSET", "j5", "data", "5,4,3", "name", "doc_with_fake_vector"});
+  Run({"HSET", "j6", "data", "[5,4,3]", "name", "doc_with_fake_vector_as_string"});
+
+  // Vector [1, 2, 3]
+  std::string vector = std::string("\x3f\x80\x00\x00\x40\x00\x00\x00\x40\x40\x00\x00", 12);
+  Run({"HSET", "j7", "data", vector, "name", "doc_with_vector [1, 2, 3]"});
+
+  auto resp = Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "data", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "data", "NUMERIC", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i3", "ON", "HASH", "SCHEMA", "data", "TAG"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i4", "ON", "HASH", "SCHEMA", "data", "TAG", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i5", "ON", "HASH", "SCHEMA", "data", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i6", "ON", "HASH", "SCHEMA", "data", "TEXT", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i7", "ON", "HASH", "SCHEMA", "data", "VECTOR", "FLAT", "6", "TYPE",
+              "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "i1", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j1", "j4"));
+
+  resp = Run({"FT.SEARCH", "i2", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j1", "j4"));
+
+  resp = Run({"FT.SEARCH", "i3", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j7", "j3", "j6", "j1", "j4", "j5"));
+
+  resp = Run({"FT.SEARCH", "i4", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j7", "j3", "j6", "j1", "j4", "j5"));
+
+  resp = Run({"FT.SEARCH", "i5", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j7", "j3", "j6", "j1", "j5"));
+
+  resp = Run({"FT.SEARCH", "i6", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j7", "j3", "j6", "j1", "j5"));
+
+  resp = Run({"FT.SEARCH", "i7", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j7"));
+}
+
+TEST_F(SearchFamilyTest, WrongVectorFieldType) {
+  Run({"JSON.SET", "j1", ".",
+       R"({"vector_field": [0.1, 0.2, 0.3], "name": "doc_with_correct_dim"})"});
+  Run({"JSON.SET", "j2", ".", R"({"vector_field": [0.1, 0.2], "name": "doc_with_small_dim"})"});
+  Run({"JSON.SET", "j3", ".",
+       R"({"vector_field": [0.1, 0.2, 0.3, 0.4], "name": "doc_with_large_dim"})"});
+  Run({"JSON.SET", "j4", ".", R"({"vector_field": [1, 2, 3], "name": "doc_with_int_values"})"});
+  Run({"JSON.SET", "j5", ".",
+       R"({"vector_field":"not_vector", "name":"doc_with_incorrect_field_type"})"});
+  Run({"JSON.SET", "j6", ".", R"({"name":"doc_with_no_field"})"});
+  Run({"JSON.SET", "j7", ".",
+       R"({"vector_field": [999999999999999999999999999999999999999, -999999999999999999999999999999999999999, 500000000000000000000000000000000000000], "name": "doc_with_out_of_range_values"})"});
+
+  auto resp =
+      Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
+           "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4"));
+}
+
 }  // namespace dfly

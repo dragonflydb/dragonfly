@@ -12,6 +12,7 @@
 
 #include "core/json/json_object.h"
 #include "core/search/search.h"
+#include "core/search/vector_utils.h"
 #include "server/common.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
@@ -37,6 +38,33 @@ struct BaseAccessor : public search::DocumentAccessor {
   indexed field
   */
   virtual SearchDocData SerializeDocument(const search::Schema& schema) const;
+
+  virtual AccessResult<VectorInfo> GetVector(std::string_view active_field) const {
+    auto strings_list = GetStrings(active_field);
+    if (strings_list) {
+      return !strings_list->empty() ? search::BytesToFtVectorSafe(strings_list->front())
+                                    : VectorInfo{};
+    }
+    return std::nullopt;
+  }
+
+  virtual AccessResult<NumsList> GetNumbers(std::string_view active_field) const {
+    auto strings_list = GetStrings(active_field);
+    if (!strings_list) {
+      return std::nullopt;
+    }
+
+    NumsList nums_list;
+    nums_list.reserve(strings_list->size());
+    for (auto str : strings_list.value()) {
+      auto num = search::ParseNumericField(str);
+      if (!num) {
+        return std::nullopt;
+      }
+      nums_list.push_back(num.value());
+    }
+    return nums_list;
+  }
 };
 
 // Accessor for hashes stored with listpack
@@ -46,8 +74,7 @@ struct ListPackAccessor : public BaseAccessor {
   explicit ListPackAccessor(LpPtr ptr) : lp_{ptr} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  AccessResult<StringList> GetStrings(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
@@ -60,8 +87,7 @@ struct StringMapAccessor : public BaseAccessor {
   explicit StringMapAccessor(StringMap* hset) : hset_{hset} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  AccessResult<StringList> GetStrings(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
@@ -75,8 +101,9 @@ struct JsonAccessor : public BaseAccessor {
   explicit JsonAccessor(const JsonType* json) : json_{*json} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  AccessResult<StringList> GetStrings(std::string_view field) const override;
+  AccessResult<VectorInfo> GetVector(std::string_view field) const override;
+  AccessResult<NumsList> GetNumbers(std::string_view active_field) const override;
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
   SearchDocData Serialize(const search::Schema& schema,

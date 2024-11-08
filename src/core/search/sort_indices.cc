@@ -46,11 +46,8 @@ std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, 
 }
 
 template <typename T>
-bool SimpleValueSortIndex<T>::IsValidFieldType(DocId id, DocumentAccessor* doc,
-                                               std::string_view field) {
-  auto strings_list = doc->GetStrings(field);
-  return std::all_of(strings_list.begin(), strings_list.end(),
-                     [&](const auto& str) { return Get(str); });
+bool SimpleValueSortIndex<T>::IsValidFieldType(DocumentAccessor* doc, std::string_view field) {
+  return Get(doc, field).has_value();
 }
 
 template <typename T>
@@ -59,10 +56,7 @@ void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_v
   if (id >= values_.size())
     values_.resize(id + 1);
 
-  auto strings_list = doc->GetStrings(field);
-  if (!strings_list.empty()) {
-    values_[id] = Get(strings_list.front()).value();  // TODO: handle multiple values
-  }
+  values_[id] = Get(doc, field).value();
 }
 
 template <typename T>
@@ -78,12 +72,21 @@ template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRe
 template struct SimpleValueSortIndex<double>;
 template struct SimpleValueSortIndex<PMR_NS::string>;
 
-std::optional<double> NumericSortIndex::Get(std::string_view field_value) {
-  return ParseNumericField(field_value);
+std::optional<double> NumericSortIndex::Get(DocumentAccessor* doc, std::string_view field) {
+  auto numbers_list = doc->GetNumbers(field);
+  if (!numbers_list) {
+    return std::nullopt;
+  }
+  return !numbers_list->empty() ? numbers_list->front() : 0.0;
 }
 
-std::optional<PMR_NS::string> StringSortIndex::Get(std::string_view field_value) {
-  return PMR_NS::string{field_value, GetMemRes()};
+std::optional<PMR_NS::string> StringSortIndex::Get(DocumentAccessor* doc, std::string_view field) {
+  auto strings_list = doc->GetStrings(field);
+  if (!strings_list) {
+    return std::nullopt;
+  }
+  return !strings_list->empty() ? PMR_NS::string{strings_list->front(), GetMemRes()}
+                                : PMR_NS::string{GetMemRes()};
 }
 
 }  // namespace dfly::search

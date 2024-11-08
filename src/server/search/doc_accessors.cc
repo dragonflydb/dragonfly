@@ -54,7 +54,12 @@ FieldValue ToSortableValue(search::SchemaField::FieldType type, string_view valu
     return value_as_double.value();
   }
   if (type == search::SchemaField::VECTOR) {
-    auto [ptr, size] = search::BytesToFtVector(value);
+    auto opt_vector = search::BytesToFtVectorSafe(value);
+    if (!opt_vector) {
+      LOG(DFATAL) << "Failed to convert " << value << " to vector";
+      return std::nullopt;
+    }
+    auto& [ptr, size] = opt_vector.value();
     return absl::StrCat("[", absl::StrJoin(absl::Span<const float>{ptr.get(), size}, ","), "]");
   }
   return string{value};
@@ -79,7 +84,8 @@ SearchDocData BaseAccessor::Serialize(
     const search::Schema& schema, absl::Span<const SearchField<std::string_view>> fields) const {
   SearchDocData out{};
   for (const auto& [fident, fname] : fields) {
-    auto field_value = ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident), ","));
+    auto field_value =
+        ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident).value(), ","));
     if (field_value) {
       out[fname] = std::move(field_value).value();
     }
@@ -91,14 +97,10 @@ SearchDocData BaseAccessor::SerializeDocument(const search::Schema& schema) cons
   return Serialize(schema);
 }
 
-BaseAccessor::StringList ListPackAccessor::GetStrings(string_view active_field) const {
+BaseAccessor::AccessResult<BaseAccessor::StringList> ListPackAccessor::GetStrings(
+    string_view active_field) const {
   auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
-  return strsv.has_value() ? StringList{*strsv} : StringList{};
-}
-
-BaseAccessor::VectorInfo ListPackAccessor::GetVector(string_view active_field) const {
-  auto strlist = GetStrings(active_field);
-  return strlist.empty() ? VectorInfo{} : search::BytesToFtVector(strlist.front());
+  return strsv.has_value() ? StringList{*strsv} : StringList();
 }
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
@@ -122,14 +124,10 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
   return out;
 }
 
-BaseAccessor::StringList StringMapAccessor::GetStrings(string_view active_field) const {
+BaseAccessor::AccessResult<BaseAccessor::StringList> StringMapAccessor::GetStrings(
+    string_view active_field) const {
   auto it = hset_->Find(active_field);
-  return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList{};
-}
-
-BaseAccessor::VectorInfo StringMapAccessor::GetVector(string_view active_field) const {
-  auto strlist = GetStrings(active_field);
-  return strlist.empty() ? VectorInfo{} : search::BytesToFtVector(strlist.front());
+  return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList();
 }
 
 SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
@@ -164,24 +162,32 @@ struct JsonAccessor::JsonPathContainer {
   variant<json::Path, jsoncons::jsonpath::jsonpath_expression<JsonType>> val;
 };
 
-BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) const {
+BaseAccessor::AccessResult<BaseAccessor::StringList> JsonAccessor::GetStrings(
+    string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
-    return {};
+    return StringList();
 
   auto path_res = path->Evaluate(json_);
   if (path_res.empty())
-    return {};
+    return StringList();
 
   if (path_res.size() == 1) {
+    if (!path_res[0].is_string())
+      return std::nullopt;
+
     buf_ = path_res[0].as_string();
-    return {buf_};
+    return StringList{buf_};
   }
+
   buf_.clear();
 
   // First, grow buffer and compute string sizes
   vector<size_t> sizes;
   for (const auto& element : path_res) {
+    if (!element.is_string())
+      return std::nullopt;
+
     size_t start = buf_.size();
     buf_ += element.as_string();
     sizes.push_back(buf_.size() - start);
@@ -199,23 +205,51 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
   return out;
 }
 
-BaseAccessor::VectorInfo JsonAccessor::GetVector(string_view active_field) const {
+BaseAccessor::AccessResult<BaseAccessor::VectorInfo> JsonAccessor::GetVector(
+    string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
-    return {};
+    return BaseAccessor::VectorInfo{};
 
   auto res = path->Evaluate(json_);
   if (res.empty())
-    return {};
+    return BaseAccessor::VectorInfo{};
+
+  if (!res[0].is_array())
+    return std::nullopt;
 
   size_t size = res[0].size();
   auto ptr = make_unique<float[]>(size);
 
   size_t i = 0;
-  for (const auto& v : res[0].array_range())
+  for (const auto& v : res[0].array_range()) {
+    if (!v.is_number()) {
+      return std::nullopt;
+    }
     ptr[i++] = v.as<float>();
+  }
 
-  return {std::move(ptr), size};
+  return BaseAccessor::VectorInfo{std::move(ptr), size};
+}
+
+BaseAccessor::AccessResult<BaseAccessor::NumsList> JsonAccessor::GetNumbers(
+    string_view active_field) const {
+  auto* path = GetPath(active_field);
+  if (!path)
+    return NumsList();
+
+  auto path_res = path->Evaluate(json_);
+  if (path_res.empty())
+    return NumsList();
+
+  NumsList nums_list;
+  nums_list.reserve(path_res.size());
+  for (const auto& element : path_res) {
+    if (!element.is_number())
+      return std::nullopt;
+    nums_list.push_back(element.as<double>());
+  }
+  return nums_list;
 }
 
 JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) const {

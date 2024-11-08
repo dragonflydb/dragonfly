@@ -71,21 +71,21 @@ absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensiti
 NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
-bool NumericIndex::IsValidFieldType(DocId id, DocumentAccessor* doc, string_view field) {
-  auto strings_list = doc->GetStrings(field);
-  return std::all_of(strings_list.begin(), strings_list.end(),
-                     [](const auto& str) { return ParseNumericField(str); });
+bool NumericIndex::IsValidFieldType(DocumentAccessor* doc, string_view field) {
+  return doc->GetNumbers(field).has_value();
 }
 
 void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  for (auto str : doc->GetStrings(field)) {
-    entries_.emplace(ParseNumericField(str).value(), id);
+  auto numbers = doc->GetNumbers(field).value();
+  for (auto num : numbers) {
+    entries_.emplace(num, id);
   }
 }
 
 void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  for (auto str : doc->GetStrings(field)) {
-    entries_.erase({ParseNumericField(str).value(), id});
+  auto numbers = doc->GetNumbers(field).value();
+  for (auto num : numbers) {
+    entries_.erase({num, id});
   }
 }
 
@@ -141,14 +141,16 @@ typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_v
 }
 
 template <typename C>
-bool BaseStringIndex<C>::IsValidFieldType(DocId id, DocumentAccessor* doc, string_view field) {
-  return true;
+bool BaseStringIndex<C>::IsValidFieldType(DocumentAccessor* doc, string_view field) {
+  return doc->GetStrings(field).has_value();
 }
 
 template <typename C>
 void BaseStringIndex<C>::Add(DocId id, DocumentAccessor* doc, string_view field) {
+  auto strings_list = doc->GetStrings(field).value();
+
   absl::flat_hash_set<std::string> tokens;
-  for (string_view str : doc->GetStrings(field))
+  for (string_view str : strings_list)
     tokens.merge(Tokenize(str));
 
   for (string_view token : tokens)
@@ -157,8 +159,10 @@ void BaseStringIndex<C>::Add(DocId id, DocumentAccessor* doc, string_view field)
 
 template <typename C>
 void BaseStringIndex<C>::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+  auto strings_list = doc->GetStrings(field).value();
+
   absl::flat_hash_set<std::string> tokens;
-  for (string_view str : doc->GetStrings(field))
+  for (string_view str : strings_list)
     tokens.merge(Tokenize(str));
 
   for (const auto& token : tokens) {
@@ -199,8 +203,12 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
   return {dim_, sim_};
 }
 
-bool BaseVectorIndex::IsValidFieldType(DocId id, DocumentAccessor* doc, string_view field) {
-  return true;
+bool BaseVectorIndex::IsValidFieldType(DocumentAccessor* doc, string_view field) {
+  auto vector = doc->GetVector(field);
+  if (!vector)
+    return false;
+  auto& [ptr, size] = vector.value();
+  return !ptr || size == dim_;
 }
 
 FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
@@ -216,7 +224,7 @@ void FlatVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
     entries_.resize((id + 1) * dim_);
 
   // TODO: Let get vector write to buf itself
-  auto [ptr, size] = doc->GetVector(field);
+  auto [ptr, size] = doc->GetVector(field).value();
 
   if (size == dim_ && ptr)  // ptr can be null
     memcpy(&entries_[id * dim_], ptr.get(), dim_ * sizeof(float));
@@ -310,7 +318,7 @@ HnswVectorIndex::~HnswVectorIndex() {
 }
 
 void HnswVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  auto [ptr, size] = doc->GetVector(field);
+  auto [ptr, size] = doc->GetVector(field).value();
   if (size == dim_ && ptr)  // ptr can be null
     adapter_->Add(ptr.get(), id);
 }

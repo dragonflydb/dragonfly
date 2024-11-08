@@ -573,12 +573,12 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
 
 bool FieldIndices::Add(DocId doc, DocumentAccessor* access) {
   for (auto& [field, index] : indices_) {
-    if (!index->IsValidFieldType(doc, access, field)) {
+    if (!index->IsValidFieldType(access, field)) {
       return false;
     }
   }
   for (auto& [field, index] : sort_indices_) {
-    if (!index->IsValidFieldType(doc, access, field)) {
+    if (!index->IsValidFieldType(access, field)) {
       return false;
     }
   }

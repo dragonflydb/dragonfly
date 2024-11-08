@@ -44,19 +44,36 @@ struct MockedDocument : public DocumentAccessor {
   MockedDocument(std::string test_field) : fields_{{"field", test_field}} {
   }
 
-  StringList GetStrings(string_view field) const override {
+  AccessResult<StringList> GetStrings(string_view field) const override {
     auto it = fields_.find(field);
     if (it == fields_.end()) {
-      return {};
+      return StringList();
     }
-    return {string_view{it->second}};
+    return StringList{string_view{it->second}};
   }
 
-  VectorInfo GetVector(string_view field) const override {
-    auto strings = GetStrings(field);
-    if (strings.empty())
-      return {};
-    return BytesToFtVector(GetStrings(field).front());
+  AccessResult<VectorInfo> GetVector(string_view field) const override {
+    auto strings_list = GetStrings(field);
+    if (!strings_list)
+      return std::nullopt;
+    return !strings_list->empty() ? BytesToFtVectorSafe(strings_list->front()) : VectorInfo{};
+  }
+
+  AccessResult<NumsList> GetNumbers(std::string_view field) const override {
+    auto strings_list = GetStrings(field);
+    if (!strings_list)
+      return std::nullopt;
+
+    NumsList nums_list;
+    nums_list.reserve(strings_list->size());
+    for (auto str : strings_list.value()) {
+      auto num = ParseNumericField(str);
+      if (!num) {
+        return std::nullopt;
+      }
+      nums_list.push_back(num.value());
+    }
+    return nums_list;
   }
 
   string DebugFormat() {

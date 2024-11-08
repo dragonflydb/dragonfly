@@ -66,13 +66,18 @@ using SortableValue = std::variant<std::monostate, double, std::string>;
 
 // Interface for accessing document values with different data structures underneath.
 struct DocumentAccessor {
+  // nullopt if field cannot be converted to type T
+  template <typename T> using AccessResult = std::optional<T>;
+
   using VectorInfo = search::OwnedFtVector;
   using StringList = absl::InlinedVector<std::string_view, 1>;
+  using NumsList = absl::InlinedVector<double, 1>;
 
   virtual ~DocumentAccessor() = default;
 
-  virtual StringList GetStrings(std::string_view active_field) const = 0;
-  virtual VectorInfo GetVector(std::string_view active_field) const = 0;
+  virtual AccessResult<StringList> GetStrings(std::string_view active_field) const = 0;
+  virtual AccessResult<VectorInfo> GetVector(std::string_view active_field) const = 0;
+  virtual AccessResult<NumsList> GetNumbers(std::string_view active_field) const = 0;
 };
 
 // Base class for type-specific indices.
@@ -85,7 +90,7 @@ struct BaseIndex {
   /* Returns true if the field type in the document matches the index and, therefore, the document
   can be added.
   TODO: Return the data needed for the Add() function to avoid retrieving the same data twice.*/
-  virtual bool IsValidFieldType(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
+  virtual bool IsValidFieldType(DocumentAccessor* doc, std::string_view field) = 0;
 
   // Before adding the document make sure that Matches() returns true
   virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field) = 0;

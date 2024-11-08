@@ -28,7 +28,7 @@ namespace dfly::search {
 struct NumericIndex : public BaseIndex {
   explicit NumericIndex(PMR_NS::memory_resource* mr);
 
-  bool IsValidFieldType(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  bool IsValidFieldType(DocumentAccessor* doc, std::string_view field) override;
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -46,7 +46,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 
   BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive);
 
-  bool IsValidFieldType(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  bool IsValidFieldType(DocumentAccessor* doc, std::string_view field) override;
 
   void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
   void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
@@ -101,7 +101,7 @@ struct TagIndex : public BaseStringIndex<SortedVector> {
 struct BaseVectorIndex : public BaseIndex {
   std::pair<size_t /*dim*/, VectorSimilarity> Info() const;
 
-  bool IsValidFieldType(DocId id, DocumentAccessor* doc, std::string_view field) override final;
+  bool IsValidFieldType(DocumentAccessor* doc, std::string_view field) override final;
 
  protected:
   BaseVectorIndex(size_t dim, VectorSimilarity sim);
