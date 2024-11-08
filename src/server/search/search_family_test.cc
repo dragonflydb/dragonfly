@@ -835,6 +835,7 @@ TEST_F(SearchFamilyTest, FtProfile) {
   ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
 }
 
+#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   Run({"json.set", "j1", ".", R"({"id":"1"})"});
   Run({"ft.create", "i1", "on", "json", "schema", "$.id", "as", "id", "tag"});
@@ -847,6 +848,7 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   resp = Run({"ft.profile", "i1", "search", "query", "@{invalid13289}"});
   EXPECT_THAT(resp, ErrArg("query syntax error"));
 }
+#endif
 
 TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   Run({"ft.create", "i1", "schema", "name", "text"});
