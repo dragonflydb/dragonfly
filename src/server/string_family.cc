@@ -529,7 +529,7 @@ struct MGetResponse {
   explicit MGetResponse(size_t size = 0) : resp_arr(size) {
   }
 
-  std::string storage;
+  std::unique_ptr<char[]> storage;
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
 };
 
@@ -558,8 +558,8 @@ MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask, cons
   }
 
   // Allocate enough for all values
-  response.storage.resize(max(size_t(27), total_size));
-  char* next = response.storage.data();
+  response.storage = make_unique<char[]>(total_size);
+  char* next = response.storage.get();
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
   for (size_t i = 0; i < iters.size(); ++i) {
