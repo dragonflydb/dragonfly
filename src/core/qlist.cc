@@ -121,9 +121,7 @@ bool NodeAllowMerge(const quicklistNode* a, const quicklistNode* b, const int fi
   /* approximate merged listpack size (- 7 to remove one listpack
    * header/trailer, see LP_HDR_SIZE and LP_EOF) */
   unsigned int merge_sz = a->sz + b->sz - 7;
-  if (ABSL_PREDICT_FALSE(quicklistNodeExceedsLimit(fill, merge_sz, a->count + b->count)))
-    return false;
-  return true;
+  return quicklistNodeExceedsLimit(fill, merge_sz, a->count + b->count);
 }
 
 quicklistNode* CreateNode() {

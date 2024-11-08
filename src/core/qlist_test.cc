@@ -39,11 +39,7 @@ class QListTest : public ::testing::Test {
 vector<string> QListTest::ToItems() const {
   vector<string> res;
   auto cb = [&](const QList::Entry& e) {
-    if (e.value)
-      res.push_back(string(e.view()));
-    else
-      res.push_back(to_string(e.longval));
-
+    res.push_back(e.value ? string(e.view()) : to_string(e.longval));
     return true;
   };
 
