@@ -1326,12 +1326,10 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"FT.SEARCH", "i1", "*"});
-  // Should also be j5. Temporary not supported
-  EXPECT_THAT(resp, AreDocIds("j1", "j4"));
+  EXPECT_THAT(resp, AreDocIds("j1", "j4", "j5"));
 
   resp = Run({"FT.SEARCH", "i2", "*"});
-  // Should also be j5. Temporary not supported
-  EXPECT_THAT(resp, AreDocIds("j1", "j4"));
+  EXPECT_THAT(resp, AreDocIds("j1", "j4", "j5"));
 
   resp = Run({"FT.SEARCH", "i3", "*"});
   EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));

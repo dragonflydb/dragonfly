@@ -172,7 +172,7 @@ BaseAccessor::AccessResult<BaseAccessor::StringList> JsonAccessor::GetStrings(
   if (path_res.empty())
     return search::EmptyAccessResult<StringList>();
 
-  if (path_res.size() == 1) {
+  if (path_res.size() == 1 && !path_res[0].is_array()) {
     if (!path_res[0].is_string())
       return std::nullopt;
 
@@ -184,13 +184,33 @@ BaseAccessor::AccessResult<BaseAccessor::StringList> JsonAccessor::GetStrings(
 
   // First, grow buffer and compute string sizes
   vector<size_t> sizes;
-  for (const auto& element : path_res) {
-    if (!element.is_string())
-      return std::nullopt;
 
+  auto add_json_to_buf = [&](const JsonType& json) {
     size_t start = buf_.size();
-    buf_ += element.as_string();
+    buf_ += json.as_string();
     sizes.push_back(buf_.size() - start);
+  };
+
+  if (!path_res[0].is_array()) {
+    sizes.reserve(path_res.size());
+    for (const auto& element : path_res) {
+      if (!element.is_string())
+        return std::nullopt;
+
+      add_json_to_buf(element);
+    }
+  } else {
+    if (path_res.size() > 1) {
+      return std::nullopt;
+    }
+
+    sizes.reserve(path_res[0].size());
+    for (const auto& element : path_res[0].array_range()) {
+      if (!element.is_string())
+        return std::nullopt;
+
+      add_json_to_buf(element);
+    }
   }
 
   // Reposition start pointers to the most recent allocation of buf
@@ -243,11 +263,24 @@ BaseAccessor::AccessResult<BaseAccessor::NumsList> JsonAccessor::GetNumbers(
     return search::EmptyAccessResult<NumsList>();
 
   NumsList nums_list;
-  nums_list.reserve(path_res.size());
-  for (const auto& element : path_res) {
-    if (!element.is_number())
+  if (!path_res[0].is_array()) {
+    nums_list.reserve(path_res.size());
+    for (const auto& element : path_res) {
+      if (!element.is_number())
+        return std::nullopt;
+      nums_list.push_back(element.as<double>());
+    }
+  } else {
+    if (path_res.size() > 1) {
       return std::nullopt;
-    nums_list.push_back(element.as<double>());
+    }
+
+    nums_list.reserve(path_res[0].size());
+    for (const auto& element : path_res[0].array_range()) {
+      if (!element.is_number())
+        return std::nullopt;
+      nums_list.push_back(element.as<double>());
+    }
   }
   return nums_list;
 }
