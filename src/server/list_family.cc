@@ -14,6 +14,7 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/qlist.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
@@ -59,6 +60,8 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
  */
 
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
+ABSL_FLAG(bool, list_experimental_v2, false,
+          "Compress depth of the list. Default is no compression");
 
 namespace dfly {
 
@@ -71,6 +74,10 @@ namespace {
 
 quicklist* GetQL(const PrimeValue& mv) {
   return (quicklist*)mv.RObjPtr();
+}
+
+QList* GetQLV2(const PrimeValue& mv) {
+  return (QList*)mv.RObjPtr();
 }
 
 void* listPopSaver(unsigned char* data, size_t sz) {
@@ -265,26 +272,46 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     res = std::move(*op_res);
   }
 
-  quicklist* ql = nullptr;
+  size_t len = 0;
   DVLOG(1) << "OpPush " << key << " new_key " << res.is_new;
+  quicklist* ql = nullptr;
+  QList* ql_v2 = nullptr;
 
   if (res.is_new) {
-    ql = quicklistCreate();
-    quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
-                        GetFlag(FLAGS_list_compress_depth));
-    res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+    if (absl::GetFlag(FLAGS_list_experimental_v2)) {
+      ql_v2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
+                                            GetFlag(FLAGS_list_compress_depth));
+      res.it->second.InitRobj(OBJ_LIST, kEncodingQL2, ql_v2);
+    } else {
+      ql = quicklistCreate();
+      quicklistSetOptions(ql, GetFlag(FLAGS_list_max_listpack_size),
+                          GetFlag(FLAGS_list_compress_depth));
+      res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+    }
   } else {
     if (res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
-    ql = GetQL(res.it->second);
+    if (res.it->second.Encoding() == kEncodingQL2) {
+      ql_v2 = GetQLV2(res.it->second);
+    } else {
+      ql = GetQL(res.it->second);
+    }
   }
 
-  // Left push is LIST_HEAD.
-  int pos = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
-
-  for (string_view v : vals) {
-    auto vsds = WrapSds(v);
-    quicklistPush(ql, vsds, sdslen(vsds), pos);
+  if (ql) {
+    // Left push is LIST_HEAD.
+    int pos = (dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
+    for (string_view v : vals) {
+      auto vsds = WrapSds(v);
+      quicklistPush(ql, vsds, sdslen(vsds), pos);
+    }
+    len = quicklistCount(ql);
+  } else {
+    QList::Where where = (dir == ListDir::LEFT) ? QList::HEAD : QList::TAIL;
+    for (string_view v : vals) {
+      ql_v2->Push(v, where);
+    }
+    len = ql_v2->Size();
   }
 
   if (res.is_new) {
@@ -305,7 +332,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     RecordJournal(op_args, command, mapped, 2);
   }
 
-  return quicklistCount(ql);
+  return len;
 }
 
 OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, uint32_t count,
@@ -320,26 +347,26 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
 
   auto it = it_res->it;
   quicklist* ql = GetQL(it->second);
-
+  auto prev_len = quicklistCount(ql);
   StringVec res;
-  if (quicklistCount(ql) < count) {
-    count = quicklistCount(ql);
+  if (prev_len < count) {
+    count = prev_len;
   }
-  res.reserve(count);
 
   if (return_results) {
-    for (unsigned i = 0; i < count; ++i) {
-      res.push_back(ListPop(dir, ql));
-    }
-  } else {
-    for (unsigned i = 0; i < count; ++i) {
-      ListPop(dir, ql);
+    res.reserve(count);
+  }
+
+  for (unsigned i = 0; i < count; ++i) {
+    string val = ListPop(dir, ql);
+    if (return_results) {
+      res.push_back(std::move(val));
     }
   }
 
   it_res->post_updater.Run();
 
-  if (quicklistCount(ql) == 0) {
+  if (count == prev_len) {
     CHECK(db_slice.Del(op_args.db_cntx, it));
   }
 
@@ -418,8 +445,12 @@ OpResult<uint32_t> OpLen(const OpArgs& op_args, std::string_view key) {
   if (!res)
     return res.status();
 
-  quicklist* ql = GetQL(res.value()->second);
+  if (res.value()->second.Encoding() == kEncodingQL2) {
+    QList* ql = GetQLV2(res.value()->second);
+    return ql->Size();
+  }
 
+  quicklist* ql = GetQL(res.value()->second);
   return quicklistCount(ql);
 }
 
@@ -427,22 +458,30 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
   auto res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!res)
     return res.status();
-  quicklist* ql = GetQL(res.value()->second);
-  quicklistEntry entry = container_utils::QLEntry();
-  quicklistIter* iter = quicklistGetIteratorAtIdx(ql, AL_START_TAIL, index);
-  if (!iter)
-    return OpStatus::KEY_NOTFOUND;
 
-  quicklistNext(iter, &entry);
   string str;
-
-  if (entry.value) {
-    str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
+  if (res.value()->second.Encoding() == kEncodingQL2) {
+    QList* ql = GetQLV2(res.value()->second);
+    auto it = ql->GetIterator(index);
+    if (!it.Next())
+      return OpStatus::KEY_NOTFOUND;
+    str = it.Get().to_string();
   } else {
-    str = absl::StrCat(entry.longval);
-  }
-  quicklistReleaseIterator(iter);
+    quicklist* ql = GetQL(res.value()->second);
+    quicklistEntry entry = container_utils::QLEntry();
+    quicklistIter* iter = quicklistGetIteratorAtIdx(ql, AL_START_TAIL, index);
+    if (!iter)
+      return OpStatus::KEY_NOTFOUND;
 
+    quicklistNext(iter, &entry);
+
+    if (entry.value) {
+      str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
+    } else {
+      str = absl::StrCat(entry.longval);
+    }
+    quicklistReleaseIterator(iter);
+  }
   return str;
 }
 

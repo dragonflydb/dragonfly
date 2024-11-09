@@ -178,7 +178,7 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_SET:
       if (compact_enc == kEncodingIntSet)
         return RDB_TYPE_SET_INTSET;
-      else if (compact_enc == kEncodingStrMap || compact_enc == kEncodingStrMap2) {
+      else if (compact_enc == kEncodingStrMap2) {
         if (((StringSet*)pv.RObjPtr())->ExpirationUsed())
           return RDB_TYPE_SET_WITH_EXPIRY;
         else
