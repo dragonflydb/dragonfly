@@ -47,7 +47,7 @@ struct MockedDocument : public DocumentAccessor {
   AccessResult<StringList> GetStrings(string_view field) const override {
     auto it = fields_.find(field);
     if (it == fields_.end()) {
-      return StringList();
+      return EmptyAccessResult<StringList>();
     }
     return StringList{string_view{it->second}};
   }

@@ -100,7 +100,7 @@ SearchDocData BaseAccessor::SerializeDocument(const search::Schema& schema) cons
 BaseAccessor::AccessResult<BaseAccessor::StringList> ListPackAccessor::GetStrings(
     string_view active_field) const {
   auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
-  return strsv.has_value() ? StringList{*strsv} : StringList();
+  return strsv.has_value() ? StringList{*strsv} : StringList{};
 }
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
@@ -127,7 +127,7 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
 BaseAccessor::AccessResult<BaseAccessor::StringList> StringMapAccessor::GetStrings(
     string_view active_field) const {
   auto it = hset_->Find(active_field);
-  return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList();
+  return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList{};
 }
 
 SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
@@ -166,11 +166,11 @@ BaseAccessor::AccessResult<BaseAccessor::StringList> JsonAccessor::GetStrings(
     string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
-    return StringList();
+    return search::EmptyAccessResult<StringList>();
 
   auto path_res = path->Evaluate(json_);
   if (path_res.empty())
-    return StringList();
+    return search::EmptyAccessResult<StringList>();
 
   if (path_res.size() == 1) {
     if (!path_res[0].is_string())
@@ -209,11 +209,11 @@ BaseAccessor::AccessResult<BaseAccessor::VectorInfo> JsonAccessor::GetVector(
     string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
-    return BaseAccessor::VectorInfo{};
+    return VectorInfo{};
 
   auto res = path->Evaluate(json_);
   if (res.empty())
-    return BaseAccessor::VectorInfo{};
+    return VectorInfo{};
 
   if (!res[0].is_array())
     return std::nullopt;
@@ -236,11 +236,11 @@ BaseAccessor::AccessResult<BaseAccessor::NumsList> JsonAccessor::GetNumbers(
     string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
-    return NumsList();
+    return search::EmptyAccessResult<NumsList>();
 
   auto path_res = path->Evaluate(json_);
   if (path_res.empty())
-    return NumsList();
+    return search::EmptyAccessResult<NumsList>();
 
   NumsList nums_list;
   nums_list.reserve(path_res.size());

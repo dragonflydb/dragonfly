@@ -106,4 +106,17 @@ struct BaseSortIndex : BaseIndex {
 /* Used for converting field values to double. Returns false if the conversion fails */
 std::optional<double> ParseNumericField(std::string_view value);
 
+/* Temporary method to create an empty AccessResult<StringList> or AccessResult<NumsList>.
+   The problem is that due to internal implementation details of absl::InlineVector, we are getting
+   a -Wmaybe-uninitialized compiler warning. To suppress this false warning, we temporarily disable
+   it around this block of code using GCC diagnostic directives. */
+template <typename InlinedVector>
+DocumentAccessor::AccessResult<InlinedVector> EmptyAccessResult() {
+  // GCC 13.1 throws spurious warnings around this code.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+  return InlinedVector{};
+#pragma GCC diagnostic pop
+}
+
 }  // namespace dfly::search
