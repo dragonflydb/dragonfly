@@ -11,6 +11,7 @@ extern "C" {
 #include <functional>
 #include <optional>
 #include <string>
+#include <variant>
 
 namespace dfly {
 
@@ -19,51 +20,34 @@ class QList {
   enum Where { TAIL, HEAD };
 
   // Provides wrapper around the references to the listpack entries.
-  struct Entry {
-    Entry(const char* value, size_t length) : value{value}, length{length} {
-    }
-    Entry(long long longval) : value{nullptr}, longval{longval} {
+  class Entry {
+    std::variant<std::string_view, int64_t> value_;
+
+   public:
+    Entry(const char* value, size_t length) : value_{std::string_view(value, length)} {
     }
 
-    // Assumes value is not null.
+    explicit Entry(int64_t longval) : value_{longval} {
+    }
+
+    // Assumes value is not int64.
     std::string_view view() const {
-      return {value, length};
+      return std::get<std::string_view>(value_);
     }
 
-    const char* value;
-    union {
-      size_t length;
-      long long longval;
-    };
+    int64_t ival() const {
+      return std::get<int64_t>(value_);
+    }
+
+    bool operator==(std::string_view sv) const;
+
+    std::string to_string() const {
+      if (std::holds_alternative<int64_t>(value_)) {
+        return std::to_string(std::get<int64_t>(value_));
+      }
+      return std::string(view());
+    }
   };
-
-  using IterateFunc = std::function<bool(Entry)>;
-  enum InsertOpt { BEFORE, AFTER };
-
-  QList();
-  QList(int fill, int compress);
-  QList(const QList&) = delete;
-  ~QList();
-
-  QList& operator=(const QList&) = delete;
-
-  size_t Size() const {
-    return count_;
-  }
-
-  void Push(std::string_view value, Where where);
-  void AppendListpack(unsigned char* zl);
-  void AppendPlain(unsigned char* zl, size_t sz);
-
-  // Returns true if pivot found and elem inserted, false otherwise.
-  bool Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
-
-  // Returns true if item was replaced, false if index is out of range.
-  bool Replace(long index, std::string_view elem);
-
-  size_t MallocUsed() const;
-
-  void Iterate(IterateFunc cb, long start, long end) const;
 
   class Iterator {
    public:
@@ -82,6 +66,38 @@ class QList {
     friend class QList;
   };
 
+  using IterateFunc = std::function<bool(Entry)>;
+  enum InsertOpt { BEFORE, AFTER };
+
+  QList();
+  QList(int fill, int compress);
+  QList(QList&&);
+  QList(const QList&) = delete;
+  ~QList();
+
+  QList& operator=(const QList&) = delete;
+  QList& operator=(QList&&);
+
+  size_t Size() const {
+    return count_;
+  }
+
+  void Clear();
+
+  void Push(std::string_view value, Where where);
+  void AppendListpack(unsigned char* zl);
+  void AppendPlain(unsigned char* zl, size_t sz);
+
+  // Returns true if pivot found and elem inserted, false otherwise.
+  bool Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
+
+  // Returns true if item was replaced, false if index is out of range.
+  bool Replace(long index, std::string_view elem);
+
+  size_t MallocUsed() const;
+
+  void Iterate(IterateFunc cb, long start, long end) const;
+
   // Returns an iterator to tail or the head of the list.
   // To mirror the quicklist interface, the iterator is not valid until Next() is called.
   // TODO: to fix this.
@@ -96,6 +112,8 @@ class QList {
   uint32_t noded_count() const {
     return len_;
   }
+
+  Iterator Erase(Iterator it);
 
  private:
   bool AllowCompression() const {
@@ -118,6 +136,7 @@ class QList {
   quicklistNode* ListpackMerge(quicklistNode* a, quicklistNode* b);
 
   void DelNode(quicklistNode* node);
+  bool DelPackedIndex(quicklistNode* node, uint8_t** p);
 
   quicklistNode* head_ = nullptr;
   quicklistNode* tail_ = nullptr;
