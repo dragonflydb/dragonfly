@@ -355,6 +355,40 @@ void QList::Push(string_view value, Where where) {
   }
 }
 
+string QList::Pop(Where where) {
+  DCHECK_GT(count_, 0u);
+  quicklistNode* node;
+  if (where == HEAD) {
+    node = head_;
+  } else {
+    DCHECK_EQ(TAIL, where);
+    node = tail_;
+  }
+
+  /* The head and tail should never be compressed */
+  DCHECK(node->encoding != QUICKLIST_NODE_ENCODING_LZF);
+
+  string res;
+  if (ABSL_PREDICT_FALSE(QL_NODE_IS_PLAIN(node))) {
+    // TODO: We could avoid this copy by returning the pointer of the plain node.
+    // But the higher level APIs should support this.
+    res.assign(reinterpret_cast<char*>(node->entry), node->sz);
+    DelNode(node);
+  } else {
+    uint8_t* pos = where == HEAD ? lpFirst(node->entry) : lpLast(node->entry);
+    unsigned int vlen;
+    long long vlong;
+    uint8_t* vstr = lpGetValue(pos, &vlen, &vlong);
+    if (vstr) {
+      res.assign(reinterpret_cast<char*>(vstr), vlen);
+    } else {
+      res = absl::StrCat(vlong);
+    }
+    DelPackedIndex(node, &pos);
+  }
+  return res;
+}
+
 void QList::AppendListpack(unsigned char* zl) {
   quicklistNode* node = CreateNode();
   node->entry = zl;

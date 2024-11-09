@@ -156,13 +156,25 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   CHECK(it_res) << t->DebugId() << " " << key;  // must exist and must be ok.
 
   auto it = it_res->it;
-  quicklist* ql = GetQL(it->second);
+  std::string value;
+  size_t len;
 
-  std::string value = ListPop(dir, ql);
+  if (it->second.Encoding() == OBJ_ENCODING_QUICKLIST) {
+    quicklist* ql = GetQL(it->second);
+
+    value = ListPop(dir, ql);
+    len = quicklistCount(ql);
+  } else {
+    QList* ql = GetQLV2(it->second);
+    QList::Where where = (dir == ListDir::LEFT) ? QList::HEAD : QList::TAIL;
+    value = ql->Pop(where);
+    len = ql->Size();
+  }
+
   it_res->post_updater.Run();
 
   OpArgs op_args = t->GetOpArgs(shard);
-  if (quicklistCount(ql) == 0) {
+  if (len == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
     CHECK(op_args.GetDbSlice().Del(op_args.db_cntx, it));
   }
@@ -346,24 +358,46 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
     return StringVec{};
 
   auto it = it_res->it;
-  quicklist* ql = GetQL(it->second);
-  auto prev_len = quicklistCount(ql);
+  size_t prev_len = 0;
   StringVec res;
-  if (prev_len < count) {
-    count = prev_len;
-  }
 
-  if (return_results) {
-    res.reserve(count);
-  }
+  if (it->second.Encoding() == kEncodingQL2) {
+    QList* ql = GetQLV2(it->second);
+    prev_len = ql->Size();
 
-  for (unsigned i = 0; i < count; ++i) {
-    string val = ListPop(dir, ql);
+    if (prev_len < count) {
+      count = prev_len;
+    }
+
     if (return_results) {
-      res.push_back(std::move(val));
+      res.reserve(count);
+    }
+
+    QList::Where where = (dir == ListDir::LEFT) ? QList::HEAD : QList::TAIL;
+    for (unsigned i = 0; i < count; ++i) {
+      if (return_results) {
+        res.push_back(ql->Pop(where));
+      }
+    }
+  } else {
+    quicklist* ql = GetQL(it->second);
+    prev_len = quicklistCount(ql);
+
+    if (prev_len < count) {
+      count = prev_len;
+    }
+
+    if (return_results) {
+      res.reserve(count);
+    }
+
+    for (unsigned i = 0; i < count; ++i) {
+      string val = ListPop(dir, ql);
+      if (return_results) {
+        res.push_back(std::move(val));
+      }
     }
   }
-
   it_res->post_updater.Run();
 
   if (count == prev_len) {
@@ -572,46 +606,77 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
     return it_res.status();
 
   auto it = it_res->it;
-  quicklist* ql = GetQL(it->second);
-
-  int iter_direction = AL_START_HEAD;
-  long long index = 0;
-  if (count < 0) {
-    count = -count;
-    iter_direction = AL_START_TAIL;
-    index = -1;
-  }
-
-  quicklistIter qiter;
-  quicklistInitIterator(&qiter, ql, iter_direction, index);
-  quicklistEntry entry;
+  size_t len = 0;
   unsigned removed = 0;
+
   int64_t ival;
 
   // try parsing the element into an integer.
   int is_int = lpStringToInt64(elem.data(), elem.size(), &ival);
 
-  auto is_match = [&](const quicklistEntry& entry) {
-    if (is_int != (entry.value == nullptr))
-      return false;
+  if (it->second.Encoding() == kEncodingQL2) {
+    QList* ql = GetQLV2(it->second);
+    QList::Where where = QList::HEAD;
 
-    return is_int ? entry.longval == ival : ElemCompare(entry, elem);
-  };
-
-  while (quicklistNext(&qiter, &entry)) {
-    if (is_match(entry)) {
-      quicklistDelEntry(&qiter, &entry);
-      removed++;
-      if (count && removed == count)
-        break;
+    if (count < 0) {
+      count = -count;
+      where = QList::TAIL;
     }
-  }
 
+    auto it = ql->GetIterator(where);
+    auto is_match = [&](const QList::Entry& entry) {
+      if (is_int) {
+        return entry.is_int() && entry.ival() == ival;
+      }
+      return entry == elem;
+    };
+
+    while (it.Next()) {
+      QList::Entry entry = it.Get();
+      if (is_match(entry)) {
+        it = ql->Erase(it);
+        removed++;
+        if (count && removed == count)
+          break;
+      }
+    }
+    len = ql->Size();
+  } else {
+    quicklist* ql = GetQL(it->second);
+
+    int iter_direction = AL_START_HEAD;
+    long long index = 0;
+    if (count < 0) {
+      count = -count;
+      iter_direction = AL_START_TAIL;
+      index = -1;
+    }
+
+    quicklistIter qiter;
+    quicklistInitIterator(&qiter, ql, iter_direction, index);
+    quicklistEntry entry;
+
+    auto is_match = [&](const quicklistEntry& entry) {
+      if (is_int != (entry.value == nullptr))
+        return false;
+
+      return is_int ? entry.longval == ival : ElemCompare(entry, elem);
+    };
+
+    while (quicklistNext(&qiter, &entry)) {
+      if (is_match(entry)) {
+        quicklistDelEntry(&qiter, &entry);
+        removed++;
+        if (count && removed == count)
+          break;
+      }
+    }
+    quicklistCompressIterator(&qiter);
+    len = quicklistCount(ql);
+  }
   it_res->post_updater.Run();
 
-  quicklistCompressIterator(&qiter);
-
-  if (quicklistCount(ql) == 0) {
+  if (len == 0) {
     CHECK(db_slice.Del(op_args.db_cntx, it));
   }
 
