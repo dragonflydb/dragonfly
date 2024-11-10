@@ -109,11 +109,15 @@ class QList {
   // Requires calling subsequent Next() to initialize the iterator.
   Iterator GetIterator(long idx) const;
 
-  uint32_t noded_count() const {
+  uint32_t node_count() const {
     return len_;
   }
 
   Iterator Erase(Iterator it);
+
+  const quicklistNode* Head() const {
+    return head_;
+  }
 
  private:
   bool AllowCompression() const {
