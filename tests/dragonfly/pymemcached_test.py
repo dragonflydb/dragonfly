@@ -57,28 +57,29 @@ async def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCCli
     so all the commands are pipelined. Assert pipelines work correctly and the
     succeeding regular command receives a reply (it should join the pipeline as last).
     """
-    keys = [f"k{i}" for i in range(2000)]
-    values = [f"d{i}" for i in range(len(keys))]
-
-    for k, v in zip(keys, values):
-        memcached_client.set(k, v, noreply=True)
-
-    # quick follow up before the pipeline finishes
-    assert memcached_client.get("k10") == b"d10"
-    # check all commands were executed
-    assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
 
     client = df_server.client()
-    info = await client.info()
-    if info["total_pipelined_commands"] == 0:
-        logging.error("No pipelined commands were detected. Info: \n" + str(info))
+    for attempts in range(2):
+        keys = [f"k{i}" for i in range(1000)]
+        values = [f"d{i}" for i in range(len(keys))]
 
-        # Try again
         for k, v in zip(keys, values):
             memcached_client.set(k, v, noreply=True)
+
+        # quick follow up before the pipeline finishes
+        assert memcached_client.get("k10") == b"d10"
+        # check all commands were executed
+        assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
+
         info = await client.info()
-        logging.error("Second Info: \n" + str(info))
-        assert False
+        if info["total_pipelined_commands"] > 100:
+            return
+        logging.warning(
+            f"Have not identified pipelining at attempt {attempts} Info: \n" + str(info)
+        )
+        await client.flushall()
+
+    assert False, "Pipelining not detected"
 
 
 @dfly_args(DEFAULT_ARGS)
