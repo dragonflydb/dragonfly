@@ -1533,7 +1533,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
-    PrintPrometheusMetrics(this->GetMetrics(&namespaces.GetDefaultNamespace()),
+    PrintPrometheusMetrics(this->GetMetrics(&namespaces->GetDefaultNamespace()),
                            this->dfly_cmd_.get(), &resp);
 
     return send->Invoke(std::move(resp));
@@ -1608,7 +1608,7 @@ void ServerFamily::StatsMC(std::string_view section, SinkReplyBuilder* builder) 
   double utime = dbl_time(ru.ru_utime);
   double systime = dbl_time(ru.ru_stime);
 
-  Metrics m = GetMetrics(&namespaces.GetDefaultNamespace());
+  Metrics m = GetMetrics(&namespaces->GetDefaultNamespace());
 
   ADD_LINE(pid, getpid());
   ADD_LINE(uptime, m.uptime);
@@ -1638,7 +1638,7 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
-  trans->InitByArgs(&namespaces.GetDefaultNamespace(), 0, {});
+  trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
   return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
@@ -1826,7 +1826,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     cntx->acl_commands = cred.acl_commands;
     cntx->keys = std::move(cred.keys);
     cntx->pub_sub = std::move(cred.pub_sub);
-    cntx->ns = &namespaces.GetOrInsert(cred.ns);
+    cntx->ns = &namespaces->GetOrInsert(cred.ns);
     cntx->authenticated = true;
   }
   return is_authorized;

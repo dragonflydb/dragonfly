@@ -468,7 +468,7 @@ void Topkeys(const http::QueryArgs& args, HttpContext* send) {
 
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       for (const auto& db :
-           namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).databases()) {
+           namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).databases()) {
         if (db->top_keys.IsEnabled()) {
           is_enabled = true;
           for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
@@ -823,7 +823,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
           auto* shard = EngineShard::tlocal();
           if (shard) {
             auto shard_id = shard->shard_id();
-            auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id);
+            auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id);
             db_slice.SetNotifyKeyspaceEvents(*res);
           }
         });
@@ -897,7 +897,6 @@ void Service::Shutdown() {
   ChannelStore::Destroy();
 
   shard_set->PreShutdown();
-  namespaces.Clear();
   shard_set->Shutdown();
   Transaction::Shutdown();
 
@@ -1586,7 +1585,7 @@ facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
                                                   facade::Connection* owner) {
   auto cred = user_registry_.GetCredentials("default");
   ConnectionContext* res = new ConnectionContext{peer, owner, std::move(cred)};
-  res->ns = &namespaces.GetOrInsert("");
+  res->ns = &namespaces->GetOrInsert("");
 
   if (peer->IsUDS()) {
     res->req_auth = false;
@@ -2449,7 +2448,7 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
-  Metrics m = server_family_.GetMetrics(&namespaces.GetDefaultNamespace());
+  Metrics m = server_family_.GetMetrics(&namespaces->GetDefaultNamespace());
   DbStats db_stats;
   for (const auto& s : m.db_stats) {
     db_stats += s;

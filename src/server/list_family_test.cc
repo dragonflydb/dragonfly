@@ -33,7 +33,7 @@ class ListFamilyTest : public BaseFamilyTest {
   static unsigned NumWatched() {
     atomic_uint32_t sum{0};
 
-    auto ns = &namespaces.GetDefaultNamespace();
+    auto ns = &namespaces->GetDefaultNamespace();
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       auto* bc = ns->GetBlockingController(es->shard_id());
       if (bc)
@@ -45,7 +45,7 @@ class ListFamilyTest : public BaseFamilyTest {
 
   static bool HasAwakened() {
     atomic_uint32_t sum{0};
-    auto ns = &namespaces.GetDefaultNamespace();
+    auto ns = &namespaces->GetDefaultNamespace();
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       auto* bc = ns->GetBlockingController(es->shard_id());
       if (bc)

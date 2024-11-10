@@ -597,7 +597,7 @@ error_code Replica::ConsumeRedisStream() {
   conn_context.is_replicating = true;
   conn_context.journal_emulated = true;
   conn_context.skip_acl_validation = true;
-  conn_context.ns = &namespaces.GetDefaultNamespace();
+  conn_context.ns = &namespaces->GetDefaultNamespace();
 
   // we never reply back on the commands.
   facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};
