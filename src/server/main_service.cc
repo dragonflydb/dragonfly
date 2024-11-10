@@ -684,32 +684,33 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
   send->Invoke(std::move(resp));
 }
 
-enum class ExecEvalState {
+enum class ExecScriptUse {
   NONE = 0,
-  ALL = 1,
-  SOME = 2,
+  SCRIPT_LOAD = 1,
+  SCRIPT_RUN = 2,
 };
 
-ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
-  unsigned eval_cnt = 0;
+ExecScriptUse DetermineScriptPresense(const std::vector<StoredCmd>& body) {
+  bool script_load = false;
   for (const auto& scmd : body) {
     if (CO::IsEvalKind(scmd.Cid()->name())) {
-      eval_cnt++;
+      return ExecScriptUse::SCRIPT_RUN;
+    }
+
+    if ((scmd.Cid()->name() == "SCRIPT") && (absl::AsciiStrToUpper(scmd.FirstArg()) == "LOAD")) {
+      script_load = true;
     }
   }
 
-  if (eval_cnt == 0)
-    return ExecEvalState::NONE;
+  if (script_load)
+    return ExecScriptUse::SCRIPT_LOAD;
 
-  if (eval_cnt == body.size())
-    return ExecEvalState::ALL;
-
-  return ExecEvalState::SOME;
+  return ExecScriptUse::NONE;
 }
 
 // Returns the multi mode for that transaction. Returns NOT_DETERMINED if no scheduling
 // is required.
-Transaction::MultiMode DeduceExecMode(ExecEvalState state,
+Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
                                       const ConnectionState::ExecInfo& exec_info,
                                       const ScriptMgr& script_mgr) {
   // Check if script most LIKELY has global eval transactions
@@ -717,7 +718,7 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
   Transaction::MultiMode multi_mode =
       static_cast<Transaction::MultiMode>(absl::GetFlag(FLAGS_multi_exec_mode));
 
-  if (state != ExecEvalState::NONE) {
+  if (state == ExecScriptUse::SCRIPT_RUN) {
     contains_global = script_mgr.AreGlobalByDefault();
   }
 
@@ -764,50 +765,6 @@ string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned 
 
   return result;
 }
-
-// Ensures availability of an interpreter for EVAL-like commands and it's automatic release.
-// If it's part of MULTI, the preborrowed interpreter is returned, otherwise a new is acquired.
-struct BorrowedInterpreter {
-  BorrowedInterpreter(Transaction* tx, ConnectionContext* cntx) {
-    // Ensure squashing ignores EVAL. We can't run on a stub context, because it doesn't have our
-    // preborrowed interpreter (which can't be shared on multiple threads).
-    CHECK(!cntx->conn_state.squashing_info);
-
-    if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
-      // Ensure a preborrowed interpreter is only set for an already running MULTI transaction.
-      CHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
-
-      interpreter_ = borrowed;
-    } else {
-      // A scheduled transaction occupies a place in the transaction queue and holds locks,
-      // preventing other transactions from progressing. Blocking below can deadlock!
-      CHECK(!tx->IsScheduled());
-
-      interpreter_ = ServerState::tlocal()->BorrowInterpreter();
-      owned_ = true;
-    }
-  }
-
-  ~BorrowedInterpreter() {
-    if (owned_)
-      ServerState::tlocal()->ReturnInterpreter(interpreter_);
-  }
-
-  // Give up ownership of the interpreter, it must be returned manually.
-  Interpreter* Release() && {
-    DCHECK(owned_);
-    owned_ = false;
-    return interpreter_;
-  }
-
-  operator Interpreter*() {
-    return interpreter_;
-  }
-
- private:
-  Interpreter* interpreter_ = nullptr;
-  bool owned_ = false;
-};
 
 string ConnectionLogContext(const facade::Connection* conn) {
   if (conn == nullptr) {
@@ -1873,7 +1830,7 @@ void Service::Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
     return rb->SendNull();
   }
 
-  BorrowedInterpreter interpreter{tx, cntx};
+  BorrowedInterpreter interpreter{tx, &cntx->conn_state};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return builder->SendError(res.error().Format(), facade::kScriptErrType);
@@ -1887,7 +1844,7 @@ void Service::EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
                       ConnectionContext* cntx) {
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
 
-  BorrowedInterpreter interpreter{cntx->transaction, cntx};
+  BorrowedInterpreter interpreter{cntx->transaction, &cntx->conn_state};
   CallSHA(args, sha, interpreter, builder, cntx);
 }
 
@@ -2254,12 +2211,13 @@ void Service::Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
 
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
 
-  // The transaction can contain scripts, determine their presence ahead to customize logic below.
-  ExecEvalState state = DetermineEvalPresense(exec_info.body);
+  // The transaction can contain script load script execution, determine their presence ahead to
+  // customize logic below.
+  ExecScriptUse state = DetermineScriptPresense(exec_info.body);
 
-  // We borrow a single interpreter for all the EVALs inside. Returned by MultiCleanup
-  if (state != ExecEvalState::NONE) {
-    exec_info.preborrowed_interpreter = BorrowedInterpreter(tx, cntx).Release();
+  // We borrow a single interpreter for all the EVALs/Script load inside. Returned by MultiCleanup
+  if (state != ExecScriptUse::NONE) {
+    exec_info.preborrowed_interpreter = BorrowedInterpreter(tx, &cntx->conn_state).Release();
   }
 
   // Determine according multi mode, not only only flag, but based on presence of global commands
@@ -2293,7 +2251,7 @@ void Service::Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
       ServerState::tlocal()->exec_freq_count[descr]++;
     }
 
-    if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE &&
+    if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this);
     } else {

@@ -399,10 +399,12 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) 
   }
 
   if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
-    if ((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
+    if (((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)) {
       EnableAllShards();
-    else
+    } else {
       EnableShard(0);
+    }
+
     return OpStatus::OK;
   }
 
@@ -976,7 +978,7 @@ string Transaction::DEBUG_PrintFailState(ShardId sid) const {
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
-  shard_data_.resize(1);
+  shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
   shard_data_.front().local_mask |= ACTIVE;
 }
 

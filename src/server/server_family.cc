@@ -3008,7 +3008,7 @@ void ServerFamily::Role(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 
 void ServerFamily::Script(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                           ConnectionContext* cntx) {
-  script_mgr_->Run(std::move(args), tx, builder);
+  script_mgr_->Run(std::move(args), tx, builder, cntx);
 }
 
 void ServerFamily::LastSave(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,

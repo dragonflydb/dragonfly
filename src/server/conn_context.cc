@@ -72,6 +72,13 @@ size_t StoredCmd::NumArgs() const {
   return sizes_.size();
 }
 
+std::string StoredCmd::FirstArg() const {
+  if (sizes_.size() == 0) {
+    return {};
+  }
+  return buffer_.substr(0, sizes_[0]);
+}
+
 facade::ReplyMode StoredCmd::ReplyMode() const {
   return reply_mode_;
 }
