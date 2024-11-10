@@ -758,7 +758,7 @@ void QList::Compress(quicklistNode* node) {
     reverse = reverse->prev;
   }
 
-  if (!in_depth)
+  if (!in_depth && node)
     CompressNodeIfNeeded(node);
 
   /* At this point, forward and reverse are one node beyond depth */
@@ -1020,6 +1020,80 @@ auto QList::Erase(Iterator it) -> Iterator {
    *  length of this listpack is N-1, the next call into
    *  quicklistNext() will jump to the next node. */
   return it;
+}
+
+bool QList::Erase(const long start, unsigned count) {
+  if (count == 0)
+    return false;
+
+  unsigned extent = count; /* range is inclusive of start position */
+
+  if (start >= 0 && extent > (count_ - start)) {
+    /* if requesting delete more elements than exist, limit to list size. */
+    extent = count_ - start;
+  } else if (start < 0 && extent > (unsigned long)(-start)) {
+    /* else, if at negative offset, limit max size to rest of list. */
+    extent = -start; /* c.f. LREM -29 29; just delete until end. */
+  }
+
+  Iterator it = GetIterator(start);
+  quicklistNode* node = it.current_;
+  long offset = it.offset_;
+
+  /* iterate over next nodes until everything is deleted. */
+  while (extent) {
+    quicklistNode* next = node->next;
+
+    unsigned long del;
+    int delete_entire_node = 0;
+    if (offset == 0 && extent >= node->count) {
+      /* If we are deleting more than the count of this node, we
+       * can just delete the entire node without listpack math. */
+      delete_entire_node = 1;
+      del = node->count;
+    } else if (offset >= 0 && extent + offset >= node->count) {
+      /* If deleting more nodes after this one, calculate delete based
+       * on size of current node. */
+      del = node->count - offset;
+    } else if (offset < 0) {
+      /* If offset is negative, we are in the first run of this loop
+       * and we are deleting the entire range
+       * from this start offset to end of list.  Since the Negative
+       * offset is the number of elements until the tail of the list,
+       * just use it directly as the deletion count. */
+      del = -offset;
+
+      /* If the positive offset is greater than the remaining extent,
+       * we only delete the remaining extent, not the entire offset.
+       */
+      if (del > extent)
+        del = extent;
+    } else {
+      /* else, we are deleting less than the extent of this node, so
+       * use extent directly. */
+      del = extent;
+    }
+
+    if (delete_entire_node || QL_NODE_IS_PLAIN(node)) {
+      DelNode(node);
+    } else {
+      DecompressNodeIfNeeded(true, node);
+      node->entry = lpDeleteRange(node->entry, offset, del);
+      NodeUpdateSz(node);
+      node->count -= del;
+      count_ -= del;
+      if (node->count == 0) {
+        DelNode(node);
+      } else {
+        RecompressOnly(node);
+      }
+    }
+
+    extent -= del;
+    node = next;
+    offset = 0;
+  }
+  return true;
 }
 
 bool QList::Entry::operator==(std::string_view sv) const {

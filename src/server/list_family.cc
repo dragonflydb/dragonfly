@@ -755,8 +755,8 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
     return it_res.status();
 
   auto it = it_res->it;
-  quicklist* ql = GetQL(it->second);
-  long llen = quicklistCount(ql);
+
+  long llen = it->second.Size();
 
   /* convert negative indexes */
   if (start < 0)
@@ -781,12 +781,18 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
     rtrim = llen - end - 1;
   }
 
-  quicklistDelRange(ql, 0, ltrim);
-  quicklistDelRange(ql, -rtrim, rtrim);
-
+  if (it->second.Encoding() == kEncodingQL2) {
+    QList* ql = GetQLV2(it->second);
+    ql->Erase(0, ltrim);
+    ql->Erase(-rtrim, rtrim);
+  } else {
+    quicklist* ql = GetQL(it->second);
+    quicklistDelRange(ql, 0, ltrim);
+    quicklistDelRange(ql, -rtrim, rtrim);
+  }
   it_res->post_updater.Run();
 
-  if (quicklistCount(ql) == 0) {
+  if (it->second.Size() == 0) {
     CHECK(db_slice.Del(op_args.db_cntx, it));
   }
   return OpStatus::OK;
