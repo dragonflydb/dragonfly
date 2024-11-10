@@ -82,7 +82,8 @@ size_t NodeNegFillLimit(int fill) {
 }
 
 const uint8_t* uint_ptr(string_view sv) {
-  return reinterpret_cast<const uint8_t*>(sv.data());
+  static uint8_t empty = 0;
+  return sv.empty() ? &empty : reinterpret_cast<const uint8_t*>(sv.data());
 }
 
 bool IsLargeElement(size_t sz, int fill) {
@@ -136,10 +137,6 @@ quicklistNode* CreateNode() {
   return node;
 }
 
-uint8_t* LP_FromElem(string_view elem) {
-  return lpPrepend(lpNew(0), uint_ptr(elem), elem.size());
-}
-
 uint8_t* LP_Insert(uint8_t* lp, string_view elem, uint8_t* pos, int lp_where) {
   return lpInsertString(lp, uint_ptr(elem), elem.size(), pos, lp_where, NULL);
 }
@@ -155,15 +152,16 @@ uint8_t* LP_Prepend(uint8_t* lp, string_view elem) {
 quicklistNode* CreateNode(int container, string_view value) {
   quicklistNode* new_node = CreateNode();
   new_node->container = container;
-  new_node->sz = value.size();
-  new_node->count++;
+  new_node->count = 1;
 
   if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
     DCHECK(!value.empty());
     new_node->entry = (uint8_t*)zmalloc(new_node->sz);
     memcpy(new_node->entry, value.data(), new_node->sz);
+    new_node->sz = value.size();
   } else {
-    new_node->entry = LP_FromElem(value);
+    new_node->entry = LP_Prepend(lpNew(0), value);
+    new_node->sz = lpBytes(new_node->entry);
   }
 
   return new_node;
@@ -467,13 +465,10 @@ bool QList::PushHead(string_view value) {
   count_++;
 
   if (ABSL_PREDICT_TRUE(NodeAllowInsert(head_, fill_, sz))) {
-    head_->entry = lpPrepend(head_->entry, uint_ptr(value), sz);
+    head_->entry = LP_Prepend(head_->entry, value);
     NodeUpdateSz(head_);
   } else {
-    quicklistNode* node = CreateNode();
-    node->entry = LP_FromElem(value);
-
-    NodeUpdateSz(node);
+    quicklistNode* node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, value);
     InsertNode(head_, node, BEFORE);
   }
 
@@ -492,16 +487,16 @@ bool QList::PushTail(string_view value) {
 
   count_++;
   if (ABSL_PREDICT_TRUE(NodeAllowInsert(orig, fill_, sz))) {
-    orig->entry = lpAppend(orig->entry, uint_ptr(value), sz);
+    orig->entry = LP_Append(orig->entry, value);
     NodeUpdateSz(orig);
-  } else {
-    quicklistNode* node = CreateNode();
-    node->entry = LP_FromElem(value);
-    NodeUpdateSz(node);
-    InsertNode(orig, node, AFTER);
+    orig->count++;
+    return false;
   }
-  tail_->count++;
-  return (orig != tail_);
+
+  quicklistNode* node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, value);
+  InsertNode(orig, node, AFTER);
+
+  return true;
 }
 
 void QList::InsertPlainNode(quicklistNode* old_node, string_view value, InsertOpt insert_opt) {
@@ -559,10 +554,9 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       InsertPlainNode(tail_, elem, insert_opt);
       return;
     }
-    new_node = CreateNode();
-    new_node->entry = LP_FromElem(elem);
+
+    new_node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, elem);
     InsertNode(NULL, new_node, insert_opt);
-    new_node->count++;
     count_++;
     return;
   }
@@ -636,10 +630,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
   } else if (full && ((at_tail && !avail_next && after) || (at_head && !avail_prev && !after))) {
     /* If we are: full, and our prev/next has no available space, then:
      *   - create new node and attach to qlist */
-    new_node = CreateNode();
-    new_node->entry = LP_FromElem(elem);
-    new_node->count++;
-    NodeUpdateSz(new_node);
+    new_node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, elem);
     InsertNode(node, new_node, insert_opt);
   } else if (full) {
     /* else, node is full we need to split it. */
