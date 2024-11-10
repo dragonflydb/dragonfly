@@ -165,6 +165,10 @@ ostream& operator<<(ostream& os, facade::CmdArgList ras) {
   return os;
 }
 
+ostream& operator<<(ostream& os, facade::Protocol p) {
+  return os << int(p);
+}
+
 ostream& operator<<(ostream& os, const facade::RespExpr& e) {
   using facade::RespExpr;
   using facade::ToSV;

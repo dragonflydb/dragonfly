@@ -518,17 +518,32 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_ms, reset_after_ms};
 }
 
+struct GetResp {
+  string key;  // TODO: to use backing storage to optimize this as well.
+  string_view value;
+  uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
+  uint32_t mc_flag = 0;
+};
+
+struct MGetResponse {
+  explicit MGetResponse(size_t size = 0) : resp_arr(size) {
+  }
+
+  std::unique_ptr<char[]> storage;
+  absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
+};
+
 // fetch_mask values
 constexpr uint8_t FETCH_MCFLAG = 0x1;
 constexpr uint8_t FETCH_MCVER = 0x2;
-SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask,
-                                      const Transaction* t, EngineShard* shard) {
+MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
+                    EngineShard* shard) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
   auto& db_slice = t->GetDbSlice(shard->shard_id());
 
-  SinkReplyBuilder::MGetResponse response(keys.Size());
+  MGetResponse response(keys.Size());
   absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
 
   // First, fetch all iterators and count total size ahead
@@ -543,8 +558,8 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_
   }
 
   // Allocate enough for all values
-  response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
-  char* next = response.storage_list->data;
+  response.storage = make_unique<char[]>(total_size);
+  char* next = response.storage.get();
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
   for (size_t i = 0; i < iters.size(); ++i) {
@@ -650,7 +665,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
   string_view value = ArgS(args, 1);
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
-  if (builder->type() == SinkReplyBuilder::REDIS) {
+  if (builder->GetProtocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
@@ -662,7 +677,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
     rb->SendLong(GetResult(std::move(res.value())));
   } else {
     // Memcached skips if key is missing
-    DCHECK(builder->type() == SinkReplyBuilder::MC);
+    DCHECK(dynamic_cast<MCReplyBuilder*>(builder));
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
@@ -723,7 +738,7 @@ void SetExGeneric(bool seconds, CmdArgList args, const CommandId* cid, Transacti
 }
 
 void IncrByGeneric(string_view key, int64_t val, Transaction* tx, SinkReplyBuilder* builder) {
-  bool skip_on_missing = builder->type() == SinkReplyBuilder::MC;
+  bool skip_on_missing = (builder->GetProtocol() == Protocol::MEMCACHE);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
@@ -974,7 +989,7 @@ void StringFamily::Set(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
 
       // Remove existed key if the key is expired already
       if (rel_ms < 0) {
-        tx->ScheduleSingleHop([key](const Transaction* tx, EngineShard* es) {
+        tx->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
           ShardArgs args = tx->GetShardArgs(es->shard_id());
           GenericFamily::OpDel(tx->GetOpArgs(es), args);
           return OpStatus::OK;
@@ -1253,10 +1268,9 @@ void StringFamily::DecrBy(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
 void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                         ConnectionContext* cntx) {
   DCHECK_GE(args.size(), 1U);
-  std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_set->size());
 
   uint8_t fetch_mask = 0;
-  if (builder->type() == SinkReplyBuilder::MC) {
+  if (builder->GetProtocol() == Protocol::MEMCACHE) {
     fetch_mask |= FETCH_MCFLAG;
     if (cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
       fetch_mask |= FETCH_MCVER;
@@ -1264,6 +1278,7 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 
   // Count of pending tiered reads
   util::fb2::BlockingCounter tiering_bc{0};
+  std::vector<MGetResponse> mget_resp(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
     mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mask, t, shard);
     return OpStatus::OK;
@@ -1275,18 +1290,14 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   // wait for all tiered reads to finish
   tiering_bc->Wait();
 
-  // reorder the responses back according to the order of their corresponding
-  // keys.
-  SinkReplyBuilder::MGetResponse res(args.size());
+  // reorder shard results back according to argument order
+  absl::FixedArray<optional<GetResp>, 8> res(args.size());
 
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
     if (!tx->IsActive(sid))
       continue;
 
-    SinkReplyBuilder::MGetResponse& src = mget_resp[sid];
-    src.storage_list->next = res.storage_list;
-    res.storage_list = src.storage_list;
-    src.storage_list = nullptr;
+    auto& src = mget_resp[sid];
     ShardArgs shard_args = tx->GetShardArgs(sid);
     unsigned src_indx = 0;
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
@@ -1295,14 +1306,32 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 
       uint32_t indx = it.index();
 
-      res.resp_arr[indx] = std::move(src.resp_arr[src_indx]);
-      if (builder->type() == SinkReplyBuilder::MC) {
-        res.resp_arr[indx]->key = *it;
+      res[indx] = std::move(src.resp_arr[src_indx]);
+      if (builder->GetProtocol() == Protocol::MEMCACHE) {
+        res[indx]->key = *it;
       }
     }
   }
 
-  return builder->SendMGetResponse(std::move(res));
+  SinkReplyBuilder::ReplyScope scope(builder);
+  if (builder->GetProtocol() == Protocol::MEMCACHE) {
+    auto* rb = static_cast<MCReplyBuilder*>(builder);
+    for (const auto& entry : res) {
+      if (!entry)
+        continue;
+      rb->SendValue(entry->key, entry->value, entry->mc_ver, entry->mc_flag);
+    }
+    rb->SendSimpleString("END");
+  } else {
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    rb->StartArray(res.size());
+    for (const auto& entry : res) {
+      if (entry)
+        rb->SendBulkString(entry->value);
+      else
+        rb->SendNull();
+    }
+  }
 }
 
 void StringFamily::MSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,

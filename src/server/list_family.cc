@@ -987,7 +987,7 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
   if (popped_key) {
     DVLOG(1) << "BPop " << tx->DebugId() << " popped from key " << popped_key;  // key.
     std::string_view str_arr[2] = {*popped_key, popped_value};
-    return rb->SendStringArr(str_arr);
+    return rb->SendBulkStrArr(str_arr);
   }
 
   DVLOG(1) << "result for " << tx->DebugId() << " is " << popped_key.status();
@@ -1202,7 +1202,7 @@ void ListFamily::LRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   }
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->SendStringArr(*res);
+  rb->SendBulkStrArr(*res);
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.

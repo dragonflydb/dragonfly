@@ -21,188 +21,28 @@ enum class ReplyMode {
   FULL       // All replies are recorded
 };
 
-class SinkReplyBuilder {
- public:
-  struct MGetStorage {
-    MGetStorage* next = nullptr;
-    char data[1];
-  };
-
-  struct GetResp {
-    std::string key;  // TODO: to use backing storage to optimize this as well.
-    std::string_view value;
-
-    uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
-    uint32_t mc_flag = 0;
-
-    GetResp() = default;
-    GetResp(std::string_view val) : value(val) {
-    }
-  };
-
-  struct MGetResponse {
-    MGetStorage* storage_list = nullptr;  // backing storage of resp_arr values.
-    std::vector<std::optional<GetResp>> resp_arr;
-
-    MGetResponse() = default;
-
-    MGetResponse(size_t size) : resp_arr(size) {
-    }
-
-    ~MGetResponse();
-
-    MGetResponse(MGetResponse&& other) noexcept
-        : storage_list(other.storage_list), resp_arr(std::move(other.resp_arr)) {
-      other.storage_list = nullptr;
-    }
-
-    MGetResponse& operator=(MGetResponse&& other) noexcept {
-      resp_arr = std::move(other.resp_arr);
-      storage_list = other.storage_list;
-      other.storage_list = nullptr;
-      return *this;
-    }
-  };
-
-  SinkReplyBuilder(const SinkReplyBuilder&) = delete;
-  void operator=(const SinkReplyBuilder&) = delete;
-
-  enum Type { REDIS, MC };
-
-  explicit SinkReplyBuilder(::io::Sink* sink, Type t);
-
-  virtual ~SinkReplyBuilder() {
-  }
-
-  static MGetStorage* AllocMGetStorage(size_t size) {
-    static_assert(alignof(MGetStorage) == 8);  // if this breaks we should fix the code below.
-    char* buf = new char[size + sizeof(MGetStorage)];
-    return new (buf) MGetStorage();
-  }
-
-  virtual void SendError(std::string_view str, std::string_view type = {}) = 0;  // MC and Redis
-  virtual void SendError(OpStatus status);
-  void SendError(ErrorReply error);
-
-  virtual void SendStored() = 0;  // Reply for set commands.
-  virtual void SendSetSkipped() = 0;
-
-  virtual void SendMGetResponse(MGetResponse resp) = 0;
-
-  virtual void SendLong(long val) = 0;
-  virtual void SendSimpleString(std::string_view str) = 0;
-
-  void SendOk() {
-    SendSimpleString("OK");
-  }
-
-  virtual void SendProtocolError(std::string_view str) = 0;
-
-  // In order to reduce interrupt rate we allow coalescing responses together using
-  // Batch mode. It is controlled by Connection state machine because it makes sense only
-  // when pipelined requests are arriving.
-  virtual void SetBatchMode(bool batch);
-
-  virtual void FlushBatch();
-
-  // Used for QUIT - > should move to conn_context?
-  virtual void CloseConnection();
-
-  virtual std::error_code GetError() const {
-    return ec_;
-  }
-
-  bool IsSendActive() const {
-    return send_active_;  // BROKEN
-  }
-
-  struct ReplyAggregator {
-    explicit ReplyAggregator(SinkReplyBuilder* builder) : builder_(builder) {
-      // If the builder is already aggregating then don't aggregate again as
-      // this will cause redundant sink writes (such as in a MULTI/EXEC).
-      if (builder->should_aggregate_) {
-        return;
-      }
-      builder_->StartAggregate();
-      is_nested_ = false;
-    }
-
-    ~ReplyAggregator() {
-      if (!is_nested_) {
-        builder_->StopAggregate();
-      }
-    }
-
-   private:
-    SinkReplyBuilder* builder_;
-    bool is_nested_ = true;
-  };
-
-  void ExpectReply();
-  bool HasReplied() const {
-    return has_replied_;
-  }
-
-  virtual size_t UsedMemory() const;
-
-  static const ReplyStats& GetThreadLocalStats() {
-    return tl_facade_stats->reply_stats;
-  }
-
-  virtual void StartAggregate();
-  virtual void StopAggregate();
-
-  std::string ConsumeLastError() {
-    return std::exchange(last_error_, std::string{});
-  }
-
-  Type type() const {
-    return type_;
-  }
-
- protected:
-  void SendRaw(std::string_view str);  // Sends raw without any formatting.
-
-  void Send(const iovec* v, uint32_t len);
-
-  std::string batch_;
-  ::io::Sink* sink_;
-  std::error_code ec_;
-
-  // msg and kind/type
-  std::string last_error_;
-
-  bool should_batch_ : 1;
-
-  // Similarly to batch mode but is controlled by at operation level.
-  bool should_aggregate_ : 1;
-  bool has_replied_ : 1;
-  bool send_active_ : 1;
-  Type type_;
-};
-
 // Base class for all reply builders. Offer a simple high level interface for controlling output
 // modes and sending basic response types.
-class SinkReplyBuilder2 {
+class SinkReplyBuilder {
   struct GuardBase {
     bool prev;
-    SinkReplyBuilder2* rb;
+    SinkReplyBuilder* rb;
   };
 
  public:
   constexpr static size_t kMaxInlineSize = 32;
   constexpr static size_t kMaxBufferSize = 8192;
 
-  explicit SinkReplyBuilder2(io::Sink* sink) : sink_(sink) {
+  explicit SinkReplyBuilder(io::Sink* sink) : sink_(sink) {
   }
 
-  virtual ~SinkReplyBuilder2() = default;
+  virtual ~SinkReplyBuilder() = default;
 
   // USE WITH CARE! ReplyScope assumes that all string views in Send calls keep valid for the scopes
   // lifetime. This allows the builder to avoid copies by enqueueing long strings directly for
   // vectorized io.
   struct ReplyScope : GuardBase {
-    explicit ReplyScope(SinkReplyBuilder2* rb) : GuardBase{std::exchange(rb->scoped_, true), rb} {
+    explicit ReplyScope(SinkReplyBuilder* rb) : GuardBase{std::exchange(rb->scoped_, true), rb} {
     }
 
     ~ReplyScope();
@@ -211,7 +51,7 @@ class SinkReplyBuilder2 {
   // Aggregator reduces the number of raw send calls by copying data in an intermediate buffer.
   // Prefer ReplyScope if possible to additionally reduce the number of copies.
   struct ReplyAggregator : GuardBase {
-    explicit ReplyAggregator(SinkReplyBuilder2* rb)
+    explicit ReplyAggregator(SinkReplyBuilder* rb)
         : GuardBase{std::exchange(rb->batched_, true), rb} {
     }
 
@@ -228,7 +68,11 @@ class SinkReplyBuilder2 {
     return buffer_.Capacity();
   }
 
-  bool IsSendActive() {
+  size_t RepliesRecorded() const {
+    return replies_recorded_;
+  }
+
+  bool IsSendActive() const {
     return send_active_;
   }
 
@@ -243,6 +87,10 @@ class SinkReplyBuilder2 {
   }
 
  public:  // High level interface
+  virtual Protocol GetProtocol() const {
+    return Protocol::NONE;
+  }
+
   virtual void SendLong(long val) = 0;
   virtual void SendSimpleString(std::string_view str) = 0;
 
@@ -257,6 +105,10 @@ class SinkReplyBuilder2 {
   void SendError(ErrorReply error);
   virtual void SendProtocolError(std::string_view str) = 0;
 
+  std::string ConsumeLastError() {
+    return std::exchange(last_error_, {});
+  }
+
  protected:
   template <typename... Ts>
   void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
@@ -267,11 +119,15 @@ class SinkReplyBuilder2 {
 
   void Send();
 
+ protected:
+  size_t replies_recorded_ = 0;
+  std::string last_error_;
+
  private:
   io::Sink* sink_;
   std::error_code ec_;
 
-  bool send_active_ = false;
+  bool send_active_ = false;  // set while Send() is suspended on socket write
   bool scoped_ = false, batched_ = false;
 
   size_t total_size_ = 0;  // sum of vec_ lengths
@@ -285,39 +141,14 @@ class SinkReplyBuilder2 {
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
-  bool noreply_;
-
  public:
-  MCReplyBuilder(::io::Sink* stream);
+  explicit MCReplyBuilder(::io::Sink* sink);
 
-  using SinkReplyBuilder::SendRaw;
+  ~MCReplyBuilder() override = default;
 
-  void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
-
-  // void SendGetReply(std::string_view key, uint32_t flags, std::string_view value) final;
-  void SendMGetResponse(MGetResponse resp) final;
-
-  void SendStored() final;
-  void SendLong(long val) final;
-  void SendSetSkipped() final;
-
-  void SendClientError(std::string_view str);
-  void SendNotFound();
-  void SendSimpleString(std::string_view str) final;
-  void SendProtocolError(std::string_view str) final;
-
-  void SetNoreply(bool noreply) {
-    noreply_ = noreply;
+  Protocol GetProtocol() const final {
+    return Protocol::MEMCACHE;
   }
-
-  bool NoReply() const;
-};
-
-class MCReplyBuilder2 : public SinkReplyBuilder2 {
- public:
-  explicit MCReplyBuilder2(::io::Sink* sink);
-
-  ~MCReplyBuilder2() override = default;
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
 
@@ -332,6 +163,8 @@ class MCReplyBuilder2 : public SinkReplyBuilder2 {
   void SendSimpleString(std::string_view str) final;
   void SendProtocolError(std::string_view str) final;
 
+  void SendRaw(std::string_view str);
+
   void SetNoreply(bool noreply) {
     noreply_ = noreply;
   }
@@ -344,161 +177,72 @@ class MCReplyBuilder2 : public SinkReplyBuilder2 {
   bool noreply_ = false;
 };
 
-class RedisReplyBuilder : public SinkReplyBuilder {
+// Redis reply builder interface for sending RESP data.
+class RedisReplyBuilderBase : public SinkReplyBuilder {
  public:
   enum CollectionType { ARRAY, SET, MAP, PUSH };
-
   enum VerbatimFormat { TXT, MARKDOWN };
 
-  using StrSpan = facade::ArgRange;
-
-  RedisReplyBuilder(::io::Sink* stream);
-
-  virtual void SetResp3(bool is_resp3);
-  virtual bool IsResp3() const {
-    return is_resp3_;
+  explicit RedisReplyBuilderBase(io::Sink* sink) : SinkReplyBuilder(sink) {
   }
 
-  void SendError(std::string_view str, std::string_view type = {}) override;
-  using SinkReplyBuilder::SendError;
+  ~RedisReplyBuilderBase() override = default;
 
-  void SendMGetResponse(MGetResponse resp) override;
-
-  void SendStored() override;
-  void SendSetSkipped() override;
-  void SendProtocolError(std::string_view str) override;
-
-  virtual void SendNullArray();   // Send *-1
-  virtual void SendEmptyArray();  // Send *0
-  virtual void SendSimpleStrArr(StrSpan arr);
-  virtual void SendStringArr(StrSpan arr, CollectionType type = ARRAY);
+  Protocol GetProtocol() const final {
+    return Protocol::REDIS;
+  }
 
   virtual void SendNull();
-  void SendLong(long val) override;
-  virtual void SendDouble(double val);
-  void SendSimpleString(std::string_view str) override;
-
-  virtual void SendBulkString(std::string_view str);
-  virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
-  virtual void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                               bool with_scores);
-
-  void StartArray(unsigned len);  // StartCollection(len, ARRAY)
-
-  virtual void StartCollection(unsigned len, CollectionType type);
-
-  static char* FormatDouble(double val, char* dest, unsigned dest_len);
-
- private:
-  void SendStringArrInternal(size_t size, absl::FunctionRef<std::string_view(unsigned)> producer,
-                             CollectionType type);
-
-  bool is_resp3_ = false;
-};
-
-// Redis reply builder interface for sending RESP data.
-class RedisReplyBuilder2Base : public SinkReplyBuilder2, public RedisReplyBuilder {
- public:
-  using CollectionType = RedisReplyBuilder::CollectionType;
-  using VerbatimFormat = RedisReplyBuilder::VerbatimFormat;
-
-  explicit RedisReplyBuilder2Base(io::Sink* sink)
-      : SinkReplyBuilder2(sink), RedisReplyBuilder(nullptr) {
-  }
-
-  ~RedisReplyBuilder2Base() override = default;
-
-  void SendNull() override;
 
   void SendSimpleString(std::string_view str) override;
-  void SendBulkString(std::string_view str) override;  // RESP: Blob String
+  virtual void SendBulkString(std::string_view str);  // RESP: Blob String
 
   void SendLong(long val) override;
-  void SendDouble(double val) override;  // RESP: Number
+  virtual void SendDouble(double val);  // RESP: Number
 
-  void SendNullArray() override;
-  void StartCollection(unsigned len, CollectionType ct) override;
+  virtual void SendNullArray();
+  virtual void StartCollection(unsigned len, CollectionType ct);
 
-  using SinkReplyBuilder2::SendError;
+  using SinkReplyBuilder::SendError;
   void SendError(std::string_view str, std::string_view type = {}) override;
   void SendProtocolError(std::string_view str) override;
 
-  virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT) override;
+  virtual void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT);
 
   static char* FormatDouble(double d, char* dest, unsigned len);
   static std::string SerializeCommand(std::string_view command);
 
-  bool IsResp3() const override {
+  bool IsResp3() const {
     return resp3_;
   }
 
-  // REMOVE THIS override
-  void SetResp3(bool resp3) override {
+  void SetResp3(bool resp3) {
     resp3_ = resp3;
   }
 
-  // REMOVE THIS
-  void SetBatchMode(bool mode) override {
-    SinkReplyBuilder2::SetBatchMode(mode);
-  }
-
-  void StartAggregate() override {
-    aggregators_.emplace_back(this);
-  }
-
-  void StopAggregate() override {
-    aggregators_.pop_back();
-  }
-
-  void FlushBatch() override {
-    SinkReplyBuilder2::Flush();
-  }
-
-  // REMOVE THIS
-
-  void CloseConnection() override {
-    SinkReplyBuilder2::CloseConnection();
-  }
-
-  std::error_code GetError() const override {
-    return SinkReplyBuilder2::GetError();
-  }
-
  private:
-  std::vector<SinkReplyBuilder2::ReplyAggregator> aggregators_;
   bool resp3_ = false;
 };
 
-// Non essential rediss reply builder functions implemented on top of the base resp protocol
-class RedisReplyBuilder2 : public RedisReplyBuilder2Base {
+// Non essential redis reply builder functions implemented on top of the base resp protocol
+class RedisReplyBuilder : public RedisReplyBuilderBase {
  public:
-  RedisReplyBuilder2(io::Sink* sink) : RedisReplyBuilder2Base(sink) {
+  using RedisReplyBuilderBase::CollectionType;
+
+  RedisReplyBuilder(io::Sink* sink) : RedisReplyBuilderBase(sink) {
   }
 
-  ~RedisReplyBuilder2() override = default;
+  ~RedisReplyBuilder() override = default;
 
-  void SendSimpleStrArr2(const facade::ArgRange& strs);
-
+  void SendSimpleStrArr(const facade::ArgRange& strs);
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
-  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                       bool with_scores) override;
-
-  void SendSimpleStrArr(RedisReplyBuilder::StrSpan arr) override {
-    SendSimpleStrArr2(arr);
-  }
-
-  void SendStringArr(RedisReplyBuilder::StrSpan arr, CollectionType type = ARRAY) override {
-    SendBulkStrArr(arr, type);
-  }
+  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr, bool with_scores);
 
   void SendStored() final;
   void SendSetSkipped() final;
 
   void StartArray(unsigned len);
-  void SendEmptyArray() override;
-
-  // TODO: Remove
-  void SendMGetResponse(SinkReplyBuilder::MGetResponse resp) override;
+  void SendEmptyArray();
 };
 
 }  // namespace facade

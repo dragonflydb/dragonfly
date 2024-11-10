@@ -712,7 +712,7 @@ void SearchFamily::FtList(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
     return OpStatus::OK;
   });
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->SendStringArr(names);
+  rb->SendBulkStrArr(names);
 }
 
 void SearchFamily::FtSearch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
@@ -920,7 +920,7 @@ void SearchFamily::FtTagVals(CmdArgList args, Transaction* tx, SinkReplyBuilder*
   vector<string> vec(result_set.begin(), result_set.end());
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->SendStringArr(vec, RedisReplyBuilder::SET);
+  rb->SendBulkStrArr(vec, RedisReplyBuilder::SET);
 }
 
 void SearchFamily::FtAggregate(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {

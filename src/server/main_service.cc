@@ -286,24 +286,16 @@ class InterpreterReplier : public RedisReplyBuilder {
   }
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
-  void SendStored() final;
 
+  void SendBulkString(std::string_view str) final;
   void SendSimpleString(std::string_view str) final;
-  void SendMGetResponse(MGetResponse resp) final;
-  void SendSimpleStrArr(StrSpan arr) final;
+
   void SendNullArray() final;
-
-  void SendStringArr(StrSpan arr, CollectionType type) final;
   void SendNull() final;
-
   void SendLong(long val) final;
   void SendDouble(double val) final;
 
-  void SendBulkString(std::string_view str) final;
-
   void StartCollection(unsigned len, CollectionType type) final;
-  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                       bool with_scores) final;
 
  private:
   void PostItem();
@@ -398,11 +390,6 @@ void InterpreterReplier::SendError(string_view str, std::string_view type) {
   explr_->OnError(str);
 }
 
-void InterpreterReplier::SendStored() {
-  DCHECK(array_len_.empty());
-  SendSimpleString("OK");
-}
-
 void InterpreterReplier::SendSimpleString(string_view str) {
   if (array_len_.empty())
     explr_->OnStatus(str);
@@ -411,37 +398,8 @@ void InterpreterReplier::SendSimpleString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::SendMGetResponse(MGetResponse resp) {
-  DCHECK(array_len_.empty());
-
-  explr_->OnArrayStart(resp.resp_arr.size());
-  for (uint32_t i = 0; i < resp.resp_arr.size(); ++i) {
-    if (resp.resp_arr[i].has_value()) {
-      explr_->OnString(resp.resp_arr[i]->value);
-    } else {
-      explr_->OnNil();
-    }
-  }
-  explr_->OnArrayEnd();
-}
-
-void InterpreterReplier::SendSimpleStrArr(StrSpan arr) {
-  explr_->OnArrayStart(arr.Size());
-  for (string_view str : arr)
-    explr_->OnString(str);
-  explr_->OnArrayEnd();
-}
-
 void InterpreterReplier::SendNullArray() {
   SendSimpleStrArr(ArgSlice{});
-  PostItem();
-}
-
-void InterpreterReplier::SendStringArr(StrSpan arr, CollectionType) {
-  explr_->OnArrayStart(arr.Size());
-  for (string_view str : arr)
-    explr_->OnString(str);
-  explr_->OnArrayEnd();
   PostItem();
 }
 
@@ -465,7 +423,9 @@ void InterpreterReplier::SendBulkString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
+void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
+  if (type == MAP)
+    len *= 2;
   explr_->OnArrayStart(len);
 
   if (len == 0) {
@@ -474,31 +434,6 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
   } else {
     array_len_.emplace_back(num_elems_ + 1, len);
     num_elems_ = 0;
-  }
-}
-
-void InterpreterReplier::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                                         bool with_scores) {
-  if (with_scores) {
-    if (IsResp3()) {
-      StartCollection(arr.size(), CollectionType::ARRAY);
-      for (size_t i = 0; i < arr.size(); ++i) {
-        StartArray(2);
-        SendBulkString(arr[i].first);
-        SendDouble(arr[i].second);
-      }
-    } else {
-      StartCollection(arr.size() * 2, CollectionType::ARRAY);
-      for (size_t i = 0; i < arr.size(); ++i) {
-        SendBulkString(arr[i].first);
-        SendDouble(arr[i].second);
-      }
-    }
-  } else {
-    StartCollection(arr.size(), CollectionType::ARRAY);
-    for (size_t i = 0; i < arr.size(); ++i) {
-      SendBulkString(arr[i].first);
-    }
   }
 }
 
@@ -1189,10 +1124,10 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
 void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
                               facade::ConnectionContext* cntx) {
-  absl::Cleanup clear_last_error([builder]() { std::ignore = builder->ConsumeLastError(); });
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
+  absl::Cleanup clear_last_error([builder]() { builder->ConsumeLastError(); });
   ServerState& etl = *ServerState::tlocal();
 
   string cmd = absl::AsciiStrToUpper(args[0]);
@@ -1305,23 +1240,26 @@ class ReplyGuard {
     const bool is_script = bool(cntx->conn_state.script_info);
     const bool is_one_of =
         absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY"}).contains(cid_name);
-    bool is_mcache = builder->type() == SinkReplyBuilder::MC;
+    bool is_mcache = builder->GetProtocol() == Protocol::MEMCACHE;
     const bool is_no_reply_memcache =
         is_mcache && (static_cast<MCReplyBuilder*>(builder)->NoReply() || cid_name == "QUIT");
     const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
       builder_ = builder;
-      builder_->ExpectReply();
+      replies_recorded_ = builder_->RepliesRecorded();
     }
   }
 
   ~ReplyGuard() {
     if (builder_) {
-      DCHECK(builder_->HasReplied());
+      DCHECK_GT(builder_->RepliesRecorded(), replies_recorded_)
+          << cid_name_ << " " << typeid(*builder_).name();
     }
   }
 
  private:
+  size_t replies_recorded_ = 0;
+  std::string_view cid_name_;
   SinkReplyBuilder* builder_ = nullptr;
 };
 
@@ -1359,7 +1297,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
       return true;
     }
     builder->SendError(std::move(*err));
-    std::ignore = builder->ConsumeLastError();
+    builder->ConsumeLastError();
     return true;  // return false only for internal error aborts
   }
 
@@ -1402,9 +1340,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
     return false;
   }
 
-  std::string reason = builder->ConsumeLastError();
-
-  if (!reason.empty()) {
+  if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
@@ -1450,7 +1386,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
                                      facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
-  DCHECK_EQ(builder->type(), SinkReplyBuilder::REDIS);
+  DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
 
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
@@ -1701,7 +1637,7 @@ absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
 
 void Service::Quit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                    ConnectionContext* cntx) {
-  if (builder->type() == SinkReplyBuilder::REDIS)
+  if (builder->GetProtocol() == Protocol::REDIS)
     builder->SendOk();
   using facade::SinkReplyBuilder;
   builder->CloseConnection();
@@ -2360,7 +2296,7 @@ void Service::Function(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
 
 void Service::PubsubChannels(string_view pattern, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->SendStringArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
+  rb->SendBulkStrArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
 }
 
 void Service::PubsubPatterns(SinkReplyBuilder* builder) {

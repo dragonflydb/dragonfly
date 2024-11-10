@@ -969,7 +969,7 @@ struct SetReplies {
     if (script)  // output is sorted under scripts
       sort(sv->begin(), sv->end());
 
-    rb->SendStringArr(*sv, RedisReplyBuilder::SET);
+    rb->SendBulkStrArr(*sv, RedisReplyBuilder::SET);
   }
 
   void Send(const ResultSetView& rsv) {
@@ -1122,7 +1122,7 @@ void SPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
         rb->SendBulkString(result.value().front());
       }
     } else {  // SPOP key cnt
-      rb->SendStringArr(*result, RedisReplyBuilder::SET);
+      rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
     }
     return;
   }
@@ -1240,7 +1240,7 @@ void SRandMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (result || result == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
-      rb->SendStringArr(*result, RedisReplyBuilder::SET);
+      rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
     } else if (result->size()) {
       rb->SendBulkString(result->front());
     } else {

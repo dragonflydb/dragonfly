@@ -121,7 +121,7 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   if (verify_commands_) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
-      std::ignore = rb->ConsumeLastError();
+      rb->ConsumeLastError();
       return !error_abort_;
     }
   }

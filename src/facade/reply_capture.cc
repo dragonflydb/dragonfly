@@ -8,7 +8,7 @@
 #include "reply_capture.h"
 
 #define SKIP_LESS(needed)     \
-  has_replied_ = true;        \
+  replies_recorded_++;        \
   if (reply_mode_ < needed) { \
     current_ = monostate{};   \
     return;                   \
@@ -23,42 +23,9 @@ void CapturingReplyBuilder::SendError(std::string_view str, std::string_view typ
   Capture(Error{str, type});
 }
 
-void CapturingReplyBuilder::SendMGetResponse(MGetResponse resp) {
-  SKIP_LESS(ReplyMode::FULL);
-  Capture(std::move(resp));
-}
-
-void CapturingReplyBuilder::SendError(OpStatus status) {
-  if (status != OpStatus::OK) {
-    last_error_ = StatusToMsg(status);
-  }
-  SKIP_LESS(ReplyMode::ONLY_ERR);
-  Capture(status);
-}
-
 void CapturingReplyBuilder::SendNullArray() {
   SKIP_LESS(ReplyMode::FULL);
   Capture(unique_ptr<CollectionPayload>{nullptr});
-}
-
-void CapturingReplyBuilder::SendEmptyArray() {
-  SKIP_LESS(ReplyMode::FULL);
-  Capture(make_unique<CollectionPayload>(0, ARRAY));
-}
-
-void CapturingReplyBuilder::SendSimpleStrArr(StrSpan arr) {
-  SKIP_LESS(ReplyMode::FULL);
-  DCHECK_EQ(current_.index(), 0u);
-
-  Capture(StrArrPayload{true, ARRAY, {arr.begin(), arr.end()}});
-}
-
-void CapturingReplyBuilder::SendStringArr(StrSpan arr, CollectionType type) {
-  SKIP_LESS(ReplyMode::FULL);
-  DCHECK_EQ(current_.index(), 0u);
-
-  // TODO: 1. Allocate all strings at once 2. Allow movable types
-  Capture(StrArrPayload{false, type, {arr.begin(), arr.end()}});
 }
 
 void CapturingReplyBuilder::SendNull() {
@@ -86,13 +53,6 @@ void CapturingReplyBuilder::SendBulkString(std::string_view str) {
   Capture(BulkString{string{str}});
 }
 
-void CapturingReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                                            bool with_scores) {
-  SKIP_LESS(ReplyMode::FULL);
-  std::vector<std::pair<std::string, double>> values(arr.begin(), arr.end());
-  Capture(ScoredArray{std::move(values), with_scores});
-}
-
 void CapturingReplyBuilder::StartCollection(unsigned len, CollectionType type) {
   SKIP_LESS(ReplyMode::FULL);
   stack_.emplace(make_unique<CollectionPayload>(len, type), type == MAP ? len * 2 : len);
@@ -109,8 +69,8 @@ CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
 }
 
 void CapturingReplyBuilder::SendDirect(Payload&& val) {
-  has_replied_ = !holds_alternative<monostate>(val);
-  bool is_err = holds_alternative<Error>(val) || holds_alternative<OpStatus>(val);
+  replies_recorded_ += !holds_alternative<monostate>(val);
+  bool is_err = holds_alternative<Error>(val);
   ReplyMode min_mode = is_err ? ReplyMode::ONLY_ERR : ReplyMode::FULL;
   if (reply_mode_ >= min_mode) {
     DCHECK_EQ(current_.index(), 0u);
@@ -178,13 +138,6 @@ struct CaptureVisitor {
     rb->SendError(status);
   }
 
-  void operator()(const CapturingReplyBuilder::StrArrPayload& sa) {
-    if (sa.simple)
-      rb->SendSimpleStrArr(sa.arr);
-    else
-      rb->SendStringArr(sa.arr, sa.type);
-  }
-
   void operator()(const unique_ptr<CapturingReplyBuilder::CollectionPayload>& cp) {
     if (!cp) {
       rb->SendNullArray();
@@ -199,14 +152,6 @@ struct CaptureVisitor {
       visit(*this, std::move(pl));
   }
 
-  void operator()(SinkReplyBuilder::MGetResponse resp) {
-    rb->SendMGetResponse(std::move(resp));
-  }
-
-  void operator()(const CapturingReplyBuilder::ScoredArray& sarr) {
-    rb->SendScoredArray(sarr.arr, sarr.with_scores);
-  }
-
   RedisReplyBuilder* rb;
 };
 
@@ -219,7 +164,7 @@ void CapturingReplyBuilder::Apply(Payload&& pl, RedisReplyBuilder* rb) {
   CaptureVisitor cv{rb};
   visit(cv, std::move(pl));
   // Consumed and printed by InvokeCmd. We just send the actual error here
-  std::ignore = rb->ConsumeLastError();
+  rb->ConsumeLastError();
 }
 
 void CapturingReplyBuilder::SetReplyMode(ReplyMode mode) {
