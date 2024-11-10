@@ -87,9 +87,7 @@ class SinkReplyBuilder {
   }
 
  public:  // High level interface
-  virtual Protocol GetProtocol() const {
-    return Protocol::NONE;
-  }
+  virtual Protocol GetProtocol() const = 0;
 
   virtual void SendLong(long val) = 0;
   virtual void SendSimpleString(std::string_view str) = 0;

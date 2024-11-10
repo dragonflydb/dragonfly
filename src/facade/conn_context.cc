@@ -12,26 +12,7 @@
 
 namespace facade {
 
-ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : owner_(owner) {
-  if (owner) {
-    protocol_ = owner->protocol();
-  }
-
-  if (stream) {
-    switch (protocol_) {
-      case Protocol::NONE:
-        LOG(DFATAL) << "Invalid protocol";
-        break;
-      case Protocol::REDIS: {
-        rbuilder_.reset(new RedisReplyBuilder(stream));
-        break;
-      }
-      case Protocol::MEMCACHE:
-        rbuilder_.reset(new MCReplyBuilder(stream));
-        break;
-    }
-  }
-
+ConnectionContext::ConnectionContext(Connection* owner) : owner_(owner) {
   conn_closing = false;
   req_auth = false;
   replica_conn = false;
@@ -46,7 +27,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
 }
 
 size_t ConnectionContext::UsedMemory() const {
-  return dfly::HeapSize(rbuilder_) + dfly::HeapSize(authed_username) + dfly::HeapSize(acl_commands);
+  return dfly::HeapSize(authed_username) + dfly::HeapSize(acl_commands);
 }
 
 }  // namespace facade

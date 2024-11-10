@@ -37,8 +37,8 @@ class OkService : public ServiceInterface {
     builder->SendError("");
   }
 
-  ConnectionContext* CreateContext(util::FiberSocketBase* peer, Connection* owner) final {
-    return new ConnectionContext{peer, owner};
+  ConnectionContext* CreateContext(Connection* owner) final {
+    return new ConnectionContext{owner};
   }
 };
 
