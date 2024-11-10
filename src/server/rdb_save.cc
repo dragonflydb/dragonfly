@@ -1546,9 +1546,9 @@ error_code RdbSaver::SaveBody(Context* cntx) {
 }
 
 void RdbSaver::FillFreqMap(RdbTypeFreqMap* freq_map) {
-    freq_map->clear();
-    impl_->FillFreqMap(freq_map);
-  }
+  freq_map->clear();
+  impl_->FillFreqMap(freq_map);
+}
 
 error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   static_assert(sizeof(void*) == 8, "");
