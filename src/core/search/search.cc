@@ -571,28 +571,41 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
   }
 }
 
-bool FieldIndices::Add(DocId doc, DocumentAccessor* access) {
-  for (auto& [field, index] : indices_) {
-    if (!index->IsValidFieldType(access, field)) {
-      return false;
+bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
+  bool was_added = true;
+
+  std::vector<std::pair<std::string_view, BaseIndex*>> successfully_added_indices;
+  successfully_added_indices.reserve(indices_.size() + sort_indices_.size());
+
+  auto try_add = [&](const auto& indices_container) {
+    for (auto& [field, index] : indices_container) {
+      if (index->Add(doc, access, field)) {
+        successfully_added_indices.emplace_back(field, index.get());
+      } else {
+        was_added = false;
+        break;
+      }
     }
-  }
-  for (auto& [field, index] : sort_indices_) {
-    if (!index->IsValidFieldType(access, field)) {
-      return false;
-    }
+  };
+
+  try_add(indices_);
+
+  if (was_added) {
+    try_add(sort_indices_);
   }
 
-  for (auto& [field, index] : indices_)
-    index->Add(doc, access, field);
-  for (auto& [field, sort_index] : sort_indices_)
-    sort_index->Add(doc, access, field);
+  if (!was_added) {
+    for (auto& [field, index] : successfully_added_indices) {
+      index->Remove(doc, access, field);
+    }
+    return false;
+  }
 
   all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
   return true;
 }
 
-void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
+void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
   for (auto& [field, index] : indices_)
     index->Remove(doc, access, field);
   for (auto& [field, sort_index] : sort_indices_)

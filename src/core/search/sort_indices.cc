@@ -46,21 +46,23 @@ std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, 
 }
 
 template <typename T>
-bool SimpleValueSortIndex<T>::IsValidFieldType(DocumentAccessor* doc, std::string_view field) {
-  return Get(doc, field).has_value();
-}
+bool SimpleValueSortIndex<T>::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
+  auto field_value = Get(doc, field);
+  if (!field_value) {
+    return false;
+  }
 
-template <typename T>
-void SimpleValueSortIndex<T>::Add(DocId id, DocumentAccessor* doc, std::string_view field) {
   DCHECK_LE(id, values_.size());  // Doc ids grow at most by one
   if (id >= values_.size())
     values_.resize(id + 1);
 
-  values_[id] = Get(doc, field).value();
+  values_[id] = field_value.value();
+  return true;
 }
 
 template <typename T>
-void SimpleValueSortIndex<T>::Remove(DocId id, DocumentAccessor* doc, std::string_view field) {
+void SimpleValueSortIndex<T>::Remove(DocId id, const DocumentAccessor& doc,
+                                     std::string_view field) {
   DCHECK_LT(id, values_.size());
   values_[id] = T{};
 }
@@ -72,16 +74,17 @@ template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRe
 template struct SimpleValueSortIndex<double>;
 template struct SimpleValueSortIndex<PMR_NS::string>;
 
-std::optional<double> NumericSortIndex::Get(DocumentAccessor* doc, std::string_view field) {
-  auto numbers_list = doc->GetNumbers(field);
+std::optional<double> NumericSortIndex::Get(const DocumentAccessor& doc, std::string_view field) {
+  auto numbers_list = doc.GetNumbers(field);
   if (!numbers_list) {
     return std::nullopt;
   }
   return !numbers_list->empty() ? numbers_list->front() : 0.0;
 }
 
-std::optional<PMR_NS::string> StringSortIndex::Get(DocumentAccessor* doc, std::string_view field) {
-  auto strings_list = doc->GetStrings(field);
+std::optional<PMR_NS::string> StringSortIndex::Get(const DocumentAccessor& doc,
+                                                   std::string_view field) {
+  auto strings_list = doc.GetStrings(field);
   if (!strings_list) {
     return std::nullopt;
   }

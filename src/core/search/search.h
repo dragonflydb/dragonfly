@@ -78,8 +78,8 @@ class FieldIndices {
   FieldIndices(const Schema& schema, const IndicesOptions& options, PMR_NS::memory_resource* mr);
 
   // Returns true if document was added
-  bool Add(DocId doc, DocumentAccessor* access);
-  void Remove(DocId doc, DocumentAccessor* access);
+  bool Add(DocId doc, const DocumentAccessor& access);
+  void Remove(DocId doc, const DocumentAccessor& access);
 
   BaseIndex* GetIndex(std::string_view field) const;
   BaseSortIndex* GetSortIndex(std::string_view field) const;

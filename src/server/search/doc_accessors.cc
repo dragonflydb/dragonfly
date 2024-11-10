@@ -97,7 +97,36 @@ SearchDocData BaseAccessor::SerializeDocument(const search::Schema& schema) cons
   return Serialize(schema);
 }
 
-BaseAccessor::AccessResult<BaseAccessor::StringList> ListPackAccessor::GetStrings(
+std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(
+    std::string_view active_field) const {
+  auto strings_list = GetStrings(active_field);
+  if (strings_list) {
+    return !strings_list->empty() ? search::BytesToFtVectorSafe(strings_list->front())
+                                  : VectorInfo{};
+  }
+  return std::nullopt;
+}
+
+std::optional<BaseAccessor::NumsList> BaseAccessor::GetNumbers(
+    std::string_view active_field) const {
+  auto strings_list = GetStrings(active_field);
+  if (!strings_list) {
+    return std::nullopt;
+  }
+
+  NumsList nums_list;
+  nums_list.reserve(strings_list->size());
+  for (auto str : strings_list.value()) {
+    auto num = search::ParseNumericField(str);
+    if (!num) {
+      return std::nullopt;
+    }
+    nums_list.push_back(num.value());
+  }
+  return nums_list;
+}
+
+std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
     string_view active_field) const {
   auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
   return strsv.has_value() ? StringList{*strsv} : StringList{};
@@ -124,7 +153,7 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
   return out;
 }
 
-BaseAccessor::AccessResult<BaseAccessor::StringList> StringMapAccessor::GetStrings(
+std::optional<BaseAccessor::StringList> StringMapAccessor::GetStrings(
     string_view active_field) const {
   auto it = hset_->Find(active_field);
   return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList{};
@@ -162,8 +191,7 @@ struct JsonAccessor::JsonPathContainer {
   variant<json::Path, jsoncons::jsonpath::jsonpath_expression<JsonType>> val;
 };
 
-BaseAccessor::AccessResult<BaseAccessor::StringList> JsonAccessor::GetStrings(
-    string_view active_field) const {
+std::optional<BaseAccessor::StringList> JsonAccessor::GetStrings(string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
     return search::EmptyAccessResult<StringList>();
@@ -225,8 +253,7 @@ BaseAccessor::AccessResult<BaseAccessor::StringList> JsonAccessor::GetStrings(
   return out;
 }
 
-BaseAccessor::AccessResult<BaseAccessor::VectorInfo> JsonAccessor::GetVector(
-    string_view active_field) const {
+std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
     return VectorInfo{};
@@ -252,8 +279,7 @@ BaseAccessor::AccessResult<BaseAccessor::VectorInfo> JsonAccessor::GetVector(
   return BaseAccessor::VectorInfo{std::move(ptr), size};
 }
 
-BaseAccessor::AccessResult<BaseAccessor::NumsList> JsonAccessor::GetNumbers(
-    string_view active_field) const {
+std::optional<BaseAccessor::NumsList> JsonAccessor::GetNumbers(string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
     return search::EmptyAccessResult<NumsList>();

@@ -71,19 +71,20 @@ absl::flat_hash_set<string> NormalizeTags(string_view taglist, bool case_sensiti
 NumericIndex::NumericIndex(PMR_NS::memory_resource* mr) : entries_{mr} {
 }
 
-bool NumericIndex::IsValidFieldType(DocumentAccessor* doc, string_view field) {
-  return doc->GetNumbers(field).has_value();
-}
+bool NumericIndex::Add(DocId id, const DocumentAccessor& doc, string_view field) {
+  auto numbers = doc.GetNumbers(field);
+  if (!numbers) {
+    return false;
+  }
 
-void NumericIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  auto numbers = doc->GetNumbers(field).value();
-  for (auto num : numbers) {
+  for (auto num : numbers.value()) {
     entries_.emplace(num, id);
   }
+  return true;
 }
 
-void NumericIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  auto numbers = doc->GetNumbers(field).value();
+void NumericIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+  auto numbers = doc.GetNumbers(field).value();
   for (auto num : numbers) {
     entries_.erase({num, id});
   }
@@ -141,25 +142,24 @@ typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_v
 }
 
 template <typename C>
-bool BaseStringIndex<C>::IsValidFieldType(DocumentAccessor* doc, string_view field) {
-  return doc->GetStrings(field).has_value();
-}
-
-template <typename C>
-void BaseStringIndex<C>::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  auto strings_list = doc->GetStrings(field).value();
+bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view field) {
+  auto strings_list = doc.GetStrings(field);
+  if (!strings_list) {
+    return false;
+  }
 
   absl::flat_hash_set<std::string> tokens;
-  for (string_view str : strings_list)
+  for (string_view str : strings_list.value())
     tokens.merge(Tokenize(str));
 
   for (string_view token : tokens)
     GetOrCreate(token)->Insert(id);
+  return true;
 }
 
 template <typename C>
-void BaseStringIndex<C>::Remove(DocId id, DocumentAccessor* doc, string_view field) {
-  auto strings_list = doc->GetStrings(field).value();
+void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
+  auto strings_list = doc.GetStrings(field).value();
 
   absl::flat_hash_set<std::string> tokens;
   for (string_view str : strings_list)
@@ -203,12 +203,18 @@ std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
   return {dim_, sim_};
 }
 
-bool BaseVectorIndex::IsValidFieldType(DocumentAccessor* doc, string_view field) {
-  auto vector = doc->GetVector(field);
+bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
+  auto vector = doc.GetVector(field);
   if (!vector)
     return false;
+
   auto& [ptr, size] = vector.value();
-  return !ptr || size == dim_;
+  if (ptr && size != dim_) {
+    return false;
+  }
+
+  AddVector(id, ptr);
+  return true;
 }
 
 FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
@@ -218,19 +224,18 @@ FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
   entries_.reserve(params.capacity * params.dim);
 }
 
-void FlatVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
+void FlatVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
   DCHECK_LE(id * dim_, entries_.size());
   if (id * dim_ == entries_.size())
     entries_.resize((id + 1) * dim_);
 
   // TODO: Let get vector write to buf itself
-  auto [ptr, size] = doc->GetVector(field).value();
-
-  if (size == dim_ && ptr)  // ptr can be null
-    memcpy(&entries_[id * dim_], ptr.get(), dim_ * sizeof(float));
+  if (vector) {
+    memcpy(&entries_[id * dim_], vector.get(), dim_ * sizeof(float));
+  }
 }
 
-void FlatVectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
   // noop
 }
 
@@ -248,7 +253,7 @@ struct HnswlibAdapter {
                100 /* seed*/} {
   }
 
-  void Add(float* data, DocId id) {
+  void Add(const float* data, DocId id) {
     if (world_.cur_element_count + 1 >= world_.max_elements_)
       world_.resizeIndex(world_.cur_element_count * 2);
     world_.addPoint(data, id);
@@ -317,10 +322,10 @@ HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS
 HnswVectorIndex::~HnswVectorIndex() {
 }
 
-void HnswVectorIndex::Add(DocId id, DocumentAccessor* doc, string_view field) {
-  auto [ptr, size] = doc->GetVector(field).value();
-  if (size == dim_ && ptr)  // ptr can be null
-    adapter_->Add(ptr.get(), id);
+void HnswVectorIndex::AddVector(DocId id, const VectorPtr& vector) {
+  if (vector) {
+    adapter_->Add(vector.get(), id);
+  }
 }
 
 std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t k,
@@ -333,7 +338,7 @@ std::vector<std::pair<float, DocId>> HnswVectorIndex::Knn(float* target, size_t 
   return adapter_->Knn(target, k, ef, allowed);
 }
 
-void HnswVectorIndex::Remove(DocId id, DocumentAccessor* doc, string_view field) {
+void HnswVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
   adapter_->Remove(id);
 }
 

@@ -41,7 +41,7 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
       return;
 
     auto accessor = GetAccessor(op_args.db_cntx, pv);
-    f(key, accessor.get());
+    f(key, *accessor);
   };
 
   PrimeTable::Cursor cursor;
@@ -186,7 +186,7 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr);
 
-  auto cb = [this](string_view key, BaseAccessor* doc) {
+  auto cb = [this](string_view key, const BaseAccessor& doc) {
     DocId id = key_index_.Add(key);
     if (!indices_->Add(id, doc)) {
       key_index_.Remove(key);
@@ -204,7 +204,7 @@ void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const Prim
 
   auto accessor = GetAccessor(db_cntx, pv);
   DocId id = key_index_.Add(key);
-  if (!indices_->Add(id, accessor.get())) {
+  if (!indices_->Add(id, *accessor)) {
     key_index_.Remove(key);
   }
 }
@@ -216,7 +216,7 @@ void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const P
   auto accessor = GetAccessor(db_cntx, pv);
   auto id = key_index_.Remove(key);
   if (id) {
-    indices_->Remove(id.value(), accessor.get());
+    indices_->Remove(id.value(), *accessor);
   }
 }
 
