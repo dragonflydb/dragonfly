@@ -38,43 +38,44 @@ string_view SdsToSafeSv(sds str) {
   return str != nullptr ? string_view{str, sdslen(str)} : ""sv;
 }
 
-search::SortableValue FieldToSortableValue(search::SchemaField::FieldType type, string_view value) {
+using FieldValue = std::optional<search::SortableValue>;
+
+FieldValue ToSortableValue(search::SchemaField::FieldType type, string_view value) {
+  if (value.empty()) {
+    return std::nullopt;
+  }
+
   if (type == search::SchemaField::NUMERIC) {
-    double value_as_double = 0;
-    if (!absl::SimpleAtod(value, &value_as_double)) {  // temporary convert to double
+    auto value_as_double = search::ParseNumericField(value);
+    if (!value_as_double) {  // temporary convert to double
       LOG(DFATAL) << "Failed to convert " << value << " to double";
+      return std::nullopt;
     }
-    return value_as_double;
+    return value_as_double.value();
   }
   if (type == search::SchemaField::VECTOR) {
-    auto [ptr, size] = search::BytesToFtVector(value);
+    auto opt_vector = search::BytesToFtVectorSafe(value);
+    if (!opt_vector) {
+      LOG(DFATAL) << "Failed to convert " << value << " to vector";
+      return std::nullopt;
+    }
+    auto& [ptr, size] = opt_vector.value();
     return absl::StrCat("[", absl::StrJoin(absl::Span<const float>{ptr.get(), size}, ","), "]");
   }
   return string{value};
 }
 
-search::SortableValue JsonToSortableValue(const search::SchemaField::FieldType type,
-                                          const JsonType& json) {
-  if (type == search::SchemaField::NUMERIC) {
-    return json.as_double();
-  }
-  return json.to_string();
-}
-
-search::SortableValue ExtractSortableValue(const search::Schema& schema, string_view key,
-                                           string_view value) {
+FieldValue ExtractSortableValue(const search::Schema& schema, string_view key, string_view value) {
   auto it = schema.fields.find(key);
   if (it == schema.fields.end())
-    return FieldToSortableValue(search::SchemaField::TEXT, value);
-  return FieldToSortableValue(it->second.type, value);
+    return ToSortableValue(search::SchemaField::TEXT, value);
+  return ToSortableValue(it->second.type, value);
 }
 
-search::SortableValue ExtractSortableValueFromJson(const search::Schema& schema, string_view key,
-                                                   const JsonType& json) {
-  auto it = schema.fields.find(key);
-  if (it == schema.fields.end())
-    return JsonToSortableValue(search::SchemaField::TEXT, json);
-  return JsonToSortableValue(it->second.type, json);
+FieldValue ExtractSortableValueFromJson(const search::Schema& schema, string_view key,
+                                        const JsonType& json) {
+  auto json_as_string = json.to_string();
+  return ExtractSortableValue(schema, key, json_as_string);
 }
 
 }  // namespace
@@ -83,7 +84,11 @@ SearchDocData BaseAccessor::Serialize(
     const search::Schema& schema, absl::Span<const SearchField<std::string_view>> fields) const {
   SearchDocData out{};
   for (const auto& [fident, fname] : fields) {
-    out[fname] = ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident), ","));
+    auto field_value =
+        ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident).value(), ","));
+    if (field_value) {
+      out[fname] = std::move(field_value).value();
+    }
   }
   return out;
 }
@@ -92,14 +97,39 @@ SearchDocData BaseAccessor::SerializeDocument(const search::Schema& schema) cons
   return Serialize(schema);
 }
 
-BaseAccessor::StringList ListPackAccessor::GetStrings(string_view active_field) const {
-  auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
-  return strsv.has_value() ? StringList{*strsv} : StringList{};
+std::optional<BaseAccessor::VectorInfo> BaseAccessor::GetVector(
+    std::string_view active_field) const {
+  auto strings_list = GetStrings(active_field);
+  if (strings_list) {
+    return !strings_list->empty() ? search::BytesToFtVectorSafe(strings_list->front())
+                                  : VectorInfo{};
+  }
+  return std::nullopt;
 }
 
-BaseAccessor::VectorInfo ListPackAccessor::GetVector(string_view active_field) const {
-  auto strlist = GetStrings(active_field);
-  return strlist.empty() ? VectorInfo{} : search::BytesToFtVector(strlist.front());
+std::optional<BaseAccessor::NumsList> BaseAccessor::GetNumbers(
+    std::string_view active_field) const {
+  auto strings_list = GetStrings(active_field);
+  if (!strings_list) {
+    return std::nullopt;
+  }
+
+  NumsList nums_list;
+  nums_list.reserve(strings_list->size());
+  for (auto str : strings_list.value()) {
+    auto num = search::ParseNumericField(str);
+    if (!num) {
+      return std::nullopt;
+    }
+    nums_list.push_back(num.value());
+  }
+  return nums_list;
+}
+
+std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
+    string_view active_field) const {
+  auto strsv = container_utils::LpFind(lp_, active_field, intbuf_[0].data());
+  return strsv.has_value() ? StringList{*strsv} : StringList{};
 }
 
 SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
@@ -114,27 +144,29 @@ SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
     string_view v = container_utils::LpGetView(fptr, intbuf_[1].data());
     fptr = lpNext(lp_, fptr);
 
-    out[k] = ExtractSortableValue(schema, k, v);
+    auto field_value = ExtractSortableValue(schema, k, v);
+    if (field_value) {
+      out[k] = std::move(field_value).value();
+    }
   }
 
   return out;
 }
 
-BaseAccessor::StringList StringMapAccessor::GetStrings(string_view active_field) const {
+std::optional<BaseAccessor::StringList> StringMapAccessor::GetStrings(
+    string_view active_field) const {
   auto it = hset_->Find(active_field);
   return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList{};
 }
 
-BaseAccessor::VectorInfo StringMapAccessor::GetVector(string_view active_field) const {
-  auto strlist = GetStrings(active_field);
-  return strlist.empty() ? VectorInfo{} : search::BytesToFtVector(strlist.front());
-}
-
 SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
   SearchDocData out{};
-  for (const auto& [kptr, vptr] : *hset_)
-    out[SdsToSafeSv(kptr)] = ExtractSortableValue(schema, SdsToSafeSv(kptr), SdsToSafeSv(vptr));
-
+  for (const auto& [kptr, vptr] : *hset_) {
+    auto field_value = ExtractSortableValue(schema, SdsToSafeSv(kptr), SdsToSafeSv(vptr));
+    if (field_value) {
+      out[SdsToSafeSv(kptr)] = std::move(field_value).value();
+    }
+  }
   return out;
 }
 
@@ -159,27 +191,54 @@ struct JsonAccessor::JsonPathContainer {
   variant<json::Path, jsoncons::jsonpath::jsonpath_expression<JsonType>> val;
 };
 
-BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) const {
+std::optional<BaseAccessor::StringList> JsonAccessor::GetStrings(string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
-    return {};
+    return search::EmptyAccessResult<StringList>();
 
   auto path_res = path->Evaluate(json_);
   if (path_res.empty())
-    return {};
+    return search::EmptyAccessResult<StringList>();
 
-  if (path_res.size() == 1) {
+  if (path_res.size() == 1 && !path_res[0].is_array()) {
+    if (!path_res[0].is_string())
+      return std::nullopt;
+
     buf_ = path_res[0].as_string();
-    return {buf_};
+    return StringList{buf_};
   }
+
   buf_.clear();
 
   // First, grow buffer and compute string sizes
   vector<size_t> sizes;
-  for (const auto& element : path_res) {
+
+  auto add_json_to_buf = [&](const JsonType& json) {
     size_t start = buf_.size();
-    buf_ += element.as_string();
+    buf_ += json.as_string();
     sizes.push_back(buf_.size() - start);
+  };
+
+  if (!path_res[0].is_array()) {
+    sizes.reserve(path_res.size());
+    for (const auto& element : path_res) {
+      if (!element.is_string())
+        return std::nullopt;
+
+      add_json_to_buf(element);
+    }
+  } else {
+    if (path_res.size() > 1) {
+      return std::nullopt;
+    }
+
+    sizes.reserve(path_res[0].size());
+    for (const auto& element : path_res[0].array_range()) {
+      if (!element.is_string())
+        return std::nullopt;
+
+      add_json_to_buf(element);
+    }
   }
 
   // Reposition start pointers to the most recent allocation of buf
@@ -194,23 +253,62 @@ BaseAccessor::StringList JsonAccessor::GetStrings(string_view active_field) cons
   return out;
 }
 
-BaseAccessor::VectorInfo JsonAccessor::GetVector(string_view active_field) const {
+std::optional<BaseAccessor::VectorInfo> JsonAccessor::GetVector(string_view active_field) const {
   auto* path = GetPath(active_field);
   if (!path)
-    return {};
+    return VectorInfo{};
 
   auto res = path->Evaluate(json_);
   if (res.empty())
-    return {nullptr, 0};
+    return VectorInfo{};
+
+  if (!res[0].is_array())
+    return std::nullopt;
 
   size_t size = res[0].size();
   auto ptr = make_unique<float[]>(size);
 
   size_t i = 0;
-  for (const auto& v : res[0].array_range())
+  for (const auto& v : res[0].array_range()) {
+    if (!v.is_number()) {
+      return std::nullopt;
+    }
     ptr[i++] = v.as<float>();
+  }
 
-  return {std::move(ptr), size};
+  return BaseAccessor::VectorInfo{std::move(ptr), size};
+}
+
+std::optional<BaseAccessor::NumsList> JsonAccessor::GetNumbers(string_view active_field) const {
+  auto* path = GetPath(active_field);
+  if (!path)
+    return search::EmptyAccessResult<NumsList>();
+
+  auto path_res = path->Evaluate(json_);
+  if (path_res.empty())
+    return search::EmptyAccessResult<NumsList>();
+
+  NumsList nums_list;
+  if (!path_res[0].is_array()) {
+    nums_list.reserve(path_res.size());
+    for (const auto& element : path_res) {
+      if (!element.is_number())
+        return std::nullopt;
+      nums_list.push_back(element.as<double>());
+    }
+  } else {
+    if (path_res.size() > 1) {
+      return std::nullopt;
+    }
+
+    nums_list.reserve(path_res[0].size());
+    for (const auto& element : path_res[0].array_range()) {
+      if (!element.is_number())
+        return std::nullopt;
+      nums_list.push_back(element.as<double>());
+    }
+  }
+  return nums_list;
 }
 
 JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) const {
@@ -259,8 +357,12 @@ SearchDocData JsonAccessor::Serialize(
   SearchDocData out{};
   for (const auto& [ident, name] : fields) {
     if (auto* path = GetPath(ident); path) {
-      if (auto res = path->Evaluate(json_); !res.empty())
-        out[name] = ExtractSortableValueFromJson(schema, ident, res[0]);
+      if (auto res = path->Evaluate(json_); !res.empty()) {
+        auto field_value = ExtractSortableValueFromJson(schema, ident, res[0]);
+        if (field_value) {
+          out[name] = std::move(field_value).value();
+        }
+      }
     }
   }
   return out;
