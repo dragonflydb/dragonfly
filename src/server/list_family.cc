@@ -84,6 +84,10 @@ void* listPopSaver(unsigned char* data, size_t sz) {
   return new string((char*)data, sz);
 }
 
+QList::Where ToWhere(ListDir dir) {
+  return dir == ListDir::LEFT ? QList::HEAD : QList::TAIL;
+}
+
 enum InsertParam { INSERT_BEFORE, INSERT_AFTER };
 
 string ListPop(ListDir dir, quicklist* ql) {
@@ -166,7 +170,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
     len = quicklistCount(ql);
   } else {
     QList* ql = GetQLV2(it->second);
-    QList::Where where = (dir == ListDir::LEFT) ? QList::HEAD : QList::TAIL;
+    QList::Where where = ToWhere(dir);
     value = ql->Pop(where);
     len = ql->Size();
   }
@@ -217,8 +221,8 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
       int pos = (dest_dir == ListDir::LEFT) ? QUICKLIST_HEAD : QUICKLIST_TAIL;
       quicklistPush(src_ql, val.data(), val.size(), pos);
     } else {
-      val = srcql_v2->Pop(src_dir == ListDir::LEFT ? QList::HEAD : QList::TAIL);
-      srcql_v2->Push(val, dest_dir == ListDir::LEFT ? QList::HEAD : QList::TAIL);
+      val = srcql_v2->Pop(ToWhere(src_dir));
+      srcql_v2->Push(val, ToWhere(dest_dir));
     }
 
     return val;
@@ -264,8 +268,8 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   } else {
     DCHECK(srcql_v2);
     DCHECK(destql_v2);
-    val = srcql_v2->Pop(src_dir == ListDir::LEFT ? QList::HEAD : QList::TAIL);
-    destql_v2->Push(val, dest_dir == ListDir::LEFT ? QList::HEAD : QList::TAIL);
+    val = srcql_v2->Pop(ToWhere(src_dir));
+    destql_v2->Push(val, ToWhere(dest_dir));
   }
 
   src_res->post_updater.Run();
@@ -295,19 +299,19 @@ OpResult<string> Peek(const OpArgs& op_args, string_view key, ListDir dir, bool 
   if (pv.Encoding() == OBJ_ENCODING_QUICKLIST) {
     quicklist* ql = GetQL(it_res.value()->second);
     quicklistEntry entry = container_utils::QLEntry();
-    quicklistIter* iter = (dir == ListDir::LEFT) ? quicklistGetIterator(ql, AL_START_HEAD)
-                                                 : quicklistGetIterator(ql, AL_START_TAIL);
+    quicklistIter* iter =
+        quicklistGetIterator(ql, (dir == ListDir::LEFT) ? AL_START_HEAD : AL_START_TAIL);
+
     CHECK(quicklistNext(iter, &entry));
     quicklistReleaseIterator(iter);
 
-    if (entry.value)
-      return string(reinterpret_cast<char*>(entry.value), entry.sz);
-    else
-      return absl::StrCat(entry.longval);
+    return (entry.value) ? string(reinterpret_cast<char*>(entry.value), entry.sz)
+                         : absl::StrCat(entry.longval);
   }
+
   DCHECK_EQ(pv.Encoding(), kEncodingQL2);
   QList* ql = GetQLV2(pv);
-  auto it = ql->GetIterator(dir == ListDir::LEFT ? QList::HEAD : QList::TAIL);
+  auto it = ql->GetIterator(ToWhere(dir));
   CHECK(it.Next());
 
   return it.Get().to_string();
@@ -365,7 +369,7 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
     }
     len = quicklistCount(ql);
   } else {
-    QList::Where where = (dir == ListDir::LEFT) ? QList::HEAD : QList::TAIL;
+    QList::Where where = ToWhere(dir);
     for (string_view v : vals) {
       ql_v2->Push(v, where);
     }
@@ -419,7 +423,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
       res.reserve(count);
     }
 
-    QList::Where where = (dir == ListDir::LEFT) ? QList::HEAD : QList::TAIL;
+    QList::Where where = ToWhere(dir);
     for (unsigned i = 0; i < count; ++i) {
       string val = ql->Pop(where);
       if (return_results) {
@@ -672,7 +676,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
 
     auto it = ql->GetIterator(where);
     auto is_match = [&](const QList::Entry& entry) {
-      return (is_int && entry.is_int() && entry.ival() == ival) || (entry == elem);
+      return is_int ? entry.is_int() && entry.ival() == ival : entry == elem;
     };
 
     while (it.Next()) {
