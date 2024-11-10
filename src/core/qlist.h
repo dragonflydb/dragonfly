@@ -8,7 +8,8 @@ extern "C" {
 #include "redis/quicklist.h"
 }
 
-#include <functional>
+#include <absl/functional/function_ref.h>
+
 #include <optional>
 #include <string>
 #include <variant>
@@ -33,6 +34,10 @@ class QList {
     // Assumes value is not int64.
     std::string_view view() const {
       return std::get<std::string_view>(value_);
+    }
+
+    bool is_int() const {
+      return std::holds_alternative<int64_t>(value_);
     }
 
     int64_t ival() const {
@@ -66,7 +71,7 @@ class QList {
     friend class QList;
   };
 
-  using IterateFunc = std::function<bool(Entry)>;
+  using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt { BEFORE, AFTER };
 
   QList();
@@ -85,6 +90,10 @@ class QList {
   void Clear();
 
   void Push(std::string_view value, Where where);
+
+  // Returns the popped value. Precondition: list is not empty.
+  std::string Pop(Where where);
+
   void AppendListpack(unsigned char* zl);
   void AppendPlain(unsigned char* zl, size_t sz);
 
