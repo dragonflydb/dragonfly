@@ -566,26 +566,6 @@ TEST_F(DashTest, Traverse) {
   EXPECT_EQ(kNumItems - 1, nums.back());
 }
 
-TEST_F(DashTest, Bucket) {
-  constexpr auto kNumItems = 250;
-  for (size_t i = 0; i < kNumItems; ++i) {
-    dt_.Insert(i, 0);
-  }
-  std::vector<uint64_t> s;
-  auto it = dt_.begin();
-  auto bucket_it = Dash64::BucketIt(it);
-
-  dt_.TraverseBucket(it, [&](auto i) { s.push_back(i->first); });
-
-  unsigned num_items = 0;
-  while (!bucket_it.is_done()) {
-    ASSERT_TRUE(find(s.begin(), s.end(), bucket_it->first) != s.end());
-    ++bucket_it;
-    ++num_items;
-  }
-  EXPECT_EQ(s.size(), num_items);
-}
-
 TEST_F(DashTest, TraverseSegmentOrder) {
   constexpr auto kNumItems = 50;
   for (size_t i = 0; i < kNumItems; ++i) {

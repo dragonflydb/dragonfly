@@ -222,22 +222,23 @@ class DashTable : public detail::DashTableBase {
   // Returns: cursor with a random position
   Cursor GetRandomCursor(absl::BitGen* bitgen);
 
-  // Traverses over a single bucket in table and calls cb(iterator) 0 or more
+  // Traverses over a single logical bucket in table and calls cb(iterator) 0 or more
   // times. if cursor=0 starts traversing from the beginning, otherwise continues from where it
   // stopped. returns 0 if the supplied cursor reached end of traversal. Traverse iterates at bucket
-  // granularity, which means for each non-empty bucket it calls cb per each entry in the bucket
-  // before returning. Unlike begin/end interface, traverse is stable during table mutations.
-  // It guarantees that if key exists (1)at the beginning of traversal, (2) stays in the table
-  // during the traversal, then Traverse() will eventually reach it even when the
-  // table shrinks or grows.
-  // Returns: cursor that is guaranteed to be less than 2^40.
+  // logical granularity, which means for each non-empty bucket it calls cb per each entry in the
+  // logical bucket before returning. Unlike begin/end interface, traverse is stable during table
+  // mutations. It guarantees that if key exists (1)at the beginning of traversal, (2) stays in the
+  // table during the traversal, then Traverse() will eventually reach it even when the table
+  // shrinks or grows. Returns: cursor that is guaranteed to be less than 2^40.
   template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb);
 
+  // Traverses over a single physical bucket in table call cb once on bucket iterator.
+  // if cursor=0 starts traversing from the beginning, otherwise continues from where
+  // it stopped. returns 0 if the supplied cursor reached end of traversal.
+  // Unlike Traverse, TraverseBuckets calls cb once on bucket iterator and not on each entry in
+  // bucket. TraverseBuckets is stable during table mutations. It guarantees traversing all buckets
+  // that existed at the beginning of traversal.
   template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb);
-
-  // Takes an iterator pointing to an entry in a dash bucket and traverses all bucket's entries by
-  // calling cb(iterator) for every non-empty slot. The iteration goes over a physical bucket.
-  template <typename Cb> void TraverseBucket(const_iterator it, Cb&& cb);
 
   // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
   // segment by segment over physical backets.
@@ -996,16 +997,6 @@ auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor curs, Cb&& cb) -> C
   } while (!fetched);
 
   return Cursor{global_depth_, sid, bid};
-}
-
-template <typename _Key, typename _Value, typename Policy>
-template <typename Cb>
-void DashTable<_Key, _Value, Policy>::TraverseBucket(const_iterator it, Cb&& cb) {
-  SegmentType& s = *segment_[it.seg_id_];
-  const auto& b = s.GetBucket(it.bucket_id_);
-  b.ForEachSlot([it, cb = std::move(cb), table = this](auto* bucket, uint8_t slot, bool probe) {
-    cb(iterator{table, it.seg_id_, it.bucket_id_, slot});
-  });
 }
 
 }  // namespace dfly
