@@ -122,10 +122,23 @@ class QList {
     return len_;
   }
 
+  unsigned compress_param() const {
+    return compress_;
+  }
+
   Iterator Erase(Iterator it);
 
+  // Returns true if elements were deleted, false if list has not changed.
+  // Negative start index is allowed.
+  bool Erase(const long start, unsigned count);
+
+  // Needed by tests and the rdb code.
   const quicklistNode* Head() const {
     return head_;
+  }
+
+  const quicklistNode* Tail() const {
+    return tail_;
   }
 
  private:
