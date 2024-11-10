@@ -1567,6 +1567,76 @@ async def test_cluster_replication_migration(
     assert await seeder.compare(r1_capture, r2_node.instance.port)
 
 
+@pytest.mark.parametrize("migration_first", [False, True])
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "dbfilename": "snap_during_migration"})
+async def test_snapshoting_during_migration(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, migration_first: bool
+):
+    instances = [
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + 1000 + i) for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(n) for n in instances]
+
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    logging.debug("Push initial config")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("create data")
+    seeder = df_seeder_factory.create(keys=10000, port=nodes[0].instance.port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    capture_before_migration = await seeder.capture(nodes[0].instance.port)
+
+    nodes[0].migrations = [
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
+    ]
+
+    async def start_migration():
+        logging.debug("start migration")
+        await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    async def start_save():
+        logging.debug("BGSAVE")
+        await nodes[0].client.execute_command(f"BGSAVE")
+
+    if migration_first:
+        await start_migration()
+        await start_save()
+    else:
+        await start_save()
+        await start_migration()
+
+    logging.debug("wait for snapshot")
+    while await is_saving(nodes[0].client):
+        await asyncio.sleep(0.1)
+
+    logging.debug("wait migration finish")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+
+    logging.debug("finish migration")
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[0].migrations = []
+    nodes[0].slots = [(0, 16383)]
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert await seeder.compare(capture_before_migration, nodes[1].instance.port)
+
+    assert await nodes[1].client.flushall()
+    await nodes[1].client.execute_command(
+        "DFLY",
+        "LOAD",
+        "snap_during_migration-summary.dfs",
+    )
+
+    assert await seeder.compare(capture_before_migration, nodes[1].instance.port)
+
+
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 @pytest.mark.asyncio
 async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
