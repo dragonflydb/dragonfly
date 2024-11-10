@@ -255,7 +255,7 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
   std::error_code SaveStreamConsumers(streamCG* cg);
-  std::error_code SavePlainNodeAsZiplist(quicklistNode* node);
+  std::error_code SavePlainNodeAsZiplist(const quicklistNode* node);
 
   // Might preempt
   void FlushIfNeeded(FlushState flush_state);
