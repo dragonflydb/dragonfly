@@ -133,7 +133,7 @@ class ShardDocIndex {
   // DocKeyIndex manages mapping document keys to ids and vice versa through a simple interface.
   struct DocKeyIndex {
     DocId Add(std::string_view key);
-    DocId Remove(std::string_view key);
+    std::optional<DocId> Remove(std::string_view key);
 
     std::string_view Get(DocId id) const;
     size_t Size() const;

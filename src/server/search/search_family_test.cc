@@ -90,6 +90,13 @@ template <typename... Args> auto IsArray(Args... args) {
 template <typename... Args> auto IsUnordArray(Args... args) {
   return RespArray(UnorderedElementsAre(std::forward<Args>(args)...));
 }
+template <typename Expected, size_t... Is>
+void BuildKvMatchers(std::vector<Matcher<std::pair<std::string, RespExpr>>>& kv_matchers,
+                     const Expected& expected, std::index_sequence<Is...>) {
+  std::initializer_list<int>{
+      (kv_matchers.emplace_back(Pair(std::get<Is * 2>(expected), std::get<Is * 2 + 1>(expected))),
+       0)...};
+}
 
 MATCHER_P(IsMapMatcher, expected, "") {
   if (arg.type != RespExpr::ARRAY) {
@@ -97,73 +104,29 @@ MATCHER_P(IsMapMatcher, expected, "") {
     return false;
   }
 
+  constexpr size_t expected_size = std::tuple_size<decltype(expected)>::value;
+  constexpr size_t exprected_pairs_number = expected_size / 2;
+
   auto result = arg.GetVec();
-  if (result.size() != expected.size()) {
+  if (result.size() != expected_size) {
     *result_listener << "Wrong resp array size: " << result.size();
     return false;
   }
 
-  using KeyValueArray = std::vector<std::pair<std::string, std::string>>;
-
-  KeyValueArray received_pairs;
+  std::vector<std::pair<std::string, RespExpr>> received_pairs;
   for (size_t i = 0; i < result.size(); i += 2) {
-    received_pairs.emplace_back(result[i].GetString(), result[i + 1].GetString());
+    received_pairs.emplace_back(result[i].GetString(), result[i + 1]);
   }
 
-  KeyValueArray expected_pairs;
-  for (size_t i = 0; i < expected.size(); i += 2) {
-    expected_pairs.emplace_back(expected[i], expected[i + 1]);
-  }
+  std::vector<Matcher<std::pair<std::string, RespExpr>>> kv_matchers;
+  BuildKvMatchers(kv_matchers, expected, std::make_index_sequence<exprected_pairs_number>{});
 
-  // Custom unordered comparison
-  std::sort(received_pairs.begin(), received_pairs.end());
-  std::sort(expected_pairs.begin(), expected_pairs.end());
-
-  return received_pairs == expected_pairs;
-}
-
-template <typename... Matchers> auto IsMap(Matchers... matchers) {
-  return IsMapMatcher(std::vector<std::string>{std::forward<Matchers>(matchers)...});
-}
-
-MATCHER_P(IsUnordArrayWithSizeMatcher, expected, "") {
-  if (arg.type != RespExpr::ARRAY) {
-    *result_listener << "Wrong response type: " << arg.type;
-    return false;
-  }
-
-  auto result = arg.GetVec();
-  size_t expected_size = std::tuple_size<decltype(expected)>::value;
-  if (result.size() != expected_size + 1) {
-    *result_listener << "Wrong resp array size: " << result.size();
-    return false;
-  }
-
-  if (result[0].GetInt() != expected_size) {
-    *result_listener << "Wrong elements count: " << result[0].GetInt().value_or(-1);
-    return false;
-  }
-
-  std::vector<RespExpr> received_elements(result.begin() + 1, result.end());
-
-  // Create a vector of matchers from the tuple
-  std::vector<Matcher<RespExpr>> matchers;
-  std::apply([&matchers](auto&&... args) { ((matchers.push_back(args)), ...); }, expected);
-
-  return ExplainMatchResult(UnorderedElementsAreArray(matchers), received_elements,
+  return ExplainMatchResult(UnorderedElementsAreArray(kv_matchers), received_pairs,
                             result_listener);
 }
 
-template <typename... Matchers> auto IsUnordArrayWithSize(Matchers... matchers) {
-  return IsUnordArrayWithSizeMatcher(std::make_tuple(matchers...));
-}
-
-template <typename Expected, size_t... Is>
-void BuildKvMatchers(std::vector<Matcher<std::pair<std::string, RespExpr>>>& kv_matchers,
-                     const Expected& expected, std::index_sequence<Is...>) {
-  std::initializer_list<int>{
-      (kv_matchers.emplace_back(Pair(std::get<Is * 2>(expected), std::get<Is * 2 + 1>(expected))),
-       0)...};
+template <typename... Args> auto IsMap(Args... args) {
+  return IsMapMatcher(std::make_tuple(args...));
 }
 
 MATCHER_P(IsMapWithSizeMatcher, expected, "") {
@@ -199,6 +162,38 @@ MATCHER_P(IsMapWithSizeMatcher, expected, "") {
 
 template <typename... Args> auto IsMapWithSize(Args... args) {
   return IsMapWithSizeMatcher(std::make_tuple(args...));
+}
+
+MATCHER_P(IsUnordArrayWithSizeMatcher, expected, "") {
+  if (arg.type != RespExpr::ARRAY) {
+    *result_listener << "Wrong response type: " << arg.type;
+    return false;
+  }
+
+  auto result = arg.GetVec();
+  size_t expected_size = std::tuple_size<decltype(expected)>::value;
+  if (result.size() != expected_size + 1) {
+    *result_listener << "Wrong resp array size: " << result.size();
+    return false;
+  }
+
+  if (result[0].GetInt() != expected_size) {
+    *result_listener << "Wrong elements count: " << result[0].GetInt().value_or(-1);
+    return false;
+  }
+
+  std::vector<RespExpr> received_elements(result.begin() + 1, result.end());
+
+  // Create a vector of matchers from the tuple
+  std::vector<Matcher<RespExpr>> matchers;
+  std::apply([&matchers](auto&&... args) { ((matchers.push_back(args)), ...); }, expected);
+
+  return ExplainMatchResult(UnorderedElementsAreArray(matchers), received_elements,
+                            result_listener);
+}
+
+template <typename... Matchers> auto IsUnordArrayWithSize(Matchers... matchers) {
+  return IsUnordArrayWithSizeMatcher(std::make_tuple(matchers...));
 }
 
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
@@ -649,7 +644,7 @@ TEST_F(SearchFamilyTest, TestReturn) {
 
   // Check non-existing field
   resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "nothere"});
-  EXPECT_THAT(resp, MatchEntry("k0", "nothere", ""));
+  EXPECT_THAT(resp, MatchEntry("k0"));
 
   // Checl implcit __vector_score is provided
   float score = 20;
@@ -1194,8 +1189,8 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
                                          IsMap("foo_total", "10", "word", "item1")));
 
   // Test JSON
-  Run({"JSON.SET", "j1", ".", R"({"word":"item1","foo":"10","text":"first key"})"});
-  Run({"JSON.SET", "j2", ".", R"({"word":"item2","foo":"20","text":"second key"})"});
+  Run({"JSON.SET", "j1", ".", R"({"word":"item1","foo":10,"text":"first key"})"});
+  Run({"JSON.SET", "j2", ".", R"({"word":"item2","foo":20,"text":"second key"})"});
 
   resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.word", "AS", "word", "TAG", "$.foo",
               "AS", "foo", "NUMERIC", "$.text", "AS", "text", "TEXT"});
@@ -1213,5 +1208,221 @@ TEST_F(SearchFamilyTest, AggregateWithLoadOptionHard) {
                                          IsMap("foo_total", "10", "word", "\"item1\"")));
 }
 #endif
+
+TEST_F(SearchFamilyTest, WrongFieldTypeJson) {
+  // Test simple
+  Run({"JSON.SET", "j1", ".", R"({"value":"one"})"});
+  Run({"JSON.SET", "j2", ".", R"({"value":1})"});
+
+  EXPECT_EQ(Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC",
+                 "SORTABLE"}),
+            "OK");
+
+  auto resp = Run({"FT.SEARCH", "i1", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2"));
+
+  resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "$.value"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("$.value", "1")));
+
+  // Test with two fields. One is loading
+  Run({"JSON.SET", "j3", ".", R"({"value":"two","another_value":1})"});
+  Run({"JSON.SET", "j4", ".", R"({"value":2,"another_value":2})"});
+
+  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.value", "AS", "value", "NUMERIC"}),
+            "OK");
+
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "$.another_value"});
+  EXPECT_THAT(
+      resp, IsMapWithSize("j2", IsMap("$", R"({"value":1})"), "j4",
+                          IsMap("$", R"({"another_value":2,"value":2})", "$.another_value", "2")));
+
+  resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "$.value", "$.another_value", "GROUPBY", "2",
+              "$.value", "$.another_value", "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp,
+              IsUnordArrayWithSize(
+                  IsMap("$.value", "1", "$.another_value", ArgType(RespExpr::NIL), "count", "1"),
+                  IsMap("$.value", "2", "$.another_value", "2", "count", "1")));
+
+  // Test multiple field values
+  Run({"JSON.SET", "j5", ".", R"({"arr":[{"id":1},{"id":"two"}]})"});
+  Run({"JSON.SET", "j6", ".", R"({"arr":[{"id":1},{"id":2}]})"});
+  Run({"JSON.SET", "j7", ".", R"({"arr":[]})"});
+
+  resp = Run({"FT.CREATE", "i3", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "i3", "*"});
+  EXPECT_THAT(resp, AreDocIds("j1", "j2", "j3", "j4", "j6", "j7"));  // Only j5 fails
+
+  resp = Run({"FT.CREATE", "i4", "ON", "JSON", "SCHEMA", "$.arr[*].id", "AS", "id", "NUMERIC",
+              "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "i4", "*"});
+  EXPECT_THAT(resp, AreDocIds("j1", "j2", "j3", "j4", "j6", "j7"));  // Only j5 fails
+}
+
+TEST_F(SearchFamilyTest, WrongFieldTypeHash) {
+  // Test simple
+  Run({"HSET", "h1", "value", "one"});
+  Run({"HSET", "h2", "value", "1"});
+
+  EXPECT_EQ(Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "value", "NUMERIC", "SORTABLE"}), "OK");
+
+  auto resp = Run({"FT.SEARCH", "i1", "*"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("value", "1")));
+
+  resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@value"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("value", "1")));
+
+  // Test with two fields. One is loading
+  Run({"HSET", "h3", "value", "two", "another_value", "1"});
+  Run({"HSET", "h4", "value", "2", "another_value", "2"});
+
+  EXPECT_EQ(Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "value", "NUMERIC"}), "OK");
+
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@another_value"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("value", "1"), "h4",
+                                  IsMap("value", "2", "another_value", "2")));
+
+  resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "@value", "@another_value", "GROUPBY", "2",
+              "@value", "@another_value", "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("value", "1", "another_value", ArgType(RespExpr::NIL), "count", "1"),
+                        IsMap("value", "2", "another_value", "2", "count", "1")));
+}
+
+TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
+  Run({"JSON.SET", "j1", ".", R"({"data":1,"name":"doc_with_int"})"});
+  Run({"JSON.SET", "j2", ".", R"({"data":"1","name":"doc_with_int_as_string"})"});
+  Run({"JSON.SET", "j3", ".", R"({"data":"string","name":"doc_with_string"})"});
+  Run({"JSON.SET", "j4", ".", R"({"name":"no_data"})"});
+  Run({"JSON.SET", "j5", ".", R"({"data":[5,4,3],"name":"doc_with_vector"})"});
+  Run({"JSON.SET", "j6", ".", R"({"data":"[5,4,3]","name":"doc_with_vector_as_string"})"});
+
+  auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run(
+      {"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "NUMERIC", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i3", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "TAG"});
+  EXPECT_EQ(resp, "OK");
+
+  resp =
+      Run({"FT.CREATE", "i4", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "TAG", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i5", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  resp =
+      Run({"FT.CREATE", "i6", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "TEXT", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i7", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "VECTOR", "FLAT",
+              "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "i1", "*"});
+  EXPECT_THAT(resp, AreDocIds("j1", "j4", "j5"));
+
+  resp = Run({"FT.SEARCH", "i2", "*"});
+  EXPECT_THAT(resp, AreDocIds("j1", "j4", "j5"));
+
+  resp = Run({"FT.SEARCH", "i3", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));
+
+  resp = Run({"FT.SEARCH", "i4", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));
+
+  resp = Run({"FT.SEARCH", "i5", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j3", "j6"));
+
+  resp = Run({"FT.SEARCH", "i6", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j3", "j6"));
+
+  resp = Run({"FT.SEARCH", "i7", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j5"));
+}
+
+TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
+  Run({"HSET", "j1", "data", "1", "name", "doc_with_int"});
+  Run({"HSET", "j2", "data", "1", "name", "doc_with_int_as_string"});
+  Run({"HSET", "j3", "data", "string", "name", "doc_with_string"});
+  Run({"HSET", "j4", "name", "no_data"});
+  Run({"HSET", "j5", "data", "5,4,3", "name", "doc_with_fake_vector"});
+  Run({"HSET", "j6", "data", "[5,4,3]", "name", "doc_with_fake_vector_as_string"});
+
+  // Vector [1, 2, 3]
+  std::string vector = std::string("\x3f\x80\x00\x00\x40\x00\x00\x00\x40\x40\x00\x00", 12);
+  Run({"HSET", "j7", "data", vector, "name", "doc_with_vector [1, 2, 3]"});
+
+  auto resp = Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "data", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "data", "NUMERIC", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i3", "ON", "HASH", "SCHEMA", "data", "TAG"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i4", "ON", "HASH", "SCHEMA", "data", "TAG", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i5", "ON", "HASH", "SCHEMA", "data", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i6", "ON", "HASH", "SCHEMA", "data", "TEXT", "SORTABLE"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.CREATE", "i7", "ON", "HASH", "SCHEMA", "data", "VECTOR", "FLAT", "6", "TYPE",
+              "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "i1", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j1", "j4"));
+
+  resp = Run({"FT.SEARCH", "i2", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j1", "j4"));
+
+  resp = Run({"FT.SEARCH", "i3", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j7", "j3", "j6", "j1", "j4", "j5"));
+
+  resp = Run({"FT.SEARCH", "i4", "*"});
+  EXPECT_THAT(resp, AreDocIds("j2", "j7", "j3", "j6", "j1", "j4", "j5"));
+
+  resp = Run({"FT.SEARCH", "i5", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j7", "j3", "j6", "j1", "j5"));
+
+  resp = Run({"FT.SEARCH", "i6", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j7", "j3", "j6", "j1", "j5"));
+
+  resp = Run({"FT.SEARCH", "i7", "*"});
+  EXPECT_THAT(resp, AreDocIds("j4", "j7"));
+}
+
+TEST_F(SearchFamilyTest, WrongVectorFieldType) {
+  Run({"JSON.SET", "j1", ".",
+       R"({"vector_field": [0.1, 0.2, 0.3], "name": "doc_with_correct_dim"})"});
+  Run({"JSON.SET", "j2", ".", R"({"vector_field": [0.1, 0.2], "name": "doc_with_small_dim"})"});
+  Run({"JSON.SET", "j3", ".",
+       R"({"vector_field": [0.1, 0.2, 0.3, 0.4], "name": "doc_with_large_dim"})"});
+  Run({"JSON.SET", "j4", ".", R"({"vector_field": [1, 2, 3], "name": "doc_with_int_values"})"});
+  Run({"JSON.SET", "j5", ".",
+       R"({"vector_field":"not_vector", "name":"doc_with_incorrect_field_type"})"});
+  Run({"JSON.SET", "j6", ".", R"({"name":"doc_with_no_field"})"});
+  Run({"JSON.SET", "j7", ".",
+       R"({"vector_field": [999999999999999999999999999999999999999, -999999999999999999999999999999999999999, 500000000000000000000000000000000000000], "name": "doc_with_out_of_range_values"})"});
+
+  auto resp =
+      Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
+           "VECTOR", "FLAT", "6", "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.SEARCH", "index", "*"});
+  EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4"));
+}
 
 }  // namespace dfly

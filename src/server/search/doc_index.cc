@@ -41,7 +41,7 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
       return;
 
     auto accessor = GetAccessor(op_args.db_cntx, pv);
-    f(key, accessor.get());
+    f(key, *accessor);
   };
 
   PrimeTable::Cursor cursor;
@@ -146,12 +146,14 @@ ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
   return id;
 }
 
-ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Remove(string_view key) {
-  DCHECK_GT(ids_.count(key), 0u);
+std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_view key) {
+  auto it = ids_.extract(key);
+  if (!it) {
+    return std::nullopt;
+  }
 
-  DocId id = ids_.find(key)->second;
+  const DocId id = it.mapped();
   keys_[id] = "";
-  ids_.erase(key);
   free_ids_.push_back(id);
 
   return id;
@@ -184,7 +186,13 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr);
 
-  auto cb = [this](string_view key, BaseAccessor* doc) { indices_->Add(key_index_.Add(key), doc); };
+  auto cb = [this](string_view key, const BaseAccessor& doc) {
+    DocId id = key_index_.Add(key);
+    if (!indices_->Add(id, doc)) {
+      key_index_.Remove(key);
+    }
+  };
+
   TraverseAllMatching(*base_, op_args, cb);
 
   VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
@@ -195,7 +203,10 @@ void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const Prim
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
-  indices_->Add(key_index_.Add(key), accessor.get());
+  DocId id = key_index_.Add(key);
+  if (!indices_->Add(id, *accessor)) {
+    key_index_.Remove(key);
+  }
 }
 
 void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
@@ -203,8 +214,10 @@ void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const P
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
-  DocId id = key_index_.Remove(key);
-  indices_->Remove(id, accessor.get());
+  auto id = key_index_.Remove(key);
+  if (id) {
+    indices_->Remove(id.value(), *accessor);
+  }
 }
 
 bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
