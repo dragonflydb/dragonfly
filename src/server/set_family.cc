@@ -26,8 +26,6 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
-ABSL_DECLARE_FLAG(bool, use_set2);
-
 namespace dfly {
 
 using namespace facade;
