@@ -1567,6 +1567,66 @@ async def test_cluster_replication_migration(
     assert await seeder.compare(r1_capture, r2_node.instance.port)
 
 
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_run_replication_during_migration(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+):
+    instances = [
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + 1000 + i) for i in range(3)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(n) for n in instances]
+    m1_node, r1_node, m2_node = nodes
+    master_nodes = [m1_node, m2_node]
+
+    m1_node.slots = [(0, 16383)]
+    m1_node.replicas = [r1_node]
+    m2_node.slots = []
+
+    logging.debug("Push initial config")
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    logging.debug("create data")
+    seeder = df_seeder_factory.create(keys=10000, port=nodes[0].instance.port, cluster_mode=True)
+    await seeder.run(target_deviation=0.1)
+
+    logging.debug("start migration")
+    m1_node.migrations = [
+        MigrationInfo("127.0.0.1", m2_node.instance.admin_port, [(0, 16383)], m2_node.id)
+    ]
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    logging.debug("start replication")
+    await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
+
+    await wait_available_async(r1_node.admin_client)
+
+    await wait_for_status(m1_node.admin_client, m2_node.id, "FINISHED")
+
+    logging.debug("finish migration")
+    m1_node.migrations = []
+    m1_node.slots = []
+    m2_node.migrations = []
+    m2_node.slots = [(0, 16383)]
+
+    await push_config(
+        json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
+    )
+
+    # wait for replicas to catch up
+    await asyncio.sleep(2)
+
+    r1_capture = await seeder.capture(r1_node.instance.port)
+
+    # ensure captures got exchanged
+    assert await seeder.compare(r1_capture, m1_node.instance.port)
+
+
 @pytest.mark.parametrize("migration_first", [False, True])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "dbfilename": "snap_during_migration"})
 async def test_snapshoting_during_migration(
