@@ -168,7 +168,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
         return;
 
       PrimeTable::Cursor next =
-          pt->Traverse(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
+          pt->TraverseBuckets(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
       cursor = next;
       PushSerialized(false);
 

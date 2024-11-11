@@ -662,7 +662,7 @@ void EngineShard::Heartbeat() {
   CacheStats();
 
   // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id());
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   // Skip heartbeat if we are serializing a big value
   if (db_slice.HasBlockingCounterMutating()) {
     return;
