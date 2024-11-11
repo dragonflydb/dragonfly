@@ -590,6 +590,41 @@ TEST_F(DashTest, TraverseSegmentOrder) {
   EXPECT_EQ(kNumItems - 1, nums.back());
 }
 
+TEST_F(DashTest, TraverseBucketOrder) {
+  constexpr auto kNumItems = 18000;
+  for (size_t i = 0; i < kNumItems; ++i) {
+    dt_.Insert(i, i);
+  }
+  for (size_t i = 0; i < kNumItems; ++i) {
+    dt_.Erase(i);
+  }
+  constexpr auto kSparseItems = kNumItems / 50;
+  for (size_t i = 0; i < kSparseItems; ++i) {  // create sparse table
+    dt_.Insert(i, i);
+  }
+
+  vector<unsigned> nums;
+  auto tr_cb = [&](Dash64::bucket_iterator it) {
+    VLOG(1) << "call cb";
+    while (!it.is_done()) {
+      nums.push_back(it->first);
+      VLOG(1) << it.bucket_id() << " " << it.slot_id() << " " << it->first;
+      ++it;
+    }
+  };
+
+  Dash64::Cursor cursor;
+  do {
+    cursor = dt_.TraverseBuckets(cursor, tr_cb);
+  } while (cursor);
+
+  sort(nums.begin(), nums.end());
+  nums.resize(unique(nums.begin(), nums.end()) - nums.begin());
+  ASSERT_EQ(kSparseItems, nums.size());
+  EXPECT_EQ(0, nums[0]);
+  EXPECT_EQ(kSparseItems - 1, nums.back());
+}
+
 struct TestEvictionPolicy {
   static constexpr bool can_evict = true;
   static constexpr bool can_gc = false;

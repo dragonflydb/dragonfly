@@ -240,6 +240,8 @@ class DashTable : public detail::DashTableBase {
   // that existed at the beginning of traversal.
   template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb);
 
+  Cursor AdvanceCursorBucketOrder(Cursor cursor);
+
   // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
   // segment by segment over physical backets.
   // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
@@ -937,66 +939,70 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
   if (curs.bucket_id() >= Policy::kBucketNum)  // sanity.
     return 0;
 
-  uint32_t sid = curs.segment_id(global_depth_);
-  uint8_t bid = curs.bucket_id();
-
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
   bool fetched = false;
 
   // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
-  do {
+  while (!fetched) {
+    uint32_t sid = curs.segment_id(global_depth_);
+    uint8_t bid = curs.bucket_id();
+
     SegmentType* s = segment_[sid];
     assert(s);
 
     auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
 
     fetched = s->TraverseLogicalBucket(bid, hash_fun, std::move(dt_cb));
-    sid = NextSeg(sid);
-    if (sid >= segment_.size()) {
-      sid = 0;
-      ++bid;
+    curs = AdvanceCursorBucketOrder(curs);
+    if (!curs)  // Check for end of traversal
+      return curs;
+  }
 
-      if (bid >= Policy::kBucketNum)
-        return 0;  // "End of traversal" cursor.
-    }
-  } while (!fetched);
+  return curs;
+}
 
+template <typename _Key, typename _Value, typename Policy>
+auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) -> Cursor {
+  uint32_t sid = cursor.segment_id(global_depth_);
+  uint8_t bid = cursor.bucket_id();
+  sid = NextSeg(sid);
+  if (sid >= segment_.size()) {
+    sid = 0;
+    ++bid;
+
+    if (bid >= SegmentType::kTotalBuckets)
+      return 0;  // "End of traversal" cursor.
+  }
   return Cursor{global_depth_, sid, bid};
 }
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor curs, Cb&& cb) -> Cursor {
-  if (curs.bucket_id() >= SegmentType::kTotalBuckets)  // sanity.
+auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) -> Cursor {
+  if (cursor.bucket_id() >= SegmentType::kTotalBuckets)  // sanity.
     return 0;
 
-  uint32_t sid = curs.segment_id(global_depth_);
-  uint8_t bid = curs.bucket_id();
+  constexpr uint32_t kMaxIterations = 8;
+  bool invoked = false;
 
-  bool fetched = false;
-
-  // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
-  do {
+  for (uint32_t i = 0; i < kMaxIterations; ++i) {
+    uint32_t sid = cursor.segment_id(global_depth_);
+    uint8_t bid = cursor.bucket_id();
     SegmentType* s = segment_[sid];
     assert(s);
 
     const auto& bucket = s->GetBucket(bid);
-    if (bucket.GetBusy()) {  // call cb on bucket only if it has elements.
+    if (bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
       cb(BucketIt(sid, bid));
-      fetched = true;
+      invoked = true;
     }
-    sid = NextSeg(sid);
-    if (sid >= segment_.size()) {
-      sid = 0;
-      ++bid;
 
-      if (bid >= SegmentType::kTotalBuckets)
-        return 0;  // "End of traversal" cursor.
-    }
-  } while (!fetched);
-
-  return Cursor{global_depth_, sid, bid};
+    cursor = AdvanceCursorBucketOrder(cursor);
+    if (invoked || !cursor)  // Break end of traversal or callback invoked.
+      return cursor;
+  }
+  return cursor;
 }
 
 }  // namespace dfly
