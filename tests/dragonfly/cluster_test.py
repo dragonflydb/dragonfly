@@ -1687,7 +1687,6 @@ async def test_snapshoting_during_migration(
 
     assert await seeder.compare(capture_before_migration, nodes[1].instance.port)
 
-    assert await nodes[1].client.flushall()
     await nodes[1].client.execute_command(
         "DFLY",
         "LOAD",
