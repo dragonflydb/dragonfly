@@ -232,7 +232,7 @@ class DashTable : public detail::DashTableBase {
   // shrinks or grows. Returns: cursor that is guaranteed to be less than 2^40.
   template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb);
 
-  // Traverses over a single physical bucket in table call cb once on bucket iterator.
+  // Traverses over physical buckets. It calls cb once for each bucket by passing a bucket iterator.
   // if cursor=0 starts traversing from the beginning, otherwise continues from where
   // it stopped. returns 0 if the supplied cursor reached end of traversal.
   // Unlike Traverse, TraverseBuckets calls cb once on bucket iterator and not on each entry in
@@ -943,7 +943,6 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
 
   bool fetched = false;
 
-  // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
   while (!fetched) {
     uint32_t sid = curs.segment_id(global_depth_);
     uint8_t bid = curs.bucket_id();
@@ -964,6 +963,7 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
 
 template <typename _Key, typename _Value, typename Policy>
 auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) -> Cursor {
+  // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
   uint32_t sid = cursor.segment_id(global_depth_);
   uint8_t bid = cursor.bucket_id();
   sid = NextSeg(sid);
