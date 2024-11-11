@@ -222,20 +222,25 @@ class DashTable : public detail::DashTableBase {
   // Returns: cursor with a random position
   Cursor GetRandomCursor(absl::BitGen* bitgen);
 
-  // Traverses over a single bucket in table and calls cb(iterator) 0 or more
+  // Traverses over a single logical bucket in table and calls cb(iterator) 0 or more
   // times. if cursor=0 starts traversing from the beginning, otherwise continues from where it
   // stopped. returns 0 if the supplied cursor reached end of traversal. Traverse iterates at bucket
-  // granularity, which means for each non-empty bucket it calls cb per each entry in the bucket
-  // before returning. Unlike begin/end interface, traverse is stable during table mutations.
-  // It guarantees that if key exists (1)at the beginning of traversal, (2) stays in the table
-  // during the traversal, then Traverse() will eventually reach it even when the
-  // table shrinks or grows.
-  // Returns: cursor that is guaranteed to be less than 2^40.
+  // logical granularity, which means for each non-empty bucket it calls cb per each entry in the
+  // logical bucket before returning. Unlike begin/end interface, traverse is stable during table
+  // mutations. It guarantees that if key exists (1)at the beginning of traversal, (2) stays in the
+  // table during the traversal, then Traverse() will eventually reach it even when the table
+  // shrinks or grows. Returns: cursor that is guaranteed to be less than 2^40.
   template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb);
 
-  // Takes an iterator pointing to an entry in a dash bucket and traverses all bucket's entries by
-  // calling cb(iterator) for every non-empty slot. The iteration goes over a physical bucket.
-  template <typename Cb> void TraverseBucket(const_iterator it, Cb&& cb);
+  // Traverses over physical buckets. It calls cb once for each bucket by passing a bucket iterator.
+  // if cursor=0 starts traversing from the beginning, otherwise continues from where
+  // it stopped. returns 0 if the supplied cursor reached end of traversal.
+  // Unlike Traverse, TraverseBuckets calls cb once on bucket iterator and not on each entry in
+  // bucket. TraverseBuckets is stable during table mutations. It guarantees traversing all buckets
+  // that existed at the beginning of traversal.
+  template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb);
+
+  Cursor AdvanceCursorBucketOrder(Cursor cursor);
 
   // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
   // segment by segment over physical backets.
@@ -251,6 +256,10 @@ class DashTable : public detail::DashTableBase {
   // Seeks to the first occupied slot if exists in the bucket.
   const_bucket_iterator BucketIt(unsigned segment_id, unsigned bucket_id) const {
     return const_bucket_iterator{this, segment_id, uint8_t(bucket_id)};
+  }
+
+  bucket_iterator BucketIt(unsigned segment_id, unsigned bucket_id) {
+    return bucket_iterator{this, segment_id, uint8_t(bucket_id)};
   }
 
   iterator GetIterator(unsigned segment_id, unsigned bucket_id, unsigned slot_id) {
@@ -959,13 +968,47 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
 }
 
 template <typename _Key, typename _Value, typename Policy>
+auto DashTable<_Key, _Value, Policy>::AdvanceCursorBucketOrder(Cursor cursor) -> Cursor {
+  // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
+  uint32_t sid = cursor.segment_id(global_depth_);
+  uint8_t bid = cursor.bucket_id();
+  sid = NextSeg(sid);
+  if (sid >= segment_.size()) {
+    sid = 0;
+    ++bid;
+
+    if (bid >= SegmentType::kTotalBuckets)
+      return 0;  // "End of traversal" cursor.
+  }
+  return Cursor{global_depth_, sid, bid};
+}
+
+template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-void DashTable<_Key, _Value, Policy>::TraverseBucket(const_iterator it, Cb&& cb) {
-  SegmentType& s = *segment_[it.seg_id_];
-  const auto& b = s.GetBucket(it.bucket_id_);
-  b.ForEachSlot([it, cb = std::move(cb), table = this](auto* bucket, uint8_t slot, bool probe) {
-    cb(iterator{table, it.seg_id_, it.bucket_id_, slot});
-  });
+auto DashTable<_Key, _Value, Policy>::TraverseBuckets(Cursor cursor, Cb&& cb) -> Cursor {
+  if (cursor.bucket_id() >= SegmentType::kTotalBuckets)  // sanity.
+    return 0;
+
+  constexpr uint32_t kMaxIterations = 8;
+  bool invoked = false;
+
+  for (uint32_t i = 0; i < kMaxIterations; ++i) {
+    uint32_t sid = cursor.segment_id(global_depth_);
+    uint8_t bid = cursor.bucket_id();
+    SegmentType* s = segment_[sid];
+    assert(s);
+
+    const auto& bucket = s->GetBucket(bid);
+    if (bucket.GetBusy()) {  // Invoke callback only if bucket has elements.
+      cb(BucketIt(sid, bid));
+      invoked = true;
+    }
+
+    cursor = AdvanceCursorBucketOrder(cursor);
+    if (invoked || !cursor)  // Break end of traversal or callback invoked.
+      return cursor;
+  }
+  return cursor;
 }
 
 }  // namespace dfly
