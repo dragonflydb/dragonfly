@@ -10,7 +10,6 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
-#include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "helio/util/proactor_pool.h"
 #include "server/acl/acl_commands_def.h"
@@ -20,6 +19,7 @@
 
 namespace facade {
 class SinkReplyBuilder;
+class Listener;
 }  // namespace facade
 
 namespace dfly {

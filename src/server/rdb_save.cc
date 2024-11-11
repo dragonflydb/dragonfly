@@ -29,6 +29,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/json/json_object.h"
+#include "core/qlist.h"
 #include "core/size_tracking_channel.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -168,12 +169,10 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
     case OBJ_STRING:
       return RDB_TYPE_STRING;
     case OBJ_LIST:
-      if (compact_enc == OBJ_ENCODING_QUICKLIST) {
-        if (absl::GetFlag(FLAGS_list_rdb_encode_v2))
-          return RDB_TYPE_LIST_QUICKLIST_2;
-        return RDB_TYPE_LIST_QUICKLIST;
+      if (compact_enc == OBJ_ENCODING_QUICKLIST || compact_enc == kEncodingQL2) {
+        return absl::GetFlag(FLAGS_list_rdb_encode_v2) ? RDB_TYPE_LIST_QUICKLIST_2
+                                                       : RDB_TYPE_LIST_QUICKLIST;
       }
-
       break;
     case OBJ_SET:
       if (compact_enc == kEncodingIntSet)
@@ -436,12 +435,21 @@ error_code RdbSerializer::SaveObject(const PrimeValue& pv) {
 
 error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   /* Save a list value */
-  DCHECK_EQ(OBJ_ENCODING_QUICKLIST, pv.Encoding());
-  const quicklist* ql = reinterpret_cast<const quicklist*>(pv.RObjPtr());
-  quicklistNode* node = ql->head;
-  DVLOG(2) << "Saving list of length " << ql->len;
+  size_t len = 0;
+  const quicklistNode* node = nullptr;
 
-  RETURN_ON_ERR(SaveLen(ql->len));
+  if (pv.Encoding() == OBJ_ENCODING_QUICKLIST) {
+    const quicklist* ql = reinterpret_cast<const quicklist*>(pv.RObjPtr());
+    node = ql->head;
+    DVLOG(2) << "Saving list of length " << ql->len;
+    len = ql->len;
+  } else {
+    DCHECK_EQ(pv.Encoding(), kEncodingQL2);
+    QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
+    node = ql->Head();
+    len = ql->node_count();
+  }
+  RETURN_ON_ERR(SaveLen(len));
 
   while (node) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
@@ -759,7 +767,7 @@ error_code RdbSerializer::SaveListPackAsZiplist(uint8_t* lp) {
   return ec;
 }
 
-error_code RdbSerializer::SavePlainNodeAsZiplist(quicklistNode* node) {
+error_code RdbSerializer::SavePlainNodeAsZiplist(const quicklistNode* node) {
   uint8_t* zl = ziplistNew();
   zl = ziplistPush(zl, node->entry, node->sz, ZIPLIST_TAIL);
 
@@ -1319,7 +1327,7 @@ void RdbSaver::Impl::FinalizeSnapshotWriting() {
 
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard) {
   auto& s = GetSnapshot(shard);
-  auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
+  auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto on_snapshot_finish = std::bind(&RdbSaver::Impl::FinalizeSnapshotWriting, this);
   auto push_cb = std::bind(&RdbSaver::Impl::PushSnapshotData, this, cntx, std::placeholders::_1);
 
@@ -1333,7 +1341,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, Engin
 
 void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* shard,
                                                   LSN start_lsn) {
-  auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
+  auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
   auto on_finalize_cb = std::bind(&RdbSaver::Impl::FinalizeSnapshotWriting, this);
   auto push_cb = std::bind(&RdbSaver::Impl::PushSnapshotData, this, cntx, std::placeholders::_1);

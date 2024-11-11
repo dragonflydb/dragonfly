@@ -23,47 +23,23 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   friend struct CaptureVisitor;
 
  public:
-  void SendError(std::string_view str, std::string_view type = {}) override;
-  void SendMGetResponse(MGetResponse resp) override;
-
-  // SendStored -> SendSimpleString("OK")
-  // SendSetSkipped -> SendNull()
-  void SendError(OpStatus status) override;
   using RedisReplyBuilder::SendError;
+  void SendError(std::string_view str, std::string_view type) override;
 
-  void SendNullArray() override;
-  void SendEmptyArray() override;
-  void SendSimpleStrArr(StrSpan arr) override;
-  void SendStringArr(StrSpan arr, CollectionType type = ARRAY) override;
-
-  void SendNull() override;
   void SendLong(long val) override;
   void SendDouble(double val) override;
   void SendSimpleString(std::string_view str) override;
-
   void SendBulkString(std::string_view str) override;
-  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                       bool with_scores) override;
 
   void StartCollection(unsigned len, CollectionType type) override;
+  void SendNullArray() override;
+  void SendNull() override;
 
  public:
   using Error = std::pair<std::string, std::string>;  // SendError (msg, type)
   using Null = std::nullptr_t;                        // SendNull or SendNullArray
 
-  struct StrArrPayload {
-    bool simple;
-    CollectionType type;
-    std::vector<std::string> arr;
-  };
-
   struct CollectionPayload;
-
-  struct ScoredArray {
-    std::vector<std::pair<std::string, double>> arr;
-    bool with_scores;
-  };
-
   struct SimpleString : public std::string {};  // SendSimpleString
   struct BulkString : public std::string {};    // SendBulkString
 
@@ -71,9 +47,8 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
       : RedisReplyBuilder{nullptr}, reply_mode_{mode}, stack_{}, current_{} {
   }
 
-  using Payload =
-      std::variant<std::monostate, Null, Error, OpStatus, long, double, SimpleString, BulkString,
-                   StrArrPayload, std::unique_ptr<CollectionPayload>, MGetResponse, ScoredArray>;
+  using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
+                               std::unique_ptr<CollectionPayload>>;
 
   // Non owned Error based on SendError arguments (msg, type)
   using ErrorRef = std::pair<std::string_view, std::string_view>;

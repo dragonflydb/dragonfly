@@ -8,7 +8,8 @@ extern "C" {
 #include "redis/quicklist.h"
 }
 
-#include <functional>
+#include <absl/functional/function_ref.h>
+
 #include <optional>
 #include <string>
 #include <variant>
@@ -33,6 +34,10 @@ class QList {
     // Assumes value is not int64.
     std::string_view view() const {
       return std::get<std::string_view>(value_);
+    }
+
+    bool is_int() const {
+      return std::holds_alternative<int64_t>(value_);
     }
 
     int64_t ival() const {
@@ -66,7 +71,7 @@ class QList {
     friend class QList;
   };
 
-  using IterateFunc = std::function<bool(Entry)>;
+  using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt { BEFORE, AFTER };
 
   QList();
@@ -85,6 +90,10 @@ class QList {
   void Clear();
 
   void Push(std::string_view value, Where where);
+
+  // Returns the popped value. Precondition: list is not empty.
+  std::string Pop(Where where);
+
   void AppendListpack(unsigned char* zl);
   void AppendPlain(unsigned char* zl, size_t sz);
 
@@ -109,11 +118,28 @@ class QList {
   // Requires calling subsequent Next() to initialize the iterator.
   Iterator GetIterator(long idx) const;
 
-  uint32_t noded_count() const {
+  uint32_t node_count() const {
     return len_;
   }
 
+  unsigned compress_param() const {
+    return compress_;
+  }
+
   Iterator Erase(Iterator it);
+
+  // Returns true if elements were deleted, false if list has not changed.
+  // Negative start index is allowed.
+  bool Erase(const long start, unsigned count);
+
+  // Needed by tests and the rdb code.
+  const quicklistNode* Head() const {
+    return head_;
+  }
+
+  const quicklistNode* Tail() const {
+    return tail_;
+  }
 
  private:
   bool AllowCompression() const {

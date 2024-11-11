@@ -103,7 +103,10 @@ EngineShardSet* shard_set = nullptr;
 
 void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
   CHECK_EQ(0u, size());
+  CHECK(namespaces == nullptr);
+
   shards_.reset(new EngineShard*[sz]);
+
   size_ = sz;
   size_t max_shard_file_size = GetTieredFileLimit(sz);
   pp_->AwaitFiberOnAll([this](uint32_t index, ProactorBase* pb) {
@@ -112,7 +115,8 @@ void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
     }
   });
 
-  namespaces.Init();
+  // The order is important here. We must initialize namespaces after shards_.
+  namespaces = new Namespaces();
 
   pp_->AwaitFiberOnAll([&](uint32_t index, ProactorBase* pb) {
     if (index < size_) {
@@ -139,7 +143,13 @@ void EngineShardSet::PreShutdown() {
 }
 
 void EngineShardSet::Shutdown() {
+  // Calling Namespaces::Clear before destroying engine shards, because it accesses them
+  // internally.
+  namespaces->Clear();
   RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
+
+  delete namespaces;
+  namespaces = nullptr;
 }
 
 void EngineShardSet::InitThreadLocal(ProactorBase* pb) {
@@ -150,7 +160,7 @@ void EngineShardSet::InitThreadLocal(ProactorBase* pb) {
 
 void EngineShardSet::TEST_EnableCacheMode() {
   RunBlockingInParallel([](EngineShard* shard) {
-    namespaces.GetDefaultNamespace().GetCurrentDbSlice().TEST_EnableCacheMode();
+    namespaces->GetDefaultNamespace().GetCurrentDbSlice().TEST_EnableCacheMode();
   });
 }
 

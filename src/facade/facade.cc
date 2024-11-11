@@ -209,4 +209,17 @@ ostream& operator<<(ostream& os, facade::RespSpan ras) {
   return os;
 }
 
+ostream& operator<<(ostream& os, facade::Protocol p) {
+  switch (p) {
+    case facade::Protocol::REDIS:
+      os << "REDIS";
+      break;
+    case facade::Protocol::MEMCACHE:
+      os << "MEMCACHE";
+      break;
+  }
+
+  return os;
+}
+
 }  // namespace std

@@ -82,7 +82,8 @@ size_t NodeNegFillLimit(int fill) {
 }
 
 const uint8_t* uint_ptr(string_view sv) {
-  return reinterpret_cast<const uint8_t*>(sv.data());
+  static uint8_t empty = 0;
+  return sv.empty() ? &empty : reinterpret_cast<const uint8_t*>(sv.data());
 }
 
 bool IsLargeElement(size_t sz, int fill) {
@@ -136,10 +137,6 @@ quicklistNode* CreateNode() {
   return node;
 }
 
-uint8_t* LP_FromElem(string_view elem) {
-  return lpPrepend(lpNew(0), uint_ptr(elem), elem.size());
-}
-
 uint8_t* LP_Insert(uint8_t* lp, string_view elem, uint8_t* pos, int lp_where) {
   return lpInsertString(lp, uint_ptr(elem), elem.size(), pos, lp_where, NULL);
 }
@@ -155,15 +152,16 @@ uint8_t* LP_Prepend(uint8_t* lp, string_view elem) {
 quicklistNode* CreateNode(int container, string_view value) {
   quicklistNode* new_node = CreateNode();
   new_node->container = container;
-  new_node->sz = value.size();
-  new_node->count++;
+  new_node->count = 1;
 
   if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
     DCHECK(!value.empty());
     new_node->entry = (uint8_t*)zmalloc(new_node->sz);
     memcpy(new_node->entry, value.data(), new_node->sz);
+    new_node->sz = value.size();
   } else {
-    new_node->entry = LP_FromElem(value);
+    new_node->entry = LP_Prepend(lpNew(0), value);
+    new_node->sz = lpBytes(new_node->entry);
   }
 
   return new_node;
@@ -355,6 +353,40 @@ void QList::Push(string_view value, Where where) {
   }
 }
 
+string QList::Pop(Where where) {
+  DCHECK_GT(count_, 0u);
+  quicklistNode* node;
+  if (where == HEAD) {
+    node = head_;
+  } else {
+    DCHECK_EQ(TAIL, where);
+    node = tail_;
+  }
+
+  /* The head and tail should never be compressed */
+  DCHECK(node->encoding != QUICKLIST_NODE_ENCODING_LZF);
+
+  string res;
+  if (ABSL_PREDICT_FALSE(QL_NODE_IS_PLAIN(node))) {
+    // TODO: We could avoid this copy by returning the pointer of the plain node.
+    // But the higher level APIs should support this.
+    res.assign(reinterpret_cast<char*>(node->entry), node->sz);
+    DelNode(node);
+  } else {
+    uint8_t* pos = where == HEAD ? lpFirst(node->entry) : lpLast(node->entry);
+    unsigned int vlen;
+    long long vlong;
+    uint8_t* vstr = lpGetValue(pos, &vlen, &vlong);
+    if (vstr) {
+      res.assign(reinterpret_cast<char*>(vstr), vlen);
+    } else {
+      res = absl::StrCat(vlong);
+    }
+    DelPackedIndex(node, &pos);
+  }
+  return res;
+}
+
 void QList::AppendListpack(unsigned char* zl) {
   quicklistNode* node = CreateNode();
   node->entry = zl;
@@ -433,13 +465,10 @@ bool QList::PushHead(string_view value) {
   count_++;
 
   if (ABSL_PREDICT_TRUE(NodeAllowInsert(head_, fill_, sz))) {
-    head_->entry = lpPrepend(head_->entry, uint_ptr(value), sz);
+    head_->entry = LP_Prepend(head_->entry, value);
     NodeUpdateSz(head_);
   } else {
-    quicklistNode* node = CreateNode();
-    node->entry = LP_FromElem(value);
-
-    NodeUpdateSz(node);
+    quicklistNode* node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, value);
     InsertNode(head_, node, BEFORE);
   }
 
@@ -458,16 +487,16 @@ bool QList::PushTail(string_view value) {
 
   count_++;
   if (ABSL_PREDICT_TRUE(NodeAllowInsert(orig, fill_, sz))) {
-    orig->entry = lpAppend(orig->entry, uint_ptr(value), sz);
+    orig->entry = LP_Append(orig->entry, value);
     NodeUpdateSz(orig);
-  } else {
-    quicklistNode* node = CreateNode();
-    node->entry = LP_FromElem(value);
-    NodeUpdateSz(node);
-    InsertNode(orig, node, AFTER);
+    orig->count++;
+    return false;
   }
-  tail_->count++;
-  return (orig != tail_);
+
+  quicklistNode* node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, value);
+  InsertNode(orig, node, AFTER);
+
+  return true;
 }
 
 void QList::InsertPlainNode(quicklistNode* old_node, string_view value, InsertOpt insert_opt) {
@@ -525,10 +554,9 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       InsertPlainNode(tail_, elem, insert_opt);
       return;
     }
-    new_node = CreateNode();
-    new_node->entry = LP_FromElem(elem);
+
+    new_node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, elem);
     InsertNode(NULL, new_node, insert_opt);
-    new_node->count++;
     count_++;
     return;
   }
@@ -602,10 +630,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
   } else if (full && ((at_tail && !avail_next && after) || (at_head && !avail_prev && !after))) {
     /* If we are: full, and our prev/next has no available space, then:
      *   - create new node and attach to qlist */
-    new_node = CreateNode();
-    new_node->entry = LP_FromElem(elem);
-    new_node->count++;
-    NodeUpdateSz(new_node);
+    new_node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, elem);
     InsertNode(node, new_node, insert_opt);
   } else if (full) {
     /* else, node is full we need to split it. */
@@ -724,7 +749,7 @@ void QList::Compress(quicklistNode* node) {
     reverse = reverse->prev;
   }
 
-  if (!in_depth)
+  if (!in_depth && node)
     CompressNodeIfNeeded(node);
 
   /* At this point, forward and reverse are one node beyond depth */
@@ -986,6 +1011,80 @@ auto QList::Erase(Iterator it) -> Iterator {
    *  length of this listpack is N-1, the next call into
    *  quicklistNext() will jump to the next node. */
   return it;
+}
+
+bool QList::Erase(const long start, unsigned count) {
+  if (count == 0)
+    return false;
+
+  unsigned extent = count; /* range is inclusive of start position */
+
+  if (start >= 0 && extent > (count_ - start)) {
+    /* if requesting delete more elements than exist, limit to list size. */
+    extent = count_ - start;
+  } else if (start < 0 && extent > (unsigned long)(-start)) {
+    /* else, if at negative offset, limit max size to rest of list. */
+    extent = -start; /* c.f. LREM -29 29; just delete until end. */
+  }
+
+  Iterator it = GetIterator(start);
+  quicklistNode* node = it.current_;
+  long offset = it.offset_;
+
+  /* iterate over next nodes until everything is deleted. */
+  while (extent) {
+    quicklistNode* next = node->next;
+
+    unsigned long del;
+    int delete_entire_node = 0;
+    if (offset == 0 && extent >= node->count) {
+      /* If we are deleting more than the count of this node, we
+       * can just delete the entire node without listpack math. */
+      delete_entire_node = 1;
+      del = node->count;
+    } else if (offset >= 0 && extent + offset >= node->count) {
+      /* If deleting more nodes after this one, calculate delete based
+       * on size of current node. */
+      del = node->count - offset;
+    } else if (offset < 0) {
+      /* If offset is negative, we are in the first run of this loop
+       * and we are deleting the entire range
+       * from this start offset to end of list.  Since the Negative
+       * offset is the number of elements until the tail of the list,
+       * just use it directly as the deletion count. */
+      del = -offset;
+
+      /* If the positive offset is greater than the remaining extent,
+       * we only delete the remaining extent, not the entire offset.
+       */
+      if (del > extent)
+        del = extent;
+    } else {
+      /* else, we are deleting less than the extent of this node, so
+       * use extent directly. */
+      del = extent;
+    }
+
+    if (delete_entire_node || QL_NODE_IS_PLAIN(node)) {
+      DelNode(node);
+    } else {
+      DecompressNodeIfNeeded(true, node);
+      node->entry = lpDeleteRange(node->entry, offset, del);
+      NodeUpdateSz(node);
+      node->count -= del;
+      count_ -= del;
+      if (node->count == 0) {
+        DelNode(node);
+      } else {
+        RecompressOnly(node);
+      }
+    }
+
+    extent -= del;
+    node = next;
+    offset = 0;
+  }
+  return true;
 }
 
 bool QList::Entry::operator==(std::string_view sv) const {

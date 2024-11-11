@@ -978,7 +978,7 @@ void GenericFamily::Del(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   VLOG(1) << "Del " << ArgS(args, 0);
 
   atomic_uint32_t result{0};
-  bool is_mc = (builder->type() == SinkReplyBuilder::MC);
+  bool is_mc = (builder->GetProtocol() == Protocol::MEMCACHE);
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
@@ -1025,7 +1025,7 @@ void GenericFamily::Ping(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
     }
 
     string_view resp[2] = {"pong", msg};
-    return rb->SendStringArr(resp);
+    return rb->SendBulkStrArr(resp);
   }
 
   if (args.size() == 0) {

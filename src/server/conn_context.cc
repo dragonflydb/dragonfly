@@ -72,6 +72,13 @@ size_t StoredCmd::NumArgs() const {
   return sizes_.size();
 }
 
+std::string StoredCmd::FirstArg() const {
+  if (sizes_.size() == 0) {
+    return {};
+  }
+  return buffer_.substr(0, sizes_[0]);
+}
+
 facade::ReplyMode StoredCmd::ReplyMode() const {
   return reply_mode_;
 }
@@ -93,9 +100,8 @@ const CommandId* StoredCmd::Cid() const {
   return cid_;
 }
 
-ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* owner,
-                                     acl::UserCredentials cred)
-    : facade::ConnectionContext(stream, owner) {
+ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredentials cred)
+    : facade::ConnectionContext(owner) {
   if (owner) {
     skip_acl_validation = owner->IsPrivileged();
   }
@@ -110,7 +116,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, facade::Connection* own
 }
 
 ConnectionContext::ConnectionContext(const ConnectionContext* owner, Transaction* tx)
-    : facade::ConnectionContext(nullptr, nullptr), transaction{tx} {
+    : facade::ConnectionContext(nullptr), transaction{tx} {
   if (owner) {
     acl_commands = owner->acl_commands;
     keys = owner->keys;

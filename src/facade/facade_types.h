@@ -189,5 +189,6 @@ void ResetStats();
 
 namespace std {
 ostream& operator<<(ostream& os, facade::CmdArgList args);
+ostream& operator<<(ostream& os, facade::Protocol protocol);
 
 }  // namespace std

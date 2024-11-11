@@ -44,13 +44,36 @@ struct MockedDocument : public DocumentAccessor {
   MockedDocument(std::string test_field) : fields_{{"field", test_field}} {
   }
 
-  StringList GetStrings(string_view field) const override {
+  std::optional<StringList> GetStrings(string_view field) const override {
     auto it = fields_.find(field);
-    return {it != fields_.end() ? string_view{it->second} : ""};
+    if (it == fields_.end()) {
+      return EmptyAccessResult<StringList>();
+    }
+    return StringList{string_view{it->second}};
   }
 
-  VectorInfo GetVector(string_view field) const override {
-    return BytesToFtVector(GetStrings(field).front());
+  std::optional<VectorInfo> GetVector(string_view field) const override {
+    auto strings_list = GetStrings(field);
+    if (!strings_list)
+      return std::nullopt;
+    return !strings_list->empty() ? BytesToFtVectorSafe(strings_list->front()) : VectorInfo{};
+  }
+
+  std::optional<NumsList> GetNumbers(std::string_view field) const override {
+    auto strings_list = GetStrings(field);
+    if (!strings_list)
+      return std::nullopt;
+
+    NumsList nums_list;
+    nums_list.reserve(strings_list->size());
+    for (auto str : strings_list.value()) {
+      auto num = ParseNumericField(str);
+      if (!num) {
+        return std::nullopt;
+      }
+      nums_list.push_back(num.value());
+    }
+    return nums_list;
   }
 
   string DebugFormat() {
@@ -121,7 +144,7 @@ class SearchTest : public ::testing::Test {
 
     shuffle(entries_.begin(), entries_.end(), default_random_engine{});
     for (DocId i = 0; i < entries_.size(); i++)
-      index.Add(i, &entries_[i].first);
+      index.Add(i, entries_[i].first);
 
     SearchAlgorithm search_algo{};
     if (!search_algo.Init(query_, &params_)) {
@@ -430,7 +453,7 @@ TEST_F(SearchTest, StopWords) {
                               "explicitly found!"};
   for (size_t i = 0; i < documents.size(); i++) {
     MockedDocument doc{{{"title", documents[i]}}};
-    indices.Add(i, &doc);
+    indices.Add(i, doc);
   }
 
   // words is a stopword
@@ -484,7 +507,7 @@ TEST_P(KnnTest, Simple1D) {
   for (size_t i = 0; i < 100; i++) {
     Map values{{{"even", i % 2 == 0 ? "YES" : "NO"}, {"pos", ToBytes({float(i)})}}};
     MockedDocument doc{values};
-    indices.Add(i, &doc);
+    indices.Add(i, doc);
   }
 
   SearchAlgorithm algo{};
@@ -540,7 +563,7 @@ TEST_P(KnnTest, Simple2D) {
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
     string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
     MockedDocument doc{Map{{"pos", coords}}};
-    indices.Add(i, &doc);
+    indices.Add(i, doc);
   }
 
   SearchAlgorithm algo{};
@@ -602,7 +625,7 @@ TEST_P(KnnTest, Cosine) {
   for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
     string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
     MockedDocument doc{Map{{"pos", coords}}};
-    indices.Add(i, &doc);
+    indices.Add(i, doc);
   }
 
   SearchAlgorithm algo{};
@@ -646,7 +669,7 @@ TEST_P(KnnTest, AddRemove) {
   vector<MockedDocument> documents(10);
   for (size_t i = 0; i < 10; i++) {
     documents[i] = Map{{"pos", ToBytes({float(i)})}};
-    indices.Add(i, &documents[i]);
+    indices.Add(i, documents[i]);
   }
 
   SearchAlgorithm algo{};
@@ -661,7 +684,7 @@ TEST_P(KnnTest, AddRemove) {
 
   // delete leftmost 5
   for (size_t i = 0; i < 5; i++)
-    indices.Remove(i, &documents[i]);
+    indices.Remove(i, documents[i]);
 
   // search leftmost 5 again
   {
@@ -672,7 +695,7 @@ TEST_P(KnnTest, AddRemove) {
 
   // add removed elements
   for (size_t i = 0; i < 5; i++)
-    indices.Add(i, &documents[i]);
+    indices.Add(i, documents[i]);
 
   // repeat first search
   {
@@ -693,7 +716,7 @@ TEST_P(KnnTest, AutoResize) {
 
   for (size_t i = 0; i < 100; i++) {
     MockedDocument doc{Map{{"pos", ToBytes({float(i)})}}};
-    indices.Add(i, &doc);
+    indices.Add(i, doc);
   }
 
   EXPECT_EQ(indices.GetAllDocs().size(), 100);
@@ -720,7 +743,7 @@ static void BM_VectorSearch(benchmark::State& state) {
   for (size_t i = 0; i < nvecs; i++) {
     auto rv = random_vec();
     MockedDocument doc{Map{{"pos", ToBytes(rv)}}};
-    indices.Add(i, &doc);
+    indices.Add(i, doc);
   }
 
   SearchAlgorithm algo{};

@@ -1147,6 +1147,29 @@ TEST_F(MultiEvalTest, MultiAndEval) {
   Run({"eval", "return 'OK';", "0"});
   auto resp = Run({"exec"});
   EXPECT_EQ(resp, "OK");
+
+  // We had a bug running script load inside multi
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
+  Run({"exec"});
+
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
+  Run({"get", "x"});
+  Run({"exec"});
+
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
+  Run({"mset", "x1", "y1", "x2", "y2"});
+  Run({"exec"});
+
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
+  Run({"eval", "return redis.call('set', 'x', 'y')", "1", "x"});
+  Run({"get", "x"});
+  Run({"exec"});
+
+  Run({"get", "x"});
 }
 
 TEST_F(MultiTest, MultiTypes) {

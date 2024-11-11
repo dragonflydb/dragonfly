@@ -46,6 +46,8 @@ class StoredCmd {
     Fill(absl::MakeSpan(*dest));
   }
 
+  std::string FirstArg() const;
+
   const CommandId* Cid() const;
 
   facade::ReplyMode ReplyMode() const;
@@ -266,7 +268,7 @@ struct ConnectionState {
 
 class ConnectionContext : public facade::ConnectionContext {
  public:
-  ConnectionContext(::io::Sink* stream, facade::Connection* owner, dfly::acl::UserCredentials cred);
+  ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
   ConnectionContext(const ConnectionContext* owner, Transaction* tx);
 
   struct DebugInfo {
