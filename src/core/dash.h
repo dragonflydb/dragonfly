@@ -939,26 +939,32 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
   if (curs.bucket_id() >= Policy::kBucketNum)  // sanity.
     return 0;
 
+  uint32_t sid = curs.segment_id(global_depth_);
+  uint8_t bid = curs.bucket_id();
+
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
   bool fetched = false;
 
-  while (!fetched) {
-    uint32_t sid = curs.segment_id(global_depth_);
-    uint8_t bid = curs.bucket_id();
-
+  // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
+  do {
     SegmentType* s = segment_[sid];
     assert(s);
 
     auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
 
     fetched = s->TraverseLogicalBucket(bid, hash_fun, std::move(dt_cb));
-    curs = AdvanceCursorBucketOrder(curs);
-    if (!curs)  // Check for end of traversal
-      return curs;
-  }
+    sid = NextSeg(sid);
+    if (sid >= segment_.size()) {
+      sid = 0;
+      ++bid;
 
-  return curs;
+      if (bid >= Policy::kBucketNum)
+        return 0;  // "End of traversal" cursor.
+    }
+  } while (!fetched);
+
+  return Cursor{global_depth_, sid, bid};
 }
 
 template <typename _Key, typename _Value, typename Policy>
