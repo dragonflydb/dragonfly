@@ -1426,15 +1426,14 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
-    const bool is_multi =
-        dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
+    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(cmd);
 
     // Generally, executing any multi-transactions (including eval) is not possible because they
     // might request a stricter multi mode than non-atomic which is used for squashing.
     // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
     // invocations, we can potentially execute multiple eval in parallel, which is very powerful
     // paired with shardlocal eval
-    const bool is_eval = CO::IsEvalKind(ArgS(args, 0));
+    const bool is_eval = CO::IsEvalKind(cmd);
 
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
