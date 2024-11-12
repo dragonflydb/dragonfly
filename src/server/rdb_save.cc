@@ -933,14 +933,13 @@ VersionBuffer MakeRdbVersion() {
   return buf;
 }
 
-CrcBuffer MakeCheckSum(std::string_view dump_res) {
-  uint64_t chksum = crc64(0, reinterpret_cast<const uint8_t*>(dump_res.data()), dump_res.size());
+CrcBuffer WrapCheckSum(uint64_t crc) {
   CrcBuffer buf;
-  absl::little_endian::Store64(buf.data(), chksum);
+  absl::little_endian::Store64(buf.data(), crc);
   return buf;
 }
 
-void AppendFooter(io::StringSink* dump_res) {
+void AppendFooter(io::Sink* dump_res, uint64_t crc) {
   auto to_bytes = [](const auto& buf) {
     return io::Bytes(reinterpret_cast<const uint8_t*>(buf.data()), buf.size());
   };
@@ -952,18 +951,45 @@ void AppendFooter(io::StringSink* dump_res) {
    * RDB version and CRC are both in little endian.
    */
   const auto ver = MakeRdbVersion();
-  dump_res->Write(to_bytes(ver));
-  const auto crc = MakeCheckSum(dump_res->str());
-  dump_res->Write(to_bytes(crc));
+  auto ver_bytes = to_bytes(ver);
+  dump_res->Write(ver_bytes);
+
+  crc = crc64(crc, ver_bytes.data(), ver_bytes.size());
+  const auto crc_buf = WrapCheckSum(crc);
+  dump_res->Write(to_bytes(crc_buf));
 }
 }  // namespace
 
-void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
+void SerializerBase::DumpObject(const CompactObj& obj, io::Sink* out) {
   CompressionMode compression_mode = GetDefaultCompressionMode();
   if (compression_mode != CompressionMode::NONE) {
     compression_mode = CompressionMode::SINGLE_ENTRY;
   }
-  RdbSerializer serializer(compression_mode);
+  uint64_t crc = 0;
+  uint64_t total_size = 0;
+  auto flush = [&](RdbSerializer* srz) {
+    io::StringSink s;
+
+    // Use kFlushMidEntry because we append a footer below
+    auto ec = srz->FlushToSink(&s, SerializerBase::FlushState::kFlushMidEntry);
+    RETURN_ON_ERR(ec);
+
+    string_view sv = s.str();
+    if (sv.empty()) {
+      return ec;  // Nothing to do
+    }
+
+    total_size += sv.size();
+    crc = crc64(crc, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
+
+    return out->Write(io::Buffer(sv));
+  };
+
+  RdbSerializer serializer(compression_mode, [&](size_t size, SerializerBase::FlushState) {
+    auto size_before = total_size;
+    flush(&serializer);
+    DCHECK_EQ(size, total_size - size_before);
+  });
 
   // According to Redis code we need to
   // 1. Save the value itself - without the key
@@ -974,10 +1000,9 @@ void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
   CHECK(!ec);
   ec = serializer.SaveValue(obj);
   CHECK(!ec);  // make sure that fully was successful
-  ec = serializer.FlushToSink(out, SerializerBase::FlushState::kFlushMidEntry);
-  CHECK(!ec);         // make sure that fully was successful
-  AppendFooter(out);  // version and crc
-  CHECK_GT(out->str().size(), 10u);
+  ec = flush(&serializer);
+  CHECK(!ec);              // make sure that fully was successful
+  AppendFooter(out, crc);  // version and crc
 }
 
 size_t SerializerBase::SerializedLen() const {
