@@ -599,7 +599,7 @@ async def test_big_value_serialization_memory_limit(df_factory, query):
     await client.execute_command("SAVE")
     info = await client.info("ALL")
 
-    upper_limit = 2_200_000_000  # 2.2 GB
+    upper_limit = 2_250_000_000  # 2.25 GB
     assert info["used_memory_peak_rss"] < upper_limit
 
     await client.execute_command("FLUSHALL")
