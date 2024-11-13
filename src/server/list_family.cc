@@ -1118,9 +1118,9 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED: {
-      auto error = cluster::SlotOwnershipErrorStr(*tx->GetUniqueSlotId());
+      auto error = cluster::SlotOwnershipError(*tx->GetUniqueSlotId());
       CHECK(error.has_value());
-      return builder->SendError(std::move(*error), dfly::cluster::kMovedErrorType);
+      return builder->SendError(std::move(*error));
     }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
