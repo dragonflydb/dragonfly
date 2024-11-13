@@ -127,7 +127,8 @@ void SinkReplyBuilder::WriteRef(std::string_view str) {
 }
 
 void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
-  Send();
+  if (!vecs_.empty())
+    Send();
 
   // Grow backing buffer if was at least half full and still below it's max size
   if (buffer_.InputLen() * 2 > buffer_.Capacity() && buffer_.Capacity() * 2 <= kMaxBufferSize)
@@ -144,6 +145,8 @@ void SinkReplyBuilder::Flush(size_t expected_buffer_cap) {
 }
 
 void SinkReplyBuilder::Send() {
+  DCHECK(sink_ != nullptr);
+  DCHECK(!vecs_.empty());
   auto& reply_stats = tl_facade_stats->reply_stats;
 
   send_active_ = true;

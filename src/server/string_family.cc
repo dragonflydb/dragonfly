@@ -1313,9 +1313,28 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     }
   }
 
+  // The code below is safe in the context of squashing (uses CapturingReplyBuilder).
+  // Specifically:
+  // 1. For Memcache:
+  //    builder != CapturingReplyBuilder here because this is only used in squashing
+  //    and there are only two cases:
+  //    * Squashing the pipeline something that is turned off when using MEMCACHE.
+  //    * Squashing a multi/exec block. There exist no such command in MEMCACHE.
+  //    Therefore this path is safe, and the DCHECK in the if statement below shall
+  //    never trigger.
+  // 2. For Redis:
+  //    * Call to StartArray() is safe because it calls RedisReplyBuilder::StartCollection which
+  //      calls CapturingReplyBuilder::StartCollection
+  //    * Calls to SendBulkString() and SendNull() find and if builder is CapturingReplyBuilder
+  //      then the right member gets called.
+  //
+  // Finally, the ReplyScope will trigger a Flush() on scope's end. What that means is,
+  // for CapturingReplyBuilder the internal vec is empty and therefore we should skip the call
+  // to Send because sink_ is nullptr and there is no payload to Send since it was captured.
   SinkReplyBuilder::ReplyScope scope(builder);
   if (builder->GetProtocol() == Protocol::MEMCACHE) {
     auto* rb = static_cast<MCReplyBuilder*>(builder);
+    DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
     for (const auto& entry : res) {
       if (!entry)
         continue;
@@ -1588,7 +1607,7 @@ void StringFamily::Register(CommandRegistry* registry) {
             << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.HFUNC(GetRange)  // Alias for GetRange
             << CI{"SETRANGE", CO::WRITE | CO::DENYOOM, 4, 1, 1}.HFUNC(SetRange)
             << CI{"CL.THROTTLE", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
-             ClThrottle);
+                   ClThrottle);
 }
 
 }  // namespace dfly
