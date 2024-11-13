@@ -10,7 +10,9 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 
-ABSL_FLAG(bool, experimental_new_io, true, "the flag is deprecated");
+ABSL_RETIRED_FLAG(bool, experimental_new_io, true,
+                  "Use new replying code - should "
+                  "reduce latencies for pipelining");
 
 namespace facade {
 
