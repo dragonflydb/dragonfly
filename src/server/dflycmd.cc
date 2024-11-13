@@ -624,8 +624,6 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard
       flow->streamer->Cancel();
     }
   };
-
-  return OpStatus::OK;
 }
 
 auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, unsigned> {
