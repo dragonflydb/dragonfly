@@ -1568,9 +1568,16 @@ async def test_cluster_replication_migration(
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_run_replication_during_migration(
+async def test_start_replication_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
 ):
+    """
+    Test replication with migration. Create the following setup:
+
+    master_1 do migration to master_2 and we start replication for master_1 during this migration
+
+    in the end master_1 and replica_1 should have the same data
+    """
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + 1000 + i) for i in range(3)
     ]
@@ -1595,7 +1602,7 @@ async def test_run_replication_during_migration(
 
     logging.debug("start migration")
     m1_node.migrations = [
-        MigrationInfo("127.0.0.1", m2_node.instance.admin_port, [(0, 16383)], m2_node.id)
+        MigrationInfo("127.0.0.1", m2_node.instance.admin_port, [(2001, 16383)], m2_node.id)
     ]
     await push_config(
         json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
@@ -1610,21 +1617,19 @@ async def test_run_replication_during_migration(
 
     logging.debug("finish migration")
     m1_node.migrations = []
-    m1_node.slots = []
+    m1_node.slots = [(0, 2000)]
     m2_node.migrations = []
-    m2_node.slots = [(0, 16383)]
+    m2_node.slots = [(2001, 16383)]
 
     await push_config(
         json.dumps(generate_config(master_nodes)), [node.admin_client for node in nodes]
     )
 
-    # wait for replicas to catch up
-    await asyncio.sleep(2)
+    await check_all_replicas_finished([r1_node.client], m1_node.client)
 
-    r1_capture = await seeder.capture(r1_node.instance.port)
+    m1_capture = await seeder.capture(m1_node.instance.port)
 
-    # ensure captures got exchanged
-    assert await seeder.compare(r1_capture, m1_node.instance.port)
+    assert await seeder.compare(m1_capture, r1_node.instance.port)
 
 
 @pytest.mark.parametrize("migration_first", [False, True])
@@ -1632,6 +1637,14 @@ async def test_run_replication_during_migration(
 async def test_snapshoting_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, migration_first: bool
 ):
+    """
+    Test saving snapshot during migration. Create the following setups:
+
+    1) Start saving and then run migration simultaneously
+    2) Run migration and start saving simultaneously
+
+    The result should be the same: snapshot contains all the data that existed before migration
+    """
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + 1000 + i) for i in range(2)
     ]
@@ -1665,9 +1678,11 @@ async def test_snapshoting_during_migration(
 
     if migration_first:
         await start_migration()
+        await asyncio.sleep(random.randint(0, 10) / 100)
         await start_save()
     else:
         await start_save()
+        await asyncio.sleep(random.randint(0, 10) / 100)
         await start_migration()
 
     logging.debug("wait for snapshot")
