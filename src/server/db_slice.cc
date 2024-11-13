@@ -203,22 +203,14 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   return 1;
 }
 
-// Helper class to cache and restore fetched_items_ of DbSlice for flows that preempt
-// because some other transaction might conclude and clear the fetched_items_ with OnCbFinish()
+// Deprecated and should be removed.
 class FetchedItemsRestorer {
  public:
-  // using RestoreType = absl::flat_hash_set<CompactObjectView>;
   template <typename U> explicit FetchedItemsRestorer(U&& u) {
-    // cached_ = std::move(*dst_to_restore_);
   }
 
   ~FetchedItemsRestorer() {
-    // *dst_to_restore_ = std::move(cached_);
   }
-
- private:
-  // RestoreType cached_;
-  // RestoreType* dst_to_restore_;
 };
 
 }  // namespace

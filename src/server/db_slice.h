@@ -605,6 +605,13 @@ class DbSlice {
   std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
+  // This set is used to hold fingerprints of key accessed during the run of
+  // a transaction callback (not the whole transaction).
+  // We track them to avoid bumping them again (in any direction) so that the iterators to
+  // the fetched keys will not be invalidated. We must do it for atomic operations,
+  // for operations that preempt in the middle we have another mechanism -
+  // auto laundering iterators, so in case of preemption we do not mind that fetched_items are
+  // cleared or changed.
   mutable absl::flat_hash_set<uint64_t, FpHasher> fetched_items_;
 
   // Registered by shard indices on when first document index is created.
