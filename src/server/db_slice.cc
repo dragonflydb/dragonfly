@@ -811,7 +811,6 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
-  block_counter_.Wait();
   // clear client tracking map.
   client_tracking_map_.clear();
 

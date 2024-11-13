@@ -167,9 +167,10 @@ class SliceSnapshot {
     size_t side_saved = 0;
     size_t savecb_calls = 0;
     size_t keys_total = 0;
+    size_t big_value_preemptions = 0;
   } stats_;
 
-  ConditionFlag bucket_ser_;
+  ThreadLocalMutex big_value_mu_;
 
   std::function<void(std::string)> on_push_;
   std::function<void()> on_snapshot_finish_;

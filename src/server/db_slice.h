@@ -503,6 +503,10 @@ class DbSlice {
     return block_counter_.HasMutating();
   }
 
+  LocalBlockingCounter* BlockingCounter() {
+    return &block_counter_;
+  }
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);

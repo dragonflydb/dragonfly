@@ -84,6 +84,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
       if (bytes_serialized > flush_threshold) {
         size_t serialized = FlushSerialized(flush_state);
         VLOG(2) << "FlushSerialized " << serialized << " bytes";
+        ++stats_.big_value_preemptions;
       }
     };
   }
@@ -243,7 +244,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
-  ConditionGuard guard(&bucket_ser_);
+  std::lock_guard guard(big_value_mu_);
   ++stats_.savecb_calls;
 
   auto check = [&](auto v) {
@@ -263,6 +264,12 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
 
   db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
+
+  auto* blocking_counter = db_slice_->BlockingCounter();
+  // Locking this never preempts. We merely just increment the underline counter such that
+  // if SerializeBucket preempts, Heartbeat() won't run because the blocking counter is not
+  // zero.
+  std::lock_guard blocking_counter_guard(*blocking_counter);
 
   stats_.loop_serialized += SerializeBucket(current_db_, it);
 
@@ -372,7 +379,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  ConditionGuard guard(&bucket_ser_);
+  std::lock_guard guard(big_value_mu_);
 
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
@@ -398,7 +405,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerialized.
-  ConditionGuard guard(&bucket_ser_);
+  std::lock_guard guard(big_value_mu_);
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }
@@ -427,7 +434,8 @@ size_t SliceSnapshot::GetTempBuffersSize() const {
 }
 
 RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {
-  return {stats_.loop_serialized + stats_.side_saved, stats_.keys_total};
+  return {stats_.loop_serialized + stats_.side_saved, stats_.keys_total,
+          stats_.big_value_preemptions};
 }
 
 }  // namespace dfly

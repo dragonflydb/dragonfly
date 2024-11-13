@@ -664,9 +664,17 @@ void EngineShard::Heartbeat() {
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   // Skip heartbeat if we are serializing a big value
+  static size_t skipped_hearbeats = 0;
   if (db_slice.HasBlockingCounterMutating()) {
+    ++skipped_hearbeats;
+    // We run Heartbeat 600 times every minute. If Heartbeat stalls more than 300 times,
+    // it means it hasn't ran for at least 30 seconds. This can be tuned a little bit more,
+    // as the actualy frequency of this is configurable via a flag.
+    if (skipped_hearbeats == 300)
+      LOG(WARNING) << "Stalling heartbeat() fiber because of big value serialization";
     return;
   }
+  skipped_hearbeats = 0;
 
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
     RetireExpiredAndEvict();
@@ -695,46 +703,49 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RetireExpiredAndEvict() {
-  // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-  constexpr double kTtlDeleteLimit = 200;
-  constexpr double kRedLimitFactor = 0.1;
+  {
+    FiberAtomicGuard guard;
+    // TODO: iterate over all namespaces
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+    constexpr double kTtlDeleteLimit = 200;
+    constexpr double kRedLimitFactor = 0.1;
 
-  uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
-  uint32_t deleted = GetMovingSum6(TTL_DELETE);
-  unsigned ttl_delete_target = 5;
+    uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
+    uint32_t deleted = GetMovingSum6(TTL_DELETE);
+    unsigned ttl_delete_target = 5;
 
-  if (deleted > 10) {
-    // deleted should be <= traversed.
-    // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
-    // The higher ttl_delete_target the more likely we have lots of expired items that need
-    // to be deleted.
-    ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
-  }
-
-  ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
-
-  DbContext db_cntx;
-  db_cntx.time_now_ms = GetCurrentTimeMs();
-
-  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-    if (!db_slice.IsDbValid(i))
-      continue;
-
-    db_cntx.db_index = i;
-    auto [pt, expt] = db_slice.GetTables(i);
-    if (expt->size() > pt->size() / 4) {
-      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
-
-      counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-      counter_[TTL_DELETE].IncBy(stats.deleted);
+    if (deleted > 10) {
+      // deleted should be <= traversed.
+      // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
+      // The higher ttl_delete_target the more likely we have lots of expired items that need
+      // to be deleted.
+      ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
     }
 
-    // if our budget is below the limit
-    if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
-      uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-      db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
-                                       eviction_redline - db_slice.memory_budget());
+    ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
+
+    DbContext db_cntx;
+    db_cntx.time_now_ms = GetCurrentTimeMs();
+
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (!db_slice.IsDbValid(i))
+        continue;
+
+      db_cntx.db_index = i;
+      auto [pt, expt] = db_slice.GetTables(i);
+      if (expt->size() > pt->size() / 4) {
+        DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
+
+        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+        counter_[TTL_DELETE].IncBy(stats.deleted);
+      }
+
+      // if our budget is below the limit
+      if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
+        uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
+        db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
+                                         eviction_redline - db_slice.memory_budget());
+      }
     }
   }
 
