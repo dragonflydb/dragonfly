@@ -171,6 +171,7 @@ SlotId KeySlot(std::string_view key);
 
 // return error message if slot doesn't belong to this node
 std::optional<std::string> SlotOwnershipErrorStr(SlotId slot_id);
+constexpr auto kMovedErrorType = std::string_view("MOVED");
 
 void InitializeCluster();
 bool IsClusterEnabled();

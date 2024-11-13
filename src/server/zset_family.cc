@@ -1281,7 +1281,7 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipErrorStr(*tx->GetUniqueSlotId());
       CHECK(error.has_value());
-      return builder->SendError(std::move(*error));
+      return builder->SendError(std::move(*error), dfly::cluster::kMovedErrorType);
     }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();
