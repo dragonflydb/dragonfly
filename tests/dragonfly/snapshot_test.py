@@ -568,7 +568,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 
 @dfly_args({"serialization_max_chunk_size": 4096, "proactor_threads": 1})
 @pytest.mark.parametrize(
-    "query",
+    "cont_type",
     [
         ("HASH"),
         ("SET"),
@@ -577,7 +577,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
     ],
 )
 @pytest.mark.slow
-async def test_big_value_serialization_memory_limit(df_factory, query):
+async def test_big_value_serialization_memory_limit(df_factory, cont_type):
     dbfilename = f"dump_{tmp_file_name()}"
     instance = df_factory.create(dbfilename=dbfilename)
     instance.start()
@@ -585,10 +585,10 @@ async def test_big_value_serialization_memory_limit(df_factory, query):
 
     one_gb = 1_000_000_000
     elements = 1000
-    one_mb = 1_000_000
+    element_size = 1_000_000  # 1mb
 
     await client.execute_command(
-        f"debug populate 1 prefix {one_mb} TYPE {query} RAND ELEMENTS {elements}"
+        f"debug populate 1 prefix {element_size} TYPE {cont_type} RAND ELEMENTS {elements}"
     )
 
     info = await client.info("ALL")
