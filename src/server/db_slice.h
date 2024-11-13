@@ -592,14 +592,27 @@ class DbSlice {
 
   DbTableArray db_arr_;
 
+  struct FpHasher {
+    size_t operator()(uint64_t val) const {
+      return val;
+    }
+  };
+
   // Used in temporary computations in Acquire/Release.
-  mutable absl::flat_hash_set<uint64_t> uniq_fps_;
+  mutable absl::flat_hash_set<uint64_t, FpHasher> uniq_fps_;
 
   // ordered from the smallest to largest version.
   std::list<std::pair<uint64_t, ChangeCallback>> change_cb_;
 
   // Used in temporary computations in Find item and CbFinish
-  mutable absl::flat_hash_set<CompactObjectView> fetched_items_;
+  // This set is used to hold fingerprints of key accessed during the run of
+  // a transaction callback (not the whole transaction).
+  // We track them to avoid bumping them again (in any direction) so that the iterators to
+  // the fetched keys will not be invalidated. We must do it for atomic operations,
+  // for operations that preempt in the middle we have another mechanism -
+  // auto laundering iterators, so in case of preemption we do not mind that fetched_items are
+  // cleared or changed.
+  mutable absl::flat_hash_set<uint64_t, FpHasher> fetched_items_;
 
   // Registered by shard indices on when first document index is created.
   DocDeletionCallback doc_del_cb_;
@@ -632,6 +645,24 @@ class DbSlice {
                       absl::container_internal::hash_default_hash<std::string>,
                       absl::container_internal::hash_default_eq<std::string>, AllocatorType>
       client_tracking_map_;
+
+  class PrimeBumpPolicy {
+   public:
+    PrimeBumpPolicy(absl::flat_hash_set<uint64_t, FpHasher>* items) : fetched_items_(items) {
+    }
+
+    // returns true if we can change the object location in dash table.
+    bool CanBump(const CompactObj& obj) const {
+      if (obj.IsSticky()) {
+        return false;
+      }
+      auto hc = obj.HashCode();
+      return fetched_items_->insert(hc).second;
+    }
+
+   private:
+    mutable absl::flat_hash_set<uint64_t, FpHasher>* fetched_items_;
+  };
 };
 
 inline bool IsValid(const DbSlice::Iterator& it) {

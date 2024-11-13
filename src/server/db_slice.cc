@@ -118,20 +118,6 @@ class PrimeEvictionPolicy {
   const bool apply_memory_limit_;
 };
 
-class PrimeBumpPolicy {
- public:
-  PrimeBumpPolicy(const absl::flat_hash_set<CompactObjectView>& fetched_items)
-      : fetched_items_(fetched_items) {
-  }
-  // returns true if we can change the object location in dash table.
-  bool CanBump(const CompactObj& obj) const {
-    return !obj.IsSticky() && !fetched_items_.contains(obj);
-  }
-
- private:
-  const absl::flat_hash_set<CompactObjectView>& fetched_items_;
-};
-
 bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   ssize_t mem_available = db_slice_->memory_budget() + mem_offset_;
   if (!apply_memory_limit_ || mem_available > soft_limit_)
@@ -217,22 +203,14 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   return 1;
 }
 
-// Helper class to cache and restore fetched_items_ of DbSlice for flows that preempt
-// because some other transaction might conclude and clear the fetched_items_ with OnCbFinish()
+// Deprecated and should be removed.
 class FetchedItemsRestorer {
  public:
-  using RestoreType = absl::flat_hash_set<CompactObjectView>;
-  explicit FetchedItemsRestorer(RestoreType* dst) : dst_to_restore_(dst) {
-    cached_ = std::move(*dst_to_restore_);
+  template <typename U> explicit FetchedItemsRestorer(U&& u) {
   }
 
   ~FetchedItemsRestorer() {
-    *dst_to_restore_ = std::move(cached_);
   }
-
- private:
-  RestoreType cached_;
-  RestoreType* dst_to_restore_;
 };
 
 }  // namespace
@@ -487,12 +465,12 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
-    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{fetched_items_});
+
+    auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{&fetched_items_});
     if (bump_it != res.it) {  // the item was bumped
       res.it = bump_it;
       ++events_.bumpups;
     }
-    fetched_items_.insert(res.it->first.AsRef());
   }
 
   std::move(update_stats_on_miss).Cancel();
@@ -704,7 +682,6 @@ bool DbSlice::Del(Context cntx, Iterator it) {
     string_view key = it->first.GetSlice(&tmp);
     doc_del_cb_(key, cntx, it->second);
   }
-  fetched_items_.erase(it->first.AsRef());
   PerformDeletion(it, db.get());
 
   return true;
