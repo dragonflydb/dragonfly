@@ -10,6 +10,8 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 
+ABSL_FLAG(bool, experimental_new_io, true, "the flag is deprecated");
+
 namespace facade {
 
 ConnectionContext::ConnectionContext(Connection* owner) : owner_(owner) {
