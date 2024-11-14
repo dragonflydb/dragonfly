@@ -156,9 +156,9 @@ quicklistNode* CreateNode(int container, string_view value) {
 
   if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
     DCHECK(!value.empty());
+    new_node->sz = value.size();
     new_node->entry = (uint8_t*)zmalloc(new_node->sz);
     memcpy(new_node->entry, value.data(), new_node->sz);
-    new_node->sz = value.size();
   } else {
     new_node->entry = LP_Prepend(lpNew(0), value);
     new_node->sz = lpBytes(new_node->entry);
