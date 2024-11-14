@@ -10,8 +10,11 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 
-namespace facade {
+ABSL_RETIRED_FLAG(bool, experimental_new_io, true,
+                  "Use new replying code - should "
+                  "reduce latencies for pipelining");  // TODO remove in 1/2/25
 
+namespace facade {
 ConnectionContext::ConnectionContext(Connection* owner) : owner_(owner) {
   conn_closing = false;
   req_auth = false;

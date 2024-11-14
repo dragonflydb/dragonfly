@@ -566,55 +566,42 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
     assert await StaticSeeder.capture(async_client) == start_capture
 
 
-@dfly_args({"proactor_threads": 1})
+@dfly_args({"serialization_max_chunk_size": 4096, "proactor_threads": 1})
 @pytest.mark.parametrize(
-    "query",
+    "cont_type",
     [
-        ("HSET"),
-        ("SADD"),
+        ("HASH"),
+        ("SET"),
         ("ZSET"),
         ("LIST"),
     ],
 )
 @pytest.mark.slow
-async def test_big_value_serialization_memory_limit(df_factory, query):
+async def test_big_value_serialization_memory_limit(df_factory, cont_type):
     dbfilename = f"dump_{tmp_file_name()}"
     instance = df_factory.create(dbfilename=dbfilename)
     instance.start()
     client = instance.client()
 
-    ten_mb = 10_000_000
+    one_gb = 1_000_000_000
+    elements = 1000
+    element_size = 1_000_000  # 1mb
 
-    def ten_mb_random_string():
-        return "".join(random.choices(string.ascii_letters, k=ten_mb))
+    await client.execute_command(
+        f"debug populate 1 prefix {element_size} TYPE {cont_type} RAND ELEMENTS {elements}"
+    )
 
-    one_gb = 1_000_000_000  # 1GB
-
-    upper_limit = one_gb * 1.1  # 1GB + 100MB
-
-    i = 0
-
-    while instance.rss < one_gb:
-        if query == "HSET":
-            i = i + 1
-            await client.execute_command(f"HSET foo_key foo_{i} {ten_mb_random_string()}")
-        elif query == "SADD":
-            await client.execute_command(f"SADD foo_key {ten_mb_random_string()}")
-        elif query == "ZSET":
-            await client.execute_command(f"ZADD foo_key {i} {ten_mb_random_string()}")
-        elif query == "LIST":
-            await client.execute_command(f"LPUSH foo_key {ten_mb_random_string()}")
-
-    async def check_memory_usage(instance):
-        while True:
-            assert instance.rss < upper_limit
-            await asyncio.sleep(0.01)
-
-    checker = asyncio.create_task(check_memory_usage(instance))
-
+    info = await client.info("ALL")
+    # rss double's because of DEBUG POPULATE
+    assert info["used_memory_peak_rss"] > (one_gb * 2)
+    # if we execute SAVE below without big value serialization we trigger the assertion below.
+    # note the peak would reach (one_gb * 3) without it.
     await client.execute_command("SAVE")
+    info = await client.info("ALL")
 
-    checker.cancel()
+    upper_limit = 2_250_000_000  # 2.25 GB
+    assert info["used_memory_peak_rss"] < upper_limit
+
     await client.execute_command("FLUSHALL")
     await client.close()
 
