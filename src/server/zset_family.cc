@@ -1279,9 +1279,9 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED: {
-      auto error = cluster::SlotOwnershipErrorStr(*tx->GetUniqueSlotId());
-      CHECK(error.has_value());
-      return builder->SendError(std::move(*error));
+      auto error = cluster::SlotOwnershipError(*tx->GetUniqueSlotId());
+      CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
+      return builder->SendError(std::move(error));
     }
     default:
       LOG(ERROR) << "Unexpected error " << popped_key.status();

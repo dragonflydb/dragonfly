@@ -940,8 +940,9 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   if (keys_slot.has_value()) {
-    if (auto error_str = cluster::SlotOwnershipErrorStr(*keys_slot); error_str) {
-      return ErrorReply{std::move(*error_str)};
+    if (auto error = cluster::SlotOwnershipError(*keys_slot);
+        !error.status.has_value() || error.status.value() != facade::OpStatus::OK) {
+      return ErrorReply{std::move(error)};
     }
   }
 
