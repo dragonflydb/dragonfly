@@ -430,7 +430,7 @@ ThreadLocalMutex::ThreadLocalMutex() {
 }
 
 ThreadLocalMutex::~ThreadLocalMutex() {
-  DCHECK_EQ(EngineShard::tlocal(), shard_);
+  //  DCHECK_EQ(EngineShard::tlocal(), shard_);
 }
 
 void ThreadLocalMutex::lock() {

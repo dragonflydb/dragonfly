@@ -670,8 +670,10 @@ void EngineShard::Heartbeat() {
     // We run Heartbeat 600 times every minute. If Heartbeat stalls more than 300 times,
     // it means it hasn't ran for at least 30 seconds. This can be tuned a little bit more,
     // as the actualy frequency of this is configurable via a flag.
-    if (skipped_hearbeats == 300)
+    if (skipped_hearbeats == 300) {
       LOG(WARNING) << "Stalling heartbeat() fiber because of big value serialization";
+      skipped_hearbeats = 0;
+    }
     return;
   }
   skipped_hearbeats = 0;
