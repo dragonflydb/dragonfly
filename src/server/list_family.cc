@@ -1119,7 +1119,7 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
       return rb->SendNullArray();
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*tx->GetUniqueSlotId());
-      CHECK(error.status.has_value() && error.status.value() != facade::OpStatus::OK);
+      CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
       return builder->SendError(std::move(error));
     }
     default:
