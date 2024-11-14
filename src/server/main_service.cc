@@ -1407,13 +1407,13 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     }
 
     dfly_cntx->transaction = dist_trans.get();
-    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                  static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, true,
-                                  false);
+    size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
+                                                        static_cast<RedisReplyBuilder*>(builder),
+                                                        dfly_cntx, this, true, false);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
-    ss->stats.squashed_commands += stored_cmds.size();
+    ss->stats.squashed_commands += squashed_num;
     stored_cmds.clear();
   };
 

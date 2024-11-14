@@ -254,7 +254,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   return !aborted;
 }
 
-void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
+size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
   DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
@@ -291,6 +291,7 @@ void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
 
   VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
           << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
+  return num_squashed_;
 }
 
 bool MultiCommandSquasher::IsAtomic() const {
