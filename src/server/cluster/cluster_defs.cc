@@ -116,7 +116,7 @@ bool IsClusterShardedByTag() {
   return IsClusterEnabledOrEmulated() || LockTagOptions::instance().enabled;
 }
 
-std::optional<facade::ErrorReply> SlotOwnershipError(SlotId slot_id) {
+facade::ErrorReply SlotOwnershipError(SlotId slot_id) {
   const cluster::ClusterConfig* cluster_config = ClusterFamily::cluster_config();
   if (!cluster_config)
     return facade::ErrorReply{facade::kClusterNotConfigured};
@@ -127,6 +127,6 @@ std::optional<facade::ErrorReply> SlotOwnershipError(SlotId slot_id) {
     return facade::ErrorReply{absl::StrCat("-MOVED ", slot_id, " ", master.ip, ":", master.port),
                               "MOVED"};
   }
-  return std::nullopt;
+  return facade::ErrorReply{facade::OpStatus::OK};
 }
 }  // namespace dfly::cluster

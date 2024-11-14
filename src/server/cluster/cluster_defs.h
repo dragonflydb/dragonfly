@@ -172,7 +172,7 @@ enum class MigrationState : uint8_t {
 SlotId KeySlot(std::string_view key);
 
 // return error message if slot doesn't belong to this node
-std::optional<facade::ErrorReply> SlotOwnershipError(SlotId slot_id);
+facade::ErrorReply SlotOwnershipError(SlotId slot_id);
 
 void InitializeCluster();
 bool IsClusterEnabled();
