@@ -236,6 +236,14 @@ TEST_F(QListTest, InsertDelete) {
   EXPECT_EQ(0, ql_.Size());
 }
 
+TEST_F(QListTest, PushPlain) {
+  // push a value large enough to trigger plain node insertion.
+  string val(9000, 'a');
+  ql_.Push(val, QList::HEAD);
+  auto items = ToItems();
+  EXPECT_THAT(items, ElementsAre(val));
+}
+
 using FillCompress = tuple<int, unsigned>;
 
 class PrintToFillCompress {
