@@ -244,7 +244,6 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
-  std::lock_guard guard(big_value_mu_);
   ++stats_.savecb_calls;
 
   auto check = [&](auto v) {
@@ -257,13 +256,15 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
     return true;
   };
 
-  uint64_t v = it.GetVersion();
-  if (!check(v)) {
+  if (!check(it.GetVersion())) {
     return false;
   }
 
   db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
+  if (!check(it.GetVersion())) {
+    return false;
+  }
 
   auto* blocking_counter = db_slice_->BlockingCounter();
   // Locking this never preempts. We merely just increment the underline counter such that
@@ -278,6 +279,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
 
 unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it) {
   DCHECK_LT(it.GetVersion(), snapshot_version_);
+  std::lock_guard guard(big_value_mu_);
 
   // traverse physical bucket and write it into string file.
   serialize_bucket_running_ = true;
@@ -379,8 +381,6 @@ bool SliceSnapshot::PushSerialized(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  std::lock_guard guard(big_value_mu_);
-
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 
