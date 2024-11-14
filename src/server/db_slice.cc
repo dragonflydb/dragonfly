@@ -206,8 +206,6 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiry(cntx_.db_index, key);
     }
-    // Safe we already acquired util::fb2::LockGuard lk(db_slice_->GetSerializationMutex());
-    // on the flows that call this function
     db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
 
     ++evicted_;
@@ -1131,6 +1129,11 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
                << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
   }
 
+  // Replicate expiry
+  if (auto journal = owner_->journal(); journal) {
+    RecordExpiry(cntx.db_index, key);
+  }
+
   if (expired_keys_events_recording_)
     db->expired_keys_events_.emplace_back(key);
 
@@ -1142,10 +1145,6 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   const_cast<DbSlice*>(this)->PerformDeletion(Iterator(it, StringOrView::FromView(key)),
                                               ExpIterator(expire_it, StringOrView::FromView(key)),
                                               db.get());
-  // Replicate expiry
-  if (auto journal = owner_->journal(); journal) {
-    RecordExpiry(cntx.db_index, key);
-  }
 
   ++events_.expired_keys;
 

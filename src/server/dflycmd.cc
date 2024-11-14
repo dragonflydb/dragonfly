@@ -589,6 +589,12 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
 void DflyCmd::StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(shard);
 
+  absl::Cleanup clean([&]() {
+    // Reset cleanup and saver
+    flow->cleanup = []() {};
+    flow->saver.reset();
+  });
+
   error_code ec = flow->saver->StopFullSyncInShard(shard);
   if (ec) {
     cntx->ReportError(ec);
@@ -600,10 +606,6 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* s
     cntx->ReportError(ec);
     return;
   }
-
-  // Reset cleanup and saver
-  flow->cleanup = []() {};
-  flow->saver.reset();
 }
 
 void DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
