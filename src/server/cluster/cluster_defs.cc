@@ -116,16 +116,17 @@ bool IsClusterShardedByTag() {
   return IsClusterEnabledOrEmulated() || LockTagOptions::instance().enabled;
 }
 
-std::optional<std::string> SlotOwnershipErrorStr(SlotId slot_id) {
+facade::ErrorReply SlotOwnershipError(SlotId slot_id) {
   const cluster::ClusterConfig* cluster_config = ClusterFamily::cluster_config();
   if (!cluster_config)
-    return facade::kClusterNotConfigured;
+    return facade::ErrorReply{facade::kClusterNotConfigured};
 
   if (!cluster_config->IsMySlot(slot_id)) {
     // See more details here: https://redis.io/docs/reference/cluster-spec/#moved-redirection
     cluster::ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(slot_id);
-    return absl::StrCat("-MOVED ", slot_id, " ", master.ip, ":", master.port);
+    return facade::ErrorReply{absl::StrCat("-MOVED ", slot_id, " ", master.ip, ":", master.port),
+                              "MOVED"};
   }
-  return std::nullopt;
+  return facade::ErrorReply{facade::OpStatus::OK};
 }
 }  // namespace dfly::cluster
