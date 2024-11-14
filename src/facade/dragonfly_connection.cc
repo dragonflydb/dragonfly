@@ -1428,8 +1428,11 @@ std::string Connection::DebugInfo() const {
 
   absl::StrAppend(&info, "address=", uint64_t(this), ", ");
   absl::StrAppend(&info, "phase=", phase_, ", ");
-  absl::StrAppend(&info, "dispatch(s/a)=", cc_->sync_dispatch, " ", cc_->async_dispatch, ", ");
-  absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
+  if (cc_) {
+    // In some rare cases cc_ can be null, see https://github.com/dragonflydb/dragonfly/pull/3873
+    absl::StrAppend(&info, "dispatch(s/a)=", cc_->sync_dispatch, " ", cc_->async_dispatch, ", ");
+    absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
+  }
   absl::StrAppend(&info, "dispatch_fiber:joinable=", dispatch_fb_.IsJoinable(), ", ");
 
   bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsControl();
@@ -1437,11 +1440,13 @@ std::string Connection::DebugInfo() const {
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
 
-  absl::StrAppend(&info, "state=");
-  if (cc_->paused)
-    absl::StrAppend(&info, "p");
-  if (cc_->blocked)
-    absl::StrAppend(&info, "b");
+  if (cc_) {
+    absl::StrAppend(&info, "state=");
+    if (cc_->paused)
+      absl::StrAppend(&info, "p");
+    if (cc_->blocked)
+      absl::StrAppend(&info, "b");
+  }
 
   absl::StrAppend(&info, "}");
   return info;

@@ -940,8 +940,9 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   if (keys_slot.has_value()) {
-    if (auto error_str = cluster::SlotOwnershipErrorStr(*keys_slot); error_str) {
-      return ErrorReply{std::move(*error_str)};
+    if (auto error = cluster::SlotOwnershipError(*keys_slot);
+        !error.status.has_value() || error.status.value() != facade::OpStatus::OK) {
+      return ErrorReply{std::move(error)};
     }
   }
 
@@ -1406,13 +1407,13 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     }
 
     dfly_cntx->transaction = dist_trans.get();
-    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                  static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, true,
-                                  false);
+    size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
+                                                        static_cast<RedisReplyBuilder*>(builder),
+                                                        dfly_cntx, this, true, false);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
-    ss->stats.squashed_commands += stored_cmds.size();
+    ss->stats.squashed_commands += squashed_num;
     stored_cmds.clear();
   };
 

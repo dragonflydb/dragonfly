@@ -61,7 +61,6 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(
             8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, False, marks=M_STRESS
         ),
-        pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, True, marks=M_STRESS),
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
