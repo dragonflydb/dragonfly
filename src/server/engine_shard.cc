@@ -664,19 +664,15 @@ void EngineShard::Heartbeat() {
   // TODO: iterate over all namespaces
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   // Skip heartbeat if we are serializing a big value
-  static size_t skipped_hearbeats = 0;
+  static auto start = std::chrono::system_clock::now();
   if (db_slice.HasBlockingCounterMutating()) {
-    ++skipped_hearbeats;
-    // We run Heartbeat 600 times every minute. If Heartbeat stalls more than 300 times,
-    // it means it hasn't ran for at least 30 seconds. This can be tuned a little bit more,
-    // as the actualy frequency of this is configurable via a flag.
-    if (skipped_hearbeats == 300) {
-      LOG(WARNING) << "Stalling heartbeat() fiber because of big value serialization";
-      skipped_hearbeats = 0;
+    const auto elapsed = std::chrono::system_clock::now() - start;
+    if(elapsed > std::chrono::seconds(1)) {
+      LOG(WARNING) << "Stalled heartbeat() fiber for " << elapsed.count() << " seconds because of big value serialization";
     }
     return;
   }
-  skipped_hearbeats = 0;
+  start = std::chrono::system_clock::now();
 
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
     RetireExpiredAndEvict();
