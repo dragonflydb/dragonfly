@@ -603,6 +603,28 @@ int StreamTrim(const AddTrimOpts& opts, stream* s) {
   return 0;
 }
 
+class StreamMemTracker {
+ public:
+  StreamMemTracker() {
+    start_size_ = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+  }
+
+  void SetStreamSize(PrimeValue& pv, bool is_op_set = false) {
+    const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
+    // If the diff is 0 it means the object use the same memory as before. No action needed.
+    if (diff == 0) {
+      return;
+    }
+    pv.SetStreamSize(diff);
+    // Under any flow we must not end up with this special value.
+    DCHECK(pv.MallocUsed() != 0);
+  }
+
+ private:
+  size_t start_size_{0};
+};
+
 OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
   auto& db_slice = op_args.GetDbSlice();
@@ -621,6 +643,8 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
   }
 
   auto& it = add_res.it;
+
+  StreamMemTracker mem_tracker;
 
   if (add_res.is_new) {
     stream* s = streamNew();
@@ -647,6 +671,8 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
   }
 
   StreamTrim(opts, stream_inst);
+
+  mem_tracker.SetStreamSize(it->second);
 
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (blocking_controller) {
@@ -1093,6 +1119,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   int64_t entries_read = SCG_INVALID_ENTRIES_READ;
+  StreamMemTracker mem_tracker;
   if (!res_it) {
     if (opts.flags & kCreateOptMkstream) {
       // MKSTREAM is enabled, so create the stream
@@ -1123,16 +1150,15 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   }
 
   streamCG* cg = streamCreateCG(s, opts.gname.data(), opts.gname.size(), &id, entries_read);
-  if (cg) {
-    return OpStatus::OK;
-  }
-  return OpStatus::BUSY_GROUP;
+  mem_tracker.SetStreamSize(res_it->it->second);
+  return cg ? OpStatus::OK : OpStatus::BUSY_GROUP;
 }
 
 struct FindGroupResult {
   stream* s = nullptr;
   streamCG* cg = nullptr;
   DbSlice::AutoUpdater post_updater;
+  DbSlice::Iterator it;
 };
 
 OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, string_view gname,
@@ -1147,7 +1173,7 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
   if (skip_group && !cg)
     return OpStatus::SKIPPED;
 
-  return FindGroupResult{s, cg, std::move(res_it->post_updater)};
+  return FindGroupResult{s, cg, std::move(res_it->post_updater), res_it->it};
 }
 
 constexpr uint8_t kClaimForce = 1 << 0;
@@ -1221,6 +1247,8 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
     }
   }
 
+  StreamMemTracker tracker;
+
   for (streamID id : ids) {
     std::array<uint8_t, sizeof(streamID)> buf;
     StreamEncodeID(buf.begin(), &id);
@@ -1292,6 +1320,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
       AppendClaimResultItem(result, cgr_res->s, id);
     }
   }
+  tracker.SetStreamSize(cgr_res->it->second);
   return result;
 }
 
@@ -1299,9 +1328,12 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
 OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gname) {
   auto cgr_res = FindGroup(op_args, key, gname);
   RETURN_ON_BAD_STATUS(cgr_res);
+  StreamMemTracker mem_tracker;
 
   raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
   streamFreeCG(cgr_res->cg);
+
+  mem_tracker.SetStreamSize(cgr_res->it->second);
 
   // Awake readers blocked on this group
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
@@ -1328,12 +1360,13 @@ OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, stri
   auto cgroup_res = FindGroup(op_args, key, gname);
   RETURN_ON_BAD_STATUS(cgroup_res);
 
+  StreamMemTracker mem_tracker;
+
   streamConsumer* consumer = streamCreateConsumer(cgroup_res->cg, WrapSds(consumer_name), NULL, 0,
                                                   SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
 
-  if (consumer)
-    return OpStatus::OK;
-  return OpStatus::KEY_EXISTS;
+  mem_tracker.SetStreamSize(cgroup_res->it->second);
+  return consumer ? OpStatus::OK : OpStatus::KEY_EXISTS;
 }
 
 // XGROUP DELCONSUMER key groupname consumername
@@ -1341,6 +1374,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
                                  string_view consumer_name) {
   auto cgroup_res = FindGroup(op_args, key, gname);
   RETURN_ON_BAD_STATUS(cgroup_res);
+  StreamMemTracker mem_tracker;
 
   long long pending = 0;
   streamConsumer* consumer =
@@ -1350,6 +1384,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
     streamDelConsumer(cgroup_res->cg, consumer);
   }
 
+  mem_tracker.SetStreamSize(cgroup_res->it->second);
   return pending;
 }
 
@@ -1378,6 +1413,8 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
     return res_it.status();
+
+  StreamMemTracker mem_tracker;
 
   CompactObj& cobj = res_it->it->second;
   stream* stream_inst = (stream*)cobj.RObjPtr();
@@ -1408,6 +1445,8 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
   if (!streamIDEqZero(&max_xdel_id))
     stream_inst->max_deleted_entry_id = max_xdel_id;
 
+  mem_tracker.SetStreamSize(cobj);
+
   return OpStatus::OK;
 }
 
@@ -1422,6 +1461,8 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
 
   uint32_t deleted = 0;
   bool first_entry = false;
+
+  StreamMemTracker tracker;
 
   for (size_t j = 0; j < ids.size(); j++) {
     streamID id = ids[j];
@@ -1450,6 +1491,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
     }
   }
 
+  tracker.SetStreamSize(cobj);
   return deleted;
 }
 
@@ -1464,6 +1506,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
   }
 
   int acknowledged = 0;
+  StreamMemTracker mem_tracker;
   for (auto& id : ids) {
     unsigned char buf[sizeof(streamID)];
     streamEncodeID(buf, &id);
@@ -1480,6 +1523,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
       acknowledged++;
     }
   }
+  mem_tracker.SetStreamSize(res->it->second);
   return acknowledged;
 }
 
@@ -1493,6 +1537,8 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   if (stream == nullptr || group == nullptr) {
     return OpStatus::KEY_NOTFOUND;
   }
+
+  StreamMemTracker mem_tracker;
 
   streamConsumer* consumer = nullptr;
   // from Redis spec on XAutoClaim:
@@ -1571,6 +1617,8 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   }
   raxStop(&ri);
   result.end_id = end_id;
+
+  mem_tracker.SetStreamSize(cgr_res->it->second);
 
   return result;
 }
@@ -1874,10 +1922,15 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
     return res_it.status();
   }
 
+  StreamMemTracker mem_tracker;
+
   CompactObj& cobj = res_it->it->second;
   stream* s = (stream*)cobj.RObjPtr();
 
-  return StreamTrim(opts, s);
+  auto res = StreamTrim(opts, s);
+
+  mem_tracker.SetStreamSize(cobj);
+  return res;
 }
 
 optional<pair<AddTrimOpts, unsigned>> ParseAddOrTrimArgsOrReply(CmdArgList args, bool is_xadd,

@@ -107,54 +107,6 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
   return 0;
 }
 
-size_t MallocUsedStream(unsigned encoding, void* streamv) {
-  auto* s = (stream*)streamv;
-  auto size = zmalloc_usable_size(s);
-  size += sizeof(*s);
-  size += s->rax_tree->numele * sizeof(streamID);
-  size += s->rax_tree->numnodes * sizeof(raxNode);
-
-  raxIterator ri;
-  raxStart(&ri, s->rax_tree);
-  raxSeek(&ri, "^", nullptr, 0);
-  size_t lpsize = 0;
-  while (raxNext(&ri)) {
-    auto* lp = (unsigned char*)ri.data;
-    lpsize += zmalloc_size(lp);
-  }
-  raxStop(&ri);
-
-  /* Consumer groups also have a non trivial memory overhead if there
-   * are many consumers and many groups, let's count at least the
-   * overhead of the pending entries in the groups and consumers
-   * PELs. */
-  if (s->cgroups) {
-    raxStart(&ri, s->cgroups);
-    raxSeek(&ri, "^", NULL, 0);
-    while (raxNext(&ri)) {
-      auto* cg = (streamCG*)ri.data;
-      size += sizeof(*cg);
-      size += cg->pel->numnodes * sizeof(raxNode);
-      size += sizeof(streamNACK) * raxSize(cg->pel);
-
-      /* For each consumer we also need to add the basic data
-       * structures and the PEL memory usage. */
-      raxIterator cri;
-      raxStart(&cri, cg->consumers);
-      raxSeek(&cri, "^", NULL, 0);
-      while (raxNext(&cri)) {
-        auto* consumer = (streamConsumer*)cri.data;
-        size += sizeof(*consumer);
-        size += sdslen(consumer->name);
-        size += consumer->pel->numnodes * sizeof(raxNode);
-      }
-      raxStop(&cri);
-    }
-    raxStop(&ri);
-  }
-  return size;
-}
-
 inline void FreeObjHash(unsigned encoding, void* ptr) {
   switch (encoding) {
     case kEncodingStrMap2:
@@ -340,7 +292,7 @@ size_t RobjWrapper::MallocUsed() const {
     case OBJ_ZSET:
       return MallocUsedZSet(encoding_, inner_obj_);
     case OBJ_STREAM:
-      return MallocUsedStream(encoding_, inner_obj_);
+      return sz_;
 
     default:
       LOG(FATAL) << "Not supported " << type_;
@@ -482,6 +434,10 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
     memcpy(inner_obj_, s.data(), s.size());
     sz_ = s.size();
   }
+}
+
+void RobjWrapper::SetSize(uint64_t size) {
+  sz_ = size;
 }
 
 bool RobjWrapper::DefragIfNeeded(float ratio) {
@@ -832,6 +788,13 @@ void CompactObj::SetJsonSize(int64_t size) {
     }
     u_.json_obj.cons.bytes_used += size;
   }
+}
+
+void CompactObj::SetStreamSize(int64_t size) {
+  if (size < 0) {
+    DCHECK(static_cast<int64_t>(u_.r_obj.Size()) >= size);
+  }
+  u_.r_obj.SetSize((u_.r_obj.Size() + size));
 }
 
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
