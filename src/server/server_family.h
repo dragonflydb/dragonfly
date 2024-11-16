@@ -89,7 +89,6 @@ struct Metrics {
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;
 
-  size_t uptime = 0;
   size_t qps = 0;
 
   size_t heap_used_bytes = 0;

@@ -1275,15 +1275,17 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse* resp) {
+void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd,
+                            StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
 
   bool is_master = ServerState::tlocal()->is_master;
+
   AppendMetricWithoutLabels("master", "1 if master 0 if replica", is_master ? 1 : 0,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("uptime_in_seconds", "", uptime, MetricType::COUNTER, &resp->body());
 
   // Clients metrics
   const auto& conn_stats = m.facade_stats.conn_stats;
@@ -1533,7 +1535,8 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
-    PrintPrometheusMetrics(this->GetMetrics(&namespaces->GetDefaultNamespace()),
+    uint64_t uptime = time(NULL) - start_time_;
+    PrintPrometheusMetrics(uptime, this->GetMetrics(&namespaces->GetDefaultNamespace()),
                            this->dfly_cmd_.get(), &resp);
 
     return send->Invoke(std::move(resp));
@@ -1607,14 +1610,17 @@ void ServerFamily::StatsMC(std::string_view section, SinkReplyBuilder* builder) 
 
   double utime = dbl_time(ru.ru_utime);
   double systime = dbl_time(ru.ru_stime);
+  auto kind = ProactorBase::me()->GetKind();
+  const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
 
   Metrics m = GetMetrics(&namespaces->GetDefaultNamespace());
+  uint64_t uptime = time(NULL) - start_time_;
 
   ADD_LINE(pid, getpid());
-  ADD_LINE(uptime, m.uptime);
+  ADD_LINE(uptime, uptime);
   ADD_LINE(time, now);
   ADD_LINE(version, kGitTag);
-  ADD_LINE(libevent, "iouring");
+  ADD_LINE(libevent, multiplex_api);
   ADD_LINE(pointer_size, sizeof(void*));
   ADD_LINE(rusage_user, utime);
   ADD_LINE(rusage_system, systime);
@@ -2095,6 +2101,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   Metrics result;
   util::fb2::Mutex mu;
 
+  uint64_t start = absl::GetCurrentTimeNanos();
+
   auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
     calls += stat.first;
@@ -2117,7 +2125,6 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
     result.coordinator_stats.Add(ss->stats);
 
-    result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
     result.facade_stats += *tl_facade_stats;
     result.serialization_bytes += SliceSnapshot::GetThreadLocalMemoryUsage();
@@ -2156,6 +2163,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
 
+  uint64_t after_cb = absl::GetCurrentTimeNanos();
+
   // Normalize moving average stats
   result.qps /= 6;
   result.traverse_ttl_per_sec /= 6;
@@ -2187,6 +2196,12 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   result.peak_stats = peak_stats_;
 
+  uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+  if (delta_ms > 30) {
+    uint64_t cb_dur = (after_cb - start) / 1000'000;
+    LOG(INFO) << "GetMetrics took " << delta_ms << " ms, out of which callback took " << cb_dur
+              << " ms";
+  }
   return result;
 }
 
@@ -2217,15 +2232,6 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
-  uint64_t start = absl::GetCurrentTimeNanos();
-  Metrics m = GetMetrics(cntx->ns);
-  uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
-  LOG_IF(INFO, delta_ms > 100) << "GetMetrics took " << delta_ms << " ms";
-
-  DbStats total;
-  for (const auto& db_stats : m.db_stats)
-    total += db_stats;
-
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
@@ -2238,10 +2244,20 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
     append("thread_count", service_.proactor_pool().size());
-    size_t uptime = m.uptime;
+
+    uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
   }
+
+  Metrics m;
+  if (section != "SERVER") {
+    m = GetMetrics(cntx->ns);
+  }
+
+  DbStats total;
+  for (const auto& db_stats : m.db_stats)
+    total += db_stats;
 
   if (should_enter("CLIENTS")) {
     append("connected_clients", m.facade_stats.conn_stats.num_conns);
@@ -2472,15 +2488,17 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   }
 
   if (should_enter("REPLICATION")) {
-    util::fb2::LockGuard lk(replicaof_mu_);
     // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
     // ensuring eventual consistency of is_master. When determining if the server is a replica and
     // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
     // insufficient in this scenario.
-    if (!replica_) {
-      append("role", "master");
-      append("connected_slaves", m.facade_stats.conn_stats.num_replicas);
+    util::fb2::LockGuard lk(replicaof_mu_);
+    bool is_master = bool(!replica_);
+    if (is_master) {
       const auto& replicas = m.master_side_replicas_info;
+      append("role", "master");
+      append("connected_slaves", replicas.size());
+
       for (size_t i = 0; i < replicas.size(); i++) {
         auto& r = replicas[i];
         // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
@@ -2895,9 +2913,6 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
         string sync_id = absl::StrCat("SYNC", sid);
         cntx->conn_state.replication_info.repl_session_id = sid;
 
-        if (!cntx->replica_conn) {
-          ServerState::tl_connection_stats()->num_replicas += 1;
-        }
         cntx->replica_conn = true;
 
         // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads> <version>
