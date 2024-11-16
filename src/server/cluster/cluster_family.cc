@@ -1036,7 +1036,7 @@ void ClusterFamily::BreakStalledFlowsInShard() {
 
 void ClusterFamily::PauseMigration(bool pause) {
   util::fb2::LockGuard lk(migration_mu_);
-  CHECK(!incoming_migrations_jobs_.empty());
+  LOG_IF(ERROR, !incoming_migrations_jobs_.empty()) << "No incoming migrations!";
   for (auto& im : incoming_migrations_jobs_) {
     im->Pause(pause);
   }

@@ -2292,7 +2292,16 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     )
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC")
+    await asyncio.sleep(random.randint(0, 50) / 100)
+    while (
+        len(
+            await nodes[1].admin_client.execute_command(
+                "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
+            )
+        )
+        == 0
+    ):
+        await asyncio.sleep(0.1)
 
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
