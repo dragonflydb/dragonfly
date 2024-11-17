@@ -2088,7 +2088,7 @@ static void MergeDbSliceStats(const DbSlice::Stats& src, Metrics* dest) {
 
 void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
-      [registry = service_.mutable_registry(), this, ns](unsigned index, auto*) {
+      [registry = service_.mutable_registry(), ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
         ns->GetCurrentDbSlice().ResetEvents();
         facade::ResetStats();
@@ -2487,15 +2487,17 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   }
 
   if (should_enter("REPLICATION")) {
+    bool is_master = true;
     // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
     // ensuring eventual consistency of is_master. When determining if the server is a replica and
     // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
     // insufficient in this scenario.
-    // Please note that we we donot use Metrics object here.
-    unique_lock lk(replicaof_mu_);
-    bool is_master = !replica_;
+    // Please note that we we do not use Metrics object here.
+    {
+      fb2::LockGuard lk(replicaof_mu_);
+      is_master = !replica_;
+    }
     if (is_master) {
-      lk.unlock();
       vector<ReplicaRoleInfo> replicas_info = dfly_cmd_->GetReplicasRoleInfo();
       append("role", "master");
       append("connected_slaves", replicas_info.size());
@@ -2524,6 +2526,8 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
       };
+      fb2::LockGuard lk(replicaof_mu_);
+
       replication_info_cb(replica_->GetSummary());
 
       // Special case, when multiple masters replicate to a single replica.
