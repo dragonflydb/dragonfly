@@ -1358,6 +1358,10 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   // TODO: we should probably discard more commands here,
   // not just the blocking ones
   const auto* conn = cntx->conn();
+  if (cntx->conn_state.squashing_info) {
+    conn = cntx->conn_state.squashing_info->owner->conn();
+  }
+
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr &&
       // Use SafeTLocal() to avoid accessing the wrong thread local instance
       ServerState::SafeTLocal()->ShouldLogSlowCmd(invoke_time_usec)) {
