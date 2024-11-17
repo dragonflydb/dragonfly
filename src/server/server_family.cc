@@ -2196,7 +2196,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   result.peak_stats = peak_stats_;
 
-  uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+  uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
     uint64_t cb_dur = (after_cb - start) / 1000'000;
     LOG(INFO) << "GetMetrics took " << delta_ms << " ms, out of which callback took " << cb_dur
