@@ -32,27 +32,6 @@ def test_script_exists_redis7(r: redis.Redis):
     assert r.script_exists("a", sha1_one, "c", sha1_two, "e", "f") == [0, 1, 0, 1, 0, 0]
 
 
-@pytest.mark.max_server("6.2.7")
-def test_script_exists_redis6(r: redis.Redis):
-    # test response for no arguments by bypassing the py-redis command
-    # as it requires at least one argument
-    assert raw_command(r, "SCRIPT EXISTS") == []
-
-    # use single character characters for non-existing scripts, as those
-    # will never be equal to an actual sha1 hash digest
-    assert r.script_exists("a") == [0]
-    assert r.script_exists("a", "b", "c", "d", "e", "f") == [0, 0, 0, 0, 0, 0]
-
-    sha1_one = r.script_load("return 'a'")
-    assert r.script_exists(sha1_one) == [1]
-    assert r.script_exists(sha1_one, "a") == [1, 0]
-    assert r.script_exists("a", "b", "c", sha1_one, "e") == [0, 0, 0, 1, 0]
-
-    sha1_two = r.script_load("return 'b'")
-    assert r.script_exists(sha1_one, sha1_two) == [1, 1]
-    assert r.script_exists("a", sha1_one, "c", sha1_two, "e", "f") == [0, 1, 0, 1, 0, 0]
-
-
 @pytest.mark.parametrize("args", [("a",), tuple("abcdefghijklmn")])
 @pytest.mark.unsupported_server_types("dragonfly")
 def test_script_flush_errors_with_args(r, args):
@@ -336,16 +315,6 @@ def test_eval_convert_bool(r: redis.Redis):
     val = r.eval("return true", 0)
     assert val == 1
     assert not isinstance(val, bool)
-
-
-@pytest.mark.max_server("6.2.7")
-def test_eval_call_bool6(r: redis.Redis):
-    # Redis doesn't allow Lua bools to be passed to [p]call
-    with pytest.raises(
-        redis.ResponseError,
-        match=r"Lua redis\(\) command arguments must be strings or integers",
-    ):
-        r.eval('return redis.call("SET", KEYS[1], true)', 1, "testkey")
 
 
 @pytest.mark.min_server("7")
