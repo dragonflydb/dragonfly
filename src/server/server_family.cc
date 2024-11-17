@@ -1379,15 +1379,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     if (added)
       absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
-  if (!m.master_side_replicas_info.empty()) {
-    ReplicationMemoryStats repl_mem;
-    dfly_cmd->GetReplicationMemoryStats(&repl_mem);
-    AppendMetricWithoutLabels(
-        "replication_streaming_bytes", "Stable sync replication memory  usage",
-        repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
-    AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
-                              repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
-  }
 
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
@@ -1460,23 +1451,31 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
     absl::StrAppend(&resp->body(), command_metrics);
   }
 
-  if (!m.master_side_replicas_info.empty()) {
+  if (m.replica_side_info) {  // slave side
+    auto& replica_info = *m.replica_side_info;
+    AppendMetricWithoutLabels("replica_reconnect_count", "Number of replica reconnects",
+                              replica_info.reconnect_count, MetricType::COUNTER, &resp->body());
+  } else {  // Master side
     string replication_lag_metrics;
+    vector<ReplicaRoleInfo> replicas_info = dfly_cmd->GetReplicasRoleInfo();
+
+    ReplicationMemoryStats repl_mem;
+    dfly_cmd->GetReplicationMemoryStats(&repl_mem);
+    AppendMetricWithoutLabels(
+        "replication_streaming_bytes", "Stable sync replication memory  usage",
+        repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
+                              repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
+
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
-    for (const auto& replica : m.master_side_replicas_info) {
+    for (const auto& replica : replicas_info) {
       AppendMetricValue("connected_replica_lag_records", replica.lsn_lag,
                         {"replica_ip", "replica_port", "replica_state"},
                         {replica.address, absl::StrCat(replica.listening_port), replica.state},
                         &replication_lag_metrics);
     }
     absl::StrAppend(&resp->body(), replication_lag_metrics);
-  }
-
-  if (m.replica_side_info) {
-    auto& replica_info = *m.replica_side_info;
-    AppendMetricWithoutLabels("replica_reconnect_count", "Number of replica reconnects",
-                              replica_info.reconnect_count, MetricType::COUNTER, &resp->body());
   }
 
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
@@ -2171,9 +2170,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   result.delete_ttl_per_sec /= 6;
 
   bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
-  if (is_master) {
-    result.master_side_replicas_info = dfly_cmd_->GetReplicasRoleInfo();
-  } else {
+
+  if (!is_master) {
     auto info = GetReplicaSummary();
     if (info) {
       result.replica_side_info = {
@@ -2198,7 +2196,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
   if (delta_ms > 30) {
-    uint64_t cb_dur = (after_cb - start) / 1000'000;
+    uint64_t cb_dur = (after_cb - start) / 1'000'000;
     LOG(INFO) << "GetMetrics took " << delta_ms << " ms, out of which callback took " << cb_dur
               << " ms";
   }
@@ -2251,7 +2249,8 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   }
 
   Metrics m;
-  if (section != "SERVER") {
+  // Save time by not calculating metrics if we don't need them.
+  if (!(section == "SERVER" || section == "REPLICATION")) {
     m = GetMetrics(cntx->ns);
   }
 
@@ -2326,7 +2325,7 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
       append("maxmemory_policy", "noeviction");
     }
 
-    if (!m.master_side_replicas_info.empty()) {
+    if (!m.replica_side_info) {  // master
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes);
@@ -2492,15 +2491,17 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     // ensuring eventual consistency of is_master. When determining if the server is a replica and
     // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
     // insufficient in this scenario.
-    util::fb2::LockGuard lk(replicaof_mu_);
-    bool is_master = bool(!replica_);
+    // Please note that we we donot use Metrics object here.
+    unique_lock lk(replicaof_mu_);
+    bool is_master = !replica_;
     if (is_master) {
-      const auto& replicas = m.master_side_replicas_info;
+      lk.unlock();
+      vector<ReplicaRoleInfo> replicas_info = dfly_cmd_->GetReplicasRoleInfo();
       append("role", "master");
-      append("connected_slaves", replicas.size());
+      append("connected_slaves", replicas_info.size());
 
-      for (size_t i = 0; i < replicas.size(); i++) {
-        auto& r = replicas[i];
+      for (size_t i = 0; i < replicas_info.size(); i++) {
+        auto& r = replicas_info[i];
         // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
         append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port,
                                           ",state=", r.state, ",lag=", r.lsn_lag));
