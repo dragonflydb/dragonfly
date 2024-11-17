@@ -105,7 +105,6 @@ struct ConnectionStats {
   uint64_t conn_received_cnt = 0;
 
   uint32_t num_conns = 0;
-  uint32_t num_replicas = 0;
   uint32_t num_blocked_clients = 0;
   uint64_t num_migrations = 0;
 

@@ -630,9 +630,6 @@ void Connection::OnPostMigrateThread() {
   stats_ = &tl_facade_stats->conn_stats;
   ++stats_->num_conns;
   stats_->read_buf_capacity += io_buf_.Capacity();
-  if (cc_->replica_conn) {
-    ++stats_->num_replicas;
-  }
 }
 
 void Connection::OnConnectionStart() {
@@ -1840,10 +1837,6 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
 void Connection::DecreaseStatsOnClose() {
   stats_->read_buf_capacity -= io_buf_.Capacity();
 
-  // Update num_replicas if this was a replica connection.
-  if (cc_->replica_conn) {
-    --stats_->num_replicas;
-  }
   --stats_->num_conns;
 }
 
