@@ -720,8 +720,8 @@ void HGetGeneric(CmdArgList args, uint8_t getall_mask, Transaction* tx, SinkRepl
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (result) {
     bool is_map = (getall_mask == (VALUES | FIELDS));
-    rb->SendStringArr(absl::Span<const string>{*result},
-                      is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
+    rb->SendBulkStrArr(absl::Span<const string>{*result},
+                       is_map ? RedisReplyBuilder::MAP : RedisReplyBuilder::ARRAY);
   } else {
     builder->SendError(result.status());
   }
@@ -1220,7 +1220,7 @@ void HSetFamily::HRandField(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     if ((result->size() == 1) && (args.size() == 1))
       rb->SendBulkString(result->front());
     else
-      rb->SendStringArr(*result, facade::RedisReplyBuilder::ARRAY);
+      rb->SendBulkStrArr(*result, facade::RedisReplyBuilder::ARRAY);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1)
       rb->SendNull();

@@ -46,6 +46,8 @@ class RdbSnapshot {
   void StartInShard(EngineShard* shard);
 
   error_code SaveBody();
+  error_code WaitSnapshotInShard(EngineShard* shard);
+  void FillFreqMap();
   error_code Close();
   size_t GetSaveBuffersSize();
 
@@ -101,6 +103,8 @@ struct SaveStagesController : public SaveStagesInputs {
 
   // Start saving a dfs file on shard
   void SaveDfsSingle(EngineShard* shard);
+  void SaveSnashot(EngineShard* shard);
+  void WaitSnapshotInShard(EngineShard* shard);
 
   // Save a single rdb file
   void SaveRdb();
@@ -115,7 +119,7 @@ struct SaveStagesController : public SaveStagesInputs {
   // Build full path: get dir, try creating dirs, get filename with placeholder
   GenericError BuildFullPath();
 
-  void SaveCb(unsigned index);
+  void SaveBody(unsigned index);
 
   void CloseCb(unsigned index);
 
@@ -124,7 +128,6 @@ struct SaveStagesController : public SaveStagesInputs {
  private:
   time_t start_time_;
   std::filesystem::path full_path_;
-  bool is_cloud_;
 
   AggregateGenericError shared_err_;
   std::vector<std::pair<std::unique_ptr<RdbSnapshot>, std::filesystem::path>> snapshots_;

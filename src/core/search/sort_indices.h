@@ -24,11 +24,11 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
   SortableValue Lookup(DocId doc) const override;
   std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
 
-  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
-  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
  protected:
-  virtual T Get(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
+  virtual std::optional<T> Get(const DocumentAccessor& doc, std::string_view field_value) = 0;
 
   PMR_NS::memory_resource* GetMemRes() const;
 
@@ -39,14 +39,14 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
 struct NumericSortIndex : public SimpleValueSortIndex<double> {
   NumericSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
 
-  double Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  std::optional<double> Get(const DocumentAccessor& doc, std::string_view field) override;
 };
 
 // TODO: Map tags to integers for fast sort
 struct StringSortIndex : public SimpleValueSortIndex<PMR_NS::string> {
   StringSortIndex(PMR_NS::memory_resource* mr) : SimpleValueSortIndex{mr} {};
 
-  PMR_NS::string Get(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  std::optional<PMR_NS::string> Get(const DocumentAccessor& doc, std::string_view field) override;
 };
 
 }  // namespace dfly::search

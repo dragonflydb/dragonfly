@@ -61,7 +61,6 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(
             8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, False, marks=M_STRESS
         ),
-        pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, True, marks=M_STRESS),
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
@@ -2677,9 +2676,12 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     await assert_replica_reconnections(replica, 0)
 
 
-@pytest.mark.slow
+@pytest.mark.parametrize(
+    "element_size, elements_number",
+    [(16, 20000), (20000, 16)],
+)
 @pytest.mark.asyncio
-async def test_big_containers(df_factory):
+async def test_big_containers(df_factory, element_size, elements_number):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
 
@@ -2689,11 +2691,11 @@ async def test_big_containers(df_factory):
 
     logging.debug("Fill master with test data")
     seeder = StaticSeeder(
-        key_target=20,
-        data_size=4000000,
-        collection_size=1000,
-        variance=100,
-        samples=1,
+        key_target=10,
+        data_size=element_size * elements_number,
+        collection_size=elements_number,
+        variance=1,
+        samples=5,
         types=["LIST", "SET", "ZSET", "HASH"],
     )
     await seeder.run(c_master)

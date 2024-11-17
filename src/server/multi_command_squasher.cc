@@ -121,7 +121,7 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   if (verify_commands_) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
-      std::ignore = rb->ConsumeLastError();
+      rb->ConsumeLastError();
       return !error_abort_;
     }
   }
@@ -143,7 +143,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
 
   auto* local_tx = sinfo.local_tx.get();
   facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{cntx_, local_tx, &crb};
+  ConnectionContext local_cntx{cntx_, local_tx};
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
   }
@@ -177,10 +177,6 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     DCHECK_EQ(local_state.db_index, cntx_->conn_state.db_index);
     CheckConnStateClean(local_state);
   }
-
-  // ConnectionContext deletes the reply builder upon destruction, so
-  // remove our local pointer from it.
-  local_cntx.Inject(nullptr);
 
   reverse(sinfo.replies.begin(), sinfo.replies.end());
   return OpStatus::OK;
@@ -258,7 +254,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   return !aborted;
 }
 
-void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
+size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
   DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
@@ -295,6 +291,7 @@ void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
 
   VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
           << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
+  return num_squashed_;
 }
 
 bool MultiCommandSquasher::IsAtomic() const {

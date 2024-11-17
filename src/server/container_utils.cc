@@ -5,6 +5,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -152,24 +153,41 @@ quicklistEntry QLEntry() {
 }
 
 bool IterateList(const PrimeValue& pv, const IterateFunc& func, long start, long end) {
-  quicklist* ql = static_cast<quicklist*>(pv.RObjPtr());
-  long llen = quicklistCount(ql);
-  if (end < 0 || end >= llen)
-    end = llen - 1;
-
-  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, AL_START_HEAD, start);
-  quicklistEntry entry = QLEntry();
-  long lrange = end - start + 1;
-
   bool success = true;
-  while (success && quicklistNext(qiter, &entry) && lrange-- > 0) {
-    if (entry.value) {
-      success = func(ContainerEntry{reinterpret_cast<char*>(entry.value), entry.sz});
-    } else {
-      success = func(ContainerEntry{entry.longval});
+
+  if (pv.Encoding() == OBJ_ENCODING_QUICKLIST) {
+    quicklist* ql = static_cast<quicklist*>(pv.RObjPtr());
+    long llen = quicklistCount(ql);
+    if (end < 0 || end >= llen)
+      end = llen - 1;
+
+    quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, AL_START_HEAD, start);
+    quicklistEntry entry = QLEntry();
+    long lrange = end - start + 1;
+
+    while (success && quicklistNext(qiter, &entry) && lrange-- > 0) {
+      if (entry.value) {
+        success = func(ContainerEntry{reinterpret_cast<char*>(entry.value), entry.sz});
+      } else {
+        success = func(ContainerEntry{entry.longval});
+      }
     }
+    quicklistReleaseIterator(qiter);
+    return success;
   }
-  quicklistReleaseIterator(qiter);
+  DCHECK_EQ(pv.Encoding(), kEncodingQL2);
+  QList* ql = static_cast<QList*>(pv.RObjPtr());
+
+  ql->Iterate(
+      [&](const QList::Entry& entry) {
+        if (entry.is_int()) {
+          success = func(ContainerEntry{entry.ival()});
+        } else {
+          success = func(ContainerEntry{entry.view().data(), entry.view().size()});
+        }
+        return success;
+      },
+      start, end);
   return success;
 }
 

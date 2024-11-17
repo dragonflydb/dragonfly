@@ -379,7 +379,7 @@ TEST_F(DflyEngineTest, MemcacheFlags) {
   ASSERT_EQ(Run("resp", {"flushdb"}), "OK");
   pp_->AwaitFiberOnAll([](auto*) {
     if (auto* shard = EngineShard::tlocal(); shard) {
-      EXPECT_EQ(namespaces.GetDefaultNamespace()
+      EXPECT_EQ(namespaces->GetDefaultNamespace()
                     .GetDbSlice(shard->shard_id())
                     .GetDBTable(0)
                     ->mcflag.size(),
@@ -600,7 +600,7 @@ TEST_F(DflyEngineTest, Bug468) {
 
 TEST_F(DflyEngineTest, Bug496) {
   shard_set->RunBlockingInParallel([](EngineShard* shard) {
-    auto& db = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
     int cb_hits = 0;
     uint32_t cb_id =

@@ -96,7 +96,7 @@ jobs:
 
       - name: Publish Test Report
         if: ${{ github.event_name == 'pull_request' }}
-        uses: mikepenz/action-junit-report@v4
+        uses: mikepenz/action-junit-report@v5
         with:
           report_paths: tests/fakeredis/results-tests.xml
           # Do not create a check run

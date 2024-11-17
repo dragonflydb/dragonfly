@@ -47,6 +47,9 @@ using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 class CommandId;
 class Transaction;
 class EngineShard;
+struct ConnectionState;
+class Interpreter;
+class Namespaces;
 
 struct LockTagOptions {
   bool enabled = false;
@@ -129,6 +132,8 @@ extern std::atomic_uint64_t rss_mem_current;
 extern std::atomic_uint64_t rss_mem_peak;
 
 extern size_t max_memory_limit;
+
+extern Namespaces* namespaces;
 
 // version 5.11 maps to 511 etc.
 // set upon server start.
@@ -351,6 +356,29 @@ template <typename Mutex> class ABSL_SCOPED_LOCKABLE SharedLock {
  private:
   Mutex& m_;
   bool is_locked_;
+};
+
+// Ensures availability of an interpreter for EVAL-like commands and it's automatic release.
+// If it's part of MULTI, the preborrowed interpreter is returned, otherwise a new is acquired.
+struct BorrowedInterpreter {
+  BorrowedInterpreter(Transaction* tx, ConnectionState* state);
+
+  ~BorrowedInterpreter();
+
+  // Give up ownership of the interpreter, it must be returned manually.
+  Interpreter* Release() && {
+    DCHECK(owned_);
+    owned_ = false;
+    return interpreter_;
+  }
+
+  operator Interpreter*() {
+    return interpreter_;
+  }
+
+ private:
+  Interpreter* interpreter_ = nullptr;
+  bool owned_ = false;
 };
 
 extern size_t serialization_max_chunk_size;

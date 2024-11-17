@@ -148,7 +148,7 @@ detail::SdsScorePair ScoreMap::iterator::BreakToPair(void* obj) {
 
 namespace {
 // Does not Release obj. Callers must do so explicitly if a `Reallocation` happened
-pair<sds, bool> ReallocIfNeededGeneric(void* obj, float ratio) {
+pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio) {
   sds key = (sds)obj;
   size_t key_len = sdslen(key);
 
@@ -164,23 +164,21 @@ pair<sds, bool> ReallocIfNeededGeneric(void* obj, float ratio) {
 }  // namespace
 
 bool ScoreMap::iterator::ReallocIfNeeded(float ratio, std::function<void(sds, sds)> cb) {
-  // Unwrap all links to correctly call SetObject()
-  auto* ptr = curr_entry_;
-
-  if (ptr->IsLink()) {
-    ptr = ptr->AsLink();
-  }
-
-  // Note: we do not iterate over the links. Although we could that...
-  auto* obj = ptr->GetObject();
-  auto [new_obj, reallocated] = ReallocIfNeededGeneric(obj, ratio);
-  if (reallocated) {
-    if (cb) {
-      cb((sds)obj, (sds)new_obj);
+  bool reallocated = false;
+  auto body = [ratio, &cb, &reallocated](auto* ptr) {
+    auto* obj = ptr->GetObject();
+    auto [new_obj, duplicate] = DuplicateEntryIfFragmented(obj, ratio);
+    if (duplicate) {
+      if (cb) {
+        cb((sds)obj, (sds)new_obj);
+      }
+      sdsfree((sds)obj);
+      ptr->SetObject(new_obj);
     }
-    sdsfree((sds)obj);
-    ptr->SetObject(new_obj);
-  }
+    reallocated |= duplicate;
+  };
+
+  TraverseApply(curr_entry_, body);
 
   return reallocated;
 }

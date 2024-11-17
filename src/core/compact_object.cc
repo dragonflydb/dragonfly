@@ -27,11 +27,10 @@ extern "C" {
 #include "base/pod_array.h"
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
+#include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
-
-ABSL_RETIRED_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
 
 ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 
@@ -64,6 +63,19 @@ inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
       break;
     default:
       LOG(FATAL) << "Unknown set encoding type";
+  }
+}
+
+void FreeList(unsigned encoding, void* ptr, MemoryResource* mr) {
+  switch (encoding) {
+    case OBJ_ENCODING_QUICKLIST:
+      quicklistRelease((quicklist*)ptr);
+      break;
+    case kEncodingQL2:
+      CompactObj::DeleteMR<QList>(ptr);
+      break;
+    default:
+      LOG(FATAL) << "Unknown list encoding type";
   }
 }
 
@@ -288,8 +300,9 @@ size_t RobjWrapper::MallocUsed() const {
       CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return InnerObjMallocUsed();
     case OBJ_LIST:
-      DCHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
-      return QlMAllocSize((quicklist*)inner_obj_);
+      if (encoding_ == OBJ_ENCODING_QUICKLIST)
+        return QlMAllocSize((quicklist*)inner_obj_);
+      return ((QList*)inner_obj_)->MallocUsed();
     case OBJ_SET:
       return MallocUsedSet(encoding_, inner_obj_);
     case OBJ_HASH:
@@ -312,7 +325,9 @@ size_t RobjWrapper::Size() const {
       DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return sz_;
     case OBJ_LIST:
-      return quicklistCount((quicklist*)inner_obj_);
+      if (encoding_ == OBJ_ENCODING_QUICKLIST)
+        return quicklistCount((quicklist*)inner_obj_);
+      return ((QList*)inner_obj_)->Size();
     case OBJ_ZSET: {
       switch (encoding_) {
         case OBJ_ENCODING_SKIPLIST: {
@@ -367,8 +382,7 @@ void RobjWrapper::Free(MemoryResource* mr) {
       mr->deallocate(inner_obj_, 0, 8);  // we do not keep the allocated size.
       break;
     case OBJ_LIST:
-      CHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
-      quicklistRelease((quicklist*)inner_obj_);
+      FreeList(encoding_, inner_obj_, mr);
       break;
     case OBJ_SET:
       FreeObjSet(encoding_, inner_obj_, mr);

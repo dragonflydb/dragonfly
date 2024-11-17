@@ -28,8 +28,8 @@ namespace dfly::search {
 struct NumericIndex : public BaseIndex {
   explicit NumericIndex(PMR_NS::memory_resource* mr);
 
-  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
-  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
   std::vector<DocId> Range(double l, double r) const;
 
@@ -44,8 +44,8 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
 
   BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive);
 
-  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
-  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
   // Used by Add & Remove to tokenize text value
   virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
@@ -53,7 +53,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // Pointer is valid as long as index is not mutated. Nullptr if not found
   const Container* Matching(std::string_view str) const;
 
-  // Iterate over all Machting on prefix.
+  // Iterate over all Matching on prefix.
   void MatchingPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
 
   // Returns all the terms that appear as keys in the reverse index.
@@ -97,8 +97,13 @@ struct TagIndex : public BaseStringIndex<SortedVector> {
 struct BaseVectorIndex : public BaseIndex {
   std::pair<size_t /*dim*/, VectorSimilarity> Info() const;
 
+  bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override final;
+
  protected:
   BaseVectorIndex(size_t dim, VectorSimilarity sim);
+
+  using VectorPtr = decltype(std::declval<OwnedFtVector>().first);
+  virtual void AddVector(DocId id, const VectorPtr& vector) = 0;
 
   size_t dim_;
   VectorSimilarity sim_;
@@ -109,10 +114,12 @@ struct BaseVectorIndex : public BaseIndex {
 struct FlatVectorIndex : public BaseVectorIndex {
   FlatVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
 
-  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
-  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
   const float* Get(DocId doc) const;
+
+ protected:
+  void AddVector(DocId id, const VectorPtr& vector) override;
 
  private:
   PMR_NS::vector<float> entries_;
@@ -124,12 +131,14 @@ struct HnswVectorIndex : public BaseVectorIndex {
   HnswVectorIndex(const SchemaField::VectorParams& params, PMR_NS::memory_resource* mr);
   ~HnswVectorIndex();
 
-  void Add(DocId id, DocumentAccessor* doc, std::string_view field) override;
-  void Remove(DocId id, DocumentAccessor* doc, std::string_view field) override;
+  void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
   std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef) const;
   std::vector<std::pair<float, DocId>> Knn(float* target, size_t k, std::optional<size_t> ef,
                                            const std::vector<DocId>& allowed) const;
+
+ protected:
+  void AddVector(DocId id, const VectorPtr& vector) override;
 
  private:
   std::unique_ptr<HnswlibAdapter> adapter_;

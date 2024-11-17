@@ -101,7 +101,7 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
       server_family_(sf),
       cf_(cf),
       tx_(new Transaction{sf->service().FindCmd("DFLYCLUSTER")}) {
-  tx_->InitByArgs(&namespaces.GetDefaultNamespace(), 0, {});
+  tx_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
 }
 
 OutgoingMigration::~OutgoingMigration() {
@@ -218,7 +218,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     OnAllShards([this](auto& migration) {
-      DbSlice& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+      DbSlice& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
       server_family_->journal()->StartInThread();
       migration = std::make_unique<SliceSlotMigration>(
           &db_slice, server(), migration_info_.slot_ranges, server_family_->journal());
@@ -291,8 +291,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt =
-      Pause(server_family_->GetNonPriviligedListeners(), &namespaces.GetDefaultNamespace(), nullptr,
-            ClientPause::WRITE, is_pause_in_progress);
+      Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
+            nullptr, ClientPause::WRITE, is_pause_in_progress);
 
   if (!pause_fb_opt) {
     LOG(WARNING) << "Cluster migration finalization time out";

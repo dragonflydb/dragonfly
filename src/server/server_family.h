@@ -89,7 +89,6 @@ struct Metrics {
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;
 
-  size_t uptime = 0;
   size_t qps = 0;
 
   size_t heap_used_bytes = 0;
@@ -118,9 +117,6 @@ struct Metrics {
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
 
   absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
-
-  // Replica info on the master side.
-  std::vector<ReplicaRoleInfo> master_side_replicas_info;
 
   struct ReplicaInfo {
     uint32_t reconnect_count;
@@ -172,8 +168,7 @@ class ServerFamily {
   void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Public because is used by DflyCmd.
-  void ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
+  void ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
 
   Service& service() {
     return service_;
@@ -208,7 +203,7 @@ class ServerFamily {
 
   LastSaveInfo GetLastSaveInfo() const ABSL_LOCKS_EXCLUDED(save_mu_);
 
-  void FlushAll(ConnectionContext* cntx);
+  void FlushAll(Namespace* ns);
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
@@ -246,9 +241,8 @@ class ServerFamily {
   std::optional<Replica::Summary> GetReplicaSummary() const;
 
   // Master-side acces method to replication info of that connection.
-  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfoFromConnection(
-      ConnectionContext* cntx) const {
-    return dfly_cmd_->GetReplicaInfoFromConnection(cntx);
+  std::shared_ptr<DflyCmd::ReplicaInfo> GetReplicaInfoFromConnection(ConnectionState* state) const {
+    return dfly_cmd_->GetReplicaInfoFromConnection(state);
   }
 
   void OnClose(ConnectionContext* cntx);

@@ -83,7 +83,7 @@ class RedisReplyBuilderTest : public testing::Test {
 
   void SetUp() {
     sink_.Clear();
-    builder_.reset(new RedisReplyBuilder2(&sink_));
+    builder_.reset(new RedisReplyBuilder(&sink_));
     ResetStats();
   }
 
@@ -112,7 +112,7 @@ class RedisReplyBuilderTest : public testing::Test {
   }
 
   unsigned GetError(string_view err) const {
-    const auto& map = SinkReplyBuilder2::GetThreadLocalStats().err_count;
+    const auto& map = SinkReplyBuilder::GetThreadLocalStats().err_count;
     auto it = map.find(err);
     return it == map.end() ? 0 : it->second;
   }
@@ -135,7 +135,7 @@ class RedisReplyBuilderTest : public testing::Test {
   ParsingResults Parse();
 
   io::StringSink sink_;
-  std::unique_ptr<RedisReplyBuilder2> builder_;
+  std::unique_ptr<RedisReplyBuilder> builder_;
   std::unique_ptr<std::uint8_t[]> parser_buffer_;
 };
 
@@ -205,7 +205,7 @@ RedisReplyBuilderTest::ParsingResults RedisReplyBuilderTest::Parse() {
 
 TEST_F(RedisReplyBuilderTest, MessageSend) {
   // Test each message that is "sent" to the sink
-  builder_->SinkReplyBuilder2::SendOk();
+  builder_->SinkReplyBuilder::SendOk();
   ASSERT_EQ(TakePayload(), kOKMessage);
   builder_->StartArray(10);
 
@@ -783,7 +783,7 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
   string_view kTestSws[] = {"a1"sv, "a2"sv, "a3"sv, "a4"sv};
 
   CapturingReplyBuilder crb{};
-  using RRB = RedisReplyBuilder2;
+  using RRB = RedisReplyBuilder;
 
   auto big_arr_cb = [](RRB* r) {
     r->StartArray(4);
@@ -870,12 +870,12 @@ TEST_F(RedisReplyBuilderTest, VerbatimString) {
   std::string str = "A simple string!";
 
   builder_->SetResp3(true);
-  builder_->SendVerbatimString(str, RedisReplyBuilder2::VerbatimFormat::TXT);
+  builder_->SendVerbatimString(str, RedisReplyBuilder::VerbatimFormat::TXT);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "=20\r\ntxt:A simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
 
   builder_->SetResp3(true);
-  builder_->SendVerbatimString(str, RedisReplyBuilder2::VerbatimFormat::MARKDOWN);
+  builder_->SendVerbatimString(str, RedisReplyBuilder::VerbatimFormat::MARKDOWN);
   ASSERT_TRUE(NoErrors());
   ASSERT_EQ(TakePayload(), "=20\r\nmkd:A simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
 

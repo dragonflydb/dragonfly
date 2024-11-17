@@ -68,11 +68,18 @@ using SortableValue = std::variant<std::monostate, double, std::string>;
 struct DocumentAccessor {
   using VectorInfo = search::OwnedFtVector;
   using StringList = absl::InlinedVector<std::string_view, 1>;
+  using NumsList = absl::InlinedVector<double, 1>;
 
   virtual ~DocumentAccessor() = default;
 
-  virtual StringList GetStrings(std::string_view active_field) const = 0;
-  virtual VectorInfo GetVector(std::string_view active_field) const = 0;
+  /* Returns nullopt if the specified field is not a list of strings */
+  virtual std::optional<StringList> GetStrings(std::string_view active_field) const = 0;
+
+  /* Returns nullopt if the specified field is not a vector */
+  virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const = 0;
+
+  /* Return nullopt if the specified field is not a list of doubles */
+  virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const = 0;
 };
 
 // Base class for type-specific indices.
@@ -81,8 +88,10 @@ struct DocumentAccessor {
 // query functions. All results for all index types should be sorted.
 struct BaseIndex {
   virtual ~BaseIndex() = default;
-  virtual void Add(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
-  virtual void Remove(DocId id, DocumentAccessor* doc, std::string_view field) = 0;
+
+  // Returns true if the document was added / indexed
+  virtual bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
+  virtual void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) = 0;
 };
 
 // Base class for type-specific sorting indices.
@@ -90,5 +99,21 @@ struct BaseSortIndex : BaseIndex {
   virtual SortableValue Lookup(DocId doc) const = 0;
   virtual std::vector<ResultScore> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const = 0;
 };
+
+/* Used for converting field values to double. Returns std::nullopt if the conversion fails */
+std::optional<double> ParseNumericField(std::string_view value);
+
+/* Temporary method to create an empty std::optional<InlinedVector> in DocumentAccessor::GetString
+   and DocumentAccessor::GetNumbers methods. The problem is that due to internal implementation
+   details of absl::InlineVector, we are getting a -Wmaybe-uninitialized compiler warning. To
+   suppress this false warning, we temporarily disable it around this block of code using GCC
+   diagnostic directives. */
+template <typename InlinedVector> std::optional<InlinedVector> EmptyAccessResult() {
+  // GCC 13.1 throws spurious warnings around this code.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+  return InlinedVector{};
+#pragma GCC diagnostic pop
+}
 
 }  // namespace dfly::search

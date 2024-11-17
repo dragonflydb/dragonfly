@@ -148,7 +148,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
 
   absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
-  ConnectionContext local_cntx{cntx, stub_tx.get(), &crb};
+  ConnectionContext local_cntx{cntx, stub_tx.get()};
 
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
@@ -175,7 +175,6 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
     sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
   }
 
-  local_cntx.Inject(nullptr);
   local_tx->UnlockMulti();
 }
 
@@ -511,7 +510,7 @@ void DebugCmd::Reload(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   string last_save_file = sf_.GetLastSaveInfo().file_name;
 
-  sf_.FlushAll(cntx_);
+  sf_.FlushAll(cntx_->ns);
 
   if (auto fut_ec = sf_.Load(last_save_file, ServerFamily::LoadExistingKeys::kFail); fut_ec) {
     GenericError ec = fut_ec->Get();
@@ -843,9 +842,9 @@ void DebugCmd::Watched(facade::SinkReplyBuilder* builder) {
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
-  rb->SendStringArr(awaked_trans);
+  rb->SendBulkStrArr(awaked_trans);
   rb->SendBulkString("watched");
-  rb->SendStringArr(watched_keys);
+  rb->SendBulkStrArr(watched_keys);
 }
 
 void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {

@@ -54,7 +54,24 @@ class SnapshotStorage {
   // Searches for all the relevant snapshot files given the RDB file or DFS summary file path.
   io::Result<std::vector<std::string>, GenericError> ExpandSnapshot(const std::string& load_path);
 
+  virtual bool IsCloud() const {
+    return false;
+  }
+
  protected:
+  struct SnapStat {
+    SnapStat(std::string file_name, int64_t ts)
+        : name(std::move(file_name)), last_modified(std::move(ts)) {
+    }
+    std::string name;
+    int64_t last_modified;
+  };
+
+  // Returns empty string if nothing is matched. vector is passed by value on purpose, as it is
+  // been sorted inside.
+  static std::string FindMatchingFile(std::string_view prefix, std::string_view dbfilename,
+                                      std::vector<SnapStat> keys);
+
   virtual io::Result<std::vector<std::string>, GenericError> ExpandFromPath(
       const std::string& path) = 0;
 
@@ -94,6 +111,10 @@ class GcsSnapshotStorage : public SnapshotStorage {
   io::Result<std::string, GenericError> LoadPath(std::string_view dir,
                                                  std::string_view dbfilename) override;
 
+  bool IsCloud() const final {
+    return true;
+  }
+
  private:
   io::Result<std::vector<std::string>, GenericError> ExpandFromPath(const std::string& path) final;
 
@@ -117,18 +138,15 @@ class AwsS3SnapshotStorage : public SnapshotStorage {
   io::Result<std::string, GenericError> LoadPath(std::string_view dir,
                                                  std::string_view dbfilename) override;
 
+  bool IsCloud() const final {
+    return true;
+  }
+
  private:
   io::Result<std::vector<std::string>, GenericError> ExpandFromPath(const std::string& path) final;
 
   std::error_code CheckPath(const std::string& path) final;
 
-  struct SnapStat {
-    SnapStat(std::string file_name, int64_t ts)
-        : name(std::move(file_name)), last_modified(std::move(ts)) {
-    }
-    std::string name;
-    int64_t last_modified;
-  };
   // List the objects in the given bucket with the given prefix. This must
   // run from a proactor.
   io::Result<std::vector<SnapStat>, GenericError> ListObjects(std::string_view bucket_name,

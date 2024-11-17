@@ -228,14 +228,22 @@ using strings::HumanReadableNumBytes;
 namespace {
 
 const auto kRedisVersion = "6.2.11";
-constexpr string_view kS3Prefix = "s3://"sv;
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, Transaction* tx,
                                           SinkReplyBuilder* builder, ConnectionContext* cntx);
 
+using EngineFunc2 = void (ServerFamily::*)(CmdArgList args, Transaction* tx,
+                                           SinkReplyBuilder* builder);
+
 inline CommandId::Handler HandlerFunc(ServerFamily* se, EngineFunc f) {
   return [=](CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
     return (se->*f)(args, tx, builder, cntx);
+  };
+}
+
+inline auto HandlerFunc(ServerFamily* se, EngineFunc2 f) {
+  return [=](CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+    return (se->*f)(args, tx, builder);
   };
 }
 
@@ -252,8 +260,12 @@ string UnknownCmd(string cmd, CmdArgList args) {
                       absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-bool IsCloudPath(string_view path) {
-  return absl::StartsWith(path, kS3Prefix);
+bool IsS3Path(string_view path) {
+  return absl::StartsWith(path, detail::kS3Prefix);
+}
+
+bool IsGCSPath(string_view path) {
+  return absl::StartsWith(path, detail::kGCSPrefix);
 }
 
 // Check that if TLS is used at least one form of client authentication is
@@ -866,7 +878,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   string flag_dir = GetFlag(FLAGS_dir);
-  if (IsCloudPath(flag_dir)) {
+  if (IsS3Path(flag_dir)) {
 #ifdef WITH_AWS
     shard_set->pool()->GetNextProactor()->Await([&] { util::aws::Init(); });
     snapshot_storage_ = std::make_shared<detail::AwsS3SnapshotStorage>(
@@ -875,6 +887,14 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
 #else
     LOG(ERROR) << "Compiled without AWS support";
 #endif
+  } else if (IsGCSPath(flag_dir)) {
+    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
+    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
+    if (ec) {
+      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
+      exit(1);
+    }
+    snapshot_storage_ = std::move(gcs);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -1035,10 +1055,10 @@ struct AggregateLoadResult {
   std::atomic<size_t> keys_read;
 };
 
-void ServerFamily::FlushAll(ConnectionContext* cntx) {
+void ServerFamily::FlushAll(Namespace* ns) {
   const CommandId* cid = service_.FindCmd("FLUSHALL");
   boost::intrusive_ptr<Transaction> flush_trans(new Transaction{cid});
-  flush_trans->InitByArgs(cntx->ns, 0, {});
+  flush_trans->InitByArgs(ns, 0, {});
   VLOG(1) << "Performing flush";
   error_code ec = Drakarys(flush_trans.get(), DbSlice::kDbAll);
   if (ec) {
@@ -1174,6 +1194,8 @@ void ServerFamily::SnapshotScheduling() {
 
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
                                          LoadExistingKeys existing_keys) {
+  VLOG(1) << "Loading data from " << rdb_file;
+
   error_code ec;
   io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
   if (res) {
@@ -1253,15 +1275,17 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse* resp) {
+void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd,
+                            StringResponse* resp) {
   // Server metrics
   AppendMetricHeader("version", "", MetricType::GAUGE, &resp->body());
   AppendMetricValue("version", 1, {"version"}, {GetVersion()}, &resp->body());
 
   bool is_master = ServerState::tlocal()->is_master;
+
   AppendMetricWithoutLabels("master", "1 if master 0 if replica", is_master ? 1 : 0,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("uptime_in_seconds", "", m.uptime, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("uptime_in_seconds", "", uptime, MetricType::COUNTER, &resp->body());
 
   // Clients metrics
   const auto& conn_stats = m.facade_stats.conn_stats;
@@ -1355,15 +1379,6 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     if (added)
       absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
-  if (!m.master_side_replicas_info.empty()) {
-    ReplicationMemoryStats repl_mem;
-    dfly_cmd->GetReplicationMemoryStats(&repl_mem);
-    AppendMetricWithoutLabels(
-        "replication_streaming_bytes", "Stable sync replication memory  usage",
-        repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
-    AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
-                              repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
-  }
 
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
@@ -1436,23 +1451,31 @@ void PrintPrometheusMetrics(const Metrics& m, DflyCmd* dfly_cmd, StringResponse*
     absl::StrAppend(&resp->body(), command_metrics);
   }
 
-  if (!m.master_side_replicas_info.empty()) {
+  if (m.replica_side_info) {  // slave side
+    auto& replica_info = *m.replica_side_info;
+    AppendMetricWithoutLabels("replica_reconnect_count", "Number of replica reconnects",
+                              replica_info.reconnect_count, MetricType::COUNTER, &resp->body());
+  } else {  // Master side
     string replication_lag_metrics;
+    vector<ReplicaRoleInfo> replicas_info = dfly_cmd->GetReplicasRoleInfo();
+
+    ReplicationMemoryStats repl_mem;
+    dfly_cmd->GetReplicationMemoryStats(&repl_mem);
+    AppendMetricWithoutLabels(
+        "replication_streaming_bytes", "Stable sync replication memory  usage",
+        repl_mem.streamer_buf_capacity_bytes, MetricType::GAUGE, &resp->body());
+    AppendMetricWithoutLabels("replication_full_sync_bytes", "Full sync memory usage",
+                              repl_mem.full_sync_buf_bytes, MetricType::GAUGE, &resp->body());
+
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
-    for (const auto& replica : m.master_side_replicas_info) {
+    for (const auto& replica : replicas_info) {
       AppendMetricValue("connected_replica_lag_records", replica.lsn_lag,
                         {"replica_ip", "replica_port", "replica_state"},
                         {replica.address, absl::StrCat(replica.listening_port), replica.state},
                         &replication_lag_metrics);
     }
     absl::StrAppend(&resp->body(), replication_lag_metrics);
-  }
-
-  if (m.replica_side_info) {
-    auto& replica_info = *m.replica_side_info;
-    AppendMetricWithoutLabels("replica_reconnect_count", "Number of replica reconnects",
-                              replica_info.reconnect_count, MetricType::COUNTER, &resp->body());
   }
 
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
@@ -1511,7 +1534,8 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
-    PrintPrometheusMetrics(this->GetMetrics(&namespaces.GetDefaultNamespace()),
+    uint64_t uptime = time(NULL) - start_time_;
+    PrintPrometheusMetrics(uptime, this->GetMetrics(&namespaces->GetDefaultNamespace()),
                            this->dfly_cmd_.get(), &resp);
 
     return send->Invoke(std::move(resp));
@@ -1585,14 +1609,17 @@ void ServerFamily::StatsMC(std::string_view section, SinkReplyBuilder* builder) 
 
   double utime = dbl_time(ru.ru_utime);
   double systime = dbl_time(ru.ru_stime);
+  auto kind = ProactorBase::me()->GetKind();
+  const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
 
-  Metrics m = GetMetrics(&namespaces.GetDefaultNamespace());
+  Metrics m = GetMetrics(&namespaces->GetDefaultNamespace());
+  uint64_t uptime = time(NULL) - start_time_;
 
   ADD_LINE(pid, getpid());
-  ADD_LINE(uptime, m.uptime);
+  ADD_LINE(uptime, uptime);
   ADD_LINE(time, now);
   ADD_LINE(version, kGitTag);
-  ADD_LINE(libevent, "iouring");
+  ADD_LINE(libevent, multiplex_api);
   ADD_LINE(pointer_size, sizeof(void*));
   ADD_LINE(rusage_user, utime);
   ADD_LINE(rusage_system, systime);
@@ -1616,7 +1643,7 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
   const CommandId* cid = service().FindCmd("SAVE");
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
-  trans->InitByArgs(&namespaces.GetDefaultNamespace(), 0, {});
+  trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
   return DoSave(absl::GetFlag(FLAGS_df_snapshot_format), {}, trans.get(), ignore_state);
 }
 
@@ -1634,6 +1661,8 @@ GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view bas
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
+
+    VLOG(1) << "Saving snapshot to " << basename;
 
     save_controller_ = make_unique<SaveStagesController>(detail::SaveStagesInputs{
         new_version, basename, trans, &service_, fq_threadpool_.get(), snapshot_storage_});
@@ -1802,7 +1831,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     cntx->acl_commands = cred.acl_commands;
     cntx->keys = std::move(cred.keys);
     cntx->pub_sub = std::move(cred.pub_sub);
-    cntx->ns = &namespaces.GetOrInsert(cred.ns);
+    cntx->ns = &namespaces->GetOrInsert(cred.ns);
     cntx->authenticated = true;
   }
   return is_authorized;
@@ -1944,7 +1973,7 @@ void ServerFamily::Config(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
       }
     }
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    return rb->SendStringArr(res, RedisReplyBuilder::MAP);
+    return rb->SendBulkStrArr(res, RedisReplyBuilder::MAP);
   }
 
   if (sub_cmd == "RESETSTAT") {
@@ -2059,7 +2088,7 @@ static void MergeDbSliceStats(const DbSlice::Stats& src, Metrics* dest) {
 
 void ServerFamily::ResetStat(Namespace* ns) {
   shard_set->pool()->AwaitBrief(
-      [registry = service_.mutable_registry(), this, ns](unsigned index, auto*) {
+      [registry = service_.mutable_registry(), ns](unsigned index, auto*) {
         registry->ResetCallStats(index);
         ns->GetCurrentDbSlice().ResetEvents();
         facade::ResetStats();
@@ -2070,6 +2099,8 @@ void ServerFamily::ResetStat(Namespace* ns) {
 Metrics ServerFamily::GetMetrics(Namespace* ns) const {
   Metrics result;
   util::fb2::Mutex mu;
+
+  uint64_t start = absl::GetCurrentTimeNanos();
 
   auto cmd_stat_cb = [&dest = result.cmd_stats_map](string_view name, const CmdCallStats& stat) {
     auto& [calls, sum] = dest[absl::AsciiStrToLower(name)];
@@ -2093,7 +2124,6 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
     result.coordinator_stats.Add(ss->stats);
 
-    result.uptime = time(NULL) - this->start_time_;
     result.qps += uint64_t(ss->MovingSum6());
     result.facade_stats += *tl_facade_stats;
     result.serialization_bytes += SliceSnapshot::GetThreadLocalMemoryUsage();
@@ -2132,15 +2162,16 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   service_.proactor_pool().AwaitFiberOnAll(std::move(cb));
 
+  uint64_t after_cb = absl::GetCurrentTimeNanos();
+
   // Normalize moving average stats
   result.qps /= 6;
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
   bool is_master = ServerState::tlocal() && ServerState::tlocal()->is_master;
-  if (is_master) {
-    result.master_side_replicas_info = dfly_cmd_->GetReplicasRoleInfo();
-  } else {
+
+  if (!is_master) {
     auto info = GetReplicaSummary();
     if (info) {
       result.replica_side_info = {
@@ -2163,6 +2194,12 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
   result.peak_stats = peak_stats_;
 
+  uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1'000'000;
+  if (delta_ms > 30) {
+    uint64_t cb_dur = (after_cb - start) / 1'000'000;
+    LOG(INFO) << "GetMetrics took " << delta_ms << " ms, out of which callback took " << cb_dur
+              << " ms";
+  }
   return result;
 }
 
@@ -2193,15 +2230,6 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
-  uint64_t start = absl::GetCurrentTimeNanos();
-  Metrics m = GetMetrics(cntx->ns);
-  uint64_t delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
-  LOG_IF(INFO, delta_ms > 100) << "GetMetrics took " << delta_ms << " ms";
-
-  DbStats total;
-  for (const auto& db_stats : m.db_stats)
-    total += db_stats;
-
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
@@ -2214,10 +2242,21 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
     append("thread_count", service_.proactor_pool().size());
-    size_t uptime = m.uptime;
+
+    uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
     append("uptime_in_days", uptime / (3600 * 24));
   }
+
+  Metrics m;
+  // Save time by not calculating metrics if we don't need them.
+  if (!(section == "SERVER" || section == "REPLICATION")) {
+    m = GetMetrics(cntx->ns);
+  }
+
+  DbStats total;
+  for (const auto& db_stats : m.db_stats)
+    total += db_stats;
 
   if (should_enter("CLIENTS")) {
     append("connected_clients", m.facade_stats.conn_stats.num_conns);
@@ -2286,7 +2325,7 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
       append("maxmemory_policy", "noeviction");
     }
 
-    if (!m.master_side_replicas_info.empty()) {
+    if (!m.replica_side_info) {  // master
       ReplicationMemoryStats repl_mem;
       dfly_cmd_->GetReplicationMemoryStats(&repl_mem);
       append("replication_streaming_buffer_bytes", repl_mem.streamer_buf_capacity_bytes);
@@ -2448,17 +2487,23 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   }
 
   if (should_enter("REPLICATION")) {
-    util::fb2::LockGuard lk(replicaof_mu_);
+    bool is_master = true;
     // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
     // ensuring eventual consistency of is_master. When determining if the server is a replica and
     // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
     // insufficient in this scenario.
-    if (!replica_) {
+    // Please note that we we do not use Metrics object here.
+    {
+      fb2::LockGuard lk(replicaof_mu_);
+      is_master = !replica_;
+    }
+    if (is_master) {
+      vector<ReplicaRoleInfo> replicas_info = dfly_cmd_->GetReplicasRoleInfo();
       append("role", "master");
-      append("connected_slaves", m.facade_stats.conn_stats.num_replicas);
-      const auto& replicas = m.master_side_replicas_info;
-      for (size_t i = 0; i < replicas.size(); i++) {
-        auto& r = replicas[i];
+      append("connected_slaves", replicas_info.size());
+
+      for (size_t i = 0; i < replicas_info.size(); i++) {
+        auto& r = replicas_info[i];
         // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
         append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port,
                                           ",state=", r.state, ",lag=", r.lsn_lag));
@@ -2481,6 +2526,8 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
         append("slave_priority", GetFlag(FLAGS_replica_priority));
         append("slave_read_only", 1);
       };
+      fb2::LockGuard lk(replicaof_mu_);
+
       replication_info_cb(replica_->GetSummary());
 
       // Special case, when multiple masters replicate to a single replica.
@@ -2865,15 +2912,12 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     std::string_view arg = ArgS(args, i + 1);
     if (cmd == "CAPA") {
       if (arg == "dragonfly" && args.size() == 2 && i == 0) {
-        auto [sid, flow_count] = dfly_cmd_->CreateSyncSession(cntx);
+        auto [sid, flow_count] = dfly_cmd_->CreateSyncSession(&cntx->conn_state);
         cntx->conn()->SetName(absl::StrCat("repl_ctrl_", sid));
 
         string sync_id = absl::StrCat("SYNC", sid);
         cntx->conn_state.replication_info.repl_session_id = sid;
 
-        if (!cntx->replica_conn) {
-          ServerState::tl_connection_stats()->num_replicas += 1;
-        }
         cntx->replica_conn = true;
 
         // The response for 'capa dragonfly' is: <masterid> <syncid> <numthreads> <version>
@@ -2900,7 +2944,7 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     } else if (cmd == "IP-ADDRESS") {
       cntx->conn_state.replication_info.repl_ip_address = arg;
     } else if (cmd == "CLIENT-ID" && args.size() == 2) {
-      auto info = dfly_cmd_->GetReplicaInfoFromConnection(cntx);
+      auto info = dfly_cmd_->GetReplicaInfoFromConnection(&cntx->conn_state);
       DCHECK(info != nullptr);
       if (info) {
         info->id = arg;
@@ -2910,7 +2954,7 @@ void ServerFamily::ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
       if (!absl::SimpleAtoi(arg, &version)) {
         return builder->SendError(kInvalidIntErr);
       }
-      dfly_cmd_->SetDflyClientVersion(cntx, DflyVersion(version));
+      dfly_cmd_->SetDflyClientVersion(&cntx->conn_state, DflyVersion(version));
     } else if (cmd == "ACK" && args.size() == 2) {
       // Don't send error/Ok back through the socket, because we don't want to interleave with
       // the journal writes that we write into the same socket.
@@ -2984,7 +3028,7 @@ void ServerFamily::Role(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 
 void ServerFamily::Script(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                           ConnectionContext* cntx) {
-  script_mgr_->Run(std::move(args), tx, builder);
+  script_mgr_->Run(std::move(args), tx, builder, cntx);
 }
 
 void ServerFamily::LastSave(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -3010,8 +3054,7 @@ void ServerFamily::Latency(CmdArgList args, Transaction* tx, SinkReplyBuilder* b
   builder->SendError(kSyntaxErr);
 }
 
-void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                               ConnectionContext* cntx) {
+void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   if (args.size() > 1) {
     builder->SendError(kSyntaxErr);
     return;
@@ -3037,7 +3080,7 @@ void ServerFamily::ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilde
 
 void ServerFamily::Dfly(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                         ConnectionContext* cntx) {
-  dfly_cmd_->Run(args, static_cast<RedisReplyBuilder*>(builder), cntx);
+  dfly_cmd_->Run(args, tx, static_cast<RedisReplyBuilder*>(builder), cntx);
 }
 
 void ServerFamily::SlowLog(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,

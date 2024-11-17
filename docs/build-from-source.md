@@ -16,7 +16,7 @@ On Debian/Ubuntu:
 
 ```bash
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev
+     autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev zlib1g-dev
 ```
 
 On Fedora:

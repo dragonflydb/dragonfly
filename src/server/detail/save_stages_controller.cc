@@ -36,7 +36,7 @@ namespace fs = std::filesystem;
 namespace {
 
 bool IsCloudPath(string_view path) {
-  return absl::StartsWith(path, kS3Prefix);
+  return absl::StartsWith(path, kS3Prefix) || absl::StartsWith(path, kGCSPrefix);
 }
 
 // Create a directory and all its parents if they don't exist.
@@ -124,12 +124,20 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 }
 
 error_code RdbSnapshot::SaveBody() {
-  return saver_->SaveBody(&cntx_, &freq_map_);
+  return saver_->SaveBody(&cntx_);
+}
+
+error_code RdbSnapshot::WaitSnapshotInShard(EngineShard* shard) {
+  return saver_->WaitSnapshotInShard(shard);
 }
 
 size_t RdbSnapshot::GetSaveBuffersSize() {
   CHECK(saver_);
   return saver_->GetTotalBuffersSize();
+}
+
+void RdbSnapshot::FillFreqMap() {
+  saver_->FillFreqMap(&freq_map_);
 }
 
 RdbSaver::SnapshotStats RdbSnapshot::GetCurrentSnapshotProgress() const {
@@ -147,7 +155,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, cntx_.GetCancellation(), shard);
+  saver_->StartSnapshotInShard(false, &cntx_, shard);
   started_shards_.fetch_add(1, memory_order_relaxed);
 }
 
@@ -176,7 +184,12 @@ std::optional<SaveInfo> SaveStagesController::InitResourcesAndStart() {
 }
 
 void SaveStagesController::WaitAllSnapshots() {
-  RunStage(&SaveStagesController::SaveCb);
+  if (use_dfs_format_) {
+    shard_set->RunBlockingInParallel([&](EngineShard* shard) { WaitSnapshotInShard(shard); });
+    SaveBody(shard_set->size());
+  } else {
+    SaveBody(0);
+  }
 }
 
 SaveInfo SaveStagesController::Finalize() {
@@ -240,7 +253,7 @@ RdbSaver::SnapshotStats SaveStagesController::GetCurrentSnapshotProgress() const
 // Summary file is always last in snapshots array.
 void SaveStagesController::SaveDfs() {
   // Extend all filenames with -{sid} or -summary and append .dfs.tmp
-  const string_view ext = is_cloud_ ? ".dfs" : ".dfs.tmp";
+  const string_view ext = snapshot_storage_->IsCloud() ? ".dfs" : ".dfs.tmp";
   ShardId sid = 0;
   for (auto& [_, filename] : snapshots_) {
     filename = full_path_;
@@ -286,7 +299,7 @@ void SaveStagesController::SaveRdb() {
   filename = full_path_;
   if (!filename.has_extension())
     filename += ".rdb";
-  if (!is_cloud_)
+  if (!snapshot_storage_->IsCloud())
     filename += ".tmp";
 
   if (auto err = snapshot->Start(SaveMode::RDB, filename, RdbSaver::GetGlobalData(service_)); err) {
@@ -342,7 +355,7 @@ void SaveStagesController::InitResources() {
 
 // Remove .tmp extension or delete files in case of error
 GenericError SaveStagesController::FinalizeFileMovement() {
-  if (is_cloud_)
+  if (snapshot_storage_->IsCloud())
     return {};
   DVLOG(1) << "FinalizeFileMovement start";
 
@@ -391,17 +404,26 @@ GenericError SaveStagesController::BuildFullPath() {
   dest_buf.resize(len);
 
   full_path_ = dir_path / dest_buf;
-  is_cloud_ = IsCloudPath(full_path_.string());
+
   return {};
 }
 
-void SaveStagesController::SaveCb(unsigned index) {
-  if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted())
+void SaveStagesController::SaveBody(unsigned index) {
+  CHECK(!use_dfs_format_ || index == shard_set->size());  // used in rdb and df summary file
+  if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted()) {
     shared_err_ = snapshot->SaveBody();
+  }
+}
+
+void SaveStagesController::WaitSnapshotInShard(EngineShard* shard) {
+  if (auto& snapshot = snapshots_[shard->shard_id()].first; snapshot && snapshot->HasStarted()) {
+    shared_err_ = snapshot->WaitSnapshotInShard(shard);
+  }
 }
 
 void SaveStagesController::CloseCb(unsigned index) {
   if (auto& snapshot = snapshots_[index].first; snapshot) {
+    snapshot->FillFreqMap();
     shared_err_ = snapshot->Close();
 
     unique_lock lk{rdb_name_map_mu_};
@@ -412,7 +434,7 @@ void SaveStagesController::CloseCb(unsigned index) {
   }
 
   if (auto* es = EngineShard::tlocal(); use_dfs_format_ && es)
-    namespaces.GetDefaultNamespace().GetDbSlice(es->shard_id()).ResetUpdateEvents();
+    namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id()).ResetUpdateEvents();
 }
 
 void SaveStagesController::RunStage(void (SaveStagesController::*cb)(unsigned)) {
