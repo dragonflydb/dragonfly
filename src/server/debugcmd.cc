@@ -561,7 +561,7 @@ void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
   string opt = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (opt == "PAUSE" || opt == "RESUME") {
-    cf_.PauseMigration(opt == "PAUSE");
+    cf_.PauseAllIncomingMigrations(opt == "PAUSE");
     return builder->SendOk();
   }
   return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));

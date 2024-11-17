@@ -44,9 +44,12 @@ class ClusterFamily {
     return id_;
   }
 
+  // Tries to break those flows for migration outgoing migrations that stuck on socket write for too
+  // long time.
   void BreakStalledFlowsInShard();
 
-  void PauseMigration(bool pause);
+  // Only for debug purpose. Pause/Resume all incoming migrations
+  void PauseAllIncomingMigrations(bool pause);
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;

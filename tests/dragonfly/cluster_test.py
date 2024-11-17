@@ -157,6 +157,14 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
             assert len(states) != 0 and all(status == state[2] for state in states), states
 
 
+async def wait_for_migration_start(admin_client, node_id):
+    while (
+        len(await admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id))
+        == 0
+    ):
+        await asyncio.sleep(0.1)
+
+
 async def check_for_no_state_status(admin_clients):
     for client in admin_clients:
         state = await client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
@@ -2293,15 +2301,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await asyncio.sleep(random.randint(0, 50) / 100)
-    while (
-        len(
-            await nodes[1].admin_client.execute_command(
-                "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[0].id
-            )
-        )
-        == 0
-    ):
-        await asyncio.sleep(0.1)
+    await wait_for_migration_start(nodes[1].admin_client, nodes[0].id)
 
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
@@ -2316,3 +2316,6 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await seeder_task
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, nodes[1].instance.port)

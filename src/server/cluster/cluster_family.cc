@@ -1010,11 +1010,11 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
 }
 
 void ClusterFamily::BreakStalledFlowsInShard() {
-  std::unique_lock global_lock(migration_mu_, try_to_lock);
+  std::unique_lock global_lock(migration_mu_, std::defer_lock);
 
   // give up on blocking because we run this function periodically in a background fiber,
   // so it will eventually grab the lock.
-  if (!global_lock.owns_lock())
+  if (!global_lock.try_lock())
     return;
 
   int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_migration_timeout)) * 1'000'000LL;
@@ -1034,7 +1034,7 @@ void ClusterFamily::BreakStalledFlowsInShard() {
   }
 }
 
-void ClusterFamily::PauseMigration(bool pause) {
+void ClusterFamily::PauseAllIncomingMigrations(bool pause) {
   util::fb2::LockGuard lk(migration_mu_);
   LOG_IF(ERROR, !incoming_migrations_jobs_.empty()) << "No incoming migrations!";
   for (auto& im : incoming_migrations_jobs_) {
