@@ -1010,26 +1010,25 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
 }
 
 void ClusterFamily::BreakStalledFlowsInShard() {
-  std::unique_lock global_lock(migration_mu_, std::defer_lock);
-
   // give up on blocking because we run this function periodically in a background fiber,
   // so it will eventually grab the lock.
-  if (!global_lock.try_lock())
-    return;
+  if (migration_mu_.try_lock()) {
+    std::lock_guard lock(migration_mu_, std::adopt_lock);
+    int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_migration_timeout)) * 1'000'000LL;
+    for (auto& om : outgoing_migration_jobs_) {
+      if (om->GetState() == MigrationState::C_FINISHED)
+        continue;
 
-  int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_migration_timeout)) * 1'000'000LL;
-  for (auto& om : outgoing_migration_jobs_) {
-    if (om->GetState() == MigrationState::C_FINISHED)
-      continue;
+      int64_t now = absl::GetCurrentTimeNanos();
+      int64_t last_write_ns = om->GetShardLastWriteTime();
 
-    int64_t now = absl::GetCurrentTimeNanos();
-    int64_t last_write_ns = om->GetShardLastWriteTime();
-
-    if (last_write_ns > 0 && last_write_ns + timeout_ns < now) {
-      LOG(WARNING) << "Source node detected migration timeout for: "
-                   << om->GetMigrationInfo().ToString()
-                   << " last_write_ms: " << last_write_ns / 1000'000 << ", now: " << now / 1000'000;
-      om->Finish(true, "Detected migration timeout");
+      if (last_write_ns > 0 && last_write_ns + timeout_ns < now) {
+        LOG(WARNING) << "Source node detected migration timeout for: "
+                     << om->GetMigrationInfo().ToString()
+                     << " last_write_ms: " << last_write_ns / 1000'000
+                     << ", now: " << now / 1000'000;
+        om->Finish(true, "Detected migration timeout");
+      }
     }
   }
 }

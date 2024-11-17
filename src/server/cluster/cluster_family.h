@@ -46,7 +46,7 @@ class ClusterFamily {
 
   // Tries to break those flows for migration outgoing migrations that stuck on socket write for too
   // long time.
-  void BreakStalledFlowsInShard();
+  void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
 
   // Only for debug purpose. Pause/Resume all incoming migrations
   void PauseAllIncomingMigrations(bool pause);
