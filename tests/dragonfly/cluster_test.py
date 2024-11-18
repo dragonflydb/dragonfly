@@ -1294,10 +1294,11 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
 
 
 @pytest.mark.parametrize(
-    "node_count, segments, keys",
+    "node_count, segments, keys, huge_values",
     [
-        pytest.param(3, 16, 20_000),
-        pytest.param(5, 20, 30_000, marks=[pytest.mark.slow, pytest.mark.opt_only]),
+        pytest.param(3, 16, 20_000, 10),
+        pytest.param(3, 16, 20_000, 1_000_000),
+        pytest.param(5, 20, 30_000, 1_000_000, marks=[pytest.mark.slow, pytest.mark.opt_only]),
     ],
 )
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1307,12 +1308,14 @@ async def test_cluster_fuzzymigration(
     node_count: int,
     segments: int,
     keys: int,
+    huge_values: int,
 ):
     instances = [
         df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
             vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+            serialization_max_chunk_size=huge_values,
         )
         for i in range(node_count)
     ]
