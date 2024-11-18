@@ -1607,6 +1607,16 @@ void GenericFamily::Select(CmdArgList args, Transaction*, SinkReplyBuilder* buil
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
     return builder->SendError(kDbIndOutOfRangeErr);
   }
+
+  if (cntx->conn_state.db_index == index) {
+    // accept a noop.
+    return builder->SendOk();
+  }
+
+  if (cntx->conn_state.exec_info.IsRunning()) {
+    return builder->SendError("SELECT is not allowed in a transaction");
+  }
+
   cntx->conn_state.db_index = index;
   auto cb = [ns = cntx->ns, index](EngineShard* shard) {
     auto& db_slice = ns->GetDbSlice(shard->shard_id());

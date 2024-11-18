@@ -1067,7 +1067,7 @@ async def assert_replica_reconnections(replica_inst, initial_reconnects_count):
 @pytest.mark.asyncio
 async def test_replication_info(df_factory: DflyInstanceFactory, df_seeder_factory, n_keys=2000):
     master = df_factory.create()
-    replica = df_factory.create(logtostdout=True, replication_acks_interval=100)
+    replica = df_factory.create(replication_acks_interval=100)
     df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
@@ -1157,8 +1157,8 @@ redis.call('SET', 'A', 'ErrroR')
 
 @pytest.mark.asyncio
 async def test_readonly_script(df_factory):
-    master = df_factory.create(proactor_threads=2, logtostdout=True)
-    replica = df_factory.create(proactor_threads=2, logtostdout=True)
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
 
     df_factory.start_all([master, replica])
 

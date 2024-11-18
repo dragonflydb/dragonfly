@@ -76,8 +76,6 @@ void JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {
-  conn_context_.conn_state.db_index = dbid;
-
   if (ensured_dbs_.size() <= dbid)
     ensured_dbs_.resize(dbid + 1);
 
@@ -85,6 +83,8 @@ void JournalExecutor::SelectDb(DbIndex dbid) {
     auto cmd = BuildFromParts("SELECT", dbid);
     Execute(cmd);
     ensured_dbs_[dbid] = true;
+  } else {
+    conn_context_.conn_state.db_index = dbid;
   }
 }
 
