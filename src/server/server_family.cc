@@ -50,6 +50,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
+#include "server/multi_command_squasher.h"
 #include "server/protocol_client.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
@@ -2314,6 +2315,7 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
     append("tls_bytes", m.tls_bytes);
     append("snapshot_serialization_bytes", m.serialization_bytes);
+    append("commands_squashing_replies_bytes", MultiCommandSquasher::GetRepliesMemSize());
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
