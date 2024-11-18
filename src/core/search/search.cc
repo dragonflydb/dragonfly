@@ -652,25 +652,9 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
-vector<pair<string, SortableValue>> FieldIndices::ExtractStoredValues(
-    DocId doc, const absl::flat_hash_map<std::string_view, std::string_view>& aliases) const {
-  vector<pair<string, SortableValue>> out;
-  for (const auto& [ident, index] : sort_indices_) {
-    const auto& it = aliases.find(ident);
-    const auto& name = it == aliases.end() ? schema_.LookupIdentifier(ident) : it->second;
-
-    out.emplace_back(name, index->Lookup(doc));
-  }
-  return out;
-}
-
-absl::flat_hash_set<std::string_view> FieldIndices::GetSortIndiciesFields() const {
-  absl::flat_hash_set<std::string_view> fields_idents;
-  fields_idents.reserve(sort_indices_.size());
-  for (const auto& [ident, _] : sort_indices_) {
-    fields_idents.insert(ident);
-  }
-  return fields_idents;
+SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_identifier) const {
+  auto it = sort_indices_.find(field_identifier);
+  return it->second->Lookup(doc);
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;

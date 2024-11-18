@@ -207,7 +207,7 @@ std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
-void ParseLoadFields(CmdArgParser* parser, std::optional<OwnedSearchFieldsList>* load_fields) {
+void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load_fields) {
   // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
   size_t num_fields = parser->Next<size_t>();
   if (!load_fields->has_value()) {
@@ -263,7 +263,8 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
       }
 
       // RETURN {num} [{ident} AS {name}...]
-      /* TODO: Change to num_strings. In Redis strings number is expected. For example: RETURN 3 $.a AS a */
+      /* TODO: Change to num_strings. In Redis strings number is expected. For example: RETURN 3 $.a
+       * AS a */
       size_t num_fields = parser->Next<size_t>();
       params.return_fields.emplace();
       while (params.return_fields->size() < num_fields) {

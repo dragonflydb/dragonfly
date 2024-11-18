@@ -128,7 +128,6 @@ class SearchField {
 };
 
 using SearchFieldsList = std::vector<SearchField>;
-using OwnedSearchFieldsList = std::vector<SearchField>;
 
 struct SearchParams {
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
@@ -141,14 +140,14 @@ struct SearchParams {
   2. If set but empty -> no fields should be returned
   3. If set and not empty -> return only these fields
   */
-  std::optional<OwnedSearchFieldsList> return_fields;
+  std::optional<SearchFieldsList> return_fields;
 
   /*
     Fields that should be also loaded from the document.
 
     Only one of load_fields and return_fields should be set.
   */
-  std::optional<OwnedSearchFieldsList> load_fields;
+  std::optional<SearchFieldsList> load_fields;
 
   std::optional<search::SortOption> sort_option;
   search::QueryParams query_params;
@@ -168,7 +167,7 @@ struct AggregateParams {
   std::string_view index, query;
   search::QueryParams params;
 
-  std::optional<OwnedSearchFieldsList> load_fields;
+  std::optional<SearchFieldsList> load_fields;
   std::vector<aggregate::PipelineStep> steps;
 };
 
@@ -242,12 +241,6 @@ class ShardDocIndex {
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
  private:
-  /* Returns the fields that are the union of the already indexed fields and load_fields, excluding
-  skip_fields.
-  Load_fields should not be destroyed while the result of this function is being used */
-  SearchFieldsList GetFieldsToLoad(const std::optional<OwnedSearchFieldsList>& load_fields,
-                                   const absl::flat_hash_set<std::string_view>& skip_fields) const;
-
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 
