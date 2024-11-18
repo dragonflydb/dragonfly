@@ -2733,7 +2733,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     }
 
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
-      VLOG(1) << "Expire key on load: " << item->key;
+      VLOG(2) << "Expire key on load: " << item->key;
       continue;
     }
 
