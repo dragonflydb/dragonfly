@@ -106,14 +106,14 @@ io::Result<SnapshotStorage::ExpandResult, GenericError> SnapshotStorage::ExpandS
 
   // Collect all other files in case we're loading dfs.
   if (absl::EndsWith(load_path, "summary.dfs")) {
-    result.summary_file = load_path;
     auto res = ExpandFromPath(load_path);
     if (!res) {
       return nonstd::make_unexpected(res.error());
     }
-    result.snapshot_files = std::move(*res);
+    result = std::move(*res);
+    result.push_back(load_path);
   } else {
-    result.snapshot_files.push_back(load_path);
+    result.push_back(load_path);
   }
   return result;
 }

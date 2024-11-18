@@ -1108,21 +1108,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
   auto& pool = service_.proactor_pool();
 
-  if (!expand_result->summary_file.empty()) {
-    auto load_result = pool.GetNextProactor()->Await(
-        [&] { return LoadRdb(expand_result->summary_file, existing_keys); });
-
-    if (!load_result) {
-      LOG(ERROR) << "DFS summary load failed: " << load_result.error().message();
-
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-      fb2::Future<GenericError> future;
-      future.Resolve(load_result.error());
-      return immediate(load_result.error());
-    }
-  }
-
-  const vector<string>& paths = expand_result->snapshot_files;
+  const vector<string>& paths = *expand_result;
 
   LOG(INFO) << "Loading " << path;
 

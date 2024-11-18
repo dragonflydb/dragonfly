@@ -1569,11 +1569,9 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   RETURN_ON_ERR(SaveAuxFieldStrInt("redis-bits", 64));
 
   RETURN_ON_ERR(SaveAuxFieldStrInt("ctime", time(NULL)));
-  if (save_mode_ != SaveMode::SINGLE_SHARD) {
-    auto used_mem = used_mem_current.load(memory_order_relaxed);
-    VLOG(1) << "Used memory during save: " << used_mem;
-    RETURN_ON_ERR(SaveAuxFieldStrInt("used-mem", used_mem));
-  }
+  auto used_mem = used_mem_current.load(memory_order_relaxed);
+  VLOG(1) << "Used memory during save: " << used_mem;
+  RETURN_ON_ERR(SaveAuxFieldStrInt("used-mem", used_mem));
   RETURN_ON_ERR(SaveAuxFieldStrInt("aof-preamble", 0));
 
   // Save lua scripts only in rdb or summary file
