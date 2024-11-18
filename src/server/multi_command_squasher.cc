@@ -7,6 +7,7 @@
 #include <absl/container/inlined_vector.h>
 
 #include "base/logging.h"
+#include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
 #include "server/cluster/cluster_utility.h"
 #include "server/command_registry.h"
@@ -31,41 +32,38 @@ void CheckConnStateClean(const ConnectionState& state) {
 }
 
 size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
-  const auto size_visitor = [](const auto& data) {
-    using data_t = std::decay_t<decltype(data)>;
-    size_t payload_size = sizeof(facade::CapturingReplyBuilder::Payload);
-
-    if constexpr (std::is_same_v<monostate, data_t> || std::is_same_v<long, data_t> ||
-                  std::is_same_v<double, data_t> || std::is_same_v<OpStatus, data_t> ||
-                  std::is_same_v<CapturingReplyBuilder::Null, data_t>) {
-      return payload_size;
-    } else if constexpr (std::is_same_v<CapturingReplyBuilder::SimpleString, data_t>) {
-      // ignore SSO because it's insignificant
-      return payload_size + data.size();
-    } else if constexpr (std::is_same_v<CapturingReplyBuilder::BulkString, data_t>) {
-      // ignore SSO because it's insignificant
-      return payload_size + data.size();
-    } else if constexpr (std::is_same_v<CapturingReplyBuilder::Error, data_t>) {
-      // ignore SSO because it's insignificant
-      return payload_size + data.first.size() + data.second.size();
-    } else if constexpr (std::is_same_v<unique_ptr<CapturingReplyBuilder::CollectionPayload>,
-                                        data_t>) {
-      if (!data || (data->len == 0 && data->type == RedisReplyBuilder::ARRAY)) {
-        return payload_size;
-      }
-      for (const auto& pl : data->arr) {
-        payload_size += Size(pl);
-      }
-      return payload_size;
-    }
-    DCHECK(false);
-  };
-  return visit(size_visitor, payload);
+  size_t payload_size = sizeof(facade::CapturingReplyBuilder::Payload);
+  return visit(
+      Overloaded{
+          [&](monostate) { return payload_size; },
+          [&](long) { return payload_size; },
+          [&](double) { return payload_size; },
+          [&](OpStatus) { return payload_size; },
+          [&](CapturingReplyBuilder::Null) { return payload_size; },
+          // ignore SSO because it's insignificant
+          [&](const CapturingReplyBuilder::SimpleString& data) {
+            return payload_size + data.size();
+          },
+          [&](const CapturingReplyBuilder::BulkString& data) { return payload_size + data.size(); },
+          [&](const CapturingReplyBuilder::Error& data) {
+            return payload_size + data.first.size() + data.second.size();
+          },
+          [&](const unique_ptr<CapturingReplyBuilder::CollectionPayload>& data) {
+            if (!data || (data->len == 0 && data->type == RedisReplyBuilder::ARRAY)) {
+              return payload_size;
+            }
+            for (const auto& pl : data->arr) {
+              payload_size += Size(pl);
+            }
+            return payload_size;
+          },
+      },
+      payload);
 }
 
 }  // namespace
 
-atomic_uint64_t MultiCommandSquasher::current_reply_size = 0;
+atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, bool verify_commands, bool error_abort)
@@ -194,7 +192,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
       if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
         crb.SendError(std::move(*err));
         sinfo.replies.emplace_back(crb.Take());
-        current_reply_size.fetch_add(Size(sinfo.replies.back()), std::memory_order_relaxed);
+        current_reply_size_.fetch_add(Size(sinfo.replies.back()), std::memory_order_relaxed);
 
         continue;
       }
@@ -208,7 +206,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     service_->InvokeCmd(cmd->Cid(), args, &crb, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());
-    current_reply_size.fetch_add(Size(sinfo.replies.back()), std::memory_order_relaxed);
+    current_reply_size_.fetch_add(Size(sinfo.replies.back()), std::memory_order_relaxed);
 
     // Assert commands made no persistent state changes to stub context state
     const auto& local_state = local_cntx.conn_state;
@@ -276,7 +274,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     aborted |= error_abort_ && CapturingReplyBuilder::TryExtractError(replies.back());
 
     CapturingReplyBuilder::Apply(std::move(replies.back()), rb);
-    current_reply_size.fetch_sub(Size(replies.back()), std::memory_order_relaxed);
+    current_reply_size_.fetch_sub(Size(replies.back()), std::memory_order_relaxed);
     replies.pop_back();
 
     if (aborted)

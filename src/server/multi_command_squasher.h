@@ -29,7 +29,7 @@ class MultiCommandSquasher {
   }
 
   static size_t GetRepliesMemSize() {
-    return current_reply_size.load(std::memory_order_relaxed);
+    return current_reply_size_.load(std::memory_order_relaxed);
   }
 
  private:
@@ -90,7 +90,8 @@ class MultiCommandSquasher {
 
   std::vector<MutableSlice> tmp_keylist_;
 
-  static atomic_uint64_t current_reply_size;
+  // we increase size in one thread and decrease in another
+  static atomic_uint64_t current_reply_size_;
 };
 
 }  // namespace dfly
