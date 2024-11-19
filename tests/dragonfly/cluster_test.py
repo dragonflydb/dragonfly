@@ -2290,7 +2290,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await nodes[0].client.execute_command("debug", "populate", "200000", "foo", "1000")
 
     seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
-    seeder_task = asyncio.create_task(seeder.run(target_deviation=0.1))
+    capture = await seeder.capture()
 
     await asyncio.sleep(0.5)  # wait for seeder running
 
@@ -2316,10 +2316,13 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await nodes[1].client.execute_command("debug migration resume")
 
     await asyncio.sleep(1)  # migration will start resync
-    seeder.stop()
-    await seeder_task
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    capture = await seeder.capture()
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
     assert await seeder.compare(capture, nodes[1].instance.port)
