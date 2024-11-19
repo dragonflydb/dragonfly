@@ -2308,6 +2308,10 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
 
     await asyncio.sleep(1)
 
+    assert (
+        await nodes[0].client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id)
+    )[0][4] == "Detected migration timeout"
+
     logging.debug("debug migration resume")
     await nodes[1].client.execute_command("debug migration resume")
 
