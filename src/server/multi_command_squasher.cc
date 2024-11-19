@@ -273,8 +273,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
     aborted |= error_abort_ && CapturingReplyBuilder::TryExtractError(replies.back());
 
-    CapturingReplyBuilder::Apply(std::move(replies.back()), rb);
     current_reply_size_.fetch_sub(Size(replies.back()), std::memory_order_relaxed);
+    CapturingReplyBuilder::Apply(std::move(replies.back()), rb);
     replies.pop_back();
 
     if (aborted)
