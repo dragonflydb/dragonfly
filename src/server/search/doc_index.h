@@ -110,7 +110,7 @@ class SearchField {
 
  private:
   bool HasNewAlias() const {
-    return new_alias_.has_value();
+    return !new_alias_.empty();
   }
 
   std::string_view NameView() const {
@@ -118,13 +118,13 @@ class SearchField {
   }
 
   std::string_view AliasView() const {
-    return new_alias_.value().view();
+    return new_alias_.view();
   }
 
  private:
   StringOrView name_;
   bool is_short_name_;
-  std::optional<StringOrView> new_alias_;
+  StringOrView new_alias_;
 };
 
 using SearchFieldsList = std::vector<SearchField>;
