@@ -144,7 +144,7 @@ class ClusterShardMigration {
   IncomingSlotMigration* in_migration_;
   util::fb2::BlockingCounter bc_;
   atomic_long last_attempt_{-1};
-  atomic_bool pause_;
+  atomic_bool pause_ = false;
 };
 
 IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
@@ -178,8 +178,7 @@ bool IncomingSlotMigration::Join(long attempt) {
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG_EVERY_N(1, 1000) << "Checking whether to continue with join " << passed << " vs "
-                          << timeout;
+    VLOG(1) << "Checking whether to continue with join " << passed << " vs " << timeout;
     if (passed >= timeout) {
       LOG(WARNING) << "Can't join migration in time";
       ReportError(GenericError("Can't join migration in time"));
@@ -215,8 +214,7 @@ void IncomingSlotMigration::Stop() {
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG_EVERY_N(1, 1000) << "Checking whether to continue with stop " << passed << " vs "
-                          << timeout;
+    VLOG(1) << "Checking whether to continue with stop " << passed << " vs " << timeout;
 
     if (bc_->WaitFor(absl::ToInt64Milliseconds(timeout - passed) * 1ms)) {
       return;
