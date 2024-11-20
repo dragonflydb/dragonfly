@@ -46,6 +46,8 @@ class StoredCmd {
     Fill(absl::MakeSpan(*dest));
   }
 
+  std::string FirstArg() const;
+
   const CommandId* Cid() const;
 
   facade::ReplyMode ReplyMode() const;
@@ -266,10 +268,8 @@ struct ConnectionState {
 
 class ConnectionContext : public facade::ConnectionContext {
  public:
-  ConnectionContext(::io::Sink* stream, facade::Connection* owner, dfly::acl::UserCredentials cred);
-
-  ConnectionContext(const ConnectionContext* owner, Transaction* tx,
-                    facade::CapturingReplyBuilder* crb);
+  ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
+  ConnectionContext(const ConnectionContext* owner, Transaction* tx);
 
   struct DebugInfo {
     uint32_t shards_count = 0;
@@ -292,10 +292,13 @@ class ConnectionContext : public facade::ConnectionContext {
     return conn_state.db_index;
   }
 
-  void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args);
-  void ChangePSubscription(bool to_add, bool to_reply, CmdArgList args);
-  void UnsubscribeAll(bool to_reply);
-  void PUnsubscribeAll(bool to_reply);
+  void ChangeSubscription(bool to_add, bool to_reply, CmdArgList args,
+                          facade::RedisReplyBuilder* rb);
+
+  void ChangePSubscription(bool to_add, bool to_reply, CmdArgList args,
+                           facade::RedisReplyBuilder* rb);
+  void UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb);
+  void PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb);
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   size_t UsedMemory() const override;
@@ -317,8 +320,8 @@ class ConnectionContext : public facade::ConnectionContext {
     monitor = enable;
   }
 
-  void SendSubscriptionChangedResponse(std::string_view action,
-                                       std::optional<std::string_view> topic, unsigned count);
+  std::vector<unsigned> ChangeSubscriptions(CmdArgList channels, bool pattern, bool to_add,
+                                            bool to_reply);
 };
 
 }  // namespace dfly

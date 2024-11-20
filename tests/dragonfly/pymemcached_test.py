@@ -1,3 +1,4 @@
+import logging
 import pytest
 from pymemcache.client.base import Client as MCClient
 from redis import Redis
@@ -50,27 +51,35 @@ def test_basic(memcached_client: MCClient):
 
 
 @dfly_args(DEFAULT_ARGS)
-def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
+async def test_noreply_pipeline(df_server: DflyInstance, memcached_client: MCClient):
     """
     With the noreply option the python client doesn't wait for replies,
     so all the commands are pipelined. Assert pipelines work correctly and the
     succeeding regular command receives a reply (it should join the pipeline as last).
     """
-    keys = [f"k{i}" for i in range(2000)]
-    values = [f"d{i}" for i in range(len(keys))]
 
-    for k, v in zip(keys, values):
-        memcached_client.set(k, v, noreply=True)
+    client = df_server.client()
+    for attempts in range(2):
+        keys = [f"k{i}" for i in range(1000)]
+        values = [f"d{i}" for i in range(len(keys))]
 
-    # quick follow up before the pipeline finishes
-    assert memcached_client.get("k10") == b"d10"
-    # check all commands were executed
-    assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
+        for k, v in zip(keys, values):
+            memcached_client.set(k, v, noreply=True)
 
-    info = Redis(port=df_server.port).info()
-    if info["total_pipelined_commands"] == 0:
-        warnings.warn("No pipelined commands were detected. Info: \n" + str(info))
-        assert False, "No pipelined commands were detected."
+        # quick follow up before the pipeline finishes
+        assert memcached_client.get("k10") == b"d10"
+        # check all commands were executed
+        assert memcached_client.get_many(keys) == {k: v.encode() for k, v in zip(keys, values)}
+
+        info = await client.info()
+        if info["total_pipelined_commands"] > 100:
+            return
+        logging.warning(
+            f"Have not identified pipelining at attempt {attempts} Info: \n" + str(info)
+        )
+        await client.flushall()
+
+    assert False, "Pipelining not detected"
 
 
 @dfly_args(DEFAULT_ARGS)

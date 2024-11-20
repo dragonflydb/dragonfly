@@ -31,7 +31,7 @@ def server_info() -> Tuple[str, Union[None, Tuple[int, ...]]]:
     """Returns server's version or None if server is not running"""
     client = None
     try:
-        client = redis.Redis("localhost", port=6390, db=2)
+        client = redis.Redis("localhost", port=6380, db=2)
         client_info = client.info()
         server_type = "dragonfly" if "dragonfly_version" in client_info else "redis"
         server_version = (
@@ -294,7 +294,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
     def __init__(self):
         super().__init__()
         try:
-            self.real = redis.StrictRedis("localhost", port=6390, db=2)
+            self.real = redis.StrictRedis("localhost", port=6380, db=2)
             self.real.ping()
         except redis.ConnectionError:
             pytest.skip("redis is not running")
@@ -302,7 +302,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             self.real.connection_pool.disconnect()
             pytest.skip("redis server is not 64-bit")
         self.fake = fakeredis.FakeStrictRedis(
-            server=fakeredis.FakeServer(version=redis_ver), port=6390, db=2
+            server=fakeredis.FakeServer(version=redis_ver), port=6380, db=2
         )
         # Disable the response parsing so that we can check the raw values returned
         self.fake.response_callbacks.clear()

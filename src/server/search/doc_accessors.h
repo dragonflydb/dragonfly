@@ -12,6 +12,7 @@
 
 #include "core/json/json_object.h"
 #include "core/search/search.h"
+#include "core/search/vector_utils.h"
 #include "server/common.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
@@ -37,6 +38,10 @@ struct BaseAccessor : public search::DocumentAccessor {
   indexed field
   */
   virtual SearchDocData SerializeDocument(const search::Schema& schema) const;
+
+  // Default implementation uses GetStrings
+  virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const;
+  virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const;
 };
 
 // Accessor for hashes stored with listpack
@@ -46,8 +51,7 @@ struct ListPackAccessor : public BaseAccessor {
   explicit ListPackAccessor(LpPtr ptr) : lp_{ptr} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  std::optional<StringList> GetStrings(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
@@ -60,8 +64,7 @@ struct StringMapAccessor : public BaseAccessor {
   explicit StringMapAccessor(StringMap* hset) : hset_{hset} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  std::optional<StringList> GetStrings(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
@@ -75,8 +78,9 @@ struct JsonAccessor : public BaseAccessor {
   explicit JsonAccessor(const JsonType* json) : json_{*json} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  std::optional<StringList> GetStrings(std::string_view field) const override;
+  std::optional<VectorInfo> GetVector(std::string_view field) const override;
+  std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
   SearchDocData Serialize(const search::Schema& schema,

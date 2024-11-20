@@ -110,16 +110,16 @@ TEST_F(RedisParserTest, Multi2) {
   EXPECT_EQ(4, consumed_);
 
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("$4\r\nMSET"));
-  EXPECT_EQ(4, consumed_);
+  EXPECT_EQ(8, consumed_);
 
-  ASSERT_EQ(RedisParser::OK, Parse("MSET\r\n*2\r\n"));
-  EXPECT_EQ(6, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\r\n*2\r\n"));
+  EXPECT_EQ(2, consumed_);
 
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*2\r\n$3\r\nKEY\r\n$3\r\nVAL"));
-  EXPECT_EQ(17, consumed_);
+  EXPECT_EQ(20, consumed_);
 
-  ASSERT_EQ(RedisParser::OK, Parse("VAL\r\n"));
-  EXPECT_EQ(5, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
+  EXPECT_EQ(2, consumed_);
   EXPECT_THAT(args_, ElementsAre("KEY", "VAL"));
 }
 
@@ -129,8 +129,9 @@ TEST_F(RedisParserTest, Multi3) {
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(kFirst));
   ASSERT_EQ(strlen(kFirst) - 4, consumed_);
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(kSecond));
-  ASSERT_EQ(strlen(kSecond) - 3, consumed_);
-  ASSERT_EQ(RedisParser::OK, Parse("VXK\r\n*3\r\n$3\r\nSET"));
+  ASSERT_EQ(strlen(kSecond), consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\r\n*3\r\n$3\r\nSET"));
+  ASSERT_EQ(2, consumed_);
   EXPECT_THAT(args_, ElementsAre("SET", "key:000002273458", "VXK"));
 }
 

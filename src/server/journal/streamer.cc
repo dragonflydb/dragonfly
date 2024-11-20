@@ -90,6 +90,7 @@ void JournalStreamer::Write(std::string_view str) {
   DVLOG(2) << "Writing " << str.size() << " bytes";
 
   size_t total_pending = pending_buf_.size() + str.size();
+
   if (in_flight_bytes_ > 0) {
     // We can not flush data while there are in flight requests because AsyncWrite
     // is not atomic. Therefore, we just aggregate.
@@ -212,17 +213,11 @@ void RestoreStreamer::Run() {
     if (fiber_cancelled_)
       return;
 
-    bool written = false;
     cursor = db_slice_->Traverse(pt, cursor, [&](PrimeTable::bucket_iterator it) {
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
-      if (WriteBucket(it)) {
-        written = true;
-      }
+      WriteBucket(it);
     });
-    if (written) {
-      ThrottleIfNeeded();
-    }
 
     if (++last_yield >= 100) {
       ThisFiber::Yield();
@@ -282,18 +277,15 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
-  bool written = false;
-
+void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   if (it.GetVersion() < snapshot_version_) {
+    FiberAtomicGuard fg;
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
     for (; !it.is_done(); ++it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
       if (ShouldWrite(key)) {
-        written = true;
-
         uint64_t expire = 0;
         if (pv.HasExpire()) {
           auto eit = db_slice_->databases()[0]->expire.Find(it->first);
@@ -304,8 +296,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
       }
     }
   }
-
-  return written;
+  ThrottleIfNeeded();
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
@@ -332,33 +323,31 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const Pr
   string expire_str = absl::StrCat(expire_ms);
   args.push_back(expire_str);
 
-  io::StringSink value_dump_sink;
-  SerializerBase::DumpObject(pv, &value_dump_sink);
-  args.push_back(value_dump_sink.str());
+  io::StringSink restore_cmd_sink;
+  {  // to destroy extra copy
+    io::StringSink value_dump_sink;
+    SerializerBase::DumpObject(pv, &value_dump_sink);
+    args.push_back(value_dump_sink.str());
 
-  args.push_back("ABSTTL");  // Means expire string is since epoch
+    args.push_back("ABSTTL");  // Means expire string is since epoch
 
-  if (pk.IsSticky()) {
-    args.push_back("STICK");
+    if (pk.IsSticky()) {
+      args.push_back("STICK");
+    }
+
+    journal::Entry entry(0,                     // txid
+                         journal::Op::COMMAND,  // single command
+                         0,                     // db index
+                         1,                     // shard count
+                         0,                     // slot-id, but it is ignored at this level
+                         journal::Entry::Payload("RESTORE", ArgSlice(args)));
+
+    JournalWriter writer{&restore_cmd_sink};
+    writer.Write(entry);
   }
-
-  WriteCommand(journal::Entry::Payload("RESTORE", ArgSlice(args)));
-}
-
-void RestoreStreamer::WriteCommand(journal::Entry::Payload cmd_payload) {
-  journal::Entry entry(0,                     // txid
-                       journal::Op::COMMAND,  // single command
-                       0,                     // db index
-                       1,                     // shard count
-                       0,                     // slot-id, but it is ignored at this level
-                       cmd_payload);
-
-  // TODO: From WriteEntry to till Write we tripple copy the PrimeValue. It's ver in-efficient and
+  // TODO: From DumpObject to till Write we tripple copy the PrimeValue. It's very inefficient and
   // will burn CPU for large values.
-  io::StringSink sink;
-  JournalWriter writer{&sink};
-  writer.Write(entry);
-  Write(sink.str());
+  Write(restore_cmd_sink.str());
 }
 
 }  // namespace dfly

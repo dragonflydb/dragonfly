@@ -101,7 +101,7 @@ OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, Serv
       server_family_(sf),
       cf_(cf),
       tx_(new Transaction{sf->service().FindCmd("DFLYCLUSTER")}) {
-  tx_->InitByArgs(&namespaces.GetDefaultNamespace(), 0, {});
+  tx_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
 }
 
 OutgoingMigration::~OutgoingMigration() {
@@ -218,7 +218,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     OnAllShards([this](auto& migration) {
-      DbSlice& db_slice = namespaces.GetDefaultNamespace().GetCurrentDbSlice();
+      DbSlice& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
       server_family_->journal()->StartInThread();
       migration = std::make_unique<SliceSlotMigration>(
           &db_slice, server(), migration_info_.slot_ranges, server_family_->journal());
@@ -291,8 +291,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt =
-      Pause(server_family_->GetNonPriviligedListeners(), &namespaces.GetDefaultNamespace(), nullptr,
-            ClientPause::WRITE, is_pause_in_progress);
+      Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
+            nullptr, ClientPause::WRITE, is_pause_in_progress);
 
   if (!pause_fb_opt) {
     LOG(WARNING) << "Cluster migration finalization time out";
@@ -317,21 +317,33 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     return false;
   }
 
-  if (auto resp = ReadRespReply(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms)); !resp) {
-    LOG(WARNING) << resp.error();
-    return false;
-  }
+  const absl::Time start = absl::Now();
+  const absl::Duration timeout =
+      absl::Milliseconds(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+  while (true) {
+    const absl::Time now = absl::Now();
+    const absl::Duration passed = now - start;
+    if (passed >= timeout) {
+      LOG(WARNING) << "Timeout fot ACK " << attempt;
+      return false;
+    }
 
-  if (!CheckRespFirstTypes({RespExpr::INT64})) {
-    LOG(WARNING) << "Incorrect response type: "
-                 << facade::ToSV(LastResponseArgs().front().GetBuf());
-    return false;
-  }
+    if (auto resp = ReadRespReply(absl::ToInt64Milliseconds(passed - timeout)); !resp) {
+      LOG(WARNING) << resp.error();
+      return false;
+    }
 
-  const auto attempt_res = get<int64_t>(LastResponseArgs().front().u);
-  if (attempt_res != attempt) {
-    LOG(WARNING) << "Incorrect attempt payload, sent " << attempt << " received " << attempt_res;
-    return false;
+    if (!CheckRespFirstTypes({RespExpr::INT64})) {
+      LOG(WARNING) << "Incorrect response type: "
+                   << facade::ToSV(LastResponseArgs().front().GetBuf());
+      return false;
+    }
+
+    if (const auto res = get<int64_t>(LastResponseArgs().front().u); res == attempt) {
+      break;
+    } else {
+      LOG(WARNING) << "Incorrect attempt payload, sent " << attempt << " received " << res;
+    }
   }
 
   auto is_error = CheckFlowsForErrors();

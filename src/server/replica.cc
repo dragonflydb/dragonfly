@@ -593,11 +593,11 @@ error_code Replica::InitiateDflySync() {
 
 error_code Replica::ConsumeRedisStream() {
   base::IoBuf io_buf(16_KB);
-  ConnectionContext conn_context{static_cast<io::Sink*>(nullptr), nullptr, {}};
+  ConnectionContext conn_context{nullptr, {}};
   conn_context.is_replicating = true;
   conn_context.journal_emulated = true;
   conn_context.skip_acl_validation = true;
-  conn_context.ns = &namespaces.GetDefaultNamespace();
+  conn_context.ns = &namespaces->GetDefaultNamespace();
 
   // we never reply back on the commands.
   facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};

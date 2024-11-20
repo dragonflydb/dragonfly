@@ -48,7 +48,7 @@ class ScriptMgr {
 
   ScriptMgr();
 
-  void Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
 
   // Insert script and return sha. Get possible error from compilation or parsing script flags.
   io::Result<std::string, GenericError> Insert(std::string_view body, Interpreter* interpreter);
@@ -69,7 +69,8 @@ class ScriptMgr {
  private:
   void ExistsCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) const;
   void FlushCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+               ConnectionContext* cntx);
   void ConfigCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
   void ListCmd(Transaction* tx, SinkReplyBuilder* builder) const;
   void LatencyCmd(Transaction* tx, SinkReplyBuilder* builder) const;

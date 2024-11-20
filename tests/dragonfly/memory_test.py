@@ -3,6 +3,7 @@ from redis import asyncio as aioredis
 from .utility import *
 import logging
 from . import dfly_args
+from .instance import DflyInstance, DflyInstanceFactory
 
 
 @pytest.mark.opt_only
@@ -17,17 +18,16 @@ from . import dfly_args
         ("STRING", 3_500_000, 1000, 1),
     ],
 )
-async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
+# We limit to 5gb just in case to sanity check the gh runner. Otherwise, if we ask for too much
+# memory it might force the gh runner to run out of memory (since OOM killer might not even
+# get a chance to run).
+@dfly_args({"proactor_threads": 4, "maxmemory": "5gb"})
+async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, elements):
     # Create a Dragonfly and fill it up with `type` until it reaches `min_rss`, then make sure that
     # the gap between used_memory and rss is no more than `max_unaccounted_ratio`.
     min_rss = 3 * 1024 * 1024 * 1024  # 3gb
     max_unaccounted = 200 * 1024 * 1024  # 200mb
 
-    # We limit to 5gb just in case to sanity check the gh runner. Otherwise, if we ask for too much
-    # memory it might force the gh runner to run out of memory (since OOM killer might not even
-    # get a chance to run).
-    df_server = df_factory.create(maxmemory="5gb")
-    df_factory.start_all([df_server])
     client = df_server.client()
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
@@ -60,7 +60,7 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
     }
 )
 @pytest.mark.parametrize("admin_port", [0, 1112])
-async def test_rss_oom_ratio(df_factory, admin_port):
+async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     """
     Test dragonfly rejects denyoom commands and new connections when rss memory is above maxmemory*rss_oom_deny_ratio
     Test dragonfly does not rejects when rss memory goes below threshold
@@ -68,13 +68,12 @@ async def test_rss_oom_ratio(df_factory, admin_port):
     df_server = df_factory.create(admin_port=admin_port)
     df_server.start()
 
-    client = aioredis.Redis(port=df_server.port)
+    client = df_server.client()
     await client.execute_command("DEBUG POPULATE 10000 key 40000 RAND")
 
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
-    port = df_server.admin_port if admin_port else df_server.port
-    new_client = aioredis.Redis(port=port)
+    new_client = df_server.admin_client() if admin_port else df_server.client()
     await new_client.ping()
 
     info = await new_client.info("memory")
@@ -92,7 +91,7 @@ async def test_rss_oom_ratio(df_factory, admin_port):
 
     if admin_port:
         # new client create should also fail if admin port was set
-        client = aioredis.Redis(port=df_server.port)
+        client = df_server.client()
         with pytest.raises(redis.exceptions.ConnectionError):
             await client.ping()
 
@@ -106,5 +105,5 @@ async def test_rss_oom_ratio(df_factory, admin_port):
     assert info["used_memory_rss"] < reject_limit
 
     # new client create shoud not fail after memory usage decrease
-    client = aioredis.Redis(port=df_server.port)
+    client = df_server.client()
     await client.execute_command("set x y")

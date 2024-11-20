@@ -4,9 +4,14 @@ import pytest
 import redis
 
 topk_tests = pytest.importorskip("probables")
+pytestmark = []
+pytestmark.extend(
+    [
+        pytest.mark.unsupported_server_types("dragonfly"),
+    ]
+)
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_reset(r: redis.Redis):
     assert r.tdigest().create("tDigest", 10)
     # reset on empty histogram
@@ -20,7 +25,6 @@ def test_tdigest_reset(r: redis.Redis):
     assert 0 == info.get("unmerged_weight")
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_merge(r: redis.Redis):
     assert r.tdigest().create("to-tDigest", 10)
     assert r.tdigest().create("from-tDigest", 10)
@@ -44,7 +48,6 @@ def test_tdigest_merge(r: redis.Redis):
     assert 4.0 == r.tdigest().max("to-tDigest")
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_min_and_max(r: redis.Redis):
     assert r.tdigest().create("tDigest", 100)
     # insert data-points into sketch
@@ -54,7 +57,6 @@ def test_tdigest_min_and_max(r: redis.Redis):
     assert 1 == r.tdigest().min("tDigest")
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_quantile(r: redis.Redis):
     assert r.tdigest().create("tDigest", 500)
     # insert data-points into sketch
@@ -74,7 +76,6 @@ def test_tdigest_quantile(r: redis.Redis):
     assert [3.0, 5.0] == r.tdigest().quantile("t-digest", 0.5, 0.8)
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_cdf(r: redis.Redis):
     assert r.tdigest().create("tDigest", 100)
     # insert data-points into sketch
@@ -85,7 +86,6 @@ def test_tdigest_cdf(r: redis.Redis):
     assert [0.1, 0.9] == [round(x, 1) for x in res]
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_trimmed_mean(r: redis.Redis):
     assert r.tdigest().create("tDigest", 100)
     # insert data-points into sketch
@@ -94,7 +94,6 @@ def test_tdigest_trimmed_mean(r: redis.Redis):
     assert 4.5 == r.tdigest().trimmed_mean("tDigest", 0.4, 0.5)
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_rank(r: redis.Redis):
     assert r.tdigest().create("t-digest", 500)
     assert r.tdigest().add("t-digest", list(range(0, 20)))
@@ -104,7 +103,6 @@ def test_tdigest_rank(r: redis.Redis):
     assert [-1, 20, 9] == r.tdigest().rank("t-digest", -20, 20, 9)
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_revrank(r: redis.Redis):
     assert r.tdigest().create("t-digest", 500)
     assert r.tdigest().add("t-digest", list(range(0, 20)))
@@ -113,7 +111,6 @@ def test_tdigest_revrank(r: redis.Redis):
     assert [-1, 19, 9] == r.tdigest().revrank("t-digest", 21, 0, 10)
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_byrank(r: redis.Redis):
     assert r.tdigest().create("t-digest", 500)
     assert r.tdigest().add("t-digest", list(range(1, 11)))
@@ -124,7 +121,6 @@ def test_tdigest_byrank(r: redis.Redis):
         r.tdigest().byrank("t-digest", -1)[0]
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_tdigest_byrevrank(r: redis.Redis):
     assert r.tdigest().create("t-digest", 500)
     assert r.tdigest().add("t-digest", list(range(1, 11)))

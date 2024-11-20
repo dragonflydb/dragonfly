@@ -67,7 +67,8 @@ ScriptMgr::ScriptKey::ScriptKey(string_view sha) : array{} {
   memcpy(data(), sha.data(), size());
 }
 
-void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                    ConnectionContext* cntx) {
   string subcmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (subcmd == "HELP") {
@@ -110,7 +111,7 @@ void ScriptMgr::Run(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder)
     return LatencyCmd(tx, builder);
 
   if (subcmd == "LOAD" && args.size() == 2)
-    return LoadCmd(args, tx, builder);
+    return LoadCmd(args, tx, builder, cntx);
 
   if (subcmd == "FLAGS" && args.size() > 2)
     return ConfigCmd(args, tx, builder);
@@ -144,7 +145,8 @@ void ScriptMgr::FlushCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
   return builder->SendOk();
 }
 
-void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                        ConnectionContext* cntx) {
   string_view body = ArgS(args, 1);
   auto rb = static_cast<RedisReplyBuilder*>(builder);
   if (body.empty()) {
@@ -153,9 +155,7 @@ void ScriptMgr::LoadCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     return rb->SendBulkString(sha);
   }
 
-  ServerState* ss = ServerState::tlocal();
-  auto interpreter = ss->BorrowInterpreter();
-  absl::Cleanup clean = [ss, interpreter]() { ss->ReturnInterpreter(interpreter); };
+  BorrowedInterpreter interpreter{tx, &cntx->conn_state};
 
   auto res = Insert(body, interpreter);
   if (!res)

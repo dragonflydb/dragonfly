@@ -132,7 +132,7 @@ jobs:
       #  build is broken based on platforms as load: true is not supported with multi-platform builds
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
         name: Build release image for amd64
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
@@ -150,7 +150,7 @@ jobs:
 
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
         name: Build release image for arm64
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
             context: .
             platforms: linux/arm64
@@ -190,7 +190,7 @@ jobs:
 
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
         name: Push release image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64

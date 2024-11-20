@@ -477,7 +477,7 @@ void DeleteSlots(const SlotRanges& slots_ranges) {
     if (shard == nullptr)
       return;
 
-    namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
@@ -633,7 +633,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* bu
 
     util::fb2::LockGuard lk(mu);
     for (auto& [slot, data] : slots_stats) {
-      data += namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
+      data += namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
     }
   };
 

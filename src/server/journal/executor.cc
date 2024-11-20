@@ -38,17 +38,14 @@ template <typename... Ts> journal::ParsedEntry::CmdData BuildFromParts(Ts... par
 }  // namespace
 
 JournalExecutor::JournalExecutor(Service* service)
-    : service_{service},
-      reply_builder_{facade::ReplyMode::NONE},
-      conn_context_{nullptr, nullptr, &reply_builder_} {
+    : service_{service}, reply_builder_{facade::ReplyMode::NONE}, conn_context_{nullptr, nullptr} {
   conn_context_.is_replicating = true;
   conn_context_.journal_emulated = true;
   conn_context_.skip_acl_validation = true;
-  conn_context_.ns = &namespaces.GetDefaultNamespace();
+  conn_context_.ns = &namespaces->GetDefaultNamespace();
 }
 
 JournalExecutor::~JournalExecutor() {
-  conn_context_.Inject(nullptr);
 }
 
 void JournalExecutor::Execute(DbIndex dbid, absl::Span<journal::ParsedEntry::CmdData> cmds) {
@@ -79,8 +76,6 @@ void JournalExecutor::Execute(journal::ParsedEntry::CmdData& cmd) {
 }
 
 void JournalExecutor::SelectDb(DbIndex dbid) {
-  conn_context_.conn_state.db_index = dbid;
-
   if (ensured_dbs_.size() <= dbid)
     ensured_dbs_.resize(dbid + 1);
 
@@ -88,6 +83,8 @@ void JournalExecutor::SelectDb(DbIndex dbid) {
     auto cmd = BuildFromParts("SELECT", dbid);
     Execute(cmd);
     ensured_dbs_[dbid] = true;
+  } else {
+    conn_context_.conn_state.db_index = dbid;
   }
 }
 
