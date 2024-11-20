@@ -8,6 +8,7 @@ from redis import asyncio as aioredis
 from . import dfly_multi_test_args, dfly_args
 from .instance import DflyStartException
 from .utility import batch_fill_data, gen_test_data, EnvironCntx
+from .seeder import StaticSeeder
 
 
 @dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})
@@ -171,7 +172,7 @@ async def test_denyoom_commands(df_factory):
     await client.execute_command("mget x")
 
 
-@pytest.mark.parametrize("type", ["list", "hash", "string", "set", "zset"])
+@pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING"])
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.asyncio
 async def test_rename_huge_values(df_factory, type):
@@ -180,30 +181,27 @@ async def test_rename_huge_values(df_factory, type):
     client = df_server.client()
 
     logging.debug(f"Generating huge {type}")
-    await client.execute_command(f"debug populate 1 k 10000 RAND TYPE {type} ELEMENTS 1000")
-
-    async def get_length(key):
-        if type == "list":
-            return await client.llen(key)
-        elif type == "hash":
-            return await client.hlen(key)
-        elif type == "string":
-            return await client.strlen(key)
-        elif type == "set":
-            return await client.scard(key)
-        else:
-            assert type == "zset"
-            return await client.zcard(key)
-
-    size = await get_length("k:0")
-    logging.debug(f"size {size}")
-    keys = await client.execute_command("keys *")
-    logging.debug(f"keys {keys}")
+    seeder = StaticSeeder(
+        key_target=1,
+        data_size=10_000_000,
+        collection_size=10_000,
+        variance=1,
+        samples=1,
+        types=[type],
+    )
+    await seeder.run(client)
+    source_data = await StaticSeeder.capture(client)
+    logging.debug(f"src {source_data}")
 
     # Rename multiple times to make sure the key moves between shards
-    old_name = "k:0"
+    orig_name = (await client.execute_command("keys *"))[0]
+    old_name = orig_name
+    new_name = ""
     for i in range(10):
         new_name = f"new:{i}"
         await client.execute_command(f"rename {old_name} {new_name}")
-        assert size == await get_length(new_name)
         old_name = new_name
+    await client.execute_command(f"rename {new_name} {orig_name}")
+    target_data = await StaticSeeder.capture(client)
+
+    assert source_data == target_data

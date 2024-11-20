@@ -13,7 +13,7 @@ from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
-from .seeder import SeederBase
+from .seeder import StaticSeeder
 
 from . import dfly_args
 
@@ -1773,10 +1773,10 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
 
 
-@pytest.mark.parametrize("type", ["list", "hash", "string", "set", "zset"])
+@pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING"])
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.asyncio
-async def test_cluster_migration_huge_list(df_factory: DflyInstanceFactory, type):
+async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory, type):
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
@@ -1789,24 +1789,16 @@ async def test_cluster_migration_huge_list(df_factory: DflyInstanceFactory, type
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug(f"Generating huge {type}")
-    await nodes[0].client.execute_command(
-        f"debug populate 1 k 10000 RAND TYPE {type} ELEMENTS 1000"
+    seeder = StaticSeeder(
+        key_target=1,
+        data_size=10_000_000,
+        collection_size=10_000,
+        variance=1,
+        samples=1,
+        types=[type],
     )
-
-    async def get_length(client):
-        if type == "list":
-            return await client.llen("k:0")
-        elif type == "hash":
-            return await client.hlen("k:0")
-        elif type == "string":
-            return await client.strlen("k:0")
-        elif type == "set":
-            return await client.scard("k:0")
-        else:
-            assert type == "zset"
-            return await client.zcard("k:0")
-
-    size = await get_length(nodes[0].client)
+    await seeder.run(nodes[0].client)
+    source_data = await StaticSeeder.capture(nodes[0].client)
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
@@ -1817,7 +1809,8 @@ async def test_cluster_migration_huge_list(df_factory: DflyInstanceFactory, type
     logging.debug("Waiting for migration to finish")
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    assert size == await get_length(nodes[1].client)
+    target_data = await StaticSeeder.capture(nodes[1].client)
+    assert source_data == target_data
 
 
 def parse_lag(replication_info: str):
