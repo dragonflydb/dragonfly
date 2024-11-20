@@ -155,6 +155,6 @@
 // Currently moved here from server.h
 #define LONG_STR_SIZE      21          /* Bytes needed for long -> str + '\0' */
 
-#define REDIS_VERSION "999.999.999"
+#define REDIS_VERSION "6.2.11"
 
 #endif

@@ -1083,24 +1083,23 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
   DCHECK_GT(shard_count(), 0u);
 
+  // TODO: to move it to helio.
+  auto immediate = [](auto val) {
+    fb2::Future<GenericError> future;
+    future.Resolve(val);
+    return future;
+  };
+
   if (ServerState::tlocal() && !ServerState::tlocal()->is_master) {
-    fb2::Future<GenericError> future;
-    future.Resolve(string("Replica cannot load data"));
-    return future;
+    return immediate(string("Replica cannot load data"));
   }
 
-  auto paths_result = snapshot_storage_->ExpandSnapshot(path);
-  if (!paths_result) {
-    LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
+  auto expand_result = snapshot_storage_->ExpandSnapshot(path);
+  if (!expand_result) {
+    LOG(ERROR) << "Failed to load snapshot: " << expand_result.error().Format();
 
-    fb2::Future<GenericError> future;
-    future.Resolve(paths_result.error());
-    return future;
+    return immediate(expand_result.error());
   }
-
-  std::vector<std::string> paths = *paths_result;
-
-  LOG(INFO) << "Loading " << path;
 
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
@@ -1109,6 +1108,10 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
   }
 
   auto& pool = service_.proactor_pool();
+
+  const vector<string>& paths = *expand_result;
+
+  LOG(INFO) << "Loading " << path;
 
   vector<fb2::Fiber> load_fibers;
   load_fibers.reserve(paths.size());
@@ -1125,39 +1128,36 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
       proactor = pool.GetNextProactor();
     }
 
-    auto load_fiber = [this, aggregated_result, existing_keys, path = std::move(path)]() {
+    auto load_func = [this, aggregated_result, existing_keys, path = std::move(path)]() {
       auto load_result = LoadRdb(path, existing_keys);
       if (load_result.has_value())
         aggregated_result->keys_read.fetch_add(*load_result);
       else
         aggregated_result->first_error = load_result.error();
     };
-    load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
+    load_fibers.push_back(proactor->LaunchFiber(std::move(load_func)));
   }
 
   fb2::Future<GenericError> future;
 
   // Run fiber that empties the channel and sets ec_promise.
-  auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
-                          future]() mutable {
+  auto load_join_func = [this, aggregated_result, load_fibers = std::move(load_fibers),
+                         future]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
 
     if (aggregated_result->first_error) {
-      LOG(ERROR) << "Rdb load failed. " << (*aggregated_result->first_error).message();
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-      future.Resolve(*aggregated_result->first_error);
-      return;
+      LOG(ERROR) << "Rdb load failed: " << (*aggregated_result->first_error).message();
+    } else {
+      RdbLoader::PerformPostLoad(&service_);
+      LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     }
 
-    RdbLoader::PerformPostLoad(&service_);
-
-    LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     future.Resolve(*(aggregated_result->first_error));
   };
-  pool.GetNextProactor()->Dispatch(std::move(load_join_fiber));
+  pool.GetNextProactor()->Dispatch(std::move(load_join_func));
 
   return future;
 }
@@ -1196,6 +1196,7 @@ void ServerFamily::SnapshotScheduling() {
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
                                          LoadExistingKeys existing_keys) {
   VLOG(1) << "Loading data from " << rdb_file;
+  CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
 
   error_code ec;
   io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);

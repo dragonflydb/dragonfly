@@ -90,7 +90,8 @@ string SnapshotStorage::FindMatchingFile(string_view prefix, string_view dbfilen
   return {};
 }
 
-io::Result<vector<string>, GenericError> SnapshotStorage::ExpandSnapshot(const string& load_path) {
+io::Result<SnapshotStorage::ExpandResult, GenericError> SnapshotStorage::ExpandSnapshot(
+    const string& load_path) {
   if (!(absl::EndsWith(load_path, ".rdb") || absl::EndsWith(load_path, "summary.dfs"))) {
     return nonstd::make_unexpected(
         GenericError(std::make_error_code(std::errc::invalid_argument), "Bad filename extension"));
@@ -101,17 +102,20 @@ io::Result<vector<string>, GenericError> SnapshotStorage::ExpandSnapshot(const s
     return nonstd::make_unexpected(GenericError(ec, "File not found"));
   }
 
-  vector<string> paths{{load_path}};
+  ExpandResult result;
 
   // Collect all other files in case we're loading dfs.
   if (absl::EndsWith(load_path, "summary.dfs")) {
     auto res = ExpandFromPath(load_path);
     if (!res) {
-      return res;
+      return nonstd::make_unexpected(res.error());
     }
-    paths.insert(paths.end(), res->begin(), res->end());
+    result = std::move(*res);
+    result.push_back(load_path);
+  } else {
+    result.push_back(load_path);
   }
-  return paths;
+  return result;
 }
 
 FileSnapshotStorage::FileSnapshotStorage(fb2::FiberQueueThreadPool* fq_threadpool)
