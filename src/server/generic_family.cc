@@ -157,25 +157,32 @@ class RdbRestoreValue : protected RdbLoaderBase {
                                            const RestoreArgs& args, EngineShard* shard);
 
  private:
-  std::optional<OpaqueObj> Parse(std::string_view payload);
+  std::optional<OpaqueObj> Parse(io::Source* source);
+  int rdb_type_ = -1;
 };
 
-std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(std::string_view payload) {
-  InMemSource source(payload);
-  src_ = &source;
-  if (io::Result<uint8_t> type_id = FetchType(); type_id && rdbIsObjectTypeDF(type_id.value())) {
-    OpaqueObj obj;
-    error_code ec = ReadObj(type_id.value(), &obj);  // load the type from the input stream
-    if (ec) {
-      LOG(ERROR) << "failed to load data for type id " << (unsigned int)type_id.value();
-      return std::nullopt;
+std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* source) {
+  src_ = source;
+  if (pending_read_.remaining == 0) {
+    io::Result<uint8_t> type_id = FetchType();
+    if (type_id && rdbIsObjectTypeDF(type_id.value())) {
+      rdb_type_ = *type_id;
     }
+  }
 
-    return std::optional<OpaqueObj>(std::move(obj));
-  } else {
+  if (rdb_type_ == -1) {
     LOG(ERROR) << "failed to load type id from the input stream or type id is invalid";
     return std::nullopt;
   }
+
+  OpaqueObj obj;
+  error_code ec = ReadObj(rdb_type_, &obj);  // load the type from the input stream
+  if (ec) {
+    LOG(ERROR) << "failed to load data for type id " << rdb_type_;
+    return std::nullopt;
+  }
+
+  return std::optional<OpaqueObj>(std::move(obj));
 }
 
 std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
@@ -183,17 +190,31 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
                                                           const DbContext& cntx,
                                                           const RestoreArgs& args,
                                                           EngineShard* shard) {
-  auto opaque_res = Parse(data);
-  if (!opaque_res) {
-    return std::nullopt;
-  }
-
+  InMemSource data_src(data);
   PrimeValue pv;
-  if (auto ec = FromOpaque(*opaque_res, &pv); ec) {
-    // we failed - report and exit
-    LOG(WARNING) << "error while trying to save data: " << ec;
-    return std::nullopt;
-  }
+  bool first_parse = true;
+  do {
+    auto opaque_res = Parse(&data_src);
+    if (!opaque_res) {
+      return std::nullopt;
+    }
+
+    LoadConfig config;
+    if (first_parse) {
+      first_parse = false;
+    } else {
+      config.append = true;
+    }
+    if (pending_read_.remaining > 0) {
+      config.streamed = true;
+    }
+
+    if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
+      // we failed - report and exit
+      LOG(WARNING) << "error while trying to read data: " << ec;
+      return std::nullopt;
+    }
+  } while (pending_read_.remaining > 0);
 
   if (auto res = db_slice.AddNew(cntx, key, std::move(pv), args.ExpirationTime()); res) {
     res->it->first.SetSticky(args.Sticky());

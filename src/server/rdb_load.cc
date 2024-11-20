@@ -2676,10 +2676,6 @@ void RdbLoader::FlushAllShards() {
     FlushShardAsync(i);
 }
 
-std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
-  return RdbLoaderBase::FromOpaque(opaque, LoadConfig{}, pv);
-}
-
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
                                           CompactObj* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv, config);

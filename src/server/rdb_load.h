@@ -139,7 +139,6 @@ class RdbLoaderBase {
 
   template <typename T> io::Result<T> FetchInt();
 
-  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv);
   static std::error_code FromOpaque(const OpaqueObj& opaque, LoadConfig config, CompactObj* pv);
 
   io::Result<uint64_t> LoadLen(bool* is_encoded);

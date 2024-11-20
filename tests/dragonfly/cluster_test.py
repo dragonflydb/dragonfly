@@ -13,7 +13,7 @@ from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
-from .seeder import SeederBase
+from .seeder import StaticSeeder
 
 from . import dfly_args
 
@@ -1771,6 +1771,45 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
 
     for i in range(SIZE):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@pytest.mark.asyncio
+async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory):
+    instances = [
+        df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(instance) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Generating huge containers")
+    seeder = StaticSeeder(
+        key_target=10,
+        data_size=10_000_000,
+        collection_size=10_000,
+        variance=1,
+        samples=1,
+        types=["LIST", "HASH", "SET", "ZSET", "STRING"],
+    )
+    await seeder.run(nodes[0].client)
+    source_data = await StaticSeeder.capture(nodes[0].client)
+
+    nodes[0].migrations = [
+        MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
+    ]
+    logging.debug("Migrating slots")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Waiting for migration to finish")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+
+    target_data = await StaticSeeder.capture(nodes[1].client)
+    assert source_data == target_data
 
 
 def parse_lag(replication_info: str):
