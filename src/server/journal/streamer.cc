@@ -132,6 +132,7 @@ void JournalStreamer::Write(std::string_view str) {
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
   last_write_time_ns_ = -1;
   DCHECK_GE(in_flight_bytes_, len);
+  CHECK(len != 0);
 
   DVLOG(2) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
   in_flight_bytes_ -= len;

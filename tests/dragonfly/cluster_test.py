@@ -157,6 +157,16 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
             assert len(states) != 0 and all(status == state[2] for state in states), states
 
 
+async def wait_for_error(admin_client, node_id, error, timeout=10):
+    get_status = lambda: admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
+    )
+
+    async for states, breaker in tick_timer(get_status, timeout=timeout):
+        with breaker:
+            assert len(states) != 0 and all(error == state[4] for state in states), states
+
+
 async def wait_for_migration_start(admin_client, node_id):
     while (
         len(await admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id))
@@ -2267,12 +2277,12 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
-    # setting migration_timeout to a very small value to force the replica to timeout
+    # setting replication_timeout to a very small value to force the migration to timeout
     instances = [
         df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
-            migration_timeout=100,
+            replication_timeout=100,
             vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
         )
         for i in range(2)
@@ -2287,10 +2297,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("source node DEBUG POPULATE")
-    await nodes[0].client.execute_command("debug", "populate", "200000", "foo", "1000")
-
-    seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
-    capture = await seeder.capture()
+    await nodes[0].client.execute_command("debug", "populate", "500000", "foo", "1000")
 
     await asyncio.sleep(0.5)  # wait for seeder running
 
@@ -2306,11 +2313,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
 
-    await asyncio.sleep(1)
-
-    assert (
-        await nodes[0].client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", nodes[1].id)
-    )[0][4] == "Detected migration timeout"
+    await wait_for_error(nodes[0].admin_client, nodes[1].id, "Detected migration timeout")
 
     logging.debug("debug migration resume")
     await nodes[1].client.execute_command("debug migration resume")
@@ -2318,11 +2321,16 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await asyncio.sleep(1)  # migration will start resync
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
     nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
 
+    keys_num = await nodes[0].client.execute_command("dbsize")
+
+    await asyncio.sleep(1)  # migration will start resync
+
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert await seeder.compare(capture, nodes[1].instance.port)
+    assert await nodes[1].client.execute_command("dbsize") == keys_num

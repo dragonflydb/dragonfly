@@ -1010,7 +1010,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
 }
 
 void ClusterFamily::BreakStalledFlowsInShard() {
-  const int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_migration_timeout)) * 1'000'000LL;
+  const int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_replication_timeout)) * 1'000'000LL;
   if (timeout_ns == 0)
     return;
   // give up on blocking because we run this function periodically in a background fiber,
@@ -1027,7 +1027,9 @@ void ClusterFamily::BreakStalledFlowsInShard() {
         LOG(WARNING) << "Source node detected migration timeout for: "
                      << om->GetMigrationInfo().ToString()
                      << " last_write_ms: " << last_write_ns / 1000'000
-                     << ", now: " << now / 1000'000;
+                     << ", now: " << now / 1000'000 << ". Consider increasing replication_timeout";
+        // Finish(true,...) declares that current migration process is broken and should be
+        // restarted for more details see OutgoingMigration::Finish() description
         om->Finish(true, "Detected migration timeout");
       }
     }
