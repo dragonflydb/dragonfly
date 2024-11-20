@@ -1316,6 +1316,7 @@ async def test_cluster_fuzzymigration(
             admin_port=BASE_PORT + i + 1000,
             vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
             serialization_max_chunk_size=huge_values,
+            replication_stream_output_limit=10,
         )
         for i in range(node_count)
     ]
