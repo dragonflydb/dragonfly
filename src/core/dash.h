@@ -149,6 +149,9 @@ class DashTable : public detail::DashTableBase {
   template <typename U> const_iterator Find(U&& key) const;
   template <typename U> iterator Find(U&& key);
 
+  // Prefetches the memory where the key would resize into the cache.
+  template <typename U> void Prefetch(U&& key) const;
+
   // Find first entry with given key hash that evaulates to true on pred.
   // Pred accepts either (const key&) or (const key&, const value&)
   template <typename Pred> iterator FindFirst(uint64_t key_hash, Pred&& pred);
@@ -697,6 +700,14 @@ template <typename _Key, typename _Value, typename Policy>
 template <typename U>
 auto DashTable<_Key, _Value, Policy>::Find(U&& key) -> iterator {
   return FindFirst(DoHash(key), EqPred(key));
+}
+
+template <typename _Key, typename _Value, typename Policy>
+template <typename U>
+void DashTable<_Key, _Value, Policy>::Prefetch(U&& key) const {
+  uint64_t key_hash = DoHash(key);
+  uint32_t seg_id = SegmentId(key_hash);
+  segment_[seg_id]->Prefetch(key_hash);
 }
 
 template <typename _Key, typename _Value, typename Policy>
