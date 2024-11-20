@@ -502,6 +502,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   // Find item with given key hash and truthy predicate
   template <typename Pred> Iterator FindIt(Hash_t key_hash, Pred&& pred) const;
+  void Prefetch(Hash_t key_hash) const;
 
   // Returns valid iterator if succeeded or invalid if not (it's full).
   // Requires: key should be not present in the segment.
@@ -1121,10 +1122,6 @@ auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& pred) const -> 
   uint8_t bidx = BucketIndex(key_hash);
   const Bucket& target = bucket_[bidx];
 
-  // It helps a bit (10% on my home machine) and more importantly, it does not hurt
-  // since we are going to access this memory in a bit.
-  __builtin_prefetch(&target);
-
   uint8_t fp_hash = key_hash & kFpMask;
   SlotId sid = target.FindByFp(fp_hash, false, pred);
   if (sid != BucketType::kNanSlot) {
@@ -1186,6 +1183,18 @@ auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& pred) const -> 
     return Iterator{uint8_t(kBucketNum + stash_res.first), stash_res.second};
   }
   return Iterator{};
+}
+
+template <typename Key, typename Value, typename Policy>
+void Segment<Key, Value, Policy>::Prefetch(Hash_t key_hash) const {
+  uint8_t bidx = BucketIndex(key_hash);
+  const Bucket& target = bucket_[bidx];
+  uint8_t nid = NextBid(bidx);
+  const Bucket& probe = bucket_[nid];
+
+  // Prefetch buckets that might hold the key with high probability.
+  __builtin_prefetch(&target, 0, 1);
+  __builtin_prefetch(&probe, 0, 1);
 }
 
 template <typename Key, typename Value, typename Policy>

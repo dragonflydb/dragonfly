@@ -1171,6 +1171,8 @@ void Transaction::ScheduleBatchInShard() {
   ShardId sid = shard->shard_id();
   auto& sq = schedule_queues[sid];
 
+  array<ScheduleContext*, 32> batch;
+
   for (unsigned j = 0;; ++j) {
     // We pull the items from the queue in a loop until we reach the stop condition.
     // TODO: we may have fairness problem here, where transactions being added up all the time
@@ -1178,16 +1180,42 @@ void Transaction::ScheduleBatchInShard() {
     // because we must ensure that there is another ScheduleBatchInShard callback in the queue.
     // Can be checked with testing sq.armed is true when j == 1.
     while (true) {
-      ScheduleContext* item = sq.queue.Pop();
-      if (!item)
+      unsigned len = 0;
+
+      for (; len < batch.size(); ++len) {
+        ScheduleContext* item = sq.queue.Pop();
+        if (!item)
+          break;
+
+        batch[len] = item;
+        if (item->trans->IsGlobal())
+          continue;
+
+        auto shard_args = item->trans->GetShardArgs(sid);
+        // Can be empty if the transaction is not touching any keys and is
+        // NO_KEY_TRANSACTIONAL.
+        if (shard_args.Empty())
+          continue;
+        auto& db_slice = item->trans->GetDbSlice(shard->shard_id());
+
+        // We could prefetch all the keys but this is enough to test the optimization for
+        // single key operations.
+        db_slice.GetDBTable(item->trans->GetDbIndex())->prime.Prefetch(shard_args.Front());
+      }
+
+      if (len == 0)
         break;
 
-      if (!item->trans->ScheduleInShard(shard, item->optimistic_execution)) {
-        item->fail_cnt.fetch_add(1, memory_order_relaxed);
+      stats.tx_batch_scheduled_items_total += len;
+
+      for (unsigned i = 0; i < len; ++i) {
+        ScheduleContext* item = batch[i];
+        if (!item->trans->ScheduleInShard(shard, item->optimistic_execution)) {
+          item->fail_cnt.fetch_add(1, memory_order_relaxed);
+        }
+        item->trans->FinishHop();
       }
-      item->trans->FinishHop();
-      stats.tx_batch_scheduled_items_total++;
-    };
+    }
 
     // j==1 means we already signalled that we're done with the current batch.
     if (j == 1)
