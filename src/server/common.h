@@ -47,7 +47,7 @@ using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 class CommandId;
 class Transaction;
 class EngineShard;
-class ConnectionState;
+struct ConnectionState;
 class Interpreter;
 class Namespaces;
 

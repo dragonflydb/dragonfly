@@ -13,6 +13,16 @@ from redis.exceptions import ResponseError
 def test_sadd(r: redis.Redis):
     assert r.sadd("foo", "member1") == 1
     assert r.sadd("foo", "member1") == 0
+    assert set(r.smembers("foo")) == {b"member1"}
+    assert r.sadd("foo", "member2", "member3") == 2
+    assert set(r.smembers("foo")) == {b"member1", b"member2", b"member3"}
+    assert r.sadd("foo", "member3", "member4") == 1
+    assert set(r.smembers("foo")) == {b"member1", b"member2", b"member3", b"member4"}
+
+
+def test_sadd_redispy_5(r: redis.Redis):
+    assert r.sadd("foo", "member1") == 1
+    assert r.sadd("foo", "member1") == 0
     assert r.smembers("foo") == {b"member1"}
     assert r.sadd("foo", "member2", "member3") == 2
     assert r.smembers("foo") == {b"member1", b"member2", b"member3"}
@@ -22,7 +32,7 @@ def test_sadd(r: redis.Redis):
 
 def test_sadd_as_str_type(r: redis.Redis):
     assert r.sadd("foo", *range(3)) == 3
-    assert r.smembers("foo") == {b"0", b"1", b"2"}
+    assert set(r.smembers("foo")) == {b"0", b"1", b"2"}
 
 
 def test_sadd_wrong_type(r: redis.Redis):
@@ -49,20 +59,20 @@ def test_sdiff(r: redis.Redis):
     r.sadd("foo", "member2")
     r.sadd("bar", "member2")
     r.sadd("bar", "member3")
-    assert r.sdiff("foo", "bar") == {b"member1"}
+    assert set(r.sdiff("foo", "bar")) == {b"member1"}
     # Original sets shouldn't be modified.
-    assert r.smembers("foo") == {b"member1", b"member2"}
-    assert r.smembers("bar") == {b"member2", b"member3"}
+    assert set(r.smembers("foo")) == {b"member1", b"member2"}
+    assert set(r.smembers("bar")) == {b"member2", b"member3"}
 
 
 def test_sdiff_one_key(r: redis.Redis):
     r.sadd("foo", "member1")
     r.sadd("foo", "member2")
-    assert r.sdiff("foo") == {b"member1", b"member2"}
+    assert set(r.sdiff("foo")) == {b"member1", b"member2"}
 
 
 def test_sdiff_empty(r: redis.Redis):
-    assert r.sdiff("foo") == set()
+    assert set(r.sdiff("foo")) == set()
 
 
 def test_sdiff_wrong_type(r: redis.Redis):
@@ -92,8 +102,8 @@ def test_sinter(r: redis.Redis):
     r.sadd("foo", "member2")
     r.sadd("bar", "member2")
     r.sadd("bar", "member3")
-    assert r.sinter("foo", "bar") == {b"member2"}
-    assert r.sinter("foo") == {b"member1", b"member2"}
+    assert set(r.sinter("foo", "bar")) == {b"member2"}
+    assert set(r.sinter("foo")) == {b"member1", b"member2"}
 
 
 def test_sinter_bytes_keys(r: redis.Redis):
@@ -103,8 +113,8 @@ def test_sinter_bytes_keys(r: redis.Redis):
     r.sadd(foo, "member2")
     r.sadd(bar, "member2")
     r.sadd(bar, "member3")
-    assert r.sinter(foo, bar) == {b"member2"}
-    assert r.sinter(foo) == {b"member1", b"member2"}
+    assert set(r.sinter(foo, bar)) == {b"member2"}
+    assert set(r.sinter(foo)) == {b"member1", b"member2"}
 
 
 def test_sinter_wrong_type(r: redis.Redis):
@@ -169,7 +179,7 @@ def test_sismember_wrong_type(r: redis.Redis):
 
 
 def test_smembers(r: redis.Redis):
-    assert r.smembers("foo") == set()
+    assert set(r.smembers("foo")) == set()
 
 
 def test_smembers_copy(r: redis.Redis):
@@ -195,7 +205,7 @@ def test_smove(r: redis.Redis):
     r.sadd("foo", "member1")
     r.sadd("foo", "member2")
     assert r.smove("foo", "bar", "member1")
-    assert r.smembers("bar") == {b"member1"}
+    assert set(r.smembers("bar")) == {b"member1"}
 
 
 def test_smove_non_existent_key(r: redis.Redis):
@@ -208,7 +218,7 @@ def test_smove_wrong_type(r: redis.Redis):
     with pytest.raises(redis.ResponseError):
         r.smove("bar", "foo", "member")
     # Must raise the error before removing member from bar
-    assert r.smembers("bar") == {b"member"}
+    assert set(r.smembers("bar")) == {b"member"}
     with pytest.raises(redis.ResponseError):
         r.smove("foo", "bar", "member")
 
@@ -255,15 +265,15 @@ def test_srandmember_wrong_type(r: redis.Redis):
 
 def test_srem(r: redis.Redis):
     r.sadd("foo", "member1", "member2", "member3", "member4")
-    assert r.smembers("foo") == {b"member1", b"member2", b"member3", b"member4"}
+    assert set(r.smembers("foo")) == {b"member1", b"member2", b"member3", b"member4"}
     assert r.srem("foo", "member1") == 1
-    assert r.smembers("foo") == {b"member2", b"member3", b"member4"}
+    assert set(r.smembers("foo")) == {b"member2", b"member3", b"member4"}
     assert r.srem("foo", "member1") == 0
     # Since redis>=2.7.6 returns number of deleted items.
     assert r.srem("foo", "member2", "member3") == 2
-    assert r.smembers("foo") == {b"member4"}
+    assert set(r.smembers("foo")) == {b"member4"}
     assert r.srem("foo", "member3", "member4") == 1
-    assert r.smembers("foo") == set()
+    assert set(r.smembers("foo")) == set()
     assert r.srem("foo", "member3", "member4") == 0
 
 
@@ -278,7 +288,7 @@ def test_sunion(r: redis.Redis):
     r.sadd("foo", "member2")
     r.sadd("bar", "member2")
     r.sadd("bar", "member3")
-    assert r.sunion("foo", "bar") == {b"member1", b"member2", b"member3"}
+    assert set(r.sunion("foo", "bar")) == {b"member1", b"member2", b"member3"}
 
 
 def test_sunion_wrong_type(r: redis.Redis):
@@ -296,7 +306,7 @@ def test_sunionstore(r: redis.Redis):
     r.sadd("bar", "member2")
     r.sadd("bar", "member3")
     assert r.sunionstore("baz", "foo", "bar") == 3
-    assert r.smembers("baz") == {b"member1", b"member2", b"member3"}
+    assert set(r.smembers("baz")) == {b"member1", b"member2", b"member3"}
 
     # Catch instances where we store bytes and strings inconsistently
     # and thus baz = {b'member1', b'member2', b'member3', 'member3'}

@@ -32,11 +32,6 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
   ResultConsumed resultc{OK, 0};
 
   do {
-    if (str.empty()) {
-      resultc.first = INPUT_PENDING;
-      break;
-    }
-
     switch (state_) {
       case MAP_LEN_S:
       case ARRAY_LEN_S:
@@ -61,16 +56,21 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
     }
 
     *consumed += resultc.second;
-
-    if (resultc.first != OK) {
-      break;
-    }
     str.remove_prefix(exchange(resultc.second, 0));
-  } while (state_ != CMD_COMPLETE_S);
+  } while (state_ != CMD_COMPLETE_S && resultc.first == OK && !str.empty());
 
-  if (resultc.first == INPUT_PENDING) {
-    StashState(res);
-  } else if (resultc.first == OK) {
+  if (state_ != CMD_COMPLETE_S) {
+    if (resultc.first == OK) {
+      resultc.first = INPUT_PENDING;
+    }
+
+    if (resultc.first == INPUT_PENDING) {
+      StashState(res);
+    }
+    return resultc.first;
+  }
+
+  if (resultc.first == OK) {
     DCHECK(cached_expr_);
     if (res != cached_expr_) {
       DCHECK(!stash_.empty());
@@ -82,7 +82,7 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
   return resultc.first;
 }
 
-void RedisParser::InitStart(uint8_t prefix_b, RespExpr::Vec* res) {
+void RedisParser::InitStart(char prefix_b, RespExpr::Vec* res) {
   buf_stash_.clear();
   stash_.clear();
   cached_expr_ = res;
@@ -287,6 +287,7 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
 }
 
 auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
+  DCHECK(!str.empty());
   char c = str[0];
 
   if (c == '$') {
@@ -389,25 +390,29 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
 
   uint32_t consumed = 0;
 
-  if (str.size() >= bulk_len_ + 2) {
-    if (str[bulk_len_] != '\r' || str[bulk_len_ + 1] != '\n') {
-      return {BAD_STRING, 0};
-    }
-
+  if (str.size() >= bulk_len_) {
+    consumed = bulk_len_;
     if (bulk_len_) {
+      // is_broken_token_ can be false, if we just parsed the bulk length but have
+      // not parsed the token itself.
       if (is_broken_token_) {
         memcpy(bulk_str.end(), str.data(), bulk_len_);
         bulk_str = Buffer{bulk_str.data(), bulk_str.size() + bulk_len_};
       } else {
         bulk_str = str.subspan(0, bulk_len_);
       }
+      str.remove_prefix(exchange(bulk_len_, 0));
+      is_broken_token_ = false;
     }
-    is_broken_token_ = false;
-    consumed = bulk_len_ + 2;
-    bulk_len_ = 0;
-    HandleFinishArg();
 
-    return {OK, consumed};
+    if (str.size() >= 2) {
+      if (str[0] != '\r' || str[1] != '\n') {
+        return {BAD_STRING, consumed};
+      }
+      HandleFinishArg();
+      return {OK, consumed + 2};
+    }
+    return {INPUT_PENDING, consumed};
   }
 
   if (str.size() >= 32) {

@@ -1561,16 +1561,18 @@ void RdbSaver::FillFreqMap(RdbTypeFreqMap* freq_map) {
 error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
   static_assert(sizeof(void*) == 8, "");
 
-  int aof_preamble = false;
   error_code ec;
 
   /* Add a few fields about the state when the RDB was created. */
   RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("redis-ver", REDIS_VERSION));
+  RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("df-ver", GetVersion()));
   RETURN_ON_ERR(SaveAuxFieldStrInt("redis-bits", 64));
 
   RETURN_ON_ERR(SaveAuxFieldStrInt("ctime", time(NULL)));
-  RETURN_ON_ERR(SaveAuxFieldStrInt("used-mem", used_mem_current.load(memory_order_relaxed)));
-  RETURN_ON_ERR(SaveAuxFieldStrInt("aof-preamble", aof_preamble));
+  auto used_mem = used_mem_current.load(memory_order_relaxed);
+  VLOG(1) << "Used memory during save: " << used_mem;
+  RETURN_ON_ERR(SaveAuxFieldStrInt("used-mem", used_mem));
+  RETURN_ON_ERR(SaveAuxFieldStrInt("aof-preamble", 0));
 
   // Save lua scripts only in rdb or summary file
   DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.lua_scripts.empty());

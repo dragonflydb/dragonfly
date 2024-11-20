@@ -401,7 +401,7 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
         "    If SLOTS is specified then create keys only in given slots range.",
-        "    TYPE specifies data type (must be STRING/LIST/SET/HSET/ZSET/JSON), default STRING.",
+        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON), default STRING.",
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
         "OBJHIST",
         "    Prints histogram of object sizes.",

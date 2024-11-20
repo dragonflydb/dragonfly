@@ -630,9 +630,6 @@ void Connection::OnPostMigrateThread() {
   stats_ = &tl_facade_stats->conn_stats;
   ++stats_->num_conns;
   stats_->read_buf_capacity += io_buf_.Capacity();
-  if (cc_->replica_conn) {
-    ++stats_->num_replicas;
-  }
 }
 
 void Connection::OnConnectionStart() {
@@ -819,9 +816,10 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
-    DCHECK(reply_builder_);
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
-    if (reply_builder_->IsSendActive())
+
+    // reply_builder_ may be null if the connection is in the setup phase, for example.
+    if (reply_builder_ && reply_builder_->IsSendActive())
       phase_name = "send";
     absl::StrAppend(&after, " ", cc_info);
   }
@@ -1840,10 +1838,6 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
 void Connection::DecreaseStatsOnClose() {
   stats_->read_buf_capacity -= io_buf_.Capacity();
 
-  // Update num_replicas if this was a replica connection.
-  if (cc_->replica_conn) {
-    --stats_->num_replicas;
-  }
   --stats_->num_conns;
 }
 

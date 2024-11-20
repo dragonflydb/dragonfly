@@ -89,7 +89,6 @@ struct Metrics {
   ServerState::Stats coordinator_stats;  // stats on transaction running
   PeakStats peak_stats;
 
-  size_t uptime = 0;
   size_t qps = 0;
 
   size_t heap_used_bytes = 0;
@@ -118,9 +117,6 @@ struct Metrics {
   std::map<std::string, std::pair<uint64_t, uint64_t>> cmd_stats_map;
 
   absl::flat_hash_map<std::string, uint64_t> connections_lib_name_ver_map;
-
-  // Replica info on the master side.
-  std::vector<ReplicaRoleInfo> master_side_replicas_info;
 
   struct ReplicaInfo {
     uint32_t reconnect_count;
