@@ -1773,10 +1773,9 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
 
 
-@pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING"])
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.asyncio
-async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory, type):
+async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory):
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
@@ -1788,14 +1787,14 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory,
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    logging.debug(f"Generating huge {type}")
+    logging.debug("Generating huge containers")
     seeder = StaticSeeder(
-        key_target=1,
+        key_target=10,
         data_size=10_000_000,
         collection_size=10_000,
         variance=1,
         samples=1,
-        types=[type],
+        types=["LIST", "HASH", "SET", "ZSET", "STRING"],
     )
     await seeder.run(nodes[0].client)
     source_data = await StaticSeeder.capture(nodes[0].client)
