@@ -224,7 +224,7 @@ void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load
     StringOrView name = StringOrView::FromString(std::string{str});
     if (parser->Check("AS")) {
       load_fields->value().emplace_back(name, true,
-                                        StringOrView::FromString(std::string{parser->Next()}));
+                                        StringOrView::FromString(parser->Next<std::string>()));
     } else {
       load_fields->value().emplace_back(name, true);
     }
@@ -268,11 +268,11 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
       size_t num_fields = parser->Next<size_t>();
       params.return_fields.emplace();
       while (params.return_fields->size() < num_fields) {
-        StringOrView name = StringOrView::FromString(std::string{parser->Next()});
+        StringOrView name = StringOrView::FromString(parser->Next<std::string>());
 
         if (parser->Check("AS")) {
           params.return_fields->emplace_back(std::move(name), true,
-                                             StringOrView::FromString(std::string{parser->Next()}));
+                                             StringOrView::FromString(parser->Next<std::string>()));
         } else {
           params.return_fields->emplace_back(std::move(name), true);
         }
@@ -283,7 +283,8 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
-      params.sort_option = search::SortOption{string{parser->Next()}, bool(parser->Check("DESC"))};
+      params.sort_option =
+          search::SortOption{parser->Next<std::string>(), bool(parser->Check("DESC"))};
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);

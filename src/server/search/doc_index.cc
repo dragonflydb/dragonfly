@@ -333,7 +333,7 @@ std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
     sort_fields.emplace_back(fident, fname);
   }
 
-  return {fields, sort_fields};
+  return {std::move(fields), std::move(sort_fields)};
 }
 
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(
