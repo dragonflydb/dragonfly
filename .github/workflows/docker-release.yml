@@ -90,7 +90,7 @@ jobs:
 
         go test ./contrib/charts/dragonfly/... -update
 
-        git commit \
+        git commit --allow-empty \
           -m 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
           contrib/charts/dragonfly/Chart.yaml \
           contrib/charts/dragonfly/ci
