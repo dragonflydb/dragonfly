@@ -37,7 +37,7 @@ class RobjWrapper {
   RobjWrapper() : sz_(0), type_(0), encoding_(0) {
   }
 
-  size_t MallocUsed() const;
+  size_t MallocUsed(bool slow) const;
 
   uint64_t HashCode() const;
   bool Equal(const RobjWrapper& ow) const;
@@ -359,9 +359,9 @@ class CompactObj {
   // Postcondition: The object is an in-memory string.
   void Materialize(std::string_view str, bool is_raw);
 
-  // In case this object a single blob, returns number of bytes allocated on heap
-  // for that blob. Otherwise returns 0.
-  size_t MallocUsed() const;
+  // Returns the approximation of memory used by the object.
+  // If slow is true, may use more expensive methods to calculate the precise size.
+  size_t MallocUsed(bool slow = false) const;
 
   // Resets the object to empty state (string).
   void Reset();

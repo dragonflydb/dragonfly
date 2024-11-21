@@ -83,7 +83,8 @@ std::string MallocStatsCb(bool backing, unsigned tid) {
 }
 
 size_t MemoryUsage(PrimeIterator it) {
-  return it->first.MallocUsed() + it->second.MallocUsed();
+  size_t key_size = it->first.MallocUsed();
+  return key_size + it->second.MallocUsed(true);
 }
 
 }  // namespace

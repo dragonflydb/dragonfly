@@ -83,6 +83,11 @@ void JournalExecutor::SelectDb(DbIndex dbid) {
     auto cmd = BuildFromParts("SELECT", dbid);
     Execute(cmd);
     ensured_dbs_[dbid] = true;
+
+    // TODO: This is a temporary fix for #4146.
+    // For some reason without this the replication breaks in regtests.
+    auto cb = [](EngineShard* shard) { return OpStatus::OK; };
+    shard_set->RunBriefInParallel(std::move(cb));
   } else {
     conn_context_.conn_state.db_index = dbid;
   }
