@@ -1297,6 +1297,9 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
     "node_count, segments, keys, huge_values",
     [
         pytest.param(3, 16, 20_000, 10),
+        # 1mb effectively disables breakdown of huge values.
+        # TODO: add a test that mixes huge and small values, see
+        # https://github.com/dragonflydb/dragonfly/pull/4144/files/11e5e387d31bcf1bc53dfbb28cf3bcaf094d77fa#r1850130930
         pytest.param(3, 16, 20_000, 1_000_000),
         pytest.param(5, 20, 30_000, 1_000_000, marks=[pytest.mark.slow, pytest.mark.opt_only]),
     ],
