@@ -105,12 +105,39 @@ void CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
 }
 
 void CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
+  CommandAggregator aggregator(
+      key, [&](absl::Span<const string_view> args) { SerializeCommand("ZADD", args); });
+
+  container_utils::IterateSortedSet(
+      pv.GetRobjWrapper(),
+      [&](container_utils::ContainerEntry ce, double score) {
+        aggregator.AddArg(absl::StrCat(score), CommandAggregator::CommitMode::kNoCommit);
+        aggregator.AddArg(ce.ToString());
+        return true;
+      },
+      /*start=*/0, /*end=*/-1, /*reverse=*/false, /*use_score=*/true);
 }
 
 void CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
+  CommandAggregator aggregator(
+      key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); });
+
+  container_utils::IterateMap(
+      pv, [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
+        aggregator.AddArg(k.ToString(), CommandAggregator::CommitMode::kNoCommit);
+        aggregator.AddArg(v.ToString());
+        return true;
+      });
 }
 
 void CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
+  CommandAggregator aggregator(
+      key, [&](absl::Span<const string_view> args) { SerializeCommand("RPUSH", args); });
+
+  container_utils::IterateList(pv, [&](container_utils::ContainerEntry ce) {
+    aggregator.AddArg(ce.ToString());
+    return true;
+  });
 }
 
 void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, const PrimeValue& pv,
