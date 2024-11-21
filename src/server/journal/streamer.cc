@@ -318,46 +318,8 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  // We send RESTORE commands for small objects, or objects we don't support breaking.
   CmdSerializer serializer([&](std::string s) { Write(s); });
-
-  bool use_restore_serialization = true;
-  if (serialization_max_chunk_size > 0 && pv.MallocUsed() > serialization_max_chunk_size) {
-    switch (pv.ObjType()) {
-      case OBJ_SET:
-        serializer.SerializeSet(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_ZSET:
-        serializer.SerializeZSet(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_HASH:
-        serializer.SerializeHash(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_LIST:
-        serializer.SerializeList(key, pv);
-        use_restore_serialization = false;
-        break;
-      case OBJ_STRING:
-      case OBJ_STREAM:
-      case OBJ_JSON:
-      case OBJ_SBF:
-      default:
-        // These types are unsupported wrt splitting huge values to multiple commands, so we send
-        // them as a RESTORE command.
-        break;
-    }
-  }
-
-  if (use_restore_serialization) {
-    // RESTORE sets STICK and EXPIRE as part of the command.
-    serializer.SerializeRestore(key, pk, pv, expire_ms);
-  } else {
-    serializer.SerializeStickIfNeeded(key, pk);
-    serializer.SerializeExpireIfNeeded(key, expire_ms);
-  }
+  serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
 }  // namespace dfly

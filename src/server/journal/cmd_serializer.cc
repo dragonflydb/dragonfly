@@ -62,6 +62,48 @@ class CommandAggregator {
 CmdSerializer::CmdSerializer(Callback cb) : cb_(std::move(cb)) {
 }
 
+void CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+                                   uint64_t expire_ms) {
+  // We send RESTORE commands for small objects, or objects we don't support breaking.
+  bool use_restore_serialization = true;
+  if (serialization_max_chunk_size > 0 && pv.MallocUsed() > serialization_max_chunk_size) {
+    switch (pv.ObjType()) {
+      case OBJ_SET:
+        SerializeSet(key, pv);
+        use_restore_serialization = false;
+        break;
+      case OBJ_ZSET:
+        SerializeZSet(key, pv);
+        use_restore_serialization = false;
+        break;
+      case OBJ_HASH:
+        SerializeHash(key, pv);
+        use_restore_serialization = false;
+        break;
+      case OBJ_LIST:
+        SerializeList(key, pv);
+        use_restore_serialization = false;
+        break;
+      case OBJ_STRING:
+      case OBJ_STREAM:
+      case OBJ_JSON:
+      case OBJ_SBF:
+      default:
+        // These types are unsupported wrt splitting huge values to multiple commands, so we send
+        // them as a RESTORE command.
+        break;
+    }
+  }
+
+  if (use_restore_serialization) {
+    // RESTORE sets STICK and EXPIRE as part of the command.
+    SerializeRestore(key, pk, pv, expire_ms);
+  } else {
+    SerializeStickIfNeeded(key, pk);
+    SerializeExpireIfNeeded(key, expire_ms);
+  }
+}
+
 void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_view> args) {
   journal::Entry entry(0,                     // txid
                        journal::Op::COMMAND,  // single command

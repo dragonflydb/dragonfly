@@ -19,6 +19,10 @@ class CmdSerializer {
 
   explicit CmdSerializer(Callback cb);
 
+  void SerializeEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
+                      uint64_t expire_ms);
+
+ private:
   void SerializeCommand(std::string_view cmd, absl::Span<const std::string_view> args);
   void SerializeStickIfNeeded(std::string_view key, const PrimeValue& pk);
   void SerializeExpireIfNeeded(std::string_view key, uint64_t expire_ms);
@@ -30,7 +34,6 @@ class CmdSerializer {
   void SerializeRestore(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                         uint64_t expire_ms);
 
- private:
   Callback cb_;
 };
 
