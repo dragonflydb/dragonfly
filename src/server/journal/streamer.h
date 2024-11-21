@@ -100,16 +100,6 @@ class RestoreStreamer : public JournalStreamer {
   void WriteBucket(PrimeTable::bucket_iterator it);
   void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
-  void WriteCommand(std::string_view cmd, absl::Span<const std::string_view> args);
-  void WriteStickIfNeeded(std::string_view key, const PrimeValue& pk);
-  void WriteExpireIfNeeded(std::string_view key, uint64_t expire_ms);
-
-  void WriteSet(std::string_view key, const PrimeValue& pv);
-  void WriteZSet(std::string_view key, const PrimeValue& pv);
-  void WriteHash(std::string_view key, const PrimeValue& pv);
-  void WriteList(std::string_view key, const PrimeValue& pv);
-  void WriteRestore(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
-                    uint64_t expire_ms);
 
   DbSlice* db_slice_;
   DbTableArray db_array_;

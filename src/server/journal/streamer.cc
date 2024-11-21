@@ -9,7 +9,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
-#include "server/container_utils.h"
+#include "server/journal/cmd_serializer.h"
 #include "util/fibers/synchronization.h"
 
 using namespace facade;
@@ -319,23 +319,25 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
   // We send RESTORE commands for small objects, or objects we don't support breaking.
+  CmdSerializer serializer([&](std::string s) { Write(s); });
+
   bool use_restore_serialization = true;
   if (serialization_max_chunk_size > 0 && pv.MallocUsed() > serialization_max_chunk_size) {
     switch (pv.ObjType()) {
       case OBJ_SET:
-        WriteSet(key, pv);
+        serializer.SerializeSet(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_ZSET:
-        WriteZSet(key, pv);
+        serializer.SerializeZSet(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_HASH:
-        WriteHash(key, pv);
+        serializer.SerializeHash(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_LIST:
-        WriteList(key, pv);
+        serializer.SerializeList(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_STRING:
@@ -351,155 +353,11 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const Pr
 
   if (use_restore_serialization) {
     // RESTORE sets STICK and EXPIRE as part of the command.
-    WriteRestore(key, pk, pv, expire_ms);
+    serializer.SerializeRestore(key, pk, pv, expire_ms);
   } else {
-    WriteStickIfNeeded(key, pk);
-    WriteExpireIfNeeded(key, expire_ms);
+    serializer.SerializeStickIfNeeded(key, pk);
+    serializer.SerializeExpireIfNeeded(key, expire_ms);
   }
-}
-
-class CommandAggregator {
- public:
-  using Callback = std::function<void(absl::Span<const string_view>)>;
-
-  CommandAggregator(string_view key, Callback cb) : key_(key), cb_(cb) {
-  }
-
-  ~CommandAggregator() {
-    CommitPending();
-  }
-
-  enum class CommitMode { kAuto, kNoCommit };
-  void AddArg(string arg, CommitMode commit_mode = CommitMode::kAuto) {
-    agg_bytes_ += arg.size();
-    members_.push_back(std::move(arg));
-
-    if (commit_mode != CommitMode::kNoCommit && agg_bytes_ >= serialization_max_chunk_size) {
-      CommitPending();
-    }
-  }
-
- private:
-  void CommitPending() {
-    if (members_.empty()) {
-      return;
-    }
-
-    args_.clear();
-    args_.reserve(members_.size() + 1);
-    args_.push_back(key_);
-    for (string_view member : members_) {
-      args_.push_back(member);
-    }
-    cb_(args_);
-    members_.clear();
-  }
-
-  string_view key_;
-  Callback cb_;
-  vector<string> members_;
-  absl::InlinedVector<string_view, 5> args_;
-  size_t agg_bytes_ = 0;
-};
-
-void RestoreStreamer::WriteSet(string_view key, const PrimeValue& pv) {
-  CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { WriteCommand("SADD", args); });
-
-  container_utils::IterateSet(pv, [&](container_utils::ContainerEntry ce) {
-    aggregator.AddArg(ce.ToString());
-    return true;
-  });
-}
-
-void RestoreStreamer::WriteList(string_view key, const PrimeValue& pv) {
-  CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { WriteCommand("RPUSH", args); });
-
-  container_utils::IterateList(pv, [&](container_utils::ContainerEntry ce) {
-    aggregator.AddArg(ce.ToString());
-    return true;
-  });
-}
-
-void RestoreStreamer::WriteZSet(string_view key, const PrimeValue& pv) {
-  CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { WriteCommand("ZADD", args); });
-
-  container_utils::IterateSortedSet(
-      pv.GetRobjWrapper(),
-      [&](container_utils::ContainerEntry ce, double score) {
-        aggregator.AddArg(absl::StrCat(score), CommandAggregator::CommitMode::kNoCommit);
-        aggregator.AddArg(ce.ToString());
-        return true;
-      },
-      /*start=*/0, /*end=*/-1, /*reverse=*/false, /*use_score=*/true);
-}
-
-void RestoreStreamer::WriteHash(string_view key, const PrimeValue& pv) {
-  CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { WriteCommand("HSET", args); });
-
-  container_utils::IterateMap(
-      pv, [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
-        aggregator.AddArg(k.ToString(), CommandAggregator::CommitMode::kNoCommit);
-        aggregator.AddArg(v.ToString());
-        return true;
-      });
-}
-
-void RestoreStreamer::WriteRestore(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
-                                   uint64_t expire_ms) {
-  absl::InlinedVector<string_view, 5> args;
-  args.push_back(key);
-
-  string expire_str = absl::StrCat(expire_ms);
-  args.push_back(expire_str);
-
-  io::StringSink value_dump_sink;
-  SerializerBase::DumpObject(pv, &value_dump_sink);
-  args.push_back(value_dump_sink.str());
-
-  args.push_back("ABSTTL");  // Means expire string is since epoch
-
-  if (pk.IsSticky()) {
-    args.push_back("STICK");
-  }
-
-  WriteCommand("RESTORE", args);
-}
-
-void RestoreStreamer::WriteCommand(string_view cmd, absl::Span<const string_view> args) {
-  journal::Entry entry(0,                     // txid
-                       journal::Op::COMMAND,  // single command
-                       0,                     // db index
-                       1,                     // shard count
-                       0,                     // slot-id, but it is ignored at this level
-                       journal::Entry::Payload(cmd, ArgSlice(args)));
-
-  // Serialize into a string
-  io::StringSink cmd_sink;
-  JournalWriter writer{&cmd_sink};
-  writer.Write(entry);
-
-  // Write string to dest_
-  Write(cmd_sink.str());
-}
-
-void RestoreStreamer::WriteStickIfNeeded(string_view key, const PrimeValue& pk) {
-  if (!pk.IsSticky()) {
-    return;
-  }
-
-  WriteCommand("STICK", {key});
-}
-
-void RestoreStreamer::WriteExpireIfNeeded(string_view key, uint64_t expire_ms) {
-  if (expire_ms == 0) {
-    return;
-  }
-
-  WriteCommand("PEXIRE", {key, absl::StrCat(expire_ms)});
 }
 
 }  // namespace dfly
