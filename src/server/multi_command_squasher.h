@@ -28,6 +28,10 @@ class MultiCommandSquasher {
     return MultiCommandSquasher{cmds, cntx, service, verify_commands, error_abort}.Run(rb);
   }
 
+  static size_t GetRepliesMemSize() {
+    return current_reply_size_.load(std::memory_order_relaxed);
+  }
+
  private:
   // Per-shard execution info.
   struct ShardExecInfo {
@@ -85,6 +89,9 @@ class MultiCommandSquasher {
   size_t num_shards_ = 0;
 
   std::vector<MutableSlice> tmp_keylist_;
+
+  // we increase size in one thread and decrease in another
+  static atomic_uint64_t current_reply_size_;
 };
 
 }  // namespace dfly

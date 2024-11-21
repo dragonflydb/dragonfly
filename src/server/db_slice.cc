@@ -1000,6 +1000,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.fps.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return true;
   }
+  DCHECK_LT(lock_args.db_index, db_array_size());
 
   auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   bool lock_acquired = true;

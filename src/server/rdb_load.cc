@@ -102,6 +102,8 @@ string error_category::message(int ev) const {
   switch (ev) {
     case errc::wrong_signature:
       return "Wrong signature while trying to load from rdb file";
+    case errc::out_of_memory:
+      return "Out of memory, or used memory is too high";
     default:
       return absl::StrCat("Internal error when loading RDB file ", ev);
       break;
@@ -2596,7 +2598,9 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "lua") {
     LoadScriptFromAux(std::move(auxval));
   } else if (auxkey == "redis-ver") {
-    VLOG(1) << "Loading RDB produced by version " << auxval;
+    VLOG(1) << "Loading RDB produced by Redis version " << auxval;
+  } else if (auxkey == "df-ver") {
+    VLOG(1) << "Loading RDB produced by Dragonfly version " << auxval;
   } else if (auxkey == "ctime") {
     int64_t ctime;
     if (absl::SimpleAtoi(auxval, &ctime)) {
@@ -2606,9 +2610,14 @@ error_code RdbLoader::HandleAux() {
       VLOG(1) << "RDB age " << strings::HumanReadableElapsedTime(age);
     }
   } else if (auxkey == "used-mem") {
-    long long usedmem;
+    int64_t usedmem;
     if (absl::SimpleAtoi(auxval, &usedmem)) {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
+      if (usedmem > ssize_t(max_memory_limit)) {
+        LOG(WARNING) << "Could not load snapshot - its used memory is " << usedmem
+                     << " but the limit is " << max_memory_limit;
+        return RdbError(errc::out_of_memory);
+      }
     }
   } else if (auxkey == "aof-preamble") {
     long long haspreamble;
@@ -2665,10 +2674,6 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
 void RdbLoader::FlushAllShards() {
   for (ShardId i = 0; i < shard_set->size(); i++)
     FlushShardAsync(i);
-}
-
-std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
-  return RdbLoaderBase::FromOpaque(opaque, LoadConfig{}, pv);
 }
 
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
@@ -2733,7 +2738,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     }
 
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
-      VLOG(1) << "Expire key on load: " << item->key;
+      VLOG(2) << "Expire key on load: " << item->key;
       continue;
     }
 

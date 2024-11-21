@@ -50,6 +50,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
+#include "server/multi_command_squasher.h"
 #include "server/protocol_client.h"
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
@@ -1082,24 +1083,23 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
   DCHECK_GT(shard_count(), 0u);
 
+  // TODO: to move it to helio.
+  auto immediate = [](auto val) {
+    fb2::Future<GenericError> future;
+    future.Resolve(val);
+    return future;
+  };
+
   if (ServerState::tlocal() && !ServerState::tlocal()->is_master) {
-    fb2::Future<GenericError> future;
-    future.Resolve(string("Replica cannot load data"));
-    return future;
+    return immediate(string("Replica cannot load data"));
   }
 
-  auto paths_result = snapshot_storage_->ExpandSnapshot(path);
-  if (!paths_result) {
-    LOG(ERROR) << "Failed to load snapshot: " << paths_result.error().Format();
+  auto expand_result = snapshot_storage_->ExpandSnapshot(path);
+  if (!expand_result) {
+    LOG(ERROR) << "Failed to load snapshot: " << expand_result.error().Format();
 
-    fb2::Future<GenericError> future;
-    future.Resolve(paths_result.error());
-    return future;
+    return immediate(expand_result.error());
   }
-
-  std::vector<std::string> paths = *paths_result;
-
-  LOG(INFO) << "Loading " << path;
 
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
@@ -1108,6 +1108,10 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
   }
 
   auto& pool = service_.proactor_pool();
+
+  const vector<string>& paths = *expand_result;
+
+  LOG(INFO) << "Loading " << path;
 
   vector<fb2::Fiber> load_fibers;
   load_fibers.reserve(paths.size());
@@ -1124,39 +1128,36 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
       proactor = pool.GetNextProactor();
     }
 
-    auto load_fiber = [this, aggregated_result, existing_keys, path = std::move(path)]() {
+    auto load_func = [this, aggregated_result, existing_keys, path = std::move(path)]() {
       auto load_result = LoadRdb(path, existing_keys);
       if (load_result.has_value())
         aggregated_result->keys_read.fetch_add(*load_result);
       else
         aggregated_result->first_error = load_result.error();
     };
-    load_fibers.push_back(proactor->LaunchFiber(std::move(load_fiber)));
+    load_fibers.push_back(proactor->LaunchFiber(std::move(load_func)));
   }
 
   fb2::Future<GenericError> future;
 
   // Run fiber that empties the channel and sets ec_promise.
-  auto load_join_fiber = [this, aggregated_result, load_fibers = std::move(load_fibers),
-                          future]() mutable {
+  auto load_join_func = [this, aggregated_result, load_fibers = std::move(load_fibers),
+                         future]() mutable {
     for (auto& fiber : load_fibers) {
       fiber.Join();
     }
 
     if (aggregated_result->first_error) {
-      LOG(ERROR) << "Rdb load failed. " << (*aggregated_result->first_error).message();
-      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-      future.Resolve(*aggregated_result->first_error);
-      return;
+      LOG(ERROR) << "Rdb load failed: " << (*aggregated_result->first_error).message();
+    } else {
+      RdbLoader::PerformPostLoad(&service_);
+      LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     }
 
-    RdbLoader::PerformPostLoad(&service_);
-
-    LOG(INFO) << "Load finished, num keys read: " << aggregated_result->keys_read;
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     future.Resolve(*(aggregated_result->first_error));
   };
-  pool.GetNextProactor()->Dispatch(std::move(load_join_fiber));
+  pool.GetNextProactor()->Dispatch(std::move(load_join_func));
 
   return future;
 }
@@ -1195,6 +1196,7 @@ void ServerFamily::SnapshotScheduling() {
 io::Result<size_t> ServerFamily::LoadRdb(const std::string& rdb_file,
                                          LoadExistingKeys existing_keys) {
   VLOG(1) << "Loading data from " << rdb_file;
+  CHECK(fb2::ProactorBase::IsProactorThread()) << "must be called from proactor thread";
 
   error_code ec;
   io::ReadonlyFileOrError res = snapshot_storage_->OpenReadFile(rdb_file);
@@ -1299,8 +1301,6 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("dispatch_queue_bytes", "", conn_stats.dispatch_queue_bytes,
                             MetricType::GAUGE, &resp->body());
-  AppendMetricWithoutLabels("pipeline_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
-                            MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_throttle_total", "", conn_stats.pipeline_throttle_count,
@@ -1311,6 +1311,9 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("commands_squashing_replies_bytes", "",
+                            MultiCommandSquasher::GetRepliesMemSize(), MetricType::GAUGE,
                             &resp->body());
   string connections_libs;
   AppendMetricHeader("connections_libs", "Total number of connections by libname:ver",
@@ -2314,6 +2317,7 @@ void ServerFamily::Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     append("client_read_buffer_peak_bytes", m.peak_stats.conn_read_buf_capacity);
     append("tls_bytes", m.tls_bytes);
     append("snapshot_serialization_bytes", m.serialization_bytes);
+    append("commands_squashing_replies_bytes", MultiCommandSquasher::GetRepliesMemSize());
 
     if (GetFlag(FLAGS_cache_mode)) {
       append("cache_mode", "cache");
