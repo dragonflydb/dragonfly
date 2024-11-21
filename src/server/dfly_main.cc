@@ -799,5 +799,9 @@ Usage: dragonfly [FLAGS]
     unlink(pidfile_path.c_str());
   }
 
+  // Returns memory to OS.
+  // This is a workaround for a bug in mi_malloc that may cause a crash on exit.
+  mi_collect(true);
+
   return res;
 }

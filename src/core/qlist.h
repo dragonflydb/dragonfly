@@ -103,7 +103,7 @@ class QList {
   // Returns true if item was replaced, false if index is out of range.
   bool Replace(long index, std::string_view elem);
 
-  size_t MallocUsed() const;
+  size_t MallocUsed(bool slow) const;
 
   void Iterate(IterateFunc cb, long start, long end) const;
 
