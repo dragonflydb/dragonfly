@@ -1,6 +1,8 @@
 module dragonfly
 
-go 1.20
+go 1.21
+
+toolchain go1.21.6
 
 require github.com/gruntwork-io/terratest v0.47.2
 
