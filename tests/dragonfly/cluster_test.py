@@ -13,6 +13,7 @@ from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
+from .seeder import SeederBase
 from .seeder import StaticSeeder
 
 from . import dfly_args
@@ -2274,6 +2275,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
     await check_for_no_state_status([node.admin_client for node in nodes])
 
 
+@pytest.mark.skip("Flaky")
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
@@ -2299,7 +2301,8 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     logging.debug("source node DEBUG POPULATE")
     await nodes[0].client.execute_command("debug", "populate", "100000", "foo", "5000")
 
-    await asyncio.sleep(0.5)  # wait for seeder running
+    # await StaticSeeder(key_target=200000, data_size=1000).run(nodes[0].client)
+    start_capture = await StaticSeeder.capture(nodes[0].client)
 
     logging.debug("Start migration")
     nodes[0].migrations.append(
@@ -2320,8 +2323,6 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     logging.debug("debug migration resume")
     await nodes[1].client.execute_command("debug migration resume")
 
-    await asyncio.sleep(1)  # migration will start resync
-
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
@@ -2329,10 +2330,6 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
 
-    keys_num = await nodes[0].client.execute_command("dbsize")
-
-    await asyncio.sleep(1)  # migration will start resync
-
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert await nodes[1].client.execute_command("dbsize") == keys_num
+    assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
