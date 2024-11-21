@@ -280,6 +280,7 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
 
 void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   if (it.GetVersion() < snapshot_version_) {
+    FiberAtomicGuard fg;
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
     for (; !it.is_done(); ++it) {
@@ -402,10 +403,8 @@ class CommandAggregator {
 };
 
 void RestoreStreamer::WriteSet(string_view key, const PrimeValue& pv) {
-  CommandAggregator aggregator(key, [&](absl::Span<const string_view> args) {
-    WriteCommand("SADD", args);
-    ThrottleIfNeeded();
-  });
+  CommandAggregator aggregator(
+      key, [&](absl::Span<const string_view> args) { WriteCommand("SADD", args); });
 
   container_utils::IterateSet(pv, [&](container_utils::ContainerEntry ce) {
     aggregator.AddArg(ce.ToString());
@@ -414,10 +413,8 @@ void RestoreStreamer::WriteSet(string_view key, const PrimeValue& pv) {
 }
 
 void RestoreStreamer::WriteList(string_view key, const PrimeValue& pv) {
-  CommandAggregator aggregator(key, [&](absl::Span<const string_view> args) {
-    WriteCommand("RPUSH", args);
-    ThrottleIfNeeded();
-  });
+  CommandAggregator aggregator(
+      key, [&](absl::Span<const string_view> args) { WriteCommand("RPUSH", args); });
 
   container_utils::IterateList(pv, [&](container_utils::ContainerEntry ce) {
     aggregator.AddArg(ce.ToString());
@@ -426,10 +423,8 @@ void RestoreStreamer::WriteList(string_view key, const PrimeValue& pv) {
 }
 
 void RestoreStreamer::WriteZSet(string_view key, const PrimeValue& pv) {
-  CommandAggregator aggregator(key, [&](absl::Span<const string_view> args) {
-    WriteCommand("ZADD", args);
-    ThrottleIfNeeded();
-  });
+  CommandAggregator aggregator(
+      key, [&](absl::Span<const string_view> args) { WriteCommand("ZADD", args); });
 
   container_utils::IterateSortedSet(
       pv.GetRobjWrapper(),
@@ -442,10 +437,8 @@ void RestoreStreamer::WriteZSet(string_view key, const PrimeValue& pv) {
 }
 
 void RestoreStreamer::WriteHash(string_view key, const PrimeValue& pv) {
-  CommandAggregator aggregator(key, [&](absl::Span<const string_view> args) {
-    WriteCommand("HSET", args);
-    ThrottleIfNeeded();
-  });
+  CommandAggregator aggregator(
+      key, [&](absl::Span<const string_view> args) { WriteCommand("HSET", args); });
 
   container_utils::IterateMap(
       pv, [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
