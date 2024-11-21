@@ -164,7 +164,7 @@ IncomingSlotMigration::~IncomingSlotMigration() {
 }
 
 void IncomingSlotMigration::Pause(bool pause) {
-  VLOG(1) << "Pausing migration";
+  VLOG(1) << "Pausing migration " << pause;
   for (auto& flow : shard_flows_) {
     flow->Pause(pause);
   }

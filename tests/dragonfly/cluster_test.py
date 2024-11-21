@@ -2216,7 +2216,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
 
 
 @pytest.mark.skip("Takes more than 10 minutes")
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"cluster_mode": "yes"})
 async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFactory):
     # Check data migration from one node to another
     instances = [
@@ -2277,13 +2277,13 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
-    # setting replication_timeout to a very small value to force the migration to timeout
+    # Timeout set to 3 seconds because we must first saturate the socket before we get the timeout
     instances = [
         df_factory.create(
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
-            replication_timeout=100,
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+            replication_timeout=3000,
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
         )
         for i in range(2)
     ]
@@ -2297,7 +2297,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("source node DEBUG POPULATE")
-    await nodes[0].client.execute_command("debug", "populate", "500000", "foo", "1000")
+    await nodes[0].client.execute_command("debug", "populate", "100000", "foo", "5000")
 
     await asyncio.sleep(0.5)  # wait for seeder running
 
@@ -2313,7 +2313,9 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
 
-    await wait_for_error(nodes[0].admin_client, nodes[1].id, "Detected migration timeout")
+    await wait_for_error(
+        nodes[0].admin_client, nodes[1].id, "JournalStreamer write operation timeout"
+    )
 
     logging.debug("debug migration resume")
     await nodes[1].client.execute_command("debug migration resume")

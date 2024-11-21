@@ -868,7 +868,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // Initialize shard_set with a callback running once in a while in the shard threads.
   shard_set->Init(shard_num, [this] {
     server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
-    cluster_family_.BreakStalledFlowsInShard();
     server_family_.UpdateMemoryGlobalStats();
   });
   Transaction::Init(shard_num);

@@ -33,7 +33,7 @@ class OutgoingMigration : private ProtocolClient {
   // if is_error = false mark migration as FINISHED and cancel migration if it's not finished yet
   // can be called from any thread, but only after Start()
   // if is_error = true and migration is in progress it will be restarted otherwise nothing happens
-  void Finish(bool is_error = false, std::string error = "") ABSL_LOCKS_EXCLUDED(state_mu_);
+  void Finish(GenericError error = {}) ABSL_LOCKS_EXCLUDED(state_mu_);
 
   MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
@@ -57,8 +57,6 @@ class OutgoingMigration : private ProtocolClient {
     return last_error_.Format();
   }
 
-  int64_t GetShardLastWriteTime() const;
-
   size_t GetKeyCount() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
   static constexpr long kInvalidAttempt = -1;
@@ -67,9 +65,6 @@ class OutgoingMigration : private ProtocolClient {
  private:
   // should be run for all shards
   void StartFlow(journal::Journal* journal, io::Sink* dest);
-
-  // if we have an error reports it into cntx_ and return true
-  bool CheckFlowsForErrors();
 
   MigrationState GetStateImpl() const;
   // SliceSlotMigration manages state and data transfering for the corresponding shard

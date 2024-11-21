@@ -120,7 +120,6 @@ void JournalStreamer::Write(std::string_view str) {
   }
   v[next_buf_id++] = IoVec(io::Bytes(buf, str.size()));
 
-  last_write_time_ns_ = absl::GetCurrentTimeNanos();
   dest_->AsyncWrite(
       v, next_buf_id,
       [buf0 = std::move(pending_buf_), buf, this, len = total_pending](std::error_code ec) {
@@ -130,7 +129,6 @@ void JournalStreamer::Write(std::string_view str) {
 }
 
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
-  last_write_time_ns_ = -1;
   DCHECK_GE(in_flight_bytes_, len);
   CHECK(len != 0);
 
@@ -142,7 +140,6 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
     // If everything was sent but we have a pending buf, flush it.
     io::Bytes src(pending_buf_);
     in_flight_bytes_ += src.size();
-    last_write_time_ns_ = absl::GetCurrentTimeNanos();
     dest_->AsyncWrite(src, [buf = std::move(pending_buf_), this](std::error_code ec) {
       OnCompletion(ec, buf.size());
     });
@@ -170,7 +167,7 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
-    cntx_->ReportError(make_error_code(errc::stream_timeout));
+    cntx_->ReportError("JournalStreamer write operation timeout");
   }
 }
 

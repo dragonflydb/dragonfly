@@ -35,9 +35,6 @@ ABSL_FLAG(std::string, cluster_node_id, "",
 
 ABSL_FLAG(bool, managed_service_info, false,
           "Hides some implementation details from users when true (i.e. in managed service env)");
-ABSL_FLAG(uint32_t, migration_timeout, 30000,
-          "Time in milliseconds to wait for the migration writes being stuck.");
-
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
 
@@ -1009,36 +1006,9 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
   return builder->SendLong(attempt);
 }
 
-void ClusterFamily::BreakStalledFlowsInShard() {
-  const int64_t timeout_ns = int64_t(absl::GetFlag(FLAGS_replication_timeout)) * 1'000'000LL;
-  if (timeout_ns == 0)
-    return;
-  // give up on blocking because we run this function periodically in a background fiber,
-  // so it will eventually grab the lock.
-  if (migration_mu_.try_lock()) {
-    std::lock_guard lock(migration_mu_, std::adopt_lock);
-    for (auto& om : outgoing_migration_jobs_) {
-      if (om->GetState() == MigrationState::C_FINISHED)
-        continue;
-
-      int64_t now = absl::GetCurrentTimeNanos();
-      int64_t last_write_ns = om->GetShardLastWriteTime();
-      if (last_write_ns > 0 && last_write_ns + timeout_ns < now) {
-        LOG(WARNING) << "Source node detected migration timeout for: "
-                     << om->GetMigrationInfo().ToString()
-                     << " last_write_ms: " << last_write_ns / 1000'000
-                     << ", now: " << now / 1000'000 << ". Consider increasing replication_timeout";
-        // Finish(true,...) declares that current migration process is broken and should be
-        // restarted for more details see OutgoingMigration::Finish() description
-        om->Finish(true, "Detected migration timeout");
-      }
-    }
-  }
-}
-
 void ClusterFamily::PauseAllIncomingMigrations(bool pause) {
   util::fb2::LockGuard lk(migration_mu_);
-  LOG_IF(ERROR, !incoming_migrations_jobs_.empty()) << "No incoming migrations!";
+  LOG_IF(ERROR, incoming_migrations_jobs_.empty()) << "No incoming migrations!";
   for (auto& im : incoming_migrations_jobs_) {
     im->Pause(pause);
   }

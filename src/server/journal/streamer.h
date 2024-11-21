@@ -32,10 +32,6 @@ class JournalStreamer {
 
   size_t GetTotalBufferCapacities() const;
 
-  int64_t GetLastWriteTime() const {
-    return last_write_time_ns_;
-  }
-
  protected:
   // TODO: we copy the string on each write because JournalItem may be passed to multiple
   // streamers so we can not move it. However, if we would either wrap JournalItem in shared_ptr
@@ -72,7 +68,6 @@ class JournalStreamer {
   time_t last_lsn_time_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
-  int64_t last_write_time_ns_ = -1;  // last write call.
 };
 
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
