@@ -768,6 +768,21 @@ TEST_F(DflyEngineTest, EvalBug2664) {
   EXPECT_THAT(resp, DoubleArg(42.9));
 }
 
+TEST_F(DflyEngineTest, MemoryUsage) {
+  for (unsigned i = 0; i < 1000; ++i) {
+    Run({"rpush", "l1", StrCat("val", i)});
+  }
+
+  for (unsigned i = 0; i < 1000; ++i) {
+    Run({"rpush", "l2", StrCat(string('a', 200), i)});
+  }
+  auto resp = Run({"memory", "usage", "l1"});
+  EXPECT_GT(*resp.GetInt(), 8000);
+
+  resp = Run({"memory", "usage", "l2"});
+  EXPECT_GT(*resp.GetInt(), 100000);
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.

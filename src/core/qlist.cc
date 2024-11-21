@@ -431,10 +431,17 @@ bool QList::Replace(long index, std::string_view elem) {
   return false;
 }
 
-size_t QList::MallocUsed() const {
+size_t QList::MallocUsed(bool slow) const {
   // Approximation since does not account for listpacks.
-  size_t res = len_ * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
-  return res + count_ * 16;  // we account for each member 16 bytes.
+  size_t node_size = len_ * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
+  if (slow) {
+    for (quicklistNode* node = head_; node; node = node->next) {
+      node_size += zmalloc_usable_size(node->entry);
+    }
+    return node_size;
+  }
+
+  return node_size + count_ * 16;  // we account for each member 16 bytes.
 }
 
 void QList::Iterate(IterateFunc cb, long start, long end) const {

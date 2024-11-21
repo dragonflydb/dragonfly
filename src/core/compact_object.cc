@@ -46,9 +46,15 @@ constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
 
 // Approximation since does not account for listpacks.
-size_t QlMAllocSize(quicklist* ql) {
-  size_t res = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
-  return res + ql->count * 16;  // we account for each member 16 bytes.
+size_t QlMAllocSize(quicklist* ql, bool slow) {
+  size_t node_size = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
+  if (slow) {
+    for (quicklistNode* node = ql->head; node; node = node->next) {
+      node_size += zmalloc_usable_size(node->entry);
+    }
+    return node_size;
+  }
+  return node_size + ql->count * 16;  // we account for each member 16 bytes.
 }
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
@@ -291,7 +297,7 @@ static_assert(sizeof(CompactObj) == 18);
 
 namespace detail {
 
-size_t RobjWrapper::MallocUsed() const {
+size_t RobjWrapper::MallocUsed(bool slow) const {
   if (!inner_obj_)
     return 0;
 
@@ -301,8 +307,8 @@ size_t RobjWrapper::MallocUsed() const {
       return InnerObjMallocUsed();
     case OBJ_LIST:
       if (encoding_ == OBJ_ENCODING_QUICKLIST)
-        return QlMAllocSize((quicklist*)inner_obj_);
-      return ((QList*)inner_obj_)->MallocUsed();
+        return QlMAllocSize((quicklist*)inner_obj_, slow);
+      return ((QList*)inner_obj_)->MallocUsed(slow);
     case OBJ_SET:
       return MallocUsedSet(encoding_, inner_obj_);
     case OBJ_HASH:
@@ -1132,12 +1138,12 @@ void CompactObj::Free() {
   memset(u_.inline_str, 0, kInlineLen);
 }
 
-size_t CompactObj::MallocUsed() const {
+size_t CompactObj::MallocUsed(bool slow) const {
   if (!HasAllocated())
     return 0;
 
   if (taglen_ == ROBJ_TAG) {
-    return u_.r_obj.MallocUsed();
+    return u_.r_obj.MallocUsed(slow);
   }
 
   if (taglen_ == JSON_TAG) {
