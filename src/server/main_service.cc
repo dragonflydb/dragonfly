@@ -722,6 +722,16 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
+void SetOomDenyRatioOnAllThreads(double ratio) {
+  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->oom_deny_ratio = ratio; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
+void SetRssOomDenyRatioOnAllThreads(double ratio) {
+  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -734,7 +744,7 @@ Service::Service(ProactorPool* pp)
 
 #ifdef PRINT_STACKTRACES_ON_SIGNAL
   LOG(INFO) << "PRINT STACKTRACES REGISTERED";
-  pp_.GetNextProactor()->RegisterSignal({SIGUSR1}, [this](int signal) {
+  ProactorBase::RegisterSignal({SIGUSR1}, pp_.GetNextProactor(), [this](int signal) {
     LOG(INFO) << "Received " << strsignal(signal);
     base::SetVLogLevel("uring_proactor", 2);
 
@@ -759,17 +769,11 @@ Service::Service(ProactorPool* pp)
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
 
-void SetOomDenyRatioOnAllThreads(double ratio) {
-  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->oom_deny_ratio = ratio; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
-void SetRssOomDenyRatioOnAllThreads(double ratio) {
-  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
 Service::~Service() {
+#ifdef PRINT_STACKTRACES_ON_SIGNAL
+  ProactorBase::ClearSignal({SIGUSR1});
+#endif
+
   delete shard_set;
   shard_set = nullptr;
 }
