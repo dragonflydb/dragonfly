@@ -131,6 +131,7 @@ async def df_factory(request, tmp_dir, test_env) -> DflyInstanceFactory:
         path=path,
         cwd=tmp_dir,
         gdb=request.config.getoption("--gdb"),
+        direct_output=request.config.getoption("--direct-out"),
         buffered_out=request.config.getoption("--buffered-output"),
         args=parse_args(request.config.getoption("--df")),
         existing_port=int(existing) if existing else None,
@@ -259,6 +260,13 @@ def pytest_addoption(parser):
         default=None,
         help="Provide a port to the existing memcached process for the test",
     )
+    parser.addoption(
+        "--direct-out",
+        action="store_true",
+        default=False,
+        help="If true, does not post process dragonfly output",
+    )
+
     parser.addoption("--repeat", action="store", help="Number of times to repeat each test")
 
 

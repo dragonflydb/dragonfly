@@ -762,44 +762,42 @@ Usage: dragonfly [FLAGS]
 
   fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 
-  unique_ptr<util::ProactorPool> pool;
+  {
+    unique_ptr<util::ProactorPool> pool;
 
 #ifdef __linux__
-  base::sys::KernelVersion kver;
-  base::sys::GetKernelVersion(&kver);
+    base::sys::KernelVersion kver;
+    base::sys::GetKernelVersion(&kver);
 
-  CHECK_LT(kver.major, 99u);
-  dfly::kernel_version = kver.kernel * 100 + kver.major;
+    CHECK_LT(kver.major, 99u);
+    dfly::kernel_version = kver.kernel * 100 + kver.major;
 
-  bool use_epoll = ShouldUseEpollAPI(kver);
+    bool use_epoll = ShouldUseEpollAPI(kver);
 
-  if (use_epoll) {
-    pool.reset(fb2::Pool::Epoll(max_available_threads));
-  } else {
-    pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
-  }
+    if (use_epoll) {
+      pool.reset(fb2::Pool::Epoll(max_available_threads));
+    } else {
+      pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
+    }
 #else
-  pool.reset(fb2::Pool::Epoll(max_available_threads));
+    pool.reset(fb2::Pool::Epoll(max_available_threads));
 #endif
 
-  pool->Run();
+    pool->Run();
 
-  SetupAllocationTracker(pool.get());
+    SetupAllocationTracker(pool.get());
 
-  AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
-  acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
+    AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
+    acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
-  dfly::RunEngine(pool.get(), &acceptor);
+    dfly::RunEngine(pool.get(), &acceptor);
 
-  pool->Stop();
+    pool->Stop();
 
-  if (!pidfile_path.empty()) {
-    unlink(pidfile_path.c_str());
+    if (!pidfile_path.empty()) {
+      unlink(pidfile_path.c_str());
+    }
   }
-
-  // Returns memory to OS.
-  // This is a workaround for a bug in mi_malloc that may cause a crash on exit.
-  mi_collect(true);
 
   return 0;
 }
