@@ -165,12 +165,12 @@ template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
   return res;
 }
 
-bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
+void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   uint64_t maxmemory = GetMaxMemoryFlag();
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
     LOG(ERROR) << "There are " << pool->size() << " threads, so "
                << HumanReadableNumBytes(pool->size() * 256_MB) << " are required. Exiting...";
-    return false;
+    exit(1);
   }
 
   Service service(pool);
@@ -310,8 +310,6 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   version_monitor.Shutdown();
   service.Shutdown();
-
-  return true;
 }
 
 bool CreatePidFile(const string& path) {
@@ -791,7 +789,7 @@ Usage: dragonfly [FLAGS]
   AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
   acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
-  int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
+  dfly::RunEngine(pool.get(), &acceptor);
 
   pool->Stop();
 
@@ -803,5 +801,5 @@ Usage: dragonfly [FLAGS]
   // This is a workaround for a bug in mi_malloc that may cause a crash on exit.
   mi_collect(true);
 
-  return res;
+  return 0;
 }
