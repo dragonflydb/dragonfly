@@ -234,7 +234,9 @@ class DflyInstance:
                 # if the return code is negative it means termination by signal
                 # if the return code is positive it means abnormal exit
                 if proc.returncode != 0:
-                    raise Exception("Dragonfly did not terminate gracefully")
+                    raise Exception(
+                        f"Dragonfly did not terminate gracefully, exit code {proc.returncode}"
+                    )
 
         except subprocess.TimeoutExpired:
             # We need to send SIGUSR1 to DF such that it prints the stacktrace
