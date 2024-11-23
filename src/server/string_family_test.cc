@@ -254,6 +254,8 @@ TEST_F(StringFamilyTest, MGetSet) {
 }
 
 TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
+  max_memory_limit = 3000000;  // 3mb
+
   absl::FlagSaver fs;
   SetTestFlag("cache_mode", "true");
   ResetService();

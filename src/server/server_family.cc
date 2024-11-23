@@ -137,7 +137,6 @@ ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
-ABSL_DECLARE_FLAG(double, oom_deny_ratio);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {

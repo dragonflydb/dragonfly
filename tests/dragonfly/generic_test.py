@@ -149,7 +149,7 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
 @pytest.mark.asyncio
 async def test_denyoom_commands(df_factory):
     df_server = df_factory.create(
-        proactor_threads=1, maxmemory="256mb", oom_deny_commands="get", oom_deny_ratio=0.7
+        proactor_threads=1, maxmemory="256mb", oom_deny_commands="get", rss_oom_deny_ratio=0.7
     )
     df_server.start()
     client = df_server.client()

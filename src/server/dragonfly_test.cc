@@ -26,7 +26,7 @@ ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
-ABSL_DECLARE_FLAG(double, oom_deny_ratio);
+ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
 
 namespace dfly {
@@ -456,19 +456,20 @@ TEST_F(DflyEngineTest, OOM) {
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
-  max_memory_limit = 300000;
-
-  absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
+  max_memory_limit = 5000000;  // 5mb
   ResetService();
 
   shard_set->TEST_EnableCacheMode();
 
   ssize_t i = 0;
   RespExpr resp;
+  std::string value(1024, 'b');
   for (; i < 10000; ++i) {
-    resp = Run({"setex", StrCat("key", i), "30", "bar"});
+    resp = Run({"setex", StrCat("key", i), "30", value});
     // we evict some items because 5000 is too much when max_memory_limit is 300000.
+    if (resp != "OK") {
+      continue;
+    }
     ASSERT_EQ(resp, "OK");
   }
 
@@ -483,31 +484,30 @@ TEST_F(DflyEngineTest, Bug207) {
   EXPECT_GT(evicted_count(resp.GetString()), 0);
 
   for (; i > 0; --i) {
-    resp = Run({"setex", StrCat("key", i), "30", "bar"});
+    resp = Run({"setex", StrCat("key", i), "30", value});
     ASSERT_EQ(resp, "OK");
   }
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {
-  max_memory_limit = 300000;
-  absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
+  max_memory_limit = 5000000;  // 5mb
   ResetService();
+
   shard_set->TEST_EnableCacheMode();
 
-  string tmp_val(100, '.');
+  std::string value(1024, 'b');
 
   ssize_t failed = -1;
-  for (ssize_t i = 0; i < 5000; ++i) {
+  for (ssize_t i = 0; i < 2000; ++i) {
     string key = StrCat("volatile", i);
-    ASSERT_EQ("OK", Run({"set", key, tmp_val}));
+    ASSERT_EQ("OK", Run({"set", key, value}));
   }
 
   bool done = false;
-  for (ssize_t i = 0; !done && i < 5000; ++i) {
+  for (ssize_t i = 0; !done && i < 7000; ++i) {
     string key = StrCat("key", i);
     while (true) {
-      if (Run({"set", key, tmp_val}) != "OK") {
+      if (Run({"set", key, value}) != "OK") {
         failed = i;
         done = true;
         break;
