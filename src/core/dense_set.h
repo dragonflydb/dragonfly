@@ -202,11 +202,6 @@ class DenseSet {
 
     void Advance();
 
-    // If ptr is a link, it calls fun on all links in the chain.
-    // Otherwise it calls it only once on the object.
-    // ptr must be non empty.
-    size_t TraverseApply(DensePtr* ptr, std::function<void(DensePtr*)> fun);
-
     DenseSet* owner_;
     ChainVectorIterator curr_list_;
     DensePtr* curr_entry_;
