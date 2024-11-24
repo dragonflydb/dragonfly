@@ -1121,6 +1121,10 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
         return err.value();
       }
     }
+
+    if (dfly_cntx.conn_state.script_info->read_only && is_write_cmd) {
+      return ErrorReply{"Write commands are not allowed from read-only scripts"};
+    }
   }
 
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
@@ -1764,7 +1768,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 }
 
 void Service::Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx) {
+                   ConnectionContext* cntx, bool read_only) {
   string_view body = ArgS(args, 0);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -1779,19 +1783,29 @@ void Service::Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
 
   string sha{std::move(res.value())};
 
-  CallSHA(args, sha, interpreter, builder, cntx);
+  CallSHA(args, sha, interpreter, builder, cntx, read_only);
+}
+
+void Service::EvalRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                     ConnectionContext* cntx) {
+  Eval(args, tx, builder, cntx, true);
 }
 
 void Service::EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                      ConnectionContext* cntx) {
+                      ConnectionContext* cntx, bool read_only) {
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
 
   BorrowedInterpreter interpreter{cntx->transaction, &cntx->conn_state};
-  CallSHA(args, sha, interpreter, builder, cntx);
+  CallSHA(args, sha, interpreter, builder, cntx, read_only);
+}
+
+void Service::EvalShaRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                        ConnectionContext* cntx) {
+  EvalSha(args, tx, builder, cntx, true);
 }
 
 void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter,
-                      SinkReplyBuilder* builder, ConnectionContext* cntx) {
+                      SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only) {
   uint32_t num_keys;
   CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
 
@@ -1801,7 +1815,7 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ev_args.args = args.subspan(2 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(args, ev_args, interpreter, builder, cntx);
+  EvalInternal(args, ev_args, interpreter, builder, cntx, read_only);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
@@ -1887,7 +1901,7 @@ static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::Scrip
 }
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                           SinkReplyBuilder* builder, ConnectionContext* cntx) {
+                           SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only) {
   DCHECK(!eval_args.sha.empty());
 
   // Sanitizing the input to avoid code injection.
@@ -1909,6 +1923,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   sinfo->lock_tags.reserve(eval_args.keys.size());
+  sinfo->read_only = read_only;
 
   optional<ShardId> sid;
 
@@ -2594,7 +2609,9 @@ constexpr uint32_t kWatch = FAST | TRANSACTION;
 constexpr uint32_t kUnwatch = FAST | TRANSACTION;
 constexpr uint32_t kDiscard = FAST | TRANSACTION;
 constexpr uint32_t kEval = SLOW | SCRIPTING;
+constexpr uint32_t kEvalRo = SLOW | SCRIPTING;
 constexpr uint32_t kEvalSha = SLOW | SCRIPTING;
+constexpr uint32_t kEvalShaRo = SLOW | SCRIPTING;
 constexpr uint32_t kExec = SLOW | TRANSACTION;
 constexpr uint32_t kPublish = PUBSUB | FAST;
 constexpr uint32_t kSubscribe = PUBSUB | SLOW;
@@ -2619,8 +2636,15 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEval}
              .MFUNC(Eval)
              .SetValidator(&EvalValidator)
+      << CI{"EVAL_RO", CO::NOSCRIPT | CO::READONLY | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEvalRo}
+             .MFUNC(EvalRo)
+             .SetValidator(&EvalValidator)
       << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEvalSha}
              .MFUNC(EvalSha)
+             .SetValidator(&EvalValidator)
+      << CI{"EVALSHA_RO",   CO::NOSCRIPT | CO::READONLY | CO::VARIADIC_KEYS, -3, 3, 3,
+            acl::kEvalShaRo}
+             .MFUNC(EvalShaRo)
              .SetValidator(&EvalValidator)
       << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, acl::kExec}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)

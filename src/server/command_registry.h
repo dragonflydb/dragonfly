@@ -64,7 +64,8 @@ constexpr inline bool IsTransKind(std::string_view name) {
   return (name == "EXEC") || (name == "MULTI") || (name == "DISCARD");
 }
 
-static_assert(IsEvalKind("EVAL") && IsEvalKind("EVALSHA"));
+static_assert(IsEvalKind("EVAL") && IsEvalKind("EVAL_RO") && IsEvalKind("EVALSHA") &&
+              IsEvalKind("EVALSHA_RO"));
 static_assert(!IsEvalKind(""));
 
 };  // namespace CO
