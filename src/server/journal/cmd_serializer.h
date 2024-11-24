@@ -13,11 +13,15 @@
 
 namespace dfly {
 
+// CmdSerializer serializes DB entries (key+value) into command(s) in RESP format string.
+// Small entries are serialized as RESTORE commands, while bigger ones (see
+// serialization_max_chunk_size) are split into multiple commands (like rpush, hset, etc).
+// Expiration and stickiness are also serialized into commands.
 class CmdSerializer {
  public:
-  using Callback = std::function<void(std::string)>;
+  using FlushSerialized = std::function<void(std::string)>;
 
-  explicit CmdSerializer(Callback cb);
+  explicit CmdSerializer(FlushSerialized cb);
 
   void SerializeEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                       uint64_t expire_ms);
@@ -34,7 +38,7 @@ class CmdSerializer {
   void SerializeRestore(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                         uint64_t expire_ms);
 
-  Callback cb_;
+  FlushSerialized cb_;
 };
 
 }  // namespace dfly

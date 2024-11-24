@@ -15,9 +15,9 @@ using namespace std;
 
 class CommandAggregator {
  public:
-  using Callback = std::function<void(absl::Span<const string_view>)>;
+  using WriteCmdCallback = std::function<void(absl::Span<const string_view>)>;
 
-  CommandAggregator(string_view key, Callback cb) : key_(key), cb_(cb) {
+  CommandAggregator(string_view key, WriteCmdCallback cb) : key_(key), cb_(cb) {
   }
 
   ~CommandAggregator() {
@@ -51,7 +51,7 @@ class CommandAggregator {
   }
 
   string_view key_;
-  Callback cb_;
+  WriteCmdCallback cb_;
   vector<string> members_;
   absl::InlinedVector<string_view, 5> args_;
   size_t agg_bytes_ = 0;
@@ -59,7 +59,7 @@ class CommandAggregator {
 
 }  // namespace
 
-CmdSerializer::CmdSerializer(Callback cb) : cb_(std::move(cb)) {
+CmdSerializer::CmdSerializer(FlushSerialized cb) : cb_(std::move(cb)) {
 }
 
 void CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
