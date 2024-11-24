@@ -33,6 +33,9 @@ ABSL_FLAG(std::string, cluster_node_id, "",
           "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
           "replication ID (random string)");
 
+ABSL_FLAG(bool, managed_service_info, false,
+          "Hides some implementation details from users when true (i.e. in managed service env)");
+
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
 
@@ -122,10 +125,12 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
 
     info.master = {.id = id_, .ip = preferred_endpoint, .port = preferred_port};
 
-    for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
-      info.replicas.push_back({.id = replica.id,
-                               .ip = replica.address,
-                               .port = static_cast<uint16_t>(replica.listening_port)});
+    if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
+      for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
+        info.replicas.push_back({.id = replica.id,
+                                 .ip = replica.address,
+                                 .port = static_cast<uint16_t>(replica.listening_port)});
+      }
     }
   } else {
     // TODO: We currently don't save the master's ID in the replica

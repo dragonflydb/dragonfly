@@ -234,7 +234,7 @@ def verify_slots_result(port: int, answer: list, replicas) -> bool:
 
     info = answer[2]
     assert len(info) == 3
-    ip_addr = str(info[0], "utf-8")
+    ip_addr = info[0]
     assert is_local_host(ip_addr)
     assert info[1] == port
 
@@ -244,7 +244,7 @@ def verify_slots_result(port: int, answer: list, replicas) -> bool:
         replica = replicas[i - 3]
         rep_info = answer[i]
         assert len(rep_info) == 3
-        ip_addr = str(rep_info[0], "utf-8")
+        ip_addr = rep_info[0]
         assert is_local_host(ip_addr)
         assert rep_info[1] == replica.port
         assert rep_info[2] == replica.id
@@ -252,21 +252,21 @@ def verify_slots_result(port: int, answer: list, replicas) -> bool:
     return True
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "emulated"})
+# --managed_service_info means that Dragonfly is running in a managed service, so some details
+# are hidden from users, see https://github.com/dragonflydb/dragonfly/issues/4173
+@dfly_args({"proactor_threads": 4, "cluster_mode": "emulated", "managed_service_info": "true"})
 async def test_emulated_cluster_with_replicas(df_factory):
-    master = df_factory.create(port=BASE_PORT)
+    master = df_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1000)
     replicas = [df_factory.create(port=BASE_PORT + i, logtostdout=True) for i in range(1, 3)]
 
     df_factory.start_all([master, *replicas])
 
-    c_master = aioredis.Redis(port=master.port)
-    master_id = (await c_master.execute_command("CLUSTER MYID")).decode("utf-8")
+    c_master = master.client()
+    c_master_admin = master.admin_client()
+    master_id = await c_master.execute_command("CLUSTER MYID")
 
-    c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
-    replica_ids = [
-        (await c_replica.execute_command("CLUSTER MYID")).decode("utf-8")
-        for c_replica in c_replicas
-    ]
+    c_replicas = [replica.client() for replica in replicas]
+    replica_ids = [(await c_replica.execute_command("CLUSTER MYID")) for c_replica in c_replicas]
 
     for replica, c_replica in zip(replicas, c_replicas):
         res = await c_replica.execute_command("CLUSTER SLOTS")
@@ -279,7 +279,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
     # Connect replicas to master
     for replica, c_replica in zip(replicas, c_replicas):
         rc = await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        assert str(rc, "utf-8") == "OK"
+        assert rc == "OK"
 
     await asyncio.sleep(0.5)
 
@@ -293,10 +293,31 @@ async def test_emulated_cluster_with_replicas(df_factory):
     assert verify_slots_result(
         port=master.port,
         answer=res[0],
+        replicas=[],
+    )
+
+    res = await c_master_admin.execute_command("CLUSTER SLOTS")
+    assert verify_slots_result(
+        port=master.port,
+        answer=res[0],
         replicas=[ReplicaInfo(id, replica.port) for id, replica in zip(replica_ids, replicas)],
     )
 
     assert await c_master.execute_command("CLUSTER NODES") == {
+        f"127.0.0.1:{master.port}": {
+            "connected": True,
+            "epoch": "0",
+            "flags": "myself,master",
+            "last_ping_sent": "0",
+            "last_pong_rcvd": "0",
+            "master_id": "-",
+            "migrations": [],
+            "node_id": master_id,
+            "slots": [["0", "16383"]],
+        },
+    }
+
+    assert await c_master_admin.execute_command("CLUSTER NODES") == {
         f"127.0.0.1:{master.port}": {
             "connected": True,
             "epoch": "0",
