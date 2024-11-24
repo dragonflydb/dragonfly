@@ -771,7 +771,7 @@ Service::Service(ProactorPool* pp)
 
 Service::~Service() {
 #ifdef PRINT_STACKTRACES_ON_SIGNAL
-  ProactorBase::ClearSignal({SIGUSR1});
+  ProactorBase::ClearSignal({SIGUSR1}, true);
 #endif
 
   delete shard_set;
