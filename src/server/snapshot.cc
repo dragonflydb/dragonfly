@@ -18,6 +18,7 @@
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
@@ -84,7 +85,8 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
       if (bytes_serialized > flush_threshold) {
         size_t serialized = FlushSerialized(flush_state);
         VLOG(2) << "FlushSerialized " << serialized << " bytes";
-        ++stats_.big_value_preemptions;
+        auto& stats = ServerState::tlocal()->stats;
+        ++stats.big_value_preemptions;
       }
     };
   }
@@ -165,8 +167,9 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
-      if (cll->IsCancelled())
+      if (cll->IsCancelled()) {
         return;
+      }
 
       PrimeTable::Cursor next =
           pt->TraverseBuckets(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
@@ -434,8 +437,7 @@ size_t SliceSnapshot::GetTempBuffersSize() const {
 }
 
 RdbSaver::SnapshotStats SliceSnapshot::GetCurrentSnapshotProgress() const {
-  return {stats_.loop_serialized + stats_.side_saved, stats_.keys_total,
-          stats_.big_value_preemptions};
+  return {stats_.loop_serialized + stats_.side_saved, stats_.keys_total};
 }
 
 }  // namespace dfly

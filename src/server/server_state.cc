@@ -27,7 +27,7 @@ ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 17 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 18 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -49,6 +49,9 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(blocked_on_interpreter);
   ADD(rdb_save_usec);
   ADD(rdb_save_count);
+
+  ADD(big_value_preemptions);
+
   ADD(oom_error_cmd_cnt);
 
   if (this->tx_width_freq_arr.size() > 0) {

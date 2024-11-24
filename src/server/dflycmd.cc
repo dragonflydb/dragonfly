@@ -368,7 +368,6 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
 
     auto cb = [this, replica_ptr = replica_ptr](EngineShard* shard) {
       FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
-
       StopFullSyncInThread(flow, &replica_ptr->cntx, shard);
       StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
     };
@@ -589,12 +588,6 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
 void DflyCmd::StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(shard);
 
-  absl::Cleanup clean([&]() {
-    // Reset cleanup and saver
-    flow->cleanup = []() {};
-    flow->saver.reset();
-  });
-
   error_code ec = flow->saver->StopFullSyncInShard(shard);
   if (ec) {
     cntx->ReportError(ec);
@@ -606,6 +599,10 @@ void DflyCmd::StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* s
     cntx->ReportError(ec);
     return;
   }
+
+  // Reset cleanup and saver
+  flow->cleanup = []() {};
+  flow->saver.reset();
 }
 
 void DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
@@ -692,6 +689,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
     return;
 
   ShardId sid = EngineShard::tlocal()->shard_id();
+
   vector<uint32_t> deleted;
 
   for (auto [sync_id, replica_ptr] : replica_infos_) {

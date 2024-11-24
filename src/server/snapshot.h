@@ -167,7 +167,6 @@ class SliceSnapshot {
     size_t side_saved = 0;
     size_t savecb_calls = 0;
     size_t keys_total = 0;
-    size_t big_value_preemptions = 0;
   } stats_;
 
   ThreadLocalMutex big_value_mu_;
