@@ -1104,10 +1104,13 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
 
     // We need to acquire the fp locks because the executing callback
     // within RunCallback below might preempt.
-    bool keys_unlocked = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
+    auto [keys_unlocked, has_duplicates] = GetDbSlice(shard->shard_id()).Acquire(mode, lock_args);
     lock_granted = shard_unlocked && keys_unlocked;
 
     sd.local_mask |= KEYLOCK_ACQUIRED;
+    if (has_duplicates)
+      sd.local_mask |= DUPLICATE_KEYS_HINT;
+
     if (lock_granted) {
       sd.local_mask |= OUT_OF_ORDER;
     }

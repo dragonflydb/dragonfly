@@ -363,7 +363,10 @@ class DbSlice {
 
   void OnCbFinish();
 
-  bool Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
+  // Returns: first=true if the keys are locked under m.
+  //          second=true, if lock_args have duplicate fingerprints.
+  std::pair<bool, bool> Acquire(IntentLock::Mode m, const KeyLockArgs& lock_args);
+
   void Release(IntentLock::Mode m, const KeyLockArgs& lock_args);
 
   // Returns true if the key can be locked under m. Does not lock.
