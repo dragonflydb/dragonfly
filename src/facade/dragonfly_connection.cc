@@ -1122,7 +1122,7 @@ Connection::ParserStatus Connection::ParseRedis() {
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
     io_buf_.ConsumeInput(consumed);
-  } while (RedisParser::OK == result && !reply_builder_->GetError());
+  } while (RedisParser::OK == result && io_buf_.InputLen() > 0 && !reply_builder_->GetError());
 
   parser_error_ = result;
   if (result == RedisParser::OK)

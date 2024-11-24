@@ -125,9 +125,9 @@ TEST_F(RedisParserTest, Multi2) {
 
 TEST_F(RedisParserTest, Multi3) {
   const char kFirst[] = "*3\r\n$3\r\nSET\r\n$16\r\nkey:";
-  const char kSecond[] = "key:000002273458\r\n$3\r\nVXK";
+  const char kSecond[] = "000002273458\r\n$3\r\nVXK";
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(kFirst));
-  ASSERT_EQ(strlen(kFirst) - 4, consumed_);
+  ASSERT_EQ(strlen(kFirst), consumed_);
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(kSecond));
   ASSERT_EQ(strlen(kSecond), consumed_);
   ASSERT_EQ(RedisParser::OK, Parse("\r\n*3\r\n$3\r\nSET"));
