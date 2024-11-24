@@ -252,14 +252,17 @@ def verify_slots_result(port: int, answer: list, replicas) -> bool:
     return True
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "emulated"})
+# --managed_service_info means that Dragonfly is running in a managed service, so some details
+# are hidden from users, see https://github.com/dragonflydb/dragonfly/issues/4173
+@dfly_args({"proactor_threads": 4, "cluster_mode": "emulated", "managed_service_info": "true"})
 async def test_emulated_cluster_with_replicas(df_factory):
-    master = df_factory.create(port=BASE_PORT)
+    master = df_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1000)
     replicas = [df_factory.create(port=BASE_PORT + i, logtostdout=True) for i in range(1, 3)]
 
     df_factory.start_all([master, *replicas])
 
     c_master = aioredis.Redis(port=master.port)
+    c_master_admin = aioredis.Redis(port=master.admin_port)
     master_id = (await c_master.execute_command("CLUSTER MYID")).decode("utf-8")
 
     c_replicas = [aioredis.Redis(port=replica.port) for replica in replicas]
@@ -293,10 +296,31 @@ async def test_emulated_cluster_with_replicas(df_factory):
     assert verify_slots_result(
         port=master.port,
         answer=res[0],
+        replicas=[],
+    )
+
+    res = await c_master_admin.execute_command("CLUSTER SLOTS")
+    assert verify_slots_result(
+        port=master.port,
+        answer=res[0],
         replicas=[ReplicaInfo(id, replica.port) for id, replica in zip(replica_ids, replicas)],
     )
 
     assert await c_master.execute_command("CLUSTER NODES") == {
+        f"127.0.0.1:{master.port}": {
+            "connected": True,
+            "epoch": "0",
+            "flags": "myself,master",
+            "last_ping_sent": "0",
+            "last_pong_rcvd": "0",
+            "master_id": "-",
+            "migrations": [],
+            "node_id": master_id,
+            "slots": [["0", "16383"]],
+        },
+    }
+
+    assert await c_master_admin.execute_command("CLUSTER NODES") == {
         f"127.0.0.1:{master.port}": {
             "connected": True,
             "epoch": "0",
