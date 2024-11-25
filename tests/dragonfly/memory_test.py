@@ -29,6 +29,12 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     min_rss = 3 * 1024 * 1024 * 1024  # 3gb
     max_unaccounted = 200 * 1024 * 1024  # 200mb
 
+    # There is a big rss spike when this test is ran in one the gh runners (not the self hosted)
+    # and it fails. This rss spike is not observed locally or on our self host runner so
+    # this adjustment is mostly for CI
+    if type == "STREAM":
+        max_unaccounted = max_unaccounted * 3
+
     client = df_server.client()
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
@@ -47,7 +53,7 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     assert delta < max_unaccounted
     delta = info["used_memory_rss"] - info["object_used_memory"]
     # TODO investigate why it fails on string
-    if type == "json":
+    if type == "JSON" or type == "STREAM":
         assert delta > 0
         assert delta < max_unaccounted
 
