@@ -20,13 +20,7 @@ if [ -z "$HEALTHCHECK_PORT" ]; then
   PORT=$(echo $DF_NET | grep -oE ':[0-9]+' | cut -c2- | tail -n 1)
 fi
 
-# If we're running with TLS enabled, utilise OpenSSL for the check
-if [ -f "/etc/dragonfly/tls/ca.crt" ]
-then
-    _healthcheck="openssl s_client -connect ${HOST}:${PORT} -CAfile /etc/dragonfly/tls/ca.crt -quiet -no_ign_eof"
-else
-    _healthcheck="nc -q1 $HOST $PORT"
-fi
+_healthcheck="nc -q1 $HOST $PORT"
 
 echo PING | ${_healthcheck}
 
