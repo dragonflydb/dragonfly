@@ -501,6 +501,12 @@ string_view Schema::LookupAlias(string_view alias) const {
   return alias;
 }
 
+string_view Schema::LookupIdentifier(string_view identifier) const {
+  if (auto it = fields.find(identifier); it != fields.end())
+    return it->second.short_name;
+  return identifier;
+}
+
 IndicesOptions::IndicesOptions() {
   static absl::flat_hash_set<std::string> kDefaultStopwords{
       "a",    "is",    "the",  "an",    "and",   "are",  "as",   "at", "be",  "but",  "by",
@@ -646,21 +652,10 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
-vector<pair<string, SortableValue>> FieldIndices::ExtractStoredValues(DocId doc) const {
-  vector<pair<string, SortableValue>> out;
-  for (const auto& [ident, index] : sort_indices_) {
-    out.emplace_back(ident, index->Lookup(doc));
-  }
-  return out;
-}
-
-absl::flat_hash_set<std::string_view> FieldIndices::GetSortIndiciesFields() const {
-  absl::flat_hash_set<std::string_view> fields_idents;
-  fields_idents.reserve(sort_indices_.size());
-  for (const auto& [ident, _] : sort_indices_) {
-    fields_idents.insert(ident);
-  }
-  return fields_idents;
+SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_identifier) const {
+  auto it = sort_indices_.find(field_identifier);
+  DCHECK(it != sort_indices_.end());
+  return it->second->Lookup(doc);
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;

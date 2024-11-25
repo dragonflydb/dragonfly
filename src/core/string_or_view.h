@@ -65,6 +65,10 @@ class StringOrView {
       val_ = std::string{std::get<std::string_view>(val_)};
   }
 
+  bool empty() const {
+    return visit([](const auto& s) { return s.empty(); }, val_);
+  }
+
  private:
   std::variant<std::string_view, std::string> val_;
 };

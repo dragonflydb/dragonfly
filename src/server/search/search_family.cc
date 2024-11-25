@@ -185,7 +185,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 
 std::string_view ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (!field.empty() && field.front() == '@') {
+  if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @ if exists
   }
   return field;
@@ -193,7 +193,7 @@ std::string_view ParseField(CmdArgParser* parser) {
 
 std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (!field.empty() && field.front() == '@') {
+  if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @
   } else {
     // Temporary warning until we can throw an error
@@ -203,16 +203,27 @@ std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
-void ParseLoadFields(CmdArgParser* parser, std::optional<OwnedSearchFieldsList>* load_fields) {
+void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load_fields) {
+  // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
   size_t num_fields = parser->Next<size_t>();
   if (!load_fields->has_value()) {
     load_fields->emplace();
   }
 
   while (num_fields--) {
-    string_view field = ParseField(parser);
-    string_view alias = parser->Check("AS") ? parser->Next() : field;
-    load_fields->value().emplace_back(field, alias);
+    string_view str = parser->Next();
+
+    if (absl::StartsWith(str, "@"sv)) {
+      str.remove_prefix(1);  // remove leading @
+    }
+
+    StringOrView name = StringOrView::FromString(std::string{str});
+    if (parser->Check("AS")) {
+      load_fields->value().emplace_back(name, true,
+                                        StringOrView::FromString(parser->Next<std::string>()));
+    } else {
+      load_fields->value().emplace_back(name, true);
+    }
   }
 }
 
@@ -248,12 +259,19 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
       }
 
       // RETURN {num} [{ident} AS {name}...]
+      /* TODO: Change to num_strings. In Redis strings number is expected. For example: RETURN 3 $.a
+       * AS a */
       size_t num_fields = parser->Next<size_t>();
       params.return_fields.emplace();
       while (params.return_fields->size() < num_fields) {
-        string_view ident = parser->Next();
-        string_view alias = parser->Check("AS") ? parser->Next() : ident;
-        params.return_fields->emplace_back(ident, alias);
+        StringOrView name = StringOrView::FromString(parser->Next<std::string>());
+
+        if (parser->Check("AS")) {
+          params.return_fields->emplace_back(std::move(name), true,
+                                             StringOrView::FromString(parser->Next<std::string>()));
+        } else {
+          params.return_fields->emplace_back(std::move(name), true);
+        }
       }
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
       params.load_fields.emplace();
@@ -261,7 +279,8 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
-      params.sort_option = search::SortOption{string{parser->Next()}, bool(parser->Check("DESC"))};
+      params.sort_option =
+          search::SortOption{parser->Next<std::string>(), bool(parser->Check("DESC"))};
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
