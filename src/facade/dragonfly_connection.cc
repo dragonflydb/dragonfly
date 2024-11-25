@@ -479,22 +479,23 @@ void Connection::DispatchOperations::operator()(const PubMessage& pub_msg) {
   }
   arr[i++] = pub_msg.channel;
   arr[i++] = pub_msg.message;
-  rbuilder->SendStringArr(absl::Span<string_view>{arr.data(), i},
-                          RedisReplyBuilder::CollectionType::PUSH);
+  rbuilder->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
+                           RedisReplyBuilder::CollectionType::PUSH);
 }
 
 void Connection::DispatchOperations::operator()(Connection::PipelineMessage& msg) {
   DVLOG(2) << "Dispatching pipeline: " << ToSV(msg.args.front());
 
   self->service_->DispatchCommand(CmdArgList{msg.args.data(), msg.args.size()},
-                                  self->reply_builder_, self->cc_.get());
+                                  self->reply_builder_.get(), self->cc_.get());
 
   self->last_interaction_ = time(nullptr);
   self->skip_next_squashing_ = false;
 }
 
 void Connection::DispatchOperations::operator()(const Connection::MCPipelineMessage& msg) {
-  self->service_->DispatchMC(msg.cmd, msg.value, static_cast<MCReplyBuilder*>(self->reply_builder_),
+  self->service_->DispatchMC(msg.cmd, msg.value,
+                             static_cast<MCReplyBuilder*>(self->reply_builder_.get()),
                              self->cc_.get());
   self->last_interaction_ = time(nullptr);
 }
@@ -518,7 +519,7 @@ void Connection::DispatchOperations::operator()(const InvalidationMessage& msg) 
     rbuilder->SendNull();
   } else {
     std::string_view keys[] = {msg.key};
-    rbuilder->SendStringArr(keys);
+    rbuilder->SendBulkStrArr(keys);
   }
 }
 
@@ -538,13 +539,12 @@ void UpdateLibNameVerMap(const string& name, const string& ver, int delta) {
 Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
                        ServiceInterface* service)
     : io_buf_(kMinReadSize),
+      protocol_(protocol),
       http_listener_(http_listener),
       ssl_ctx_(ctx),
       service_(service),
       flags_(0) {
   static atomic_uint32_t next_id{1};
-
-  protocol_ = protocol;
 
   constexpr size_t kReqSz = sizeof(Connection::PipelineMessage);
   static_assert(kReqSz <= 256 && kReqSz >= 200);
@@ -630,9 +630,6 @@ void Connection::OnPostMigrateThread() {
   stats_ = &tl_facade_stats->conn_stats;
   ++stats_->num_conns;
   stats_->read_buf_capacity += io_buf_.Capacity();
-  if (cc_->replica_conn) {
-    ++stats_->num_replicas;
-  }
 }
 
 void Connection::OnConnectionStart() {
@@ -724,8 +721,7 @@ void Connection::HandleRequests() {
   // because both Write and Recv internally check if the socket was shut
   // down and return with an error accordingly.
   if (http_res && socket_->IsOpen()) {
-    cc_.reset(service_->CreateContext(socket_.get(), this));
-    reply_builder_ = cc_->reply_builder_old();
+    cc_.reset(service_->CreateContext(this));
 
     if (*http_res) {
       VLOG(1) << "HTTP1.1 identified";
@@ -745,19 +741,28 @@ void Connection::HandleRequests() {
       // Release the ownership of the socket from http_conn so it would stay with
       // this connection.
       http_conn.ReleaseSocket();
-    } else {
+    } else {  // non-http
       if (breaker_cb_) {
         socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
       }
-
+      switch (protocol_) {
+        case Protocol::REDIS:
+          reply_builder_.reset(new RedisReplyBuilder(socket_.get()));
+          break;
+        case Protocol::MEMCACHE:
+          reply_builder_.reset(new MCReplyBuilder(socket_.get()));
+          break;
+        default:
+          break;
+      }
       ConnectionFlow();
 
       socket_->CancelOnErrorCb();  // noop if nothing is registered.
+      VLOG(1) << "Closed connection for peer "
+              << GetClientInfo(fb2::ProactorBase::me()->GetPoolIndex());
+      reply_builder_.reset();
     }
-    VLOG(1) << "Closed connection for peer "
-            << GetClientInfo(fb2::ProactorBase::me()->GetPoolIndex());
     cc_.reset();
-    reply_builder_ = nullptr;
   }
 }
 
@@ -811,9 +816,10 @@ std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() co
   string_view phase_name = PHASE_NAMES[phase_];
 
   if (cc_) {
-    DCHECK(reply_builder_);
     string cc_info = service_->GetContextInfo(cc_.get()).Format();
-    if (reply_builder_->IsSendActive())
+
+    // reply_builder_ may be null if the connection is in the setup phase, for example.
+    if (reply_builder_ && reply_builder_->IsSendActive())
       phase_name = "send";
     absl::StrAppend(&after, " ", cc_info);
   }
@@ -929,6 +935,8 @@ io::Result<bool> Connection::CheckForHttpProto() {
 }
 
 void Connection::ConnectionFlow() {
+  DCHECK(reply_builder_);
+
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
@@ -986,7 +994,7 @@ void Connection::ConnectionFlow() {
     VLOG(1) << "Error parser status " << parser_error_;
 
     if (redis_parser_) {
-      SendProtocolError(RedisParser::Result(parser_error_), reply_builder_);
+      SendProtocolError(RedisParser::Result(parser_error_), reply_builder_.get());
     } else {
       DCHECK(memcache_parser_);
       reply_builder_->SendProtocolError("bad command line format");
@@ -1089,7 +1097,7 @@ Connection::ParserStatus Connection::ParseRedis() {
 
   auto dispatch_sync = [this, &parse_args, &cmd_vec] {
     RespExpr::VecToArgList(parse_args, &cmd_vec);
-    service_->DispatchCommand(absl::MakeSpan(cmd_vec), reply_builder_, cc_.get());
+    service_->DispatchCommand(absl::MakeSpan(cmd_vec), reply_builder_.get(), cc_.get());
   };
   auto dispatch_async = [this, &parse_args, tlh = mi_heap_get_backing()]() -> MessageHandle {
     return {FromArgs(std::move(parse_args), tlh)};
@@ -1114,7 +1122,7 @@ Connection::ParserStatus Connection::ParseRedis() {
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
     io_buf_.ConsumeInput(consumed);
-  } while (RedisParser::OK == result && !reply_builder_->GetError());
+  } while (RedisParser::OK == result && io_buf_.InputLen() > 0 && !reply_builder_->GetError());
 
   parser_error_ = result;
   if (result == RedisParser::OK)
@@ -1134,14 +1142,14 @@ auto Connection::ParseMemcache() -> ParserStatus {
   string_view value;
 
   auto dispatch_sync = [this, &cmd, &value] {
-    service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(reply_builder_), cc_.get());
+    service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(reply_builder_.get()), cc_.get());
   };
 
   auto dispatch_async = [&cmd, &value]() -> MessageHandle {
     return {make_unique<MCPipelineMessage>(std::move(cmd), value)};
   };
 
-  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_);
+  MCReplyBuilder* builder = static_cast<MCReplyBuilder*>(reply_builder_.get());
 
   do {
     string_view str = ToSV(io_buf_.InputBuffer());
@@ -1358,7 +1366,7 @@ bool Connection::ShouldEndDispatchFiber(const MessageHandle& msg) {
 
 void Connection::SquashPipeline() {
   DCHECK_EQ(dispatch_q_.size(), pending_pipeline_cmd_cnt_);
-  DCHECK_EQ(reply_builder_->type(), SinkReplyBuilder::REDIS);  // Only Redis is supported.
+  DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
 
   vector<ArgSlice> squash_cmds;
   squash_cmds.reserve(dispatch_q_.size());
@@ -1374,10 +1382,10 @@ void Connection::SquashPipeline() {
   cc_->async_dispatch = true;
 
   size_t dispatched =
-      service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_, cc_.get());
+      service_->DispatchManyCommands(absl::MakeSpan(squash_cmds), reply_builder_.get(), cc_.get());
 
   if (pending_pipeline_cmd_cnt_ == squash_cmds.size()) {  // Flush if no new commands appeared
-    reply_builder_->FlushBatch();
+    reply_builder_->Flush();
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
   }
 
@@ -1397,7 +1405,7 @@ void Connection::SquashPipeline() {
 }
 
 void Connection::ClearPipelinedMessages() {
-  DispatchOperations dispatch_op{reply_builder_, this};
+  DispatchOperations dispatch_op{reply_builder_.get(), this};
 
   // Recycle messages even from disconnecting client to keep properly track of memory stats
   // As well as to avoid pubsub backpressure leakege.
@@ -1418,8 +1426,11 @@ std::string Connection::DebugInfo() const {
 
   absl::StrAppend(&info, "address=", uint64_t(this), ", ");
   absl::StrAppend(&info, "phase=", phase_, ", ");
-  absl::StrAppend(&info, "dispatch(s/a)=", cc_->sync_dispatch, " ", cc_->async_dispatch, ", ");
-  absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
+  if (cc_) {
+    // In some rare cases cc_ can be null, see https://github.com/dragonflydb/dragonfly/pull/3873
+    absl::StrAppend(&info, "dispatch(s/a)=", cc_->sync_dispatch, " ", cc_->async_dispatch, ", ");
+    absl::StrAppend(&info, "closing=", cc_->conn_closing, ", ");
+  }
   absl::StrAppend(&info, "dispatch_fiber:joinable=", dispatch_fb_.IsJoinable(), ", ");
 
   bool intrusive_front = dispatch_q_.size() > 0 && dispatch_q_.front().IsControl();
@@ -1427,11 +1438,13 @@ std::string Connection::DebugInfo() const {
   absl::StrAppend(&info, "dispatch_queue:pipelined=", pending_pipeline_cmd_cnt_, ", ");
   absl::StrAppend(&info, "dispatch_queue:intrusive=", intrusive_front, ", ");
 
-  absl::StrAppend(&info, "state=");
-  if (cc_->paused)
-    absl::StrAppend(&info, "p");
-  if (cc_->blocked)
-    absl::StrAppend(&info, "b");
+  if (cc_) {
+    absl::StrAppend(&info, "state=");
+    if (cc_->paused)
+      absl::StrAppend(&info, "p");
+    if (cc_->blocked)
+      absl::StrAppend(&info, "b");
+  }
 
   absl::StrAppend(&info, "}");
   return info;
@@ -1445,7 +1458,7 @@ std::string Connection::DebugInfo() const {
 void Connection::ExecutionFiber() {
   ThisFiber::SetName("ExecutionFiber");
 
-  DispatchOperations dispatch_op{reply_builder_, this};
+  DispatchOperations dispatch_op{reply_builder_.get(), this};
 
   size_t squashing_threshold = GetFlag(FLAGS_pipeline_squash);
 
@@ -1498,7 +1511,7 @@ void Connection::ExecutionFiber() {
       // last command to reply and flush. If it doesn't reply (i.e. is a control message like
       // migrate), we have to flush manually.
       if (dispatch_q_.empty() && !msg.IsReplying()) {
-        reply_builder_->FlushBatch();
+        reply_builder_->Flush();
       }
 
       if (ShouldEndDispatchFiber(msg)) {
@@ -1809,7 +1822,7 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
   size_t mem = sizeof(*this) + dfly::HeapSize(dispatch_q_) + dfly::HeapSize(name_) +
                dfly::HeapSize(tmp_parse_args_) + dfly::HeapSize(tmp_cmd_vec_) +
                dfly::HeapSize(memcache_parser_) + dfly::HeapSize(redis_parser_) +
-               dfly::HeapSize(cc_);
+               dfly::HeapSize(cc_) + dfly::HeapSize(reply_builder_);
 
   // We add a hardcoded 9k value to accomodate for the part of the Fiber stack that is in use.
   // The allocated stack is actually larger (~130k), but only a small fraction of that (9k
@@ -1825,10 +1838,6 @@ Connection::MemoryUsage Connection::GetMemoryUsage() const {
 void Connection::DecreaseStatsOnClose() {
   stats_->read_buf_capacity -= io_buf_.Capacity();
 
-  // Update num_replicas if this was a replica connection.
-  if (cc_->replica_conn) {
-    --stats_->num_replicas;
-  }
   --stats_->num_conns;
 }
 

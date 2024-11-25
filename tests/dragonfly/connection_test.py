@@ -783,6 +783,16 @@ async def test_tls_reject(
         await client.ping()
 
 
+@dfly_args({"proactor_threads": "4", "pipeline_squash": 1})
+async def test_squashed_pipeline_eval(async_client: aioredis.Redis):
+    p = async_client.pipeline(transaction=False)
+    for _ in range(5):
+        # Deliberately lowcase EVAL to test that it is not squashed
+        p.execute_command("eval", "return redis.call('set', KEYS[1], 'value')", 1, "key")
+    res = await p.execute()
+    assert res == ["OK"] * 5
+
+
 @dfly_args({"proactor_threads": "4", "pipeline_squash": 10})
 async def test_squashed_pipeline(async_client: aioredis.Redis):
     p = async_client.pipeline(transaction=False)

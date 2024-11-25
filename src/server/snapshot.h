@@ -89,7 +89,7 @@ class SliceSnapshot {
   void SwitchIncrementalFb(Context* cntx, LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(PrimeIterator it);
+  bool BucketSaveCb(PrimeTable::bucket_iterator it);
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.

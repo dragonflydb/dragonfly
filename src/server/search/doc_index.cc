@@ -41,7 +41,7 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
       return;
 
     auto accessor = GetAccessor(op_args.db_cntx, pv);
-    f(key, accessor.get());
+    f(key, *accessor);
   };
 
   PrimeTable::Cursor cursor;
@@ -60,8 +60,8 @@ bool SerializedSearchDoc::operator>=(const SerializedSearchDoc& other) const {
   return this->score >= other.score;
 }
 
-bool SearchParams::ShouldReturnField(std::string_view field) const {
-  auto cb = [field](const auto& entry) { return entry.first == field; };
+bool SearchParams::ShouldReturnField(std::string_view alias) const {
+  auto cb = [alias](const auto& entry) { return entry.GetShortName() == alias; };
   return !return_fields || any_of(return_fields->begin(), return_fields->end(), cb);
 }
 
@@ -146,12 +146,14 @@ ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
   return id;
 }
 
-ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Remove(string_view key) {
-  DCHECK_GT(ids_.count(key), 0u);
+std::optional<ShardDocIndex::DocId> ShardDocIndex::DocKeyIndex::Remove(string_view key) {
+  auto it = ids_.extract(key);
+  if (!it) {
+    return std::nullopt;
+  }
 
-  DocId id = ids_.find(key)->second;
+  const DocId id = it.mapped();
   keys_[id] = "";
-  ids_.erase(key);
   free_ids_.push_back(id);
 
   return id;
@@ -184,7 +186,13 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr) 
   key_index_ = DocKeyIndex{};
   indices_.emplace(base_->schema, base_->options, mr);
 
-  auto cb = [this](string_view key, BaseAccessor* doc) { indices_->Add(key_index_.Add(key), doc); };
+  auto cb = [this](string_view key, const BaseAccessor& doc) {
+    DocId id = key_index_.Add(key);
+    if (!indices_->Add(id, doc)) {
+      key_index_.Remove(key);
+    }
+  };
+
   TraverseAllMatching(*base_, op_args, cb);
 
   VLOG(1) << "Indexed " << key_index_.Size() << " docs on " << base_->prefix;
@@ -195,7 +203,10 @@ void ShardDocIndex::AddDoc(string_view key, const DbContext& db_cntx, const Prim
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
-  indices_->Add(key_index_.Add(key), accessor.get());
+  DocId id = key_index_.Add(key);
+  if (!indices_->Add(id, *accessor)) {
+    key_index_.Remove(key);
+  }
 }
 
 void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const PrimeValue& pv) {
@@ -203,20 +214,22 @@ void ShardDocIndex::RemoveDoc(string_view key, const DbContext& db_cntx, const P
     return;
 
   auto accessor = GetAccessor(db_cntx, pv);
-  DocId id = key_index_.Remove(key);
-  indices_->Remove(id, accessor.get());
+  auto id = key_index_.Remove(key);
+  if (id) {
+    indices_->Remove(id.value(), *accessor);
+  }
 }
 
 bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
   return base_->Matches(key, obj_code);
 }
 
-SearchFieldsList ToSV(const std::optional<OwnedSearchFieldsList>& fields) {
+SearchFieldsList ToSV(const search::Schema& schema, const std::optional<SearchFieldsList>& fields) {
   SearchFieldsList sv_fields;
   if (fields) {
     sv_fields.reserve(fields->size());
-    for (const auto& [fident, fname] : fields.value()) {
-      sv_fields.emplace_back(fident, fname);
+    for (const auto& field : fields.value()) {
+      sv_fields.push_back(field.View());
     }
   }
   return sv_fields;
@@ -230,8 +243,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   if (!search_results.error.empty())
     return SearchResult{facade::ErrorReply{std::move(search_results.error)}};
 
-  SearchFieldsList fields_to_load =
-      ToSV(params.ShouldReturnAllFields() ? params.load_fields : params.return_fields);
+  SearchFieldsList fields_to_load = ToSV(
+      base_->schema, params.ShouldReturnAllFields() ? params.load_fields : params.return_fields);
 
   vector<SerializedSearchDoc> out;
   out.reserve(search_results.ids.size());
@@ -272,6 +285,57 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
                       std::move(search_results.profile)};
 }
 
+using SortIndiciesFieldsList =
+    std::vector<std::pair<string_view /*identifier*/, string_view /*alias*/>>;
+
+std::pair<SearchFieldsList, SortIndiciesFieldsList> PreprocessAggregateFields(
+    const search::Schema& schema, const AggregateParams& params,
+    const std::optional<SearchFieldsList>& load_fields) {
+  auto is_sortable = [&schema](std::string_view fident) {
+    auto it = schema.fields.find(fident);
+    return it != schema.fields.end() && (it->second.flags & search::SchemaField::SORTABLE);
+  };
+
+  absl::flat_hash_map<std::string_view, SearchField> fields_by_identifier;
+  absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
+  fields_by_identifier.reserve(schema.field_names.size());
+  sort_indicies_aliases.reserve(schema.field_names.size());
+
+  for (const auto& [fname, fident] : schema.field_names) {
+    if (!is_sortable(fident)) {
+      fields_by_identifier[fident] = {StringOrView::FromView(fident), true,
+                                      StringOrView::FromView(fname)};
+    } else {
+      sort_indicies_aliases[fident] = fname;
+    }
+  }
+
+  if (load_fields) {
+    for (const auto& field : load_fields.value()) {
+      const auto& fident = field.GetIdentifier(schema, false);
+      if (!is_sortable(fident)) {
+        fields_by_identifier[fident] = field.View();
+      } else {
+        sort_indicies_aliases[fident] = field.GetShortName();
+      }
+    }
+  }
+
+  SearchFieldsList fields;
+  fields.reserve(fields_by_identifier.size());
+  for (auto& [_, field] : fields_by_identifier) {
+    fields.emplace_back(std::move(field));
+  }
+
+  SortIndiciesFieldsList sort_fields;
+  sort_fields.reserve(sort_indicies_aliases.size());
+  for (auto& [fident, fname] : sort_indicies_aliases) {
+    sort_fields.emplace_back(fident, fname);
+  }
+
+  return {std::move(fields), std::move(sort_fields)};
+}
+
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
@@ -281,8 +345,8 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
   if (!search_results.error.empty())
     return {};
 
-  SearchFieldsList fields_to_load =
-      GetFieldsToLoad(params.load_fields, indices_->GetSortIndiciesFields());
+  auto [fields_to_load, sort_indicies] =
+      PreprocessAggregateFields(base_->schema, params, params.load_fields);
 
   vector<absl::flat_hash_map<string, search::SortableValue>> out;
   for (DocId doc : search_results.ids) {
@@ -293,39 +357,21 @@ vector<SearchDocData> ShardDocIndex::SearchForAggregator(
       continue;
 
     auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
-    auto extracted = indices_->ExtractStoredValues(doc);
+
+    SearchDocData extracted_sort_indicies;
+    extracted_sort_indicies.reserve(sort_indicies.size());
+    for (const auto& [fident, fname] : sort_indicies) {
+      extracted_sort_indicies[fname] = indices_->GetSortIndexValue(doc, fident);
+    }
 
     SearchDocData loaded = accessor->Serialize(base_->schema, fields_to_load);
 
-    out.emplace_back(make_move_iterator(extracted.begin()), make_move_iterator(extracted.end()));
+    out.emplace_back(make_move_iterator(extracted_sort_indicies.begin()),
+                     make_move_iterator(extracted_sort_indicies.end()));
     out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
   }
 
   return out;
-}
-
-SearchFieldsList ShardDocIndex::GetFieldsToLoad(
-    const std::optional<OwnedSearchFieldsList>& load_fields,
-    const absl::flat_hash_set<std::string_view>& skip_fields) const {
-  // identifier to short name
-  absl::flat_hash_map<std::string_view, std::string_view> unique_fields;
-  unique_fields.reserve(base_->schema.field_names.size());
-
-  for (const auto& [fname, fident] : base_->schema.field_names) {
-    if (!skip_fields.contains(fident)) {
-      unique_fields[fident] = fname;
-    }
-  }
-
-  if (load_fields) {
-    for (const auto& [fident, fname] : load_fields.value()) {
-      if (!skip_fields.contains(fident)) {
-        unique_fields[fident] = fname;
-      }
-    }
-  }
-
-  return {unique_fields.begin(), unique_fields.end()};
 }
 
 DocIndexInfo ShardDocIndex::GetInfo() const {

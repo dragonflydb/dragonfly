@@ -1147,6 +1147,29 @@ TEST_F(MultiEvalTest, MultiAndEval) {
   Run({"eval", "return 'OK';", "0"});
   auto resp = Run({"exec"});
   EXPECT_EQ(resp, "OK");
+
+  // We had a bug running script load inside multi
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
+  Run({"exec"});
+
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
+  Run({"get", "x"});
+  Run({"exec"});
+
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
+  Run({"mset", "x1", "y1", "x2", "y2"});
+  Run({"exec"});
+
+  Run({"multi"});
+  Run({"script", "load", "return '5'"});
+  Run({"eval", "return redis.call('set', 'x', 'y')", "1", "x"});
+  Run({"get", "x"});
+  Run({"exec"});
+
+  Run({"get", "x"});
 }
 
 TEST_F(MultiTest, MultiTypes) {
@@ -1160,6 +1183,40 @@ TEST_F(MultiTest, MultiTypes) {
   EXPECT_THAT(Run({"type", "erg2"}), "QUEUED");
   EXPECT_THAT(Run({"exec"}),
               RespArray(ElementsAre("none", "none", "none", "none", "none", "none")));
+}
+
+TEST_F(MultiTest, EvalRo) {
+  RespExpr resp;
+
+  resp = Run({"set", "foo", "bar"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"eval_ro", "return redis.call('get', KEYS[1])", "1", "foo"});
+  EXPECT_THAT(resp, "bar");
+
+  resp = Run({"eval_ro", "return redis.call('set', KEYS[1], 'car')", "1", "foo"});
+  EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
+}
+
+TEST_F(MultiTest, EvalShaRo) {
+  RespExpr resp;
+
+  const char* read_script = "return redis.call('get', KEYS[1]);";
+  const char* write_script = "return redis.call('set', KEYS[1], 'car');";
+
+  auto sha_resp = Run({"script", "load", read_script});
+  auto read_sha = facade::ToSV(sha_resp.GetBuf());
+  sha_resp = Run({"script", "load", write_script});
+  auto write_sha = facade::ToSV(sha_resp.GetBuf());
+
+  resp = Run({"set", "foo", "bar"});
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"evalsha_ro", read_sha, "1", "foo"});
+  EXPECT_THAT(resp, "bar");
+
+  resp = Run({"evalsha_ro", write_sha, "1", "foo"});
+  EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
 }
 
 }  // namespace dfly

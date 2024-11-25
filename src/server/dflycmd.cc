@@ -77,7 +77,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
                               EngineShard* shard) {
   // We don't want any writes to the journal after we send the `PING`,
   // and expirations could ruin that.
-  namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
+  namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
   shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {}, true);
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
@@ -455,7 +455,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   absl::Cleanup cleanup([] {
     VLOG(2) << "Enabling expiration";
     shard_set->RunBriefInParallel([](EngineShard* shard) {
-      namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+      namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
     });
   });
 

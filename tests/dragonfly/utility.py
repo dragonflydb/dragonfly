@@ -83,8 +83,8 @@ async def tick_timer(func, timeout=5, step=0.1):
         await asyncio.sleep(step)
 
     if last_error:
-        raise RuntimeError("Timed out!") from last_error
-    raise RuntimeError("Timed out!")
+        raise TimeoutError("Timed out!") from last_error
+    raise TimeoutError("Timed out!")
 
 
 async def info_tick_timer(client: aioredis.Redis, section=None, **kwargs):
@@ -113,7 +113,7 @@ async def wait_available_async(
             assert "Dragonfly is loading the dataset in memory" in str(e)
     timeout -= time.time() - start
     if timeout <= 0:
-        raise RuntimeError("Timed out!")
+        raise TimeoutError("Timed out!")
 
     # Secondly for replicas, we make sure they reached stable state replicaton
     async for info, breaker in info_tick_timer(clients, "REPLICATION", timeout=timeout):

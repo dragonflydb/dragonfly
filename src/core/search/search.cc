@@ -501,6 +501,12 @@ string_view Schema::LookupAlias(string_view alias) const {
   return alias;
 }
 
+string_view Schema::LookupIdentifier(string_view identifier) const {
+  if (auto it = fields.find(identifier); it != fields.end())
+    return it->second.short_name;
+  return identifier;
+}
+
 IndicesOptions::IndicesOptions() {
   static absl::flat_hash_set<std::string> kDefaultStopwords{
       "a",    "is",    "the",  "an",    "and",   "are",  "as",   "at", "be",  "but",  "by",
@@ -571,23 +577,48 @@ void FieldIndices::CreateSortIndices(PMR_NS::memory_resource* mr) {
   }
 }
 
-void FieldIndices::Add(DocId doc, DocumentAccessor* access) {
-  for (auto& [field, index] : indices_)
-    index->Add(doc, access, field);
-  for (auto& [field, sort_index] : sort_indices_)
-    sort_index->Add(doc, access, field);
+bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
+  bool was_added = true;
+
+  std::vector<std::pair<std::string_view, BaseIndex*>> successfully_added_indices;
+  successfully_added_indices.reserve(indices_.size() + sort_indices_.size());
+
+  auto try_add = [&](const auto& indices_container) {
+    for (auto& [field, index] : indices_container) {
+      if (index->Add(doc, access, field)) {
+        successfully_added_indices.emplace_back(field, index.get());
+      } else {
+        was_added = false;
+        break;
+      }
+    }
+  };
+
+  try_add(indices_);
+
+  if (was_added) {
+    try_add(sort_indices_);
+  }
+
+  if (!was_added) {
+    for (auto& [field, index] : successfully_added_indices) {
+      index->Remove(doc, access, field);
+    }
+    return false;
+  }
 
   all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
+  return true;
 }
 
-void FieldIndices::Remove(DocId doc, DocumentAccessor* access) {
+void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
   for (auto& [field, index] : indices_)
     index->Remove(doc, access, field);
   for (auto& [field, sort_index] : sort_indices_)
     sort_index->Remove(doc, access, field);
 
   auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
-  CHECK(it != all_ids_.end() && *it == doc);
+  DCHECK(it != all_ids_.end() && *it == doc);
   all_ids_.erase(it);
 }
 
@@ -621,21 +652,10 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
-vector<pair<string, SortableValue>> FieldIndices::ExtractStoredValues(DocId doc) const {
-  vector<pair<string, SortableValue>> out;
-  for (const auto& [ident, index] : sort_indices_) {
-    out.emplace_back(ident, index->Lookup(doc));
-  }
-  return out;
-}
-
-absl::flat_hash_set<std::string_view> FieldIndices::GetSortIndiciesFields() const {
-  absl::flat_hash_set<std::string_view> fields_idents;
-  fields_idents.reserve(sort_indices_.size());
-  for (const auto& [ident, _] : sort_indices_) {
-    fields_idents.insert(ident);
-  }
-  return fields_idents;
+SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_identifier) const {
+  auto it = sort_indices_.find(field_identifier);
+  DCHECK(it != sort_indices_.end());
+  return it->second->Lookup(doc);
 }
 
 SearchAlgorithm::SearchAlgorithm() = default;

@@ -26,6 +26,7 @@ class DflyParams:
     path: str
     cwd: str
     gdb: bool
+    direct_output: bool
     buffered_out: bool
     args: Dict[str, Union[str, None]]
     existing_port: int
@@ -153,7 +154,7 @@ class DflyInstance:
 
     async def close_clients(self):
         for client in self.clients:
-            await client.close()
+            await client.aclose() if hasattr(client, "aclose") else client.close()
 
     def __enter__(self):
         self.start()
@@ -186,7 +187,7 @@ class DflyInstance:
             try:
                 self.get_port_from_psutil()
                 logging.debug(
-                    f"Process started after {time.time() - s:.2f} seconds. port={self.port}"
+                    f"Process {self.proc.pid} started after {time.time() - s:.2f} seconds. port={self.port}"
                 )
                 break
             except RuntimeError:
@@ -202,18 +203,19 @@ class DflyInstance:
         sed_cmd = ["sed", "-u", "-e", sed_format]
         if self.params.buffered_out:
             sed_cmd.remove("-u")
-        self.sed_proc = subprocess.Popen(
-            sed_cmd,
-            stdin=self.proc.stdout,
-            stdout=subprocess.PIPE,
-            bufsize=1,
-            universal_newlines=True,
-        )
-        self.stacktrace = []
-        self.sed_thread = threading.Thread(
-            target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
-        )
-        self.sed_thread.start()
+        if not self.params.direct_output:
+            self.sed_proc = subprocess.Popen(
+                sed_cmd,
+                stdin=self.proc.stdout,
+                stdout=subprocess.PIPE,
+                bufsize=1,
+                universal_newlines=True,
+            )
+            self.stacktrace = []
+            self.sed_thread = threading.Thread(
+                target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
+            )
+            self.sed_thread.start()
 
     def set_proc_to_none(self):
         self.proc = None
@@ -234,7 +236,10 @@ class DflyInstance:
                 # if the return code is negative it means termination by signal
                 # if the return code is positive it means abnormal exit
                 if proc.returncode != 0:
-                    raise Exception("Dragonfly did not terminate gracefully")
+                    raise Exception(
+                        f"Dragonfly did not terminate gracefully, exit code {proc.returncode}, "
+                        f"pid: {proc.pid}"
+                    )
 
         except subprocess.TimeoutExpired:
             # We need to send SIGUSR1 to DF such that it prints the stacktrace
@@ -266,15 +271,18 @@ class DflyInstance:
 
         all_args = self.format_args(self.args)
         real_path = os.path.realpath(self.params.path)
-        logging.debug(f"Starting instance with arguments {' '.join(all_args)} from {real_path}")
 
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
             run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
 
         self.proc = subprocess.Popen(
-            run_cmd, cwd=self.params.cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            run_cmd,
+            cwd=self.params.cwd,
+            stdout=None if self.params.direct_output else subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
+        logging.debug(f"Starting {real_path} {' '.join(all_args)}, pid {self.proc.pid}")
 
     def _check_status(self):
         if not self.params.existing_port:
@@ -411,6 +419,10 @@ class DflyInstanceFactory:
         vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
+
+        # If path is not set, we assume that we are running the latest dragonfly.
+        if not path:
+            args.setdefault("list_experimental_v2")
         args.setdefault("log_dir", self.params.log_dir)
 
         if version >= 1.21:

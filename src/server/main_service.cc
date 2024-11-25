@@ -286,24 +286,16 @@ class InterpreterReplier : public RedisReplyBuilder {
   }
 
   void SendError(std::string_view str, std::string_view type = std::string_view{}) final;
-  void SendStored() final;
 
+  void SendBulkString(std::string_view str) final;
   void SendSimpleString(std::string_view str) final;
-  void SendMGetResponse(MGetResponse resp) final;
-  void SendSimpleStrArr(StrSpan arr) final;
+
   void SendNullArray() final;
-
-  void SendStringArr(StrSpan arr, CollectionType type) final;
   void SendNull() final;
-
   void SendLong(long val) final;
   void SendDouble(double val) final;
 
-  void SendBulkString(std::string_view str) final;
-
   void StartCollection(unsigned len, CollectionType type) final;
-  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                       bool with_scores) final;
 
  private:
   void PostItem();
@@ -398,11 +390,6 @@ void InterpreterReplier::SendError(string_view str, std::string_view type) {
   explr_->OnError(str);
 }
 
-void InterpreterReplier::SendStored() {
-  DCHECK(array_len_.empty());
-  SendSimpleString("OK");
-}
-
 void InterpreterReplier::SendSimpleString(string_view str) {
   if (array_len_.empty())
     explr_->OnStatus(str);
@@ -411,37 +398,8 @@ void InterpreterReplier::SendSimpleString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::SendMGetResponse(MGetResponse resp) {
-  DCHECK(array_len_.empty());
-
-  explr_->OnArrayStart(resp.resp_arr.size());
-  for (uint32_t i = 0; i < resp.resp_arr.size(); ++i) {
-    if (resp.resp_arr[i].has_value()) {
-      explr_->OnString(resp.resp_arr[i]->value);
-    } else {
-      explr_->OnNil();
-    }
-  }
-  explr_->OnArrayEnd();
-}
-
-void InterpreterReplier::SendSimpleStrArr(StrSpan arr) {
-  explr_->OnArrayStart(arr.Size());
-  for (string_view str : arr)
-    explr_->OnString(str);
-  explr_->OnArrayEnd();
-}
-
 void InterpreterReplier::SendNullArray() {
   SendSimpleStrArr(ArgSlice{});
-  PostItem();
-}
-
-void InterpreterReplier::SendStringArr(StrSpan arr, CollectionType) {
-  explr_->OnArrayStart(arr.Size());
-  for (string_view str : arr)
-    explr_->OnString(str);
-  explr_->OnArrayEnd();
   PostItem();
 }
 
@@ -465,7 +423,9 @@ void InterpreterReplier::SendBulkString(string_view str) {
   PostItem();
 }
 
-void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
+void InterpreterReplier::StartCollection(unsigned len, CollectionType type) {
+  if (type == MAP)
+    len *= 2;
   explr_->OnArrayStart(len);
 
   if (len == 0) {
@@ -474,31 +434,6 @@ void InterpreterReplier::StartCollection(unsigned len, CollectionType) {
   } else {
     array_len_.emplace_back(num_elems_ + 1, len);
     num_elems_ = 0;
-  }
-}
-
-void InterpreterReplier::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                                         bool with_scores) {
-  if (with_scores) {
-    if (IsResp3()) {
-      StartCollection(arr.size(), CollectionType::ARRAY);
-      for (size_t i = 0; i < arr.size(); ++i) {
-        StartArray(2);
-        SendBulkString(arr[i].first);
-        SendDouble(arr[i].second);
-      }
-    } else {
-      StartCollection(arr.size() * 2, CollectionType::ARRAY);
-      for (size_t i = 0; i < arr.size(); ++i) {
-        SendBulkString(arr[i].first);
-        SendDouble(arr[i].second);
-      }
-    }
-  } else {
-    StartCollection(arr.size(), CollectionType::ARRAY);
-    for (size_t i = 0; i < arr.size(); ++i) {
-      SendBulkString(arr[i].first);
-    }
   }
 }
 
@@ -533,7 +468,7 @@ void Topkeys(const http::QueryArgs& args, HttpContext* send) {
 
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       for (const auto& db :
-           namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).databases()) {
+           namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).databases()) {
         if (db->top_keys.IsEnabled()) {
           is_enabled = true;
           for (const auto& [key, count] : db->top_keys.GetTopKeys()) {
@@ -684,32 +619,33 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
   send->Invoke(std::move(resp));
 }
 
-enum class ExecEvalState {
+enum class ExecScriptUse {
   NONE = 0,
-  ALL = 1,
-  SOME = 2,
+  SCRIPT_LOAD = 1,
+  SCRIPT_RUN = 2,
 };
 
-ExecEvalState DetermineEvalPresense(const std::vector<StoredCmd>& body) {
-  unsigned eval_cnt = 0;
+ExecScriptUse DetermineScriptPresense(const std::vector<StoredCmd>& body) {
+  bool script_load = false;
   for (const auto& scmd : body) {
     if (CO::IsEvalKind(scmd.Cid()->name())) {
-      eval_cnt++;
+      return ExecScriptUse::SCRIPT_RUN;
+    }
+
+    if ((scmd.Cid()->name() == "SCRIPT") && (absl::AsciiStrToUpper(scmd.FirstArg()) == "LOAD")) {
+      script_load = true;
     }
   }
 
-  if (eval_cnt == 0)
-    return ExecEvalState::NONE;
+  if (script_load)
+    return ExecScriptUse::SCRIPT_LOAD;
 
-  if (eval_cnt == body.size())
-    return ExecEvalState::ALL;
-
-  return ExecEvalState::SOME;
+  return ExecScriptUse::NONE;
 }
 
 // Returns the multi mode for that transaction. Returns NOT_DETERMINED if no scheduling
 // is required.
-Transaction::MultiMode DeduceExecMode(ExecEvalState state,
+Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
                                       const ConnectionState::ExecInfo& exec_info,
                                       const ScriptMgr& script_mgr) {
   // Check if script most LIKELY has global eval transactions
@@ -717,7 +653,7 @@ Transaction::MultiMode DeduceExecMode(ExecEvalState state,
   Transaction::MultiMode multi_mode =
       static_cast<Transaction::MultiMode>(absl::GetFlag(FLAGS_multi_exec_mode));
 
-  if (state != ExecEvalState::NONE) {
+  if (state == ExecScriptUse::SCRIPT_RUN) {
     contains_global = script_mgr.AreGlobalByDefault();
   }
 
@@ -765,50 +701,6 @@ string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned 
   return result;
 }
 
-// Ensures availability of an interpreter for EVAL-like commands and it's automatic release.
-// If it's part of MULTI, the preborrowed interpreter is returned, otherwise a new is acquired.
-struct BorrowedInterpreter {
-  BorrowedInterpreter(Transaction* tx, ConnectionContext* cntx) {
-    // Ensure squashing ignores EVAL. We can't run on a stub context, because it doesn't have our
-    // preborrowed interpreter (which can't be shared on multiple threads).
-    CHECK(!cntx->conn_state.squashing_info);
-
-    if (auto borrowed = cntx->conn_state.exec_info.preborrowed_interpreter; borrowed) {
-      // Ensure a preborrowed interpreter is only set for an already running MULTI transaction.
-      CHECK_EQ(cntx->conn_state.exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
-
-      interpreter_ = borrowed;
-    } else {
-      // A scheduled transaction occupies a place in the transaction queue and holds locks,
-      // preventing other transactions from progressing. Blocking below can deadlock!
-      CHECK(!tx->IsScheduled());
-
-      interpreter_ = ServerState::tlocal()->BorrowInterpreter();
-      owned_ = true;
-    }
-  }
-
-  ~BorrowedInterpreter() {
-    if (owned_)
-      ServerState::tlocal()->ReturnInterpreter(interpreter_);
-  }
-
-  // Give up ownership of the interpreter, it must be returned manually.
-  Interpreter* Release() && {
-    DCHECK(owned_);
-    owned_ = false;
-    return interpreter_;
-  }
-
-  operator Interpreter*() {
-    return interpreter_;
-  }
-
- private:
-  Interpreter* interpreter_ = nullptr;
-  bool owned_ = false;
-};
-
 string ConnectionLogContext(const facade::Connection* conn) {
   if (conn == nullptr) {
     return "(null-conn)";
@@ -830,6 +722,16 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
+void SetOomDenyRatioOnAllThreads(double ratio) {
+  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->oom_deny_ratio = ratio; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
+void SetRssOomDenyRatioOnAllThreads(double ratio) {
+  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -842,7 +744,7 @@ Service::Service(ProactorPool* pp)
 
 #ifdef PRINT_STACKTRACES_ON_SIGNAL
   LOG(INFO) << "PRINT STACKTRACES REGISTERED";
-  pp_.GetNextProactor()->RegisterSignal({SIGUSR1}, [this](int signal) {
+  ProactorBase::RegisterSignal({SIGUSR1}, pp_.GetNextProactor(), [this](int signal) {
     LOG(INFO) << "Received " << strsignal(signal);
     base::SetVLogLevel("uring_proactor", 2);
 
@@ -867,17 +769,11 @@ Service::Service(ProactorPool* pp)
   engine_varz.emplace("engine", [this] { return GetVarzStats(); });
 }
 
-void SetOomDenyRatioOnAllThreads(double ratio) {
-  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->oom_deny_ratio = ratio; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
-void SetRssOomDenyRatioOnAllThreads(double ratio) {
-  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
 Service::~Service() {
+#ifdef PRINT_STACKTRACES_ON_SIGNAL
+  ProactorBase::ClearSignal({SIGUSR1}, true);
+#endif
+
   delete shard_set;
   shard_set = nullptr;
 }
@@ -931,7 +827,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
           auto* shard = EngineShard::tlocal();
           if (shard) {
             auto shard_id = shard->shard_id();
-            auto& db_slice = namespaces.GetDefaultNamespace().GetDbSlice(shard_id);
+            auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id);
             db_slice.SetNotifyKeyspaceEvents(*res);
           }
         });
@@ -1005,7 +901,6 @@ void Service::Shutdown() {
   ChannelStore::Destroy();
 
   shard_set->PreShutdown();
-  namespaces.Clear();
   shard_set->Shutdown();
   Transaction::Shutdown();
 
@@ -1049,8 +944,9 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   if (keys_slot.has_value()) {
-    if (auto error_str = cluster::SlotOwnershipErrorStr(*keys_slot); error_str) {
-      return ErrorReply{std::move(*error_str)};
+    if (auto error = cluster::SlotOwnershipError(*keys_slot);
+        !error.status.has_value() || error.status.value() != facade::OpStatus::OK) {
+      return ErrorReply{std::move(error)};
     }
   }
 
@@ -1136,9 +1032,9 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
   // If there is no connection owner, it means the command it being called
   // from another command or used internally, therefore is always permitted.
   if (dfly_cntx.conn() != nullptr && !dfly_cntx.conn()->IsPrivileged() && cid->IsRestricted()) {
-    VLOG(1) << "Non-admin attempt to execute " << cid->name() << " "
+    VLOG(1) << "Non-admin attempt to execute " << cid->name() << " " << tail_args << " "
             << ConnectionLogContext(dfly_cntx.conn());
-    return ErrorReply{"Cannot execute restricted command (admin only)"};
+    return ErrorReply{"Cannot execute restricted command (admin only)", kRestrictDenied};
   }
 
   if (auto err = cid->Validate(tail_args); err)
@@ -1192,7 +1088,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
     return ErrorReply{"-READONLY You can't write against a read only replica."};
 
   if (multi_active) {
-    if (cmd_name == "SELECT" || absl::EndsWith(cmd_name, "SUBSCRIBE"))
+    if (absl::EndsWith(cmd_name, "SUBSCRIBE"))
       return ErrorReply{absl::StrCat("Can not call ", cmd_name, " within a transaction")};
 
     if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB")
@@ -1225,6 +1121,10 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
         return err.value();
       }
     }
+
+    if (dfly_cntx.conn_state.script_info->read_only && is_write_cmd) {
+      return ErrorReply{"Write commands are not allowed from read-only scripts"};
+    }
   }
 
   return VerifyConnectionAclStatus(cid, &dfly_cntx, "has no ACL permissions", tail_args);
@@ -1232,10 +1132,10 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
 
 void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
                               facade::ConnectionContext* cntx) {
-  absl::Cleanup clear_last_error([builder]() { std::ignore = builder->ConsumeLastError(); });
   DCHECK(!args.empty());
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
+  absl::Cleanup clear_last_error([builder]() { builder->ConsumeLastError(); });
   ServerState& etl = *ServerState::tlocal();
 
   string cmd = absl::AsciiStrToUpper(args[0]);
@@ -1348,23 +1248,26 @@ class ReplyGuard {
     const bool is_script = bool(cntx->conn_state.script_info);
     const bool is_one_of =
         absl::flat_hash_set<std::string_view>({"REPLCONF", "DFLY"}).contains(cid_name);
-    bool is_mcache = builder->type() == SinkReplyBuilder::MC;
+    bool is_mcache = builder->GetProtocol() == Protocol::MEMCACHE;
     const bool is_no_reply_memcache =
         is_mcache && (static_cast<MCReplyBuilder*>(builder)->NoReply() || cid_name == "QUIT");
     const bool should_dcheck = !is_one_of && !is_script && !is_no_reply_memcache;
     if (should_dcheck) {
       builder_ = builder;
-      builder_->ExpectReply();
+      replies_recorded_ = builder_->RepliesRecorded();
     }
   }
 
   ~ReplyGuard() {
     if (builder_) {
-      DCHECK(builder_->HasReplied());
+      DCHECK_GT(builder_->RepliesRecorded(), replies_recorded_)
+          << cid_name_ << " " << typeid(*builder_).name();
     }
   }
 
  private:
+  size_t replies_recorded_ = 0;
+  std::string_view cid_name_;
   SinkReplyBuilder* builder_ = nullptr;
 };
 
@@ -1402,7 +1305,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
       return true;
     }
     builder->SendError(std::move(*err));
-    std::ignore = builder->ConsumeLastError();
+    builder->ConsumeLastError();
     return true;  // return false only for internal error aborts
   }
 
@@ -1445,9 +1348,7 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
     return false;
   }
 
-  std::string reason = builder->ConsumeLastError();
-
-  if (!reason.empty()) {
+  if (std::string reason = builder->ConsumeLastError(); !reason.empty()) {
     VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
     LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
   }
@@ -1465,6 +1366,10 @@ bool Service::InvokeCmd(const CommandId* cid, CmdArgList tail_args, SinkReplyBui
   // TODO: we should probably discard more commands here,
   // not just the blocking ones
   const auto* conn = cntx->conn();
+  if (cntx->conn_state.squashing_info) {
+    conn = cntx->conn_state.squashing_info->owner->conn();
+  }
+
   if (!(cid->opt_mask() & CO::BLOCKING) && conn != nullptr &&
       // Use SafeTLocal() to avoid accessing the wrong thread local instance
       ServerState::SafeTLocal()->ShouldLogSlowCmd(invoke_time_usec)) {
@@ -1493,7 +1398,7 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
                                      facade::ConnectionContext* cntx) {
   ConnectionContext* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
-  DCHECK_EQ(builder->type(), SinkReplyBuilder::REDIS);
+  DCHECK_EQ(builder->GetProtocol(), Protocol::REDIS);
 
   vector<StoredCmd> stored_cmds;
   intrusive_ptr<Transaction> dist_trans;
@@ -1514,13 +1419,13 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
     }
 
     dfly_cntx->transaction = dist_trans.get();
-    MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
-                                  static_cast<RedisReplyBuilder*>(builder), dfly_cntx, this, true,
-                                  false);
+    size_t squashed_num = MultiCommandSquasher::Execute(absl::MakeSpan(stored_cmds),
+                                                        static_cast<RedisReplyBuilder*>(builder),
+                                                        dfly_cntx, this, true, false);
     dfly_cntx->transaction = nullptr;
 
     dispatched += stored_cmds.size();
-    ss->stats.squashed_commands += stored_cmds.size();
+    ss->stats.squashed_commands += squashed_num;
     stored_cmds.clear();
   };
 
@@ -1534,15 +1439,14 @@ size_t Service::DispatchManyCommands(absl::Span<CmdArgList> args_list, SinkReply
 
     // MULTI...EXEC commands need to be collected into a single context, so squashing is not
     // possible
-    const bool is_multi =
-        dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(ArgS(args, 0));
+    const bool is_multi = dfly_cntx->conn_state.exec_info.IsCollecting() || CO::IsTransKind(cmd);
 
     // Generally, executing any multi-transactions (including eval) is not possible because they
     // might request a stricter multi mode than non-atomic which is used for squashing.
     // TODO: By allowing promoting non-atomic multit transactions to lock-ahead for specific command
     // invocations, we can potentially execute multiple eval in parallel, which is very powerful
     // paired with shardlocal eval
-    const bool is_eval = CO::IsEvalKind(ArgS(args, 0));
+    const bool is_eval = CO::IsEvalKind(cmd);
 
     const bool is_blocking = cid != nullptr && cid->IsBlocking();
 
@@ -1689,13 +1593,12 @@ bool RequirePrivilegedAuth() {
   return !GetFlag(FLAGS_admin_nopass);
 }
 
-facade::ConnectionContext* Service::CreateContext(util::FiberSocketBase* peer,
-                                                  facade::Connection* owner) {
+facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   auto cred = user_registry_.GetCredentials("default");
-  ConnectionContext* res = new ConnectionContext{peer, owner, std::move(cred)};
-  res->ns = &namespaces.GetOrInsert("");
+  ConnectionContext* res = new ConnectionContext{owner, std::move(cred)};
+  res->ns = &namespaces->GetOrInsert("");
 
-  if (peer->IsUDS()) {
+  if (owner->socket()->IsUDS()) {
     res->req_auth = false;
     res->skip_acl_validation = true;
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
@@ -1744,9 +1647,9 @@ absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
 
 void Service::Quit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                    ConnectionContext* cntx) {
-  if (builder->type() == SinkReplyBuilder::REDIS)
+  if (builder->GetProtocol() == Protocol::REDIS)
     builder->SendOk();
-  using facade::SinkReplyBuilder;
+
   builder->CloseConnection();
 
   DeactivateMonitoring(static_cast<ConnectionContext*>(cntx));
@@ -1865,7 +1768,7 @@ void Service::CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& ca)
 }
 
 void Service::Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx) {
+                   ConnectionContext* cntx, bool read_only) {
   string_view body = ArgS(args, 0);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -1873,26 +1776,36 @@ void Service::Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
     return rb->SendNull();
   }
 
-  BorrowedInterpreter interpreter{tx, cntx};
+  BorrowedInterpreter interpreter{tx, &cntx->conn_state};
   auto res = server_family_.script_mgr()->Insert(body, interpreter);
   if (!res)
     return builder->SendError(res.error().Format(), facade::kScriptErrType);
 
   string sha{std::move(res.value())};
 
-  CallSHA(args, sha, interpreter, builder, cntx);
+  CallSHA(args, sha, interpreter, builder, cntx, read_only);
+}
+
+void Service::EvalRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                     ConnectionContext* cntx) {
+  Eval(args, tx, builder, cntx, true);
 }
 
 void Service::EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                      ConnectionContext* cntx) {
+                      ConnectionContext* cntx, bool read_only) {
   string sha = absl::AsciiStrToLower(ArgS(args, 0));
 
-  BorrowedInterpreter interpreter{cntx->transaction, cntx};
-  CallSHA(args, sha, interpreter, builder, cntx);
+  BorrowedInterpreter interpreter{cntx->transaction, &cntx->conn_state};
+  CallSHA(args, sha, interpreter, builder, cntx, read_only);
+}
+
+void Service::EvalShaRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                        ConnectionContext* cntx) {
+  EvalSha(args, tx, builder, cntx, true);
 }
 
 void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter,
-                      SinkReplyBuilder* builder, ConnectionContext* cntx) {
+                      SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only) {
   uint32_t num_keys;
   CHECK(absl::SimpleAtoi(ArgS(args, 1), &num_keys));  // we already validated this
 
@@ -1902,7 +1815,7 @@ void Service::CallSHA(CmdArgList args, string_view sha, Interpreter* interpreter
   ev_args.args = args.subspan(2 + num_keys);
 
   uint64_t start = absl::GetCurrentTimeNanos();
-  EvalInternal(args, ev_args, interpreter, builder, cntx);
+  EvalInternal(args, ev_args, interpreter, builder, cntx, read_only);
 
   uint64_t end = absl::GetCurrentTimeNanos();
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
@@ -1988,7 +1901,7 @@ static bool CanRunSingleShardMulti(optional<ShardId> sid, const ScriptMgr::Scrip
 }
 
 void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                           SinkReplyBuilder* builder, ConnectionContext* cntx) {
+                           SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only) {
   DCHECK(!eval_args.sha.empty());
 
   // Sanitizing the input to avoid code injection.
@@ -2010,6 +1923,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
   auto& sinfo = cntx->conn_state.script_info;
   sinfo = make_unique<ConnectionState::ScriptInfo>();
   sinfo->lock_tags.reserve(eval_args.keys.size());
+  sinfo->read_only = read_only;
 
   optional<ShardId> sid;
 
@@ -2254,12 +2168,13 @@ void Service::Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
 
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
 
-  // The transaction can contain scripts, determine their presence ahead to customize logic below.
-  ExecEvalState state = DetermineEvalPresense(exec_info.body);
+  // The transaction can contain script load script execution, determine their presence ahead to
+  // customize logic below.
+  ExecScriptUse state = DetermineScriptPresense(exec_info.body);
 
-  // We borrow a single interpreter for all the EVALs inside. Returned by MultiCleanup
-  if (state != ExecEvalState::NONE) {
-    exec_info.preborrowed_interpreter = BorrowedInterpreter(tx, cntx).Release();
+  // We borrow a single interpreter for all the EVALs/Script load inside. Returned by MultiCleanup
+  if (state != ExecScriptUse::NONE) {
+    exec_info.preborrowed_interpreter = BorrowedInterpreter(tx, &cntx->conn_state).Release();
   }
 
   // Determine according multi mode, not only only flag, but based on presence of global commands
@@ -2293,7 +2208,7 @@ void Service::Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
       ServerState::tlocal()->exec_freq_count[descr]++;
     }
 
-    if (absl::GetFlag(FLAGS_multi_exec_squash) && state == ExecEvalState::NONE &&
+    if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
       MultiCommandSquasher::Execute(absl::MakeSpan(exec_info.body), rb, cntx, this);
     } else {
@@ -2402,7 +2317,7 @@ void Service::Function(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
 
 void Service::PubsubChannels(string_view pattern, SinkReplyBuilder* builder) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->SendStringArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
+  rb->SendBulkStrArr(ServerState::tlocal()->channel_store()->ListChannels(pattern));
 }
 
 void Service::PubsubPatterns(SinkReplyBuilder* builder) {
@@ -2555,7 +2470,7 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
 VarzValue::Map Service::GetVarzStats() {
   VarzValue::Map res;
 
-  Metrics m = server_family_.GetMetrics(&namespaces.GetDefaultNamespace());
+  Metrics m = server_family_.GetMetrics(&namespaces->GetDefaultNamespace());
   DbStats db_stats;
   for (const auto& s : m.db_stats) {
     db_stats += s;
@@ -2694,7 +2609,9 @@ constexpr uint32_t kWatch = FAST | TRANSACTION;
 constexpr uint32_t kUnwatch = FAST | TRANSACTION;
 constexpr uint32_t kDiscard = FAST | TRANSACTION;
 constexpr uint32_t kEval = SLOW | SCRIPTING;
+constexpr uint32_t kEvalRo = SLOW | SCRIPTING;
 constexpr uint32_t kEvalSha = SLOW | SCRIPTING;
+constexpr uint32_t kEvalShaRo = SLOW | SCRIPTING;
 constexpr uint32_t kExec = SLOW | TRANSACTION;
 constexpr uint32_t kPublish = PUBSUB | FAST;
 constexpr uint32_t kSubscribe = PUBSUB | SLOW;
@@ -2719,8 +2636,15 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEval}
              .MFUNC(Eval)
              .SetValidator(&EvalValidator)
+      << CI{"EVAL_RO", CO::NOSCRIPT | CO::READONLY | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEvalRo}
+             .MFUNC(EvalRo)
+             .SetValidator(&EvalValidator)
       << CI{"EVALSHA", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEvalSha}
              .MFUNC(EvalSha)
+             .SetValidator(&EvalValidator)
+      << CI{"EVALSHA_RO",   CO::NOSCRIPT | CO::READONLY | CO::VARIADIC_KEYS, -3, 3, 3,
+            acl::kEvalShaRo}
+             .MFUNC(EvalShaRo)
              .SetValidator(&EvalValidator)
       << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, acl::kExec}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)

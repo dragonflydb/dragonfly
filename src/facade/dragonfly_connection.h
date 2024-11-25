@@ -269,10 +269,6 @@ class Connection : public util::Connection {
 
   bool IsMain() const;
 
-  Protocol protocol() const {
-    return protocol_;
-  }
-
   void SetName(std::string name);
 
   void SetLibName(std::string name);
@@ -404,9 +400,7 @@ class Connection : public util::Connection {
   Protocol protocol_;
   ConnectionStats* stats_ = nullptr;
 
-  // cc_->reply_builder may change during the lifetime of the connection, due to injections.
-  // This is a pointer to the original, socket based reply builder that never changes.
-  SinkReplyBuilder* reply_builder_ = nullptr;
+  std::unique_ptr<SinkReplyBuilder> reply_builder_;
   util::HttpListenerBase* http_listener_;
   SSL_CTX* ssl_ctx_;
 

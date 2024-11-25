@@ -13,6 +13,7 @@ namespace facade {
 using namespace std;
 
 auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> Result {
+  DCHECK(!str.empty());
   *consumed = 0;
   res->clear();
 
@@ -32,11 +33,6 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
   ResultConsumed resultc{OK, 0};
 
   do {
-    if (str.empty()) {
-      resultc.first = INPUT_PENDING;
-      break;
-    }
-
     switch (state_) {
       case MAP_LEN_S:
       case ARRAY_LEN_S:
@@ -61,16 +57,21 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
     }
 
     *consumed += resultc.second;
-
-    if (resultc.first != OK) {
-      break;
-    }
     str.remove_prefix(exchange(resultc.second, 0));
-  } while (state_ != CMD_COMPLETE_S);
+  } while (state_ != CMD_COMPLETE_S && resultc.first == OK && !str.empty());
 
-  if (resultc.first == INPUT_PENDING) {
-    StashState(res);
-  } else if (resultc.first == OK) {
+  if (state_ != CMD_COMPLETE_S) {
+    if (resultc.first == OK) {
+      resultc.first = INPUT_PENDING;
+    }
+
+    if (resultc.first == INPUT_PENDING) {
+      StashState(res);
+    }
+    return resultc.first;
+  }
+
+  if (resultc.first == OK) {
     DCHECK(cached_expr_);
     if (res != cached_expr_) {
       DCHECK(!stash_.empty());
@@ -82,7 +83,7 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
   return resultc.first;
 }
 
-void RedisParser::InitStart(uint8_t prefix_b, RespExpr::Vec* res) {
+void RedisParser::InitStart(char prefix_b, RespExpr::Vec* res) {
   buf_stash_.clear();
   stash_.clear();
   cached_expr_ = res;
@@ -212,8 +213,10 @@ auto RedisParser::ParseInline(Buffer str) -> ResultConsumed {
 auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
   DCHECK(!str.empty());
 
-  char* s = reinterpret_cast<char*>(str.data() + 1);
-  char* pos = reinterpret_cast<char*>(memchr(s, '\n', str.size() - 1));
+  DCHECK(str[0] == '$' || str[0] == '*' || str[0] == '%' || str[0] == '~');
+
+  const char* s = reinterpret_cast<const char*>(str.data());
+  const char* pos = reinterpret_cast<const char*>(memchr(s, '\n', str.size()));
   if (!pos) {
     Result r = str.size() < 32 ? INPUT_PENDING : BAD_ARRAYLEN;
     return {r, 0};
@@ -223,8 +226,11 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
     return {BAD_ARRAYLEN, 0};
   }
 
-  bool success = absl::SimpleAtoi(std::string_view{s, size_t(pos - s - 1)}, res);
-  return ResultConsumed{success ? OK : BAD_ARRAYLEN, (pos - s) + 2};
+  // Skip the first character and 2 last ones (\r\n).
+  bool success = absl::SimpleAtoi(std::string_view{s + 1, size_t(pos - 1 - s)}, res);
+  unsigned consumed = pos - s + 1;
+
+  return ResultConsumed{success ? OK : BAD_ARRAYLEN, consumed};
 }
 
 auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
@@ -287,7 +293,14 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
 }
 
 auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
+  DCHECK(!str.empty());
+
   char c = str[0];
+  unsigned min_len = 3 + int(c != '_');
+
+  if (str.size() < min_len) {
+    return {INPUT_PENDING, 0};
+  }
 
   if (c == '$') {
     int64_t len;
@@ -320,12 +333,18 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
   }
 
   if (c == '_') {  // Resp3 NIL
-    // TODO: Do we need to validate that str[1:2] == "\r\n"?
+    // '_','\r','\n'
+    DCHECK_GE(str.size(), 3u);
+
+    unsigned consumed = 3;
+    if (str[1] != '\r' || str[2] != '\n') {
+      return {BAD_STRING, 0};
+    }
 
     cached_expr_->emplace_back(RespExpr::NIL);
     cached_expr_->back().u = Buffer{};
     HandleFinishArg();
-    return {OK, 3};  // // '_','\r','\n'
+    return {OK, consumed};
   }
 
   if (c == '*') {
@@ -389,47 +408,49 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
 
   uint32_t consumed = 0;
 
-  if (str.size() >= bulk_len_ + 2) {
-    if (str[bulk_len_] != '\r' || str[bulk_len_ + 1] != '\n') {
-      return {BAD_STRING, 0};
-    }
-
+  if (str.size() >= bulk_len_) {
+    consumed = bulk_len_;
     if (bulk_len_) {
+      // is_broken_token_ can be false, if we just parsed the bulk length but have
+      // not parsed the token itself.
       if (is_broken_token_) {
         memcpy(bulk_str.end(), str.data(), bulk_len_);
         bulk_str = Buffer{bulk_str.data(), bulk_str.size() + bulk_len_};
       } else {
         bulk_str = str.subspan(0, bulk_len_);
       }
+      str.remove_prefix(exchange(bulk_len_, 0));
+      is_broken_token_ = false;
     }
-    is_broken_token_ = false;
-    consumed = bulk_len_ + 2;
-    bulk_len_ = 0;
-    HandleFinishArg();
 
-    return {OK, consumed};
+    if (str.size() >= 2) {
+      if (str[0] != '\r' || str[1] != '\n') {
+        return {BAD_STRING, consumed};
+      }
+      HandleFinishArg();
+      return {OK, consumed + 2};
+    }
+    return {INPUT_PENDING, consumed};
   }
 
-  if (str.size() >= 32) {
-    DCHECK(bulk_len_);
-    size_t len = std::min<size_t>(str.size(), bulk_len_);
+  DCHECK(bulk_len_);
+  size_t len = std::min<size_t>(str.size(), bulk_len_);
 
-    if (is_broken_token_) {
-      memcpy(bulk_str.end(), str.data(), len);
-      bulk_str = Buffer{bulk_str.data(), bulk_str.size() + len};
-      DVLOG(1) << "Extending bulk stash to size " << bulk_str.size();
-    } else {
-      DVLOG(1) << "New bulk stash size " << bulk_len_;
-      vector<uint8_t> nb(bulk_len_);
-      memcpy(nb.data(), str.data(), len);
-      bulk_str = Buffer{nb.data(), len};
-      buf_stash_.emplace_back(std::move(nb));
-      is_broken_token_ = true;
-      cached_expr_->back().has_support = true;
-    }
-    consumed = len;
-    bulk_len_ -= len;
+  if (is_broken_token_) {
+    memcpy(bulk_str.end(), str.data(), len);
+    bulk_str = Buffer{bulk_str.data(), bulk_str.size() + len};
+    DVLOG(1) << "Extending bulk stash to size " << bulk_str.size();
+  } else {
+    DVLOG(1) << "New bulk stash size " << bulk_len_;
+    vector<uint8_t> nb(bulk_len_);
+    memcpy(nb.data(), str.data(), len);
+    bulk_str = Buffer{nb.data(), len};
+    buf_stash_.emplace_back(std::move(nb));
+    is_broken_token_ = true;
+    cached_expr_->back().has_support = true;
   }
+  consumed = len;
+  bulk_len_ -= len;
 
   return {INPUT_PENDING, consumed};
 }

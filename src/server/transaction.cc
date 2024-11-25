@@ -176,7 +176,8 @@ void Transaction::Shutdown() {
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   InitTxTime();
   string_view cmd_name(cid_->name());
-  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
+  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVAL_RO" || cmd_name == "EVALSHA" ||
+      cmd_name == "EVALSHA_RO") {
     multi_.reset(new MultiData);
     multi_->mode = NOT_DETERMINED;
     multi_->role = DEFAULT;
@@ -399,10 +400,12 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) 
   }
 
   if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
-    if ((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
+    if (((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)) {
       EnableAllShards();
-    else
+    } else {
       EnableShard(0);
+    }
+
     return OpStatus::OK;
   }
 
@@ -976,7 +979,7 @@ string Transaction::DEBUG_PrintFailState(ShardId sid) const {
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
-  shard_data_.resize(1);
+  shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
   shard_data_.front().local_mask |= ACTIVE;
 }
 

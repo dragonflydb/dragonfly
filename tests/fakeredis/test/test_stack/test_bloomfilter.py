@@ -1,8 +1,7 @@
 import pytest
 import redis
-from redis.commands.bf import BFInfo
-
 from fakeredis import _msgs as msgs
+from redis.commands.bf import BFInfo
 
 bloom_tests = pytest.importorskip("probables")
 
@@ -15,17 +14,6 @@ def test_create_bf(r: redis.Redis):
     assert r.bf().create("bloom", 0.01, 1000)
     assert r.bf().create("bloom_e", 0.01, 1000, expansion=1)
     assert r.bf().create("bloom_ns", 0.01, 1000, noScale=True)
-
-
-@pytest.mark.unsupported_server_types("dragonfly")
-def test_create_cf(r: redis.Redis):
-    assert r.cf().create("cuckoo", 1000)
-    assert r.cf().create("cuckoo_e", 1000, expansion=1)
-    assert r.cf().create("cuckoo_bs", 1000, bucket_size=4)
-    assert r.cf().create("cuckoo_mi", 1000, max_iterations=10)
-    assert r.cms().initbydim("cmsDim", 100, 5)
-    assert r.cms().initbyprob("cmsProb", 0.01, 0.01)
-    assert r.topk().reserve("topk", 5, 100, 5, 0.9)
 
 
 def test_bf_reserve(r: redis.Redis):

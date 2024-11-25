@@ -1,12 +1,18 @@
-from test import testtools
-
 import pytest
 import redis
 
+from test import testtools
+
 json_tests = pytest.importorskip("probables")
 
+pytestmark = []
+pytestmark.extend(
+    [
+        pytest.mark.unsupported_server_types("dragonfly"),
+    ]
+)
 
-@pytest.mark.unsupported_server_types("dragonfly")
+
 def test_cms_create(r: redis.Redis):
     assert r.cms().initbydim("cmsDim", 100, 5)
     assert r.cms().initbyprob("cmsProb", 0.01, 0.01)
@@ -30,7 +36,6 @@ def test_cms_create(r: redis.Redis):
         r.cms().initbyprob("cmsProb2", 0.01, 0)
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_cms_incrby(r: redis.Redis):
     assert r.cms().initbydim("cmsDim", 100, 5)
     assert r.cms().initbyprob("cmsProb", 0.01, 0.01)
@@ -59,7 +64,6 @@ def test_cms_incrby(r: redis.Redis):
         r.cms().incrby("cmsDim", ["foo", "bar"], [3, "four"])
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_cms_merge(r: redis.Redis):
     assert r.cms().initbydim("cmsDim", 100, 5)
     assert r.cms().initbydim("cms2", 100, 5)
@@ -92,7 +96,6 @@ def test_cms_merge(r: redis.Redis):
         r.cms().merge("cmsDim", 2, ["cms2", "noexist"], [4, 3])
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_cms_info(r: redis.Redis):
     assert r.cms().initbydim("A", 1000, 5)
     assert r.cms().initbydim("B", 1000, 5)
@@ -120,7 +123,6 @@ def test_cms_info(r: redis.Redis):
 
 
 @pytest.mark.xfail(reason="Bug in pyprobables")
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_cms_merge_fail(r: redis.Redis):
     assert r.cms().initbydim("A", 1000, 5)
     assert r.cms().initbydim("B", 1000, 5)

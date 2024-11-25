@@ -27,11 +27,10 @@ extern "C" {
 #include "base/pod_array.h"
 #include "core/bloom.h"
 #include "core/detail/bitpacking.h"
+#include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
-
-ABSL_RETIRED_FLAG(bool, use_set2, true, "If true use DenseSet for an optimized set data structure");
 
 ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
 
@@ -47,9 +46,15 @@ constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
 
 // Approximation since does not account for listpacks.
-size_t QlMAllocSize(quicklist* ql) {
-  size_t res = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
-  return res + ql->count * 16;  // we account for each member 16 bytes.
+size_t QlMAllocSize(quicklist* ql, bool slow) {
+  size_t node_size = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
+  if (slow) {
+    for (quicklistNode* node = ql->head; node; node = node->next) {
+      node_size += zmalloc_usable_size(node->entry);
+    }
+    return node_size;
+  }
+  return node_size + ql->count * 16;  // we account for each member 16 bytes.
 }
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
@@ -64,6 +69,19 @@ inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
       break;
     default:
       LOG(FATAL) << "Unknown set encoding type";
+  }
+}
+
+void FreeList(unsigned encoding, void* ptr, MemoryResource* mr) {
+  switch (encoding) {
+    case OBJ_ENCODING_QUICKLIST:
+      quicklistRelease((quicklist*)ptr);
+      break;
+    case kEncodingQL2:
+      CompactObj::DeleteMR<QList>(ptr);
+      break;
+    default:
+      LOG(FATAL) << "Unknown list encoding type";
   }
 }
 
@@ -274,7 +292,7 @@ static_assert(sizeof(CompactObj) == 18);
 
 namespace detail {
 
-size_t RobjWrapper::MallocUsed() const {
+size_t RobjWrapper::MallocUsed(bool slow) const {
   if (!inner_obj_)
     return 0;
 
@@ -283,8 +301,9 @@ size_t RobjWrapper::MallocUsed() const {
       CHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return InnerObjMallocUsed();
     case OBJ_LIST:
-      DCHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
-      return QlMAllocSize((quicklist*)inner_obj_);
+      if (encoding_ == OBJ_ENCODING_QUICKLIST)
+        return QlMAllocSize((quicklist*)inner_obj_, slow);
+      return ((QList*)inner_obj_)->MallocUsed(slow);
     case OBJ_SET:
       return MallocUsedSet(encoding_, inner_obj_);
     case OBJ_HASH:
@@ -307,7 +326,9 @@ size_t RobjWrapper::Size() const {
       DCHECK_EQ(OBJ_ENCODING_RAW, encoding_);
       return sz_;
     case OBJ_LIST:
-      return quicklistCount((quicklist*)inner_obj_);
+      if (encoding_ == OBJ_ENCODING_QUICKLIST)
+        return quicklistCount((quicklist*)inner_obj_);
+      return ((QList*)inner_obj_)->Size();
     case OBJ_ZSET: {
       switch (encoding_) {
         case OBJ_ENCODING_SKIPLIST: {
@@ -362,8 +383,7 @@ void RobjWrapper::Free(MemoryResource* mr) {
       mr->deallocate(inner_obj_, 0, 8);  // we do not keep the allocated size.
       break;
     case OBJ_LIST:
-      CHECK_EQ(encoding_, OBJ_ENCODING_QUICKLIST);
-      quicklistRelease((quicklist*)inner_obj_);
+      FreeList(encoding_, inner_obj_, mr);
       break;
     case OBJ_SET:
       FreeObjSet(encoding_, inner_obj_, mr);
@@ -1124,12 +1144,12 @@ void CompactObj::Free() {
   memset(u_.inline_str, 0, kInlineLen);
 }
 
-size_t CompactObj::MallocUsed() const {
+size_t CompactObj::MallocUsed(bool slow) const {
   if (!HasAllocated())
     return 0;
 
   if (taglen_ == ROBJ_TAG) {
-    return u_.r_obj.MallocUsed();
+    return u_.r_obj.MallocUsed(slow);
   }
 
   if (taglen_ == JSON_TAG) {

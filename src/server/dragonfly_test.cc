@@ -379,7 +379,7 @@ TEST_F(DflyEngineTest, MemcacheFlags) {
   ASSERT_EQ(Run("resp", {"flushdb"}), "OK");
   pp_->AwaitFiberOnAll([](auto*) {
     if (auto* shard = EngineShard::tlocal(); shard) {
-      EXPECT_EQ(namespaces.GetDefaultNamespace()
+      EXPECT_EQ(namespaces->GetDefaultNamespace()
                     .GetDbSlice(shard->shard_id())
                     .GetDBTable(0)
                     ->mcflag.size(),
@@ -600,7 +600,7 @@ TEST_F(DflyEngineTest, Bug468) {
 
 TEST_F(DflyEngineTest, Bug496) {
   shard_set->RunBlockingInParallel([](EngineShard* shard) {
-    auto& db = namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
     int cb_hits = 0;
     uint32_t cb_id =
@@ -766,6 +766,21 @@ TEST_F(DflyEngineTest, EvalBug2664) {
 
   resp = Run({"eval", "return 42.9", "0"});
   EXPECT_THAT(resp, DoubleArg(42.9));
+}
+
+TEST_F(DflyEngineTest, MemoryUsage) {
+  for (unsigned i = 0; i < 1000; ++i) {
+    Run({"rpush", "l1", StrCat("val", i)});
+  }
+
+  for (unsigned i = 0; i < 1000; ++i) {
+    Run({"rpush", "l2", StrCat(string('a', 200), i)});
+  }
+  auto resp = Run({"memory", "usage", "l1"});
+  EXPECT_GT(*resp.GetInt(), 8000);
+
+  resp = Run({"memory", "usage", "l2"});
+  EXPECT_GT(*resp.GetInt(), 100000);
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

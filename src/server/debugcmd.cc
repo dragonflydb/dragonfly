@@ -401,7 +401,7 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
         "    If SLOTS is specified then create keys only in given slots range.",
-        "    TYPE specifies data type (must be STRING/LIST/SET/HSET/ZSET/JSON), default STRING.",
+        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON), default STRING.",
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
         "OBJHIST",
         "    Prints histogram of object sizes.",
@@ -842,9 +842,9 @@ void DebugCmd::Watched(facade::SinkReplyBuilder* builder) {
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
-  rb->SendStringArr(awaked_trans);
+  rb->SendBulkStrArr(awaked_trans);
   rb->SendBulkString("watched");
-  rb->SendStringArr(watched_keys);
+  rb->SendBulkStrArr(watched_keys);
 }
 
 void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {

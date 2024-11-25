@@ -32,6 +32,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/json/json_object.h"
+#include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -57,7 +58,7 @@ extern "C" {
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
-
+ABSL_DECLARE_FLAG(bool, list_experimental_v2);
 namespace dfly {
 
 using namespace std;
@@ -101,6 +102,8 @@ string error_category::message(int ev) const {
   switch (ev) {
     case errc::wrong_signature:
       return "Wrong signature while trying to load from rdb file";
+    case errc::out_of_memory:
+      return "Out of memory, or used memory is too high";
     default:
       return absl::StrCat("Internal error when loading RDB file ", ev);
       break;
@@ -709,20 +712,34 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
-  quicklist* ql;
+  quicklist* ql = nullptr;
+  QList* qlv2 = nullptr;
   if (config_.append) {
-    if (!EnsureObjEncoding(OBJ_LIST, OBJ_ENCODING_QUICKLIST)) {
+    if (pv_->ObjType() != OBJ_LIST) {
+      ec_ = RdbError(errc::invalid_rdb_type);
       return;
     }
-
-    ql = static_cast<quicklist*>(pv_->RObjPtr());
+    if (pv_->Encoding() == OBJ_ENCODING_QUICKLIST) {
+      ql = static_cast<quicklist*>(pv_->RObjPtr());
+    } else {
+      DCHECK_EQ(pv_->Encoding(), kEncodingQL2);
+      qlv2 = static_cast<QList*>(pv_->RObjPtr());
+    }
   } else {
-    ql = quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
+    if (absl::GetFlag(FLAGS_list_experimental_v2)) {
+      qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
+                                           GetFlag(FLAGS_list_compress_depth));
+    } else {
+      ql = quicklistNew(GetFlag(FLAGS_list_max_listpack_size), GetFlag(FLAGS_list_compress_depth));
+    }
   }
 
   auto cleanup = absl::Cleanup([&] {
     if (!config_.append) {
-      quicklistRelease(ql);
+      if (ql)
+        quicklistRelease(ql);
+      else
+        CompactObj::DeleteMR<QList>(qlv2);
     }
   });
 
@@ -737,7 +754,11 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
     if (container == QUICKLIST_NODE_CONTAINER_PLAIN) {
       lp = (uint8_t*)zmalloc(sv.size());
       ::memcpy(lp, (uint8_t*)sv.data(), sv.size());
-      quicklistAppendPlainNode(ql, lp, sv.size());
+      if (ql)
+        quicklistAppendPlainNode(ql, lp, sv.size());
+      else
+        qlv2->AppendPlain(lp, sv.size());
+
       return true;
     }
 
@@ -774,13 +795,16 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
       lp = lpShrinkToFit(lp);
     }
 
-    quicklistAppendListpack(ql, lp);
+    if (ql)
+      quicklistAppendListpack(ql, lp);
+    else
+      qlv2->AppendListpack(lp);
     return true;
   });
 
   if (ec_)
     return;
-  if (quicklistCount(ql) == 0) {
+  if ((ql && quicklistCount(ql) == 0) || (qlv2 && qlv2->Size() == 0)) {
     ec_ = RdbError(errc::empty_key);
     return;
   }
@@ -788,7 +812,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   std::move(cleanup).Cancel();
 
   if (!config_.append) {
-    pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+    if (ql)
+      pv_->InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, ql);
+    else
+      pv_->InitRobj(OBJ_LIST, kEncodingQL2, qlv2);
   }
 }
 
@@ -2258,7 +2285,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
         // Active database if not existed before.
         shard_set->Add(
-            i, [dbid] { namespaces.GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid); });
+            i, [dbid] { namespaces->GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid); });
       }
 
       cur_db_index_ = dbid;
@@ -2571,7 +2598,9 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "lua") {
     LoadScriptFromAux(std::move(auxval));
   } else if (auxkey == "redis-ver") {
-    VLOG(1) << "Loading RDB produced by version " << auxval;
+    VLOG(1) << "Loading RDB produced by Redis version " << auxval;
+  } else if (auxkey == "df-ver") {
+    VLOG(1) << "Loading RDB produced by Dragonfly version " << auxval;
   } else if (auxkey == "ctime") {
     int64_t ctime;
     if (absl::SimpleAtoi(auxval, &ctime)) {
@@ -2581,9 +2610,14 @@ error_code RdbLoader::HandleAux() {
       VLOG(1) << "RDB age " << strings::HumanReadableElapsedTime(age);
     }
   } else if (auxkey == "used-mem") {
-    long long usedmem;
+    int64_t usedmem;
     if (absl::SimpleAtoi(auxval, &usedmem)) {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
+      if (usedmem > ssize_t(max_memory_limit)) {
+        LOG(WARNING) << "Could not load snapshot - its used memory is " << usedmem
+                     << " but the limit is " << max_memory_limit;
+        return RdbError(errc::out_of_memory);
+      }
     }
   } else if (auxkey == "aof-preamble") {
     long long haspreamble;
@@ -2642,10 +2676,6 @@ void RdbLoader::FlushAllShards() {
     FlushShardAsync(i);
 }
 
-std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
-  return RdbLoaderBase::FromOpaque(opaque, LoadConfig{}, pv);
-}
-
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
                                           CompactObj* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv, config);
@@ -2656,7 +2686,7 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig co
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   EngineShard* es = EngineShard::tlocal();
-  DbContext db_cntx{&namespaces.GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
+  DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
   DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
 
   auto error_msg = [](const auto* item, auto db_ind) {
@@ -2708,7 +2738,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     }
 
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
-      VLOG(1) << "Expire key on load: " << item->key;
+      VLOG(2) << "Expire key on load: " << item->key;
       continue;
     }
 
@@ -2860,7 +2890,7 @@ void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
   cntx.is_replicating = true;
   cntx.journal_emulated = true;
   cntx.skip_acl_validation = true;
-  cntx.ns = &namespaces.GetDefaultNamespace();
+  cntx.ns = &namespaces->GetDefaultNamespace();
 
   uint32_t consumed = 0;
   facade::RespVec resp_vec;
@@ -2897,7 +2927,7 @@ void RdbLoader::PerformPostLoad(Service* service) {
   // Rebuild all search indices as only their definitions are extracted from the snapshot
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     es->search_indices()->RebuildAllIndices(
-        OpArgs{es, nullptr, DbContext{&namespaces.GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
+        OpArgs{es, nullptr, DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
   });
 }
 

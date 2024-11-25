@@ -6,35 +6,16 @@
 
 #include "absl/flags/internal/flag.h"
 #include "base/flags.h"
+#include "base/logging.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
 
-ABSL_FLAG(bool, experimental_new_io, true,
-          "Use new replying code - should "
-          "reduce latencies for pipelining");
+ABSL_RETIRED_FLAG(bool, experimental_new_io, true,
+                  "Use new replying code - should "
+                  "reduce latencies for pipelining");  // TODO remove in 1/2/25
 
 namespace facade {
-
-ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : owner_(owner) {
-  if (owner) {
-    protocol_ = owner->protocol();
-  }
-
-  if (stream) {
-    switch (protocol_) {
-      case Protocol::REDIS: {
-        RedisReplyBuilder* rb = absl::GetFlag(FLAGS_experimental_new_io)
-                                    ? new RedisReplyBuilder2(stream)
-                                    : new RedisReplyBuilder(stream);
-        rbuilder_.reset(rb);
-        break;
-      }
-      case Protocol::MEMCACHE:
-        rbuilder_.reset(new MCReplyBuilder(stream));
-        break;
-    }
-  }
-
+ConnectionContext::ConnectionContext(Connection* owner) : owner_(owner) {
   conn_closing = false;
   req_auth = false;
   replica_conn = false;
@@ -49,7 +30,7 @@ ConnectionContext::ConnectionContext(::io::Sink* stream, Connection* owner) : ow
 }
 
 size_t ConnectionContext::UsedMemory() const {
-  return dfly::HeapSize(rbuilder_) + dfly::HeapSize(authed_username) + dfly::HeapSize(acl_commands);
+  return dfly::HeapSize(authed_username) + dfly::HeapSize(acl_commands);
 }
 
 }  // namespace facade
