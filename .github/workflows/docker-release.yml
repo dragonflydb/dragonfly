@@ -90,10 +90,10 @@ jobs:
 
         go test ./contrib/charts/dragonfly/... -update
 
-        git commit --allow-empty \
+        git commit \
           -m 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
           contrib/charts/dragonfly/Chart.yaml \
-          contrib/charts/dragonfly/ci
+          contrib/charts/dragonfly/ci || true
 
     - name: Push Helm chart as OCI to Github
       if: env.IS_PRERELEASE != 'true'
