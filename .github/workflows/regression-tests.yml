@@ -18,15 +18,19 @@ jobs:
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /var/crash:/var/crash
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: Print cpu info
-        run: cat /proc/cpuinfo
-
+      - name: Print environment info
+        run: |
+          cat /proc/cpuinfo
+          ulimit -a
+          env
       - name: Configure & Build
         run: |
           # -no-pie to disable address randomization so we could symbolize stacktraces
@@ -55,6 +59,16 @@ jobs:
         with:
           name: logs
           path: /tmp/failed/*
+
+      - name: Copy binary on a self hosted runner
+        if: failure()
+        run: |
+          # We must use sh syntax.
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then
+            cd ${GITHUB_WORKSPACE}/build
+            timestamp=$(date +%Y-%m-%d_%H:%M:%S)
+            mv ./dragonfly /var/crash/dragonfy_${timestamp}
+          fi
 
   lint-test-chart:
     runs-on: ubuntu-latest
