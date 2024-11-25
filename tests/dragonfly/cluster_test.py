@@ -153,9 +153,12 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
     )
 
+    if not isinstance(status, list):
+        status = [status]
+
     async for states, breaker in tick_timer(get_status, timeout=timeout):
         with breaker:
-            assert len(states) != 0 and all(status == state[2] for state in states), states
+            assert len(states) != 0 and all(state[2] in status for state in states), states
 
 
 async def wait_for_error(admin_client, node_id, error, timeout=10):
@@ -1300,9 +1303,8 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    seeder = df_seeder_factory.create(keys=30000, port=nodes[0].instance.port, cluster_mode=True)
-
-    await seeder.run(target_deviation=0.1)
+    await StaticSeeder(key_target=200000).run(nodes[0].client)
+    start_capture = await StaticSeeder.capture(nodes[0].client)
 
     proxy = Proxy("127.0.0.1", 1111, "127.0.0.1", nodes[1].instance.admin_port)
     await proxy.start()
@@ -1314,23 +1316,26 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
         await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
         for _ in range(10):
-            await asyncio.sleep(random.randint(0, 10) / 20)
+            await asyncio.sleep(random.randint(0, 10) / 100)
             logging.debug("drop connections")
             proxy.drop_connection()
             logging.debug(
                 await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             )
     finally:
+        await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC")
         await proxy.close(task)
 
+    await proxy.start()
+
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 20)
     nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
     logging.debug("remove finished migrations")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    capture = await seeder.capture()
-    assert await seeder.compare(capture, nodes[1].instance.port)
+    assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
 
 
 @pytest.mark.parametrize(
