@@ -325,11 +325,14 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   Run({"del", vec[1]});
   Run({"lpush", vec[1], "a"});
 
+  resp = Run({"get", vec[2]});
+  string val = resp.GetString();
   auto mget_resp = StrArray(Run({"mget", vec[2], vec[2], vec[2]}));
+  EXPECT_THAT(mget_resp, ElementsAre(val, val, val));
 
   resp = Run({"info", "stats"});
   size_t bumps = get_bump_ups(resp.GetString());
-  EXPECT_EQ(bumps, 2);  // one bump for del and one for the mget key
+  EXPECT_EQ(bumps, 3);  // one bump for del and one for get and one for mget
 }
 
 TEST_F(StringFamilyTest, MSetGet) {

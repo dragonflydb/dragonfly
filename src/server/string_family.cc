@@ -551,9 +551,13 @@ MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Tran
   };
 
   absl::InlinedVector<Item, 32> items(keys.Size());
-  static thread_local absl::flat_hash_map<string_view, unsigned> key_index;
 
-  FiberAtomicGuard guard;
+  // We can not make it thread-local because we may preempt during the Find loop due to
+  // serialization with the bumpup calls.
+
+  // TODO: consider separating BumpUps from finds because it becomes too complicated
+  // to reason about.
+  absl::flat_hash_map<string_view, unsigned> key_index;
 
   // First, fetch all iterators and count total size ahead
   size_t total_size = 0;
