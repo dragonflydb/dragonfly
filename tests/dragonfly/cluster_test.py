@@ -13,6 +13,7 @@ from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
+from .seeder import SeederBase
 from .seeder import StaticSeeder
 
 from . import dfly_args
@@ -152,9 +153,30 @@ async def wait_for_status(admin_client, node_id, status, timeout=10):
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
     )
 
+    if not isinstance(status, list):
+        status = [status]
+
     async for states, breaker in tick_timer(get_status, timeout=timeout):
         with breaker:
-            assert len(states) != 0 and all(status == state[2] for state in states), states
+            assert len(states) != 0 and all(state[2] in status for state in states), states
+
+
+async def wait_for_error(admin_client, node_id, error, timeout=10):
+    get_status = lambda: admin_client.execute_command(
+        "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
+    )
+
+    async for states, breaker in tick_timer(get_status, timeout=timeout):
+        with breaker:
+            assert len(states) != 0 and all(error == state[4] for state in states), states
+
+
+async def wait_for_migration_start(admin_client, node_id):
+    while (
+        len(await admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id))
+        == 0
+    ):
+        await asyncio.sleep(0.1)
 
 
 async def check_for_no_state_status(admin_clients):
@@ -1281,9 +1303,8 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    seeder = df_seeder_factory.create(keys=30000, port=nodes[0].instance.port, cluster_mode=True)
-
-    await seeder.run(target_deviation=0.1)
+    await StaticSeeder(key_target=200000).run(nodes[0].client)
+    start_capture = await StaticSeeder.capture(nodes[0].client)
 
     proxy = Proxy("127.0.0.1", 1111, "127.0.0.1", nodes[1].instance.admin_port)
     await proxy.start()
@@ -1295,23 +1316,26 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
         await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
         for _ in range(10):
-            await asyncio.sleep(random.randint(0, 10) / 20)
+            await asyncio.sleep(random.randint(0, 10) / 100)
             logging.debug("drop connections")
             proxy.drop_connection()
             logging.debug(
                 await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             )
     finally:
+        await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC")
         await proxy.close(task)
 
+    await proxy.start()
+
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 20)
     nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
     logging.debug("remove finished migrations")
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    capture = await seeder.capture()
-    assert await seeder.compare(capture, nodes[1].instance.port)
+    assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
 
 
 @pytest.mark.parametrize(
@@ -2205,7 +2229,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
 
 
 @pytest.mark.skip("Takes more than 10 minutes")
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"cluster_mode": "yes"})
 async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFactory):
     # Check data migration from one node to another
     instances = [
@@ -2261,3 +2285,63 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await check_for_no_state_status([node.admin_client for node in nodes])
+
+
+@pytest.mark.skip("Flaky")
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # Timeout set to 3 seconds because we must first saturate the socket before we get the timeout
+    instances = [
+        df_factory.create(
+            port=BASE_PORT + i,
+            admin_port=BASE_PORT + i + 1000,
+            replication_timeout=3000,
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
+        )
+        for i in range(2)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("source node DEBUG POPULATE")
+    await nodes[0].client.execute_command("debug", "populate", "100000", "foo", "5000")
+
+    # await StaticSeeder(key_target=200000, data_size=1000).run(nodes[0].client)
+    start_capture = await StaticSeeder.capture(nodes[0].client)
+
+    logging.debug("Start migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await asyncio.sleep(random.randint(0, 50) / 100)
+    await wait_for_migration_start(nodes[1].admin_client, nodes[0].id)
+
+    logging.debug("debug migration pause")
+    await nodes[1].client.execute_command("debug migration pause")
+
+    await wait_for_error(
+        nodes[0].admin_client, nodes[1].id, "JournalStreamer write operation timeout"
+    )
+
+    logging.debug("debug migration resume")
+    await nodes[1].client.execute_command("debug migration resume")
+
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    assert (await StaticSeeder.capture(nodes[1].client)) == start_capture

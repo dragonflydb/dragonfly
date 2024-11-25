@@ -38,6 +38,10 @@ class ClusterShardMigration {
         bc_(bc) {
   }
 
+  void Pause(bool pause) {
+    pause_ = pause;
+  }
+
   void Start(Context* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
     {
       util::fb2::LockGuard lk(mu_);
@@ -56,6 +60,11 @@ class ClusterShardMigration {
     TransactionReader tx_reader;
 
     while (!cntx->IsCancelled()) {
+      if (pause_) {
+        ThisFiber::SleepFor(100ms);
+        continue;
+      }
+
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
         in_migration_->ReportError(GenericError("No tx data"));
@@ -135,6 +144,7 @@ class ClusterShardMigration {
   IncomingSlotMigration* in_migration_;
   util::fb2::BlockingCounter bc_;
   atomic_long last_attempt_{-1};
+  atomic_bool pause_ = false;
 };
 
 IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
@@ -153,6 +163,13 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 IncomingSlotMigration::~IncomingSlotMigration() {
 }
 
+void IncomingSlotMigration::Pause(bool pause) {
+  VLOG(1) << "Pausing migration " << pause;
+  for (auto& flow : shard_flows_) {
+    flow->Pause(pause);
+  }
+}
+
 bool IncomingSlotMigration::Join(long attempt) {
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
@@ -161,8 +178,7 @@ bool IncomingSlotMigration::Join(long attempt) {
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG_EVERY_N(1, 1000) << "Checking whether to continue with join " << passed << " vs "
-                          << timeout;
+    VLOG(1) << "Checking whether to continue with join " << passed << " vs " << timeout;
     if (passed >= timeout) {
       LOG(WARNING) << "Can't join migration in time";
       ReportError(GenericError("Can't join migration in time"));
@@ -198,8 +214,7 @@ void IncomingSlotMigration::Stop() {
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG_EVERY_N(1, 1000) << "Checking whether to continue with stop " << passed << " vs "
-                          << timeout;
+    VLOG(1) << "Checking whether to continue with stop " << passed << " vs " << timeout;
 
     if (bc_->WaitFor(absl::ToInt64Milliseconds(timeout - passed) * 1ms)) {
       return;

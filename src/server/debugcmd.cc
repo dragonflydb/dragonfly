@@ -367,7 +367,8 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
 
 }  // namespace
 
-DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
+DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx)
+    : sf_(*owner), cf_(*cf), cntx_(cntx) {
 }
 
 void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
@@ -435,6 +436,10 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "REPLICA" && args.size() == 2) {
     return Replica(args, builder);
+  }
+
+  if (subcmd == "MIGRATION" && args.size() == 2) {
+    return Migration(args, builder);
   }
 
   if (subcmd == "WATCHED") {
@@ -548,6 +553,18 @@ void DebugCmd::Replica(CmdArgList args, facade::SinkReplyBuilder* builder) {
     }
   }
   return builder->SendError(UnknownSubCmd("replica", "DEBUG"));
+}
+
+void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  args.remove_prefix(1);
+
+  string opt = absl::AsciiStrToUpper(ArgS(args, 0));
+
+  if (opt == "PAUSE" || opt == "RESUME") {
+    cf_.PauseAllIncomingMigrations(opt == "PAUSE");
+    return builder->SendOk();
+  }
+  return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
 }
 
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,

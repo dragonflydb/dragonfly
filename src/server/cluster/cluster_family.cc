@@ -35,7 +35,6 @@ ABSL_FLAG(std::string, cluster_node_id, "",
 
 ABSL_FLAG(bool, managed_service_info, false,
           "Hides some implementation details from users when true (i.e. in managed service env)");
-
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
 
@@ -1005,6 +1004,14 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
   ApplyMigrationSlotRangeToConfig(migration->GetSourceID(), migration->GetSlots(), true);
 
   return builder->SendLong(attempt);
+}
+
+void ClusterFamily::PauseAllIncomingMigrations(bool pause) {
+  util::fb2::LockGuard lk(migration_mu_);
+  LOG_IF(ERROR, incoming_migrations_jobs_.empty()) << "No incoming migrations!";
+  for (auto& im : incoming_migrations_jobs_) {
+    im->Pause(pause);
+  }
 }
 
 using EngineFunc = void (ClusterFamily::*)(CmdArgList args, SinkReplyBuilder* builder,

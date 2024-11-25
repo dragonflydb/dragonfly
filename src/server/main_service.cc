@@ -865,7 +865,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     acl_family_.Init(listeners.front(), &user_registry_);
   }
 
-  // Initialize shard_set with a global callback running once in a while in the shard threads.
+  // Initialize shard_set with a callback running once in a while in the shard threads.
   shard_set->Init(shard_num, [this] {
     server_family_.GetDflyCmd()->BreakStalledFlowsInShard();
     server_family_.UpdateMemoryGlobalStats();
