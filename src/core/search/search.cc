@@ -654,6 +654,7 @@ const Schema& FieldIndices::GetSchema() const {
 
 SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_identifier) const {
   auto it = sort_indices_.find(field_identifier);
+  DCHECK(it != sort_indices_.end());
   return it->second->Lookup(doc);
 }
 

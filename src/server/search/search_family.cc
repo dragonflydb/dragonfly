@@ -183,13 +183,9 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 #pragma GCC diagnostic pop
 #endif
 
-bool StartsWithAtSign(std::string_view field) {
-  return !field.empty() && field.front() == '@';
-}
-
 std::string_view ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (StartsWithAtSign(field)) {
+  if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @ if exists
   }
   return field;
@@ -197,7 +193,7 @@ std::string_view ParseField(CmdArgParser* parser) {
 
 std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (StartsWithAtSign(field)) {
+  if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @
   } else {
     // Temporary warning until we can throw an error
@@ -217,7 +213,7 @@ void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load
   while (num_fields--) {
     string_view str = parser->Next();
 
-    if (StartsWithAtSign(str)) {
+    if (absl::StartsWith(str, "@"sv)) {
       str.remove_prefix(1);  // remove leading @
     }
 
