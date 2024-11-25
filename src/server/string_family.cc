@@ -529,14 +529,29 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_
   auto& db_slice = t->GetDbSlice(shard->shard_id());
 
   SinkReplyBuilder::MGetResponse response(keys.Size());
-  absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
+
+  struct Item {
+    DbSlice::ConstIterator it;
+    int source_index = -1;  // in case of duplicate keys, points to the first occurrence.
+  };
+
+  absl::InlinedVector<Item, 32> items(keys.Size());
+  absl::flat_hash_map<string_view, unsigned> key_index;
 
   // First, fetch all iterators and count total size ahead
   size_t total_size = 0;
   unsigned index = 0;
+
+  key_index.reserve(keys.Size());
   for (string_view key : keys) {
+    auto [it, inserted] = key_index.try_emplace(key, index);
+    if (!inserted) {  // duplicate -> point to the first occurrence.
+      items[index++].source_index = it->second;
+      continue;
+    }
+
     auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
-    if (auto& dest = iters[index++]; it_res) {
+    if (auto& dest = items[index++].it; it_res) {
       dest = *it_res;
       total_size += (*it_res)->second.Size();
     }
@@ -547,10 +562,14 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_
   char* next = response.storage_list->data;
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
-  for (size_t i = 0; i < iters.size(); ++i) {
-    auto it = iters[i];
-    if (it.is_done())
+  for (size_t i = 0; i < items.size(); ++i) {
+    auto it = items[i].it;
+    if (it.is_done()) {
+      if (items[i].source_index >= 0) {
+        response.resp_arr[i] = response.resp_arr[items[i].source_index];
+      }
       continue;
+    }
 
     auto& resp = response.resp_arr[i].emplace();
 
