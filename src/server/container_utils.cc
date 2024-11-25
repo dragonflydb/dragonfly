@@ -270,6 +270,36 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
   return false;
 }
 
+bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func) {
+  bool finished = true;
+
+  if (pv.Encoding() == kEncodingListPack) {
+    uint8_t intbuf[LP_INTBUF_SIZE];
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    uint8_t* fptr = lpFirst(lp);
+    while (fptr) {
+      string_view key = LpGetView(fptr, intbuf);
+      fptr = lpNext(lp, fptr);
+      string_view val = LpGetView(fptr, intbuf);
+      fptr = lpNext(lp, fptr);
+      if (!func(ContainerEntry{key.data(), key.size()}, ContainerEntry{val.data(), val.size()})) {
+        finished = false;
+        break;
+      }
+    }
+  } else {
+    StringMap* sm = static_cast<StringMap*>(pv.RObjPtr());
+    for (const auto& k_v : *sm) {
+      if (!func(ContainerEntry{k_v.first, sdslen(k_v.first)},
+                ContainerEntry{k_v.second, sdslen(k_v.second)})) {
+        finished = false;
+        break;
+      }
+    }
+  }
+  return finished;
+}
+
 StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   StringMap* res = static_cast<StringMap*>(pv.RObjPtr());

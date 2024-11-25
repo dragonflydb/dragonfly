@@ -28,7 +28,7 @@ endif()
 
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
             command_registry.cc  cluster/cluster_utility.cc
-            journal/tx_executor.cc namespaces.cc
+            journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
