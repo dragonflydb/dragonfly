@@ -539,7 +539,6 @@ constexpr uint8_t FETCH_MCVER = 0x2;
 MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
                     EngineShard* shard) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
-  bool may_have_duplicate_keys = t->MayHaveDuplicateKeys(shard->shard_id());
   DCHECK(!keys.Empty());
 
   auto& db_slice = t->GetDbSlice(shard->shard_id());
@@ -551,18 +550,18 @@ MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask, cons
   };
 
   absl::InlinedVector<Item, 32> items(keys.Size());
-  absl::flat_hash_map<string_view, unsigned> key_index;
+  static thread_local absl::flat_hash_map<string_view, unsigned> key_index;
 
   // First, fetch all iterators and count total size ahead
   size_t total_size = 0;
   unsigned index = 0;
+  key_index.reserve(keys.Size());
+
   for (string_view key : keys) {
-    if (may_have_duplicate_keys) {
-      auto [it, inserted] = key_index.try_emplace(key, index);
-      if (!inserted) {  // duplicate -> point to the first occurrence.
-        items[index++].source_index = it->second;
-        continue;
-      }
+    auto [it, inserted] = key_index.try_emplace(key, index);
+    if (!inserted) {  // duplicate -> point to the first occurrence.
+      items[index++].source_index = it->second;
+      continue;
     }
 
     auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
@@ -617,6 +616,7 @@ MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask, cons
       }
     }
   }
+  key_index.clear();
 
   return response;
 }

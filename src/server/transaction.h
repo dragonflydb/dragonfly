@@ -160,18 +160,14 @@ class Transaction {
   // State on specific shard.
   enum LocalMask : uint16_t {
     ACTIVE = 1,  // Whether its active on this shard (to schedule or execute hops)
-
-    // if set, then with high probability the transaction has duplicate keys on this shard.
-    DUPLICATE_KEYS_HINT = 1 << 1,
-
+    OPTIMISTIC_EXECUTION = 1 << 7,  // Whether the shard executed optimistically (during schedule)
     // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
     OUT_OF_ORDER = 1 << 2,
     // Whether its key locks are acquired, never set for global commands.
     KEYLOCK_ACQUIRED = 1 << 3,
-    SUSPENDED_Q = 1 << 4,           // Whether it suspended (by WatchInShard())
-    AWAKED_Q = 1 << 5,              // Whether it was awakened (by NotifySuspended())
-    UNLOCK_MULTI = 1 << 6,          // Whether this shard executed UnlockMultiShardCb
-    OPTIMISTIC_EXECUTION = 1 << 7,  // Whether the shard executed optimistically (during schedule)
+    SUSPENDED_Q = 1 << 4,   // Whether it suspended (by WatchInShard())
+    AWAKED_Q = 1 << 5,      // Whether it was awakened (by NotifySuspended())
+    UNLOCK_MULTI = 1 << 6,  // Whether this shard executed UnlockMultiShardCb
   };
 
   struct Guard {
@@ -370,10 +366,6 @@ class Transaction {
 
   uint16_t DEBUG_GetLocalMask(ShardId sid) const {
     return shard_data_[SidToId(sid)].local_mask;
-  }
-
-  bool MayHaveDuplicateKeys(ShardId sid) const {
-    return shard_data_[SidToId(sid)].local_mask & DUPLICATE_KEYS_HINT;
   }
 
   void SetTrackingCallback(std::function<void(Transaction* trans)> f) {

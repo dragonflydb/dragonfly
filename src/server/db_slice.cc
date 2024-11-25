@@ -996,16 +996,14 @@ size_t DbSlice::DbSize(DbIndex db_ind) const {
   return 0;
 }
 
-pair<bool, bool> DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
+bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.fps.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
-    return {true, false};
+    return true;
   }
-
   DCHECK_LT(lock_args.db_index, db_array_size());
 
   auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   bool lock_acquired = true;
-  bool duplicate = false;
 
   if (lock_args.fps.size() == 1) {
     lock_acquired = lt.Acquire(lock_args.fps.front(), mode);
@@ -1016,8 +1014,6 @@ pair<bool, bool> DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock
     for (LockFp fp : lock_args.fps) {
       if (uniq_fps_.insert(fp).second) {
         lock_acquired &= lt.Acquire(fp, mode);
-      } else {
-        duplicate = true;
       }
     }
   }
@@ -1025,7 +1021,7 @@ pair<bool, bool> DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock
   DVLOG(2) << "Acquire " << IntentLock::ModeName(mode) << " for " << lock_args.fps[0]
            << " has_acquired: " << lock_acquired;
 
-  return {lock_acquired, duplicate};
+  return lock_acquired;
 }
 
 void DbSlice::Release(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
