@@ -88,7 +88,7 @@ class RobjWrapper {
 
   void* inner_obj_ = nullptr;
 
-  // semantijs depend on the type. For OBJ_STRING it's string length.
+  // semantics depend on the type. For OBJ_STRING it's string length.
   uint64_t sz_ : 56;
 
   uint64_t type_ : 4;

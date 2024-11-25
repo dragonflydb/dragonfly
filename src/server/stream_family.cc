@@ -606,11 +606,11 @@ int StreamTrim(const AddTrimOpts& opts, stream* s) {
 class StreamMemTracker {
  public:
   StreamMemTracker() {
-    start_size_ = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+    start_size_ = zmalloc_used_memory_tl;
   }
 
-  void SetStreamSize(PrimeValue& pv, bool is_op_set = false) {
-    const size_t current = static_cast<MiMemoryResource*>(CompactObj::memory_resource())->used();
+  void SetStreamSize(PrimeValue& pv) const {
+    const size_t current = zmalloc_used_memory_tl;
     int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
     // If the diff is 0 it means the object use the same memory as before. No action needed.
     if (diff == 0) {
