@@ -28,6 +28,7 @@ def test_create_cf(r: redis.Redis):
     assert r.topk().reserve("topk", 5, 100, 5, 0.9)
 
 
+@pytest.mark.unsupported_server_types("dragonfly")
 def test_bf_reserve(r: redis.Redis):
     assert r.bf().reserve("bloom", 0.01, 1000)
     assert r.bf().reserve("bloom_ns", 0.01, 1000, noScale=True)
