@@ -1913,9 +1913,9 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     load_trace->stream_trace->max_deleted_entry_id.seq = 0;
     load_trace->stream_trace->entries_added = load_trace->stream_trace->stream_len;
 
-    /* Since the rax is already loaded, we can find the first entry's * ID. */
-    // TODO add implementation
-    //  streamGetEdgeID(s,1,1,&s->first_id);
+    // TODO add implementation, we need to find the first entry's ID.
+    // The redis code is next
+    // streamGetEdgeID(s,1,1,&s->first_id);
   }
 
   /* Consumer groups loading */
