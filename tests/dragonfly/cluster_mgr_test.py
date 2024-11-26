@@ -24,6 +24,7 @@ def run_cluster_mgr(args):
     return result.returncode == 0
 
 
+@pytest.mark.skip("it leaves an unclosed instance that fails other tests")
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_mgr(df_factory):
     NODES = 3
