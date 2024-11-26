@@ -812,6 +812,10 @@ void CompactObj::SetJsonSize(int64_t size) {
 
 void CompactObj::SetStreamSize(int64_t size) {
   if (size < 0) {
+    // We might have a negative size. For example, if we remove a consumer,
+    // the tracker will report a negative net (since we deallocated),
+    // so the object now consumes less memory than it did before. This DCHECK
+    // is for fanity and to catch any potential issues with our tracking approach.
     DCHECK(static_cast<int64_t>(u_.r_obj.Size()) >= size);
   }
   u_.r_obj.SetSize((u_.r_obj.Size() + size));

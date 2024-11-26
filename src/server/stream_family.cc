@@ -612,10 +612,6 @@ class StreamMemTracker {
   void SetStreamSize(PrimeValue& pv) const {
     const size_t current = zmalloc_used_memory_tl;
     int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
-    // If the diff is 0 it means the object use the same memory as before. No action needed.
-    if (diff == 0) {
-      return;
-    }
     pv.SetStreamSize(diff);
     // Under any flow we must not end up with this special value.
     DCHECK(pv.MallocUsed() != 0);
