@@ -144,7 +144,7 @@ class QList {
   }
 
   const quicklistNode* Tail() const {
-    return tail_;
+    return _Tail();
   }
 
   void set_fill(int fill) {
@@ -156,6 +156,10 @@ class QList {
  private:
   bool AllowCompression() const {
     return compress_ != 0;
+  }
+
+  quicklistNode* _Tail() const {
+    return head_ ? head_->prev : nullptr;
   }
 
   // Returns false if used existing sentinel, true if a new sentinel was created.
@@ -176,7 +180,7 @@ class QList {
   bool DelPackedIndex(quicklistNode* node, uint8_t** p);
 
   quicklistNode* head_ = nullptr;
-  quicklistNode* tail_ = nullptr;
+
   uint32_t count_ = 0;                   /* total count of all entries in all listpacks */
   uint32_t len_ = 0;                     /* number of quicklistNodes */
   signed int fill_ : QL_FILL_BITS;       /* fill factor for individual nodes */

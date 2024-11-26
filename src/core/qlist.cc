@@ -60,7 +60,7 @@ namespace dfly {
 
 namespace {
 
-static_assert(sizeof(QList) == 32);
+static_assert(sizeof(QList) == 24);
 
 enum IterDir : uint8_t { FWD = 1, REV = 0 };
 
@@ -305,13 +305,12 @@ QList::QList(int fill, int compress) : fill_(fill), compress_(compress), bookmar
 
 QList::QList(QList&& other)
     : head_(other.head_),
-      tail_(other.tail_),
       count_(other.count_),
       len_(other.len_),
       fill_(other.fill_),
       compress_(other.compress_),
       bookmark_count_(other.bookmark_count_) {
-  other.head_ = other.tail_ = nullptr;
+  other.head_ = nullptr;
   other.len_ = other.count_ = 0;
 }
 
@@ -323,14 +322,13 @@ QList& QList::operator=(QList&& other) {
   if (this != &other) {
     Clear();
     head_ = other.head_;
-    tail_ = other.tail_;
     len_ = other.len_;
     count_ = other.count_;
     fill_ = other.fill_;
     compress_ = other.compress_;
     bookmark_count_ = other.bookmark_count_;
 
-    other.head_ = other.tail_ = nullptr;
+    other.head_ = nullptr;
     other.len_ = other.count_ = 0;
   }
   return *this;
@@ -348,28 +346,24 @@ void QList::Clear() {
     len_--;
     current = next;
   }
-  head_ = tail_ = nullptr;
+  head_ = nullptr;
   count_ = 0;
 }
 
 void QList::Push(string_view value, Where where) {
   /* The head and tail should never be compressed (we don't attempt to decompress them) */
-  if (head_)
+  if (head_) {
     DCHECK(head_->encoding != QUICKLIST_NODE_ENCODING_LZF);
-  if (tail_)
-    DCHECK(tail_->encoding != QUICKLIST_NODE_ENCODING_LZF);
-
+    DCHECK(head_->prev->encoding != QUICKLIST_NODE_ENCODING_LZF);
+  }
   PushSentinel(value, where);
 }
 
 string QList::Pop(Where where) {
   DCHECK_GT(count_, 0u);
-  quicklistNode* node;
-  if (where == HEAD) {
-    node = head_;
-  } else {
-    DCHECK_EQ(TAIL, where);
-    node = tail_;
+  quicklistNode* node = head_;
+  if (where == TAIL) {
+    node = head_->prev;
   }
 
   /* The head and tail should never be compressed */
@@ -402,7 +396,7 @@ void QList::AppendListpack(unsigned char* zl) {
   node->count = lpLength(node->entry);
   node->sz = lpBytes(zl);
 
-  InsertNode(tail_, node, AFTER);
+  InsertNode(_Tail(), node, AFTER);
   count_ += node->count;
 }
 
@@ -414,7 +408,7 @@ void QList::AppendPlain(unsigned char* data, size_t sz) {
   node->sz = sz;
   node->container = QUICKLIST_NODE_CONTAINER_PLAIN;
 
-  InsertNode(tail_, node, AFTER);
+  InsertNode(_Tail(), node, AFTER);
   ++count_;
 }
 
@@ -469,7 +463,11 @@ void QList::Iterate(IterateFunc cb, long start, long end) const {
 }
 
 bool QList::PushSentinel(string_view value, Where where) {
-  quicklistNode* orig = where == HEAD ? head_ : tail_;
+  quicklistNode* orig = head_;
+  if (where == TAIL && orig) {
+    orig = orig->prev;
+  }
+
   InsertOpt opt = where == HEAD ? BEFORE : AFTER;
 
   size_t sz = value.size();
@@ -507,23 +505,27 @@ void QList::InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertO
       if (old_node->next)
         old_node->next->prev = new_node;
       old_node->next = new_node;
+      if (head_->prev == old_node)  // if old_node is tail, update the tail to the new node.
+        head_->prev = new_node;
     }
-    if (tail_ == old_node)
-      tail_ = new_node;
   } else {
     new_node->next = old_node;
     if (old_node) {
       new_node->prev = old_node->prev;
-      if (old_node->prev)
+      // if old_node is not head, link its prev to the new node.
+      // head->prev is tail, so we don't need to update it.
+      if (old_node != head_)
         old_node->prev->next = new_node;
       old_node->prev = new_node;
     }
     if (head_ == old_node)
       head_ = new_node;
   }
+
   /* If this insert creates the only element so far, initialize head/tail. */
   if (len_ == 0) {
-    head_ = tail_ = new_node;
+    head_ = new_node;
+    head_->prev = new_node;
   }
 
   /* Update len first, so in Compress we know exactly len */
@@ -698,7 +700,7 @@ void QList::Compress(quicklistNode* node) {
     return;
 
   /* The head and tail should never be compressed (we should not attempt to recompress them) */
-  assert(head_->recompress == 0 && tail_->recompress == 0);
+  DCHECK(head_->recompress == 0 && head_->prev->recompress == 0);
 
   /* If length is less than our compress depth (from both sides),
    * we can't compress anything. */
@@ -709,7 +711,7 @@ void QList::Compress(quicklistNode* node) {
    * Note: because we do length checks at the *top* of this function,
    *       we can skip explicit null checks below. Everything exists. */
   quicklistNode* forward = head_;
-  quicklistNode* reverse = tail_;
+  quicklistNode* reverse = head_->prev;
   int depth = 0;
   int in_depth = 0;
   while (depth++ < compress_) {
@@ -837,12 +839,10 @@ void QList::DelNode(quicklistNode* node) {
   if (node->prev)
     node->prev->next = node->next;
 
-  if (node == tail_) {
-    tail_ = node->prev;
-  }
-
   if (node == head_) {
     head_ = node->next;
+  } else if (node == head_->prev) {  // tail
+    head_->prev = node->prev;
   }
 
   /* Update len first, so in Compress we know exactly len */
@@ -892,7 +892,7 @@ auto QList::GetIterator(Where where) const -> Iterator {
     it.offset_ = 0;
     it.direction_ = FWD;
   } else {
-    it.current_ = tail_;
+    it.current_ = _Tail();
     it.offset_ = -1;
     it.direction_ = REV;
   }
@@ -918,7 +918,7 @@ auto QList::GetIterator(long idx) const -> Iterator {
     seek_index = count_ - 1 - index;
   }
 
-  n = seek_forward ? head_ : tail_;
+  n = seek_forward ? head_ : head_->prev;
   while (ABSL_PREDICT_TRUE(n)) {
     if ((accum + n->count) > seek_index) {
       break;
@@ -1119,9 +1119,8 @@ bool QList::Iterator::Next() {
   } else {
     /* Reverse traversal, Jumping to end of previous node */
     DCHECK_EQ(REV, direction_);
-
-    current_ = current_->prev;
     offset_ = -1;
+    current_ = (current_ == owner_->head_) ? nullptr : current_->prev;
   }
 
   return current_ ? Next() : false;
