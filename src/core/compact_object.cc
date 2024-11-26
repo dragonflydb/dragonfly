@@ -365,7 +365,12 @@ size_t RobjWrapper::Size() const {
           StringMap* sm = (StringMap*)inner_obj_;
           return sm->UpperBoundSize();
         }
+        default:
+          LOG(FATAL) << "Unexpected encoding " << encoding_;
       }
+    case OBJ_STREAM:
+      // Size mean malloc bytes for streams
+      return sz_;
     default:;
   }
   return 0;
