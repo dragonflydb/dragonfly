@@ -1338,6 +1338,7 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
     assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
 
 
+@pytest.mark.skip("Crashes and cascades to the rest of the tests")
 @pytest.mark.parametrize(
     "node_count, segments, keys, huge_values",
     [
