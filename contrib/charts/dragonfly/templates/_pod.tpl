@@ -114,12 +114,6 @@ containers:
             name: {{ .Values.passwordFromSecret.existingSecret.name }}
             key: {{ .Values.passwordFromSecret.existingSecret.key }}
     {{- end }}
-    {{- if .Values.env }}
-      {{- range $key, $value := .Values.env }}
-    - name: {{ $key }}
-      value: {{ $value | quote }}
-      {{- end }}
-    {{- end }}
     {{- with .Values.env }}
       {{- toYaml . | trim | nindent 6 }}
     {{- end }}
