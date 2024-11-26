@@ -1502,7 +1502,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadListQuicklist(rdbtype);
       break;
     case RDB_TYPE_STREAM_LISTPACKS:
-      iores = ReadStreams();
+    case RDB_TYPE_STREAM_LISTPACKS_2:
+    case RDB_TYPE_STREAM_LISTPACKS_3:
+      iores = ReadStreams(rdbtype);
       break;
     case RDB_TYPE_JSON:
       iores = ReadJson();
@@ -1828,7 +1830,7 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
-auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   size_t listpacks;
   if (pending_read_.remaining > 0) {
     listpacks = pending_read_.remaining;
@@ -1892,6 +1894,30 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
   SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->ms);
   SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->seq);
 
+  if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_2) {
+    /* Load the first entry ID. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->first_id.ms);
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->first_id.seq);
+
+    /* Load the maximal deleted entry ID. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->max_deleted_entry_id.ms);
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->max_deleted_entry_id.seq);
+
+    /* Load the offset. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->entries_added);
+  } else {
+    /* During migration the offset can be initialized to the stream's
+     * length. At this point, we also don't care about tombstones
+     * because CG offsets will be later initialized as well. */
+    load_trace->stream_trace->max_deleted_entry_id.ms = 0;
+    load_trace->stream_trace->max_deleted_entry_id.seq = 0;
+    load_trace->stream_trace->entries_added = load_trace->stream_trace->stream_len;
+
+    // TODO add implementation, we need to find the first entry's ID.
+    // The redis code is next
+    // streamGetEdgeID(s,1,1,&s->first_id);
+  }
+
   /* Consumer groups loading */
   uint64_t cgroups_count;
   SET_OR_UNEXPECT(LoadLen(nullptr), cgroups_count);
@@ -1912,6 +1938,24 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
 
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.ms);
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.seq);
+
+    uint64_t cg_offset;
+    if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_2) {
+      SET_OR_UNEXPECT(LoadLen(nullptr), cg_offset);
+      (void)cg_offset;
+    } else {
+      // TODO implement
+      // cg_offset = should be calculated like streamEstimateDistanceFromFirstEverEntry();
+    }
+
+    // TODO add our implementation for the next Redis logic
+    // streamCG* cgroup = streamCreateCG(s, cgname, sdslen(cgname), &cg_id, cg_offset);
+    // if (cgroup == NULL) {
+    //   rdbReportCorruptRDB("Duplicated consumer group name %s", cgname);
+    //   decrRefCount(o);
+    //   sdsfree(cgname);
+    //   return NULL;
+    // }
 
     /* Load the global PEL for this consumer group, however we'll
      * not yet populate the NACK structures with the message
@@ -1957,6 +2001,13 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
         return make_unexpected(ec);
 
       SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.seen_time);
+
+      if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_3) {
+        SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.active_time);
+      } else {
+        /* That's the best estimate we got */
+        consumer.active_time = consumer.seen_time;
+      }
 
       /* Load the PEL about entries owned by this specific
        * consumer. */
