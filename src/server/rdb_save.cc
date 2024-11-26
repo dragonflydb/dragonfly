@@ -164,7 +164,8 @@ dfly::CompressionMode GetDefaultCompressionMode() {
     return flag;
   }
 
-  LOG_IF(WARNING, flag != dfly::CompressionMode::NONE);
+  LOG_IF(WARNING, flag != dfly::CompressionMode::NONE)
+      << "Setting CompressionMode to NONE because big value serialization is on";
   return dfly::CompressionMode::NONE;
 }
 
