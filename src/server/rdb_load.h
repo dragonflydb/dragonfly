@@ -79,7 +79,13 @@ class RdbLoaderBase {
   struct StreamConsumerTrace {
     RdbVariant name;
     int64_t seen_time;
+    int64_t active_time;
     std::vector<std::array<uint8_t, 16>> nack_arr;
+  };
+
+  struct StreamID {
+    uint64_t ms;
+    uint64_t seq;
   };
 
   struct StreamCGTrace {
@@ -95,6 +101,9 @@ class RdbLoaderBase {
     size_t lp_len;
     size_t stream_len;
     uint64_t ms, seq;
+    StreamID first_id;             /* The first non-tombstone entry, zero if empty. */
+    StreamID max_deleted_entry_id; /* The maximal ID that was deleted. */
+    uint64_t entries_added;        /* All time count of elements added. */
     std::vector<StreamCGTrace> cgroup;
   };
 
@@ -165,7 +174,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
-  ::io::Result<OpaqueObj> ReadStreams();
+  ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
   ::io::Result<OpaqueObj> ReadRedisJson();
   ::io::Result<OpaqueObj> ReadJson();
   ::io::Result<OpaqueObj> ReadSBF();

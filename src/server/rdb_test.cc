@@ -655,4 +655,14 @@ TEST_F(RdbTest, SnapshotTooBig) {
   ASSERT_THAT(resp, ErrArg("Out of memory"));
 }
 
+TEST_F(RdbTest, LoadStream2) {
+  auto ec = LoadRdb("RDB_TYPE_STREAM_LISTPACKS_2.rdb");
+  ASSERT_FALSE(ec) << ec.message();
+}
+
+TEST_F(RdbTest, LoadStream3) {
+  auto ec = LoadRdb("RDB_TYPE_STREAM_LISTPACKS_3.rdb");
+  ASSERT_FALSE(ec) << ec.message();
+}
+
 }  // namespace dfly
