@@ -456,7 +456,6 @@ TEST_F(DflyEngineTest, OOM) {
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
   max_memory_limit = 5000000;  // 5mb
-  ResetService();
 
   shard_set->TEST_EnableCacheMode();
 
@@ -490,7 +489,6 @@ TEST_F(DflyEngineTest, Bug207) {
 
 TEST_F(DflyEngineTest, StickyEviction) {
   max_memory_limit = 5000000;  // 5mb
-  ResetService();
 
   shard_set->TEST_EnableCacheMode();
 
