@@ -1905,7 +1905,7 @@ async def test_cluster_migration_huge_container(
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("Waiting for migration to finish")
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=30)
 
     if seed_during_migration:
         await stop_seed()
