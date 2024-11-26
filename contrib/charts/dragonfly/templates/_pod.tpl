@@ -96,6 +96,8 @@ containers:
       {{- toYaml . | trim | nindent 6 }}
     {{- end }}
     {{- include "dragonfly.volumemounts" . | trim | nindent 4 }}
+    {{- if or .Values.passwordFromSecret.enable .Values.env }}
+    env:
     {{- if .Values.passwordFromSecret.enable }}
     {{- $appVersion := .Chart.AppVersion | trimPrefix "v" }}
     {{- $imageTag := .Values.image.tag | trimPrefix "v" }}
@@ -103,7 +105,6 @@ containers:
     {{- if and $imageTag (ne $imageTag "") }}
       {{- $effectiveVersion = $imageTag }}
     {{- end }}
-    env:
     {{- if semverCompare ">=1.14.0" $effectiveVersion }}
       - name: DFLY_requirepass
     {{- else }}
@@ -116,6 +117,7 @@ containers:
     {{- end }}
     {{- with .Values.env }}
       {{- toYaml . | trim | nindent 6 }}
+    {{- end }}
     {{- end }}
     {{- with .Values.envFrom }}
     envFrom:
