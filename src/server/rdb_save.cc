@@ -969,7 +969,8 @@ void SerializerBase::DumpObject(const CompactObj& obj, io::StringSink* out) {
   // 1. Save the value itself - without the key
   // 2. Save footer: this include the RDB version and the CRC value for the message
   auto type = RdbObjectType(obj);
-  DVLOG(1) << "We are going to dump object type: " << int(type);
+  DVLOG(2) << "We are going to dump object type: " << int(type);
+
   std::error_code ec = serializer.WriteOpcode(type);
   CHECK(!ec);
   ec = serializer.SaveValue(obj);
