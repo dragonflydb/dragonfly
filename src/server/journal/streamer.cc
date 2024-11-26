@@ -280,7 +280,6 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
 
 void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   if (it.GetVersion() < snapshot_version_) {
-    FiberAtomicGuard fg;
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
     for (; !it.is_done(); ++it) {
@@ -318,7 +317,10 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  CmdSerializer serializer([&](std::string s) { Write(s); });
+  CmdSerializer serializer([&](std::string s) {
+    Write(s);
+    ThrottleIfNeeded();
+  });
   serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
