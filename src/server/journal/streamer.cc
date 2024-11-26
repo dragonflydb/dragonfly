@@ -9,6 +9,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
+#include "server/journal/cmd_serializer.h"
 #include "util/fibers/synchronization.h"
 
 using namespace facade;
@@ -166,7 +167,7 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
-    cntx_->ReportError(make_error_code(errc::stream_timeout));
+    cntx_->ReportError("JournalStreamer write operation timeout");
   }
 }
 
@@ -316,37 +317,8 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  absl::InlinedVector<string_view, 5> args;
-  args.push_back(key);
-
-  string expire_str = absl::StrCat(expire_ms);
-  args.push_back(expire_str);
-
-  io::StringSink restore_cmd_sink;
-  {  // to destroy extra copy
-    io::StringSink value_dump_sink;
-    SerializerBase::DumpObject(pv, &value_dump_sink);
-    args.push_back(value_dump_sink.str());
-
-    args.push_back("ABSTTL");  // Means expire string is since epoch
-
-    if (pk.IsSticky()) {
-      args.push_back("STICK");
-    }
-
-    journal::Entry entry(0,                     // txid
-                         journal::Op::COMMAND,  // single command
-                         0,                     // db index
-                         1,                     // shard count
-                         0,                     // slot-id, but it is ignored at this level
-                         journal::Entry::Payload("RESTORE", ArgSlice(args)));
-
-    JournalWriter writer{&restore_cmd_sink};
-    writer.Write(entry);
-  }
-  // TODO: From DumpObject to till Write we tripple copy the PrimeValue. It's very inefficient and
-  // will burn CPU for large values.
-  Write(restore_cmd_sink.str());
+  CmdSerializer serializer([&](std::string s) { Write(s); });
+  serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
 }  // namespace dfly

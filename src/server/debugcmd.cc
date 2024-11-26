@@ -57,6 +57,7 @@ struct PopulateBatch {
 };
 
 struct ObjInfo {
+  unsigned type = 0;
   unsigned encoding;
   unsigned bucket_id = 0;
   unsigned slot_id = 0;
@@ -309,6 +310,7 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
     const PrimeValue& pv = it->second;
 
     oinfo.found = true;
+    oinfo.type = pv.ObjType();
     oinfo.encoding = pv.Encoding();
     oinfo.bucket_id = it.bucket_id();
     oinfo.slot_id = it.slot_id();
@@ -365,9 +367,54 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
   return info;
 };
 
+const char* EncodingName(unsigned obj_type, unsigned encoding) {
+  switch (obj_type) {
+    case OBJ_STRING:
+      return "raw";
+    case OBJ_LIST:
+      switch (encoding) {
+        case kEncodingQL2:
+        case OBJ_ENCODING_QUICKLIST:
+          return "quicklist";
+      }
+      break;
+    case OBJ_SET:
+      ABSL_FALLTHROUGH_INTENDED;
+    case OBJ_ZSET:
+      ABSL_FALLTHROUGH_INTENDED;
+    case OBJ_HASH:
+      switch (encoding) {
+        case kEncodingIntSet:
+          return "intset";
+        case kEncodingStrMap2:
+          return "dense_set";
+        case OBJ_ENCODING_SKIPLIST:  // we kept the old enum for zset
+          return "btree";
+        case OBJ_ENCODING_LISTPACK:
+          ABSL_FALLTHROUGH_INTENDED;
+        case kEncodingListPack:
+          return "listpack";
+      }
+      break;
+    case OBJ_JSON:
+      switch (encoding) {
+        case kEncodingJsonCons:
+          return "jsoncons";
+        case kEncodingJsonFlat:
+          return "jsonflat";
+      }
+      break;
+    case OBJ_STREAM:
+      return "stream";
+    default:;
+  }
+  return "unknown";
+}
+
 }  // namespace
 
-DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
+DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx)
+    : sf_(*owner), cf_(*cf), cntx_(cntx) {
 }
 
 void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
@@ -435,6 +482,10 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "REPLICA" && args.size() == 2) {
     return Replica(args, builder);
+  }
+
+  if (subcmd == "MIGRATION" && args.size() == 2) {
+    return Migration(args, builder);
   }
 
   if (subcmd == "WATCHED") {
@@ -548,6 +599,18 @@ void DebugCmd::Replica(CmdArgList args, facade::SinkReplyBuilder* builder) {
     }
   }
   return builder->SendError(UnknownSubCmd("replica", "DEBUG"));
+}
+
+void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  args.remove_prefix(1);
+
+  string opt = absl::AsciiStrToUpper(ArgS(args, 0));
+
+  if (opt == "PAUSE" || opt == "RESUME") {
+    cf_.PauseAllIncomingMigrations(opt == "PAUSE");
+    return builder->SendOk();
+  }
+  return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
 }
 
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
@@ -801,7 +864,8 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
       return;
     }
 
-    StrAppend(&resp, "encoding:", strEncoding(res.encoding), " bucket_id:", res.bucket_id);
+    StrAppend(&resp, "encoding:", EncodingName(res.type, res.encoding),
+              " bucket_id:", res.bucket_id);
     StrAppend(&resp, " slot:", res.slot_id, " shard:", sid);
 
     if (res.ttl != INT64_MAX) {

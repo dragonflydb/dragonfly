@@ -783,6 +783,25 @@ TEST_F(DflyEngineTest, MemoryUsage) {
   EXPECT_GT(*resp.GetInt(), 100000);
 }
 
+TEST_F(DflyEngineTest, DebugObject) {
+  Run({"set", "key", "value"});
+  Run({"lpush", "l1", "a", "b"});
+  Run({"sadd", "s1", "1", "2", "3"});
+  Run({"sadd", "s2", "a", "b", "c"});
+  Run({"zadd", "z1", "1", "a", "2", "b", "3", "c"});
+  Run({"hset", "h1", "a", "1", "b", "2", "c", "3"});
+  auto resp = Run({"debug", "object", "key"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:raw"));
+  resp = Run({"debug", "object", "l1"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:quicklist"));
+  resp = Run({"debug", "object", "s1"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:intset"));
+  resp = Run({"debug", "object", "s2"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:dense_set"));
+  resp = Run({"debug", "object", "z1"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.

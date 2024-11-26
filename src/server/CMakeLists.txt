@@ -28,7 +28,7 @@ endif()
 
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
             command_registry.cc  cluster/cluster_utility.cc
-            journal/tx_executor.cc namespaces.cc
+            journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -109,7 +109,8 @@ cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
-         testdata/redis_json.rdb LABELS DFLY)
+         testdata/redis_json.rdb testdata/RDB_TYPE_STREAM_LISTPACKS_2.rdb
+         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)

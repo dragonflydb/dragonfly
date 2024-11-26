@@ -403,11 +403,10 @@ void EngineShard::Shutdown() {
   queue2_.Shutdown();
   DCHECK(!fiber_heartbeat_periodic_.IsJoinable());
   DCHECK(!fiber_shard_handler_periodic_.IsJoinable());
-
-  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
 }
 
 void EngineShard::StopPeriodicFiber() {
+  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
     fiber_heartbeat_periodic_.Join();

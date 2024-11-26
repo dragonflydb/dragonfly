@@ -52,10 +52,82 @@ struct SearchResult {
   std::optional<facade::ErrorReply> error;
 };
 
-template <typename T> using SearchField = std::pair<T /*identifier*/, T /*short name*/>;
+/* SearchField represents a field that can store combinations of identifiers and aliases in various
+   forms: [identifier and alias], [alias and new_alias], [new identifier and alias] (used for JSON
+   data) This class provides methods to retrieve the actual identifier and alias for a field,
+   handling different naming conventions and resolving names based on the schema. */
+class SearchField {
+ private:
+  static bool IsJsonPath(std::string_view name) {
+    if (name.size() < 2) {
+      return false;
+    }
+    return name.front() == '$' && (name[1] == '.' || name[1] == '[');
+  }
 
-using SearchFieldsList = std::vector<SearchField<std::string_view>>;
-using OwnedSearchFieldsList = std::vector<SearchField<std::string>>;
+ public:
+  SearchField() = default;
+
+  SearchField(StringOrView name, bool is_short_name)
+      : name_(std::move(name)), is_short_name_(is_short_name) {
+  }
+
+  SearchField(StringOrView name, bool is_short_name, StringOrView new_alias)
+      : name_(std::move(name)), is_short_name_(is_short_name), new_alias_(std::move(new_alias)) {
+  }
+
+  std::string_view GetIdentifier(const search::Schema& schema, bool is_json_field) const {
+    auto as_view = NameView();
+    if (!is_short_name_ || (is_json_field && IsJsonPath(as_view))) {
+      return as_view;
+    }
+    return schema.LookupAlias(as_view);
+  }
+
+  std::string_view GetShortName() const {
+    if (HasNewAlias()) {
+      return AliasView();
+    }
+    return NameView();
+  }
+
+  std::string_view GetShortName(const search::Schema& schema) const {
+    if (HasNewAlias()) {
+      return AliasView();
+    }
+    return is_short_name_ ? NameView() : schema.LookupIdentifier(NameView());
+  }
+
+  /* Returns a new SearchField instance with name and alias stored as views to the values in this
+   * SearchField */
+  SearchField View() const {
+    if (HasNewAlias()) {
+      return SearchField{StringOrView::FromView(NameView()), is_short_name_,
+                         StringOrView::FromView(AliasView())};
+    }
+    return SearchField{StringOrView::FromView(NameView()), is_short_name_};
+  }
+
+ private:
+  bool HasNewAlias() const {
+    return !new_alias_.empty();
+  }
+
+  std::string_view NameView() const {
+    return name_.view();
+  }
+
+  std::string_view AliasView() const {
+    return new_alias_.view();
+  }
+
+ private:
+  StringOrView name_;
+  bool is_short_name_;
+  StringOrView new_alias_;
+};
+
+using SearchFieldsList = std::vector<SearchField>;
 
 struct SearchParams {
   // Parameters for "LIMIT offset total": select total amount documents with a specific offset from
@@ -68,14 +140,14 @@ struct SearchParams {
   2. If set but empty -> no fields should be returned
   3. If set and not empty -> return only these fields
   */
-  std::optional<OwnedSearchFieldsList> return_fields;
+  std::optional<SearchFieldsList> return_fields;
 
   /*
     Fields that should be also loaded from the document.
 
     Only one of load_fields and return_fields should be set.
   */
-  std::optional<OwnedSearchFieldsList> load_fields;
+  std::optional<SearchFieldsList> load_fields;
 
   std::optional<search::SortOption> sort_option;
   search::QueryParams query_params;
@@ -88,14 +160,14 @@ struct SearchParams {
     return return_fields && return_fields->empty();
   }
 
-  bool ShouldReturnField(std::string_view field) const;
+  bool ShouldReturnField(std::string_view alias) const;
 };
 
 struct AggregateParams {
   std::string_view index, query;
   search::QueryParams params;
 
-  std::optional<OwnedSearchFieldsList> load_fields;
+  std::optional<SearchFieldsList> load_fields;
   std::vector<aggregate::PipelineStep> steps;
 };
 
@@ -169,11 +241,6 @@ class ShardDocIndex {
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
 
  private:
-  // Returns the fields that are the union of the already indexed fields and load_fields, excluding
-  // skip_fields Load_fields should not be destroyed while the result of this function is being used
-  SearchFieldsList GetFieldsToLoad(const std::optional<OwnedSearchFieldsList>& load_fields,
-                                   const absl::flat_hash_set<std::string_view>& skip_fields) const;
-
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr);
 

@@ -114,6 +114,10 @@ class Service : public facade::ServiceInterface {
     return server_family_;
   }
 
+  cluster::ClusterFamily& cluster_family() {
+    return cluster_family_;
+  }
+
   // Utility function used in unit tests
   // Do not use in production, only meant to be used by unit tests
   const acl::AclFamily* TestInit();
@@ -133,9 +137,13 @@ class Service : public facade::ServiceInterface {
 
   void Discard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                ConnectionContext* cntx);
-  void Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
+  void Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx,
+            bool read_only = false);
+  void EvalRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx,
+               bool read_only = false);
+  void EvalShaRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
+                 ConnectionContext* cntx);
   void Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
   void Publish(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
                ConnectionContext* cntx);
@@ -169,9 +177,9 @@ class Service : public facade::ServiceInterface {
                                                        const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                    SinkReplyBuilder* builder, ConnectionContext* cntx);
+                    SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
-               SinkReplyBuilder* builder, ConnectionContext* cntx);
+               SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
 
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,

@@ -85,7 +85,8 @@ bool CommandId::IsTransactional() const {
   if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_TRANSACTIONAL))
     return true;
 
-  if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EXEC")
+  if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EVAL_RO" || name_ == "EVALSHA_RO" ||
+      name_ == "EXEC")
     return true;
 
   return false;

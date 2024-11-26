@@ -39,10 +39,6 @@ namespace journal {
 class Journal;
 }  // namespace journal
 
-namespace cluster {
-class ClusterFamily;
-}
-
 class ConnectionContext;
 class CommandRegistry;
 class Service;

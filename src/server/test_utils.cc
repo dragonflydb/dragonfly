@@ -408,7 +408,8 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   DCHECK(context->transaction == nullptr);
 
   auto cmd = absl::AsciiStrToUpper(slice.front());
-  if (cmd == "EVAL" || cmd == "EVALSHA" || cmd == "EXEC") {
+  if (cmd == "EVAL" || cmd == "EVALSHA" || cmd == "EVAL_RO" || cmd == "EVALSHA_RO" ||
+      cmd == "EXEC") {
     shard_set->AwaitRunningOnShardQueue([](auto*) {});  // Wait for async UnlockMulti.
   }
 

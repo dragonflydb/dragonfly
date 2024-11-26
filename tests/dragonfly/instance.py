@@ -160,7 +160,7 @@ class DflyInstance:
 
     async def close_clients(self):
         for client in self.clients:
-            await client.aclose() if hasattr(client, "aclose") else client.close()
+            await client.aclose() if hasattr(client, "aclose") else await client.close()
 
     def __enter__(self):
         self.start()
