@@ -198,9 +198,30 @@ optional<uint32_t> GetPeriodicCycleMs() {
   return clock_cycle_ms;
 }
 
-template <typename From, typename To>
-To ConvertNumericOrRound(From value, From max = std::numeric_limits<To>::max()) {
-  return static_cast<To>(std::min(value, max));
+/* Eviction begins when the shard's free memory falls below (max_memory_limit *
+ * kEvictionFreeMemoryThreshold) / <number of shards> */
+constexpr double kEvictionFreeMemoryThreshold = 0.1;
+/* or eviction starts if the used RSS memory exceeds max_memory_limit * kEvictionRssThreshold */
+constexpr double kEvictionRssThreshold = 1.0 - kEvictionFreeMemoryThreshold;
+
+size_t CalculateRssMemoryToFreePerShard() {
+  const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
+  if (rss_oom_deny_ratio < 0.0) {
+    return 0;
+  }
+  const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
+
+  // Used rss memory for all shards
+  const size_t global_rss_memory = rss_mem_current.load(memory_order_relaxed);
+  // For rss we are using threshold for used memory
+  const size_t global_rss_memory_threshold = size_t(max_rss_memory * kEvictionRssThreshold);
+
+  // If we have more memory than the threshold, we need to free some
+  if (global_rss_memory > global_rss_memory_threshold) {
+    // Сalculate how much RSS memory we need to free per shard
+    return (global_rss_memory - global_rss_memory_threshold) / shard_set->size();
+  }
+  return 0;
 }
 
 }  // namespace
@@ -711,8 +732,6 @@ void EngineShard::RetireExpiredAndEvict() {
     // TODO: iterate over all namespaces
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
     constexpr double kTtlDeleteLimit = 200;
-    constexpr double kRedLimitFactor = 0.1;
-    constexpr double kRedLimitFactorRev = 1.0 - kRedLimitFactor;
     
     uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
     uint32_t deleted = GetMovingSum6(TTL_DELETE);
@@ -726,17 +745,13 @@ void EngineShard::RetireExpiredAndEvict() {
       ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
     }
 
-  const size_t max_rss_memory =
-      max_memory_limit * std::max(ServerState::tlocal()->rss_oom_deny_ratio, 0.0);
-  const ssize_t rss_memory =
-      ConvertNumericOrRound<uint64_t, ssize_t>(rss_mem_current.load(memory_order_relaxed));
-
   // For memory we are using threshold for free memory
-  const ssize_t memory_budget_threshold =
-      ssize_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
-  // For rss we are using threshold for used memory
-  const ssize_t rss_memory_threshold =
-      ssize_t(max_rss_memory * kRedLimitFactorRev) / shard_set->size();
+  const ssize_t shard_memory_budget_threshold =
+      ssize_t(max_memory_limit * kEvictionFreeMemoryThreshold) / shard_set->size();
+
+  // Calculate how much rss memory we need to free per shard
+  ssize_t rss_memory_to_free = CalculateRssMemoryToFreePerShard();
+
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
@@ -754,12 +769,17 @@ void EngineShard::RetireExpiredAndEvict() {
       }
 
     // if our budget is below the limit
-    if ((db_slice.memory_budget() < memory_budget_threshold || rss_memory > rss_memory_threshold) &&
+    if ((db_slice.memory_budget() < shard_memory_budget_threshold || rss_memory_to_free > 0) &&
         GetFlag(FLAGS_enable_heartbeat_eviction)) {
       uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-      size_t goal_bytes = std::max(memory_budget_threshold - db_slice.memory_budget(),
-                                   rss_memory - rss_memory_threshold);
-      db_slice.FreeMemWithEvictionStep(i, starting_segment_id, goal_bytes);
+      size_t goal_bytes =
+          std::max(rss_memory_to_free, shard_memory_budget_threshold - db_slice.memory_budget());
+
+      auto [_, released_bytes] =
+          db_slice.FreeMemWithEvictionStep(i, starting_segment_id, goal_bytes);
+
+      // We have released some memory, so we need to update the rss_memory_to_free
+      rss_memory_to_free -= released_bytes;
     }
   }
 

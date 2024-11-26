@@ -27,7 +27,6 @@ ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(unsigned, tiered_storage_write_depth);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
-ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 
 namespace dfly {
 
@@ -165,9 +164,6 @@ TEST_F(TieredStorageTest, MultiDb) {
 }
 
 TEST_F(TieredStorageTest, Defrag) {
-  absl::FlagSaver saver;
-  SetFlag(&FLAGS_rss_oom_deny_ratio, 1.25);
-
   for (char k = 'a'; k < 'a' + 8; k++) {
     Run({"SET", string(1, k), string(600, k)});
   }
