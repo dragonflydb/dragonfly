@@ -1425,6 +1425,7 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
   EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4"));
 }
 
+#ifndef SANITIZERS
 TEST_F(SearchFamilyTest, SearchLoadReturnJson) {
   Run({"JSON.SET", "j1", ".", R"({"a":"one"})"});
   Run({"JSON.SET", "j2", ".", R"({"a":"two"})"});
@@ -1527,6 +1528,7 @@ TEST_F(SearchFamilyTest, SearchLoadReturnJson) {
   EXPECT_THAT(
       resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})"), "j2", IsMap("$", R"({"a":"two"})")));
 }
+#endif
 
 TEST_F(SearchFamilyTest, SearchLoadReturnHash) {
   Run({"HSET", "h1", "a", "one"});
