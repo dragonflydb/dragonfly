@@ -499,8 +499,8 @@ class DbSlice {
   // if it's not empty and not EX.
   void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
 
-  bool HasBlockingCounterMutating() const {
-    return block_counter_.HasMutating();
+  bool WillBlockOnJournalWrite() const {
+    return block_counter_.IsBlocked();
   }
 
   LocalBlockingCounter* BlockingCounter() {

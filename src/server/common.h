@@ -402,7 +402,7 @@ class LocalBlockingCounter {
     cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
   }
 
-  bool HasMutating() const {
+  bool IsBlocked() const {
     return mutating_ > 0;
   }
 

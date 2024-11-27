@@ -139,6 +139,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
 }
 
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
+  db_slice_->BlockingCounter()->Wait();
   unsigned res = 0;
   // bool should_print = (eb.key_hash % 128) == 0;
 
@@ -165,7 +166,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
 }
 
 unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
-  if (!can_evict_ || db_slice_->HasBlockingCounterMutating())
+  if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
     return 0;
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.by_type.stash_buckets);
@@ -1084,6 +1085,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
   }
+  block_counter_.Wait();
 
   auto& db = db_arr_[cntx.db_index];
 

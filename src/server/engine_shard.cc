@@ -664,10 +664,11 @@ void EngineShard::Heartbeat() {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   // Skip heartbeat if we are serializing a big value
   static auto start = std::chrono::system_clock::now();
-  if (db_slice.HasBlockingCounterMutating()) {
+  if (db_slice.WillBlockOnJournalWrite()) {
     const auto elapsed = std::chrono::system_clock::now() - start;
-    if(elapsed > std::chrono::seconds(1)) {
-      LOG(WARNING) << "Stalled heartbeat() fiber for " << elapsed.count() << " seconds because of big value serialization";
+    if (elapsed > std::chrono::seconds(1)) {
+      LOG(WARNING) << "Stalled heartbeat() fiber for " << elapsed.count()
+                   << " seconds because of big value serialization";
     }
     return;
   }
