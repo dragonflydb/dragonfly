@@ -72,11 +72,18 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
-search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
+std::optional<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser,
+                                                             SinkReplyBuilder* builder) {
   search::SchemaField::TagParams params{};
   while (parser->HasNext()) {
     if (parser->Check("SEPARATOR")) {
-      string_view separator = parser->Next();
+      std::string_view separator = parser->NextOrDefault();
+      if (separator.size() != 1) {
+        builder->SendError(
+            absl::StrCat("Tag separator must be a single character. Got `", separator, "`"),
+            kSyntaxErrType);
+        return std::nullopt;
+      }
       params.separator = separator.front();
       continue;
     }
@@ -127,7 +134,11 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     // Vector fields include: {algorithm} num_args args...
     search::SchemaField::ParamsVariant params(monostate{});
     if (type == search::SchemaField::TAG) {
-      params = ParseTagParams(&parser);
+      auto tag_params = ParseTagParams(&parser, builder);
+      if (!tag_params) {
+        return std::nullopt;
+      }
+      params = tag_params.value();
     } else if (type == search::SchemaField::VECTOR) {
       auto vector_params = ParseVectorParams(&parser);
       if (parser.HasError()) {
