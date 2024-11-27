@@ -370,8 +370,11 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
       FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
 
-      StopFullSyncInThread(flow, &replica_ptr->cntx, shard);
-      status = StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
+      status = StopFullSyncInThread(flow, &replica_ptr->cntx, shard);
+      if (*status != OpStatus::OK) {
+        return;
+      }
+      StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
 
@@ -590,26 +593,27 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   return OpStatus::OK;
 }
 
-void DflyCmd::StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
+OpStatus DflyCmd::StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(shard);
   error_code ec = flow->saver->StopFullSyncInShard(shard);
   if (ec) {
     cntx->ReportError(ec);
-    return;
+    return OpStatus::CANCELLED;
   }
 
   ec = flow->conn->socket()->Write(io::Buffer(flow->eof_token));
   if (ec) {
     cntx->ReportError(ec);
-    return;
+    return OpStatus::CANCELLED;
   }
 
   // Reset cleanup and saver
   flow->cleanup = []() {};
   flow->saver.reset();
+  return OpStatus::OK;
 }
 
-OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
+void DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   // Create streamer for shard flows.
   DCHECK(shard);
   DCHECK(flow->conn);
@@ -625,8 +629,6 @@ OpStatus DflyCmd::StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineS
       flow->streamer->Cancel();
     }
   };
-
-  return OpStatus::OK;
 }
 
 auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, unsigned> {
