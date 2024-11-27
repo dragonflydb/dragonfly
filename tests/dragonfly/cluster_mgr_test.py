@@ -24,7 +24,6 @@ def run_cluster_mgr(args):
     return result.returncode == 0
 
 
-@pytest.mark.skip("it leaves an unclosed instance that fails other tests")
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_mgr(df_factory):
     NODES = 3
@@ -113,7 +112,7 @@ async def test_cluster_mgr(df_factory):
     # Add replicas
     replica_clients = [replica.client() for replica in replicas]
     for i in range(NODES):
-        await replica_clients[i].execute_command(f"replicaof localhost {masters[i].port}")
+        await replica_clients[i].execute_command(f"replicaof 127.0.0.1 {masters[i].port}")
         assert run_cluster_mgr(
             [
                 f"--action=attach",
@@ -133,7 +132,7 @@ async def test_cluster_mgr(df_factory):
 
     # Revert take over
     c_master0 = masters[0].client()
-    await c_master0.execute_command(f"replicaof localhost {replicas[0].port}")
+    await c_master0.execute_command(f"replicaof 127.0.0.1 {replicas[0].port}")
     assert run_cluster_mgr(
         [
             f"--action=attach",
@@ -144,7 +143,7 @@ async def test_cluster_mgr(df_factory):
     )
     assert run_cluster_mgr(["--action=takeover", f"--target_port={masters[0].port}"])
     await c_master0.execute_command(f"replicaof no one")
-    await replica_clients[0].execute_command(f"replicaof localhost {masters[0].port}")
+    await replica_clients[0].execute_command(f"replicaof 127.0.0.1 {masters[0].port}")
     assert run_cluster_mgr(
         [
             f"--action=attach",
