@@ -1289,7 +1289,10 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+# See issue #4207
+@dfly_args(
+    {"proactor_threads": 4, "cluster_mode": "yes", "disable_serialization_max_chunk_size": 0}
+)
 async def test_network_disconnect_during_migration(df_factory, df_seeder_factory):
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
