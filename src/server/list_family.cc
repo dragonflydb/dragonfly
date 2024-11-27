@@ -571,47 +571,75 @@ OpResult<string> OpIndex(const OpArgs& op_args, std::string_view key, long index
 }
 
 OpResult<vector<uint32_t>> OpPos(const OpArgs& op_args, string_view key, string_view element,
-                                 int rank, int count, int max_len) {
+                                 int rank, uint32_t count, uint32_t max_len) {
   DCHECK(key.data() && element.data());
+  DCHECK_NE(rank, 0);
 
   auto it_res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
   if (!it_res.ok())
     return it_res.status();
 
-  int direction = AL_START_HEAD;
-  if (rank < 0) {
-    rank = -rank;
-    direction = AL_START_TAIL;
-  }
-
-  quicklist* ql = GetQL(it_res.value()->second);
-  quicklistIter* ql_iter = quicklistGetIterator(ql, direction);
-  quicklistEntry entry;
-
-  int index = 0;
-  int matched = 0;
+  const PrimeValue& pv = (*it_res)->second;
   vector<uint32_t> matches;
-  string str;
 
-  while (quicklistNext(ql_iter, &entry) && (max_len == 0 || index < max_len)) {
-    if (entry.value) {
-      str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
-    } else {
-      str = absl::StrCat(entry.longval);
+  if (pv.Encoding() == kEncodingQL2) {
+    QList* ql = GetQLV2(pv);
+    QList::Where where = QList::HEAD;
+    if (rank < 0) {
+      rank = -rank;
+      where = QList::TAIL;
     }
-    if (str == element) {
-      matched++;
-      auto k = (direction == AL_START_TAIL) ? ql->count - index - 1 : index;
-      if (matched >= rank) {
-        matches.push_back(k);
-        if (count && matched - rank + 1 >= count) {
-          break;
+
+    auto it = ql->GetIterator(where);
+    unsigned index = 0;
+    while (it.Next() && (max_len == 0 || index < max_len)) {
+      if (it.Get() == element) {
+        if (rank == 1) {
+          auto k = (where == QList::HEAD) ? index : ql->Size() - index - 1;
+          matches.push_back(k);
+          if (count && matches.size() >= count)
+            break;
+        } else {
+          rank--;
         }
       }
+      index++;
     }
-    index++;
+  } else {
+    int direction = AL_START_HEAD;
+    if (rank < 0) {
+      rank = -rank;
+      direction = AL_START_TAIL;
+    }
+
+    quicklist* ql = GetQL(it_res.value()->second);
+    quicklistIter* ql_iter = quicklistGetIterator(ql, direction);
+    quicklistEntry entry;
+
+    unsigned index = 0;
+    int matched = 0;
+    string str;
+
+    while (quicklistNext(ql_iter, &entry) && (max_len == 0 || index < max_len)) {
+      if (entry.value) {
+        str.assign(reinterpret_cast<char*>(entry.value), entry.sz);
+      } else {
+        str = absl::StrCat(entry.longval);
+      }
+      if (str == element) {
+        matched++;
+        auto k = (direction == AL_START_TAIL) ? ql->count - index - 1 : index;
+        if (matched >= rank) {
+          matches.push_back(k);
+          if (count && unsigned(matched - rank + 1) >= count) {
+            break;
+          }
+        }
+      }
+      index++;
+    }
+    quicklistReleaseIterator(ql_iter);
   }
-  quicklistReleaseIterator(ql_iter);
   return matches;
 }
 
@@ -624,29 +652,41 @@ OpResult<int> OpInsert(const OpArgs& op_args, string_view key, string_view pivot
   if (!it_res)
     return it_res.status();
 
-  quicklist* ql = GetQL(it_res->it->second);
-  quicklistEntry entry = container_utils::QLEntry();
-  quicklistIter* qiter = quicklistGetIterator(ql, AL_START_HEAD);
-  bool found = false;
-
-  while (quicklistNext(qiter, &entry)) {
-    if (ElemCompare(entry, pivot)) {
-      found = true;
-      break;
-    }
-  }
+  PrimeValue& pv = it_res->it->second;
 
   int res = -1;
-  if (found) {
-    if (insert_param == INSERT_AFTER) {
-      quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
-    } else {
-      DCHECK_EQ(INSERT_BEFORE, insert_param);
-      quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
+
+  if (pv.Encoding() == kEncodingQL2) {
+    QList* ql = GetQLV2(pv);
+    QList::InsertOpt insert_opt = (insert_param == INSERT_BEFORE) ? QList::BEFORE : QList::AFTER;
+    if (ql->Insert(pivot, elem, insert_opt)) {
+      res = ql->Size();
     }
-    res = quicklistCount(ql);
+  } else {
+    quicklist* ql = GetQL(pv);
+    quicklistEntry entry = container_utils::QLEntry();
+    quicklistIter* qiter = quicklistGetIterator(ql, AL_START_HEAD);
+    bool found = false;
+
+    while (quicklistNext(qiter, &entry)) {
+      if (ElemCompare(entry, pivot)) {
+        found = true;
+        break;
+      }
+    }
+
+    if (found) {
+      if (insert_param == INSERT_AFTER) {
+        quicklistInsertAfter(qiter, &entry, elem.data(), elem.size());
+      } else {
+        DCHECK_EQ(INSERT_BEFORE, insert_param);
+        quicklistInsertBefore(qiter, &entry, elem.data(), elem.size());
+      }
+      res = quicklistCount(ql);
+    }
+    quicklistReleaseIterator(qiter);
   }
-  quicklistReleaseIterator(qiter);
+
   return res;
 }
 
@@ -738,14 +778,21 @@ OpStatus OpSet(const OpArgs& op_args, string_view key, string_view elem, long in
     return it_res.status();
 
   auto it = it_res->it;
-  quicklist* ql = GetQL(it->second);
+  OpStatus status = OpStatus::OUT_OF_RANGE;
+  if (it->second.Encoding() == kEncodingQL2) {
+    QList* ql = GetQLV2(it->second);
+    if (ql->Replace(index, elem))
+      status = OpStatus::OK;
+  } else {
+    DCHECK_EQ(it->second.Encoding(), OBJ_ENCODING_QUICKLIST);
+    quicklist* ql = GetQL(it->second);
 
-  int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
-
-  if (!replaced) {
-    return OpStatus::OUT_OF_RANGE;
+    int replaced = quicklistReplaceAtIndex(ql, index, elem.data(), elem.size());
+    if (replaced) {
+      status = OpStatus::OK;
+    }
   }
-  return OpStatus::OK;
+  return status;
 }
 
 OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
@@ -803,8 +850,8 @@ OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long st
   if (!res)
     return res.status();
 
-  quicklist* ql = GetQL(res.value()->second);
-  long llen = quicklistCount(ql);
+  const PrimeValue& pv = (*res)->second;
+  long llen = pv.Size();
 
   /* convert negative indexes */
   if (start < 0)
@@ -823,13 +870,12 @@ OpResult<StringVec> OpRange(const OpArgs& op_args, std::string_view key, long st
 
   StringVec str_vec;
   container_utils::IterateList(
-      res.value()->second,
+      pv,
       [&str_vec](container_utils::ContainerEntry ce) {
         str_vec.emplace_back(ce.ToString());
         return true;
       },
       start, end);
-
   return str_vec;
 }
 
