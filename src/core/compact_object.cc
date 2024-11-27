@@ -125,11 +125,6 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
   return 0;
 }
 
-size_t MallocUsedStream(unsigned encoding, void* streamv) {
-  // stream* str_obj = (stream*)streamv;
-  return 0;  // TODO
-}
-
 inline void FreeObjHash(unsigned encoding, void* ptr) {
   switch (encoding) {
     case kEncodingStrMap2:
@@ -316,7 +311,7 @@ size_t RobjWrapper::MallocUsed(bool slow) const {
     case OBJ_ZSET:
       return MallocUsedZSet(encoding_, inner_obj_);
     case OBJ_STREAM:
-      return MallocUsedStream(encoding_, inner_obj_);
+      return sz_;
 
     default:
       LOG(FATAL) << "Not supported " << type_;
@@ -370,7 +365,12 @@ size_t RobjWrapper::Size() const {
           StringMap* sm = (StringMap*)inner_obj_;
           return sm->UpperBoundSize();
         }
+        default:
+          LOG(FATAL) << "Unexpected encoding " << encoding_;
       }
+    case OBJ_STREAM:
+      // Size mean malloc bytes for streams
+      return sz_;
     default:;
   }
   return 0;
@@ -459,6 +459,10 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
     memcpy(inner_obj_, s.data(), s.size());
     sz_ = s.size();
   }
+}
+
+void RobjWrapper::SetSize(uint64_t size) {
+  sz_ = size;
 }
 
 bool RobjWrapper::DefragIfNeeded(float ratio) {
@@ -809,6 +813,17 @@ void CompactObj::SetJsonSize(int64_t size) {
     }
     u_.json_obj.cons.bytes_used += size;
   }
+}
+
+void CompactObj::AddStreamSize(int64_t size) {
+  if (size < 0) {
+    // We might have a negative size. For example, if we remove a consumer,
+    // the tracker will report a negative net (since we deallocated),
+    // so the object now consumes less memory than it did before. This DCHECK
+    // is for fanity and to catch any potential issues with our tracking approach.
+    DCHECK(static_cast<int64_t>(u_.r_obj.Size()) >= size);
+  }
+  u_.r_obj.SetSize((u_.r_obj.Size() + size));
 }
 
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
