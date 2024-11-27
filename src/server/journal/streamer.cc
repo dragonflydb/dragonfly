@@ -215,6 +215,9 @@ void RestoreStreamer::Run() {
       return;
 
     cursor = db_slice_->Traverse(pt, cursor, [&](PrimeTable::bucket_iterator it) {
+      if (fiber_cancelled_)  // Traverse could have yieleded
+        return;
+
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
       WriteBucket(it);
