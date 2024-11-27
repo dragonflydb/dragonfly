@@ -1667,8 +1667,9 @@ async def test_df_crash_on_replicaof_flag(df_factory):
 
 
 async def test_network_disconnect(df_factory, df_seeder_factory):
-    master = df_factory.create(proactor_threads=6)
-    replica = df_factory.create(proactor_threads=4)
+    # See issue #4207
+    master = df_factory.create(proactor_threads=6, disable_serialization_max_chunk_size=0)
+    replica = df_factory.create(proactor_threads=4, disable_serialization_max_chunk_size=0)
 
     df_factory.start_all([replica, master])
     seeder = df_seeder_factory.create(port=master.port)
