@@ -21,6 +21,7 @@ namespace dfly {
 
 using namespace std;
 using namespace testing;
+using absl::StrCat;
 
 static int _ql_verify_compress(const QList& ql) {
   int errors = 0;
@@ -162,6 +163,8 @@ TEST_F(QListTest, Basic) {
   EXPECT_EQ(0, ql_.Size());
   ql_.Push("abc", QList::HEAD);
   EXPECT_EQ(1, ql_.Size());
+  EXPECT_TRUE(ql_.Head()->prev == nullptr);
+  EXPECT_TRUE(ql_.Tail() == ql_.Head());
 
   auto it = ql_.GetIterator(QList::HEAD);
   ASSERT_TRUE(it.Next());  // Needed to initialize the iterator.
@@ -380,6 +383,134 @@ TEST_P(OptionsTest, DelRangeD) {
   ql_.Erase(-12, 3);
 
   ASSERT_EQ(30, ql_.Size());
+}
+
+TEST_P(OptionsTest, DelRangeNode) {
+  auto [_, compress] = GetParam();
+  ql_ = QList(-2, compress);
+
+  for (int i = 0; i < 32; i++)
+    ql_.Push(StrCat("hello", i), QList::HEAD);
+
+  ql_verify(ql_, 1, 32, 32, 32);
+  ql_.Erase(0, 32);
+  ql_verify(ql_, 0, 0, 0, 0);
+}
+
+TEST_P(OptionsTest, DelRangeNodeOverflow) {
+  auto [_, compress] = GetParam();
+  ql_ = QList(-2, compress);
+
+  for (int i = 0; i < 32; i++)
+    ql_.Push(StrCat("hello", i), QList::HEAD);
+  ql_verify(ql_, 1, 32, 32, 32);
+  ql_.Erase(0, 128);
+  ql_verify(ql_, 0, 0, 0, 0);
+}
+
+TEST_P(OptionsTest, DelRangeMiddle100of500) {
+  auto [_, compress] = GetParam();
+  ql_ = QList(32, compress);
+
+  for (int i = 0; i < 500; i++)
+    ql_.Push(StrCat("hello", i + 1), QList::TAIL);
+
+  ql_verify(ql_, 16, 500, 32, 20);
+  ql_.Erase(200, 100);
+  ql_verify(ql_, 14, 400, 32, 20);
+}
+
+TEST_P(OptionsTest, DelLessFillAcrossNodes) {
+  auto [_, compress] = GetParam();
+  ql_ = QList(32, compress);
+
+  for (int i = 0; i < 500; i++)
+    ql_.Push(StrCat("hello", i + 1), QList::TAIL);
+  ql_verify(ql_, 16, 500, 32, 20);
+  ql_.Erase(60, 10);
+  ql_verify(ql_, 16, 490, 32, 20);
+}
+
+TEST_P(OptionsTest, DelNegOne) {
+  auto [_, compress] = GetParam();
+  ql_ = QList(32, compress);
+  for (int i = 0; i < 500; i++)
+    ql_.Push(StrCat("hello", i + 1), QList::TAIL);
+  ql_verify(ql_, 16, 500, 32, 20);
+  ql_.Erase(-1, 1);
+  ql_verify(ql_, 16, 499, 32, 19);
+}
+
+TEST_P(OptionsTest, DelNegOneOverflow) {
+  auto [_, compress] = GetParam();
+  ql_ = QList(32, compress);
+  for (int i = 0; i < 500; i++)
+    ql_.Push(StrCat("hello", i + 1), QList::TAIL);
+
+  ql_verify(ql_, 16, 500, 32, 20);
+  ql_.Erase(-1, 128);
+
+  ql_verify(ql_, 16, 499, 32, 19);
+}
+
+TEST_P(OptionsTest, DelNeg100From500) {
+  auto [_, compress] = GetParam();
+  ql_ = QList(32, compress);
+  for (int i = 0; i < 500; i++)
+    ql_.Push(StrCat("hello", i + 1), QList::TAIL);
+  ql_.Erase(-100, 100);
+  ql_verify(ql_, 13, 400, 32, 16);
+}
+
+TEST_P(OptionsTest, DelMin10_5_from50) {
+  auto [_, compress] = GetParam();
+  ql_ = QList(32, compress);
+
+  for (int i = 0; i < 50; i++)
+    ql_.Push(StrCat("hello", i + 1), QList::TAIL);
+  ql_verify(ql_, 2, 50, 32, 18);
+  ql_.Erase(-10, 5);
+  ql_verify(ql_, 2, 45, 32, 13);
+}
+
+TEST_P(OptionsTest, DelElems) {
+  auto [fill, compress] = GetParam();
+  ql_ = QList(fill, compress);
+
+  const char* words[] = {"abc", "foo", "bar", "foobar", "foobared", "zap", "bar", "test", "foo"};
+  const char* result[] = {"abc", "foo", "foobar", "foobared", "zap", "test", "foo"};
+  const char* resultB[] = {"abc", "foo", "foobar", "foobared", "zap", "test"};
+
+  for (int i = 0; i < 9; i++)
+    ql_.Push(words[i], QList::TAIL);
+
+  /* lrem 0 bar */
+  auto iter = ql_.GetIterator(QList::HEAD);
+  while (iter.Next()) {
+    if (iter.Get() == "bar") {
+      iter = ql_.Erase(iter);
+    }
+  }
+  EXPECT_THAT(ToItems(), ElementsAreArray(result));
+
+  ql_.Push("foo", QList::TAIL);
+
+  /* lrem -2 foo */
+  iter = ql_.GetIterator(QList::TAIL);
+  int del = 2;
+  while (iter.Next()) {
+    if (iter.Get() == "foo") {
+      iter = ql_.Erase(iter);
+      del--;
+    }
+    if (del == 0)
+      break;
+  }
+
+  /* check result of lrem -2 foo */
+  /* (we're ignoring the '2' part and still deleting all foo
+   * because we only have two foo) */
+  EXPECT_THAT(ToItems(), ElementsAreArray(resultB));
 }
 
 }  // namespace dfly

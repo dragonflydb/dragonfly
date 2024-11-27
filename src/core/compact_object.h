@@ -46,6 +46,8 @@ class RobjWrapper {
   void Free(MemoryResource* mr);
 
   void SetString(std::string_view s, MemoryResource* mr);
+  // Used when sz_ is used to denote memory usage
+  void SetSize(uint64_t size);
   void Init(unsigned type, unsigned encoding, void* inner);
 
   unsigned type() const {
@@ -315,6 +317,8 @@ class CompactObj {
   void SetJson(const uint8_t* buf, size_t len);
   // Adjusts the size used by json
   void SetJsonSize(int64_t size);
+  // Adjusts the size used by a stream
+  void AddStreamSize(int64_t size);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;

@@ -73,6 +73,16 @@ static_assert(!IsEvalKind(""));
 // Per thread vector of command stats. Each entry is {cmd_calls, cmd_latency_agg in usec}.
 using CmdCallStats = std::pair<uint64_t, uint64_t>;
 
+struct CommandContext {
+  CommandContext(Transaction* _tx, facade::SinkReplyBuilder* _rb, ConnectionContext* cntx)
+      : tx(_tx), rb(_rb), conn_cntx(cntx) {
+  }
+
+  Transaction* tx;
+  facade::SinkReplyBuilder* rb;
+  ConnectionContext* conn_cntx;
+};
+
 class CommandId : public facade::CommandId {
  public:
   // NOTICE: name must be a literal string, otherwise metrics break! (see cmd_stats_map in
@@ -95,6 +105,8 @@ class CommandId : public facade::CommandId {
       fu2::function_base<true, true, fu2::capacity_default, false, false,
                          void(CmdArgList, Transaction*, facade::SinkReplyBuilder*) const>;
 
+  using Handler3 = fu2::function_base<true, true, fu2::capacity_default, false, false,
+                                      void(CmdArgList, const CommandContext&) const>;
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
@@ -129,6 +141,8 @@ class CommandId : public facade::CommandId {
   }
 
   CommandId&& SetHandler(Handler2 f) &&;
+
+  CommandId&& SetHandler(Handler3 f) &&;
 
   CommandId&& SetValidator(ArgValidator f) && {
     validator_ = std::move(f);
