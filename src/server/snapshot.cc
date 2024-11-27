@@ -48,6 +48,7 @@ SliceSnapshot::SliceSnapshot(DbSlice* slice, CompressionMode compression_mode,
 }
 
 SliceSnapshot::~SliceSnapshot() {
+  DCHECK(db_slice_->shard_owner()->IsMyThread());
   tl_slice_snapshots.erase(this);
 }
 
