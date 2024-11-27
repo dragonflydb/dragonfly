@@ -135,10 +135,18 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
 
 CommandId&& CommandId::SetHandler(Handler2 f) && {
   handler_ = [f = std::move(f)](CmdArgList args, Transaction* tx, facade::SinkReplyBuilder* builder,
-                                facade::ConnectionContext*) { f(args, tx, builder); };
+                                ConnectionContext*) { f(args, tx, builder); };
 
   return std::move(*this);
 }
+
+CommandId&& CommandId::SetHandler(Handler3 f) && {
+  handler_ = [f = std::move(f)](CmdArgList args, Transaction* tx, facade::SinkReplyBuilder* builder,
+                                ConnectionContext* cntx) {
+    f(std::move(args), CommandContext{tx, builder, cntx});
+  };
+  return std::move(*this);
+};
 
 CommandRegistry::CommandRegistry() {
   vector<string> rename_command = GetFlag(FLAGS_rename_command);
