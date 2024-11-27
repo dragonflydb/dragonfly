@@ -75,12 +75,12 @@ using CmdCallStats = std::pair<uint64_t, uint64_t>;
 
 struct CommandContext {
   CommandContext(Transaction* _tx, facade::SinkReplyBuilder* _rb, ConnectionContext* cntx)
-      : tx(_tx), rb(_rb), extended(cntx) {
+      : tx(_tx), rb(_rb), conn_cntx(cntx) {
   }
 
   Transaction* tx;
   facade::SinkReplyBuilder* rb;
-  ConnectionContext* extended;
+  ConnectionContext* conn_cntx;
 };
 
 class CommandId : public facade::CommandId {

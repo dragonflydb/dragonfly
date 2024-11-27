@@ -980,7 +980,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
-  sparams.memcache_flags = cmnd_cntx.extended->conn_state.memcache_flag;
+  sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
   auto* builder = cmnd_cntx.rb;
 
   while (parser.HasNext()) {
@@ -1050,7 +1050,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   StringValue prev;
   if (sparams.flags & SetCmd::SET_GET)
     sparams.prev_val = &prev;
-  bool manual_journal = cmnd_cntx.extended->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
   OpStatus result = SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx);
 
   if (result == OpStatus::WRONG_TYPE) {
@@ -1075,11 +1075,11 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
 }
 
 void StringFamily::SetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
-  SetExGeneric(true, std::move(args), cmnd_cntx.extended->cid, cmnd_cntx.tx, cmnd_cntx.rb);
+  SetExGeneric(true, std::move(args), cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
 void StringFamily::PSetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
-  SetExGeneric(false, std::move(args), cmnd_cntx.extended->cid, cmnd_cntx.tx, cmnd_cntx.rb);
+  SetExGeneric(false, std::move(args), cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
 void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
@@ -1093,8 +1093,8 @@ void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
-  sparams.memcache_flags = cmnd_cntx.extended->conn_state.memcache_flag;
-  bool manual_journal = cmnd_cntx.extended->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
+  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
   const auto results{SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx)};
   auto* builder = cmnd_cntx.rb;
   if (results == OpStatus::OK) {
@@ -1143,7 +1143,7 @@ void StringFamily::GetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   StringValue prev;
   SetCmd::SetParams sparams;
   sparams.prev_val = &prev;
-  bool manual_journal = cmnd_cntx.extended->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
   if (OpStatus status = SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx);
       status != OpStatus::OK) {
     auto* builder = cmnd_cntx.rb;
@@ -1296,7 +1296,7 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto* builder = cmnd_cntx.rb;
   if (builder->GetProtocol() == Protocol::MEMCACHE) {
     fetch_mask |= FETCH_MCFLAG;
-    if (cmnd_cntx.extended->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+    if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
       fetch_mask |= FETCH_MCVER;
   }
 
