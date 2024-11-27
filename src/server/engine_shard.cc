@@ -206,7 +206,7 @@ constexpr double kEvictionRssThreshold = 1.0 - kEvictionFreeMemoryThreshold;
 
 size_t CalculateRssMemoryToFreePerShard() {
   const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-  if (rss_oom_deny_ratio < 0.0) {
+  if (rss_oom_deny_ratio <= 0.0) {
     return 0;
   }
   const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
@@ -219,7 +219,8 @@ size_t CalculateRssMemoryToFreePerShard() {
   // If we have more memory than the threshold, we need to free some
   if (global_rss_memory > global_rss_memory_threshold) {
     // Сalculate how much RSS memory we need to free per shard
-    return (global_rss_memory - global_rss_memory_threshold) / shard_set->size();
+    const uint32_t shards_count = shard_set->size();
+    return (global_rss_memory - global_rss_memory_threshold) / shards_count;
   }
   return 0;
 }

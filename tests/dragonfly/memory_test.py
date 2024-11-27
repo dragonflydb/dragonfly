@@ -180,22 +180,24 @@ async def test_cache_eviction_with_rss_deny_oom(
     """
 
     max_memory = 256 * 1024 * 1024  # 256 MB
-    first_fill_size = int(0.25 * max_memory)  # 25% of max memory
-    second_fill_size = int(0.3 * max_memory)  # Another 30% of max memory
+    data_fill_size = int(0.25 * max_memory)  # 25% of max memory
     rss_increase_size = int(0.3 * max_memory)  # 30% of max memory
 
     key_size = 1024  # 1 mb
-    num_keys_first_fill = first_fill_size // key_size
-    num_keys_second_fill = second_fill_size // key_size
+    num_keys = data_fill_size // key_size
 
-    # Fill 25% of max memory using DEBUG POPULATE
-    await async_client.execute_command("DEBUG", "POPULATE", num_keys_first_fill, "key", key_size)
+    # Fill data to 25% of max memory
+    await async_client.execute_command("DEBUG", "POPULATE", num_keys, "key", key_size)
 
-    await asyncio.sleep(1)  # Wait for RSS heartbeat
+    await asyncio.sleep(1)  # Wait for RSS heartbeat update
+
+    # First test that eviction is not triggered without connection creation
+    stats_info = await async_client.info("stats")
+    assert stats_info["evicted_keys"] == 0, "No eviction should start yet."
 
     # Get RSS memory before creating new connections
-    info_before_connections = await async_client.info("memory")
-    rss_before_connections = info_before_connections["used_memory_rss"]
+    memory_info = await async_client.info("memory")
+    rss_before_connections = memory_info["used_memory_rss"]
 
     # Increase RSS memory by 30% of max memory
     # We can simulate RSS increase by creating new connections
@@ -211,19 +213,21 @@ async def test_cache_eviction_with_rss_deny_oom(
     await asyncio.sleep(1)  # Wait for RSS heartbeat update
 
     # Get RSS memory after creating new connections
-    info_after_connections = await async_client.info("memory")
-    rss_after_connections = info_after_connections["used_memory_rss"]
+    memory_info = await async_client.info("memory")
 
-    assert rss_after_connections > rss_before_connections, "RSS memory should have increased."
+    assert (
+        memory_info["used_memory"] < data_fill_size
+    ), "Used memory should be less than initial fill size due to eviction."
 
-    # Attempt to insert another 30% of data
-    await async_client.execute_command("DEBUG", "POPULATE", num_keys_second_fill, "key2", key_size)
-
-    await asyncio.sleep(1)  # Wait for RSS heartbeat
+    assert (
+        memory_info["used_memory_rss"] > rss_before_connections
+    ), "RSS memory should have increased."
 
     # Check that eviction has occurred
-    info = await async_client.info("stats")
-    assert info["evicted_keys"] > 0, "Eviction should have occurred due to rss memory pressure."
+    stats_info = await async_client.info("stats")
+    assert (
+        stats_info["evicted_keys"] > 0
+    ), "Eviction should have occurred due to rss memory pressure."
 
     for conn in connections:
         await conn.close()
