@@ -815,7 +815,7 @@ void CompactObj::SetJsonSize(int64_t size) {
   }
 }
 
-void CompactObj::SetStreamSize(int64_t size) {
+void CompactObj::AddStreamSize(int64_t size) {
   if (size < 0) {
     // We might have a negative size. For example, if we remove a consumer,
     // the tracker will report a negative net (since we deallocated),

@@ -609,10 +609,10 @@ class StreamMemTracker {
     start_size_ = zmalloc_used_memory_tl;
   }
 
-  void SetStreamSize(PrimeValue& pv) const {
+  void UpdateStreamSize(PrimeValue& pv) const {
     const size_t current = zmalloc_used_memory_tl;
     int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
-    pv.SetStreamSize(diff);
+    pv.AddStreamSize(diff);
     // Under any flow we must not end up with this special value.
     DCHECK(pv.MallocUsed() != 0);
   }
@@ -668,7 +668,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
 
   StreamTrim(opts, stream_inst);
 
-  mem_tracker.SetStreamSize(it->second);
+  mem_tracker.UpdateStreamSize(it->second);
 
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (blocking_controller) {
@@ -1146,7 +1146,7 @@ OpStatus OpCreate(const OpArgs& op_args, string_view key, const CreateOpts& opts
   }
 
   streamCG* cg = streamCreateCG(s, opts.gname.data(), opts.gname.size(), &id, entries_read);
-  mem_tracker.SetStreamSize(res_it->it->second);
+  mem_tracker.UpdateStreamSize(res_it->it->second);
   return cg ? OpStatus::OK : OpStatus::BUSY_GROUP;
 }
 
@@ -1316,7 +1316,7 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
       AppendClaimResultItem(result, cgr_res->s, id);
     }
   }
-  tracker.SetStreamSize(cgr_res->it->second);
+  tracker.UpdateStreamSize(cgr_res->it->second);
   return result;
 }
 
@@ -1329,7 +1329,7 @@ OpStatus OpDestroyGroup(const OpArgs& op_args, string_view key, string_view gnam
   raxRemove(cgr_res->s->cgroups, (uint8_t*)(gname.data()), gname.size(), NULL);
   streamFreeCG(cgr_res->cg);
 
-  mem_tracker.SetStreamSize(cgr_res->it->second);
+  mem_tracker.UpdateStreamSize(cgr_res->it->second);
 
   // Awake readers blocked on this group
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
@@ -1361,7 +1361,7 @@ OpResult<uint32_t> OpCreateConsumer(const OpArgs& op_args, string_view key, stri
   streamConsumer* consumer = streamCreateConsumer(cgroup_res->cg, WrapSds(consumer_name), NULL, 0,
                                                   SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
 
-  mem_tracker.SetStreamSize(cgroup_res->it->second);
+  mem_tracker.UpdateStreamSize(cgroup_res->it->second);
   return consumer ? OpStatus::OK : OpStatus::KEY_EXISTS;
 }
 
@@ -1380,7 +1380,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
     streamDelConsumer(cgroup_res->cg, consumer);
   }
 
-  mem_tracker.SetStreamSize(cgroup_res->it->second);
+  mem_tracker.UpdateStreamSize(cgroup_res->it->second);
   return pending;
 }
 
@@ -1441,7 +1441,7 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
   if (!streamIDEqZero(&max_xdel_id))
     stream_inst->max_deleted_entry_id = max_xdel_id;
 
-  mem_tracker.SetStreamSize(cobj);
+  mem_tracker.UpdateStreamSize(cobj);
 
   return OpStatus::OK;
 }
@@ -1487,7 +1487,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, absl::Span<stre
     }
   }
 
-  tracker.SetStreamSize(cobj);
+  tracker.UpdateStreamSize(cobj);
   return deleted;
 }
 
@@ -1519,7 +1519,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
       acknowledged++;
     }
   }
-  mem_tracker.SetStreamSize(res->it->second);
+  mem_tracker.UpdateStreamSize(res->it->second);
   return acknowledged;
 }
 
@@ -1614,7 +1614,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   raxStop(&ri);
   result.end_id = end_id;
 
-  mem_tracker.SetStreamSize(cgr_res->it->second);
+  mem_tracker.UpdateStreamSize(cgr_res->it->second);
 
   return result;
 }
@@ -1925,7 +1925,7 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
 
   auto res = StreamTrim(opts, s);
 
-  mem_tracker.SetStreamSize(cobj);
+  mem_tracker.UpdateStreamSize(cobj);
   return res;
 }
 

@@ -318,7 +318,7 @@ class CompactObj {
   // Adjusts the size used by json
   void SetJsonSize(int64_t size);
   // Adjusts the size used by a stream
-  void SetStreamSize(int64_t size);
+  void AddStreamSize(int64_t size);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
