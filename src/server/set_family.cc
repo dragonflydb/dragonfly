@@ -984,7 +984,7 @@ struct SetReplies {
   bool script;
 };
 
-void SAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto values = args.subspan(1);
 
@@ -992,15 +992,15 @@ void SAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpAdd(t->GetOpArgs(shard), key, values, false, false);
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return builder->SendLong(result.value());
+    return cmd_cntx.rb->SendLong(result.value());
   }
 
-  builder->SendError(result.status());
+  cmd_cntx.rb->SendError(result.status());
 }
 
-void SIsMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view val = ArgS(args, 1);
 
@@ -1015,11 +1015,11 @@ void SIsMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return find_res.status();
   };
 
-  OpResult<void> result = tx->ScheduleSingleHop(std::move(cb));
-  SendNumeric(result ? OpResult<uint32_t>(1) : result.status(), builder);
+  OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  SendNumeric(result ? OpResult<uint32_t>(1) : result.status(), cmd_cntx.rb);
 }
 
-void SMIsMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SMIsMember(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto members = args.subspan(1);
 
@@ -1040,35 +1040,35 @@ void SMIsMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return find_res.status();
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  OpResult<void> result = tx->ScheduleSingleHop(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
     rb->StartArray(memberships.size());
     for (bool b : memberships)
       rb->SendLong(int(b));
     return;
   }
-  builder->SendError(result.status());
+  cmd_cntx.rb->SendError(result.status());
 }
 
-void SMove(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SMove(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
   string_view member = ArgS(args, 2);
 
   Mover mover{src, dest, member, true};
-  mover.Find(tx);
+  mover.Find(cmd_cntx.tx);
 
-  OpResult<unsigned> result = mover.Commit(tx);
+  OpResult<unsigned> result = mover.Commit(cmd_cntx.tx);
   if (!result) {
-    return builder->SendError(result.status());
+    return cmd_cntx.rb->SendError(result.status());
     return;
   }
 
-  builder->SendLong(result.value());
+  cmd_cntx.rb->SendLong(result.value());
 }
 
-void SRem(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SRem(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto vals = args.subspan(1);
 
@@ -1076,11 +1076,11 @@ void SRem(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpRem(t->GetOpArgs(shard), key, vals, false);
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
-  SendNumeric(result, builder);
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  SendNumeric(result, cmd_cntx.rb);
 }
 
-void SCard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SCard(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<uint32_t> {
@@ -1092,17 +1092,17 @@ void SCard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return find_res.value()->second.Size();
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
-  SendNumeric(result, builder);
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  SendNumeric(result, cmd_cntx.rb);
 }
 
-void SPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SPop(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   unsigned count = 1;
   if (args.size() > 1) {
     string_view arg = ArgS(args, 1);
     if (!absl::SimpleAtoi(arg, &count)) {
-      builder->SendError(kInvalidIntErr);
+      cmd_cntx.rb->SendError(kInvalidIntErr);
       return;
     }
   }
@@ -1111,8 +1111,8 @@ void SPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpPop(t->GetOpArgs(shard), key, count);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
     if (args.size() == 1) {  // SPOP key
       if (result.status() == OpStatus::KEY_NOTFOUND) {
@@ -1127,10 +1127,10 @@ void SPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return;
   }
 
-  builder->SendError(result.status());
+  cmd_cntx.rb->SendError(result.status());
 }
 
-void SDiff(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
+void SDiff(CmdArgList args, const CommandContext& cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   string_view src_key = ArgS(args, 0);
   ShardId src_shard = Shard(src_key, result_set.size());
@@ -1147,12 +1147,12 @@ void SDiff(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, Connecti
     return OpStatus::OK;
   };
 
-  tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
-  SetReplies{builder, bool(cntx->conn_state.script_info)}.Send(rsv);
+  SetReplies{cmd_cntx.rb, bool(cmd_cntx.conn_cntx->conn_state.script_info)}.Send(rsv);
 }
 
-void SDiffStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SDiffStore(CmdArgList args, const CommandContext& cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
@@ -1185,11 +1185,11 @@ void SDiffStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpStatus::OK;
   };
 
-  tx->Execute(std::move(diff_cb), false);
+  cmd_cntx.tx->Execute(std::move(diff_cb), false);
   ResultSetView rsv = DiffResultVec(result_set, src_shard);
   if (!rsv) {
-    tx->Conclude();
-    builder->SendError(rsv.status());
+    cmd_cntx.tx->Conclude();
+    cmd_cntx.rb->SendError(rsv.status());
     return;
   }
 
@@ -1202,24 +1202,23 @@ void SDiffStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpStatus::OK;
   };
 
-  tx->Execute(std::move(store_cb), true);
-  builder->SendLong(result_size);
+  cmd_cntx.tx->Execute(std::move(store_cb), true);
+  cmd_cntx.rb->SendLong(result_size);
 }
 
-void SMembers(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-              ConnectionContext* cntx) {
+void SMembers(CmdArgList args, const CommandContext& cmd_cntx) {
   auto cb = [](Transaction* t, EngineShard* shard) { return OpInter(t, shard, false); };
 
-  OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    SetReplies{builder, bool(cntx->conn_state.script_info)}.Send(&result.value());
+    SetReplies{cmd_cntx.rb, bool(cmd_cntx.conn_cntx->conn_state.script_info)}.Send(&result.value());
   } else {
-    builder->SendError(result.status());
+    cmd_cntx.rb->SendError(result.status());
   }
 }
 
-void SRandMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SRandMember(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
@@ -1227,17 +1226,17 @@ void SRandMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   int count = is_count ? parser.Next<int>() : 1;
 
   if (parser.HasNext())
-    return builder->SendError(WrongNumArgsError("SRANDMEMBER"));
+    return cmd_cntx.rb->SendError(WrongNumArgsError("SRANDMEMBER"));
 
   if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+    return cmd_cntx.rb->SendError(err->MakeReply());
 
   const auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     return OpRandMember(t->GetOpArgs(shard), key, count);
   };
 
-  OpResult<StringVec> result = tx->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (result || result == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
       rb->SendBulkStrArr(*result, RedisReplyBuilder::SET);
@@ -1248,10 +1247,10 @@ void SRandMember(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     }
     return;
   }
-  builder->SendError(result.status());
+  cmd_cntx.rb->SendError(result.status());
 }
 
-void SInter(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
+void SInter(CmdArgList args, const CommandContext& cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1260,16 +1259,16 @@ void SInter(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, Connect
     return OpStatus::OK;
   };
 
-  tx->ScheduleSingleHop(std::move(cb));
-  OpResult<SvArray> result = InterResultVec(result_set, tx->GetUniqueShardCnt());
+  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx.tx->GetUniqueShardCnt());
   if (result) {
-    SetReplies{builder, bool(cntx->conn_state.script_info)}.Send(&*result);
+    SetReplies{cmd_cntx.rb, bool(cmd_cntx.conn_cntx->conn_state.script_info)}.Send(&*result);
   } else {
-    builder->SendError(result.status());
+    cmd_cntx.rb->SendError(result.status());
   }
 }
 
-void SInterStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SInterStore(CmdArgList args, const CommandContext& cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
@@ -1287,12 +1286,12 @@ void SInterStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpStatus::OK;
   };
 
-  tx->Execute(std::move(inter_cb), false);
+  cmd_cntx.tx->Execute(std::move(inter_cb), false);
 
   OpResult<SvArray> result = InterResultVec(result_set, inter_shard_cnt.load(memory_order_relaxed));
   if (!result) {
-    tx->Conclude();
-    builder->SendError(result.status());
+    cmd_cntx.tx->Conclude();
+    cmd_cntx.rb->SendError(result.status());
     return;
   }
 
@@ -1304,21 +1303,21 @@ void SInterStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpStatus::OK;
   };
 
-  tx->Execute(std::move(store_cb), true);
-  builder->SendLong(result->size());
+  cmd_cntx.tx->Execute(std::move(store_cb), true);
+  cmd_cntx.rb->SendLong(result->size());
 }
 
-void SInterCard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
   unsigned num_keys;
   if (!absl::SimpleAtoi(ArgS(args, 0), &num_keys))
-    return builder->SendError(kSyntaxErr);
+    return cmd_cntx.rb->SendError(kSyntaxErr);
 
   unsigned limit = 0;
   if (args.size() == (num_keys + 3) && ArgS(args, 1 + num_keys) == "LIMIT") {
     if (!absl::SimpleAtoi(ArgS(args, num_keys + 2), &limit))
-      return builder->SendError("limit can't be negative");
+      return cmd_cntx.rb->SendError("limit can't be negative");
   } else if (args.size() > (num_keys + 1))
-    return builder->SendError(kSyntaxErr);
+    return cmd_cntx.rb->SendError(kSyntaxErr);
 
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1326,16 +1325,16 @@ void SInterCard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpStatus::OK;
   };
 
-  tx->ScheduleSingleHop(std::move(cb));
-  OpResult<SvArray> result = InterResultVec(result_set, tx->GetUniqueShardCnt(), limit);
+  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  OpResult<SvArray> result = InterResultVec(result_set, cmd_cntx.tx->GetUniqueShardCnt(), limit);
 
   if (result) {
-    return builder->SendLong(result->size());
+    return cmd_cntx.rb->SendLong(result->size());
   }
-  builder->SendError(result.status());
+  cmd_cntx.rb->SendError(result.status());
 }
 
-void SUnion(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
+void SUnion(CmdArgList args, const CommandContext& cmd_cntx) {
   ResultStringVec result_set(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1344,13 +1343,13 @@ void SUnion(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, Connect
     return OpStatus::OK;
   };
 
-  tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
 
   ResultSetView unionset = UnionResultVec(result_set);
-  SetReplies{builder, bool(cntx->conn_state.script_info)}.Send(unionset);
+  SetReplies{cmd_cntx.rb, bool(cmd_cntx.conn_cntx->conn_state.script_info)}.Send(unionset);
 }
 
-void SUnionStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SUnionStore(CmdArgList args, const CommandContext& cmd_cntx) {
   ResultStringVec result_set(shard_set->size(), OpStatus::SKIPPED);
   string_view dest_key = ArgS(args, 0);
   ShardId dest_shard = Shard(dest_key, result_set.size());
@@ -1368,12 +1367,12 @@ void SUnionStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpStatus::OK;
   };
 
-  tx->Execute(std::move(union_cb), false);
+  cmd_cntx.tx->Execute(std::move(union_cb), false);
 
   ResultSetView unionset = UnionResultVec(result_set);
   if (!unionset) {
-    tx->Conclude();
-    builder->SendError(unionset.status());
+    cmd_cntx.tx->Conclude();
+    cmd_cntx.rb->SendError(unionset.status());
     return;
   }
 
@@ -1386,30 +1385,30 @@ void SUnionStore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpStatus::OK;
   };
 
-  tx->Execute(std::move(store_cb), true);
-  builder->SendLong(result_size);
+  cmd_cntx.tx->Execute(std::move(store_cb), true);
+  cmd_cntx.rb->SendLong(result_size);
 }
 
-void SScan(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view token = ArgS(args, 1);
 
   uint64_t cursor = 0;
 
   if (!absl::SimpleAtoi(token, &cursor)) {
-    return builder->SendError("invalid cursor");
+    return cmd_cntx.rb->SendError("invalid cursor");
   }
 
   // SSCAN key cursor [MATCH pattern] [COUNT count]
   if (args.size() > 6) {
     DVLOG(1) << "got " << args.size() << " this is more than it should be";
-    return builder->SendError(kSyntaxErr);
+    return cmd_cntx.rb->SendError(kSyntaxErr);
   }
 
   OpResult<ScanOpts> ops = ScanOpts::TryFrom(args.subspan(2));
   if (!ops) {
     DVLOG(1) << "SScan invalid args - return " << ops << " to the user";
-    return builder->SendError(ops.status());
+    return cmd_cntx.rb->SendError(ops.status());
   }
 
   ScanOpts scan_op = ops.value();
@@ -1418,8 +1417,8 @@ void SScan(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  OpResult<StringVec> result = tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  OpResult<StringVec> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
     rb->StartArray(2);
     rb->SendBulkString(absl::StrCat(cursor));
@@ -1428,19 +1427,19 @@ void SScan(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
       rb->SendBulkString(k);
     }
   } else {
-    builder->SendError(result.status());
+    cmd_cntx.rb->SendError(result.status());
   }
 }
 
 // Syntax: saddex key ttl_sec member [member...]
-void SAddEx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SAddEx(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view ttl_str = ArgS(args, 1);
   uint32_t ttl_sec;
   constexpr uint32_t kMaxTtl = (1UL << 26);
 
   if (!absl::SimpleAtoi(ttl_str, &ttl_sec) || ttl_sec == 0 || ttl_sec > kMaxTtl) {
-    return builder->SendError(kInvalidIntErr);
+    return cmd_cntx.rb->SendError(kInvalidIntErr);
   }
 
   auto vals = args.subspan(2);
@@ -1448,12 +1447,12 @@ void SAddEx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpAddEx(t->GetOpArgs(shard), key, ttl_sec, vals);
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    return builder->SendLong(result.value());
+    return cmd_cntx.rb->SendLong(result.value());
   }
 
-  builder->SendError(result.status());
+  cmd_cntx.rb->SendError(result.status());
 }
 
 }  // namespace
