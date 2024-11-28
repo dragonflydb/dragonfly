@@ -2450,8 +2450,10 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     return builder->SendLong(cmd_cnt);
   }
 
+  const bool sufficient_args = (args.size() == 2);
+
   // INFO [cmd]
-  if (subcmd == "INFO" && args.size() == 2) {
+  if (subcmd == "INFO" && sufficient_args) {
     string cmd = absl::AsciiStrToUpper(ArgS(args, 1));
 
     if (const auto* cid = registry_.Find(cmd); cid) {
@@ -2462,6 +2464,10 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     }
 
     return;
+  }
+
+  if (subcmd == "DOCS" && sufficient_args) {
+    return builder->SendOk();
   }
 
   return builder->SendError(kSyntaxErr, kSyntaxErrType);
