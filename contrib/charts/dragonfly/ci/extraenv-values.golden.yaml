@@ -11,6 +11,25 @@ metadata:
     app.kubernetes.io/version: "v1.25.4"
     app.kubernetes.io/managed-by: Helm
 ---
+# Source: dragonfly/templates/extra-manifests.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-secret
+stringData:
+  password: password
+  username: username
+type: Opaque
+---
+# Source: dragonfly/templates/extra-manifests.yaml
+apiVersion: v1
+data:
+  configKey1: configValue1
+  configKey2: configValue2
+kind: ConfigMap
+metadata:
+  name: my-configmap
+---
 # Source: dragonfly/templates/service.yaml
 apiVersion: v1
 kind: Service
