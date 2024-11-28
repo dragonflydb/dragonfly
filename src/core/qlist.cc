@@ -65,7 +65,7 @@ static_assert(sizeof(QList) == 32);
 enum IterDir : uint8_t { FWD = 1, REV = 0 };
 
 /* This is for test suite development purposes only, 0 means disabled. */
-static size_t packed_threshold = 0;
+size_t packed_threshold = 0;
 
 /* Optimization levels for size-based filling.
  * Note that the largest possible limit is 64k, so even if each record takes
@@ -123,7 +123,9 @@ bool NodeAllowMerge(const quicklistNode* a, const quicklistNode* b, const int fi
   /* approximate merged listpack size (- 7 to remove one listpack
    * header/trailer, see LP_HDR_SIZE and LP_EOF) */
   unsigned int merge_sz = a->sz + b->sz - 7;
-  return quicklistNodeExceedsLimit(fill, merge_sz, a->count + b->count);
+
+  // Allow merge if new node will not exceed the limit.
+  return !quicklistNodeExceedsLimit(fill, merge_sz, a->count + b->count);
 }
 
 quicklistNode* CreateNode() {
@@ -140,6 +142,7 @@ quicklistNode* CreateNode() {
 }
 
 uint8_t* LP_Insert(uint8_t* lp, string_view elem, uint8_t* pos, int lp_where) {
+  DCHECK(pos);
   return lpInsertString(lp, uint_ptr(elem), elem.size(), pos, lp_where, NULL);
 }
 
@@ -289,6 +292,10 @@ quicklistNode* SplitNode(quicklistNode* node, int offset, bool after) {
 }
 
 }  // namespace
+
+void QList::SetPackedThreshold(unsigned threshold) {
+  packed_threshold = threshold;
+}
 
 QList::QList() : fill_(-2), compress_(0), bookmark_count_(0) {
 }
@@ -529,27 +536,14 @@ void QList::InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertO
 }
 
 void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
+  DCHECK(it.current_);
+  DCHECK(it.zi_);
+
   int full = 0, at_tail = 0, at_head = 0, avail_next = 0, avail_prev = 0;
   quicklistNode* node = it.current_;
   quicklistNode* new_node = NULL;
   size_t sz = elem.size();
   bool after = insert_opt == AFTER;
-
-  if (!node) {
-    /* we have no reference node, so let's create only node in the list */
-    DCHECK_EQ(count_, 0u);
-    DCHECK_EQ(len_, 0u);
-
-    if (ABSL_PREDICT_FALSE(IsLargeElement(sz, fill_))) {
-      InsertPlainNode(tail_, elem, insert_opt);
-      return;
-    }
-
-    new_node = CreateNode(QUICKLIST_NODE_CONTAINER_PACKED, elem);
-    InsertNode(NULL, new_node, insert_opt);
-    count_++;
-    return;
-  }
 
   /* Populate accounting flags for easier boolean checks later */
   if (!NodeAllowInsert(node, fill_, sz)) {
@@ -831,10 +825,10 @@ quicklistNode* QList::ListpackMerge(quicklistNode* a, quicklistNode* b) {
     DelNode(nokeep);
     quicklistCompress(keep);
     return keep;
-  } else {
-    /* else, the merge returned NULL and nothing changed. */
-    return NULL;
   }
+
+  /* else, the merge returned NULL and nothing changed. */
+  return NULL;
 }
 
 void QList::DelNode(quicklistNode* node) {
@@ -909,12 +903,12 @@ auto QList::GetIterator(Where where) const -> Iterator {
 auto QList::GetIterator(long idx) const -> Iterator {
   quicklistNode* n;
   unsigned long long accum = 0;
-  unsigned long long index;
   int forward = idx < 0 ? 0 : 1; /* < 0 -> reverse, 0+ -> forward */
-
-  index = forward ? idx : (-idx) - 1;
+  uint64_t index = forward ? idx : (-idx) - 1;
   if (index >= count_)
     return {};
+
+  DCHECK(head_);
 
   /* Seek in the other direction if that way is shorter. */
   int seek_forward = forward;
