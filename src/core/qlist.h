@@ -167,17 +167,21 @@ class QList {
 
   // Returns false if used existing head, true if new head created.
   bool PushTail(std::string_view value);
-  void InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
+
+  // Returns newly created plain node.
+  quicklistNode* InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
   void InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertOpt insert_opt);
   void Replace(Iterator it, std::string_view elem);
 
   void Compress(quicklistNode* node);
 
   quicklistNode* MergeNodes(quicklistNode* node);
+
+  // Deletes one of the nodes and returns the other.
   quicklistNode* ListpackMerge(quicklistNode* a, quicklistNode* b);
 
   void DelNode(quicklistNode* node);
-  bool DelPackedIndex(quicklistNode* node, uint8_t** p);
+  bool DelPackedIndex(quicklistNode* node, uint8_t* p);
 
   quicklistNode* head_ = nullptr;
 
