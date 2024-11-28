@@ -2450,10 +2450,72 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
   }
 }
 
+void HelpSubCmd(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
+  XGroupHelp(parser->Tail(), tx, builder);
+}
+
+bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder* builder) {
+  size_t id_indx = 0;
+  string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
+
+  if (arg == "IDLE" && args.size() > 4) {
+    id_indx++;
+    if (!absl::SimpleAtoi(ArgS(args, id_indx), &opts.min_idle_time)) {
+      builder->SendError(kInvalidIntErr, kSyntaxErrType);
+      return false;
+    }
+    // Ignore negative min_idle_time
+    opts.min_idle_time = std::max(opts.min_idle_time, static_cast<int64_t>(0));
+    args.remove_prefix(2);
+    id_indx = 0;
+  }
+  if (args.size() < 3) {
+    builder->SendError(WrongNumArgsError("XPENDING"), kSyntaxErrType);
+    return false;
+  }
+
+  // Parse start and end
+  RangeId rs, re;
+  string_view start = ArgS(args, id_indx);
+  id_indx++;
+  string_view end = ArgS(args, id_indx);
+  if (!ParseRangeId(start, &rs) || !ParseRangeId(end, &re)) {
+    builder->SendError(kInvalidStreamId, kSyntaxErrType);
+    return false;
+  }
+
+  if (rs.exclude && streamIncrID(&rs.parsed_id.val) != C_OK) {
+    builder->SendError("invalid start ID for the interval", kSyntaxErrType);
+    return false;
+  }
+
+  if (re.exclude && streamDecrID(&re.parsed_id.val) != C_OK) {
+    builder->SendError("invalid end ID for the interval", kSyntaxErrType);
+    return false;
+  }
+  id_indx++;
+  opts.start = rs.parsed_id;
+  opts.end = re.parsed_id;
+
+  // Parse count
+  if (!absl::SimpleAtoi(ArgS(args, id_indx), &opts.count)) {
+    builder->SendError(kInvalidIntErr, kSyntaxErrType);
+    return false;
+  }
+
+  // Ignore negative count value
+  opts.count = std::max(opts.count, static_cast<int64_t>(0));
+  if (args.size() - id_indx - 1) {
+    id_indx++;
+    opts.consumer_name = ArgS(args, id_indx);
+  }
+  return true;
+}
+
 }  // namespace
 
-void StreamFamily::XAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  auto parse_resp = ParseAddOrTrimArgsOrReply(args, true, builder);
+void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto parse_resp = ParseAddOrTrimArgsOrReply(args, true, cmd_cntx.rb);
   if (!parse_resp) {
     return;
   }
@@ -2463,13 +2525,13 @@ void StreamFamily::XAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 
   args.remove_prefix(id_indx);
   if (args.size() < 2 || args.size() % 2 == 0) {
-    return builder->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
+    return cmd_cntx.rb->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }
 
   string_view id = ArgS(args, 0);
 
   if (!ParseID(id, true, 0, &add_opts.parsed_id)) {
-    return builder->SendError(kInvalidStreamId, kSyntaxErrType);
+    return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   args.remove_prefix(1);
@@ -2477,8 +2539,8 @@ void StreamFamily::XAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     return OpAdd(t->GetOpArgs(shard), add_opts, args);
   };
 
-  OpResult<streamID> add_result = tx->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<streamID> add_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   if (add_result) {
     return rb->SendBulkString(StreamIdRepr(*add_result));
@@ -2489,12 +2551,12 @@ void StreamFamily::XAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
   }
 
   if (add_result.status() == OpStatus::STREAM_ID_SMALL) {
-    return builder->SendError(
+    return cmd_cntx.rb->SendError(
         "The ID specified in XADD is equal or smaller than "
         "the target stream top item");
   }
 
-  return builder->SendError(add_result.status());
+  return cmd_cntx.rb->SendError(add_result.status());
 }
 
 absl::InlinedVector<streamID, 8> GetXclaimIds(CmdArgList& args) {
@@ -2567,13 +2629,13 @@ bool ParseXclaimOptions(CmdArgList& args, ClaimOpts& opts, SinkReplyBuilder* bui
   return true;
 }
 
-void StreamFamily::XClaim(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   ClaimOpts opts;
   string_view key = ArgS(args, 0);
   opts.group = ArgS(args, 1);
   opts.consumer = ArgS(args, 2);
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
-    return builder->SendError(kSyntaxErr);
+    return cmd_cntx.rb->SendError(kSyntaxErr);
   }
   // Ignore negative min-idle-time
   opts.min_idle_time = std::max(opts.min_idle_time, static_cast<int64>(0));
@@ -2582,11 +2644,11 @@ void StreamFamily::XClaim(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
   auto ids = GetXclaimIds(args);
   if (ids.empty()) {
     // No ids given.
-    return builder->SendError(kInvalidStreamId, kSyntaxErrType);
+    return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   // parse the options
-  if (!ParseXclaimOptions(args, opts, builder))
+  if (!ParseXclaimOptions(args, opts, cmd_cntx.rb))
     return;
 
   if (auto now = GetCurrentTimeMs();
@@ -2596,16 +2658,16 @@ void StreamFamily::XClaim(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpClaim(t->GetOpArgs(shard), key, opts, absl::Span{ids.data(), ids.size()});
   };
-  OpResult<ClaimInfo> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<ClaimInfo> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (!result) {
-    builder->SendError(result.status());
+    cmd_cntx.rb->SendError(result.status());
     return;
   }
 
-  StreamReplies{builder}.SendClaimInfo(result.value());
+  StreamReplies{cmd_cntx.rb}.SendClaimInfo(result.value());
 }
 
-void StreamFamily::XDel(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XDel(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -2615,7 +2677,7 @@ void StreamFamily::XDel(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     ParsedStreamId parsed_id;
     string_view str_id = ArgS(args, i);
     if (!ParseID(str_id, true, 0, &parsed_id)) {
-      return builder->SendError(kInvalidStreamId, kSyntaxErrType);
+      return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
     }
     ids[i] = parsed_id.val;
   }
@@ -2624,19 +2686,15 @@ void StreamFamily::XDel(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     return OpDel(t->GetOpArgs(shard), key, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return builder->SendLong(*result);
+    return cmd_cntx.rb->SendLong(*result);
   }
 
-  builder->SendError(result.status());
+  cmd_cntx.rb->SendError(result.status());
 }
 
-void HelpSubCmd(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
-  XGroupHelp(parser->Tail(), tx, builder);
-}
-
-void StreamFamily::XGroup(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XGroup(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
 
   auto sub_cmd_func = parser.MapNext("HELP", &HelpSubCmd, "CREATE", &CreateGroup, "DESTROY",
@@ -2644,14 +2702,13 @@ void StreamFamily::XGroup(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
                                      "DELCONSUMER", &DelConsumer, "SETID", &SetId);
 
   if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+    return cmd_cntx.rb->SendError(err->MakeReply());
 
-  sub_cmd_func(&parser, tx, builder);
+  sub_cmd_func(&parser, cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void StreamFamily::XInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                         ConnectionContext* cntx) {
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+void StreamFamily::XInfo(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   if (sub_cmd == "HELP") {
@@ -2674,7 +2731,8 @@ void StreamFamily::XInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
       // We do not use transactional xemantics for xinfo since it's informational command.
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
+        DbContext db_context{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->db_index(),
+                             GetCurrentTimeMs()};
         return OpListGroups(db_context, key, shard);
       };
 
@@ -2708,13 +2766,13 @@ void StreamFamily::XInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
         }
         return;
       }
-      return builder->SendError(result.status());
+      return rb->SendError(result.status());
     } else if (sub_cmd == "STREAM") {
       int full = 0;
       size_t count = 10;  // default count for xinfo streams
 
       if (args.size() == 4 || args.size() > 5) {
-        return builder->SendError(
+        return rb->SendError(
             "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
       }
 
@@ -2722,30 +2780,30 @@ void StreamFamily::XInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
         full = 1;
         string full_arg = absl::AsciiStrToUpper(ArgS(args, 2));
         if (full_arg != "FULL") {
-          return builder->SendError(
+          return rb->SendError(
               "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
         }
         if (args.size() > 3) {
           string count_arg = absl::AsciiStrToUpper(ArgS(args, 3));
           string_view count_value_arg = ArgS(args, 4);
           if (count_arg != "COUNT") {
-            return builder->SendError(
+            return rb->SendError(
                 "unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP.");
           }
 
           if (!absl::SimpleAtoi(count_value_arg, &count)) {
-            return builder->SendError(kInvalidIntErr);
+            return rb->SendError(kInvalidIntErr);
           }
         }
       }
 
       auto cb = [&]() {
         EngineShard* shard = EngineShard::tlocal();
-        return OpStreams(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()}, key, shard,
-                         full, count);
+        return OpStreams(
+            DbContext{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->db_index(), GetCurrentTimeMs()},
+            key, shard, full, count);
       };
 
-      auto* rb = static_cast<RedisReplyBuilder*>(builder);
       OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
       if (sinfo) {
         if (full) {
@@ -2865,13 +2923,14 @@ void StreamFamily::XInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
         }
         return;
       }
-      return builder->SendError(sinfo.status());
+      return rb->SendError(sinfo.status());
     } else if (sub_cmd == "CONSUMERS") {
       string_view stream_name = ArgS(args, 1);
       string_view group_name = ArgS(args, 2);
       auto cb = [&]() {
-        return OpConsumers(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()},
-                           EngineShard::tlocal(), stream_name, group_name);
+        return OpConsumers(
+            DbContext{cmd_cntx.conn_cntx->ns, cmd_cntx.conn_cntx->db_index(), GetCurrentTimeMs()},
+            EngineShard::tlocal(), stream_name, group_name);
       };
 
       OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));
@@ -2889,106 +2948,48 @@ void StreamFamily::XInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
         return;
       }
       if (result.status() == OpStatus::INVALID_VALUE) {
-        return builder->SendError(NoGroupError(stream_name, group_name));
+        return rb->SendError(NoGroupError(stream_name, group_name));
       }
-      return builder->SendError(result.status());
+      return rb->SendError(result.status());
     }
   }
-  return builder->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
+  return rb->SendError(UnknownSubCmd(sub_cmd, "XINFO"));
 }
 
-void StreamFamily::XLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XLen(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return builder->SendLong(*result);
+    return cmd_cntx.rb->SendLong(*result);
   }
 
-  return builder->SendError(result.status());
+  return cmd_cntx.rb->SendError(result.status());
 }
 
-bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder* builder) {
-  size_t id_indx = 0;
-  string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
-
-  if (arg == "IDLE" && args.size() > 4) {
-    id_indx++;
-    if (!absl::SimpleAtoi(ArgS(args, id_indx), &opts.min_idle_time)) {
-      builder->SendError(kInvalidIntErr, kSyntaxErrType);
-      return false;
-    }
-    // Ignore negative min_idle_time
-    opts.min_idle_time = std::max(opts.min_idle_time, static_cast<int64_t>(0));
-    args.remove_prefix(2);
-    id_indx = 0;
-  }
-  if (args.size() < 3) {
-    builder->SendError(WrongNumArgsError("XPENDING"), kSyntaxErrType);
-    return false;
-  }
-
-  // Parse start and end
-  RangeId rs, re;
-  string_view start = ArgS(args, id_indx);
-  id_indx++;
-  string_view end = ArgS(args, id_indx);
-  if (!ParseRangeId(start, &rs) || !ParseRangeId(end, &re)) {
-    builder->SendError(kInvalidStreamId, kSyntaxErrType);
-    return false;
-  }
-
-  if (rs.exclude && streamIncrID(&rs.parsed_id.val) != C_OK) {
-    builder->SendError("invalid start ID for the interval", kSyntaxErrType);
-    return false;
-  }
-
-  if (re.exclude && streamDecrID(&re.parsed_id.val) != C_OK) {
-    builder->SendError("invalid end ID for the interval", kSyntaxErrType);
-    return false;
-  }
-  id_indx++;
-  opts.start = rs.parsed_id;
-  opts.end = re.parsed_id;
-
-  // Parse count
-  if (!absl::SimpleAtoi(ArgS(args, id_indx), &opts.count)) {
-    builder->SendError(kInvalidIntErr, kSyntaxErrType);
-    return false;
-  }
-
-  // Ignore negative count value
-  opts.count = std::max(opts.count, static_cast<int64_t>(0));
-  if (args.size() - id_indx - 1) {
-    id_indx++;
-    opts.consumer_name = ArgS(args, id_indx);
-  }
-  return true;
-}
-
-void StreamFamily::XPending(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XPending(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   PendingOpts opts;
   opts.group_name = ArgS(args, 1);
   args.remove_prefix(2);
 
-  if (!args.empty() && !ParseXpendingOptions(args, opts, builder)) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  if (!args.empty() && !ParseXpendingOptions(args, opts, rb)) {
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPending(t->GetOpArgs(shard), key, opts);
   };
-  OpResult<PendingResult> op_result = tx->ScheduleSingleHopT(cb);
+  OpResult<PendingResult> op_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
   if (!op_result) {
     if (op_result.status() == OpStatus::SKIPPED)
-      return builder->SendError(NoGroupError(key, opts.group_name));
-    return builder->SendError(op_result.status());
+      return rb->SendError(NoGroupError(key, opts.group_name));
+    return rb->SendError(op_result.status());
   }
   const PendingResult& result = op_result.value();
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (std::holds_alternative<PendingReducedResult>(result)) {
     const auto& res = std::get<PendingReducedResult>(result);
     rb->StartArray(4);
@@ -3024,20 +3025,20 @@ void StreamFamily::XPending(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
   }
 }
 
-void StreamFamily::XRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XRange(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = args[0];
   string_view start = args[1];
   string_view end = args[2];
 
-  XRangeGeneric(key, start, end, args.subspan(3), false, tx, builder);
+  XRangeGeneric(key, start, end, args.subspan(3), false, cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void StreamFamily::XRevRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XRevRange(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = args[0];
   string_view start = args[1];
   string_view end = args[2];
 
-  XRangeGeneric(key, end, start, args.subspan(3), true, tx, builder);
+  XRangeGeneric(key, end, start, args.subspan(3), true, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
@@ -3108,46 +3109,44 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   return streamCompareID(&last_id, &requested_sitem.id.val) >= 0;
 }
 
-void StreamFamily::XRead(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                         ConnectionContext* cntx) {
-  return XReadGeneric2(args, false, tx, builder, cntx);
+void StreamFamily::XRead(CmdArgList args, const CommandContext& cmd_cntx) {
+  return XReadGeneric2(args, false, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
 }
 
-void StreamFamily::XReadGroup(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                              ConnectionContext* cntx) {
-  return XReadGeneric2(args, true, tx, builder, cntx);
+void StreamFamily::XReadGroup(CmdArgList args, const CommandContext& cmd_cntx) {
+  return XReadGeneric2(args, true, cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
 }
 
-void StreamFamily::XSetId(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XSetId(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view idstr = ArgS(args, 1);
 
   ParsedStreamId parsed_id;
   if (!ParseID(idstr, true, 0, &parsed_id)) {
-    return builder->SendError(kInvalidStreamId, kSyntaxErrType);
+    return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSetId2(t->GetOpArgs(shard), key, parsed_id.val);
   };
 
-  OpStatus result = tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
   switch (result) {
     case OpStatus::STREAM_ID_SMALL:
-      return builder->SendError(
+      return cmd_cntx.rb->SendError(
           "The ID specified in XSETID is smaller than the "
           "target stream top item");
     case OpStatus::ENTRIES_ADDED_SMALL:
-      return builder->SendError(
+      return cmd_cntx.rb->SendError(
           "The entries_added specified in XSETID is smaller than "
           "the target stream length");
     default:
-      return builder->SendError(result);
+      return cmd_cntx.rb->SendError(result);
   }
 }
 
-void StreamFamily::XTrim(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  auto parse_resp = ParseAddOrTrimArgsOrReply(args, true, builder);
+void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto parse_resp = ParseAddOrTrimArgsOrReply(args, true, cmd_cntx.rb);
   if (!parse_resp) {
     return;
   }
@@ -3158,14 +3157,14 @@ void StreamFamily::XTrim(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
     return OpTrim(t->GetOpArgs(shard), trim_opts);
   };
 
-  OpResult<int64_t> trim_result = tx->ScheduleSingleHopT(cb);
+  OpResult<int64_t> trim_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
   if (trim_result) {
-    return builder->SendLong(*trim_result);
+    return cmd_cntx.rb->SendLong(*trim_result);
   }
-  return builder->SendError(trim_result.status());
+  return cmd_cntx.rb->SendError(trim_result.status());
 }
 
-void StreamFamily::XAck(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XAck(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view group = ArgS(args, 1);
   args.remove_prefix(2);
@@ -3175,7 +3174,7 @@ void StreamFamily::XAck(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     ParsedStreamId parsed_id;
     string_view str_id = ArgS(args, i);
     if (!ParseID(str_id, true, 0, &parsed_id)) {
-      return builder->SendError(kInvalidStreamId, kSyntaxErrType);
+      return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
     }
     ids[i] = parsed_id.val;
   }
@@ -3184,33 +3183,36 @@ void StreamFamily::XAck(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     return OpAck(t->GetOpArgs(shard), key, group, absl::Span{ids.data(), ids.size()});
   };
 
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(cb);
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(cb);
   if (result || result.status() == OpStatus::KEY_NOTFOUND) {
-    return builder->SendLong(*result);
+    return cmd_cntx.rb->SendLong(*result);
   }
 
-  builder->SendError(result.status());
-  return;
+  cmd_cntx.rb->SendError(result.status());
 }
 
-void StreamFamily::XAutoClaim(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StreamFamily::XAutoClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   ClaimOpts opts;
   string_view key = ArgS(args, 0);
   opts.group = ArgS(args, 1);
   opts.consumer = ArgS(args, 2);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
   if (!absl::SimpleAtoi(ArgS(args, 3), &opts.min_idle_time)) {
-    return builder->SendError(kSyntaxErr);
+    return rb->SendError(kSyntaxErr);
   }
 
   opts.min_idle_time = std::max((int64)0, opts.min_idle_time);
 
   string_view start = ArgS(args, 4);
   RangeId rs;
+
   if (!ParseRangeId(start, &rs)) {
-    return;
+    return rb->SendError(kSyntaxErr);
   }
+
   if (rs.exclude && streamDecrID(&rs.parsed_id.val) != C_OK) {
-    return builder->SendError("invalid start ID for the interval", kSyntaxErrType);
+    return rb->SendError("invalid start ID for the interval", kSyntaxErrType);
   }
   opts.start = rs.parsed_id.val;
 
@@ -3223,10 +3225,10 @@ void StreamFamily::XAutoClaim(CmdArgList args, Transaction* tx, SinkReplyBuilder
       if (arg == "COUNT") {
         arg = ArgS(args, ++i);
         if (!absl::SimpleAtoi(arg, &opts.count)) {
-          return builder->SendError(kInvalidIntErr);
+          return rb->SendError(kInvalidIntErr);
         }
         if (opts.count <= 0) {
-          return builder->SendError("COUNT must be > 0");
+          return rb->SendError("COUNT must be > 0");
         }
         continue;
       }
@@ -3234,26 +3236,27 @@ void StreamFamily::XAutoClaim(CmdArgList args, Transaction* tx, SinkReplyBuilder
     if (arg == "JUSTID") {
       opts.flags |= kClaimJustID;
     } else {
-      return builder->SendError("Unknown argument given for XAUTOCLAIM command", kSyntaxErr);
+      return cmd_cntx.rb->SendError("Unknown argument given for XAUTOCLAIM command", kSyntaxErr);
     }
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpAutoClaim(t->GetOpArgs(shard), key, opts);
   };
-  OpResult<ClaimInfo> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<ClaimInfo> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::KEY_NOTFOUND) {
-    builder->SendError(NoGroupOrKey(key, opts.group));
+    rb->SendError(NoGroupOrKey(key, opts.group));
     return;
   }
+
   if (!result) {
-    builder->SendError(result.status());
+    rb->SendError(result.status());
     return;
   }
 
   ClaimInfo cresult = result.value();
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+
   rb->StartArray(3);
   rb->SendBulkString(StreamIdRepr(cresult.end_id));
   StreamReplies{rb}.SendClaimInfo(cresult);
