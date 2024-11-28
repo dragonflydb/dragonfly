@@ -281,7 +281,8 @@ void OutgoingMigration::SyncFb() {
 bool OutgoingMigration::FinalizeMigration(long attempt) {
   // if it's not the 1st attempt and flows are work correctly we try to
   // reconnect and ACK one more time
-  VLOG(1) << "FinalizeMigration for " << cf_->MyID() << " : " << migration_info_.node_info.id;
+  VLOG(1) << "FinalizeMigration for " << cf_->MyID() << " : " << migration_info_.node_info.id
+          << " attempt " << attempt;
   if (attempt > 1) {
     if (cntx_.GetError()) {
       return true;

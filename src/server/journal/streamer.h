@@ -38,7 +38,7 @@ class JournalStreamer {
   // or wrap JournalItem::data in shared_ptr, we can avoid the cost of copying strings.
   // Also, for small strings it's more peformant to copy to the intermediate buffer than
   // to issue an io operation.
-  void Write(std::string_view str);
+  void Write(std::string str);
 
   // Blocks the if the consumer if not keeping up.
   void ThrottleIfNeeded();
@@ -53,6 +53,7 @@ class JournalStreamer {
   Context* cntx_;
 
  private:
+  void AsyncWrite();
   void OnCompletion(std::error_code ec, size_t len);
 
   bool IsStopped() const {
@@ -62,7 +63,9 @@ class JournalStreamer {
   bool IsStalled() const;
 
   journal::Journal* journal_;
-  std::vector<uint8_t> pending_buf_;
+
+  size_t pending_buf_mem_size = 0;
+  std::vector<std::string> pending_buf_;
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
 
   time_t last_lsn_time_ = 0;
