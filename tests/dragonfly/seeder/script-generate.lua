@@ -18,12 +18,15 @@ local total_ops = tonumber(ARGV[6])
 local min_dev = tonumber(ARGV[7])
 local data_size = tonumber(ARGV[8])
 local collection_size = tonumber(ARGV[9])
+-- Probability of each key in key_target to be a big value
+local huge_value_percentage = tonumber(ARGV[10])
+local huge_value_size = tonumber(ARGV[11])
 
 -- collect all keys belonging to this script
 -- assumes exclusive ownership
 local keys = LU_collect_keys(prefix, type)
 
-LG_funcs.init(data_size, collection_size)
+LG_funcs.init(data_size, collection_size, huge_value_percentage, huge_value_size)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
 
@@ -85,6 +88,7 @@ while true do
     if counter % 10 == 0 then
         -- calculate intensity (not normalized probabilities)
         -- please see attached plots in PR to undertand convergence
+        -- https://github.com/dragonflydb/dragonfly/pull/2556
 
         -- the add intensity is monotonically decreasing with keycount growing,
         -- the delete intensity is monotonically increasing with keycount growing,
