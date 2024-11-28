@@ -46,6 +46,10 @@ class QList {
 
     bool operator==(std::string_view sv) const;
 
+    friend bool operator==(std::string_view sv, const Entry& entry) {
+      return entry == sv;
+    }
+
     std::string to_string() const {
       if (std::holds_alternative<int64_t>(value_)) {
         return std::to_string(std::get<int64_t>(value_));
