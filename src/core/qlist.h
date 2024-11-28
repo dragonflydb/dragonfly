@@ -146,8 +146,8 @@ class QList {
     return compress_ != 0;
   }
 
-  // Returns false if used existing head, true if new head created.
-  bool PushHead(std::string_view value);
+  // Returns false if used existing sentinel, true if a new sentinel was created.
+  bool PushSentinel(std::string_view value, Where where);
 
   // Returns false if used existing head, true if new head created.
   bool PushTail(std::string_view value);

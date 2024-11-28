@@ -209,7 +209,7 @@ class DflyCmd {
   facade::OpStatus StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
   // Stop full sync in thread. Run state switch cleanup.
-  void StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
+  facade::OpStatus StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);
 
   // Start stable sync in thread. Called for each flow.
   void StartStableSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard);

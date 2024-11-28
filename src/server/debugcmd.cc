@@ -18,6 +18,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/qlist.h"
 #include "core/string_map.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
@@ -61,6 +62,9 @@ struct ObjInfo {
   unsigned encoding;
   unsigned bucket_id = 0;
   unsigned slot_id = 0;
+
+  // for lists - how many nodes do they have.
+  unsigned num_nodes = 0;
 
   enum LockStatus { NONE, S, X } lock_status = NONE;
 
@@ -314,6 +318,12 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
     oinfo.encoding = pv.Encoding();
     oinfo.bucket_id = it.bucket_id();
     oinfo.slot_id = it.slot_id();
+
+    if (pv.ObjType() == OBJ_LIST && pv.Encoding() == kEncodingQL2) {
+      const QList* qlist = static_cast<const QList*>(pv.RObjPtr());
+      oinfo.num_nodes = qlist->node_count();
+    }
+
     if (pv.IsExternal()) {
       oinfo.external_len.emplace(pv.GetExternalSlice().second);
     }
@@ -406,7 +416,6 @@ const char* EncodingName(unsigned obj_type, unsigned encoding) {
       break;
     case OBJ_STREAM:
       return "stream";
-    default:;
   }
   return "unknown";
 }
@@ -874,6 +883,10 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
 
     if (res.external_len) {
       StrAppend(&resp, " spill_len:", *res.external_len);
+    }
+
+    if (res.num_nodes) {
+      StrAppend(&resp, " ns:", res.num_nodes);
     }
 
     if (res.lock_status != ObjInfo::NONE) {
