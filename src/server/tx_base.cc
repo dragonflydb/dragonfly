@@ -65,6 +65,7 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice
 void RecordExpiry(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
+  util::FiberAtomicGuard guard;
   journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, cluster::KeySlot(key),
                        Payload("DEL", ArgSlice{key}), false);
 }

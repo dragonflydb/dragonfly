@@ -139,8 +139,12 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
 }
 
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
-  db_slice_->BlockingCounter()->Wait();
   unsigned res = 0;
+
+  if (db_slice_->WillBlockOnJournalWrite()) {
+    return res;
+  }
+
   // bool should_print = (eb.key_hash % 128) == 0;
 
   // based on tests - it's more efficient to pass regular buckets to gc.
