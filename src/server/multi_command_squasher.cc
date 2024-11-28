@@ -112,6 +112,8 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   cmd->Fill(&tmp_keylist_);
   auto args = absl::MakeSpan(tmp_keylist_);
+  if (args.size() == 0)
+    return SquashResult::NOT_SQUASHED;
 
   auto keys = DetermineKeys(cmd->Cid(), args);
   if (!keys.ok())

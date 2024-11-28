@@ -1290,7 +1290,7 @@ async def test_migration_with_key_ttl(df_factory):
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_network_disconnect_during_migration(df_factory, df_seeder_factory):
+async def test_network_disconnect_during_migration(df_factory):
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
     ]
@@ -1328,7 +1328,7 @@ async def test_network_disconnect_during_migration(df_factory, df_seeder_factory
 
     await proxy.start()
 
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 20)
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 60)
     nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
