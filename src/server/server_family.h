@@ -39,7 +39,7 @@ namespace journal {
 class Journal;
 }  // namespace journal
 
-class ConnectionContext;
+struct CommandContext;
 class CommandRegistry;
 class Service;
 class ScriptMgr;
@@ -164,7 +164,7 @@ class ServerFamily {
   void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   // Public because is used by DflyCmd.
-  void ShutdownCmd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx);
 
   Service& service() {
     return service_;
@@ -259,40 +259,31 @@ class ServerFamily {
     return shard_set->size();
   }
 
-  void Auth(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Client(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Config(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void DbSize(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Debug(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Dfly(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Memory(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void FlushDb(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void FlushAll(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                ConnectionContext* cntx);
-  void Info(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx)
+  void Auth(CmdArgList args, const CommandContext& cmd_cntx);
+  void Client(CmdArgList args, const CommandContext& cmd_cntx);
+  void Config(CmdArgList args, const CommandContext& cmd_cntx);
+  void DbSize(CmdArgList args, const CommandContext& cmd_cntx);
+  void Debug(CmdArgList args, const CommandContext& cmd_cntx);
+  void Dfly(CmdArgList args, const CommandContext& cmd_cntx);
+  void Memory(CmdArgList args, const CommandContext& cmd_cntx);
+  void FlushDb(CmdArgList args, const CommandContext& cmd_cntx);
+  void FlushAll(CmdArgList args, const CommandContext& cmd_cntx);
+  void Info(CmdArgList args, const CommandContext& cmd_cntx)
       ABSL_LOCKS_EXCLUDED(save_mu_, replicaof_mu_);
-  void Hello(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void LastSave(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(save_mu_);
-  void Latency(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void ReplicaOf(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                 ConnectionContext* cntx);
-  void AddReplicaOf(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
-  void ReplTakeOver(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void ReplConf(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                ConnectionContext* cntx);
-  void Role(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx)
+  void Hello(CmdArgList args, const CommandContext& cmd_cntx);
+  void LastSave(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(save_mu_);
+  void Latency(CmdArgList args, const CommandContext& cmd_cntx);
+  void ReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
+  void AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx);
+  void ReplTakeOver(CmdArgList args, const CommandContext& cmd_cntx)
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  void Save(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void BgSave(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Script(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void SlowLog(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void Module(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void ReplConf(CmdArgList args, const CommandContext& cmd_cntx);
+  void Role(CmdArgList args, const CommandContext& cmd_cntx) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Save(CmdArgList args, const CommandContext& cmd_cntx);
+  void BgSave(CmdArgList args, const CommandContext& cmd_cntx);
+  void Script(CmdArgList args, const CommandContext& cmd_cntx);
+  void SlowLog(CmdArgList args, const CommandContext& cmd_cntx);
+  void Module(CmdArgList args, const CommandContext& cmd_cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
