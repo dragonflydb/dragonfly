@@ -60,7 +60,7 @@ namespace dfly {
 
 namespace {
 
-static_assert(sizeof(QList) == 24);
+static_assert(sizeof(QList) == 32);
 
 enum IterDir : uint8_t { FWD = 1, REV = 0 };
 
@@ -171,9 +171,13 @@ quicklistNode* CreateFromSV(int container, string_view value) {
   return CreateRAW(container, entry, sz);
 }
 
-inline void NodeSetEntry(quicklistNode* node, uint8_t* entry) {
+// Returns the relative increase in size.
+inline ssize_t NodeSetEntry(quicklistNode* node, uint8_t* entry) {
   node->entry = entry;
-  node->sz = lpBytes(node->entry);
+  size_t new_sz = lpBytes(node->entry);
+  ssize_t diff = new_sz - node->sz;
+  node->sz = new_sz;
+  return diff;
 }
 
 /* Compress the listpack in 'node' and update encoding details.
@@ -195,7 +199,7 @@ bool CompressNode(quicklistNode* node) {
   if (node->sz < MIN_COMPRESS_BYTES)
     return false;
 
-  // ROMAN: we allocate LZF_STATE on heap, piggy-backing on the existing allocation.
+  // We allocate LZF_STATE on heap, piggy-backing on the existing allocation.
   char* uptr = (char*)zmalloc(sizeof(quicklistLZF) + node->sz + sizeof(LZF_STATE));
   quicklistLZF* lzf = (quicklistLZF*)uptr;
   LZF_HSLOT* sdata = (LZF_HSLOT*)(uptr + sizeof(quicklistLZF) + node->sz);
@@ -256,14 +260,13 @@ void RecompressOnly(quicklistNode* node) {
   }
 }
 
-quicklistNode* SplitNode(quicklistNode* node, int offset, bool after) {
+quicklistNode* SplitNode(quicklistNode* node, int offset, bool after, ssize_t* diff) {
   DCHECK(node->container == QUICKLIST_NODE_CONTAINER_PACKED);
   size_t zl_sz = node->sz;
   uint8_t* entry = (uint8_t*)zmalloc(zl_sz);
 
-  /* Copy original listpack so we can split it */
   memcpy(entry, node->entry, zl_sz);
-  quicklistNode* new_node = CreateRAW(QUICKLIST_NODE_CONTAINER_PACKED, entry, zl_sz);
+
   /* Need positive offset for calculating extent below. */
   if (offset < 0)
     offset = node->count + offset;
@@ -274,11 +277,13 @@ quicklistNode* SplitNode(quicklistNode* node, int offset, bool after) {
   int new_start = after ? 0 : offset;
   int new_extent = after ? offset + 1 : -1;
 
-  NodeSetEntry(node, lpDeleteRange(node->entry, orig_start, orig_extent));
+  ssize_t diff_existing = NodeSetEntry(node, lpDeleteRange(node->entry, orig_start, orig_extent));
   node->count = lpLength(node->entry);
 
-  NodeSetEntry(new_node, lpDeleteRange(new_node->entry, new_start, new_extent));
+  entry = lpDeleteRange(entry, new_start, new_extent);
+  quicklistNode* new_node = CreateRAW(QUICKLIST_NODE_CONTAINER_PACKED, entry, lpBytes(entry));
   new_node->count = lpLength(new_node->entry);
+  *diff = diff_existing;
 
   return new_node;
 }
@@ -340,6 +345,7 @@ void QList::Clear() {
   }
   head_ = nullptr;
   count_ = 0;
+  malloc_size_ = 0;
 }
 
 void QList::Push(string_view value, Where where) {
@@ -388,12 +394,14 @@ void QList::AppendListpack(unsigned char* zl) {
 
   InsertNode(_Tail(), node, AFTER);
   count_ += node->count;
+  malloc_size_ += node->sz;
 }
 
 void QList::AppendPlain(unsigned char* data, size_t sz) {
   quicklistNode* node = CreateRAW(QUICKLIST_NODE_CONTAINER_PLAIN, data, sz);
   InsertNode(_Tail(), node, AFTER);
   ++count_;
+  malloc_size_ += node->sz;
 }
 
 bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt) {
@@ -419,7 +427,6 @@ bool QList::Replace(long index, std::string_view elem) {
 }
 
 size_t QList::MallocUsed(bool slow) const {
-  // Approximation since does not account for listpacks.
   size_t node_size = len_ * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
   if (slow) {
     for (quicklistNode* node = head_; node; node = node->next) {
@@ -428,7 +435,7 @@ size_t QList::MallocUsed(bool slow) const {
     return node_size;
   }
 
-  return node_size + count_ * 16;  // we account for each member 16 bytes.
+  return node_size + malloc_size_;
 }
 
 void QList::Iterate(IterateFunc cb, long start, long end) const {
@@ -464,8 +471,11 @@ bool QList::PushSentinel(string_view value, Where where) {
 
   if (ABSL_PREDICT_TRUE(NodeAllowInsert(orig, fill_, sz))) {
     auto func = (where == HEAD) ? LP_Prepend : LP_Append;
-    NodeSetEntry(orig, func(orig->entry, value));
+    malloc_size_ += NodeSetEntry(orig, func(orig->entry, value));
     orig->count++;
+    if (len_ == 1) {  // sanity check
+      DCHECK_EQ(malloc_size_, orig->sz);
+    }
     return false;
   }
 
@@ -515,6 +525,7 @@ void QList::InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertO
 
   /* Update len first, so in Compress we know exactly len */
   len_++;
+  malloc_size_ += new_node->sz;
 
   if (old_node)
     quicklistCompress(old_node);
@@ -529,6 +540,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
   int full = 0, at_tail = 0, at_head = 0, avail_next = 0, avail_prev = 0;
   quicklistNode* node = it.current_;
   size_t sz = elem.size();
+
   bool after = insert_opt == AFTER;
 
   /* Populate accounting flags for easier boolean checks later */
@@ -555,9 +567,11 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       InsertPlainNode(node, elem, insert_opt);
     } else {
       DecompressNodeIfNeeded(true, node);
-      quicklistNode* new_node = SplitNode(node, it.offset_, after);
+      ssize_t diff_existing = 0;
+      quicklistNode* new_node = SplitNode(node, it.offset_, after, &diff_existing);
       quicklistNode* entry_node = InsertPlainNode(node, elem, insert_opt);
       InsertNode(entry_node, new_node, insert_opt);
+      malloc_size_ += diff_existing;
     }
     return;
   }
@@ -565,7 +579,8 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
   /* Now determine where and how to insert the new element */
   if (!full) {
     DecompressNodeIfNeeded(true, node);
-    NodeSetEntry(node, LP_Insert(node->entry, elem, it.zi_, after ? LP_AFTER : LP_BEFORE));
+    uint8_t* new_entry = LP_Insert(node->entry, elem, it.zi_, after ? LP_AFTER : LP_BEFORE);
+    malloc_size_ += NodeSetEntry(node, new_entry);
     node->count++;
     RecompressOnly(node);
   } else {
@@ -576,7 +591,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
        *   - insert entry at head of next node. */
       auto* new_node = node->next;
       DecompressNodeIfNeeded(true, new_node);
-      NodeSetEntry(new_node, LP_Prepend(new_node->entry, elem));
+      malloc_size_ += NodeSetEntry(new_node, LP_Prepend(new_node->entry, elem));
       new_node->count++;
       RecompressOnly(new_node);
       RecompressOnly(node);
@@ -585,7 +600,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
        *   - insert entry at tail of previous node. */
       auto* new_node = node->prev;
       DecompressNodeIfNeeded(true, new_node);
-      NodeSetEntry(new_node, LP_Append(new_node->entry, elem));
+      malloc_size_ += NodeSetEntry(new_node, LP_Append(new_node->entry, elem));
       new_node->count++;
       RecompressOnly(new_node);
       RecompressOnly(node);
@@ -598,12 +613,14 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       /* else, node is full we need to split it. */
       /* covers both after and !after cases */
       DecompressNodeIfNeeded(true, node);
-      auto* new_node = SplitNode(node, it.offset_, after);
+      ssize_t diff_existing = 0;
+      auto* new_node = SplitNode(node, it.offset_, after, &diff_existing);
       auto func = after ? LP_Prepend : LP_Append;
-      NodeSetEntry(new_node, func(new_node->entry, elem));
+      malloc_size_ += NodeSetEntry(new_node, func(new_node->entry, elem));
       new_node->count++;
       InsertNode(node, new_node, insert_opt);
       MergeNodes(node);
+      malloc_size_ += diff_existing;
     }
   }
   count_++;
@@ -616,15 +633,15 @@ void QList::Replace(Iterator it, std::string_view elem) {
 
   if (ABSL_PREDICT_TRUE(!QL_NODE_IS_PLAIN(node) && !IsLargeElement(sz, fill_) &&
                         (newentry = lpReplace(node->entry, &it.zi_, uint_ptr(elem), sz)) != NULL)) {
-    NodeSetEntry(node, newentry);
+    malloc_size_ += NodeSetEntry(node, newentry);
     /* quicklistNext() and quicklistGetIteratorEntryAtIdx() provide an uncompressed node */
     quicklistCompress(node);
   } else if (QL_NODE_IS_PLAIN(node)) {
     if (IsLargeElement(sz, fill_)) {
       zfree(node->entry);
-      node->entry = (uint8_t*)zmalloc(sz);
-      node->sz = sz;
-      memcpy(node->entry, elem.data(), sz);
+      uint8_t* new_entry = (uint8_t*)zmalloc(sz);
+      memcpy(new_entry, elem.data(), sz);
+      malloc_size_ += NodeSetEntry(node, new_entry);
       quicklistCompress(node);
     } else {
       Insert(it, elem, AFTER);
@@ -635,8 +652,11 @@ void QList::Replace(Iterator it, std::string_view elem) {
     node->dont_compress = 1; /* Prevent compression in InsertNode() */
 
     /* If the entry is not at the tail, split the node at the entry's offset. */
-    if (it.offset_ != node->count - 1 && it.offset_ != -1)
-      split_node = SplitNode(node, it.offset_, 1);
+    if (it.offset_ != node->count - 1 && it.offset_ != -1) {
+      ssize_t diff_existing = 0;
+      split_node = SplitNode(node, it.offset_, 1, &diff_existing);
+      malloc_size_ += diff_existing;
+    }
 
     /* Create a new node and insert it after the original node.
      * If the original node was split, insert the split node after the new node. */
@@ -796,7 +816,8 @@ quicklistNode* QList::ListpackMerge(quicklistNode* a, quicklistNode* b) {
       keep = a;
     }
     keep->count = lpLength(keep->entry);
-    keep->sz = lpBytes(keep->entry);
+    malloc_size_ += NodeSetEntry(keep, keep->entry);
+
     keep->recompress = 0; /* Prevent 'keep' from being recompressed if
                            * it becomes head or tail after merging. */
 
@@ -825,6 +846,7 @@ void QList::DelNode(quicklistNode* node) {
   /* Update len first, so in Compress we know exactly len */
   len_--;
   count_ -= node->count;
+  malloc_size_ -= node->sz;
 
   /* If we deleted a node within our compress depth, we
    * now have compressed nodes needing to be decompressed. */
@@ -850,7 +872,7 @@ bool QList::DelPackedIndex(quicklistNode* node, uint8_t* p) {
     return true;
   }
 
-  NodeSetEntry(node, lpDelete(node->entry, p, NULL));
+  malloc_size_ += NodeSetEntry(node, lpDelete(node->entry, p, NULL));
   node->count--;
   count_--;
 
@@ -958,6 +980,7 @@ auto QList::Erase(Iterator it) -> Iterator {
   // Sanity, should be noop in release mode.
   if (len_ == 1) {
     DCHECK_EQ(count_, head_->count);
+    DCHECK_EQ(malloc_size_, head_->sz);
   }
 
   /* else if (!deleted_node), no changes needed.
@@ -1027,7 +1050,7 @@ bool QList::Erase(const long start, unsigned count) {
       DelNode(node);
     } else {
       DecompressNodeIfNeeded(true, node);
-      NodeSetEntry(node, lpDeleteRange(node->entry, offset, del));
+      malloc_size_ += NodeSetEntry(node, lpDeleteRange(node->entry, offset, del));
       node->count -= del;
       count_ -= del;
       if (node->count == 0) {

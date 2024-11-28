@@ -60,8 +60,8 @@ ABSL_FLAG(int32_t, list_max_listpack_size, -2, "Maximum listpack size, default i
  */
 
 ABSL_FLAG(int32_t, list_compress_depth, 0, "Compress depth of the list. Default is no compression");
-ABSL_FLAG(bool, list_experimental_v2, false,
-          "Compress depth of the list. Default is no compression");
+ABSL_FLAG(bool, list_experimental_v2, true,
+          "Enables dragonfly specific implementation of quicklist");
 
 namespace dfly {
 
