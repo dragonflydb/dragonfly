@@ -46,6 +46,10 @@ class QList {
 
     bool operator==(std::string_view sv) const;
 
+    friend bool operator==(std::string_view sv, const Entry& entry) {
+      return entry == sv;
+    }
+
     std::string to_string() const {
       if (std::holds_alternative<int64_t>(value_)) {
         return std::to_string(std::get<int64_t>(value_));
@@ -100,6 +104,8 @@ class QList {
   // Returns true if pivot found and elem inserted, false otherwise.
   bool Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
 
+  void Insert(Iterator it, std::string_view elem, InsertOpt opt);
+
   // Returns true if item was replaced, false if index is out of range.
   bool Replace(long index, std::string_view elem);
 
@@ -138,12 +144,22 @@ class QList {
   }
 
   const quicklistNode* Tail() const {
-    return tail_;
+    return _Tail();
   }
+
+  void set_fill(int fill) {
+    fill_ = fill;
+  }
+
+  static void SetPackedThreshold(unsigned threshold);
 
  private:
   bool AllowCompression() const {
     return compress_ != 0;
+  }
+
+  quicklistNode* _Tail() const {
+    return head_ ? head_->prev : nullptr;
   }
 
   // Returns false if used existing sentinel, true if a new sentinel was created.
@@ -153,7 +169,6 @@ class QList {
   bool PushTail(std::string_view value);
   void InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
   void InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertOpt insert_opt);
-  void Insert(Iterator it, std::string_view elem, InsertOpt opt);
   void Replace(Iterator it, std::string_view elem);
 
   void Compress(quicklistNode* node);
@@ -165,7 +180,7 @@ class QList {
   bool DelPackedIndex(quicklistNode* node, uint8_t** p);
 
   quicklistNode* head_ = nullptr;
-  quicklistNode* tail_ = nullptr;
+
   uint32_t count_ = 0;                   /* total count of all entries in all listpacks */
   uint32_t len_ = 0;                     /* number of quicklistNodes */
   signed int fill_ : QL_FILL_BITS;       /* fill factor for individual nodes */
