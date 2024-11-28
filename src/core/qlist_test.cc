@@ -90,7 +90,7 @@ static int ql_verify(const QList& ql, uint32_t nc, uint32_t count, uint32_t head
   node_size = 0;
   while (node) {
     node_size += node->count;
-    node = node->prev;
+    node = (node == ql.Head()) ? nullptr : node->prev;
   }
   if (node_size != ql.Size()) {
     LOG(ERROR) << "has different forward count than reverse count!  "
@@ -165,7 +165,6 @@ TEST_F(QListTest, Basic) {
   EXPECT_EQ(0, ql_.Size());
   ql_.Push("abc", QList::HEAD);
   EXPECT_EQ(1, ql_.Size());
-  EXPECT_TRUE(ql_.Head()->prev == nullptr);
   EXPECT_TRUE(ql_.Tail() == ql_.Head());
 
   auto it = ql_.GetIterator(QList::HEAD);
@@ -517,6 +516,10 @@ TEST_P(OptionsTest, DelNeg100From500) {
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
   ql_.Erase(-100, 100);
+
+  QList::Iterator it = ql_.GetIterator(QList::TAIL);
+  ASSERT_TRUE(it.Next());
+  ASSERT_EQ("hello400", it.Get());
   ASSERT_EQ(0, ql_verify(ql_, 13, 400, 32, 16));
 }
 
