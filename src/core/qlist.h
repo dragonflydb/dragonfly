@@ -46,6 +46,10 @@ class QList {
 
     bool operator==(std::string_view sv) const;
 
+    friend bool operator==(std::string_view sv, const Entry& entry) {
+      return entry == sv;
+    }
+
     std::string to_string() const {
       if (std::holds_alternative<int64_t>(value_)) {
         return std::to_string(std::get<int64_t>(value_));
@@ -100,6 +104,8 @@ class QList {
   // Returns true if pivot found and elem inserted, false otherwise.
   bool Insert(std::string_view pivot, std::string_view elem, InsertOpt opt);
 
+  void Insert(Iterator it, std::string_view elem, InsertOpt opt);
+
   // Returns true if item was replaced, false if index is out of range.
   bool Replace(long index, std::string_view elem);
 
@@ -141,6 +147,12 @@ class QList {
     return tail_;
   }
 
+  void set_fill(int fill) {
+    fill_ = fill;
+  }
+
+  static void SetPackedThreshold(unsigned threshold);
+
  private:
   bool AllowCompression() const {
     return compress_ != 0;
@@ -153,7 +165,6 @@ class QList {
   bool PushTail(std::string_view value);
   void InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
   void InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertOpt insert_opt);
-  void Insert(Iterator it, std::string_view elem, InsertOpt opt);
   void Replace(Iterator it, std::string_view elem);
 
   void Compress(quicklistNode* node);
