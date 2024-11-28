@@ -125,12 +125,6 @@ class DflyInstance:
             if threads > 1:
                 self.args["num_shards"] = threads - 1
 
-        if "disable_serialization_max_chunk_size" not in self.args:
-            # Add 1 byte limit for big values
-            self.args["serialization_max_chunk_size"] = 1
-        else:
-            self.args.pop("disable_serialization_max_chunk_size")
-
     def __del__(self):
         assert self.proc == None
 
@@ -431,9 +425,9 @@ class DflyInstanceFactory:
             args.setdefault("list_experimental_v2")
         args.setdefault("log_dir", self.params.log_dir)
 
-        if version >= 1.21:
+        if version >= 1.21 and "serialization_max_chunk_size" not in args:
             # Add 1 byte limit for big values
-            args.setdefault("serialization_max_chunk_size", 0)
+            args.setdefault("serialization_max_chunk_size", 1)
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v

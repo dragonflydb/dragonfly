@@ -1828,9 +1828,7 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
 
 
-@dfly_args(
-    {"proactor_threads": 2, "cluster_mode": "yes", "disable_serialization_max_chunk_size": 0}
-)
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "serialization_max_chunk_size": 0})
 @pytest.mark.asyncio
 async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory):
     instances = [
