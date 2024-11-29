@@ -22,6 +22,7 @@ using facade::OpResult;
 class ConnectionContext;
 class CommandRegistry;
 class Transaction;
+struct CommandContext;
 
 class GenericFamily {
  public:
@@ -34,41 +35,36 @@ class GenericFamily {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Del(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Ping(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
-  static void Exists(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Expire(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void ExpireAt(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Persist(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Keys(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
-  static void PexpireAt(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Pexpire(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Stick(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Sort(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Move(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Del(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Ping(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Exists(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Expire(CmdArgList args, const CommandContext& cmd_cntx);
+  static void ExpireAt(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Persist(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Keys(CmdArgList args, const CommandContext& cmd_cntx);
+  static void PexpireAt(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Pexpire(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Stick(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Sort(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Move(CmdArgList args, const CommandContext& cmd_cntx);
 
-  static void Rename(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void RenameNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void ExpireTime(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void PExpireTime(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Ttl(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Pttl(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Rename(CmdArgList args, const CommandContext& cmd_cntx);
+  static void RenameNx(CmdArgList args, const CommandContext& cmd_cntx);
+  static void ExpireTime(CmdArgList args, const CommandContext& cmd_cntx);
+  static void PExpireTime(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Ttl(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Pttl(CmdArgList args, const CommandContext& cmd_cntx);
 
-  static void Echo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Select(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                     ConnectionContext* cntx);
-  static void Scan(CmdArgList args, Transaction*, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
-  static void Time(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Type(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Dump(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Restore(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void RandomKey(CmdArgList args, Transaction*, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx);
-  static void FieldTtl(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void FieldExpire(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Echo(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Select(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Scan(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Time(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Type(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Dump(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Restore(CmdArgList args, const CommandContext& cmd_cntx);
+  static void RandomKey(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FieldTtl(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FieldExpire(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly

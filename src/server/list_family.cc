@@ -909,19 +909,18 @@ void MoveGeneric(string_view src, string_view dest, ListDir src_dir, ListDir des
   }
 }
 
-void RPopLPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void RPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view src = ArgS(args, 0);
   string_view dest = ArgS(args, 1);
 
-  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, tx, builder);
+  MoveGeneric(src, dest, ListDir::RIGHT, ListDir::LEFT, cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void BRPopLPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                ConnectionContext* cntx) {
+void BRPopLPush(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   float timeout = parser.Next<float>();
-
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (auto err = parser.Error(); err)
     return builder->SendError(err->MakeReply());
 
@@ -929,17 +928,17 @@ void BRPopLPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
     return builder->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, ListDir::RIGHT, ListDir::LEFT);
-  OpResult<string> op_res = bpop_pusher.Run(unsigned(timeout * 1000), tx, cntx);
+  OpResult<string> op_res =
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx.tx, cmd_cntx.conn_cntx);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (op_res) {
-    return rb->SendBulkString(*op_res);
+    return builder->SendBulkString(*op_res);
   }
 
   switch (op_res.status()) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
-      return rb->SendNull();
+      return builder->SendNull();
       break;
 
     default:
@@ -948,13 +947,13 @@ void BRPopLPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   }
 }
 
-void BLMove(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx) {
+void BLMove(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
   float timeout = parser.Next<float>();
-
+  auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (auto err = parser.Error(); err)
     return builder->SendError(err->MakeReply());
 
@@ -962,17 +961,17 @@ void BLMove(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, Connect
     return builder->SendError("timeout is negative");
 
   BPopPusher bpop_pusher(src, dest, src_dir, dest_dir);
-  OpResult<string> op_res = bpop_pusher.Run(unsigned(timeout * 1000), tx, cntx);
+  OpResult<string> op_res =
+      bpop_pusher.Run(unsigned(timeout * 1000), cmd_cntx.tx, cmd_cntx.conn_cntx);
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (op_res) {
-    return rb->SendBulkString(*op_res);
+    return builder->SendBulkString(*op_res);
   }
 
   switch (op_res.status()) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
-      return rb->SendNull();
+      return builder->SendNull();
       break;
 
     default:
@@ -1176,44 +1175,44 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
 
 }  // namespace
 
-void ListFamily::LPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  return PushGeneric(ListDir::LEFT, false, std::move(args), tx, builder);
+void ListFamily::LPush(CmdArgList args, const CommandContext& cmd_cntx) {
+  return PushGeneric(ListDir::LEFT, false, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void ListFamily::LPushX(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  return PushGeneric(ListDir::LEFT, true, std::move(args), tx, builder);
+void ListFamily::LPushX(CmdArgList args, const CommandContext& cmd_cntx) {
+  return PushGeneric(ListDir::LEFT, true, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void ListFamily::LPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  return PopGeneric(ListDir::LEFT, std::move(args), tx, builder);
+void ListFamily::LPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  return PopGeneric(ListDir::LEFT, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void ListFamily::RPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  return PushGeneric(ListDir::RIGHT, false, std::move(args), tx, builder);
+void ListFamily::RPush(CmdArgList args, const CommandContext& cmd_cntx) {
+  return PushGeneric(ListDir::RIGHT, false, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void ListFamily::RPushX(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  return PushGeneric(ListDir::RIGHT, true, std::move(args), tx, builder);
+void ListFamily::RPushX(CmdArgList args, const CommandContext& cmd_cntx) {
+  return PushGeneric(ListDir::RIGHT, true, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void ListFamily::RPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  return PopGeneric(ListDir::RIGHT, std::move(args), tx, builder);
+void ListFamily::RPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  return PopGeneric(ListDir::RIGHT, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void ListFamily::LLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LLen(CmdArgList args, const CommandContext& cmd_cntx) {
   auto key = ArgS(args, 0);
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpLen(t->GetOpArgs(shard), key); };
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
-    builder->SendLong(result.value());
+    cmd_cntx.rb->SendLong(result.value());
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
-    builder->SendLong(0);
+    cmd_cntx.rb->SendLong(0);
   } else {
-    builder->SendError(result.status());
+    cmd_cntx.rb->SendError(result.status());
   }
 }
 
-void ListFamily::LPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [key, elem] = parser.Next<string_view, string_view>();
 
@@ -1242,26 +1241,26 @@ void ListFamily::LPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     parser.Skip(1);
   }
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (rank == 0)
-    return builder->SendError(kInvalidIntErr);
+    return rb->SendError(kInvalidIntErr);
 
   if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+    return rb->SendError(err->MakeReply());
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
   };
 
-  Transaction* trans = tx;
+  Transaction* trans = cmd_cntx.tx;
   OpResult<vector<uint32_t>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result.status() == OpStatus::WRONG_TYPE) {
-    return builder->SendError(result.status());
+    return rb->SendError(result.status());
   } else if (result.status() == OpStatus::INVALID_VALUE) {
-    return builder->SendError(result.status());
+    return rb->SendError(result.status());
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (skip_count) {
     if (result->empty()) {
       rb->SendNull();
@@ -1269,7 +1268,7 @@ void ListFamily::LPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
       rb->SendLong((*result)[0]);
     }
   } else {
-    SinkReplyBuilder::ReplyAggregator agg(builder);
+    SinkReplyBuilder::ReplyAggregator agg(rb);
     rb->StartArray(result->size());
     const auto& array = result.value();
     for (const auto& v : array) {
@@ -1278,12 +1277,14 @@ void ListFamily::LPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
   }
 }
 
-void ListFamily::LIndex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   int32_t index;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
   if (!absl::SimpleAtoi(index_str, &index)) {
-    builder->SendError(kInvalidIntErr);
+    rb->SendError(kInvalidIntErr);
     return;
   }
 
@@ -1291,26 +1292,25 @@ void ListFamily::LIndex(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     return OpIndex(t->GetOpArgs(shard), key, index);
   };
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  OpResult<string> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<string> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result) {
     rb->SendBulkString(result.value());
   } else if (result.status() == OpStatus::WRONG_TYPE) {
-    builder->SendError(result.status());
+    rb->SendError(result.status());
   } else {
     rb->SendNull();
   }
 }
 
 /* LINSERT <key> (BEFORE|AFTER) <pivot> <element> */
-void ListFamily::LInsert(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   string_view key = parser.Next();
   InsertParam where = parser.MapNext("AFTER", INSERT_AFTER, "BEFORE", INSERT_BEFORE);
   auto [pivot, elem] = parser.Next<string_view, string_view>();
-
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+    return rb->SendError(err->MakeReply());
 
   DCHECK(pivot.data() && elem.data());
 
@@ -1318,42 +1318,43 @@ void ListFamily::LInsert(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
   };
 
-  OpResult<int> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
-    return builder->SendLong(result.value_or(0));
+    return rb->SendLong(result.value_or(0));
   }
 
-  builder->SendError(result.status());
+  rb->SendError(result.status());
 }
 
-void ListFamily::LTrim(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LTrim(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   string_view s_str = ArgS(args, 1);
   string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    builder->SendError(kInvalidIntErr);
+    cmd_cntx.rb->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpTrim(t->GetOpArgs(shard), key, start, end);
   };
-  OpStatus st = tx->ScheduleSingleHop(std::move(cb));
+  OpStatus st = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
   if (st == OpStatus::KEY_NOTFOUND)
     st = OpStatus::OK;
-  builder->SendError(st);
+  cmd_cntx.rb->SendError(st);
 }
 
-void ListFamily::LRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LRange(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view s_str = ArgS(args, 1);
   std::string_view e_str = ArgS(args, 2);
   int32_t start, end;
 
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   if (!absl::SimpleAtoi(s_str, &start) || !absl::SimpleAtoi(e_str, &end)) {
-    builder->SendError(kInvalidIntErr);
+    rb->SendError(kInvalidIntErr);
     return;
   }
 
@@ -1361,79 +1362,76 @@ void ListFamily::LRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     return OpRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  auto res = tx->ScheduleSingleHopT(std::move(cb));
+  auto res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (!res && res.status() != OpStatus::KEY_NOTFOUND) {
-    return builder->SendError(res.status());
+    return rb->SendError(res.status());
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendBulkStrArr(*res);
 }
 
 // lrem key 5 foo, will remove foo elements from the list if exists at most 5 times.
-void ListFamily::LRem(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LRem(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
-    builder->SendError(kInvalidIntErr);
+    cmd_cntx.rb->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRem(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<uint32_t> result = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<uint32_t> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (result || result == OpStatus::KEY_NOTFOUND) {
-    return builder->SendLong(result.value_or(0));
+    return cmd_cntx.rb->SendLong(result.value_or(0));
   }
-  builder->SendError(result.status());
+  cmd_cntx.rb->SendError(result.status());
 }
 
-void ListFamily::LSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LSet(CmdArgList args, const CommandContext& cmd_cntx) {
   std::string_view key = ArgS(args, 0);
   std::string_view index_str = ArgS(args, 1);
   std::string_view elem = ArgS(args, 2);
   int32_t count;
 
   if (!absl::SimpleAtoi(index_str, &count)) {
-    builder->SendError(kInvalidIntErr);
+    cmd_cntx.rb->SendError(kInvalidIntErr);
     return;
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, elem, count);
   };
-  OpResult<void> result = tx->ScheduleSingleHop(std::move(cb));
+  OpResult<void> result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
   if (result) {
-    builder->SendOk();
+    cmd_cntx.rb->SendOk();
   } else {
-    builder->SendError(result.status());
+    cmd_cntx.rb->SendError(result.status());
   }
 }
 
-void ListFamily::BLPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                       ConnectionContext* cntx) {
-  BPopGeneric(ListDir::LEFT, std::move(args), tx, builder, cntx);
+void ListFamily::BLPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  BPopGeneric(ListDir::LEFT, std::move(args), cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
 }
 
-void ListFamily::BRPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                       ConnectionContext* cntx) {
-  BPopGeneric(ListDir::RIGHT, std::move(args), tx, builder, cntx);
+void ListFamily::BRPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  BPopGeneric(ListDir::RIGHT, std::move(args), cmd_cntx.tx, cmd_cntx.rb, cmd_cntx.conn_cntx);
 }
 
-void ListFamily::LMove(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void ListFamily::LMove(CmdArgList args, const CommandContext& cmd_cntx) {
   facade::CmdArgParser parser{args};
   auto [src, dest] = parser.Next<string_view, string_view>();
   ListDir src_dir = ParseDir(&parser);
   ListDir dest_dir = ParseDir(&parser);
 
   if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
+    return cmd_cntx.rb->SendError(err->MakeReply());
 
-  MoveGeneric(src, dest, src_dir, dest_dir, tx, builder);
+  MoveGeneric(src, dest, src_dir, dest_dir, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 using CI = CommandId;
