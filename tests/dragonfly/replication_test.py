@@ -18,6 +18,7 @@ from .seeder import Seeder as SeederV2
 from . import dfly_args
 from .proxy import Proxy
 from .seeder import StaticSeeder
+from .seeder import SeederBase
 
 ADMIN_PORT = 1211
 
@@ -60,6 +61,34 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         # Stress test
         pytest.param(
             8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, False, marks=M_STRESS
+        ),
+        # Quick general test that replication is working
+        (
+            1,
+            3 * [1],
+            dict(
+                key_target=1_000,
+                huge_value_percentage=10,
+                huge_value_size=4096 * 2,
+                collection_size=10,
+                types=SeederBase.BIG_VALUE_TYPES,
+            ),
+            500,
+            True,
+        ),
+        # Big value
+        (
+            4,
+            [4, 4],
+            dict(
+                key_target=10_000,
+                huge_value_percentage=5,
+                huge_value_size=4096 * 4,
+                collection_size=50,
+                types=SeederBase.BIG_VALUE_TYPES,
+            ),
+            500,
+            True,
         ),
     ],
 )
@@ -131,6 +160,12 @@ async def test_replication_all(
 
     # Check data after stable state stream
     await check()
+
+    if big_value:
+        info = await c_master.info()
+        preemptions = info["big_value_preemptions"]
+        logging.info(f"Preemptions {preemptions}")
+        assert preemptions > 0
 
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
