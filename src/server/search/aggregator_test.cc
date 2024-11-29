@@ -18,12 +18,11 @@ TEST(AggregatorTest, Sort) {
   };
   PipelineStep steps[] = {MakeSortStep("a", false)};
 
-  auto result = Process(values, steps);
+  auto result = Process(values, {"a"}, steps);
 
-  EXPECT_TRUE(result);
-  EXPECT_EQ(result->at(0)["a"], Value(0.5));
-  EXPECT_EQ(result->at(1)["a"], Value(1.0));
-  EXPECT_EQ(result->at(2)["a"], Value(1.5));
+  EXPECT_EQ(result.values[0]["a"], Value(0.5));
+  EXPECT_EQ(result.values[1]["a"], Value(1.0));
+  EXPECT_EQ(result.values[2]["a"], Value(1.5));
 }
 
 TEST(AggregatorTest, Limit) {
@@ -35,12 +34,11 @@ TEST(AggregatorTest, Limit) {
   };
   PipelineStep steps[] = {MakeLimitStep(1, 2)};
 
-  auto result = Process(values, steps);
+  auto result = Process(values, {"i"}, steps);
 
-  EXPECT_TRUE(result);
-  EXPECT_EQ(result->size(), 2);
-  EXPECT_EQ(result->at(0)["i"], Value(2.0));
-  EXPECT_EQ(result->at(1)["i"], Value(3.0));
+  EXPECT_EQ(result.values.size(), 2);
+  EXPECT_EQ(result.values[0]["i"], Value(2.0));
+  EXPECT_EQ(result.values[1]["i"], Value(3.0));
 }
 
 TEST(AggregatorTest, SimpleGroup) {
@@ -54,12 +52,11 @@ TEST(AggregatorTest, SimpleGroup) {
   std::string_view fields[] = {"tag"};
   PipelineStep steps[] = {MakeGroupStep(fields, {})};
 
-  auto result = Process(values, steps);
-  EXPECT_TRUE(result);
-  EXPECT_EQ(result->size(), 2);
+  auto result = Process(values, {"i", "tag"}, steps);
+  EXPECT_EQ(result.values.size(), 2);
 
-  EXPECT_EQ(result->at(0).size(), 1);
-  std::set<Value> groups{result->at(0)["tag"], result->at(1)["tag"]};
+  EXPECT_EQ(result.values[0].size(), 1);
+  std::set<Value> groups{result.values[0]["tag"], result.values[1]["tag"]};
   std::set<Value> expected{"even", "odd"};
   EXPECT_EQ(groups, expected);
 }
@@ -83,25 +80,24 @@ TEST(AggregatorTest, GroupWithReduce) {
       Reducer{"null-field", "distinct-null", FindReducerFunc(ReducerFunc::COUNT_DISTINCT)}};
   PipelineStep steps[] = {MakeGroupStep(fields, std::move(reducers))};
 
-  auto result = Process(values, steps);
-  EXPECT_TRUE(result);
-  EXPECT_EQ(result->size(), 2);
+  auto result = Process(values, {"i", "half-i", "tag"}, steps);
+  EXPECT_EQ(result.values.size(), 2);
 
   // Reorder even first
-  if (result->at(0).at("tag") == Value("odd"))
-    std::swap(result->at(0), result->at(1));
+  if (result.values[0].at("tag") == Value("odd"))
+    std::swap(result.values[0], result.values[1]);
 
   // Even
-  EXPECT_EQ(result->at(0).at("count"), Value{(double)5});
-  EXPECT_EQ(result->at(0).at("sum-i"), Value{(double)2 + 4 + 6 + 8});
-  EXPECT_EQ(result->at(0).at("distinct-hi"), Value{(double)3});
-  EXPECT_EQ(result->at(0).at("distinct-null"), Value{(double)1});
+  EXPECT_EQ(result.values[0].at("count"), Value{(double)5});
+  EXPECT_EQ(result.values[0].at("sum-i"), Value{(double)2 + 4 + 6 + 8});
+  EXPECT_EQ(result.values[0].at("distinct-hi"), Value{(double)3});
+  EXPECT_EQ(result.values[0].at("distinct-null"), Value{(double)1});
 
   // Odd
-  EXPECT_EQ(result->at(1).at("count"), Value{(double)5});
-  EXPECT_EQ(result->at(1).at("sum-i"), Value{(double)1 + 3 + 5 + 7 + 9});
-  EXPECT_EQ(result->at(1).at("distinct-hi"), Value{(double)3});
-  EXPECT_EQ(result->at(1).at("distinct-null"), Value{(double)1});
+  EXPECT_EQ(result.values[1].at("count"), Value{(double)5});
+  EXPECT_EQ(result.values[1].at("sum-i"), Value{(double)1 + 3 + 5 + 7 + 9});
+  EXPECT_EQ(result.values[1].at("distinct-hi"), Value{(double)3});
+  EXPECT_EQ(result.values[1].at("distinct-null"), Value{(double)1});
 }
 
 }  // namespace dfly::aggregate
