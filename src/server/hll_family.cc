@@ -125,7 +125,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
   return std::min(updated, 1);
 }
 
-void PFAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void PFAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -133,8 +133,8 @@ void PFAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return AddToHll(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult<int> res = tx->ScheduleSingleHopT(std::move(cb));
-  HandleOpValueResult(res, builder);
+  OpResult<int> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  HandleOpValueResult(res, cmd_cntx.rb);
 }
 
 OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
@@ -204,7 +204,7 @@ vector<HllBufferPtr> ConvertShardVector(const vector<vector<string>>& hlls) {
   return ptrs;
 }
 
-OpResult<int64_t> PFCountMulti(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+OpResult<int64_t> PFCountMulti(CmdArgList args, const CommandContext& cmd_cntx) {
   vector<vector<string>> hlls;
   hlls.resize(shard_set->size());
 
@@ -218,7 +218,7 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, Transaction* tx, SinkReplyBuilde
     return result.status();
   };
 
-  tx->ScheduleSingleHop(std::move(cb));
+  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
 
   vector<HllBufferPtr> ptrs = ConvertShardVector(hlls);
   int64_t pf_count = pfcountMulti(ptrs.data(), ptrs.size());
@@ -229,17 +229,17 @@ OpResult<int64_t> PFCountMulti(CmdArgList args, Transaction* tx, SinkReplyBuilde
   }
 }
 
-void PFCount(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void PFCount(CmdArgList args, const CommandContext& cmd_cntx) {
   if (args.size() == 1) {
     string_view key = ArgS(args, 0);
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return CountHllsSingle(t->GetOpArgs(shard), key);
     };
 
-    OpResult<int64_t> res = tx->ScheduleSingleHopT(std::move(cb));
-    HandleOpValueResult(res, builder);
+    OpResult<int64_t> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+    HandleOpValueResult(res, cmd_cntx.rb);
   } else {
-    HandleOpValueResult(PFCountMulti(args, tx, builder), builder);
+    HandleOpValueResult(PFCountMulti(args, cmd_cntx), cmd_cntx.rb);
   }
 }
 
