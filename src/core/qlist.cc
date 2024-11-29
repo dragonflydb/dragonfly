@@ -394,14 +394,12 @@ void QList::AppendListpack(unsigned char* zl) {
 
   InsertNode(_Tail(), node, AFTER);
   count_ += node->count;
-  malloc_size_ += node->sz;
 }
 
 void QList::AppendPlain(unsigned char* data, size_t sz) {
   quicklistNode* node = CreateRAW(QUICKLIST_NODE_CONTAINER_PLAIN, data, sz);
   InsertNode(_Tail(), node, AFTER);
   ++count_;
-  malloc_size_ += node->sz;
 }
 
 bool QList::Insert(std::string_view pivot, std::string_view elem, InsertOpt opt) {
