@@ -16,7 +16,10 @@ TEST(AggregatorTest, Sort) {
       DocValues{{"a", 0.5}},
       DocValues{{"a", 1.5}},
   };
-  PipelineStep steps[] = {MakeSortStep("a", false)};
+
+  SortParams params;
+  params.fields.emplace_back("a", SortParams::SortOrder::ASC);
+  PipelineStep steps[] = {MakeSortStep(std::move(params))};
 
   auto result = Process(values, {"a"}, steps);
 

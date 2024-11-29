@@ -73,6 +73,25 @@ struct Reducer {
   Func func;
 };
 
+struct SortParams {
+  enum class SortOrder { ASC, DESC };
+
+  constexpr static int64_t kSortAll = -1;
+
+  bool SortAll() const {
+    return max == kSortAll;
+  }
+
+  /* Fields to sort by. If multiple fields are provided, sorting works hierarchically:
+     - First, the i-th field is compared.
+     - If the i-th field values are equal, the (i + 1)-th field is compared, and so on. */
+  absl::InlinedVector<std::pair<std::string, SortOrder>, 1> fields;
+
+  /* Max number of elements to include in the sorted result.
+     If set, only the first [max] elements are fully sorted using partial_sort. */
+  int64_t max = kSortAll;
+};
+
 enum class ReducerFunc { COUNT, COUNT_DISTINCT, SUM, AVG, MAX, MIN };
 
 // Find reducer function by uppercase name (COUNT, MAX, etc...), empty functor if not found
@@ -83,7 +102,7 @@ PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
                            std::vector<Reducer> reducers);
 
 // Make `SORTBY field [DESC]` step
-PipelineStep MakeSortStep(std::string_view field, bool descending = false);
+PipelineStep MakeSortStep(SortParams sort_params);
 
 // Make `LIMIT offset num` step
 PipelineStep MakeLimitStep(size_t offset, size_t num);

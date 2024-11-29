@@ -114,21 +114,42 @@ PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
   return GroupStep{std::vector<std::string>(fields.begin(), fields.end()), std::move(reducers)};
 }
 
-PipelineStep MakeSortStep(std::string_view field, bool descending) {
-  return [field = std::string(field), descending](PipelineResult result) -> PipelineResult {
+PipelineStep MakeSortStep(SortParams sort_params) {
+  return [params = std::move(sort_params)](PipelineResult result) -> PipelineResult {
+    auto comparator = [&params](const DocValues& l, const DocValues& r) {
+      for (const auto& [field, order] : params.fields) {
+        auto l_it = l.find(field);
+        auto r_it = r.find(field);
+
+        // Handle cases where one of the fields is missing
+        if (l_it == l.end() || r_it == r.end()) {
+          return l_it != l.end() || r_it == r.end();
+        }
+
+        if (l_it->second < r_it->second) {
+          return order == SortParams::SortOrder::ASC;
+        }
+        if (l_it->second > r_it->second) {
+          return order == SortParams::SortOrder::DESC;
+        }
+      }
+      return false;  // Elements are equal
+    };
+
     auto& values = result.values;
-
-    std::sort(values.begin(), values.end(), [field](const DocValues& l, const DocValues& r) {
-      auto it1 = l.find(field);
-      auto it2 = r.find(field);
-      return it1 == l.end() || (it2 != r.end() && it1->second < it2->second);
-    });
-
-    if (descending) {
-      std::reverse(values.begin(), values.end());
+    if (params.SortAll()) {
+      std::sort(values.begin(), values.end(), comparator);
+    } else {
+      DCHECK_GE(params.max, 0);
+      const size_t limit = std::min(values.size(), size_t(params.max));
+      std::partial_sort(values.begin(), values.begin() + limit, values.end(), comparator);
+      values.resize(limit);
     }
 
-    result.fields_to_print.insert(field);
+    for (auto& field : params.fields) {
+      result.fields_to_print.insert(field.first);  // TODO: move
+    }
+
     return result;
   };
 }
