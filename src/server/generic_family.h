@@ -19,7 +19,6 @@ namespace dfly {
 using facade::CmdArgList;
 using facade::OpResult;
 
-class ConnectionContext;
 class CommandRegistry;
 class Transaction;
 struct CommandContext;
