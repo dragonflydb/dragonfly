@@ -184,6 +184,11 @@ string NoGroupOrKey(string_view key, string_view cgroup, string_view suffix = ""
                       suffix);
 }
 
+string LeqTopIdError(string_view cmd_name) {
+  return absl::StrCat("The ID specified in ", cmd_name,
+                      " is equal or smaller than the target stream top item");
+}
+
 inline const uint8_t* SafePtr(MutableSlice field) {
   return field.empty() ? reinterpret_cast<const uint8_t*>("")
                        : reinterpret_cast<const uint8_t*>(field.data());
@@ -424,22 +429,27 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
    * if we need to switch to the next one. 'lp' will be set to NULL if
    * the current node is full. */
   if (lp != NULL) {
+    int new_node = 0;
     size_t node_max_bytes = kStreamNodeMaxBytes;
     if (node_max_bytes == 0 || node_max_bytes > STREAM_LISTPACK_MAX_SIZE)
       node_max_bytes = STREAM_LISTPACK_MAX_SIZE;
     if (lp_bytes + totelelen >= node_max_bytes) {
-      lp = NULL;
+      new_node = 1;
     } else if (kStreamNodeMaxEntries) {
       unsigned char* lp_ele = lpFirst(lp);
       /* Count both live entries and deleted ones. */
       int64_t count = lpGetInteger(lp_ele) + lpGetInteger(lpNext(lp, lp_ele));
       if (count >= kStreamNodeMaxEntries) {
-        /* Shrink extra pre-allocated memory */
-        lp = lpShrinkToFit(lp);
-        if (ri.data != lp)
-          raxInsert(s->rax_tree, ri.key, ri.key_len, lp, NULL);
-        lp = NULL;
+        new_node = 1;
       }
+    }
+
+    if (new_node) {
+      /* Shrink extra pre-allocated memory */
+      lp = lpShrinkToFit(lp);
+      if (ri.data != lp)
+        raxInsert(s->rax_tree, ri.key, ri.key_len, lp, NULL);
+      lp = NULL;
     }
   }
 
@@ -1403,7 +1413,7 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
   return OpStatus::OK;
 }
 
-OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
+ErrorReply OpXSetId(const OpArgs& op_args, string_view key, const streamID& sid) {
   auto& db_slice = op_args.GetDbSlice();
   auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it)
@@ -1415,13 +1425,18 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
   stream* stream_inst = (stream*)cobj.RObjPtr();
   long long entries_added = -1;
   streamID max_xdel_id{0, 0};
+  streamID id = sid;
+
+  if (streamCompareID(&id, &stream_inst->max_deleted_entry_id) < 0) {
+    return ErrorReply{"The ID specified in XSETID is smaller than current max_deleted_entry_id",
+                      "stream_smaller_deleted"};
+  }
 
   /* If the stream has at least one item, we want to check that the user
    * is setting a last ID that is equal or greater than the current top
    * item, otherwise the fundamental ID monotonicity assumption is violated. */
   if (stream_inst->length > 0) {
     streamID maxid;
-    streamID id = sid;
     streamLastValidID(stream_inst, &maxid);
 
     if (streamCompareID(&id, &maxid) < 0) {
@@ -1430,7 +1445,9 @@ OpStatus OpSetId2(const OpArgs& op_args, string_view key, const streamID& sid) {
 
     /* If an entries_added was provided, it can't be lower than the length. */
     if (entries_added != -1 && stream_inst->length > uint64_t(entries_added)) {
-      return OpStatus::ENTRIES_ADDED_SMALL;
+      return ErrorReply{
+          "The entries_added specified in XSETID is smaller than the target stream length",
+          "stream_added_small"};
     }
   }
 
@@ -2557,9 +2574,7 @@ void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   if (add_result.status() == OpStatus::STREAM_ID_SMALL) {
-    return cmd_cntx.rb->SendError(
-        "The ID specified in XADD is equal or smaller than "
-        "the target stream top item");
+    return cmd_cntx.rb->SendError(LeqTopIdError("XADD"));
   }
 
   return cmd_cntx.rb->SendError(add_result.status());
@@ -3133,23 +3148,17 @@ void StreamFamily::XSetId(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
+  facade::ErrorReply reply(OpStatus::OK);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpSetId2(t->GetOpArgs(shard), key, parsed_id.val);
+    reply = OpXSetId(t->GetOpArgs(shard), key, parsed_id.val);
+    return OpStatus::OK;
   };
 
-  OpStatus result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
-  switch (result) {
-    case OpStatus::STREAM_ID_SMALL:
-      return cmd_cntx.rb->SendError(
-          "The ID specified in XSETID is smaller than the "
-          "target stream top item");
-    case OpStatus::ENTRIES_ADDED_SMALL:
-      return cmd_cntx.rb->SendError(
-          "The entries_added specified in XSETID is smaller than "
-          "the target stream length");
-    default:
-      return cmd_cntx.rb->SendError(result);
+  cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
+  if (reply.status == OpStatus::STREAM_ID_SMALL) {
+    return cmd_cntx.rb->SendError(LeqTopIdError("XSETID"));
   }
+  return cmd_cntx.rb->SendError(reply);
 }
 
 void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
