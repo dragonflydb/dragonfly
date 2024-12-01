@@ -92,7 +92,7 @@ size_t JournalStreamer::GetTotalBufferCapacities() const {
 
 void JournalStreamer::Write(std::string_view str) {
   DCHECK(!str.empty());
-  DVLOG(2) << "Writing " << str.size() << " bytes";
+  DVLOG(3) << "Writing " << str.size() << " bytes";
 
   size_t total_pending = pending_buf_.size() + str.size();
 
@@ -136,7 +136,7 @@ void JournalStreamer::Write(std::string_view str) {
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
   DCHECK_GE(in_flight_bytes_, len);
 
-  DVLOG(2) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
+  DVLOG(3) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
   in_flight_bytes_ -= len;
   if (ec && !IsStopped()) {
     cntx_->ReportError(ec);

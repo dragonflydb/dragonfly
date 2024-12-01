@@ -14,7 +14,6 @@
 #include <string_view>
 #include <vector>
 
-#include "base/logging.h"
 #include "core/compact_object.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
@@ -367,7 +366,7 @@ struct BorrowedInterpreter {
 
   // Give up ownership of the interpreter, it must be returned manually.
   Interpreter* Release() && {
-    DCHECK(owned_);
+    assert(owned_);
     owned_ = false;
     return interpreter_;
   }

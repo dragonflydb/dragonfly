@@ -15,9 +15,8 @@ namespace dfly {
 
 using facade::OpResult;
 
-class ConnectionContext;
 class CommandRegistry;
-class Transaction;
+struct CommandContext;
 
 class ListFamily {
  public:
@@ -26,25 +25,23 @@ class ListFamily {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void LPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LPushX(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void RPush(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void RPushX(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void RPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void BLPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
-  static void BRPop(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
-  static void LLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LIndex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LInsert(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LTrim(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LRem(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void LMove(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void LPush(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LPushX(CmdArgList args, const CommandContext& cmd_cntx);
+  static void RPush(CmdArgList args, const CommandContext& cmd_cntx);
+  static void RPushX(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LPop(CmdArgList args, const CommandContext& cmd_cntx);
+  static void RPop(CmdArgList args, const CommandContext& cmd_cntx);
+  static void BLPop(CmdArgList args, const CommandContext& cmd_cntx);
+  static void BRPop(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LLen(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LPos(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LIndex(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LInsert(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LTrim(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LRange(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LRem(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LSet(CmdArgList args, const CommandContext& cmd_cntx);
+  static void LMove(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly

@@ -2287,7 +2287,6 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
     await check_for_no_state_status([node.admin_client for node in nodes])
 
 
-@pytest.mark.skip("Flaky")
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
@@ -2297,7 +2296,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
             port=BASE_PORT + i,
             admin_port=BASE_PORT + i + 1000,
             replication_timeout=3000,
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=2",
         )
         for i in range(2)
     ]
@@ -2311,9 +2310,8 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("source node DEBUG POPULATE")
-    await nodes[0].client.execute_command("debug", "populate", "100000", "foo", "5000")
 
-    # await StaticSeeder(key_target=200000, data_size=1000).run(nodes[0].client)
+    await StaticSeeder(key_target=300000, data_size=1000).run(nodes[0].client)
     start_capture = await StaticSeeder.capture(nodes[0].client)
 
     logging.debug("Start migration")
@@ -2329,13 +2327,13 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await nodes[1].client.execute_command("debug migration pause")
 
     await wait_for_error(
-        nodes[0].admin_client, nodes[1].id, "JournalStreamer write operation timeout"
+        nodes[0].admin_client, nodes[1].id, "JournalStreamer write operation timeout", 30
     )
 
     logging.debug("debug migration resume")
     await nodes[1].client.execute_command("debug migration resume")
 
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
 
     nodes[0].migrations = []
