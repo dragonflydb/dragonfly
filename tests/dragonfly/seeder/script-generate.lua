@@ -127,5 +127,3 @@ if stop_key ~= '' then
 end
 
 return tostring(key_counter) .. " " .. tostring(huge_entries())
----return tostring(key_counter)
----return key_counter
