@@ -646,20 +646,11 @@ TEST_F(RdbTest, LoadHugeStream) {
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
 }
 
-TEST_F(RdbTest, SnapshotTooBig) {
-  // Run({"debug", "populate", "10000", "foo", "1000"});
-  //  usleep(5000);  // let the stats to sync
-  max_memory_limit = 100000;
-  used_mem_current = 1000000;
-  auto resp = Run({"debug", "reload"});
-  ASSERT_THAT(resp, ErrArg("Out of memory"));
-}
-
 TEST_F(RdbTest, LoadStream2) {
   auto ec = LoadRdb("RDB_TYPE_STREAM_LISTPACKS_2.rdb");
   ASSERT_FALSE(ec) << ec.message();
   auto res = Run({"XINFO", "STREAM", "mystream"});
-  EXPECT_THAT(
+  ASSERT_THAT(
       res.GetVec(),
       ElementsAre("length", IntArg(2), "radix-tree-keys", IntArg(1), "radix-tree-nodes", IntArg(2),
                   "last-generated-id", "1732613360686-0", "max-deleted-entry-id", "0-0",
@@ -668,15 +659,24 @@ TEST_F(RdbTest, LoadStream2) {
 }
 
 TEST_F(RdbTest, LoadStream3) {
-  auto ec = LoadRdb("RDB_TYPE_STREAM_LISTPACKS_2.rdb");
+  auto ec = LoadRdb("RDB_TYPE_STREAM_LISTPACKS_3.rdb");
   ASSERT_FALSE(ec) << ec.message();
   auto res = Run({"XINFO", "STREAM", "mystream"});
-  EXPECT_THAT(
+  ASSERT_THAT(
       res.GetVec(),
       ElementsAre("length", IntArg(2), "radix-tree-keys", IntArg(1), "radix-tree-nodes", IntArg(2),
-                  "last-generated-id", "1732613360686-0", "max-deleted-entry-id", "0-0",
+                  "last-generated-id", "1732614679549-0", "max-deleted-entry-id", "0-0",
                   "entries-added", IntArg(0), "recorded-first-entry-id", "0-0", "groups", IntArg(1),
                   "first-entry", ArgType(RespExpr::ARRAY), "last-entry", ArgType(RespExpr::ARRAY)));
+}
+
+TEST_F(RdbTest, SnapshotTooBig) {
+  // Run({"debug", "populate", "10000", "foo", "1000"});
+  //  usleep(5000);  // let the stats to sync
+  max_memory_limit = 100000;
+  used_mem_current = 1000000;
+  auto resp = Run({"debug", "reload"});
+  ASSERT_THAT(resp, ErrArg("Out of memory"));
 }
 
 }  // namespace dfly
