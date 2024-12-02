@@ -224,6 +224,10 @@ void RestoreStreamer::Run() {
 
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
+
+      if (fiber_cancelled_)  // Could have been cancelled in above call too
+        return;
+
       WriteBucket(it);
     });
 
