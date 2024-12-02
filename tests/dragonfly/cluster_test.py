@@ -1336,6 +1336,7 @@ async def test_network_disconnect_during_migration(df_factory):
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
+    await proxy.close()
 
 
 @pytest.mark.parametrize(
