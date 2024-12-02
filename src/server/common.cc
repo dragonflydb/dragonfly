@@ -482,7 +482,7 @@ BorrowedInterpreter::~BorrowedInterpreter() {
 }
 
 void LocalBlockingCounter::unlock() {
-  DCHECK_GT(mutating_, 0);
+  DCHECK(mutating_ > 0);
   --mutating_;
   if (mutating_ == 0) {
     cond_var_.notify_all();
