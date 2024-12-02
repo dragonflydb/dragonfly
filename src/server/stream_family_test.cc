@@ -1074,6 +1074,94 @@ TEST_F(StreamFamilyTest, XInfoStream) {
                           "pel-count", IntArg(11), "pending", ArrLen(11)));
 }
 
+TEST_F(StreamFamilyTest, AutoClaimPelItemsFromAnotherConsumer) {
+  auto resp = Run({"xadd", "mystream", "*", "a", "1"});
+  string id1 = resp.GetString();
+  resp = Run({"xadd", "mystream", "*", "b", "2"});
+  string id2 = resp.GetString();
+  resp = Run({"xadd", "mystream", "*", "c", "3"});
+  string id3 = resp.GetString();
+  resp = Run({"xadd", "mystream", "*", "d", "4"});
+  string id4 = resp.GetString();
+
+  Run({"XGROUP", "CREATE", "mystream", "mygroup", "0"});
+
+  // Consumer 1 reads item 1 from the stream without acknowledgements.
+  // Consumer 2 then claims pending item 1 from the PEL of consumer 1
+  resp = Run(
+      {"XREADGROUP", "GROUP", "mygroup", "consumer1", "COUNT", "1", "STREAMS", "mystream", ">"});
+
+  auto match_a1 = RespElementsAre("a", "1");
+  ASSERT_THAT(resp, RespElementsAre("mystream", RespElementsAre(RespElementsAre(id1, match_a1))));
+
+  AdvanceTime(200);  // Advance time to greater time than the idle time in the autoclaim (10)
+  resp = Run({"XAUTOCLAIM", "mystream", "mygroup", "consumer2", "10", "-", "COUNT", "1"});
+
+  EXPECT_THAT(resp, RespElementsAre("0-0", ArrLen(1), ArrLen(0)));
+  EXPECT_THAT(resp.GetVec()[1], RespElementsAre(RespElementsAre(id1, match_a1)));
+
+  Run({"XREADGROUP", "GROUP", "mygroup", "consumer1", "COUNT", "3", "STREAMS", "mystream", ">"});
+  AdvanceTime(200);
+
+  // Delete item 2 from the stream.Now consumer 1 has PEL that contains
+  // only item 3. Try to use consumer 2 to claim the deleted item 2
+  // from the PEL of consumer 1, this should return nil
+  resp = Run({"XDEL", "mystream", id2});
+  ASSERT_THAT(resp, IntArg(1));
+
+  // id1 and id3 are self - claimed here but not id2('count' was set to 3)
+  // we make sure id2 is indeed skipped(the cursor points to id4)
+  resp = Run({"XAUTOCLAIM", "mystream", "mygroup", "consumer2", "10", "-", "COUNT", "3"});
+  auto match_id1_a1 = RespElementsAre(id1, match_a1);
+  auto match_id3_c3 = RespElementsAre(id3, RespElementsAre("c", "3"));
+  ASSERT_THAT(resp, RespElementsAre(id4, RespElementsAre(match_id1_a1, match_id3_c3),
+                                    RespElementsAre(id2)));
+  // Delete item 3 from the stream.Now consumer 1 has PEL that is empty.
+  // Try to use consumer 2 to claim the deleted item 3 from the PEL
+  // of consumer 1, this should return nil
+  AdvanceTime(200);
+
+  ASSERT_THAT(Run({"XDEL", "mystream", id4}), IntArg(1));
+
+  // id1 and id3 are self - claimed here but not id2 and id4('count' is default 100)
+  // we also test the JUSTID modifier here.note that, when using JUSTID,
+  // deleted entries are returned in reply(consistent with XCLAIM).
+  resp = Run({"XAUTOCLAIM", "mystream", "mygroup", "consumer2", "10", "-", "JUSTID"});
+  ASSERT_THAT(resp, RespElementsAre("0-0", RespElementsAre(id1, id3), RespElementsAre(id4)));
+}
+
+TEST_F(StreamFamilyTest, AutoClaimDelCount) {
+  Run({"xadd", "x", "1-0", "f", "v"});
+  Run({"xadd", "x", "2-0", "f", "v"});
+  Run({"xadd", "x", "3-0", "f", "v"});
+  Run({"XGROUP", "CREATE", "x", "grp", "0"});
+  auto resp = Run({"XREADGROUP", "GROUP", "grp", "Alice", "STREAMS", "x", ">"});
+
+  auto m1 = RespElementsAre("1-0", _);
+  auto m2 = RespElementsAre("2-0", _);
+  auto m3 = RespElementsAre("3-0", _);
+  EXPECT_THAT(resp, RespElementsAre("x", RespElementsAre(m1, m2, m3)));
+
+  EXPECT_THAT(Run({"XDEL", "x", "1-0"}), IntArg(1));
+  EXPECT_THAT(Run({"XDEL", "x", "2-0"}), IntArg(1));
+
+  resp = Run({"XAUTOCLAIM", "x", "grp", "Bob", "0", "0-0", "COUNT", "1"});
+  EXPECT_THAT(resp, RespElementsAre("2-0", ArrLen(0), RespElementsAre("1-0")));
+
+  resp = Run({"XAUTOCLAIM", "x", "grp", "Bob", "0", "2-0", "COUNT", "1"});
+  EXPECT_THAT(resp, RespElementsAre("3-0", ArrLen(0), RespElementsAre("2-0")));
+
+  resp = Run({"XAUTOCLAIM", "x", "grp", "Bob", "0", "3-0", "COUNT", "1"});
+  EXPECT_THAT(resp, RespElementsAre(
+                        "0-0", RespElementsAre(RespElementsAre("3-0", RespElementsAre("f", "v"))),
+                        ArrLen(0)));
+  resp = Run({"xpending", "x", "grp", "-", "+", "10", "Alice"});
+  EXPECT_THAT(resp, ArrLen(0));
+
+  resp = Run({"XAUTOCLAIM", "x", "grp", "Bob", "0", "3-0", "COUNT", "704505322"});
+  EXPECT_THAT(resp, ErrArg("COUNT"));
+}
+
 TEST_F(StreamFamilyTest, XAddMaxSeq) {
   Run({"XADD", "x", "1-18446744073709551615", "f1", "v1"});
   auto resp = Run({"XADD", "x", "1-*", "f2", "v2"});

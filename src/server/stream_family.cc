@@ -1568,11 +1568,15 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
     streamDecodeID(ri.key, &id);
 
     if (!streamEntryExists(stream, &id)) {
+      // TODO: to propagate this change to replica as XCLAIM command
+      // - since we delete it from NACK. See streamPropagateXCLAIM call.
       raxRemove(group->pel, ri.key, ri.key_len, nullptr);
       raxRemove(nack->consumer->pel, ri.key, ri.key_len, nullptr);
       streamFreeNACK(nack);
       result.deleted_ids.push_back(id);
       raxSeek(&ri, ">=", ri.key, ri.key_len);
+
+      count--; /* Count is a limit of the command response size. */
       continue;
     }
 
@@ -1603,6 +1607,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
 
     AppendClaimResultItem(result, stream, id);
     count--;
+    // TODO: propagate xclaim to replica
   }
 
   raxNext(&ri);
@@ -3229,8 +3234,8 @@ void StreamFamily::XAutoClaim(CmdArgList args, const CommandContext& cmd_cntx) {
         if (!absl::SimpleAtoi(arg, &opts.count)) {
           return rb->SendError(kInvalidIntErr);
         }
-        if (opts.count <= 0) {
-          return rb->SendError("COUNT must be > 0");
+        if (opts.count <= 0 || opts.count >= (1L << 18)) {
+          return rb->SendError("COUNT must be > 0 and less than 2^18");
         }
         continue;
       }
