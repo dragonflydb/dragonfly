@@ -456,19 +456,18 @@ TEST_F(DflyEngineTest, OOM) {
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
-  /* Sometimes filling the cache is much faster than the first heartbeat, leading to OOM.
-     To prevent OOM during cache filling, we need to increase the max_memory_limit and eviction
-     threshold. */
-  max_memory_limit = 1350000;  // 1.35mb
+  max_memory_limit = 300000 * 4;
+
   absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_eviction_memory_budget_threshold, 0.6);
+  absl::SetFlag(&FLAGS_eviction_memory_budget_threshold, 0.3);
 
   shard_set->TEST_EnableCacheMode();
 
   ssize_t i = 0;
   RespExpr resp;
-  for (; i < 10000; ++i) {
-    resp = Run({"setex", StrCat("key", i), "30", "bar"});
+  std::string value(1000, '.');
+  for (; i < 1000; ++i) {
+    resp = Run({"setex", StrCat("key", i), "30", value});
     ASSERT_EQ(resp, "OK");
   }
 
