@@ -389,18 +389,9 @@ class LocalBlockingCounter {
     ++mutating_;
   }
 
-  void unlock() {
-    DCHECK_GT(mutating_, 0);
-    --mutating_;
-    if (mutating_ == 0) {
-      cond_var_.notify_all();
-    }
-  }
+  void unlock();
 
-  void Wait() {
-    util::fb2::NoOpLock noop_lk_;
-    cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
-  }
+  void Wait();
 
   bool IsBlocked() const {
     return mutating_ > 0;
