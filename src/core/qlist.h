@@ -162,25 +162,32 @@ class QList {
     return head_ ? head_->prev : nullptr;
   }
 
+  void OnPreUpdate(quicklistNode* node);
+  void OnPostUpdate(quicklistNode* node);
+
   // Returns false if used existing sentinel, true if a new sentinel was created.
   bool PushSentinel(std::string_view value, Where where);
 
   // Returns false if used existing head, true if new head created.
   bool PushTail(std::string_view value);
-  void InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
+
+  // Returns newly created plain node.
+  quicklistNode* InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
   void InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertOpt insert_opt);
   void Replace(Iterator it, std::string_view elem);
 
   void Compress(quicklistNode* node);
 
   quicklistNode* MergeNodes(quicklistNode* node);
+
+  // Deletes one of the nodes and returns the other.
   quicklistNode* ListpackMerge(quicklistNode* a, quicklistNode* b);
 
   void DelNode(quicklistNode* node);
-  bool DelPackedIndex(quicklistNode* node, uint8_t** p);
+  bool DelPackedIndex(quicklistNode* node, uint8_t* p);
 
   quicklistNode* head_ = nullptr;
-
+  size_t malloc_size_ = 0;               // size of the quicklist struct
   uint32_t count_ = 0;                   /* total count of all entries in all listpacks */
   uint32_t len_ = 0;                     /* number of quicklistNodes */
   signed int fill_ : QL_FILL_BITS;       /* fill factor for individual nodes */

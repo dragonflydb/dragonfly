@@ -166,6 +166,7 @@ TEST_F(QListTest, Basic) {
   ql_.Push("abc", QList::HEAD);
   EXPECT_EQ(1, ql_.Size());
   EXPECT_TRUE(ql_.Tail() == ql_.Head());
+  EXPECT_LE(ql_.MallocUsed(false), ql_.MallocUsed(true));
 
   auto it = ql_.GetIterator(QList::HEAD);
   ASSERT_TRUE(it.Next());  // Needed to initialize the iterator.
@@ -176,6 +177,7 @@ TEST_F(QListTest, Basic) {
 
   ql_.Push("def", QList::TAIL);
   EXPECT_EQ(2, ql_.Size());
+  EXPECT_LE(ql_.MallocUsed(false), ql_.MallocUsed(true));
 
   it = ql_.GetIterator(QList::TAIL);
   ASSERT_TRUE(it.Next());
@@ -195,6 +197,7 @@ TEST_F(QListTest, Basic) {
   vector<string> items = ToItems();
 
   EXPECT_THAT(items, ElementsAre("abc", "def"));
+  EXPECT_GT(ql_.MallocUsed(false), ql_.MallocUsed(true) * 0.8);
 }
 
 TEST_F(QListTest, ListPack) {

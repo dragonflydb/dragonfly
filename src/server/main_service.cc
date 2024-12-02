@@ -2450,7 +2450,7 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     return builder->SendLong(cmd_cnt);
   }
 
-  const bool sufficient_args = (args.size() == 2);
+  bool sufficient_args = (args.size() == 2);
 
   // INFO [cmd]
   if (subcmd == "INFO" && sufficient_args) {
@@ -2466,6 +2466,7 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     return;
   }
 
+  sufficient_args = (args.size() == 1);
   if (subcmd == "DOCS" && sufficient_args) {
     return builder->SendOk();
   }
