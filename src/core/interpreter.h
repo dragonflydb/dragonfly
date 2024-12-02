@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/container/fixed_array.h>
 #include <absl/types/span.h>
 
 #include <functional>
@@ -138,6 +139,10 @@ class Interpreter {
   static int RedisPCallCommand(lua_State* lua);
   static int RedisACallCommand(lua_State* lua);
   static int RedisAPCallCommand(lua_State* lua);
+
+  std::optional<absl::FixedArray<std::string_view, 4>> PrepareArgs();
+  std::optional<int> CallRedisFunction(bool* raise_error, bool async, ObjectExplorer* explorer,
+                                       SliceSpan args);
 
   lua_State* lua_;
   unsigned cmd_depth_ = 0;

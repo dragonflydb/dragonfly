@@ -259,10 +259,10 @@ void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::Slice
  * script will be halted.
  * This function never returns, it unwinds the Lua call stack until an error handler is found or the
  * script exits */
-void RaiseError(lua_State* lua) {
+int RaiseErrorAndAbort(lua_State* lua) {
   lua_pushstring(lua, "err");
   lua_gettable(lua, -2);
-  lua_error(lua);
+  return lua_error(lua);
 }
 
 void LoadLibrary(lua_State* lua, const char* libname, lua_CFunction luafunc) {
@@ -469,7 +469,7 @@ int RedisLogCommand(lua_State* lua) {
   int argc = lua_gettop(lua);
   if (argc < 2) {
     PushError(lua, "redis.log() requires two arguments or more.");
-    RaiseError(lua);
+    return RaiseErrorAndAbort(lua);
   }
 
   return 0;
@@ -893,6 +893,121 @@ void Interpreter::RunGC() {
   lua_gc(lua_, LUA_GCCOLLECT);
 }
 
+std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() {
+  int argc = lua_gettop(lua_);
+  /* Require at least one argument */
+  if (argc == 0) {
+    PushError(lua_, "Please specify at least one argument for redis.call()");
+    return std::nullopt;
+  }
+
+  size_t blob_len = 0;
+  char tmpbuf[64];
+
+  // Determine size required for backing storage for all args.
+  // Skip command name (idx=1), as its stored in a separate buffer.
+  for (int idx = 2; idx <= argc; idx++) {
+    switch (lua_type(lua_, idx)) {
+      case LUA_TNUMBER:
+        if (lua_isinteger(lua_, idx)) {
+          blob_len += absl::AlphaNum{lua_tointeger(lua_, idx)}.size();
+        } else {
+          int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
+          CHECK_GT(fmt_len, 0);
+          blob_len += fmt_len;
+        }
+        continue;
+      case LUA_TSTRING:
+        blob_len += lua_rawlen(lua_, idx) + 1;
+        continue;
+      default:
+        PushError(lua_, "Lua redis() command arguments must be strings or integers");
+        return std::nullopt;
+    }
+  }
+
+  char name_buffer[32];  // backing storage for cmd name
+  absl::FixedArray<string_view, 4> args(argc);
+
+  // Copy command name to name_buffer and set it as first arg.
+  unsigned name_len = lua_rawlen(lua_, 1);
+  if (name_len >= sizeof(name_buffer)) {
+    PushError(lua_, "Lua redis() command name too long");
+    return std::nullopt;
+  }
+
+  memcpy(name_buffer, lua_tostring(lua_, 1), name_len);
+  args[0] = {name_buffer, name_len};
+  buffer_.resize(blob_len + 4, '\0');  // backing storage for args
+
+  char* cur = buffer_.data();
+  char* end = cur + blob_len;
+  for (int idx = 2; idx <= argc; idx++) {
+    size_t len = 0;
+    switch (lua_type(lua_, idx)) {
+      case LUA_TNUMBER:
+        if (lua_isinteger(lua_, idx)) {
+          char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), cur);
+          len = next - cur;
+        } else if (lua_isnumber(lua_, idx)) {
+          // we pass `end - cur + 1` because we do not want to skip the last character
+          // if it's the last argument.
+          int fmt_len = absl::SNPrintF(cur, end - cur + 1, "%.17g", lua_tonumber(lua_, idx));
+          CHECK_GT(fmt_len, 0);
+          len = fmt_len;
+        }
+        break;
+      case LUA_TSTRING:
+        len = lua_rawlen(lua_, idx);
+        memcpy(cur, lua_tostring(lua_, idx), len + 1);  // + 1 for null terminator
+    };
+
+    args[idx - 1] = {cur, len};
+    cur += len;
+  }
+
+  /* Pop all arguments from the stack, we do not need them anymore
+   * and this way we guaranty we will have room on the stack for the result. */
+  lua_pop(lua_, argc);
+  return std::make_optional(args);
+}
+
+std::optional<int> Interpreter::CallRedisFunction(bool* raise_error, bool async,
+                                                  ObjectExplorer* explorer, SliceSpan args) {
+  // Calling with custom explorer is not supported with errors or async
+  DCHECK(explorer == nullptr || (!raise_error && !async));
+
+  // If no custom explorer is set, use default translator
+  optional<RedisTranslator> translator;
+  if (explorer == nullptr) {
+    translator.emplace(lua_);
+    explorer = &*translator;
+  }
+  cmd_depth_++;
+  redis_func_(CallArgs{args, &buffer_, explorer, async, *raise_error, raise_error});
+  cmd_depth_--;
+
+  // Shrink reusable buffer if it's too big.
+  if (buffer_.capacity() > 128) {
+    buffer_.clear();
+    buffer_.shrink_to_fit();
+  }
+
+  if (!translator)
+    return 0;
+
+  // Raise error for regular 'call' command if needed.
+  if (*raise_error && translator->HasError()) {
+    // error is already on top of stack
+    return std::nullopt;
+  }
+
+  if (!async)
+    DCHECK_EQ(1, lua_gettop(lua_));
+
+  return 1;
+}
+
 // Returns number of results, which is always 1 in this case.
 // Please note that lua resets the stack once the function returns so no need
 // to unwind the stack manually in the function (though lua allows doing this).
@@ -901,145 +1016,40 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplore
    * to luaRedisGenericCommand(), which normally should never happen.
    * To make this function reentrant is futile and makes it slower, but
    * we should at least detect such a misuse, and abort. */
-  {
-    if (cmd_depth_) {
-      const char* recursion_warning =
-          "luaRedisGenericCommand() recursive call detected. "
-          "Are you doing funny stuff with Lua debug hooks?";
-      PushError(lua_, recursion_warning);
-      return 1;
-    }
-
-    if (!redis_func_) {
-      PushError(lua_, "internal error - redis function not defined");
-      if (raise_error) {
-        goto lua_raise_error;
-        ;
-      }
-      return 1;
-    }
-
-    cmd_depth_++;
-    int argc = lua_gettop(lua_);
-
-#define RETURN_OR_THROW_ERROR(err) \
-  {                                \
-    PushError(lua_, err);          \
-    cmd_depth_--;                  \
-    if (raise_error) {             \
-      goto lua_raise_error;        \
-    }                              \
-    return 1;                      \
-  }
-
-    /* Require at least one argument */
-    if (argc == 0) {
-      RETURN_OR_THROW_ERROR("Please specify at least one argument for redis.call()");
-    }
-
-    size_t blob_len = 0;
-    char tmpbuf[64];
-
-    // Determine size required for backing storage for all args.
-    // Skip command name (idx=1), as its stored in a separate buffer.
-    for (int idx = 2; idx <= argc; idx++) {
-      switch (lua_type(lua_, idx)) {
-        case LUA_TNUMBER:
-          if (lua_isinteger(lua_, idx)) {
-            blob_len += absl::AlphaNum{lua_tointeger(lua_, idx)}.size();
-          } else {
-            int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
-            CHECK_GT(fmt_len, 0);
-            blob_len += fmt_len;
-          }
-          continue;
-        case LUA_TSTRING:
-          blob_len += lua_rawlen(lua_, idx) + 1;
-          continue;
-        default:
-          RETURN_OR_THROW_ERROR("Lua redis() command arguments must be strings or integers");
-      }
-    }
-
-    char name_buffer[32];  // backing storage for cmd name
-    absl::FixedArray<string_view, 4> args(argc);
-
-    // Copy command name to name_buffer and set it as first arg.
-    unsigned name_len = lua_rawlen(lua_, 1);
-    if (name_len >= sizeof(name_buffer)) {
-      RETURN_OR_THROW_ERROR("Lua redis() command name too long");
-    }
-
-    memcpy(name_buffer, lua_tostring(lua_, 1), name_len);
-    args[0] = {name_buffer, name_len};
-    buffer_.resize(blob_len + 4, '\0');  // backing storage for args
-
-    char* cur = buffer_.data();
-    char* end = cur + blob_len;
-    for (int idx = 2; idx <= argc; idx++) {
-      size_t len = 0;
-      switch (lua_type(lua_, idx)) {
-        case LUA_TNUMBER:
-          if (lua_isinteger(lua_, idx)) {
-            char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), cur);
-            len = next - cur;
-          } else if (lua_isnumber(lua_, idx)) {
-            // we pass `end - cur + 1` because we do not want to skip the last character
-            // if it's the last argument.
-            int fmt_len = absl::SNPrintF(cur, end - cur + 1, "%.17g", lua_tonumber(lua_, idx));
-            CHECK_GT(fmt_len, 0);
-            len = fmt_len;
-          }
-          break;
-        case LUA_TSTRING:
-          len = lua_rawlen(lua_, idx);
-          memcpy(cur, lua_tostring(lua_, idx), len + 1);  // + 1 for null terminator
-      };
-
-      args[idx - 1] = {cur, len};
-      cur += len;
-    }
-
-    /* Pop all arguments from the stack, we do not need them anymore
-     * and this way we guaranty we will have room on the stack for the result. */
-    lua_pop(lua_, argc);
-
-    // Calling with custom explorer is not supported with errors or async
-    DCHECK(explorer == nullptr || (!raise_error && !async));
-
-    // If no custom explorer is set, use default translator
-    optional<RedisTranslator> translator;
-    if (explorer == nullptr) {
-      translator.emplace(lua_);
-      explorer = &*translator;
-    }
-
-    redis_func_(CallArgs{SliceSpan{args}, &buffer_, explorer, async, raise_error, &raise_error});
-    cmd_depth_--;
-
-    // Shrink reusable buffer if it's too big.
-    if (buffer_.capacity() > 128) {
-      buffer_.clear();
-      buffer_.shrink_to_fit();
-    }
-
-    if (!translator)
-      return 0;
-
-    // Raise error for regular 'call' command if needed.
-    if (raise_error && translator->HasError()) {
-      // error is already on top of stack
-      goto lua_raise_error;
-    }
-
-    if (!async)
-      DCHECK_EQ(1, lua_gettop(lua_));
-
+  if (cmd_depth_) {
+    const char* recursion_warning =
+        "luaRedisGenericCommand() recursive call detected. "
+        "Are you doing funny stuff with Lua debug hooks?";
+    PushError(lua_, recursion_warning);
     return 1;
   }
-lua_raise_error:
-  RaiseError(lua_);  // this function never returns, it unwinds the Lua call stack
-  return 0;
+
+  if (!redis_func_) {
+    PushError(lua_, "internal error - redis function not defined");
+    if (raise_error) {
+      return RaiseErrorAndAbort(lua_);
+    }
+    return 1;
+  }
+
+  // IMPORTANT! all allocations withing this funciton must be freed
+  // BEFORE calling RaiseErrorAndAbort in case of script error. RaiseErrorAndAbort
+  // uses longjmp which bypasses stack unwinding and skips the destruction of objects.
+
+  std::optional<int> ret;
+  {
+    std::optional<absl::FixedArray<std::string_view, 4>> args = PrepareArgs();
+    if (args.has_value()) {
+      ret = CallRedisFunction(&raise_error, async, explorer, SliceSpan{*args});
+    }
+  }
+  if (ret.has_value()) {
+    return *ret;
+  }
+  if (raise_error) {
+    return RaiseErrorAndAbort(lua_);  // this function never returns, it unwinds the Lua call stack
+  }
+  return 1;
 }
 
 int Interpreter::RedisCallCommand(lua_State* lua) {
