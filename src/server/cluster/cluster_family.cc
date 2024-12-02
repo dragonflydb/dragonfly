@@ -65,6 +65,27 @@ constexpr string_view kClusterDisabled =
 
 thread_local shared_ptr<ClusterConfig> tl_cluster_config;
 
+ClusterShardInfos GetConfigForStats(ConnectionContext* cntx) {
+  CHECK(!IsClusterEmulated());
+  CHECK(tl_cluster_config != nullptr);
+
+  auto config = tl_cluster_config->GetConfig();
+  if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
+    return config;
+  }
+
+  // We can't mutate `config` so we copy it over
+  std::vector<ClusterShardInfo> infos;
+  infos.reserve(config.size());
+
+  for (auto& node : config) {
+    infos.push_back(node);
+    infos.rbegin()->replicas.clear();
+  }
+
+  return ClusterShardInfos{std::move(infos)};
+}
+
 }  // namespace
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
@@ -210,7 +231,7 @@ void ClusterFamily::ClusterShards(SinkReplyBuilder* builder, ConnectionContext* 
   if (IsClusterEmulated()) {
     return ClusterShardsImpl({GetEmulatedShardInfo(cntx)}, builder);
   } else if (tl_cluster_config != nullptr) {
-    return ClusterShardsImpl(tl_cluster_config->GetConfig(), builder);
+    return ClusterShardsImpl(GetConfigForStats(cntx), builder);
   } else {
     return builder->SendError(kClusterNotConfigured);
   }
@@ -255,7 +276,7 @@ void ClusterFamily::ClusterSlots(SinkReplyBuilder* builder, ConnectionContext* c
   if (IsClusterEmulated()) {
     return ClusterSlotsImpl({GetEmulatedShardInfo(cntx)}, builder);
   } else if (tl_cluster_config != nullptr) {
-    return ClusterSlotsImpl(tl_cluster_config->GetConfig(), builder);
+    return ClusterSlotsImpl(GetConfigForStats(cntx), builder);
   } else {
     return builder->SendError(kClusterNotConfigured);
   }
@@ -311,7 +332,7 @@ void ClusterFamily::ClusterNodes(SinkReplyBuilder* builder, ConnectionContext* c
   if (IsClusterEmulated()) {
     return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, id_, builder);
   } else if (tl_cluster_config != nullptr) {
-    return ClusterNodesImpl(tl_cluster_config->GetConfig(), id_, builder);
+    return ClusterNodesImpl(GetConfigForStats(cntx), id_, builder);
   } else {
     return builder->SendError(kClusterNotConfigured);
   }
@@ -375,7 +396,7 @@ void ClusterFamily::ClusterInfo(SinkReplyBuilder* builder, ConnectionContext* cn
   if (IsClusterEmulated()) {
     return ClusterInfoImpl({GetEmulatedShardInfo(cntx)}, builder);
   } else if (tl_cluster_config != nullptr) {
-    return ClusterInfoImpl(tl_cluster_config->GetConfig(), builder);
+    return ClusterInfoImpl(GetConfigForStats(cntx), builder);
   } else {
     return ClusterInfoImpl({}, builder);
   }

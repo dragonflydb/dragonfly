@@ -815,6 +815,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
+  config_registry.RegisterMutable("managed_service_info");
 
   config_registry.RegisterMutable(
       "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
