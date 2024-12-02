@@ -926,18 +926,17 @@ std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() 
     }
   }
 
-  char name_buffer[32];  // backing storage for cmd name
   absl::FixedArray<string_view, 4> args(argc);
 
   // Copy command name to name_buffer and set it as first arg.
   unsigned name_len = lua_rawlen(lua_, 1);
-  if (name_len >= sizeof(name_buffer)) {
+  if (name_len >= sizeof(name_buffer_)) {
     PushError(lua_, "Lua redis() command name too long");
     return std::nullopt;
   }
 
-  memcpy(name_buffer, lua_tostring(lua_, 1), name_len);
-  args[0] = {name_buffer, name_len};
+  memcpy(name_buffer_, lua_tostring(lua_, 1), name_len);
+  args[0] = {name_buffer_, name_len};
   buffer_.resize(blob_len + 4, '\0');  // backing storage for args
 
   char* cur = buffer_.data();

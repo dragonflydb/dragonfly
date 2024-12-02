@@ -148,6 +148,7 @@ class Interpreter {
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
   std::string buffer_;
+  char name_buffer_[32];  // backing storage for cmd name
 };
 
 // Manages an internal interpreter pool. This allows multiple connections residing on the same
