@@ -60,6 +60,10 @@ ABSL_FLAG(float, tiered_offload_threshold, 0.5,
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
 
+ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
+          "Eviction starts when free memory (including rss memory) drops below "
+          "eviction_memory_budget_threshold * max_memory_limit");
+
 namespace dfly {
 
 using absl::GetFlag;
@@ -197,11 +201,6 @@ optional<uint32_t> GetPeriodicCycleMs() {
     clock_cycle_ms = 1;
   return clock_cycle_ms;
 }
-
-/* Eviction begins when the shard's free memory falls below
-  (max_memory_limit * kEvictionMemoryThresholdFactor) / <number of shards>.
-  Same logic for the RSS memory. */
-constexpr double kEvictionMemoryThresholdFactor = 0.1;
 
 ssize_t CalculateMemoryBudget(size_t max_memory, size_t used_memory) {
   if (max_memory >= used_memory) {
@@ -753,7 +752,8 @@ void EngineShard::RetireExpiredAndEvict() {
 
   // We start eviction when we have less than 10% of free memory
   const ssize_t shard_memory_budget_threshold =
-      ssize_t(max_memory_limit * kEvictionMemoryThresholdFactor) / shards_count;
+      ssize_t(max_memory_limit * absl::GetFlag(FLAGS_eviction_memory_budget_threshold)) /
+      shards_count;
 
   size_t max_rss_memory;
   ssize_t shard_rss_memory_budget_threshold;  // Threshold for free rss memory
@@ -761,7 +761,8 @@ void EngineShard::RetireExpiredAndEvict() {
     max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
     // We start eviction when we have less than 10% of free rss memory
     shard_rss_memory_budget_threshold =
-        ssize_t(max_rss_memory * kEvictionMemoryThresholdFactor) / shards_count;
+        ssize_t(max_rss_memory * absl::GetFlag(FLAGS_eviction_memory_budget_threshold)) /
+        shards_count;
   } else {
     max_rss_memory = std::numeric_limits<size_t>::max();
     // We should never evict based on rss memory

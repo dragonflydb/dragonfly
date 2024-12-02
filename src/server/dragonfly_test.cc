@@ -27,6 +27,7 @@ ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
+ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 
 namespace dfly {
 
@@ -455,14 +456,19 @@ TEST_F(DflyEngineTest, OOM) {
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
-  max_memory_limit = 1200000;  // 1.2mb = 300000 * 4
+  /* Sometimes filling the cache is much faster than the first heartbeat, leading to OOM.
+     To prevent OOM during cache filling, we need to increase the max_memory_limit and eviction
+     threshold. */
+  max_memory_limit = 1350000;  // 1.35mb
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_eviction_memory_budget_threshold, 0.6);
+
   shard_set->TEST_EnableCacheMode();
 
   ssize_t i = 0;
   RespExpr resp;
   for (; i < 10000; ++i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
-    // we evict some items because 5000 is too much when max_memory_limit is 300000.
     ASSERT_EQ(resp, "OK");
   }
 
