@@ -1607,7 +1607,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
 
     AppendClaimResultItem(result, stream, id);
     count--;
-    // TODO: propagate xlaim to replica
+    // TODO: propagate xclaim to replica
   }
 
   raxNext(&ri);
