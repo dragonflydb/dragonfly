@@ -1089,7 +1089,7 @@ TEST_F(StreamFamilyTest, AutoClaimPelItemsFromAnotherConsumer) {
   // Consumer 1 reads item 1 from the stream without acknowledgements.
   // Consumer 2 then claims pending item 1 from the PEL of consumer 1
   resp = Run(
-      {"XREADGROUP", "GROUP", "mygroup", "consumer1", "count", "1", "STREAMS", "mystream", ">"});
+      {"XREADGROUP", "GROUP", "mygroup", "consumer1", "COUNT", "1", "STREAMS", "mystream", ">"});
 
   auto match_a1 = RespElementsAre("a", "1");
   ASSERT_THAT(resp, RespElementsAre("mystream", RespElementsAre(RespElementsAre(id1, match_a1))));
