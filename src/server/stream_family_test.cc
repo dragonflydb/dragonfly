@@ -1100,7 +1100,7 @@ TEST_F(StreamFamilyTest, AutoClaimPelItemsFromAnotherConsumer) {
   EXPECT_THAT(resp, RespElementsAre("0-0", ArrLen(1), ArrLen(0)));
   EXPECT_THAT(resp.GetVec()[1], RespElementsAre(RespElementsAre(id1, match_a1)));
 
-  Run({"XREADGROUP", "GROUP", "mygroup", "consumer1", "count", "3", "STREAMS", "mystream", ">"});
+  Run({"XREADGROUP", "GROUP", "mygroup", "consumer1", "COUNT", "3", "STREAMS", "mystream", ">"});
   AdvanceTime(200);
 
   // Delete item 2 from the stream.Now consumer 1 has PEL that contains
