@@ -87,11 +87,11 @@ void JournalStreamer::Cancel() {
 }
 
 size_t JournalStreamer::GetTotalBufferCapacities() const {
-  return in_flight_bytes_ + pending_buf_mem_size;
+  return in_flight_bytes_ + pending_buf_mem_size_;
 }
 
 void JournalStreamer::AsyncWrite() {
-  DCHECK(pending_buf_mem_size != 0);
+  DCHECK(pending_buf_mem_size_ != 0);
   DCHECK(!pending_buf_.empty());
 
   if (in_flight_bytes_ > 0) {
@@ -100,8 +100,8 @@ void JournalStreamer::AsyncWrite() {
     return;
   }
 
-  const auto len = pending_buf_mem_size;
-  pending_buf_mem_size = 0;
+  const auto len = pending_buf_mem_size_;
+  pending_buf_mem_size_ = 0;
   auto tmp_pbuf = std::move(pending_buf_);
   pending_buf_ = {};
 
@@ -113,7 +113,7 @@ void JournalStreamer::AsyncWrite() {
 
   for (size_t i = 0; i < v_size; ++i) {
     const auto* uptr = reinterpret_cast<const uint8_t*>(tmp_pbuf[i].data());
-    v[i] = (IoVec(io::Bytes(uptr, tmp_pbuf[i].size())));
+    v[i] = IoVec(io::Bytes(uptr, tmp_pbuf[i].size()));
   }
 
   dest_->AsyncWrite(v.data(), v.size(),
@@ -126,7 +126,7 @@ void JournalStreamer::Write(std::string str) {
   DCHECK(!str.empty());
   DVLOG(2) << "Writing " << str.size() << " bytes";
 
-  pending_buf_mem_size += str.size();
+  pending_buf_mem_size_ += str.size();
   pending_buf_.push_back(std::move(str));
 
   AsyncWrite();
@@ -180,7 +180,7 @@ void JournalStreamer::WaitForInflightToComplete() {
 }
 
 bool JournalStreamer::IsStalled() const {
-  return in_flight_bytes_ + pending_buf_mem_size >= replication_stream_output_limit_cached;
+  return in_flight_bytes_ + pending_buf_mem_size_ >= replication_stream_output_limit_cached;
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,

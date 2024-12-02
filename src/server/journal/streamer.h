@@ -64,8 +64,11 @@ class JournalStreamer {
 
   journal::Journal* journal_;
 
-  size_t pending_buf_mem_size = 0;
-  std::vector<std::string> pending_buf_;
+  size_t pending_buf_mem_size_ = 0;
+  std::vector<std::string>
+      pending_buf_;  // we can improve pending_buf_ if use 2 instances one for in_flight data and
+                     // the second one for data accumulating. In this case we also can use
+                     // InlinedVector
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
 
   time_t last_lsn_time_ = 0;
