@@ -1,4 +1,5 @@
 import pytest
+import copy
 import re
 import json
 import redis
@@ -374,6 +375,140 @@ async def test_emulated_cluster_with_replicas(df_factory):
             "slots": [],
         },
     }
+
+
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_cluster_managed_service_info(df_factory):
+    master = df_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 100)
+    replica = df_factory.create(port=BASE_PORT + 1, admin_port=BASE_PORT + 101)
+
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_master_admin = master.admin_client()
+    master_id = await c_master.execute_command("CLUSTER MYID")
+
+    c_replica = replica.client()
+    c_replica_admin = replica.admin_client()
+    replica_id = await c_replica.execute_command("CLUSTER MYID")
+
+    # Connect replicas to master
+    rc = await c_replica_admin.execute_command(f"REPLICAOF localhost {master.port}")
+    assert rc == "OK"
+    await wait_available_async(c_replica)
+
+    nodes = [await create_node_info(master)]
+    nodes[0].slots = [(0, 16383)]
+    nodes[0].replicas = [await create_node_info(replica)]
+    await push_config(json.dumps(generate_config(nodes)), [master.client(), replica.client()])
+
+    expected_hidden_cluster_slots = [
+        [
+            0,
+            16383,
+            [
+                "127.0.0.1",
+                master.port,
+                master_id,
+            ],
+        ],
+    ]
+    expected_full_cluster_slots = copy.deepcopy(expected_hidden_cluster_slots)
+    expected_full_cluster_slots[0].append(
+        [
+            "127.0.0.1",
+            replica.port,
+            replica_id,
+        ]
+    )
+    assert await c_master.execute_command("CLUSTER SLOTS") == expected_full_cluster_slots
+    assert await c_master_admin.execute_command("CLUSTER SLOTS") == expected_full_cluster_slots
+
+    expected_hidden_cluster_nodes = {
+        f"127.0.0.1:{master.port}": {
+            "connected": True,
+            "epoch": "0",
+            "flags": "myself,master",
+            "last_ping_sent": "0",
+            "last_pong_rcvd": "0",
+            "master_id": "-",
+            "migrations": [],
+            "node_id": master_id,
+            "slots": [["0", "16383"]],
+        },
+    }
+    expected_full_cluster_nodes = copy.deepcopy(expected_hidden_cluster_nodes)
+    expected_full_cluster_nodes[f"127.0.0.1:{replica.port}"] = {
+        "connected": True,
+        "epoch": "0",
+        "flags": "slave",
+        "last_ping_sent": "0",
+        "last_pong_rcvd": "0",
+        "master_id": master_id,
+        "migrations": [],
+        "node_id": replica_id,
+        "slots": [],
+    }
+    assert await c_master.execute_command("CLUSTER NODES") == expected_full_cluster_nodes
+    assert await c_master_admin.execute_command("CLUSTER NODES") == expected_full_cluster_nodes
+
+    expected_hidden_cluster_shards = [
+        [
+            "slots",
+            [0, 16383],
+            "nodes",
+            [
+                [
+                    "id",
+                    master_id,
+                    "endpoint",
+                    "127.0.0.1",
+                    "ip",
+                    "127.0.0.1",
+                    "port",
+                    master.port,
+                    "role",
+                    "master",
+                    "replication-offset",
+                    0,
+                    "health",
+                    "online",
+                ],
+            ],
+        ],
+    ]
+    expected_full_cluster_shards = copy.deepcopy(expected_hidden_cluster_shards)
+    expected_full_cluster_shards[0][3].append(
+        [
+            "id",
+            replica_id,
+            "endpoint",
+            "127.0.0.1",
+            "ip",
+            "127.0.0.1",
+            "port",
+            replica.port,
+            "role",
+            "replica",
+            "replication-offset",
+            0,
+            "health",
+            "online",
+        ]
+    )
+    assert await c_master.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
+    assert await c_master_admin.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
+
+    await c_master.execute_command("config set managed_service_info true")
+
+    assert await c_master.execute_command("CLUSTER SLOTS") == expected_hidden_cluster_slots
+    assert await c_master_admin.execute_command("CLUSTER SLOTS") == expected_full_cluster_slots
+
+    assert await c_master.execute_command("CLUSTER NODES") == expected_hidden_cluster_nodes
+    assert await c_master_admin.execute_command("CLUSTER NODES") == expected_full_cluster_nodes
+
+    assert await c_master.execute_command("CLUSTER SHARDS") == expected_hidden_cluster_shards
+    assert await c_master_admin.execute_command("CLUSTER SHARDS") == expected_full_cluster_shards
 
 
 @dfly_args({"cluster_mode": "emulated"})
