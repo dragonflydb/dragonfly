@@ -120,12 +120,6 @@ void DflyCmd::ReplicaInfo::Cancel() {
     if (flow->cleanup) {
       flow->cleanup();
     }
-    // flow->cleanup() might be set when we transition to StableSync but the saver
-    // might still be active. We should clean this.
-    if (flow->saver) {
-      flow->saver->CancelInShard(shard);  // stops writing to journal stream to channel
-      flow->saver.reset();
-    }
     VLOG(2) << "After flow cleanup " << shard->shard_id();
     flow->conn = nullptr;
   });
