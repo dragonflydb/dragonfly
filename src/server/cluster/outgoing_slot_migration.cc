@@ -37,7 +37,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   ~SliceSlotMigration() {
-    streamer_.Cancel();
+    Cancel();
     cntx_.JoinErrorHandler();
   }
 
@@ -81,6 +81,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   void Cancel() {
+    cntx_.Cancel();
     streamer_.Cancel();
   }
 
