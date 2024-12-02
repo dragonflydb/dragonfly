@@ -29,6 +29,7 @@ local keys = LU_collect_keys(prefix, type)
 LG_funcs.init(data_size, collection_size, huge_value_percentage, huge_value_size)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
+local huge_entries = LG_funcs["get_huge_entries"]
 
 local function action_add()
     local key = prefix .. tostring(key_counter)
@@ -87,7 +88,7 @@ while true do
     -- update probability only every 10 iterations
     if counter % 10 == 0 then
         -- calculate intensity (not normalized probabilities)
-        -- please see attached plots in PR to undertand convergence
+        -- please see attached plots in PR to understand convergence
         -- https://github.com/dragonflydb/dragonfly/pull/2556
 
         -- the add intensity is monotonically decreasing with keycount growing,
@@ -125,4 +126,6 @@ if stop_key ~= '' then
     redis.call('DEL', stop_key)
 end
 
-return key_counter
+return tostring(key_counter) .. " " .. tostring(huge_entries())
+---return tostring(key_counter)
+---return key_counter

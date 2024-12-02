@@ -204,8 +204,11 @@ class Seeder(SeederBase):
             unit.stop_key if using_stopkey else "",
         ] + args
 
-        unit.counter = await client.evalsha(sha, 0, *args)
+        result = await client.evalsha(sha, 0, *args)
+        result = result.split()
+        unit.counter = int(result[0])
+        huge_entries = int(result[1])
 
         logging.debug(
-            f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
+            f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}, huge entries {huge_entries}"
         )

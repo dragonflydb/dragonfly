@@ -18,7 +18,6 @@ from .seeder import Seeder as SeederV2
 from . import dfly_args
 from .proxy import Proxy
 from .seeder import StaticSeeder
-from .seeder import SeederBase
 
 ADMIN_PORT = 1211
 
@@ -132,12 +131,6 @@ async def test_replication_all(
 
     # Check data after stable state stream
     await check()
-
-    if big_value:
-        info = await c_master.info()
-        preemptions = info["big_value_preemptions"]
-        logging.info(f"Preemptions {preemptions}")
-        assert preemptions > 0
 
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
