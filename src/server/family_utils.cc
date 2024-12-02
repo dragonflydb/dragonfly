@@ -2,7 +2,14 @@
 
 #include "base/logging.h"
 
+extern "C" {
+#include "redis/stream.h"
+#include "redis/zmalloc.h"
+}
+
 namespace dfly {
+
+using namespace std;
 
 sds WrapSds(std::string_view s) {
   static thread_local sds tmp_sds = sdsempty();
@@ -38,6 +45,27 @@ RandomPick UniquePicksGenerator::Generate() {
 
   picked_indexes_.insert(max_index);
   return max_index;
+}
+
+streamConsumer* StreamCreateConsumer(streamCG* cg, string_view name, uint64_t now_ms, int flags) {
+  DCHECK(cg);
+  DCHECK(!name.empty());
+  if (cg == NULL)
+    return NULL;
+
+  streamConsumer* consumer = (streamConsumer*)zmalloc(sizeof(*consumer));
+
+  int success =
+      raxTryInsert(cg->consumers, (unsigned char*)name.data(), name.size(), consumer, NULL);
+  if (!success) {
+    zfree(consumer);
+    return NULL;
+  }
+  consumer->name = sdsnewlen(name.data(), name.size());
+  consumer->pel = raxNew();
+  consumer->seen_time = now_ms;
+
+  return consumer;
 }
 
 }  // namespace dfly

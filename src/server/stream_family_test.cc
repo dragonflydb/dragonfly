@@ -1073,4 +1073,11 @@ TEST_F(StreamFamilyTest, XInfoStream) {
               ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64),
                           "pel-count", IntArg(11), "pending", ArrLen(11)));
 }
+
+TEST_F(StreamFamilyTest, XAddMaxSeq) {
+  Run({"XADD", "x", "1-18446744073709551615", "f1", "v1"});
+  auto resp = Run({"XADD", "x", "1-*", "f2", "v2"});
+  EXPECT_THAT(resp, ErrArg("The ID specified in XADD is equal or smaller"));
+}
+
 }  // namespace dfly

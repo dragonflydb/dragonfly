@@ -14,6 +14,10 @@
 extern "C" {
 #include "redis/sds.h"
 }
+
+typedef struct streamConsumer streamConsumer;
+typedef struct streamCG streamCG;
+
 namespace dfly {
 
 template <typename DenseSet>
@@ -81,5 +85,8 @@ class UniquePicksGenerator : public PicksGenerator {
   absl::flat_hash_set<RandomPick> picked_indexes_;
   absl::BitGen bitgen_{};
 };
+
+streamConsumer* StreamCreateConsumer(streamCG* cg, std::string_view name, uint64_t now_ms,
+                                     int flags);
 
 }  // namespace dfly
