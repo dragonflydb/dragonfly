@@ -390,7 +390,7 @@ class LocalBlockingCounter {
   }
 
   void unlock() {
-    DCHECK(mutating_ > 0);
+    DCHECK_GT(mutating_, 0);
     --mutating_;
     if (mutating_ == 0) {
       cond_var_.notify_all();
