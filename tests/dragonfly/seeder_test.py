@@ -29,7 +29,15 @@ async def test_static_collection_size(async_client: aioredis.Redis):
 
     await async_client.flushall()
 
-    s = Seeder(units=1, key_target=10, data_size=10_000, collection_size=1, types=["LIST"])
+    s = Seeder(
+        units=1,
+        key_target=10,
+        data_size=10_000,
+        collection_size=1,
+        types=["LIST"],
+        huge_value_percentage=0,
+        huge_value_size=0,
+    )
     await s.run(async_client)
     await check_list()
 

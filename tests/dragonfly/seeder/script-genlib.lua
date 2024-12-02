@@ -35,7 +35,7 @@ local function randstr_sequence()
         strs = dragonfly.randstr(LG_funcs.huge_value_size, LG_funcs.csize)
         huge_entries = huge_entries + 1
     else
-        strs = dragonfly.randstr(LG_funcs.csize, LG_funcs.csize)
+        strs = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize)
     end
     return strs
 end
