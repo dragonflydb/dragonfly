@@ -62,34 +62,6 @@ Test full replication pipeline. Test full sync with streaming changes and stable
         pytest.param(
             8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, False, marks=M_STRESS
         ),
-        # Quick general test that replication is working
-        (
-            1,
-            3 * [1],
-            dict(
-                key_target=1_000,
-                huge_value_percentage=10,
-                huge_value_size=4096 * 2,
-                collection_size=10,
-                types=SeederBase.BIG_VALUE_TYPES,
-            ),
-            500,
-            True,
-        ),
-        # Big value
-        (
-            4,
-            [4, 4],
-            dict(
-                key_target=10_000,
-                huge_value_percentage=5,
-                huge_value_size=4096 * 4,
-                collection_size=50,
-                types=SeederBase.BIG_VALUE_TYPES,
-            ),
-            500,
-            True,
-        ),
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
