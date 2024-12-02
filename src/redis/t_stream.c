@@ -129,21 +129,6 @@ int streamDecrID(streamID *id) {
     return ret;
 }
 
-/* Generate the next stream item ID given the previous one. If the current
- * milliseconds Unix time is greater than the previous one, just use this
- * as time part and start with sequence part of zero. Otherwise we use the
- * previous time (and never go backward) and increment the sequence. */
-void streamNextID(streamID *last_id, streamID *new_id) {
-    uint64_t ms = mstime();
-    if (ms > last_id->ms) {
-        new_id->ms = ms;
-        new_id->seq = 0;
-    } else {
-        *new_id = *last_id;
-        streamIncrID(new_id);
-    }
-}
-
 /* This is a wrapper function for lpGet() to directly get an integer value
  * from the listpack (that may store numbers as a string), converting
  * the string if needed.
@@ -1031,16 +1016,6 @@ long long streamCGLag(stream *s, streamCG *cg) {
  * Low level implementation of consumer groups
  * ----------------------------------------------------------------------- */
 
-/* Create a NACK entry setting the delivery count to 1 and the delivery
- * time to the current time. The NACK consumer will be set to the one
- * specified as argument of the function. */
-streamNACK *streamCreateNACK(streamConsumer *consumer) {
-    streamNACK *nack = zmalloc(sizeof(*nack));
-    nack->delivery_time = mstime();
-    nack->delivery_count = 1;
-    nack->consumer = consumer;
-    return nack;
-}
 
 /* Free a NACK entry. */
 void streamFreeNACK(streamNACK *na) {
@@ -1093,35 +1068,13 @@ streamCG *streamLookupCG(stream *s, sds groupname) {
     return (cg == raxNotFound) ? NULL : cg;
 }
 
-/* Create a consumer with the specified name in the group 'cg' and return.
- * If the consumer exists, return NULL. As a side effect, when the consumer
- * is successfully created, the key space will be notified and dirty++ unless
- * the SCC_NO_NOTIFY or SCC_NO_DIRTIFY flags is specified. */
-streamConsumer *streamCreateConsumer(streamCG *cg, sds name, robj *key, int dbid, int flags) {
-    if (cg == NULL) return NULL;
-    streamConsumer *consumer = zmalloc(sizeof(*consumer));
-    int success = raxTryInsert(cg->consumers,(unsigned char*)name,
-                               sdslen(name),consumer,NULL);
-    if (!success) {
-        zfree(consumer);
-        return NULL;
-    }
-    consumer->name = sdsdup(name);
-    consumer->pel = raxNew();
-    consumer->seen_time = mstime();
-
-    return consumer;
-}
-
 /* Lookup the consumer with the specified name in the group 'cg'. Its last
  * seen time is updated unless the SLC_NO_REFRESH flag is specified. */
 streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int flags) {
     if (cg == NULL) return NULL;
-    int refresh = !(flags & SLC_NO_REFRESH);
     streamConsumer *consumer = raxFind(cg->consumers,(unsigned char*)name,
                                        sdslen(name));
     if (consumer == raxNotFound) return NULL;
-    if (refresh) consumer->seen_time = mstime();
     return consumer;
 }
 
