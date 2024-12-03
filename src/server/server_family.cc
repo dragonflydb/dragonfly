@@ -127,6 +127,9 @@ ABSL_FLAG(bool, s3_sign_payload, true,
 ABSL_FLAG(bool, info_replication_valkey_compatible, true,
           "when true - output valkey compatible values for info-replication");
 
+ABSL_FLAG(bool, managed_service_info, false,
+          "Hides some implementation details from users when true (i.e. in managed service env)");
+
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(uint32_t, hz);
@@ -2222,10 +2225,12 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("dragonfly_version", GetVersion());
     append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
-    append("os", GetOSString());
+    if (!absl::GetFlag(FLAGS_managed_service_info)) {
+      append("os", GetOSString());
+      append("thread_count", service_.proactor_pool().size());
+    }
     append("multiplexing_api", multiplex_api);
     append("tcp_port", GetFlag(FLAGS_port));
-    append("thread_count", service_.proactor_pool().size());
 
     uint64_t uptime = time(NULL) - start_time_;
     append("uptime_in_seconds", uptime);
@@ -2487,11 +2492,13 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
       append("role", "master");
       append("connected_slaves", replicas_info.size());
 
-      for (size_t i = 0; i < replicas_info.size(); i++) {
-        auto& r = replicas_info[i];
-        // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
-        append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port,
-                                          ",state=", r.state, ",lag=", r.lsn_lag));
+      if (!absl::GetFlag(FLAGS_managed_service_info)) {
+        for (size_t i = 0; i < replicas_info.size(); i++) {
+          auto& r = replicas_info[i];
+          // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
+          append(StrCat("slave", i), StrCat("ip=", r.address, ",port=", r.listening_port,
+                                            ",state=", r.state, ",lag=", r.lsn_lag));
+        }
       }
       append("master_replid", master_replid_);
     } else {
