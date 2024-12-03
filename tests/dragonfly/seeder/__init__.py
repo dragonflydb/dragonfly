@@ -138,8 +138,8 @@ class Seeder(SeederBase):
         data_size=100,
         collection_size=None,
         types: typing.Optional[typing.List[str]] = None,
-        huge_value_percentage=5,
-        huge_value_size=16384,
+        huge_value_percentage=3,
+        huge_value_size=8192,
     ):
         SeederBase.__init__(self, types)
         self.key_target = key_target
@@ -207,8 +207,9 @@ class Seeder(SeederBase):
         result = await client.evalsha(sha, 0, *args)
         result = result.split()
         unit.counter = int(result[0])
-        huge_entries = int(result[1])
+        huge_keys = int(result[1])
+        huge_entries = int(result[2])
 
         logging.debug(
-            f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}, huge entries {huge_entries}"
+            f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}, huge keys {huge_keys} with total huge entries {huge_entries}"
         )

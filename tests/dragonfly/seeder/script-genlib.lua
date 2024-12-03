@@ -10,17 +10,9 @@ end
 
 local huge_entries = 0
 
-local function huge_entry()
-    local ratio = LG_funcs.huge_value_percentage / 100
-    -- [0, 1]
-    local rand = math.random()
-    local huge_entry = (ratio > rand)
-    return huge_entry
-end
-
-local function randstr()
+local function randstr(huge_entry)
     local str
-    if huge_entry() then
+    if huge_entry then
         str = dragonfly.randstr(LG_funcs.huge_value_size)
         huge_entries = huge_entries + 1
     else
@@ -29,9 +21,9 @@ local function randstr()
     return str
 end
 
-local function randstr_sequence()
+local function randstr_sequence(huge_entry)
     local strs
-    if huge_entry() then
+    if huge_entry then
         strs = dragonfly.randstr(LG_funcs.huge_value_size, LG_funcs.csize)
         huge_entries = huge_entries + 1
     else
@@ -61,22 +53,24 @@ end
 -- lists
 -- store list of random blobs of default container/element sizes
 
-function LG_funcs.add_list(key, huge_value)
-    redis.apcall('LPUSH', key, unpack(randstr_sequence()))
+function LG_funcs.add_list(key, keys)
+    local is_huge = keys[key]
+    redis.apcall('LPUSH', key, unpack(randstr_sequence(is_huge)))
 end
 
-function LG_funcs.mod_list(key, huge_value)
+function LG_funcs.mod_list(key, keys)
     -- equally likely pops and pushes, we rely on the list size being large enough
     -- to "highly likely" not get emptied out by consequitve pops
+    local is_huge = keys[key]
     local action = math.random(1, 4)
     if action == 1 then
         redis.apcall('RPOP', key)
     elseif action == 2 then
         redis.apcall('LPOP', key)
     elseif action == 3 then
-      redis.apcall('LPUSH', key, randstr())
+      redis.apcall('LPUSH', key, randstr(is_huge))
     else
-      redis.apcall('RPUSH', key, randstr())
+      redis.apcall('RPUSH', key, randstr(is_huge))
     end
 end
 
@@ -95,16 +89,18 @@ function LG_funcs.add_set(key, keys)
         end
         redis.apcall('SDIFFSTORE', key, keys[i1], keys[i2])
     else
-        redis.apcall('SADD', key, unpack(randstr_sequence()))
+        local is_huge = keys[key]
+        redis.apcall('SADD', key, unpack(randstr_sequence(is_huge)))
     end
 end
 
-function LG_funcs.mod_set(key)
+function LG_funcs.mod_set(key, keys)
      -- equally likely pops and additions
     if math.random() < 0.5 then
         redis.apcall('SPOP', key)
     else
-        redis.apcall('SADD', key, randstr())
+        local is_huge = keys[key]
+        redis.apcall('SADD', key, randstr(is_huge))
     end
 end
 
@@ -113,9 +109,10 @@ end
 -- store  {to_string(i): value for i in [1, csize]},
 -- where `value` is a random string for even indices and a number for odd indices
 
-function LG_funcs.add_hash(key)
+function LG_funcs.add_hash(key, keys)
     local blobs
-    if huge_entry() then
+    local is_huge = keys[key]
+    if is_huge then
         blobs  = dragonfly.randstr(LG_funcs.huge_value_size, LG_funcs.csize / 2)
         huge_entries = huge_entries + 1
     else
@@ -134,12 +131,13 @@ function LG_funcs.add_hash(key)
     redis.apcall('HSET', key, unpack(htable))
 end
 
-function LG_funcs.mod_hash(key)
+function LG_funcs.mod_hash(key, keys)
     local idx = math.random(LG_funcs.csize)
     if idx % 2 == 1 then
         redis.apcall('HINCRBY', key, tostring(idx), 1)
     else
-      redis.apcall('HSET', key, tostring(idx), randstr())
+      local is_huge = keys[key]
+      redis.apcall('HSET', key, tostring(idx), randstr(is_huge))
     end
 end
 
@@ -147,7 +145,8 @@ end
 
 function LG_funcs.add_zset(key, keys)
     -- TODO: We don't support ZDIFFSTORE
-    local blobs = randstr_sequence()
+    local is_huge = keys[key]
+    local blobs = randstr_sequence(is_huge)
 
     local ztable = {}
     for i = 1,  LG_funcs.csize do
@@ -157,10 +156,11 @@ function LG_funcs.add_zset(key, keys)
     redis.apcall('ZADD', key, unpack(ztable))
 end
 
-function LG_funcs.mod_zset(key, dbsize)
+function LG_funcs.mod_zset(key, keys)
     local action = math.random(1, 4)
     if action <= 2 then
-        redis.apcall('ZADD', key, math.random(0, LG_funcs.csize * 2), randstr())
+        local is_huge = keys[key]
+        redis.apcall('ZADD', key, math.random(0, LG_funcs.csize * 2), randstr(is_huge))
     elseif action == 3 then
         redis.apcall('ZPOPMAX', key)
     else
