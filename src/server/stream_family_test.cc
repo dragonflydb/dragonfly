@@ -1168,4 +1168,26 @@ TEST_F(StreamFamilyTest, XAddMaxSeq) {
   EXPECT_THAT(resp, ErrArg("The ID specified in XADD is equal or smaller"));
 }
 
+TEST_F(StreamFamilyTest, XsetIdSmallerMaxDeleted) {
+  Run({"XADD", "x", "1-1", "a", "1"});
+  Run({"XADD", "x", "1-2", "b", "2"});
+  Run({"XADD", "x", "1-3", "c", "3"});
+  Run({"XDEL", "x", "1-2"});
+  Run({"XDEL", "x", "1-3"});
+  auto resp = Run({"XINFO", "stream", "x"});
+  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+  auto vec = resp.GetVec();
+  string max_del_id;
+  for (unsigned i = 0; i < vec.size(); i += 2) {
+    if (vec[i] == "max-deleted-entry-id") {
+      max_del_id = vec[i + 1].GetString();
+      break;
+    }
+  }
+  EXPECT_EQ(max_del_id, "1-3");
+
+  resp = Run({"XSETID", "x", "1-2"});
+  ASSERT_THAT(resp, ErrArg("smaller"));
+}
+
 }  // namespace dfly
