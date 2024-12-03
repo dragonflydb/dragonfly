@@ -588,7 +588,9 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   // If we are over limit in non-cache scenario, just be conservative and throw.
   if (apply_memory_limit && !caching_mode_ && memory_budget_ + memory_offset < 0) {
     LOG_EVERY_T(WARNING, 1) << "AddOrFind: over limit, budget: " << memory_budget_
-                            << " reclaimed: " << reclaimed << " offset: " << memory_offset;
+                            << " reclaimed: " << reclaimed << " offset: " << memory_offset
+                            << "max_memory_limit" << max_memory_limit << "used_mem_current"
+                            << used_mem_current;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }

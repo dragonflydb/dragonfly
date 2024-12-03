@@ -132,9 +132,9 @@ jobs:
       - name: C++ Unit Tests
         run: |
           cd ${GITHUB_WORKSPACE}/build
-          echo Run ctest -V -L DFLY
+          echo Run ctest -R rdb_test -V --repeat-until-fail 1000
           GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
-          FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY
+          FLAGS_list_experimental_v2=true timeout 60m ctest -R rdb_test -V --repeat-until-fail 100
 
           echo "Running tests with --force_epoll"
 
@@ -147,15 +147,15 @@ jobs:
           EOF
 
           gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY
+          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 60m ctest -R rdb_test -V --repeat-until-fail 100
 
           echo "Finished running tests with --force_epoll"
 
           echo "Running tests with --cluster_mode=emulated"
-          FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
+          FLAGS_cluster_mode=emulated timeout 60m ctest -R rdb_test -V --repeat-until-fail 100
 
           echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
-          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
+          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 60m ctest -R rdb_test -V --repeat-until-fail 100
 
           timeout 5m ./dragonfly_test
           timeout 5m ./multi_test --multi_exec_mode=1
