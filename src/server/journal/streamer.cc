@@ -86,12 +86,11 @@ void JournalStreamer::Cancel() {
   }
 }
 
-size_t JournalStreamer::GetTotalBufferCapacities() const {
-  return in_flight_bytes_ + pending_buf_mem_size_;
+size_t JournalStreamer::UsedBytes() const {
+  return pending_buf_.size();
 }
 
 void JournalStreamer::AsyncWrite() {
-  DCHECK(pending_buf_mem_size_ != 0);
   DCHECK(!pending_buf_.empty());
 
   if (in_flight_bytes_ > 0) {
@@ -100,34 +99,29 @@ void JournalStreamer::AsyncWrite() {
     return;
   }
 
-  const auto len = pending_buf_mem_size_;
-  pending_buf_mem_size_ = 0;
-  auto tmp_pbuf = std::move(pending_buf_);
-  pending_buf_ = {};
+  const auto& cur_buf = pending_buf_.PrepareNext();
 
-  in_flight_bytes_ += len;
-  total_sent_ += len;
+  in_flight_bytes_ = cur_buf.mem_size;
+  total_sent_ += cur_buf.mem_size;
 
-  const auto v_size = tmp_pbuf.size();
+  const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 4> v(v_size);
 
   for (size_t i = 0; i < v_size; ++i) {
-    const auto* uptr = reinterpret_cast<const uint8_t*>(tmp_pbuf[i].data());
-    v[i] = IoVec(io::Bytes(uptr, tmp_pbuf[i].size()));
+    const auto* uptr = reinterpret_cast<const uint8_t*>(cur_buf.buf[i].data());
+    v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
   }
 
-  dest_->AsyncWrite(v.data(), v.size(),
-                    [buf0 = std::move(tmp_pbuf), this, len](std::error_code ec) {
-                      OnCompletion(std::move(ec), len);
-                    });
+  dest_->AsyncWrite(v.data(), v.size(), [this, len = cur_buf.mem_size](std::error_code ec) {
+    OnCompletion(std::move(ec), len);
+  });
 }
 
 void JournalStreamer::Write(std::string str) {
   DCHECK(!str.empty());
   DVLOG(2) << "Writing " << str.size() << " bytes";
 
-  pending_buf_mem_size_ += str.size();
-  pending_buf_.push_back(std::move(str));
+  pending_buf_.push(std::move(str));
 
   AsyncWrite();
 }
@@ -137,6 +131,9 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
 
   DVLOG(3) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
   in_flight_bytes_ -= len;
+  if (in_flight_bytes_ == 0) {
+    pending_buf_.Pop();
+  }
   if (ec && !IsStopped()) {
     cntx_->ReportError(ec);
   } else if (!pending_buf_.empty() && !IsStopped()) {
@@ -180,7 +177,7 @@ void JournalStreamer::WaitForInflightToComplete() {
 }
 
 bool JournalStreamer::IsStalled() const {
-  return in_flight_bytes_ + pending_buf_mem_size_ >= replication_stream_output_limit_cached;
+  return pending_buf_.size() >= replication_stream_output_limit_cached;
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,

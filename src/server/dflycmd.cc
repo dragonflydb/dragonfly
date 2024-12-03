@@ -778,7 +778,7 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
 
         const auto& flow = info->flows[shard->shard_id()];
         if (flow.streamer)
-          streamer_bytes.fetch_add(flow.streamer->GetTotalBufferCapacities(), memory_order_relaxed);
+          streamer_bytes.fetch_add(flow.streamer->UsedBytes(), memory_order_relaxed);
         if (flow.saver)
           full_sync_bytes.fetch_add(flow.saver->GetTotalBuffersSize(), memory_order_relaxed);
       }
