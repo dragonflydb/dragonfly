@@ -306,6 +306,42 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
   return params;
 }
 
+std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
+  using SordOrder = aggregate::SortParams::SortOrder;
+
+  size_t strings_num = parser->Next<size_t>();
+
+  aggregate::SortParams sort_params;
+  sort_params.fields.reserve(strings_num / 2);
+
+  while (parser->HasNext() && strings_num > 0) {
+    // TODO: Throw an error if the field has no '@' sign at the beginning
+    std::string_view parsed_field = ParseFieldWithAtSign(parser);
+    strings_num--;
+
+    SordOrder sord_order = SordOrder::ASC;
+    if (strings_num > 0) {
+      auto order = parser->TryMapNext("ASC", SordOrder::ASC, "DESC", SordOrder::DESC);
+      if (order) {
+        sord_order = order.value();
+        strings_num--;
+      }
+    }
+
+    sort_params.fields.emplace_back(parsed_field, sord_order);
+  }
+
+  if (strings_num) {
+    return std::nullopt;
+  }
+
+  if (parser->Check("MAX")) {
+    sort_params.max = parser->Next<size_t>();
+  }
+
+  return sort_params;
+}
+
 optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
                                                        SinkReplyBuilder* builder) {
   AggregateParams params;
@@ -369,11 +405,13 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
 
     // SORTBY nargs
     if (parser.Check("SORTBY")) {
-      parser.ExpectTag("1");
-      string_view field = parser.Next();
-      bool desc = bool(parser.Check("DESC"));
+      auto sort_params = ParseAggregatorSortParams(&parser);
+      if (!sort_params) {
+        builder->SendError("bad arguments for SORTBY: specified invalid number of strings");
+        return nullopt;
+      }
 
-      params.steps.push_back(aggregate::MakeSortStep(field, desc));
+      params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
       continue;
     }
 
@@ -980,22 +1018,38 @@ void SearchFamily::FtAggregate(CmdArgList args, Transaction* tx, SinkReplyBuilde
                   make_move_iterator(sub_results.end()));
   }
 
-  auto agg_results = aggregate::Process(std::move(values), params->steps);
-  if (!agg_results.has_value())
-    return builder->SendError(agg_results.error());
+  std::vector<std::string_view> load_fields;
+  if (params->load_fields) {
+    load_fields.reserve(params->load_fields->size());
+    for (const auto& field : params->load_fields.value()) {
+      load_fields.push_back(field.GetShortName());
+    }
+  }
 
-  size_t result_size = agg_results->size();
+  auto agg_results = aggregate::Process(std::move(values), load_fields, params->steps);
+
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   auto sortable_value_sender = SortableValueSender(rb);
 
+  const size_t result_size = agg_results.values.size();
   rb->StartArray(result_size + 1);
   rb->SendLong(result_size);
 
-  for (const auto& result : agg_results.value()) {
-    rb->StartArray(result.size() * 2);
-    for (const auto& [k, v] : result) {
-      rb->SendBulkString(k);
-      std::visit(sortable_value_sender, v);
+  for (const auto& value : agg_results.values) {
+    size_t fields_count = 0;
+    for (const auto& field : agg_results.fields_to_print) {
+      if (value.find(field) != value.end()) {
+        fields_count++;
+      }
+    }
+
+    rb->StartArray(fields_count * 2);
+    for (const auto& field : agg_results.fields_to_print) {
+      auto it = value.find(field);
+      if (it != value.end()) {
+        rb->SendBulkString(field);
+        std::visit(sortable_value_sender, it->second);
+      }
     }
   }
 }
