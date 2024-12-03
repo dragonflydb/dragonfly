@@ -972,7 +972,7 @@ std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() 
 }
 
 // Calls redis function
-// return true if error needs to be raised in case api returns error.
+// Returns false if error needs to be raised.
 bool Interpreter::CallRedisFunction(bool raise_error, bool async, ObjectExplorer* explorer,
                                     SliceSpan args) {
   // Calling with custom explorer is not supported with errors or async
@@ -995,18 +995,18 @@ bool Interpreter::CallRedisFunction(bool raise_error, bool async, ObjectExplorer
   }
 
   if (!translator)
-    return false;
+    return true;
 
   // Raise error for regular 'call' command if needed.
   if (raise_error && translator->HasError()) {
     // error is already on top of stack
-    return true;
+    return false;
   }
 
   if (!async)
     DCHECK_EQ(1, lua_gettop(lua_));
 
-  return false;
+  return true;
 }
 
 // Returns number of results, which is always 1 in this case.
@@ -1033,13 +1033,13 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplore
     return 1;
   }
 
-  // IMPORTANT! all allocations withing this funciton must be freed
+  // IMPORTANT! all allocations within this funciton must be freed
   // BEFORE calling RaiseErrorAndAbort in case of script error. RaiseErrorAndAbort
   // uses longjmp which bypasses stack unwinding and skips the destruction of objects.
   {
     std::optional<absl::FixedArray<std::string_view, 4>> args = PrepareArgs();
     if (args.has_value()) {
-      raise_error = CallRedisFunction(raise_error, async, explorer, SliceSpan{*args});
+      raise_error = !CallRedisFunction(raise_error, async, explorer, SliceSpan{*args});
     }
   }
   if (!raise_error) {

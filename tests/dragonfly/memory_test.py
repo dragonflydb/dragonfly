@@ -114,3 +114,49 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     # new client create shoud not fail after memory usage decrease
     client = df_server.client()
     await client.execute_command("set x y")
+
+
+@pytest.mark.asyncio
+@dfly_args(
+    {
+        "maxmemory": "512mb",
+        "proactor_threads": 1,
+    }
+)
+async def test_eval_with_oom(df_factory: DflyInstanceFactory):
+    """
+    Test running eval commands when dragonfly returns OOM on write commands and check rss memory
+    This test was writen after detecting memory leak in script runs on OOM state
+    """
+    df_server = df_factory.create()
+    df_server.start()
+
+    client = df_server.client()
+    await client.execute_command("DEBUG POPULATE 20000 key 40000 RAND")
+
+    await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
+
+    info = await client.info("memory")
+    logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+
+    reject_limit = 512 * 1024 * 1024  # 256mb
+    assert info["used_memory"] > reject_limit
+    rss_before_eval = info["used_memory_rss"]
+
+    pipe = client.pipeline(transaction=False)
+    MSET_SCRIPT = """
+        redis.call('MSET', KEYS[1], ARGV[1], KEYS[2], ARGV[2])
+    """
+
+    for _ in range(20):
+        for _ in range(8000):
+            pipe.eval(MSET_SCRIPT, 2, "x1", "y1", "x2", "y2")
+        # reject mset due to oom
+        with pytest.raises(redis.exceptions.ResponseError):
+            await pipe.execute()
+
+    await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
+
+    info = await client.info("memory")
+    logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
+    assert rss_before_eval * 1.01 > info["used_memory_rss"]
