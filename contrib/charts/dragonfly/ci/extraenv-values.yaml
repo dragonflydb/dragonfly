@@ -1,0 +1,28 @@
+extraObjects:
+- apiVersion: v1
+  kind: ConfigMap
+  metadata:
+    name: my-configmap
+  data:
+    configKey1: configValue1
+    configKey2: configValue2
+- apiVersion: v1
+  kind: Secret
+  metadata:
+    name: my-secret
+  type: Opaque
+  stringData:
+    username: username
+    password: password
+
+env:
+  - name: ENV_VAR43
+    value: value1
+  - name: ENV_VAR323
+    value: value2
+
+envFrom:
+  - configMapRef:
+      name: my-configmap
+  - secretRef:
+      name: my-secret

@@ -92,34 +92,6 @@ void _serverAssert(const char *estr, const char *file, int line);
 #define serverAssert(_e) ((_e)?(void)0 : (_serverAssert(#_e,__FILE__,__LINE__),_exit(1)))
 
 typedef long long mstime_t; /* millisecond time type. */
-long long ustime(void);
-
-/* Return the current time in minutes, just taking the least significant
- * 16 bits. The returned time is suitable to be stored as LDT (last decrement
- * time) for the LFU implementation. */
-static inline unsigned long LFUGetTimeInMinutesT(size_t sec) {
-    return (sec / 60) & 65535;
-}
-
-static inline unsigned long LFUGetTimeInMinutes() {
-    return LFUGetTimeInMinutesT(time(NULL));
-}
-
-/* Given an object last access time, compute the minimum number of minutes
- * that elapsed since the last access. Handle overflow (ldt greater than
- * the current 16 bits minutes time) considering the time as wrapping
- * exactly once. */
-static inline unsigned long LFUTimeElapsed(time_t sec, unsigned long ldt) {
-    unsigned long now = LFUGetTimeInMinutesT(sec);
-    if (now >= ldt) return now-ldt;
-    return 65535-ldt+now;
-}
-
-
-/* Return the UNIX time in milliseconds */
-static inline mstime_t mstime(void) {
-  return ustime()/1000;
-}
 
 
 #endif

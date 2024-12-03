@@ -39,13 +39,13 @@ using BitsStrVec = vector<string>;
 
 // The following is the list of the functions that would handle the
 // commands that handle the bit operations
-void BitPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-void BitCount(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-void BitField(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-void BitFieldRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-void BitOp(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-void GetBit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-void SetBit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+void BitPos(CmdArgList args, const CommandContext& cmd_cntx);
+void BitCount(CmdArgList args, const CommandContext& cmd_cntx);
+void BitField(CmdArgList args, const CommandContext& cmd_cntx);
+void BitFieldRo(CmdArgList args, const CommandContext& cmd_cntx);
+void BitOp(CmdArgList args, const CommandContext& cmd_cntx);
+void GetBit(CmdArgList args, const CommandContext& cmd_cntx);
+void SetBit(CmdArgList args, const CommandContext& cmd_cntx);
 
 OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShard* shard);
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset);
@@ -513,10 +513,10 @@ void HandleOpValueResult(const OpResult<T>& result, SinkReplyBuilder* builder) {
 
 // ------------------------------------------------------------------------- //
 //  Impl for the command functions
-void BitPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void BitPos(CmdArgList args, const CommandContext& cmd_cntx) {
   // Support for the command BITPOS
   // See details at https://redis.io/commands/bitpos/
-
+  auto* builder = cmd_cntx.rb;
   if (args.size() < 1 || args.size() > 5) {
     return builder->SendError(kSyntaxErr);
   }
@@ -560,11 +560,11 @@ void BitPos(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return FindFirstBitWithValue(t->GetOpArgs(shard), key, value, start, end, as_bit);
   };
-  OpResult<int64_t> res = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<int64_t> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, builder);
 }
 
-void BitCount(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void BitCount(CmdArgList args, const CommandContext& cmd_cntx) {
   // Support for the command BITCOUNT
   // See details at https://redis.io/commands/bitcount/
   // Please note that if the key don't exists, it would return 0
@@ -577,14 +577,14 @@ void BitCount(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
                           : std::pair<int64_t, int64_t>{0, std::numeric_limits<int64_t>::max()};
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
-
+  auto* builder = cmd_cntx.rb;
   if (!parser.Finalize()) {
     return builder->SendError(parser.Error()->MakeReply());
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
   };
-  OpResult<std::size_t> res = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult<std::size_t> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, builder);
 }
 
@@ -1111,19 +1111,19 @@ void BitFieldGeneric(CmdArgList args, bool read_only, Transaction* tx, SinkReply
   SendResults(*res, builder);
 }
 
-void BitField(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  BitFieldGeneric(args, false, tx, builder);
+void BitField(CmdArgList args, const CommandContext& cmd_cntx) {
+  BitFieldGeneric(args, false, cmd_cntx.tx, cmd_cntx.rb);
 }
 
-void BitFieldRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  BitFieldGeneric(args, true, tx, builder);
+void BitFieldRo(CmdArgList args, const CommandContext& cmd_cntx) {
+  BitFieldGeneric(args, true, cmd_cntx.tx, cmd_cntx.rb);
 }
 
 #ifndef __clang__
 #pragma GCC diagnostic pop
 #endif
 
-void BitOp(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void BitOp(CmdArgList args, const CommandContext& cmd_cntx) {
   static const std::array<string_view, 4> BITOP_OP_NAMES{OR_OP_NAME, XOR_OP_NAME, AND_OP_NAME,
                                                          NOT_OP_NAME};
   string op = absl::AsciiStrToUpper(ArgS(args, 0));
@@ -1131,6 +1131,7 @@ void BitOp(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   bool illegal = std::none_of(BITOP_OP_NAMES.begin(), BITOP_OP_NAMES.end(),
                               [&op](auto val) { return op == val; });
 
+  auto* builder = cmd_cntx.rb;
   if (illegal || (op == NOT_OP_NAME && args.size() > 3)) {
     return builder->SendError(kSyntaxErr);  // too many arguments
   }
@@ -1155,12 +1156,12 @@ void BitOp(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
     return OpStatus::OK;
   };
 
-  tx->Execute(std::move(shard_bitop), false);  // we still have more work to do
+  cmd_cntx.tx->Execute(std::move(shard_bitop), false);  // we still have more work to do
   // All result from each shard
   const auto joined_results = CombineResultOp(result_set, op);
   // Second phase - save to target key if successful
   if (!joined_results) {
-    tx->Conclude();
+    cmd_cntx.tx->Conclude();
     builder->SendError(joined_results.status());
     return;
   } else {
@@ -1191,12 +1192,12 @@ void BitOp(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
       return OpStatus::OK;
     };
 
-    tx->Execute(std::move(store_cb), true);
+    cmd_cntx.tx->Execute(std::move(store_cb), true);
     builder->SendLong(op_result.size());
   }
 }
 
-void GetBit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void GetBit(CmdArgList args, const CommandContext& cmd_cntx) {
   // Support for the command "GETBIT key offset"
   // see https://redis.io/commands/getbit/
 
@@ -1204,16 +1205,16 @@ void GetBit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   string_view key = ArgS(args, 0);
 
   if (!absl::SimpleAtoi(ArgS(args, 1), &offset)) {
-    return builder->SendError(kInvalidIntErr);
+    return cmd_cntx.rb->SendError(kInvalidIntErr);
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return ReadValueBitsetAt(t->GetOpArgs(shard), key, offset);
   };
-  OpResult<bool> res = tx->ScheduleSingleHopT(std::move(cb));
-  HandleOpValueResult(res, builder);
+  OpResult<bool> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  HandleOpValueResult(res, cmd_cntx.rb);
 }
 
-void SetBit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SetBit(CmdArgList args, const CommandContext& cmd_cntx) {
   // Support for the command "SETBIT key offset new_value"
   // see https://redis.io/commands/setbit/
 
@@ -1221,15 +1222,15 @@ void SetBit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
   auto [key, offset, value] = parser.Next<string_view, uint32_t, FInt<0, 1>>();
 
   if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+    return cmd_cntx.rb->SendError(err->MakeReply());
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return BitNewValue(t->GetOpArgs(shard), key, offset, value != 0);
   };
 
-  OpResult<bool> res = tx->ScheduleSingleHopT(std::move(cb));
-  HandleOpValueResult(res, builder);
+  OpResult<bool> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  HandleOpValueResult(res, cmd_cntx.rb);
 }
 
 // ------------------------------------------------------------------------- //

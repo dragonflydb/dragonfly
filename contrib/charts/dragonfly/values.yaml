@@ -201,6 +201,12 @@ resources:
   #   cpu: 100m
   #   memory: 128Mi
 
+# -- extra environment variables
+env: []
+
+# -- extra environment variables from K8s objects
+envFrom: []
+
 # -- Priority class name for pod assignment
 priorityClassName: ""
 

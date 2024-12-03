@@ -815,6 +815,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("replication_timeout");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
+  config_registry.RegisterMutable("managed_service_info");
 
   config_registry.RegisterMutable(
       "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
@@ -2450,8 +2451,10 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     return builder->SendLong(cmd_cnt);
   }
 
+  bool sufficient_args = (args.size() == 2);
+
   // INFO [cmd]
-  if (subcmd == "INFO" && args.size() == 2) {
+  if (subcmd == "INFO" && sufficient_args) {
     string cmd = absl::AsciiStrToUpper(ArgS(args, 1));
 
     if (const auto* cid = registry_.Find(cmd); cid) {
@@ -2462,6 +2465,11 @@ void Service::Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     }
 
     return;
+  }
+
+  sufficient_args = (args.size() == 1);
+  if (subcmd == "DOCS" && sufficient_args) {
+    return builder->SendOk();
   }
 
   return builder->SendError(kSyntaxErr, kSyntaxErrType);

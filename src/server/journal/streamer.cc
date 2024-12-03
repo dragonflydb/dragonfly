@@ -41,7 +41,9 @@ JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
 }
 
 JournalStreamer::~JournalStreamer() {
-  DCHECK_EQ(in_flight_bytes_, 0u);
+  if (!cntx_->IsCancelled()) {
+    DCHECK_EQ(in_flight_bytes_, 0u);
+  }
   VLOG(1) << "~JournalStreamer";
 }
 
@@ -79,7 +81,9 @@ void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
-  WaitForInflightToComplete();
+  if (!cntx_->IsCancelled()) {
+    WaitForInflightToComplete();
+  }
 }
 
 size_t JournalStreamer::GetTotalBufferCapacities() const {
@@ -214,8 +218,15 @@ void RestoreStreamer::Run() {
     if (fiber_cancelled_)
       return;
     cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+      if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
+        return;
+
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
+
+      if (fiber_cancelled_)  // Could have been cancelled in above call too
+        return;
+
       WriteBucket(it);
     });
 

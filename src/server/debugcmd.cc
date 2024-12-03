@@ -19,7 +19,9 @@ extern "C" {
 #include "base/logging.h"
 #include "core/compact_object.h"
 #include "core/qlist.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
+#include "core/string_set.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -65,6 +67,7 @@ struct ObjInfo {
 
   // for lists - how many nodes do they have.
   unsigned num_nodes = 0;
+  unsigned num_compressed = 0;
 
   enum LockStatus { NONE, S, X } lock_status = NONE;
 
@@ -212,11 +215,23 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
 
   if (pv.ObjType() == OBJ_LIST) {
     IterateList(pv, per_entry_cb, 0, -1);
+    if (pv.Encoding() == kEncodingQL2) {
+      const QList* ql = static_cast<QList*>(pv.RObjPtr());
+      val_len = ql->MallocUsed(true);
+    }
   } else if (pv.ObjType() == OBJ_ZSET) {
     IterateSortedSet(pv.GetRobjWrapper(),
                      [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
+    if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
+      detail::SortedMap* smap = static_cast<detail::SortedMap*>(pv.RObjPtr());
+      val_len = smap->MallocSize();
+    }
   } else if (pv.ObjType() == OBJ_SET) {
     IterateSet(pv, per_entry_cb);
+    if (pv.Encoding() == kEncodingStrMap2) {
+      StringSet* ss = static_cast<StringSet*>(pv.RObjPtr());
+      val_len = ss->ObjMallocUsed() + ss->SetMallocUsed();
+    }
   } else if (pv.ObjType() == OBJ_HASH) {
     if (pv.Encoding() == kEncodingListPack) {
       uint8_t intbuf[LP_INTBUF_SIZE];
@@ -322,6 +337,14 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
     if (pv.ObjType() == OBJ_LIST && pv.Encoding() == kEncodingQL2) {
       const QList* qlist = static_cast<const QList*>(pv.RObjPtr());
       oinfo.num_nodes = qlist->node_count();
+      auto* node = qlist->Head();
+
+      while (node) {
+        if (node->encoding == QUICKLIST_NODE_ENCODING_LZF) {
+          ++oinfo.num_compressed;
+        }
+        node = node->next;
+      }
     }
 
     if (pv.IsExternal()) {
@@ -357,13 +380,31 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
   }
 
   // Only strings are supported right now.
-  if (it->second.ObjType() != OBJ_STRING) {
+  if (it->second.ObjType() != OBJ_STRING && it->second.ObjType() != OBJ_LIST) {
     return OpStatus::WRONG_TYPE;
   }
+  ValueCompressInfo info;
+
+  if (it->second.ObjType() == OBJ_LIST) {
+    if (it->second.Encoding() != kEncodingQL2) {
+      return OpStatus::WRONG_TYPE;
+    }
+
+    const QList* src = static_cast<const QList*>(it->second.RObjPtr());
+    info.raw_size = src->MallocUsed(true);
+    QList qlist(-2, 1);
+    auto copy_cb = [&](QList::Entry entry) {
+      qlist.Push(entry.view(), QList::HEAD);
+      return true;
+    };
+    src->Iterate(copy_cb, 0, -1);
+    info.compressed_size = qlist.MallocUsed(true);
+    return info;
+  }
+
   string scratch;
   string_view value = it->second.GetSlice(&scratch);
 
-  ValueCompressInfo info;
   info.raw_size = value.size();
   info.compressed_size = info.raw_size;
 
@@ -849,7 +890,10 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
   ShardId sid = Shard(key, ess.size());
   VLOG(1) << "DebugCmd::Inspect " << key;
 
-  bool check_compression = (args.size() == 1) && ArgS(args, 0) == "COMPRESS";
+  bool check_compression = false;
+  if (args.size() == 1) {
+    check_compression = absl::AsciiStrToUpper(ArgS(args, 0)) == "COMPRESS";
+  }
   string resp;
 
   if (check_compression) {
@@ -886,7 +930,13 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
     }
 
     if (res.num_nodes) {
-      StrAppend(&resp, " ns:", res.num_nodes);
+      // node count
+      StrAppend(&resp, " nc:", res.num_nodes);
+    }
+
+    if (res.num_compressed) {
+      // compressed nodes
+      StrAppend(&resp, " cn:", res.num_compressed);
     }
 
     if (res.lock_status != ObjInfo::NONE) {

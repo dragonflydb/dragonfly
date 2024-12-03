@@ -83,6 +83,10 @@ MATCHER_P(RespArray, value, "") {
       result_listener);
 }
 
+template <typename... Args> auto RespElementsAre(const Args&... matchers) {
+  return RespArray(::testing::ElementsAre(matchers...));
+}
+
 inline bool operator==(const RespExpr& left, std::string_view s) {
   return left.type == RespExpr::STRING && ToSV(left.GetBuf()) == s;
 }

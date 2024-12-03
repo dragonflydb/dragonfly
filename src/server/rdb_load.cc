@@ -41,6 +41,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
@@ -971,9 +972,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     }
 
     for (const auto& pel : cg.pel_arr) {
-      streamNACK* nack = streamCreateNACK(NULL);
+      streamNACK* nack = reinterpret_cast<streamNACK*>(zmalloc(sizeof(*nack)));
       nack->delivery_time = pel.delivery_time;
       nack->delivery_count = pel.delivery_count;
+      nack->consumer = nullptr;
 
       if (!raxTryInsert(cgroup->pel, const_cast<uint8_t*>(pel.rawid.data()), pel.rawid.size(), nack,
                         NULL)) {
@@ -985,17 +987,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     }
 
     for (const auto& cons : cg.cons_arr) {
-      sds cname = ToSds(cons.name);
-
-      streamConsumer* consumer =
-          streamCreateConsumer(cgroup, cname, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
-      sdsfree(cname);
+      streamConsumer* consumer = StreamCreateConsumer(cgroup, ToSV(cons.name), cons.seen_time,
+                                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
       if (!consumer) {
         LOG(ERROR) << "Duplicate stream consumer detected.";
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
-      consumer->seen_time = cons.seen_time;
 
       /* Create the PEL (pending entries list) about entries owned by this specific
        * consumer. */
@@ -1975,17 +1973,8 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
         return make_unexpected(ec);
       }
 
-      // streamNACK* nack = streamCreateNACK(NULL);
-      // auto cleanup2 = absl::Cleanup([&] { streamFreeNACK(nack); });
-
       SET_OR_UNEXPECT(FetchInt<int64_t>(), pel.delivery_time);
       SET_OR_UNEXPECT(LoadLen(nullptr), pel.delivery_count);
-
-      /*if (!raxTryInsert(cgroup->pel, rawid, sizeof(rawid), nack, NULL)) {
-        LOG(ERROR) << "Duplicated global PEL entry loading stream consumer group";
-        return Unexpected(errc::duplicate_key);
-      }
-      std::move(cleanup2).Cancel();*/
     }
 
     /* Now that we loaded our global PEL, we need to load the
@@ -2234,7 +2223,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
   /* Key-specific attributes, set by opcodes before the key type. */
   ObjSettings settings;
-  settings.now = mstime();
+  settings.now = GetCurrentTimeMs();
   size_t keys_loaded = 0;
 
   auto cleanup = absl::Cleanup([&] { FinishLoad(start, &keys_loaded); });
