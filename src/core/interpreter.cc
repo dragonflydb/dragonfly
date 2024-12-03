@@ -974,7 +974,7 @@ std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() 
 std::optional<int> Interpreter::CallRedisFunction(bool* raise_error, bool async,
                                                   ObjectExplorer* explorer, SliceSpan args) {
   // Calling with custom explorer is not supported with errors or async
-  DCHECK(explorer == nullptr || (!raise_error && !async));
+  DCHECK(explorer == nullptr || (!*raise_error && !async));
 
   // If no custom explorer is set, use default translator
   optional<RedisTranslator> translator;
