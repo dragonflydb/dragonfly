@@ -70,7 +70,7 @@ class JournalStreamer {
    public:
     struct Buf {
       size_t mem_size = 0;
-      std::vector<std::string> buf;  // TODO check inlinedVector option
+      absl::InlinedVector<std::string, 8> buf;
 
       static constexpr size_t max_buf_size = 1024;  // depends on UIO_MAXIOV
     };

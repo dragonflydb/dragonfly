@@ -105,7 +105,7 @@ void JournalStreamer::AsyncWrite() {
   total_sent_ += cur_buf.mem_size;
 
   const auto v_size = cur_buf.buf.size();
-  absl::InlinedVector<iovec, 4> v(v_size);
+  absl::InlinedVector<iovec, 8> v(v_size);
 
   for (size_t i = 0; i < v_size; ++i) {
     const auto* uptr = reinterpret_cast<const uint8_t*>(cur_buf.buf[i].data());
