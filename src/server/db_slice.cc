@@ -1290,9 +1290,6 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
 
     auto time_finish = absl::GetCurrentTimeNanos();
     events_.evicted_keys += evicted_items;
-    DVLOG(2) << "Evicted: " << evicted_bytes;
-    DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted_items << "/"
-             << max_eviction_per_hb;
     DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
     return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
   };

@@ -61,8 +61,10 @@ ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
 
 ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
-          "Eviction starts when free memory (including rss memory) drops below "
-          "eviction_memory_budget_threshold * max_memory_limit");
+          "Eviction starts when the free memory (including RSS memory) drops below "
+          "eviction_memory_budget_threshold * max_memory_limit.");
+
+ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
 
 namespace dfly {
 
@@ -751,8 +753,8 @@ void EngineShard::RetireExpiredAndEvict() {
         size_t(max_memory_limit * eviction_memory_budget_threshold) / shards_count;
   }
 
-  size_t max_rss_memory;
-  size_t shard_rss_memory_budget_threshold;
+  size_t max_rss_memory = 0;
+  size_t shard_rss_memory_budget_threshold = 0;
   if (should_evict_depending_on_rss_memory) {
     // rss_oom_deny_ratio > 0.0, so can safely use it
     max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
@@ -801,7 +803,12 @@ void EngineShard::RetireExpiredAndEvict() {
 
     if (goal_bytes) {
       uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-      db_slice.FreeMemWithEvictionStep(i, starting_segment_id, goal_bytes);
+      auto [evicted_items, evicted_bytes] =
+          db_slice.FreeMemWithEvictionStep(i, starting_segment_id, goal_bytes);
+      DVLOG(2) << "Heartbeat eviction: Expected to evict " << goal_bytes
+               << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
+               << " bytes. Max eviction per heartbeat: "
+               << GetFlag(FLAGS_max_eviction_per_heartbeat);
     }
   }
 

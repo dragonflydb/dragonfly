@@ -180,6 +180,7 @@ async def test_cache_eviction_with_rss_deny_oom(
     """
 
     max_memory = 256 * 1024 * 1024  # 256 MB
+    rss_max_memory = int(max_memory * 0.5)  # 50% of max memory
     data_fill_size = int(0.25 * max_memory)  # 25% of max memory
     rss_increase_size = int(0.3 * max_memory)  # 30% of max memory
 
@@ -197,7 +198,17 @@ async def test_cache_eviction_with_rss_deny_oom(
 
     # Get RSS memory before creating new connections
     memory_info = await async_client.info("memory")
+    memory_before_connections = memory_info["used_memory"]
     rss_before_connections = memory_info["used_memory_rss"]
+    assert (
+        memory_before_connections < max_memory * 0.9
+    ), "Used memory should be less than 90% of max memory."
+    assert (
+        rss_before_connections < rss_max_memory * 0.9
+    ), "RSS memory should be less than 90% of rss max memory (max_memory * rss_oom_deny_ratio)."
+
+    # Disable heartbeat eviction
+    await async_client.execute_command("CONFIG SET enable_heartbeat_eviction false")
 
     # Increase RSS memory by 30% of max memory
     # We can simulate RSS increase by creating new connections
@@ -209,6 +220,17 @@ async def test_cache_eviction_with_rss_deny_oom(
         conn = aioredis.Redis(port=df_server.port)
         await conn.ping()
         connections.append(conn)
+
+    await asyncio.sleep(1)
+
+    # Check that RSS memory is above rss limit
+    memory_info = await async_client.info("memory")
+    assert (
+        memory_info["used_memory_rss"] >= rss_max_memory * 0.9
+    ), "RSS memory should exceed 90% of the maximum RSS memory limit (max_memory * rss_oom_deny_ratio)."
+
+    # Enable heartbeat eviction
+    await async_client.execute_command("CONFIG SET enable_heartbeat_eviction true")
 
     await asyncio.sleep(1)  # Wait for RSS heartbeat update
 

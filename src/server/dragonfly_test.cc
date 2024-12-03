@@ -458,14 +458,18 @@ TEST_F(DflyEngineTest, OOM) {
 TEST_F(DflyEngineTest, Bug207) {
   max_memory_limit = 300000 * 4;
 
+  // The threshold is set to 0.3 to trigger eviction earlier and prevent OOM.
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_eviction_memory_budget_threshold, 0.3);
 
   shard_set->TEST_EnableCacheMode();
 
+  /* The value should be large enough to avoid being inlined. Heartbeat evicts only objects for
+   * which HasAllocated() returns true. */
+  std::string value(1000, '.');
+
   ssize_t i = 0;
   RespExpr resp;
-  std::string value(1000, '.');
   for (; i < 1000; ++i) {
     resp = Run({"setex", StrCat("key", i), "30", value});
     ASSERT_EQ(resp, "OK");
