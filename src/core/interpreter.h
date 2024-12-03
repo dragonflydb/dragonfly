@@ -141,8 +141,7 @@ class Interpreter {
   static int RedisAPCallCommand(lua_State* lua);
 
   std::optional<absl::FixedArray<std::string_view, 4>> PrepareArgs();
-  std::optional<int> CallRedisFunction(bool* raise_error, bool async, ObjectExplorer* explorer,
-                                       SliceSpan args);
+  bool CallRedisFunction(bool raise_error, bool async, ObjectExplorer* explorer, SliceSpan args);
 
   lua_State* lua_;
   unsigned cmd_depth_ = 0;

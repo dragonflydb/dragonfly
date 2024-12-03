@@ -968,13 +968,15 @@ std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() 
   /* Pop all arguments from the stack, we do not need them anymore
    * and this way we guaranty we will have room on the stack for the result. */
   lua_pop(lua_, argc);
-  return std::make_optional(args);
+  return args;
 }
 
-std::optional<int> Interpreter::CallRedisFunction(bool* raise_error, bool async,
-                                                  ObjectExplorer* explorer, SliceSpan args) {
+// Calls redis function
+// return true if error needs to be raised in case api returns error.
+bool Interpreter::CallRedisFunction(bool raise_error, bool async, ObjectExplorer* explorer,
+                                    SliceSpan args) {
   // Calling with custom explorer is not supported with errors or async
-  DCHECK(explorer == nullptr || (!*raise_error && !async));
+  DCHECK(explorer == nullptr || (!raise_error && !async));
 
   // If no custom explorer is set, use default translator
   optional<RedisTranslator> translator;
@@ -983,7 +985,7 @@ std::optional<int> Interpreter::CallRedisFunction(bool* raise_error, bool async,
     explorer = &*translator;
   }
   cmd_depth_++;
-  redis_func_(CallArgs{args, &buffer_, explorer, async, *raise_error, raise_error});
+  redis_func_(CallArgs{args, &buffer_, explorer, async, raise_error, &raise_error});
   cmd_depth_--;
 
   // Shrink reusable buffer if it's too big.
@@ -993,18 +995,18 @@ std::optional<int> Interpreter::CallRedisFunction(bool* raise_error, bool async,
   }
 
   if (!translator)
-    return 0;
+    return false;
 
   // Raise error for regular 'call' command if needed.
-  if (*raise_error && translator->HasError()) {
+  if (raise_error && translator->HasError()) {
     // error is already on top of stack
-    return std::nullopt;
+    return true;
   }
 
   if (!async)
     DCHECK_EQ(1, lua_gettop(lua_));
 
-  return 1;
+  return false;
 }
 
 // Returns number of results, which is always 1 in this case.
@@ -1034,21 +1036,16 @@ int Interpreter::RedisGenericCommand(bool raise_error, bool async, ObjectExplore
   // IMPORTANT! all allocations withing this funciton must be freed
   // BEFORE calling RaiseErrorAndAbort in case of script error. RaiseErrorAndAbort
   // uses longjmp which bypasses stack unwinding and skips the destruction of objects.
-
-  std::optional<int> ret;
   {
     std::optional<absl::FixedArray<std::string_view, 4>> args = PrepareArgs();
     if (args.has_value()) {
-      ret = CallRedisFunction(&raise_error, async, explorer, SliceSpan{*args});
+      raise_error = CallRedisFunction(raise_error, async, explorer, SliceSpan{*args});
     }
   }
-  if (ret.has_value()) {
-    return *ret;
+  if (!raise_error) {
+    return 1;
   }
-  if (raise_error) {
-    return RaiseErrorAndAbort(lua_);  // this function never returns, it unwinds the Lua call stack
-  }
-  return 1;
+  return RaiseErrorAndAbort(lua_);  // this function never returns, it unwinds the Lua call stack
 }
 
 int Interpreter::RedisCallCommand(lua_State* lua) {
