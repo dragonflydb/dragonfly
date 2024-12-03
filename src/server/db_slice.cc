@@ -450,7 +450,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   }
 
   if (res.it->second.HasExpire()) {  // check expiry state
-    res = ExpireIfNeeded(cntx, res.it);
+    res = ExpireIfNeeded(cntx, res.it, true);
     if (!IsValid(res.it)) {
       return OpStatus::KEY_NOTFOUND;
     }
@@ -1088,11 +1088,11 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
 }
 
 DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) const {
-  auto res = ExpireIfNeeded(cntx, it.GetInnerIt());
+  auto res = ExpireIfNeeded(cntx, it.GetInnerIt(), false);
   return {.it = Iterator::FromPrime(res.it), .exp_it = ExpIterator::FromPrime(res.exp_it)};
 }
 
-DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
+DbSlice::PrimeItAndExp DbSlice::ExpireIfNeededImpl(const Context& cntx, PrimeIterator it) const {
   if (!it->second.HasExpire()) {
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
@@ -1141,6 +1141,17 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   return {PrimeIterator{}, ExpireIterator{}};
 }
 
+// It's fine to preempt if we hold a lock to the key because there won't be any
+// concurrent changes. If preempt = false, we need to Wait on the blocking counter.
+DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
+                                               bool preemptive) const {
+  if (preemptive) {
+    return ExpireIfNeededImpl(cntx, it);
+  }
+  FiberAtomicGuard guard;
+  return ExpireIfNeededImpl(cntx, it);
+}
+
 void DbSlice::ExpireAllIfNeeded() {
   for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
     if (!db_arr_[db_index])
@@ -1156,6 +1167,7 @@ void DbSlice::ExpireAllIfNeeded() {
       ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
     };
 
+    block_counter_.Wait();
     ExpireTable::Cursor cursor;
     do {
       cursor = Traverse(&db.expire, cursor, cb);
