@@ -21,12 +21,13 @@ local collection_size = tonumber(ARGV[9])
 -- Probability of each key in key_target to be a big value
 local huge_value_percentage = tonumber(ARGV[10])
 local huge_value_size = tonumber(ARGV[11])
+local huge_value_csize = tonumber(ARGV[12])
 
 -- collect all keys belonging to this script
 -- assumes exclusive ownership
 local keys = LU_collect_keys(prefix, type)
 
-LG_funcs.init(data_size, collection_size, huge_value_percentage, huge_value_size)
+LG_funcs.init(data_size, collection_size, huge_value_percentage, huge_value_size, huge_value_csize)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
 local huge_entries = LG_funcs["get_huge_entries"]

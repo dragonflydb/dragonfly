@@ -1,11 +1,12 @@
 local LG_funcs = {}
 
-function LG_funcs.init(dsize, csize, large_val_perc, large_val_sz)
+function LG_funcs.init(dsize, csize, large_val_perc, large_val_sz, huge_value_csize)
     LG_funcs.dsize = dsize
     LG_funcs.csize = csize
     LG_funcs.esize = math.ceil(dsize / csize)
     LG_funcs.huge_value_percentage = large_val_perc
     LG_funcs.huge_value_size = large_val_sz
+    LG_funcs.huge_value_csize = huge_value_csize
 end
 
 local huge_entries = 0
@@ -24,7 +25,7 @@ end
 local function randstr_sequence(huge_entry)
     local strs
     if huge_entry then
-        strs = dragonfly.randstr(LG_funcs.huge_value_size, LG_funcs.csize)
+        strs = dragonfly.randstr(LG_funcs.huge_value_size, LG_funcs.huge_value_csize)
         huge_entries = huge_entries + 1
     else
         strs = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize)

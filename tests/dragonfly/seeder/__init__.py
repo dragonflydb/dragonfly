@@ -138,8 +138,10 @@ class Seeder(SeederBase):
         data_size=100,
         collection_size=None,
         types: typing.Optional[typing.List[str]] = None,
-        huge_value_percentage=1,
+        huge_value_percentage=2,
         huge_value_size=4096,
+        # 2 huge entries per container/key as default
+        huge_value_csize=2,
     ):
         SeederBase.__init__(self, types)
         self.key_target = key_target
@@ -151,6 +153,7 @@ class Seeder(SeederBase):
 
         self.huge_value_percentage = huge_value_percentage
         self.huge_value_size = huge_value_size
+        self.huge_value_csize = huge_value_csize
 
         self.units = [
             Seeder.Unit(
@@ -174,6 +177,7 @@ class Seeder(SeederBase):
             self.collection_size,
             self.huge_value_percentage,
             self.huge_value_size,
+            self.huge_value_csize,
         ]
 
         sha = await client.script_load(Seeder._load_script("generate"))
