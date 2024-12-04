@@ -10,13 +10,14 @@ from .instance import DflyInstance, DflyInstanceFactory
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",
     [
-        ("JSON", 200_000, 100, 100),
-        ("SET", 280_000, 100, 100),
+        # There is an overhead per key, so keep the number of keys equal
+        ("JSON", 250_000, 100, 75),
+        ("SET", 250_000, 100, 110),
         ("HASH", 250_000, 100, 100),
         ("ZSET", 250_000, 100, 100),
-        ("LIST", 300_000, 100, 100),
-        ("STRING", 3_500_000, 1000, 1),
-        ("STREAM", 260_000, 100, 100),
+        ("LIST", 250_000, 100, 125),
+        ("STRING", 250_000, 20_000, 1),
+        ("STREAM", 250_000, 100, 120),
     ],
 )
 # We limit to 5gb just in case to sanity check the gh runner. Otherwise, if we ask for too much
@@ -38,7 +39,7 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     client = df_server.client()
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
-    cmd = f"DEBUG POPULATE {keys} {type} {val_size} RAND TYPE {type} ELEMENTS {elements}"
+    cmd = f"DEBUG POPULATE {keys} k {val_size} RAND TYPE {type} ELEMENTS {elements}"
     print(f"Running {cmd}")
     await client.execute_command(cmd)
 
@@ -51,11 +52,10 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     # It could be the case that the machine is configured to use swap if this assertion fails
     assert delta > 0
     assert delta < max_unaccounted
+
     delta = info["used_memory_rss"] - info["object_used_memory"]
-    # TODO investigate why it fails on string
-    if type == "JSON" or type == "STREAM":
-        assert delta > 0
-        assert delta < max_unaccounted
+    assert delta > 0
+    assert delta < max_unaccounted
 
 
 @pytest.mark.asyncio
