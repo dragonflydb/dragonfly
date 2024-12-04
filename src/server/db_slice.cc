@@ -1157,7 +1157,6 @@ void DbSlice::ExpireAllIfNeeded() {
       ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it, false);
     };
 
-    block_counter_.Wait();
     ExpireTable::Cursor cursor;
     do {
       cursor = Traverse(&db.expire, cursor, cb);
