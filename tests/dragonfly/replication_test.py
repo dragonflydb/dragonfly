@@ -81,6 +81,8 @@ async def test_replication_all(
     if big_value:
         args["serialization_max_chunk_size"] = 4096
 
+    args["allocation_tracker"] = "1000000000:40000000000"
+
     master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **args)
     replicas = [
         df_factory.create(admin_port=ADMIN_PORT + i + 1, proactor_threads=t)
