@@ -150,7 +150,13 @@ function LG_funcs.add_zset(key, keys)
     local blobs = randstr_sequence(is_huge)
 
     local ztable = {}
-    for i = 1,  LG_funcs.csize do
+
+    local limit = LG_funcs.csize
+    if is_huge then
+      limit = LG_funcs.huge_value_csize
+    end
+
+    for i = 1, limit do
         ztable[i * 2 - 1] = tostring(i)
         ztable[i * 2] = blobs[i]
     end
