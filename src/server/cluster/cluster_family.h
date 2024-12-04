@@ -51,7 +51,7 @@ class ClusterFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
   // Cluster commands compatible with Redis
-  void Cluster(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void Cluster(CmdArgList args, const CommandContext& cmd_cntx);
   void ClusterHelp(SinkReplyBuilder* builder);
   void ClusterShards(SinkReplyBuilder* builder, ConnectionContext* cntx);
   void ClusterSlots(SinkReplyBuilder* builder, ConnectionContext* cntx);
@@ -61,11 +61,11 @@ class ClusterFamily {
 
   void KeySlot(CmdArgList args, SinkReplyBuilder* builder);
 
-  void ReadOnly(CmdArgList args, SinkReplyBuilder* builder);
-  void ReadWrite(CmdArgList args, SinkReplyBuilder* builder);
+  void ReadOnly(CmdArgList args, const CommandContext& cmd_cntx);
+  void ReadWrite(CmdArgList args, const CommandContext& cmd_cntx);
 
   // Custom Dragonfly commands for cluster management
-  void DflyCluster(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void DflyCluster(CmdArgList args, const CommandContext& cmd_cntx);
   void DflyClusterConfig(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
 
   void DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* builder)
@@ -77,7 +77,7 @@ class ClusterFamily {
       ABSL_LOCKS_EXCLUDED(migration_mu_);
 
   // DFLYMIGRATE is internal command defines several steps in slots migrations process
-  void DflyMigrate(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void DflyMigrate(CmdArgList args, const CommandContext& cmd_cntx);
 
   // DFLYMIGRATE INIT is internal command to create incoming migration object
   void InitMigration(CmdArgList args, SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(migration_mu_);
@@ -122,6 +122,8 @@ class ClusterFamily {
       ABSL_GUARDED_BY(migration_mu_);
 
  private:
+  std::optional<ClusterShardInfos> GetShardInfos(ConnectionContext* cntx) const;
+
   ClusterShardInfo GetEmulatedShardInfo(ConnectionContext* cntx) const;
 
   // Guards set configuration, so that we won't handle 2 in parallel.
