@@ -190,7 +190,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
     // log the evicted keys to journal.
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
-      RecordExpiry(cntx_.db_index, key);
+      RecordExpiry(cntx_.db_index, key, false);
     }
     // Safe we already acquired util::fb2::LockGuard lk(db_slice_->GetSerializationMutex());
     // on the flows that call this function
@@ -1154,7 +1154,7 @@ void DbSlice::ExpireAllIfNeeded() {
         LOG(ERROR) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
         return;
       }
-      ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
+      ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it, false);
     };
 
     block_counter_.Wait();
@@ -1217,7 +1217,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       CHECK(!prime_it.is_done());
-      ExpireIfNeeded(cntx, prime_it);
+      ExpireIfNeeded(cntx, prime_it, false);
       ++result.deleted;
     } else {
       result.survivor_ttl_sum += ttl;
@@ -1285,7 +1285,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
     // fiber preemption could happen in this phase.
     for (string_view key : keys_to_journal) {
       if (auto journal = owner_->journal(); journal)
-        RecordExpiry(db_ind, key);
+        RecordExpiry(db_ind, key, false);
 
       if (expired_keys_events_recording_)
         db_table->expired_keys_events_.emplace_back(key);
