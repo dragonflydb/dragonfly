@@ -6,8 +6,8 @@
 
 #include <absl/container/inlined_vector.h>
 
-#include <algorithm>
 #include <deque>
+#include <numeric>
 
 namespace dfly {
 
@@ -18,22 +18,22 @@ class PendingBuf {
     absl::InlinedVector<std::string, 8> buf;
 
 #ifdef UIO_MAXIOV
-    static constexpr size_t max_buf_size = UIO_MAXIOV;
-#elif
-    static constexpr size_t max_buf_size = 1024;
+    static constexpr size_t kMaxBufSize = UIO_MAXIOV;
+#else
+    static constexpr size_t kMaxBufSize = 1024;
 #endif
   };
 
   PendingBuf() : bufs_(1) {
   }
 
-  bool empty() const {
+  bool Empty() const {
     return std::all_of(bufs_.begin(), bufs_.end(), [](const auto& b) { return b.buf.empty(); });
   }
 
-  void push(std::string str) {
+  void Push(std::string str) {
     DCHECK(!bufs_.empty());
-    if (bufs_.back().buf.size() == Buf::max_buf_size) {
+    if (bufs_.back().buf.size() == Buf::kMaxBufSize) {
       bufs_.emplace_back();
     }
     auto& fron_buf = bufs_.back();
@@ -44,6 +44,7 @@ class PendingBuf {
 
   // should be called to get the next buffer for sending
   const Buf& PrepareSendingBuf() {
+    // Adding to the buffer ensures that future `Push()`es will not modify the in-flight buffer
     if (bufs_.size() == 1) {
       bufs_.emplace_back();
     }
@@ -56,7 +57,7 @@ class PendingBuf {
     bufs_.pop_front();
   }
 
-  size_t size() const {
+  size_t Size() const {
     return std::accumulate(bufs_.begin(), bufs_.end(), 0,
                            [](size_t s, const auto& b) { return s + b.mem_size; });
   }

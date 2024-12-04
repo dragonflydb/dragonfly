@@ -1,3 +1,4 @@
+#include <random>
 #include <string>
 
 #include "base/gtest.h"
@@ -126,73 +127,106 @@ TEST(Journal, WriteRead) {
   }
 }
 
+std::string rand_str() {
+  static std::random_device rd;
+  static std::mt19937 mt(rd());
+  static std::uniform_int_distribution<char> char_dist('0', 'z');
+  static std::uniform_int_distribution<int> size_dist(0, 100);
+  auto size = size_dist(mt);
+  std::string res;
+  res.reserve(size);
+  for (int i = 0; i < size; ++i) {
+    res.push_back(char_dist(mt));
+  }
+  return res;
+}
+
 TEST(Journal, PendingBuf) {
   PendingBuf pbuf;
 
-  ASSERT_TRUE(pbuf.empty());
-  ASSERT_EQ(pbuf.size(), 0);
+  ASSERT_TRUE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), 0);
 
-  pbuf.push("one");
-  pbuf.push(" small");
-  pbuf.push(" test");
+  pbuf.Push("one");
+  pbuf.Push(" smallllllllllllllllllllllllllllllll");
+  pbuf.Push(" test");
 
-  ASSERT_FALSE(pbuf.empty());
-  ASSERT_EQ(pbuf.size(), 14);
+  ASSERT_FALSE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), 44);
 
   {
     auto& sending_buf = pbuf.PrepareSendingBuf();
     ASSERT_EQ(sending_buf.buf.size(), 3);
-    ASSERT_EQ(sending_buf.mem_size, 14);
+    ASSERT_EQ(sending_buf.mem_size, 44);
 
     ASSERT_EQ(sending_buf.buf[0], "one");
-    ASSERT_EQ(sending_buf.buf[1], " small");
+    ASSERT_EQ(sending_buf.buf[1], " smallllllllllllllllllllllllllllllll");
     ASSERT_EQ(sending_buf.buf[2], " test");
   }
 
-  const size_t string_num = 2000;
+  const size_t string_num = PendingBuf::Buf::kMaxBufSize + 1000;
+  std::vector<std::string> test_data;
+  test_data.reserve(string_num);
+
   for (size_t i = 0; i < string_num; ++i) {
-    pbuf.push("big_test");
+    auto str = rand_str();
+    test_data.push_back(str);
+    pbuf.Push(std::move(str));
   }
 
-  ASSERT_FALSE(pbuf.empty());
-  ASSERT_EQ(pbuf.size(), 14 + string_num * 8);
+  const size_t test_data_size =
+      std::accumulate(test_data.begin(), test_data.end(), 0,
+                      [](size_t size, const auto& s) { return s.size() + size; });
+
+  ASSERT_FALSE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), 44 + test_data_size);
 
   pbuf.Pop();
 
-  ASSERT_FALSE(pbuf.empty());
-  ASSERT_EQ(pbuf.size(), string_num * 8);
+  ASSERT_FALSE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), test_data_size);
 
-  const auto next_buf_size = std::min(PendingBuf::Buf::max_buf_size, string_num);
   {
     auto& sending_buf = pbuf.PrepareSendingBuf();
-    ASSERT_EQ(sending_buf.buf.size(), next_buf_size);
-    ASSERT_EQ(sending_buf.mem_size, next_buf_size * 8);
 
-    for (const auto& s : sending_buf.buf) {
-      ASSERT_EQ(s, "big_test");
+    const size_t send_buf_size =
+        std::accumulate(test_data.begin(), test_data.begin() + PendingBuf::Buf::kMaxBufSize, 0,
+                        [](size_t size, const auto& s) { return s.size() + size; });
+
+    ASSERT_EQ(sending_buf.buf.size(), PendingBuf::Buf::kMaxBufSize);
+    ASSERT_EQ(sending_buf.mem_size, send_buf_size);
+
+    for (size_t i = 0; i < sending_buf.buf.size(); ++i) {
+      ASSERT_EQ(sending_buf.buf[i], test_data[i]);
     }
   }
 
   pbuf.Pop();
 
-  if (next_buf_size < string_num) {
-    const auto last_buf_size = string_num - next_buf_size;
-    ASSERT_FALSE(pbuf.empty());
-    ASSERT_EQ(pbuf.size(), last_buf_size * 8);
+  test_data.erase(test_data.begin(), test_data.begin() + PendingBuf::Buf::kMaxBufSize);
 
+  const size_t last_buf_size =
+      std::accumulate(test_data.begin(), test_data.end(), 0,
+                      [](size_t size, const auto& s) { return s.size() + size; });
+
+  ASSERT_FALSE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), last_buf_size);
+
+  {
     auto& sending_buf = pbuf.PrepareSendingBuf();
-    ASSERT_EQ(sending_buf.buf.size(), last_buf_size);
-    ASSERT_EQ(sending_buf.mem_size, last_buf_size * 8);
 
-    for (const auto& s : sending_buf.buf) {
-      ASSERT_EQ(s, "big_test");
+    ASSERT_EQ(sending_buf.buf.size(), string_num - PendingBuf::Buf::kMaxBufSize);
+    ASSERT_EQ(sending_buf.mem_size, last_buf_size);
+
+    for (size_t i = 0; i < sending_buf.buf.size(); ++i) {
+      ASSERT_EQ(sending_buf.buf[i], test_data[i]);
     }
-
-    pbuf.Pop();
   }
 
-  ASSERT_TRUE(pbuf.empty());
-  ASSERT_EQ(pbuf.size(), 0);
+  pbuf.Pop();
+
+  ASSERT_TRUE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), 0);
 }
 
 }  // namespace journal

@@ -87,11 +87,11 @@ void JournalStreamer::Cancel() {
 }
 
 size_t JournalStreamer::UsedBytes() const {
-  return pending_buf_.size();
+  return pending_buf_.Size();
 }
 
 void JournalStreamer::AsyncWrite() {
-  DCHECK(!pending_buf_.empty());
+  DCHECK(!pending_buf_.Empty());
 
   if (in_flight_bytes_ > 0) {
     // We can not flush data while there are in flight requests because AsyncWrite
@@ -121,7 +121,7 @@ void JournalStreamer::Write(std::string str) {
   DCHECK(!str.empty());
   DVLOG(2) << "Writing " << str.size() << " bytes";
 
-  pending_buf_.push(std::move(str));
+  pending_buf_.Push(std::move(str));
 
   AsyncWrite();
 }
@@ -136,7 +136,7 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
   }
   if (ec && !IsStopped()) {
     cntx_->ReportError(ec);
-  } else if (!pending_buf_.empty() && !IsStopped()) {
+  } else if (!pending_buf_.Empty() && !IsStopped()) {
     AsyncWrite();
   }
 
@@ -177,7 +177,7 @@ void JournalStreamer::WaitForInflightToComplete() {
 }
 
 bool JournalStreamer::IsStalled() const {
-  return pending_buf_.size() >= replication_stream_output_limit_cached;
+  return pending_buf_.Size() >= replication_stream_output_limit_cached;
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
