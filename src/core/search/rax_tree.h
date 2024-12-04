@@ -8,7 +8,6 @@
 #include <utility>
 
 #include "base/pmr/memory_resource.h"
-#include "glog/logging.h"
 
 extern "C" {
 #include "redis/rax.h"
@@ -25,17 +24,16 @@ template <typename V> struct RaxTreeMap {
 
   // Simple seeking iterator
   struct SeekIterator {
-    SeekIterator() = default;
+    SeekIterator() {
+      it_.rt = nullptr;
+    }
 
     SeekIterator(rax* tree, const char* op, std::string_view key) {
-      it_.emplace();
-
-      raxStart(&it_.value(), tree);
-      if (raxSeek(&it_.value(), op, to_key_ptr(key), key.size())) {  // Successufly seeked
+      raxStart(&it_, tree);
+      if (raxSeek(&it_, op, to_key_ptr(key), key.size())) {  // Successfuly seeked
         operator++();
       } else {
         InvalidateIterator();
-        LOG_IF(DFATAL, errno == ENOMEM) << "Out of memory during raxSeek()";
       }
     }
 
@@ -49,7 +47,7 @@ template <typename V> struct RaxTreeMap {
     SeekIterator& operator=(const SeekIterator&) = delete;
 
     ~SeekIterator() {
-      if (it_) {
+      if (IsValid()) {
         InvalidateIterator();
       }
     }
@@ -57,7 +55,7 @@ template <typename V> struct RaxTreeMap {
     bool operator==(const SeekIterator& rhs) const {
       if (!IsValid() || !rhs.IsValid())
         return !IsValid() && !rhs.IsValid();
-      return it_->node == rhs.it_->node;
+      return it_.node == rhs.it_.node;
     }
 
     bool operator!=(const SeekIterator& rhs) const {
@@ -65,37 +63,32 @@ template <typename V> struct RaxTreeMap {
     }
 
     SeekIterator& operator++() {
-      DCHECK(IsValid());
-
-      int next_result = raxNext(&it_.value());
+      int next_result = raxNext(&it_);
       if (!next_result) {  // OOM or we reached the end of the tree
         InvalidateIterator();
-        LOG_IF(DFATAL, errno == ENOMEM) << "Out of memory during raxNext()";
       }
-
       return *this;
     }
 
     /* After operator++() the first value (string_view) is invalid. So make sure your copied it to
      * string */
     std::pair<std::string_view, V&> operator*() const {
-      DCHECK(IsValid() && it_->node && it_->node->iskey && it_->data);
-      return {std::string_view{reinterpret_cast<const char*>(it_->key), it_->key_len},
-              *reinterpret_cast<V*>(it_->data)};
+      assert(IsValid() && it_.node && it_.node->iskey && it_.data);
+      return {std::string_view{reinterpret_cast<const char*>(it_.key), it_.key_len},
+              *reinterpret_cast<V*>(it_.data)};
     }
 
     bool IsValid() const {
-      return it_.has_value();
+      return it_.rt;
     }
 
    private:
     void InvalidateIterator() {
-      DCHECK(IsValid());
-      raxStop(&it_.value());
-      it_.reset();
+      raxStop(&it_);
+      it_.rt = nullptr;
     }
 
-    std::optional<raxIterator> it_;
+    raxIterator it_;
   };
 
   // Result of find() call. Inherits from pair to mimic iterator interface, not incrementable.
@@ -151,13 +144,9 @@ template <typename V> struct RaxTreeMap {
   std::pair<FindIterator, bool> try_emplace(std::string_view key, Args&&... args);
 
   void erase(FindIterator it) {
-    DCHECK(it);
-
     V* old = nullptr;
-    int was_removed = raxRemove(tree_, to_key_ptr(it->first.data()), it->first.size(),
-                                reinterpret_cast<void**>(&old));
-    DCHECK(was_removed);
-
+    raxRemove(tree_, to_key_ptr(it->first.data()), it->first.size(),
+              reinterpret_cast<void**>(&old));
     std::allocator_traits<decltype(alloc_)>::destroy(alloc_, old);
     alloc_.deallocate(old, 1);
   }
@@ -186,11 +175,8 @@ std::pair<typename RaxTreeMap<V>::FindIterator, bool> RaxTreeMap<V>::try_emplace
   std::allocator_traits<decltype(alloc_)>::construct(alloc_, ptr, std::forward<Args>(args)...);
 
   V* old = nullptr;
-  int was_inserted =
-      raxInsert(tree_, to_key_ptr(key), key.size(), ptr, reinterpret_cast<void**>(&old));
-  DCHECK(was_inserted);
-
-  assert(old == nullptr);
+  raxInsert(tree_, to_key_ptr(key), key.size(), ptr, reinterpret_cast<void**>(&old));
+  assert(!old);
 
   auto it = std::make_optional(std::pair<std::string, V&>(std::string(key), *ptr));
   return std::make_pair(std::move(FindIterator{it}), true);
