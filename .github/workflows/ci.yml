@@ -129,46 +129,46 @@ jobs:
           echo "disk space is:"
           df -h
 
-          #      - name: C++ Unit Tests
-          #        run: |
-          #          cd ${GITHUB_WORKSPACE}/build
-          #          echo Run ctest -V -L DFLY
-          #          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
-          #          FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY
-          #
-          #          echo "Running tests with --force_epoll"
-          #
-          #          # Create a rule that automatically prints stacktrace upon segfault
-          #          cat > ./init.gdb <<EOF
-          #          catch signal SIGSEGV
-          #          command
-          #          bt
-          #          end
-          #          EOF
-          #
-          #          gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          #          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY
-          #
-          #          echo "Finished running tests with --force_epoll"
-          #
-          #          echo "Running tests with --cluster_mode=emulated"
-          #          FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
-          #
-          #          echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
-          #          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
-          #
-          #          timeout 5m ./dragonfly_test
-          #          timeout 5m ./multi_test --multi_exec_mode=1
-          #          timeout 5m ./multi_test --multi_exec_mode=3
-          #          timeout 5m ./json_family_test --jsonpathv2=false
-          #          timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
-          #      - name: Upload unit logs on failure
-          #        if: failure()
-          #        uses: actions/upload-artifact@v4
-          #        with:
-          #          name: unit_logs
-          #          path: /tmp/*INFO*
-          #
+      - name: C++ Unit Tests
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          echo Run ctest -V -L DFLY
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
+          FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY
+
+          echo "Running tests with --force_epoll"
+
+          # Create a rule that automatically prints stacktrace upon segfault
+          cat > ./init.gdb <<EOF
+          catch signal SIGSEGV
+          command
+          bt
+          end
+          EOF
+
+          gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
+          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY
+
+          echo "Finished running tests with --force_epoll"
+
+          echo "Running tests with --cluster_mode=emulated"
+          FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
+
+          echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
+          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
+
+          timeout 5m ./dragonfly_test
+          timeout 5m ./multi_test --multi_exec_mode=1
+          timeout 5m ./multi_test --multi_exec_mode=3
+          timeout 5m ./json_family_test --jsonpathv2=false
+          timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+      - name: Upload unit logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
+
       - name: Run regression tests
         if: matrix.container == 'ubuntu-dev:20'
         uses: ./.github/actions/regression-tests

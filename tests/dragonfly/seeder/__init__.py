@@ -140,7 +140,7 @@ class Seeder(SeederBase):
         types: typing.Optional[typing.List[str]] = None,
         huge_value_percentage=1,
         huge_value_size=1024,
-        # 2 huge entries per container/key as default
+        # 1 huge entries per container/key as default
         huge_value_csize=1,
     ):
         SeederBase.__init__(self, types)
@@ -214,6 +214,8 @@ class Seeder(SeederBase):
         huge_keys = int(result[1])
         huge_entries = int(result[2])
 
-        logging.debug(
-            f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}, huge keys {huge_keys} with total huge entries {huge_entries}"
-        )
+        msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
+        if huge_keys > 0:
+            msg = f"{msg}. Total huge keys added {huge_keys} with {args[11]} elements each. Total extra modified huge entries {huge_entries}."
+
+        logging.debug(msg)
