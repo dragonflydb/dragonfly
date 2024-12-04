@@ -9,6 +9,7 @@
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
+#include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
 
@@ -66,55 +67,6 @@ class JournalStreamer {
 
   journal::Journal* journal_;
 
-  class PendingBuf {
-   public:
-    struct Buf {
-      size_t mem_size = 0;
-      absl::InlinedVector<std::string, 8> buf;
-
-      static constexpr size_t max_buf_size = 1024;  // depends on UIO_MAXIOV
-    };
-
-    PendingBuf() : bufs_(1) {
-    }
-
-    bool empty() const {
-      return std::all_of(bufs_.begin(), bufs_.end(), [](const auto& b) { return b.buf.empty(); });
-    }
-
-    void push(std::string str) {
-      DCHECK(!bufs_.empty());
-      if (bufs_.back().buf.size() == Buf::max_buf_size) {
-        bufs_.emplace_back();
-      }
-      auto& fron_buf = bufs_.back();
-
-      fron_buf.mem_size += str.size();
-      fron_buf.buf.push_back(std::move(str));
-    }
-
-    // should be called to get the next buffer for sending
-    const Buf& PrepareNext() {
-      if (bufs_.size() == 1) {
-        bufs_.emplace_back();
-      }
-      return bufs_.front();
-    }
-
-    // should be called when the buf from PrepareNext() method was sent
-    void Pop() {
-      DCHECK(bufs_.size() >= 2);
-      bufs_.pop_front();
-    }
-
-    size_t size() const {
-      return std::accumulate(bufs_.begin(), bufs_.end(), 0,
-                             [](size_t s, const auto& b) { return s + b.mem_size; });
-    }
-
-   private:
-    std::deque<Buf> bufs_;
-  };
   PendingBuf pending_buf_;
 
   size_t in_flight_bytes_ = 0, total_sent_ = 0;

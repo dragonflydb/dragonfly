@@ -99,7 +99,7 @@ void JournalStreamer::AsyncWrite() {
     return;
   }
 
-  const auto& cur_buf = pending_buf_.PrepareNext();
+  const auto& cur_buf = pending_buf_.PrepareSendingBuf();
 
   in_flight_bytes_ = cur_buf.mem_size;
   total_sent_ += cur_buf.mem_size;

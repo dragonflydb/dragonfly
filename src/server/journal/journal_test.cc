@@ -2,6 +2,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
@@ -123,6 +124,75 @@ TEST(Journal, WriteRead) {
     ASSERT_EQ(expected.dbid, res->dbid);
     ASSERT_EQ(ExtractPayload(expected), ExtractPayload(*res));
   }
+}
+
+TEST(Journal, PendingBuf) {
+  PendingBuf pbuf;
+
+  ASSERT_TRUE(pbuf.empty());
+  ASSERT_EQ(pbuf.size(), 0);
+
+  pbuf.push("one");
+  pbuf.push(" small");
+  pbuf.push(" test");
+
+  ASSERT_FALSE(pbuf.empty());
+  ASSERT_EQ(pbuf.size(), 14);
+
+  {
+    auto& sending_buf = pbuf.PrepareSendingBuf();
+    ASSERT_EQ(sending_buf.buf.size(), 3);
+    ASSERT_EQ(sending_buf.mem_size, 14);
+
+    ASSERT_EQ(sending_buf.buf[0], "one");
+    ASSERT_EQ(sending_buf.buf[1], " small");
+    ASSERT_EQ(sending_buf.buf[2], " test");
+  }
+
+  const size_t string_num = 2000;
+  for (size_t i = 0; i < string_num; ++i) {
+    pbuf.push("big_test");
+  }
+
+  ASSERT_FALSE(pbuf.empty());
+  ASSERT_EQ(pbuf.size(), 14 + string_num * 8);
+
+  pbuf.Pop();
+
+  ASSERT_FALSE(pbuf.empty());
+  ASSERT_EQ(pbuf.size(), string_num * 8);
+
+  const auto next_buf_size = std::min(PendingBuf::Buf::max_buf_size, string_num);
+  {
+    auto& sending_buf = pbuf.PrepareSendingBuf();
+    ASSERT_EQ(sending_buf.buf.size(), next_buf_size);
+    ASSERT_EQ(sending_buf.mem_size, next_buf_size * 8);
+
+    for (const auto& s : sending_buf.buf) {
+      ASSERT_EQ(s, "big_test");
+    }
+  }
+
+  pbuf.Pop();
+
+  if (next_buf_size < string_num) {
+    const auto last_buf_size = string_num - next_buf_size;
+    ASSERT_FALSE(pbuf.empty());
+    ASSERT_EQ(pbuf.size(), last_buf_size * 8);
+
+    auto& sending_buf = pbuf.PrepareSendingBuf();
+    ASSERT_EQ(sending_buf.buf.size(), last_buf_size);
+    ASSERT_EQ(sending_buf.mem_size, last_buf_size * 8);
+
+    for (const auto& s : sending_buf.buf) {
+      ASSERT_EQ(s, "big_test");
+    }
+
+    pbuf.Pop();
+  }
+
+  ASSERT_TRUE(pbuf.empty());
+  ASSERT_EQ(pbuf.size(), 0);
 }
 
 }  // namespace journal
