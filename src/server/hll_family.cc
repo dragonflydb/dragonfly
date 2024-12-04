@@ -294,16 +294,16 @@ OpResult<int> PFMergeInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder
   return result;
 }
 
-void PFMerge(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
-  OpResult<int> result = PFMergeInternal(args, tx, builder);
+void PFMerge(CmdArgList args, const CommandContext& cmd_cntx) {
+  OpResult<int> result = PFMergeInternal(args, cmd_cntx.tx, cmd_cntx.rb);
   if (result.ok()) {
     if (result.value() == 0) {
-      builder->SendOk();
+      cmd_cntx.rb->SendOk();
     } else {
-      builder->SendError(HllFamily::kInvalidHllErr);
+      cmd_cntx.rb->SendError(HllFamily::kInvalidHllErr);
     }
   } else {
-    HandleOpValueResult(result, builder);
+    HandleOpValueResult(result, cmd_cntx.rb);
   }
 }
 
