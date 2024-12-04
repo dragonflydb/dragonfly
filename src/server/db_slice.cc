@@ -1092,7 +1092,8 @@ DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) cons
   return {.it = Iterator::FromPrime(res.it), .exp_it = ExpIterator::FromPrime(res.exp_it)};
 }
 
-DbSlice::PrimeItAndExp DbSlice::ExpireIfNeededImpl(const Context& cntx, PrimeIterator it) const {
+DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
+                                               bool preempts) const {
   if (!it->second.HasExpire()) {
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
@@ -1122,7 +1123,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeededImpl(const Context& cntx, PrimeIte
 
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
-    RecordExpiry(cntx.db_index, key);
+    RecordExpiry(cntx.db_index, key, preempts);
   }
 
   if (expired_keys_events_recording_)
@@ -1139,17 +1140,6 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeededImpl(const Context& cntx, PrimeIte
   ++events_.expired_keys;
 
   return {PrimeIterator{}, ExpireIterator{}};
-}
-
-// It's fine to preempt if we hold a lock to the key because there won't be any
-// concurrent changes. If preempt = false, we need to Wait on the blocking counter.
-DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
-                                               bool preemptive) const {
-  if (preemptive) {
-    return ExpireIfNeededImpl(cntx, it);
-  }
-  FiberAtomicGuard guard;
-  return ExpireIfNeededImpl(cntx, it);
 }
 
 void DbSlice::ExpireAllIfNeeded() {
