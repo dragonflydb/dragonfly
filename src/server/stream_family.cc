@@ -1909,7 +1909,7 @@ void SetId(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* buil
   }
 }
 
-void XGroupHelp(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void XGroupHelp(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view help_arr[] = {"XGROUP <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
                             "CREATE <key> <groupname> <id|$> [option]",
                             "    Create a new consumer group. Options are:",
@@ -1927,7 +1927,7 @@ void XGroupHelp(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
                             "    Set the current group ID and entries_read counter.",
                             "HELP",
                             "    Print this help."};
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   return rb->SendSimpleStrArr(help_arr);
 }
 
@@ -2474,7 +2474,7 @@ void XReadGeneric2(CmdArgList args, bool read_group, Transaction* tx, SinkReplyB
 }
 
 void HelpSubCmd(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* builder) {
-  XGroupHelp(parser->Tail(), tx, builder);
+  XGroupHelp(parser->Tail(), CommandContext{tx, builder, nullptr});
 }
 
 bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder* builder) {
