@@ -1137,6 +1137,10 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
 }
 
 void DbSlice::ExpireAllIfNeeded() {
+  // We hold no locks to any of the keys so we should Wait() here such that
+  // we don't preempt in ExpireIfNeeded
+  block_counter_.Wait();
+
   for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
     if (!db_arr_[db_index])
       continue;

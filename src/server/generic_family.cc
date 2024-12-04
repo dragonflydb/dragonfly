@@ -597,6 +597,10 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
+  // We need to make sure we don't preempt below, because we don't hold any locks to the keys
+  // and ExpireIfNeeded requires that.
+  db_slice.BlockingCounter()->Wait();
+
   util::FiberAtomicGuard guard;
   unsigned cnt = 0;
 
