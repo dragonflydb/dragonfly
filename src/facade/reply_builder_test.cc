@@ -300,9 +300,8 @@ TEST_F(RedisReplyBuilderTest, ErrorReplyBuiltInMessage) {
 
 TEST_F(RedisReplyBuilderTest, ErrorNoneBuiltInMessage) {
   // All these op codes creating the same error message
-  OpStatus none_unique_codes[] = {OpStatus::ENTRIES_ADDED_SMALL, OpStatus::SKIPPED,
-                                  OpStatus::KEY_EXISTS,          OpStatus::INVALID_VALUE,
-                                  OpStatus::TIMED_OUT,           OpStatus::STREAM_ID_SMALL};
+  OpStatus none_unique_codes[] = {OpStatus::SKIPPED, OpStatus::KEY_EXISTS, OpStatus::INVALID_VALUE,
+                                  OpStatus::TIMED_OUT, OpStatus::STREAM_ID_SMALL};
   uint64_t error_count = 0;
   for (const auto& err : none_unique_codes) {
     const std::string_view error_name = StatusToMsg(err);

@@ -33,10 +33,9 @@ ABSL_FLAG(std::string, cluster_node_id, "",
           "ID within a cluster, used for slot assignment. MUST be unique. If empty, uses master "
           "replication ID (random string)");
 
-ABSL_FLAG(bool, managed_service_info, false,
-          "Hides some implementation details from users when true (i.e. in managed service env)");
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
+ABSL_DECLARE_FLAG(bool, managed_service_info);
 
 namespace dfly {
 namespace acl {
