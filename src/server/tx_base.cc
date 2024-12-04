@@ -62,11 +62,17 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice
   op_args.tx->LogJournalOnShard(op_args.shard, Payload(cmd, args), shard_cnt, true);
 }
 
-void RecordExpiry(DbIndex dbid, string_view key) {
+void RecordExpiry(DbIndex dbid, string_view key, bool preempts) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
+  if (!preempts) {
+    util::FiberAtomicGuard guard;
+    journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, cluster::KeySlot(key),
+                         Payload("DEL", ArgSlice{key}), preempts);
+    return;
+  }
   journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, cluster::KeySlot(key),
-                       Payload("DEL", ArgSlice{key}), false);
+                       Payload("DEL", ArgSlice{key}), preempts);
 }
 
 void TriggerJournalWriteToSink() {

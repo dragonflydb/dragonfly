@@ -555,7 +555,7 @@ class DbSlice {
     ExpireIterator exp_it;
   };
 
-  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
+  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it, bool preempts = false) const;
 
   OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key);
 
