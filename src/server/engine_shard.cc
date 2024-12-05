@@ -667,8 +667,8 @@ void EngineShard::Heartbeat() {
   if (db_slice.WillBlockOnJournalWrite()) {
     const auto elapsed = std::chrono::system_clock::now() - start;
     if (elapsed > std::chrono::seconds(1)) {
-      LOG(WARNING) << "Stalled heartbeat() fiber for " << elapsed.count()
-                   << " seconds because of big value serialization";
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count()
+                              << " seconds because of big value serialization";
     }
     return;
   }

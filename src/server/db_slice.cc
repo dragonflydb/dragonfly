@@ -1090,7 +1090,6 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
   }
-  block_counter_.Wait();
 
   auto& db = db_arr_[cntx.db_index];
 

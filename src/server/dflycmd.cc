@@ -369,6 +369,7 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
 
     auto cb = [this, &status, replica_ptr = replica_ptr](EngineShard* shard) {
       FlowInfo* flow = &replica_ptr->flows[shard->shard_id()];
+
       status = StopFullSyncInThread(flow, &replica_ptr->cntx, shard);
       if (*status != OpStatus::OK) {
         return;
@@ -376,6 +377,9 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
       StartStableSyncInThread(flow, &replica_ptr->cntx, shard);
     };
     shard_set->RunBlockingInParallel(std::move(cb));
+
+    if (*status != OpStatus::OK)
+      return rb->SendError(kInvalidState);
   }
 
   LOG(INFO) << "Transitioned into stable sync with replica " << replica_ptr->address << ":"
