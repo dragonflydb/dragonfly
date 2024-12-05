@@ -442,6 +442,7 @@ class DbSlice {
 
   struct DeleteExpiredStats {
     uint32_t deleted = 0;         // number of deleted items due to expiry (less than traversed).
+    uint32_t deleted_bytes = 0;   // total bytes of deleted items.
     uint32_t traversed = 0;       // number of traversed items that have ttl bit
     size_t survivor_ttl_sum = 0;  // total sum of ttl of survivors (traversed - deleted).
   };
