@@ -51,3 +51,9 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/bullmq
           BULLMQ_TEST_PREFIX={b} yarn test
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
