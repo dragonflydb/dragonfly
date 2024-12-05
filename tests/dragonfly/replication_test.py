@@ -1187,9 +1187,9 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
     c2 = replica2.client()
     c3 = replica3.client()
 
-    await c1.execute_command(f"REPLICAOF localhost {master.port}")
-    await c2.execute_command(f"REPLICAOF localhost {master.port}")
-    await c3.execute_command(f"REPLICAOF localhost {master.port}")
+    await c1.execute_command(f"REPLICAOF localhost {master.admin_port}")
+    await c2.execute_command(f"REPLICAOF localhost {master.admin_port}")
+    await c3.execute_command(f"REPLICAOF localhost {master.admin_port}")
 
     await wait_available_async(c1)
 
@@ -1293,7 +1293,7 @@ async def test_take_over_read_commands(df_factory, master_threads, replica_threa
     await c_master.execute_command("SET foo bar")
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}")
     await wait_available_async(c_replica)
 
     async def prompt():
@@ -1329,7 +1329,7 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
 
     logging.debug(f"PORTS ARE:  {master.port} {replica.port}")
 
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}")
     await wait_available_async(c_replica)
 
     fill_task = asyncio.create_task(seeder.run(target_ops=3000))
@@ -1517,7 +1517,7 @@ async def test_replicaof_flag(df_factory):
 
     replica = df_factory.create(
         proactor_threads=2,
-        replicaof=f"localhost:{master.port}",  # start to replicate master
+        replicaof=f"localhost:{master.admin_port}",  # start to replicate master
     )
 
     # set up replica. check that it is replicating
