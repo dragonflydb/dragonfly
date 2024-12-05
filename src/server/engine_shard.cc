@@ -216,13 +216,9 @@ size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t gl
 }
 
 /* Calculates the number of bytes to evict based on memory and rss memory usage. */
-size_t GetGoalBytesToEvict() {
+size_t CalculateEvictionBytes() {
   const size_t shards_count = shard_set->size();
   const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
-
-  if (eviction_memory_budget_threshold <= 0.0 || !GetFlag(FLAGS_enable_heartbeat_eviction)) {
-    return 0;
-  }
 
   const size_t shard_memory_budget_threshold =
       size_t(max_memory_limit * eviction_memory_budget_threshold) / shards_count;
@@ -778,7 +774,7 @@ void EngineShard::RetireExpiredAndEvict() {
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
 
-  size_t goal_bytes = GetGoalBytesToEvict();
+  size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
     for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
       if (!db_slice.IsDbValid(i))
@@ -789,21 +785,22 @@ void EngineShard::RetireExpiredAndEvict() {
       if (expt->size() > pt->size() / 4) {
         DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
 
-      goal_bytes -= std::min(goal_bytes, size_t(stats.deleted_bytes));
+      eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
       counter_[TTL_TRAVERSE].IncBy(stats.traversed);
       counter_[TTL_DELETE].IncBy(stats.deleted);
     }
 
-    if (goal_bytes) {
+    if (eviction_goal) {
       uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
       auto [evicted_items, evicted_bytes] =
-          db_slice.FreeMemWithEvictionStep(i, starting_segment_id, goal_bytes);
-      goal_bytes -= std::min(goal_bytes, evicted_bytes);
+          db_slice.FreeMemWithEvictionStep(i, starting_segment_id, eviction_goal);
 
-      DVLOG(2) << "Heartbeat eviction: Expected to evict " << goal_bytes
+      DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
                << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
                << " bytes. Max eviction per heartbeat: "
                << GetFlag(FLAGS_max_eviction_per_heartbeat);
+
+      eviction_goal -= std::min(eviction_goal, evicted_bytes);
     }
   }
 

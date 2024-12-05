@@ -1214,7 +1214,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       CHECK(!prime_it.is_done());
-      result.deleted_bytes += prime_it->second.MallocUsed();
+      result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
       ExpireIfNeeded(cntx, prime_it, false);
       ++result.deleted;
     } else {
@@ -1324,7 +1324,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
           if (record_keys)
             keys_to_journal.emplace_back(key);
 
-          evicted_bytes += evict_it->second.MallocUsed();
+          evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
           ++evicted_items;
           PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
 
