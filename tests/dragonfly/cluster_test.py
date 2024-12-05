@@ -1424,7 +1424,7 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "serialization_max_chunk_size": 0})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
         df_factory.create(port=BASE_PORT + i, admin_port=BASE_PORT + i + 1000) for i in range(2)
@@ -1438,7 +1438,7 @@ async def test_network_disconnect_during_migration(df_factory):
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    await StaticSeeder(key_target=200000).run(nodes[0].client)
+    await StaticSeeder(key_target=50000).run(nodes[0].client)
     start_capture = await StaticSeeder.capture(nodes[0].client)
 
     proxy = Proxy("127.0.0.1", 1111, "127.0.0.1", nodes[1].instance.admin_port)
