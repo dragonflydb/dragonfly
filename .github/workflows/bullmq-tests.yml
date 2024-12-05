@@ -35,16 +35,19 @@ jobs:
           cd $GITHUB_WORKSPACE/build
           cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja
           ninja dragonfly
-          ./dragonfly --alsologtostderr &
-
-      - name: Clone and build BullMQ
+          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
+      - name: Build BullMQ
         run: |
-          git clone https://github.com/taskforcesh/bullmq.git
+          DOWNLOAD_URL=$(curl -s https://api.github.com/repos/taskforcesh/bullmq/releases/latest | jq -r '.tarball_url')
+          echo "Downloading latest BullMQ release from ${DOWNLOAD_URL}"
+          wget -O bullmq.tar.gz ${DOWNLOAD_URL}
+          tar -zxvf bullmq.tar.gz
+          mv taskforcesh-bullmq-* bullmq
           cd bullmq
           pwd
-          yarn install --ignore-engines --frozen-lockfile --non-interactive
+          yarn install
           yarn build
       - name: Test BullMQ
         run: |
           cd $GITHUB_WORKSPACE/bullmq
-          # yarn test -i -g "should process delayed jobs with several workers respecting delay"
+          BULLMQ_TEST_PREFIX={b} yarn test
