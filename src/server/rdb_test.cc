@@ -54,6 +54,7 @@ class RdbTest : public BaseFamilyTest {
 
 void RdbTest::SetUp() {
   InitWithDbFilename();
+  used_mem_current = 0;
   max_memory_limit = 40000000;
 }
 

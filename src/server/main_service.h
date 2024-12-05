@@ -125,43 +125,27 @@ class Service : public facade::ServiceInterface {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Quit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
-  static void Multi(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
+  static void Quit(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Multi(CmdArgList args, const CommandContext& cmd_cntx);
 
-  static void Watch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
-  static void Unwatch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                      ConnectionContext* cntx);
+  static void Watch(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Unwatch(CmdArgList args, const CommandContext& cmd_cntx);
 
-  void Discard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx,
-            bool read_only = false);
-  void EvalRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx,
-               bool read_only = false);
-  void EvalShaRo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                 ConnectionContext* cntx);
-  void Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Publish(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void Subscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                 ConnectionContext* cntx);
-  void Unsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
-  void PSubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                  ConnectionContext* cntx);
-  void PUnsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
-  void Function(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                ConnectionContext* cntx);
-  void Monitor(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void Pubsub(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
+  void Discard(CmdArgList args, const CommandContext& cmd_cntx);
+  void Eval(CmdArgList args, const CommandContext& cmd_cntx, bool read_only = false);
+  void EvalRo(CmdArgList args, const CommandContext& cmd_cntx);
+  void EvalSha(CmdArgList args, const CommandContext& cmd_cntx, bool read_only = false);
+  void EvalShaRo(CmdArgList args, const CommandContext& cmd_cntx);
+  void Exec(CmdArgList args, const CommandContext& cmd_cntx);
+  void Publish(CmdArgList args, const CommandContext& cmd_cntx);
+  void Subscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void PSubscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void PUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void Function(CmdArgList args, const CommandContext& cmd_cntx);
+  void Monitor(CmdArgList args, const CommandContext& cmd_cntx);
+  void Pubsub(CmdArgList args, const CommandContext& cmd_cntx);
+  void Command(CmdArgList args, const CommandContext& cmd_cntx);
 
   void PubsubChannels(std::string_view pattern, SinkReplyBuilder* builder);
   void PubsubPatterns(SinkReplyBuilder* builder);
