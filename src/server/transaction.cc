@@ -1563,9 +1563,6 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
         string_view arg = ArgS(args, i);
         if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
           size_t left = args.size() - i - 1;
-          if (left < 2 || left % 2 != 0)
-            return OpStatus::SYNTAX_ERR;
-
           return KeyIndex(i + 1, i + 1 + (left / 2));
         }
       }
