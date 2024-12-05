@@ -56,4 +56,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: unit_logs
-          path: /tmp/*INFO*
+          path: /tmp/dragonfly.*
