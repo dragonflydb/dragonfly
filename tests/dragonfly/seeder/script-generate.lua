@@ -18,21 +18,48 @@ local total_ops = tonumber(ARGV[6])
 local min_dev = tonumber(ARGV[7])
 local data_size = tonumber(ARGV[8])
 local collection_size = tonumber(ARGV[9])
+-- Probability of each key in key_target to be a big value
+local huge_value_percentage = tonumber(ARGV[10])
+local huge_value_size = tonumber(ARGV[11])
+local huge_value_csize = tonumber(ARGV[12])
 
 -- collect all keys belonging to this script
 -- assumes exclusive ownership
 local keys = LU_collect_keys(prefix, type)
 
-LG_funcs.init(data_size, collection_size)
+LG_funcs.init(data_size, collection_size, huge_value_percentage, huge_value_size, huge_value_csize)
 local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
+local huge_entries = LG_funcs["get_huge_entries"]
+
+local huge_keys = 0
+
+local function huge_entry()
+    local ratio = LG_funcs.huge_value_percentage / 100
+    -- [0, 1]
+    local rand = math.random()
+    local huge_entry = (ratio > rand)
+    return huge_entry
+end
 
 local function action_add()
     local key = prefix .. tostring(key_counter)
-    key_counter = key_counter + 1
+    local op_type = string.lower(type)
+    local is_huge = false
+    -- `string` and `json` huge entries are not supported so
+    -- we don't roll a dice to decide if they are huge or not
+    if op_type ~= "string" and op_type ~= "json" then
+      is_huge = huge_entry()
+    end
 
-    addfunc(key, keys)
+    key_counter = key_counter + 1
+    if is_huge then
+      huge_keys = huge_keys + 1
+    end
+
     table.insert(keys, key)
+    keys[key] = is_huge
+    addfunc(key, keys)
 end
 
 local function action_mod()
@@ -84,7 +111,8 @@ while true do
     -- update probability only every 10 iterations
     if counter % 10 == 0 then
         -- calculate intensity (not normalized probabilities)
-        -- please see attached plots in PR to undertand convergence
+        -- please see attached plots in PR to understand convergence
+        -- https://github.com/dragonflydb/dragonfly/pull/2556
 
         -- the add intensity is monotonically decreasing with keycount growing,
         -- the delete intensity is monotonically increasing with keycount growing,
@@ -121,4 +149,4 @@ if stop_key ~= '' then
     redis.call('DEL', stop_key)
 end
 
-return key_counter
+return tostring(key_counter) .. " " .. tostring(huge_keys) .. " " .. tostring(huge_entries())
