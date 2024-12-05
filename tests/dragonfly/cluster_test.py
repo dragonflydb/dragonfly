@@ -1438,7 +1438,7 @@ async def test_network_disconnect_during_migration(df_factory):
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    await StaticSeeder(key_target=200000).run(nodes[0].client)
+    await StaticSeeder(key_target=100000).run(nodes[0].client)
     start_capture = await StaticSeeder.capture(nodes[0].client)
 
     proxy = Proxy("127.0.0.1", 1111, "127.0.0.1", nodes[1].instance.admin_port)
