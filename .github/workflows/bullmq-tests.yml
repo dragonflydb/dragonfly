@@ -38,8 +38,8 @@ jobs:
           ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
       - name: Build and Test BullMQ
         run: |
-          mkdir -p $GITHUB_WORKSPACE/bullmq
-          cd $GITHUB_WORKSPACE/bullmq
+          mkdir -p $GITHUB_WORKSPACE/build/bullmq
+          cd $GITHUB_WORKSPACE/build/bullmq
           DOWNLOAD_URL=$(curl -s https://api.github.com/repos/taskforcesh/bullmq/releases/latest | jq -r '.tarball_url')
           echo "Downloading latest BullMQ release from ${DOWNLOAD_URL}"
           wget -O bullmq.tar.gz ${DOWNLOAD_URL}
