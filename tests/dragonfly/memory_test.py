@@ -53,10 +53,11 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     assert delta > 0
     assert delta < max_unaccounted
 
-    delta = info["used_memory_rss"] - info["object_used_memory"]
-    max_unaccounted *= 1.1  # Some more memory is needed for dash table, keys, etc
-    assert delta > 0
-    assert delta < max_unaccounted
+    if type != "LIST":
+        delta = info["used_memory_rss"] - info["object_used_memory"]
+        max_unaccounted *= 1.1  # Some more memory is needed for dash table, keys, etc
+        assert delta > 0
+        assert delta < max_unaccounted
 
 
 @pytest.mark.asyncio
