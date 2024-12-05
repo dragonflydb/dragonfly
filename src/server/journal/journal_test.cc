@@ -127,20 +127,6 @@ TEST(Journal, WriteRead) {
   }
 }
 
-std::string rand_str() {
-  static std::random_device rd;
-  static std::mt19937 mt(rd());
-  static std::uniform_int_distribution<char> char_dist('0', 'z');
-  static std::uniform_int_distribution<int> size_dist(0, 100);
-  auto size = size_dist(mt);
-  std::string res;
-  res.reserve(size);
-  for (int i = 0; i < size; ++i) {
-    res.push_back(char_dist(mt));
-  }
-  return res;
-}
-
 TEST(Journal, PendingBuf) {
   PendingBuf pbuf;
 
@@ -168,8 +154,10 @@ TEST(Journal, PendingBuf) {
   std::vector<std::string> test_data;
   test_data.reserve(string_num);
 
+  absl::InsecureBitGen gen;
+
   for (size_t i = 0; i < string_num; ++i) {
-    auto str = rand_str();
+    auto str = GetRandomHex(gen, 10, 90);
     test_data.push_back(str);
     pbuf.Push(std::move(str));
   }
@@ -215,7 +203,7 @@ TEST(Journal, PendingBuf) {
   {
     auto& sending_buf = pbuf.PrepareSendingBuf();
 
-    ASSERT_EQ(sending_buf.buf.size(), string_num - PendingBuf::Buf::kMaxBufSize);
+    ASSERT_EQ(sending_buf.buf.size(), 1000);
     ASSERT_EQ(sending_buf.mem_size, last_buf_size);
 
     for (size_t i = 0; i < sending_buf.buf.size(); ++i) {

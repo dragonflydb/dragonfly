@@ -140,8 +140,13 @@ extern unsigned kernel_version;
 
 const char* GlobalStateName(GlobalState gs);
 
-template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
+template <typename RandGen>
+std::string GetRandomHex(RandGen& gen, size_t len, size_t len_deviation = 0) {
   static_assert(std::is_same<uint64_t, decltype(gen())>::value);
+  if (len_deviation) {
+    len += (gen() % len_deviation);
+  }
+
   std::string res(len, '\0');
   size_t indx = 0;
 
