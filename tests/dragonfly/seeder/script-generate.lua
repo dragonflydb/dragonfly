@@ -46,6 +46,8 @@ local function action_add()
     local key = prefix .. tostring(key_counter)
     local op_type = string.lower(type)
     local is_huge = false
+    -- `string` and `json` huge entries are not supported so
+    -- we don't roll a dice to decide if they are huge or not
     if op_type ~= "string" and op_type ~= "json" then
       is_huge = huge_entry()
     end
