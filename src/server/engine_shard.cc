@@ -329,7 +329,7 @@ bool EngineShard::DoDefrag() {
   uint64_t attempts = 0;
 
   do {
-    cur = slice.Traverse(prime_table, cur, [&](PrimeIterator it) {
+    cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
       bool did = it->second.DefragIfNeeded(threshold);
@@ -660,12 +660,23 @@ void EngineShard::Heartbeat() {
 
   CacheStats();
 
+  // TODO: iterate over all namespaces
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+  // Skip heartbeat if we are serializing a big value
+  static auto start = std::chrono::system_clock::now();
+  if (db_slice.WillBlockOnJournalWrite()) {
+    const auto elapsed = std::chrono::system_clock::now() - start;
+    if (elapsed > std::chrono::seconds(1)) {
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count()
+                              << " seconds because of big value serialization";
+    }
+    return;
+  }
+  start = std::chrono::system_clock::now();
+
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
     RetireExpiredAndEvict();
   }
-
-  // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
   // Offset CoolMemoryUsage when consider background offloading.
   // TODO: Another approach could be is to align the approach  similarly to how we do with
@@ -690,55 +701,49 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RetireExpiredAndEvict() {
-  // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-  // Some of the functions below might acquire the same lock again so we need to unlock it
-  // asap. We won't yield before we relock the mutex again, so the code below is atomic
-  // in respect to preemptions of big values. An example of that is the call to
-  // DeleteExpiredStep() below, which eventually calls ExpireIfNeeded()
-  // and within that the call to RecordExpiry() will trigger the registered
-  // callback OnJournalEntry which locks the exact same mutex.
-  // We need to lock below and immediately release because there should be no other fiber
-  // that is serializing a big value.
-  { std::unique_lock lk(db_slice.GetSerializationMutex()); }
-  constexpr double kTtlDeleteLimit = 200;
-  constexpr double kRedLimitFactor = 0.1;
+  {
+    FiberAtomicGuard guard;
+    // TODO: iterate over all namespaces
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+    constexpr double kTtlDeleteLimit = 200;
+    constexpr double kRedLimitFactor = 0.1;
 
-  uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
-  uint32_t deleted = GetMovingSum6(TTL_DELETE);
-  unsigned ttl_delete_target = 5;
+    uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
+    uint32_t deleted = GetMovingSum6(TTL_DELETE);
+    unsigned ttl_delete_target = 5;
 
-  if (deleted > 10) {
-    // deleted should be <= traversed.
-    // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
-    // The higher ttl_delete_target the more likely we have lots of expired items that need
-    // to be deleted.
-    ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
-  }
-
-  ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
-
-  DbContext db_cntx;
-  db_cntx.time_now_ms = GetCurrentTimeMs();
-
-  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-    if (!db_slice.IsDbValid(i))
-      continue;
-
-    db_cntx.db_index = i;
-    auto [pt, expt] = db_slice.GetTables(i);
-    if (expt->size() > pt->size() / 4) {
-      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
-
-      counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-      counter_[TTL_DELETE].IncBy(stats.deleted);
+    if (deleted > 10) {
+      // deleted should be <= traversed.
+      // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
+      // The higher ttl_delete_target the more likely we have lots of expired items that need
+      // to be deleted.
+      ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
     }
 
-    // if our budget is below the limit
-    if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
-      uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-      db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
-                                       eviction_redline - db_slice.memory_budget());
+    ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
+
+    DbContext db_cntx;
+    db_cntx.time_now_ms = GetCurrentTimeMs();
+
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (!db_slice.IsDbValid(i))
+        continue;
+
+      db_cntx.db_index = i;
+      auto [pt, expt] = db_slice.GetTables(i);
+      if (expt->size() > pt->size() / 4) {
+        DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
+
+        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+        counter_[TTL_DELETE].IncBy(stats.deleted);
+      }
+
+      // if our budget is below the limit
+      if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
+        uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
+        db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
+                                         eviction_redline - db_slice.memory_budget());
+      }
     }
   }
 

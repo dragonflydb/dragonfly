@@ -122,6 +122,7 @@ class RdbSaver {
   struct SnapshotStats {
     size_t current_keys = 0;
     size_t total_keys = 0;
+    size_t big_value_preemptions = 0;
   };
 
   SnapshotStats GetCurrentSnapshotProgress() const;

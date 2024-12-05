@@ -425,9 +425,9 @@ class DflyInstanceFactory:
             args.setdefault("list_experimental_v2")
         args.setdefault("log_dir", self.params.log_dir)
 
-        if version >= 1.21:
+        if version >= 1.21 and "serialization_max_chunk_size" not in args:
             # Add 1 byte limit for big values
-            args.setdefault("serialization_max_chunk_size", 0)
+            args.setdefault("serialization_max_chunk_size", 1)
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v

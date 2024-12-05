@@ -18,6 +18,7 @@
 #include "server/journal/journal.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
+#include "server/server_state.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/synchronization.h"
 
@@ -85,6 +86,8 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
       if (bytes_serialized > flush_threshold) {
         size_t serialized = FlushSerialized(flush_state);
         VLOG(2) << "FlushSerialized " << serialized << " bytes";
+        auto& stats = ServerState::tlocal()->stats;
+        ++stats.big_value_preemptions;
       }
     };
   }
@@ -165,8 +168,9 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
-      if (cll->IsCancelled())
+      if (cll->IsCancelled()) {
         return;
+      }
 
       PrimeTable::Cursor next =
           pt->TraverseBuckets(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
@@ -244,6 +248,8 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
 }
 
 bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
+  std::lock_guard guard(big_value_mu_);
+
   ++stats_.savecb_calls;
 
   auto check = [&](auto v) {
@@ -256,13 +262,18 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
     return true;
   };
 
-  uint64_t v = it.GetVersion();
-  if (!check(v)) {
+  if (!check(it.GetVersion())) {
     return false;
   }
 
   db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
+
+  auto* blocking_counter = db_slice_->BlockingCounter();
+  // Locking this never preempts. We merely just increment the underline counter such that
+  // if SerializeBucket preempts, Heartbeat() won't run because the blocking counter is not
+  // zero.
+  std::lock_guard blocking_counter_guard(*blocking_counter);
 
   stats_.loop_serialized += SerializeBucket(current_db_, it);
 
@@ -372,6 +383,8 @@ bool SliceSnapshot::PushSerialized(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  std::lock_guard guard(big_value_mu_);
+
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 
@@ -396,7 +409,7 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerialized.
-  std::unique_lock lk(db_slice_->GetSerializationMutex());
+  std::lock_guard guard(big_value_mu_);
   if (item.opcode != journal::Op::NOOP) {
     serializer_->WriteJournalEntry(item.data);
   }

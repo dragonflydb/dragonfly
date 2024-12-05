@@ -305,34 +305,33 @@ class DbSlice {
     AddOrFindResult& operator=(ItAndUpdater&& o);
   };
 
-  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key)
-      ABSL_LOCKS_EXCLUDED(local_mu_);
+  OpResult<AddOrFindResult> AddOrFind(const Context& cntx, std::string_view key);
 
   // Same as AddOrSkip, but overwrites in case entry exists.
   OpResult<AddOrFindResult> AddOrUpdate(const Context& cntx, std::string_view key, PrimeValue obj,
-                                        uint64_t expire_at_ms) ABSL_LOCKS_EXCLUDED(local_mu_);
+                                        uint64_t expire_at_ms);
 
   // Adds a new entry. Requires: key does not exist in this slice.
   // Returns the iterator to the newly added entry.
   // Returns OpStatus::OUT_OF_MEMORY if bad_alloc is thrown
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
-                                uint64_t expire_at_ms) ABSL_LOCKS_EXCLUDED(local_mu_);
+                                uint64_t expire_at_ms);
 
   // Update entry expiration. Return epxiration timepoint in abs milliseconds, or -1 if the entry
   // already expired and was deleted;
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it, ExpIterator exp_it,
-                                         const ExpireParams& params) ABSL_LOCKS_EXCLUDED(local_mu_);
+                                         const ExpireParams& params);
 
   // Adds expiry information.
-  void AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) ABSL_LOCKS_EXCLUDED(local_mu_);
+  void AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
 
   // Removes the corresponing expiry information if exists.
   // Returns true if expiry existed (and removed).
-  bool RemoveExpire(DbIndex db_ind, Iterator main_it) ABSL_LOCKS_EXCLUDED(local_mu_);
+  bool RemoveExpire(DbIndex db_ind, Iterator main_it);
 
   // Either adds or removes (if at == 0) expiry. Returns true if a change was made.
   // Does not change expiry if at != 0 and expiry already exists.
-  bool UpdateExpire(DbIndex db_ind, Iterator main_it, uint64_t at) ABSL_LOCKS_EXCLUDED(local_mu_);
+  bool UpdateExpire(DbIndex db_ind, Iterator main_it, uint64_t at);
 
   void SetMCFlag(DbIndex db_ind, PrimeKey key, uint32_t flag);
   uint32_t GetMCFlag(DbIndex db_ind, const PrimeKey& key) const;
@@ -343,12 +342,12 @@ class DbSlice {
   // Delete a key referred by its iterator.
   void PerformDeletion(Iterator del_it, DbTable* table);
 
-  bool Del(Context cntx, Iterator it) ABSL_LOCKS_EXCLUDED(local_mu_);
+  bool Del(Context cntx, Iterator it);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
   // Flushes db_ind or all databases if kDbAll is passed
-  void FlushDb(DbIndex db_ind) ABSL_LOCKS_EXCLUDED(local_mu_);
+  void FlushDb(DbIndex db_ind);
 
   // Flushes the data of given slot ranges.
   void FlushSlots(cluster::SlotRanges slot_ranges);
@@ -439,7 +438,7 @@ class DbSlice {
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
 
   //! Unregisters the callback.
-  void UnregisterOnChange(uint64_t id) ABSL_LOCKS_EXCLUDED(local_mu_);
+  void UnregisterOnChange(uint64_t id);
 
   struct DeleteExpiredStats {
     uint32_t deleted = 0;         // number of deleted items due to expiry (less than traversed).
@@ -496,24 +495,17 @@ class DbSlice {
     client_tracking_map_[key].insert(conn_ref);
   }
 
-  // Provides access to the internal lock of db_slice for flows that serialize
-  // entries with preemption and need to synchronize with Traverse below which
-  // acquires the same lock.
-  ThreadLocalMutex& GetSerializationMutex() {
-    return local_mu_;
-  }
-
-  // Wrapper around DashTable::Traverse that allows preemptions
-  template <typename Cb, typename DashTable>
-  PrimeTable::Cursor Traverse(DashTable* pt, PrimeTable::Cursor cursor, Cb&& cb)
-      ABSL_LOCKS_EXCLUDED(local_mu_) {
-    util::fb2::LockGuard lk(local_mu_);
-    return pt->Traverse(cursor, std::forward<Cb>(cb));
-  }
-
   // Does not check for non supported events. Callers must parse the string and reject it
   // if it's not empty and not EX.
   void SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events);
+
+  bool WillBlockOnJournalWrite() const {
+    return block_counter_.IsBlocked();
+  }
+
+  LocalBlockingCounter* BlockingCounter() {
+    return &block_counter_;
+  }
 
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
@@ -571,8 +563,11 @@ class DbSlice {
 
   void CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const;
 
-  // Used to provide exclusive access while Traversing segments
-  mutable ThreadLocalMutex local_mu_;
+  // We need this because registered callbacks might yield and when they do so we want
+  // to avoid Heartbeat or Flushing the db.
+  // This counter protects us against this case.
+  mutable LocalBlockingCounter block_counter_;
+
   ShardId shard_id_;
   uint8_t caching_mode_ : 1;
 

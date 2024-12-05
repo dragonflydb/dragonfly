@@ -481,4 +481,17 @@ BorrowedInterpreter::~BorrowedInterpreter() {
     ServerState::tlocal()->ReturnInterpreter(interpreter_);
 }
 
+void LocalBlockingCounter::unlock() {
+  DCHECK(mutating_ > 0);
+  --mutating_;
+  if (mutating_ == 0) {
+    cond_var_.notify_all();
+  }
+}
+
+void LocalBlockingCounter::Wait() {
+  util::fb2::NoOpLock noop_lk_;
+  cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
+}
+
 }  // namespace dfly

@@ -387,4 +387,23 @@ struct BorrowedInterpreter {
 
 extern size_t serialization_max_chunk_size;
 
+class LocalBlockingCounter {
+ public:
+  void lock() {
+    ++mutating_;
+  }
+
+  void unlock();
+
+  void Wait();
+
+  bool IsBlocked() const {
+    return mutating_ > 0;
+  }
+
+ private:
+  util::fb2::CondVarAny cond_var_;
+  size_t mutating_ = 0;
+};
+
 }  // namespace dfly
