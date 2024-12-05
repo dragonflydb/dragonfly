@@ -1214,8 +1214,8 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       CHECK(!prime_it.is_done());
-      ExpireIfNeeded(cntx, prime_it, false);
       result.deleted_bytes += prime_it->second.MallocUsed();
+      ExpireIfNeeded(cntx, prime_it, false);
       ++result.deleted;
     } else {
       result.survivor_ttl_sum += ttl;

@@ -266,6 +266,8 @@ async def test_cache_eviction_with_rss_deny_oom(
     await async_client.execute_command("CONFIG SET enable_heartbeat_eviction true")
 
     await asyncio.sleep(1)  # Wait for RSS heartbeat update
+    await async_client.execute_command("MEMORY DECOMMIT")
+    await asyncio.sleep(1)  # Wait for RSS update
 
     # Get RSS memory after creating new connections
     memory_info = await async_client.info("memory")
