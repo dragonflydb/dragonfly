@@ -36,7 +36,7 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja
           ninja dragonfly
           ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
-      - name: Build BullMQ
+      - name: Build and Test BullMQ
         run: |
           DOWNLOAD_URL=$(curl -s https://api.github.com/repos/taskforcesh/bullmq/releases/latest | jq -r '.tarball_url')
           echo "Downloading latest BullMQ release from ${DOWNLOAD_URL}"
@@ -47,9 +47,6 @@ jobs:
           pwd
           yarn install
           yarn build
-      - name: Test BullMQ
-        run: |
-          cd $GITHUB_WORKSPACE/bullmq
           BULLMQ_TEST_PREFIX={b} yarn test
       - name: Upload logs on failure
         if: failure()
