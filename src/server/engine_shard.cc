@@ -60,6 +60,12 @@ ABSL_FLAG(float, tiered_offload_threshold, 0.5,
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
 
+ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
+          "Eviction starts when the free memory (including RSS memory) drops below "
+          "eviction_memory_budget_threshold * max_memory_limit.");
+
+ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
+
 namespace dfly {
 
 using absl::GetFlag;
@@ -196,6 +202,52 @@ optional<uint32_t> GetPeriodicCycleMs() {
   if (clock_cycle_ms == 0)
     clock_cycle_ms = 1;
   return clock_cycle_ms;
+}
+
+size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t global_used_memory,
+                                           size_t shard_memory_threshold) {
+  if (global_used_memory > global_memory_limit) {
+    // Used memory is above the limit, we need to evict all bytes
+    return (global_used_memory - global_memory_limit) / shard_set->size() + shard_memory_threshold;
+  }
+
+  const size_t shard_budget = (global_memory_limit - global_used_memory) / shard_set->size();
+  return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
+}
+
+/* Calculates the number of bytes to evict based on memory and rss memory usage. */
+size_t CalculateEvictionBytes() {
+  const size_t shards_count = shard_set->size();
+  const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
+
+  const size_t shard_memory_budget_threshold =
+      size_t(max_memory_limit * eviction_memory_budget_threshold) / shards_count;
+
+  const size_t global_used_memory = used_mem_current.load(memory_order_relaxed);
+
+  // Calculate how many bytes we need to evict on this shard
+  size_t goal_bytes = CalculateHowManyBytesToEvictOnShard(max_memory_limit, global_used_memory,
+                                                          shard_memory_budget_threshold);
+
+  const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
+
+  /* If rss_oom_deny_ratio is set, we should evict depending on rss memory too */
+  if (rss_oom_deny_ratio > 0.0) {
+    const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
+    /* We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
+     * memory */
+    const size_t shard_rss_memory_budget_threshold =
+        size_t(max_rss_memory * eviction_memory_budget_threshold) / shards_count;
+
+    // Calculate how much rss memory is used by all shards
+    const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
+
+    // Try to evict more bytes if we are close to the rss memory limit
+    goal_bytes = std::max(
+        goal_bytes, CalculateHowManyBytesToEvictOnShard(max_rss_memory, global_used_rss_memory,
+                                                        shard_rss_memory_budget_threshold));
+  }
+  return goal_bytes;
 }
 
 }  // namespace
@@ -706,7 +758,6 @@ void EngineShard::RetireExpiredAndEvict() {
     // TODO: iterate over all namespaces
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
     constexpr double kTtlDeleteLimit = 200;
-    constexpr double kRedLimitFactor = 0.1;
 
     uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
     uint32_t deleted = GetMovingSum6(TTL_DELETE);
@@ -720,10 +771,10 @@ void EngineShard::RetireExpiredAndEvict() {
       ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
     }
 
-    ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
-
     DbContext db_cntx;
     db_cntx.time_now_ms = GetCurrentTimeMs();
+
+    size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
     for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
       if (!db_slice.IsDbValid(i))
@@ -734,15 +785,22 @@ void EngineShard::RetireExpiredAndEvict() {
       if (expt->size() > pt->size() / 4) {
         DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
 
+        eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
         counter_[TTL_TRAVERSE].IncBy(stats.traversed);
         counter_[TTL_DELETE].IncBy(stats.deleted);
       }
 
-      // if our budget is below the limit
-      if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
+      if (eviction_goal) {
         uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-        db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
-                                         eviction_redline - db_slice.memory_budget());
+        auto [evicted_items, evicted_bytes] =
+            db_slice.FreeMemWithEvictionStep(i, starting_segment_id, eviction_goal);
+
+        DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
+                 << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
+                 << " bytes. Max eviction per heartbeat: "
+                 << GetFlag(FLAGS_max_eviction_per_heartbeat);
+
+        eviction_goal -= std::min(eviction_goal, evicted_bytes);
       }
     }
   }

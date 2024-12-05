@@ -148,14 +148,12 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
 
 @pytest.mark.asyncio
 async def test_denyoom_commands(df_factory):
-    df_server = df_factory.create(
-        proactor_threads=1, maxmemory="256mb", oom_deny_commands="get", oom_deny_ratio=0.7
-    )
+    df_server = df_factory.create(proactor_threads=1, maxmemory="256mb", oom_deny_commands="get")
     df_server.start()
     client = df_server.client()
     await client.execute_command("DEBUG POPULATE 7000 size 44000")
 
-    min_deny = 250 * 1024 * 1024  # 250mb
+    min_deny = 256 * 1024 * 1024  # 256mb
     info = await client.info("memory")
     print(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
     assert info["used_memory"] > min_deny, "Weak testcase: too little used memory"

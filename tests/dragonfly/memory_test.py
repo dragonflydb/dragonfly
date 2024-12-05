@@ -6,6 +6,31 @@ from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
 
+async def calculate_estimated_connection_memory(
+    async_client: aioredis.Redis, df_server: DflyInstance
+):
+    memory_info = await async_client.info("memory")
+    already_used_rss_memory = memory_info["used_memory_rss"]
+
+    connections_number = 100
+    connections = []
+    for _ in range(connections_number):
+        conn = aioredis.Redis(port=df_server.port)
+        await conn.ping()
+        connections.append(conn)
+
+    await asyncio.sleep(1)  # Wait RSS update
+
+    memory_info = await async_client.info("memory")
+    estimated_connections_memory = memory_info["used_memory_rss"] - already_used_rss_memory
+
+    # Close test connection
+    for conn in connections:
+        await conn.close()
+
+    return estimated_connections_memory // connections_number
+
+
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",
@@ -160,3 +185,108 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
     info = await client.info("memory")
     logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
     assert rss_before_eval * 1.01 > info["used_memory_rss"]
+
+
+@pytest.mark.asyncio
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "cache_mode": "true",
+        "maxmemory": "256mb",
+        "rss_oom_deny_ratio": 0.5,
+        "max_eviction_per_heartbeat": 1000,
+    }
+)
+async def test_cache_eviction_with_rss_deny_oom(
+    async_client: aioredis.Redis,
+    df_server: DflyInstance,
+):
+    """
+    Test to verify that cache eviction is triggered even if used memory is small but rss memory is above limit
+    """
+
+    max_memory = 256 * 1024 * 1024  # 256 MB
+    rss_max_memory = int(max_memory * 0.5)  # 50% of max memory
+
+    data_fill_size = int(0.55 * rss_max_memory)  # 55% of rss_max_memory
+    rss_increase_size = int(0.55 * rss_max_memory)  # 55% of max rss_max_memory
+
+    key_size = 1024 * 5  # 5 kb
+    num_keys = data_fill_size // key_size
+
+    await asyncio.sleep(1)  # Wait for RSS update
+
+    estimated_connection_memory = await calculate_estimated_connection_memory(
+        async_client, df_server
+    )
+    num_connections = rss_increase_size // estimated_connection_memory
+
+    logging.info(
+        f"Estimated connection memory: {estimated_connection_memory}. Number of connections: {num_connections}."
+    )
+
+    # Fill data to 55% of rss max memory
+    await async_client.execute_command("DEBUG", "POPULATE", num_keys, "key", key_size)
+
+    await asyncio.sleep(1)  # Wait for RSS heartbeat update
+
+    # First test that eviction is not triggered without connection creation
+    stats_info = await async_client.info("stats")
+    assert stats_info["evicted_keys"] == 0, "No eviction should start yet."
+
+    # Test that used memory is less than 90% of max memory
+    memory_info = await async_client.info("memory")
+    assert (
+        memory_info["used_memory"] < max_memory * 0.9
+    ), "Used memory should be less than 90% of max memory."
+    assert (
+        memory_info["used_memory_rss"] < rss_max_memory * 0.9
+    ), "RSS memory should be less than 90% of rss max memory (max_memory * rss_oom_deny_ratio)."
+
+    # Disable heartbeat eviction
+    await async_client.execute_command("CONFIG SET enable_heartbeat_eviction false")
+
+    # Increase RSS memory by 55% of rss max memory
+    # We can simulate RSS increase by creating new connections
+    connections = []
+    for _ in range(num_connections):
+        conn = aioredis.Redis(port=df_server.port)
+        await conn.ping()
+        connections.append(conn)
+
+    await asyncio.sleep(1)
+
+    # Check that RSS memory is above rss limit
+    memory_info = await async_client.info("memory")
+    assert (
+        memory_info["used_memory_rss"] >= rss_max_memory * 0.9
+    ), "RSS memory should exceed 90% of the maximum RSS memory limit (max_memory * rss_oom_deny_ratio)."
+
+    # Enable heartbeat eviction
+    await async_client.execute_command("CONFIG SET enable_heartbeat_eviction true")
+
+    await asyncio.sleep(1)  # Wait for RSS heartbeat update
+    await async_client.execute_command("MEMORY DECOMMIT")
+    await asyncio.sleep(1)  # Wait for RSS update
+
+    # Get RSS memory after creating new connections
+    memory_info = await async_client.info("memory")
+    stats_info = await async_client.info("stats")
+
+    logging.info(f'Evicted keys number: {stats_info["evicted_keys"]}. Total keys: {num_keys}.')
+
+    assert (
+        memory_info["used_memory"] < data_fill_size
+    ), "Used memory should be less than initial fill size due to eviction."
+
+    assert (
+        memory_info["used_memory_rss"] < rss_max_memory * 0.9
+    ), "RSS memory should be less than 90% of rss max memory (max_memory * rss_oom_deny_ratio) after eviction."
+
+    # Check that eviction has occurred
+    assert (
+        stats_info["evicted_keys"] > 0
+    ), "Eviction should have occurred due to rss memory pressure."
+
+    for conn in connections:
+        await conn.close()

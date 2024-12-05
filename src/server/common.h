@@ -17,6 +17,7 @@
 #include "core/compact_object.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
+#include "helio/io/proc_reader.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
 
@@ -131,6 +132,8 @@ extern std::atomic_uint64_t rss_mem_current;
 extern std::atomic_uint64_t rss_mem_peak;
 
 extern size_t max_memory_limit;
+
+size_t FetchRssMemory(io::StatusData sdata);
 
 extern Namespaces* namespaces;
 

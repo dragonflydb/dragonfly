@@ -1214,6 +1214,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       CHECK(!prime_it.is_done());
+      result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
       ExpireIfNeeded(cntx, prime_it, false);
       ++result.deleted;
     } else {
@@ -1290,9 +1291,6 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
 
     auto time_finish = absl::GetCurrentTimeNanos();
     events_.evicted_keys += evicted_items;
-    DVLOG(2) << "Evicted: " << evicted_bytes;
-    DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted_items << "/"
-             << max_eviction_per_hb;
     DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
     return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
   };
@@ -1326,7 +1324,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
           if (record_keys)
             keys_to_journal.emplace_back(key);
 
-          evicted_bytes += evict_it->second.MallocUsed();
+          evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
           ++evicted_items;
           PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
 

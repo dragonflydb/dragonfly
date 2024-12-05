@@ -100,9 +100,10 @@ ABSL_FLAG(dfly::MemoryBytesFlag, maxmemory, dfly::MemoryBytesFlag{},
           "0 - means the program will automatically determine its maximum memory usage. "
           "default: 0");
 
-ABSL_FLAG(double, oom_deny_ratio, 1.1,
-          "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
-          "memory is above this value");
+ABSL_RETIRED_FLAG(
+    double, oom_deny_ratio, 1.1,
+    "commands with flag denyoom will return OOM when the ratio between maxmemory and used "
+    "memory is above this value");
 
 ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
           "When the ratio between maxmemory and RSS memory exceeds this value, commands marked as "
@@ -722,11 +723,6 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   return result;
 }
 
-void SetOomDenyRatioOnAllThreads(double ratio) {
-  auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->oom_deny_ratio = ratio; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
 void SetRssOomDenyRatioOnAllThreads(double ratio) {
   auto cb = [ratio](unsigned, auto*) { ServerState::tlocal()->rss_oom_deny_ratio = ratio; };
   shard_set->pool()->AwaitBrief(cb);
@@ -792,9 +788,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("masteruser");
   config_registry.RegisterMutable("max_eviction_per_heartbeat");
   config_registry.RegisterMutable("max_segment_to_consider");
-
-  config_registry.RegisterSetter<double>("oom_deny_ratio",
-                                         [](double val) { SetOomDenyRatioOnAllThreads(val); });
 
   config_registry.RegisterSetter<double>("rss_oom_deny_ratio",
                                          [](double val) { SetRssOomDenyRatioOnAllThreads(val); });
@@ -873,7 +866,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   });
   Transaction::Init(shard_num);
 
-  SetOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_oom_deny_ratio));
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
@@ -1001,7 +993,7 @@ bool ShouldDenyOnOOM(const CommandId* cid) {
     uint64_t start_ns = absl::GetCurrentTimeNanos();
     auto memory_stats = etl.GetMemoryUsage(start_ns);
 
-    if (memory_stats.used_mem > (max_memory_limit * etl.oom_deny_ratio) ||
+    if (memory_stats.used_mem > max_memory_limit ||
         (etl.rss_oom_deny_ratio > 0 &&
          memory_stats.rss_mem > (max_memory_limit * etl.rss_oom_deny_ratio))) {
       DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "

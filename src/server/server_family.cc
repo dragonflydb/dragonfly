@@ -137,7 +137,6 @@ ABSL_DECLARE_FLAG(bool, tls);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
-ABSL_DECLARE_FLAG(double, oom_deny_ratio);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
@@ -1014,7 +1013,7 @@ void ServerFamily::UpdateMemoryGlobalStats() {
 
   io::Result<io::StatusData> sdata_res = io::ReadStatusInfo();
   if (sdata_res) {
-    size_t total_rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
+    size_t total_rss = FetchRssMemory(sdata_res.value());
     rss_mem_current.store(total_rss, memory_order_relaxed);
     if (rss_mem_peak.load(memory_order_relaxed) < total_rss) {
       rss_mem_peak.store(total_rss, memory_order_relaxed);
@@ -1339,7 +1338,7 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                       &resp->body());
   }
   if (sdata_res.has_value()) {
-    size_t rss = sdata_res->vm_rss + sdata_res->hugetlb_pages;
+    size_t rss = FetchRssMemory(sdata_res.value());
     AppendMetricWithoutLabels("used_memory_rss_bytes", "", rss, MetricType::GAUGE, &resp->body());
     AppendMetricWithoutLabels("swap_memory_bytes", "", sdata_res->vm_swap, MetricType::GAUGE,
                               &resp->body());

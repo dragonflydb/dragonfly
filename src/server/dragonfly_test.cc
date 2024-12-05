@@ -26,8 +26,8 @@ ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
-ABSL_DECLARE_FLAG(double, oom_deny_ratio);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
+ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 
 namespace dfly {
 
@@ -456,19 +456,22 @@ TEST_F(DflyEngineTest, OOM) {
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
-  max_memory_limit = 300000;
+  max_memory_limit = 300000 * 4;
 
+  // The threshold is set to 0.3 to trigger eviction earlier and prevent OOM.
   absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
-  ResetService();
+  absl::SetFlag(&FLAGS_eviction_memory_budget_threshold, 0.3);
 
   shard_set->TEST_EnableCacheMode();
 
+  /* The value should be large enough to avoid being inlined. Heartbeat evicts only objects for
+   * which HasAllocated() returns true. */
+  std::string value(1000, '.');
+
   ssize_t i = 0;
   RespExpr resp;
-  for (; i < 10000; ++i) {
-    resp = Run({"setex", StrCat("key", i), "30", "bar"});
-    // we evict some items because 5000 is too much when max_memory_limit is 300000.
+  for (; i < 1000; ++i) {
+    resp = Run({"setex", StrCat("key", i), "30", value});
     ASSERT_EQ(resp, "OK");
   }
 
@@ -489,10 +492,7 @@ TEST_F(DflyEngineTest, Bug207) {
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {
-  max_memory_limit = 300000;
-  absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
-  ResetService();
+  max_memory_limit = 600000;  // 0.6mb
   shard_set->TEST_EnableCacheMode();
 
   string tmp_val(100, '.');
