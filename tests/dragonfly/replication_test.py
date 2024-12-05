@@ -66,7 +66,6 @@ Test full replication pipeline. Test full sync with streaming changes and stable
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
-@dfly_args({"serialization_max_chunk_size": 512})
 async def test_replication_all(
     df_factory: DflyInstanceFactory,
     t_master,
