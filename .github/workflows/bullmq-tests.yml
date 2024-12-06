@@ -33,7 +33,7 @@ jobs:
       - name: Configure/Build
         run: |
           cd $GITHUB_WORKSPACE/build
-          cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja
+          cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
           ninja dragonfly
           ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
       - name: Build and Test BullMQ
