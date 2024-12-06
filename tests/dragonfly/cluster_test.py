@@ -1309,7 +1309,7 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
         )
         for i in range(2)
     ]
