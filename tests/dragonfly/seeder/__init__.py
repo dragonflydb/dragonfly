@@ -139,9 +139,9 @@ class Seeder(SeederBase):
         collection_size=None,
         types: typing.Optional[typing.List[str]] = None,
         huge_value_percentage=1,
-        huge_value_size=1024,
-        # 1 huge entries per container/key as default
-        huge_value_csize=1,
+        huge_value_size=512,
+        # 2 huge entries per container/key as default
+        huge_value_csize=2,
     ):
         SeederBase.__init__(self, types)
         self.key_target = key_target
