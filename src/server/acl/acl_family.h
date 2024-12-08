@@ -37,21 +37,21 @@ class AclFamily final {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  void Acl(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void List(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void SetUser(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void DelUser(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void WhoAmI(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Save(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void Load(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void Acl(CmdArgList args, const CommandContext& cmd_cntx);
+  void List(CmdArgList args, const CommandContext& cmd_cntx);
+  void SetUser(CmdArgList args, const CommandContext& cmd_cntx);
+  void DelUser(CmdArgList args, const CommandContext& cmd_cntx);
+  void WhoAmI(CmdArgList args, const CommandContext& cmd_cntx);
+  void Save(CmdArgList args, const CommandContext& cmd_cntx);
+  void Load(CmdArgList args, const CommandContext& cmd_cntx);
   // Helper function for bootstrap
   bool Load();
-  void Log(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void Users(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void Cat(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void GetUser(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void DryRun(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  void GenPass(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  void Log(CmdArgList args, const CommandContext& cmd_cntx);
+  void Users(CmdArgList args, const CommandContext& cmd_cntx);
+  void Cat(CmdArgList args, const CommandContext& cmd_cntx);
+  void GetUser(CmdArgList args, const CommandContext& cmd_cntx);
+  void DryRun(CmdArgList args, const CommandContext& cmd_cntx);
+  void GenPass(CmdArgList args, const CommandContext& cmd_cntx);
 
   // Helper function that updates all open connections and their
   // respective ACL fields on all the available proactor threads

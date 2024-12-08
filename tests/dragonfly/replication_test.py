@@ -2372,9 +2372,15 @@ async def test_replicate_old_master(
 
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
-    master = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode=cluster_mode)
+    master = df_factory.create(
+        version=1.19,
+        path=released_dfly_path,
+        cluster_mode=cluster_mode,
+    )
     replica = df_factory.create(
-        cluster_mode=cluster_mode, cluster_announce_ip=announce_ip, announce_port=announce_port
+        cluster_mode=cluster_mode,
+        cluster_announce_ip=announce_ip,
+        announce_port=announce_port,
     )
 
     df_factory.start_all([master, replica])

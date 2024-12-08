@@ -41,6 +41,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
@@ -971,9 +972,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     }
 
     for (const auto& pel : cg.pel_arr) {
-      streamNACK* nack = streamCreateNACK(NULL);
+      streamNACK* nack = reinterpret_cast<streamNACK*>(zmalloc(sizeof(*nack)));
       nack->delivery_time = pel.delivery_time;
       nack->delivery_count = pel.delivery_count;
+      nack->consumer = nullptr;
 
       if (!raxTryInsert(cgroup->pel, const_cast<uint8_t*>(pel.rawid.data()), pel.rawid.size(), nack,
                         NULL)) {
@@ -985,17 +987,13 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     }
 
     for (const auto& cons : cg.cons_arr) {
-      sds cname = ToSds(cons.name);
-
-      streamConsumer* consumer =
-          streamCreateConsumer(cgroup, cname, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
-      sdsfree(cname);
+      streamConsumer* consumer = StreamCreateConsumer(cgroup, ToSV(cons.name), cons.seen_time,
+                                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
       if (!consumer) {
         LOG(ERROR) << "Duplicate stream consumer detected.";
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
-      consumer->seen_time = cons.seen_time;
 
       /* Create the PEL (pending entries list) about entries owned by this specific
        * consumer. */
@@ -1502,7 +1500,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadListQuicklist(rdbtype);
       break;
     case RDB_TYPE_STREAM_LISTPACKS:
-      iores = ReadStreams();
+    case RDB_TYPE_STREAM_LISTPACKS_2:
+    case RDB_TYPE_STREAM_LISTPACKS_3:
+      iores = ReadStreams(rdbtype);
       break;
     case RDB_TYPE_JSON:
       iores = ReadJson();
@@ -1828,7 +1828,7 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
-auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   size_t listpacks;
   if (pending_read_.remaining > 0) {
     listpacks = pending_read_.remaining;
@@ -1892,6 +1892,30 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
   SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->ms);
   SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->seq);
 
+  if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_2) {
+    /* Load the first entry ID. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->first_id.ms);
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->first_id.seq);
+
+    /* Load the maximal deleted entry ID. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->max_deleted_entry_id.ms);
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->max_deleted_entry_id.seq);
+
+    /* Load the offset. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->entries_added);
+  } else {
+    /* During migration the offset can be initialized to the stream's
+     * length. At this point, we also don't care about tombstones
+     * because CG offsets will be later initialized as well. */
+    load_trace->stream_trace->max_deleted_entry_id.ms = 0;
+    load_trace->stream_trace->max_deleted_entry_id.seq = 0;
+    load_trace->stream_trace->entries_added = load_trace->stream_trace->stream_len;
+
+    // TODO add implementation, we need to find the first entry's ID.
+    // The redis code is next
+    // streamGetEdgeID(s,1,1,&s->first_id);
+  }
+
   /* Consumer groups loading */
   uint64_t cgroups_count;
   SET_OR_UNEXPECT(LoadLen(nullptr), cgroups_count);
@@ -1913,6 +1937,24 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.ms);
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.seq);
 
+    uint64_t cg_offset;
+    if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_2) {
+      SET_OR_UNEXPECT(LoadLen(nullptr), cg_offset);
+      (void)cg_offset;
+    } else {
+      // TODO implement
+      // cg_offset = should be calculated like streamEstimateDistanceFromFirstEverEntry();
+    }
+
+    // TODO add our implementation for the next Redis logic
+    // streamCG* cgroup = streamCreateCG(s, cgname, sdslen(cgname), &cg_id, cg_offset);
+    // if (cgroup == NULL) {
+    //   rdbReportCorruptRDB("Duplicated consumer group name %s", cgname);
+    //   decrRefCount(o);
+    //   sdsfree(cgname);
+    //   return NULL;
+    // }
+
     /* Load the global PEL for this consumer group, however we'll
      * not yet populate the NACK structures with the message
      * owner, since consumers for this group and their messages will
@@ -1931,17 +1973,8 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
         return make_unexpected(ec);
       }
 
-      // streamNACK* nack = streamCreateNACK(NULL);
-      // auto cleanup2 = absl::Cleanup([&] { streamFreeNACK(nack); });
-
       SET_OR_UNEXPECT(FetchInt<int64_t>(), pel.delivery_time);
       SET_OR_UNEXPECT(LoadLen(nullptr), pel.delivery_count);
-
-      /*if (!raxTryInsert(cgroup->pel, rawid, sizeof(rawid), nack, NULL)) {
-        LOG(ERROR) << "Duplicated global PEL entry loading stream consumer group";
-        return Unexpected(errc::duplicate_key);
-      }
-      std::move(cleanup2).Cancel();*/
     }
 
     /* Now that we loaded our global PEL, we need to load the
@@ -1957,6 +1990,13 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
         return make_unexpected(ec);
 
       SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.seen_time);
+
+      if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_3) {
+        SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.active_time);
+      } else {
+        /* That's the best estimate we got */
+        consumer.active_time = consumer.seen_time;
+      }
 
       /* Load the PEL about entries owned by this specific
        * consumer. */
@@ -2183,7 +2223,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
   /* Key-specific attributes, set by opcodes before the key type. */
   ObjSettings settings;
-  settings.now = mstime();
+  settings.now = GetCurrentTimeMs();
   size_t keys_loaded = 0;
 
   auto cleanup = absl::Cleanup([&] { FinishLoad(start, &keys_loaded); });

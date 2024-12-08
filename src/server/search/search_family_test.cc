@@ -332,6 +332,11 @@ TEST_F(SearchFamilyTest, Errors) {
 
   // Wrong field type
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:lol"}), ErrArg("Wrong access type for field: foo"));
+
+  // ft.create index on json schema $.sometag AS sometag TAG SEPARATOR
+  EXPECT_THAT(Run({"ft.create", "i2", "ON", "JSON", "SCHEMA", "$.sometag", "AS", "sometag", "TAG",
+                   "SEPARATOR"}),
+              ErrArg("Tag separator must be a single character. Got ``"));
 }
 
 TEST_F(SearchFamilyTest, NoPrefix) {

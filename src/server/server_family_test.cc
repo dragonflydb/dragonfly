@@ -545,4 +545,8 @@ TEST_F(ServerFamilyTest, ConfigNormalization) {
               RespArray(ElementsAre("replica_priority", "13")));
 }
 
+TEST_F(ServerFamilyTest, CommandDocsOk) {
+  EXPECT_THAT(Run({"command", "docs"}), "OK");
+}
+
 }  // namespace dfly

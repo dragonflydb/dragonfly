@@ -15,21 +15,20 @@ class SinkReplyBuilder;
 
 namespace dfly {
 class CommandRegistry;
-class ConnectionContext;
+struct CommandContext;
 
 class SearchFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void FtCreate(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                       ConnectionContext* cntx);
-  static void FtAlter(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void FtDropIndex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void FtInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void FtList(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void FtSearch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void FtProfile(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void FtAggregate(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void FtTagVals(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void FtCreate(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtAlter(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtInfo(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtList(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtSearch(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtProfile(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtAggregate(CmdArgList args, const CommandContext& cmd_cntx);
+  static void FtTagVals(CmdArgList args, const CommandContext& cmd_cntx);
 
  public:
   static void Register(CommandRegistry* registry);

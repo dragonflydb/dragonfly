@@ -57,12 +57,13 @@ def send_command(node, command, print_errors=True):
     for i in range(0, 5):
         try:
             result = client.execute_command(*command)
-            client.close()
             return result
         except Exception as e:
             if print_errors:
                 print(e)
             time.sleep(0.1 * i)
+        finally:
+            client.close()
 
     if print_errors:
         print(f"Unable to run command {command} against {node.host}:{node.port} after 5 attempts!")
@@ -123,10 +124,10 @@ def create_locally(args):
     next_port = args.first_port
     masters = []
     for i in range(args.num_masters):
-        master = Master("localhost", next_port)
+        master = Master("127.0.0.1", next_port)
         next_port += 1
         for j in range(args.replicas_per_master):
-            replica = Node("localhost", next_port)
+            replica = Node("127.0.0.1", next_port)
             master.replicas.append(replica)
             next_port += 1
         masters.append(master)
@@ -205,6 +206,8 @@ def build_config_from_existing(args):
                 "replicas": [build_node(replica) for replica in shard["nodes"][1::]],
             }
         )
+
+    client.close()
     return config
 
 
@@ -456,16 +459,16 @@ Create a 6 node cluster locally, 3 of them masters with 1 replica each:
 
 Connect to existing cluster and print current config:
   ./cluster_mgr.py --action=print_config
-This will connect to localhost:6379 by default. Override with `--target_host` and `--target_port`
+This will connect to 127.0.0.1:6379 by default. Override with `--target_host` and `--target_port`
 
 Configure an existing Dragonfly server to be a standalone cluster (owning all slots):
   ./cluster_mgr.py --action=config_single_remote
 This connects to an *existing* Dragonfly server, and pushes a config telling it to own all slots.
-This will connect to localhost:6379 by default. Override with `--target_host` and `--target_port`
+This will connect to 127.0.0.1:6379 by default. Override with `--target_host` and `--target_port`
 
 Attach an existing Dragonfly server to an existing cluster (owning no slots):
   ./cluster_mgr.py --action=attach --attach_host=HOST --attach_port=PORT
-This will connect to existing cluster present at localhost:6379 by default. Override with
+This will connect to existing cluster present at 127.0.0.1:6379 by default. Override with
 `--target_host` and `--target_port`.
 To attach node as a replica - use --attach_as_replica=True. In such case, the node will be a
 replica of --target_host/--target_port.
@@ -524,10 +527,10 @@ WARNING: Be careful! This will close all Dragonfly servers connected to the clus
     parser.add_argument(
         "--slot_end", type=int, default=100, help="Last slot to move / migrate (inclusive)"
     )
-    parser.add_argument("--target_host", default="localhost", help="Master host/ip")
+    parser.add_argument("--target_host", default="127.0.0.1", help="Master host/ip")
     parser.add_argument("--target_port", type=int, default=6379, help="Master port")
     parser.add_argument(
-        "--attach_host", default="localhost", help="New cluster node master host/ip"
+        "--attach_host", default="127.0.0.1", help="New cluster node master host/ip"
     )
     parser.add_argument(
         "--attach_port", type=int, default=6379, help="New cluster node master port"

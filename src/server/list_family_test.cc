@@ -377,6 +377,11 @@ TEST_F(ListFamilyTest, LRem) {
 
   ASSERT_THAT(Run({"lrem", kKey2, "1", "12345678"}), IntArg(1));
   ASSERT_THAT(Run({"lrem", kKey2, "1", val}), IntArg(1));
+
+  ASSERT_THAT(Run({"lpush", kKey3, "bar", "bar", "foo"}), IntArg(3));
+  ASSERT_THAT(Run({"lrem", kKey3, "-2", "bar"}), IntArg(2));
+  resp = Run({"lrange", kKey3, "0", "-1"});
+  ASSERT_EQ(resp, "foo");
 }
 
 TEST_F(ListFamilyTest, DumpRestorePlain) {

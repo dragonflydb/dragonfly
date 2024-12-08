@@ -169,6 +169,8 @@ class SliceSnapshot {
     size_t keys_total = 0;
   } stats_;
 
+  ThreadLocalMutex big_value_mu_;
+
   std::function<void(std::string)> on_push_;
   std::function<void()> on_snapshot_finish_;
 };

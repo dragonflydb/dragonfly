@@ -122,6 +122,10 @@ size_t max_memory_limit = 0;
 size_t serialization_max_chunk_size = 0;
 Namespaces* namespaces = nullptr;
 
+size_t FetchRssMemory(io::StatusData sdata) {
+  return sdata.vm_rss + sdata.hugetlb_pages;
+}
+
 const char* GlobalStateName(GlobalState s) {
   switch (s) {
     case GlobalState::ACTIVE:
@@ -479,6 +483,19 @@ BorrowedInterpreter::BorrowedInterpreter(Transaction* tx, ConnectionState* state
 BorrowedInterpreter::~BorrowedInterpreter() {
   if (owned_)
     ServerState::tlocal()->ReturnInterpreter(interpreter_);
+}
+
+void LocalBlockingCounter::unlock() {
+  DCHECK(mutating_ > 0);
+  --mutating_;
+  if (mutating_ == 0) {
+    cond_var_.notify_all();
+  }
+}
+
+void LocalBlockingCounter::Wait() {
+  util::fb2::NoOpLock noop_lk_;
+  cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
 }
 
 }  // namespace dfly
