@@ -208,8 +208,10 @@ void RestoreStreamer::Run() {
   do {
     if (fiber_cancelled_)
       return;
+
     cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
-      if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
+      std::lock_guard guard(big_value_mu_);
+      if (fiber_cancelled_)  // Traverse could have yieleded
         return;
 
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
@@ -281,7 +283,6 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
 
 void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   if (it.GetVersion() < snapshot_version_) {
-    FiberAtomicGuard fg;
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
     for (; !it.is_done(); ++it) {
@@ -302,6 +303,7 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
   PrimeTable* table = db_slice_->GetTables(0).first;
@@ -319,7 +321,10 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  CmdSerializer serializer([&](std::string s) { Write(std::move(s)); });
+  CmdSerializer serializer([&](std::string s) {
+    Write(std::move(s));
+    ThrottleIfNeeded();
+  });
   serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
