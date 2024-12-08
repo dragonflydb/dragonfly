@@ -10,14 +10,13 @@ from .instance import DflyInstance, DflyInstanceFactory
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",
     [
-        # There is an overhead per key, so keep the number of keys equal
-        ("JSON", 250_000, 100, 75),
-        ("SET", 250_000, 100, 110),
+        ("JSON", 200_000, 100, 100),
+        ("SET", 280_000, 100, 100),
         ("HASH", 250_000, 100, 100),
         ("ZSET", 250_000, 100, 100),
-        ("LIST", 250_000, 100, 125),
-        ("STRING", 250_000, 20_000, 1),
-        ("STREAM", 250_000, 100, 120),
+        ("LIST", 300_000, 100, 100),
+        ("STRING", 3_500_000, 1000, 1),
+        ("STREAM", 260_000, 100, 100),
     ],
 )
 # We limit to 5gb just in case to sanity check the gh runner. Otherwise, if we ask for too much
