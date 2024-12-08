@@ -11,6 +11,7 @@
 namespace facade {
 
 using namespace std;
+constexpr static long kMaxBulkLen = 256 * (1ul << 20);  // 256MB.
 
 auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> Result {
   DCHECK(!str.empty());
@@ -218,7 +219,11 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
   const char* s = reinterpret_cast<const char*>(str.data());
   const char* pos = reinterpret_cast<const char*>(memchr(s, '\n', str.size()));
   if (!pos) {
-    Result r = str.size() < 32 ? INPUT_PENDING : BAD_ARRAYLEN;
+    Result r = INPUT_PENDING;
+    if (str.size() >= 32) {
+      LOG(WARNING) << "Unexpected format " << string_view{s, str.size()};
+      r = BAD_ARRAYLEN;
+    }
     return {r, 0};
   }
 
@@ -227,10 +232,16 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
   }
 
   // Skip the first character and 2 last ones (\r\n).
-  bool success = absl::SimpleAtoi(std::string_view{s + 1, size_t(pos - 1 - s)}, res);
-  unsigned consumed = pos - s + 1;
+  string_view len_token{s + 1, size_t(pos - 1 - s)};
+  bool success = absl::SimpleAtoi(len_token, res);
 
-  return ResultConsumed{success ? OK : BAD_ARRAYLEN, consumed};
+  unsigned consumed = pos - s + 1;
+  if (success && *res >= -1) {
+    return ResultConsumed{OK, consumed};
+  }
+
+  LOG(WARNING) << "Failed to parse len " << len_token;
+  return ResultConsumed{BAD_ARRAYLEN, consumed};
 }
 
 auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
@@ -247,8 +258,8 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
     len *= 2;
   }
 
-  if (len < -1 || len > max_arr_len_) {
-    LOG_IF(WARNING, len > max_arr_len_) << "Multibulk len is too large " << len;
+  if (len > max_arr_len_) {
+    LOG(WARNING) << "Multibulk len is too large " << len;
 
     return {BAD_ARRAYLEN, res.second};
   }
@@ -310,15 +321,14 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
       return res;
     }
 
-    if (len < -1 || len > kMaxBulkLen)
-      return {BAD_ARRAYLEN, res.second};
-
     if (len == -1) {  // Resp2 NIL
       cached_expr_->emplace_back(RespExpr::NIL);
       cached_expr_->back().u = Buffer{};
       HandleFinishArg();
     } else {
       DVLOG(1) << "String(" << len << ")";
+      LOG_IF(WARNING, len > kMaxBulkLen) << "Large bulk len: " << len;
+
       cached_expr_->emplace_back(RespExpr::STRING);
       cached_expr_->back().u = Buffer{};
       bulk_len_ = len;

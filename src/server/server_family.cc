@@ -877,6 +877,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
         absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
 #else
     LOG(ERROR) << "Compiled without AWS support";
+    exit(1);
 #endif
   } else if (IsGCSPath(flag_dir)) {
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
