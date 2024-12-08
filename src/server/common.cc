@@ -119,7 +119,6 @@ atomic_uint64_t rss_mem_peak(0);
 
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
-size_t serialization_max_chunk_size = 0;
 Namespaces* namespaces = nullptr;
 
 size_t FetchRssMemory(io::StatusData sdata) {
@@ -438,7 +437,7 @@ ThreadLocalMutex::~ThreadLocalMutex() {
 }
 
 void ThreadLocalMutex::lock() {
-  if (serialization_max_chunk_size != 0) {
+  if (ServerState::tlocal()->serialization_max_chunk_size != 0) {
     DCHECK_EQ(EngineShard::tlocal(), shard_);
     util::fb2::NoOpLock noop_lk_;
     if (locked_fiber_ != nullptr) {
@@ -452,7 +451,7 @@ void ThreadLocalMutex::lock() {
 }
 
 void ThreadLocalMutex::unlock() {
-  if (serialization_max_chunk_size != 0) {
+  if (ServerState::tlocal()->serialization_max_chunk_size != 0) {
     DCHECK_EQ(EngineShard::tlocal(), shard_);
     flag_ = false;
     cond_var_.notify_one();

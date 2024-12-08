@@ -78,7 +78,7 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
-  const auto flush_threshold = serialization_max_chunk_size;
+  const auto flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
   std::function<void(size_t, RdbSerializer::FlushState)> flush_fun;
   if (flush_threshold != 0 && allow_flush == SnapshotFlush::kAllow) {
     flush_fun = [this, flush_threshold](size_t bytes_serialized,

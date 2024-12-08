@@ -298,6 +298,7 @@ class ServerState {  // public struct - to allow initialization.
   // Exec descriptor frequency count for this thread.
   absl::flat_hash_map<std::string, unsigned> exec_freq_count;
   double rss_oom_deny_ratio;
+  size_t serialization_max_chunk_size;
 
  private:
   int64_t live_transactions_ = 0;

@@ -21,7 +21,7 @@ class CmdSerializer {
  public:
   using FlushSerialized = std::function<void(std::string)>;
 
-  explicit CmdSerializer(FlushSerialized cb);
+  explicit CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size);
 
   void SerializeEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                       uint64_t expire_ms);
@@ -39,6 +39,7 @@ class CmdSerializer {
                         uint64_t expire_ms);
 
   FlushSerialized cb_;
+  size_t max_serialization_buffer_size_;
 };
 
 }  // namespace dfly
