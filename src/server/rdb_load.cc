@@ -477,6 +477,8 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
       CreateZSet(ptr.get());
       break;
     case RDB_TYPE_STREAM_LISTPACKS:
+    case RDB_TYPE_STREAM_LISTPACKS_2:
+    case RDB_TYPE_STREAM_LISTPACKS_3:
       CreateStream(ptr.get());
       break;
     default:
@@ -955,8 +957,16 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   }
 
   s->length = ltrace->stream_trace->stream_len;
-  s->last_id.ms = ltrace->stream_trace->ms;
-  s->last_id.seq = ltrace->stream_trace->seq;
+  CopyStreamId(ltrace->stream_trace->last_id, &s->last_id);
+  CopyStreamId(ltrace->stream_trace->first_id, &s->first_id);
+  CopyStreamId(ltrace->stream_trace->max_deleted_entry_id, &s->max_deleted_entry_id);
+  s->entries_added = ltrace->stream_trace->entries_added;
+
+  if (rdb_type_ == RDB_TYPE_STREAM_LISTPACKS) {
+    /* Since the rax is already loaded, we can find the first entry's
+     * ID. */
+    streamGetEdgeID(s, 1, 1, &s->first_id);
+  }
 
   for (const auto& cg : ltrace->stream_trace->cgroup) {
     string_view cgname = ToSV(cg.name);
@@ -964,7 +974,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     cg_id.ms = cg.ms;
     cg_id.seq = cg.seq;
 
-    streamCG* cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, 0);
+    uint64_t entries_read = cg.entries_read;
+    if (rdb_type_ == RDB_TYPE_STREAM_LISTPACKS) {
+      entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg_id);
+    }
+
+    streamCG* cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, entries_read);
     if (cgroup == NULL) {
       LOG(ERROR) << "Duplicated consumer group name " << cgname;
       ec_ = RdbError(errc::duplicate_key);
@@ -1512,7 +1527,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
       // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
       if (rdb_version_ < 10) {
-        // consider it RDB_TYPE_JSON_OLD
+        // consider it RDB_TYPE_JSON_OLD (20)
         iores = ReadJson();
       } else {
         iores = ReadGeneric(rdbtype);
@@ -1876,21 +1891,20 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   // so if there are still unread elements return the partial stream.
   if (listpacks > n) {
     pending_read_.remaining = listpacks - n;
-    return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
-  } else if (pending_read_.remaining > 0) {
-    pending_read_.remaining = 0;
+    return OpaqueObj{std::move(load_trace), rdbtype};
   }
 
-  // Load stream metadata.
+  pending_read_.remaining = 0;
 
+  // Load stream metadata.
   load_trace->stream_trace.reset(new StreamTrace);
 
   /* Load total number of items inside the stream. */
   SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->stream_len);
 
   /* Load the last entry ID. */
-  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->ms);
-  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->seq);
+  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->last_id.ms);
+  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->last_id.seq);
 
   if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_2) {
     /* Load the first entry ID. */
@@ -1907,13 +1921,7 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     /* During migration the offset can be initialized to the stream's
      * length. At this point, we also don't care about tombstones
      * because CG offsets will be later initialized as well. */
-    load_trace->stream_trace->max_deleted_entry_id.ms = 0;
-    load_trace->stream_trace->max_deleted_entry_id.seq = 0;
     load_trace->stream_trace->entries_added = load_trace->stream_trace->stream_len;
-
-    // TODO add implementation, we need to find the first entry's ID.
-    // The redis code is next
-    // streamGetEdgeID(s,1,1,&s->first_id);
   }
 
   /* Consumer groups loading */
@@ -1937,23 +1945,10 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.ms);
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.seq);
 
-    uint64_t cg_offset;
+    cgroup.entries_read = 0;
     if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_2) {
-      SET_OR_UNEXPECT(LoadLen(nullptr), cg_offset);
-      (void)cg_offset;
-    } else {
-      // TODO implement
-      // cg_offset = should be calculated like streamEstimateDistanceFromFirstEverEntry();
+      SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.entries_read);
     }
-
-    // TODO add our implementation for the next Redis logic
-    // streamCG* cgroup = streamCreateCG(s, cgname, sdslen(cgname), &cg_id, cg_offset);
-    // if (cgroup == NULL) {
-    //   rdbReportCorruptRDB("Duplicated consumer group name %s", cgname);
-    //   decrRefCount(o);
-    //   sdsfree(cgname);
-    //   return NULL;
-    // }
 
     /* Load the global PEL for this consumer group, however we'll
      * not yet populate the NACK structures with the message
@@ -2722,6 +2717,11 @@ std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig co
   std::visit(visitor, opaque.obj);
 
   return visitor.ec();
+}
+
+void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
+  dest->ms = src.ms;
+  dest->seq = src.seq;
 }
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {

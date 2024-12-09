@@ -16,6 +16,8 @@ extern "C" {
 #include "server/common.h"
 #include "server/journal/serializer.h"
 
+struct streamID;
+
 namespace dfly {
 
 class EngineShardSet;
@@ -84,15 +86,15 @@ class RdbLoaderBase {
   };
 
   struct StreamID {
-    uint64_t ms;
-    uint64_t seq;
+    uint64_t ms = 0;
+    uint64_t seq = 0;
   };
 
   struct StreamCGTrace {
     RdbVariant name;
     uint64_t ms;
     uint64_t seq;
-
+    uint64_t entries_read;
     std::vector<StreamPelTrace> pel_arr;
     std::vector<StreamConsumerTrace> cons_arr;
   };
@@ -100,10 +102,10 @@ class RdbLoaderBase {
   struct StreamTrace {
     size_t lp_len;
     size_t stream_len;
-    uint64_t ms, seq;
+    StreamID last_id;
     StreamID first_id;             /* The first non-tombstone entry, zero if empty. */
     StreamID max_deleted_entry_id; /* The maximal ID that was deleted. */
-    uint64_t entries_added;        /* All time count of elements added. */
+    uint64_t entries_added = 0;    /* All time count of elements added. */
     std::vector<StreamCGTrace> cgroup;
   };
 
@@ -191,6 +193,8 @@ class RdbLoaderBase {
   std::error_code EnsureRead(size_t min_sz);
 
   std::error_code EnsureReadInternal(size_t min_to_read);
+
+  static void CopyStreamId(const StreamID& src, struct streamID* dest);
 
   base::IoBuf* mem_buf_ = nullptr;
   base::IoBuf origin_mem_buf_;
