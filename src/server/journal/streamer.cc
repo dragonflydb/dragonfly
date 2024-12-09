@@ -209,7 +209,7 @@ void RestoreStreamer::Run() {
   do {
     if (fiber_cancelled_)
       return;
-    cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+    cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
         return;
 
