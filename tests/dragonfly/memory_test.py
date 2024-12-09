@@ -6,34 +6,6 @@ from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
 
-async def calculate_estimated_connection_memory(
-    async_client: aioredis.Redis, df_server: DflyInstance
-):
-    memory_info = await async_client.info("memory")
-    already_used_rss_memory = memory_info["used_memory_rss"]
-
-    connections_number = 100
-    connections = []
-    for _ in range(connections_number):
-        conn = aioredis.Redis(port=df_server.port)
-        await conn.ping()
-        connections.append(conn)
-
-    await asyncio.sleep(1)  # Wait RSS update
-
-    memory_info = await async_client.info("memory")
-    estimated_connections_memory = memory_info["used_memory_rss"] - already_used_rss_memory
-
-    # Close test connection
-    for conn in connections:
-        await conn.close()
-
-    logging.info(
-        f"Estimated connection memory: {estimated_connections_memory // connections_number}."
-    )
-    return estimated_connections_memory // connections_number
-
-
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",
@@ -191,6 +163,7 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
     assert rss_before_eval * 1.01 > info["used_memory_rss"]
 
 
+@pytest.mark.skip("rss eviction disabled")
 @pytest.mark.asyncio
 @dfly_args(
     {
@@ -203,7 +176,6 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
 )
 async def test_cache_eviction_with_rss_deny_oom(
     async_client: aioredis.Redis,
-    df_server: DflyInstance,
 ):
     """
     Test to verify that cache eviction is triggered even if used memory is small but rss memory is above limit
