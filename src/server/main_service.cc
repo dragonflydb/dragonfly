@@ -1056,7 +1056,11 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       allowed_by_state = false;
       break;
     case GlobalState::TAKEN_OVER:
-      allowed_by_state = !cid->IsWriteOnly();
+      // Only PING, admin commands, and all commands via admin connections are allowed
+      // we prohibit even read commands, because read commands running in pipeline can take a while
+      // to send all data to a client which leads to fail in takeover
+      allowed_by_state = dfly_cntx.conn()->IsPrivileged() || (cid->opt_mask() & CO::ADMIN) ||
+                         cid->name() == "PING";
       break;
     default:
       break;
