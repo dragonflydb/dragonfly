@@ -160,7 +160,7 @@ std::string AbslUnparseFlag(dfly::CompressionMode flag) {
 
 dfly::CompressionMode GetDefaultCompressionMode() {
   const auto flag = absl::GetFlag(FLAGS_compression_mode);
-  if (serialization_max_chunk_size == 0) {
+  if (ServerState::tlocal()->serialization_max_chunk_size == 0) {
     return flag;
   }
 

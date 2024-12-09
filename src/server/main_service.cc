@@ -730,6 +730,11 @@ void SetRssOomDenyRatioOnAllThreads(double ratio) {
   shard_set->pool()->AwaitBrief(cb);
 }
 
+void SetSerializationMaxChunkSize(size_t val) {
+  auto cb = [val](unsigned, auto*) { ServerState::tlocal()->serialization_max_chunk_size = val; };
+  shard_set->pool()->AwaitBrief(cb);
+}
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -793,6 +798,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.RegisterSetter<double>("rss_oom_deny_ratio",
                                          [](double val) { SetRssOomDenyRatioOnAllThreads(val); });
+  config_registry.RegisterSetter<size_t>("serialization_max_chunk_size",
+                                         [](size_t val) { SetSerializationMaxChunkSize(val); });
 
   config_registry.RegisterMutable("pipeline_squash");
 
@@ -837,7 +844,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
         [val](auto index, auto* context) { ServerState::tlocal()->acl_log.SetTotalEntries(val); });
   });
 
-  serialization_max_chunk_size = GetFlag(FLAGS_serialization_max_chunk_size);
   uint32_t shard_num = GetFlag(FLAGS_num_shards);
   if (shard_num == 0 || shard_num > pp_.size()) {
     LOG_IF(WARNING, shard_num > pp_.size())
@@ -869,6 +875,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   Transaction::Init(shard_num);
 
   SetRssOomDenyRatioOnAllThreads(absl::GetFlag(FLAGS_rss_oom_deny_ratio));
+  SetSerializationMaxChunkSize(absl::GetFlag(FLAGS_serialization_max_chunk_size));
 
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.

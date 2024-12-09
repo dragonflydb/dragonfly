@@ -1732,13 +1732,14 @@ void ZAddGeneric(string_view key, const ZParams& zparams, ScoredMemberSpan memb_
 }
 
 double ExtractUnit(std::string_view arg) {
-  if (arg == "M") {
+  const string unit = absl::AsciiStrToUpper(arg);
+  if (unit == "M") {
     return 1;
-  } else if (arg == "KM") {
+  } else if (unit == "KM") {
     return 1000;
-  } else if (arg == "FT") {
+  } else if (unit == "FT") {
     return 0.3048;
-  } else if (arg == "MI") {
+  } else if (unit == "MI") {
     return 1609.34;
   } else {
     return -1;
@@ -2719,8 +2720,7 @@ void ZSetFamily::GeoDist(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   if (args.size() == 4) {
-    string unit = absl::AsciiStrToUpper(ArgS(args, 3));
-
+    string_view unit = ArgS(args, 3);
     distance_multiplier = ExtractUnit(unit);
     args.remove_suffix(1);
     if (distance_multiplier < 0) {

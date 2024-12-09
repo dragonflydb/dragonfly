@@ -81,7 +81,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   void Cancel() {
-    cntx_.Cancel();
+    // Close socket for clean disconnect.
+    CloseSocket();
     streamer_.Cancel();
   }
 

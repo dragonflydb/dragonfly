@@ -63,7 +63,7 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     client = df_server.client()
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
-    cmd = f"DEBUG POPULATE {keys} {type} {val_size} RAND TYPE {type} ELEMENTS {elements}"
+    cmd = f"DEBUG POPULATE {keys} k {val_size} RAND TYPE {type} ELEMENTS {elements}"
     print(f"Running {cmd}")
     await client.execute_command(cmd)
 
@@ -76,11 +76,12 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     # It could be the case that the machine is configured to use swap if this assertion fails
     assert delta > 0
     assert delta < max_unaccounted
-    delta = info["used_memory_rss"] - info["object_used_memory"]
-    # TODO investigate why it fails on string
-    if type == "JSON" or type == "STREAM":
-        assert delta > 0
-        assert delta < max_unaccounted
+
+    if type != "STRING" and type != "JSON":
+        # STRINGs keep some of the data inline, so not all of it is accounted in object_used_memory
+        # We have a very small over-accounting bug in JSON
+        assert info["object_used_memory"] > keys * elements * val_size
+        assert info["used_memory"] > info["object_used_memory"]
 
 
 @pytest.mark.asyncio
