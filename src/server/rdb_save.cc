@@ -51,9 +51,15 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 ABSL_FLAG(int, compression_level, 2, "The compression level to use on zstd/lz4 compression");
+
+// TODO: to retire both flags in v1.27 (Jan 2025)
 ABSL_FLAG(bool, list_rdb_encode_v2, true,
           "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
           "enconding of list uses ziplist encoding compatible with redis 6");
+
+ABSL_FLAG(bool, stream_rdb_encode_v2, false,
+          "V2 uses format, compatible with redis 7.2 and Dragonfly v1.26+, while v1 format "
+          "is compatible with redis 6");
 
 namespace dfly {
 
@@ -209,12 +215,12 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       }
       break;
     case OBJ_STREAM:
-      return RDB_TYPE_STREAM_LISTPACKS;
+      return absl::GetFlag(FLAGS_stream_rdb_encode_v2) ? RDB_TYPE_STREAM_LISTPACKS
+                                                       : RDB_TYPE_STREAM_LISTPACKS_2;
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
     case OBJ_JSON:
-      return RDB_TYPE_JSON;  // save with RDB_TYPE_JSON, deprecate RDB_TYPE_JSON_OLD after July
-                             // 2024.
+      return RDB_TYPE_JSON;
     case OBJ_SBF:
       return RDB_TYPE_SBF;
   }
@@ -657,6 +663,22 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
   RETURN_ON_ERR(SaveLen(s->last_id.ms));
   RETURN_ON_ERR(SaveLen(s->last_id.seq));
 
+  uint8_t rdb_type = RdbObjectType(pv);
+
+  // 'first_id', 'max_deleted_entry_id' and 'entries_added' are added
+  // in RDB_TYPE_STREAM_LISTPACKS_2
+  if (rdb_type >= RDB_TYPE_STREAM_LISTPACKS_2) {
+    /* Save the first entry ID. */
+    RETURN_ON_ERR(SaveLen(s->first_id.ms));
+    RETURN_ON_ERR(SaveLen(s->first_id.seq));
+
+    /* Save the maximal tombstone ID. */
+    RETURN_ON_ERR(SaveLen(s->max_deleted_entry_id.ms));
+    RETURN_ON_ERR(SaveLen(s->max_deleted_entry_id.seq));
+
+    /* Save the offset. */
+    RETURN_ON_ERR(SaveLen(s->entries_added));
+  }
   /* The consumer groups and their clients are part of the stream
    * type, so serialize every consumer group. */
 
@@ -678,9 +700,14 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
       RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
 
       /* Last ID. */
-      RETURN_ON_ERR(SaveLen(s->last_id.ms));
+      RETURN_ON_ERR(SaveLen(cg->last_id.ms));
 
-      RETURN_ON_ERR(SaveLen(s->last_id.seq));
+      RETURN_ON_ERR(SaveLen(cg->last_id.seq));
+
+      if (rdb_type >= RDB_TYPE_STREAM_LISTPACKS_2) {
+        /* Save the group's logical reads counter. */
+        RETURN_ON_ERR(SaveLen(cg->entries_read));
+      }
 
       /* Save the global PEL. */
       RETURN_ON_ERR(SaveStreamPEL(cg->pel, true));
@@ -836,9 +863,14 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
     /* Consumer name. */
     RETURN_ON_ERR(SaveString(ri.key, ri.key_len));
 
-    /* Last seen time. */
+    /* seen time. */
     absl::little_endian::Store64(buf, consumer->seen_time);
     RETURN_ON_ERR(WriteRaw(buf));
+
+    // TODO: enable this when we switch to RDB_TYPE_STREAM_LISTPACKS_3
+    /* Active time. */
+    // absl::little_endian::Store64(buf, consumer->active_time);
+    // RETURN_ON_ERR(WriteRaw(buf));
 
     /* Consumer PEL, without the ACKs (see last parameter of the function
      * passed with value of 0), at loading time we'll lookup the ID
