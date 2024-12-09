@@ -14,8 +14,7 @@ from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
-from .seeder import SeederBase
-from .seeder import StaticSeeder
+from .seeder import Seeder, SeederBase, StaticSeeder
 
 from . import dfly_args
 
@@ -1999,49 +1998,31 @@ async def test_cluster_migration_huge_container(
     nodes = [await create_node_info(instance) for instance in instances]
     nodes[0].slots = [(0, 16383)]
     nodes[1].slots = []
+    client0 = nodes[0].client
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("Generating huge containers")
-    # Insert data to containers with a gaussian distribution: some will be small and other big
-    stop = False
+    seeder = Seeder(
+        key_target=100_000,
+        types=StaticSeeder.BIG_VALUE_TYPES,
+        huge_value_percentage=50,
+        huge_value_size=1_000_000,
+    )
+    # Seeder v2 does not support cluster client? Maybe we need to limit to 1 key per operation?
+    seed = seeder.run(instances[0].cluster_client())
 
-    async def insert_data(client):
-        nonlocal stop
-        for i in itertools.count(start=1):
-            if stop:
-                return
-            key = int(random.gauss(mu=0, sigma=100))
-            val = "#" * i  # Create large entries for RSS to grow
-            await client.rpush(f"l:{key}", val)
-            await client.sadd(f"s:{key}", val)
-            await client.hset(f"h:{key}", val, val)
-            await client.zadd(f"z:{key}", {val: i})
-        logging.debug("Stopped feeding data")
-
-    insert_task = asyncio.create_task(insert_data(instances[0].cluster_client()))
-
-    async def get_rss(client, field):
+    async def get_memory(client, field):
         info = await client.info("memory")
         return info[field]
 
     rss = 0
-    while True:
-        rss = await get_rss(nodes[0].client, "used_memory_rss")
-        logging.debug(f"Current rss: {rss}")
-        if rss > 1_000_000_000:
-            break
-        await asyncio.sleep(1)
-
-    async def stop_seed():
-        nonlocal stop
-        stop = True
-        logging.debug("Waiting for task")
-        await insert_task
-        logging.debug("Done waiting for task")
-
+    capture = ""
     if not seed_during_migration:
-        await stop_seed()
+        await seed
+        rss = await get_memory(nodes[0].client, "used_memory_rss")
+        assert rss > 1_000_000_000, "Weak test case - RSS too low"
+        capture = StaticSeeder.capture(client0)
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
@@ -2053,21 +2034,13 @@ async def test_cluster_migration_huge_container(
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=30)
 
     if seed_during_migration:
-        await stop_seed()
+        await seed
     else:
         # Only verify memory growth if we haven't pushed new data during migration
-        new_rss = await get_rss(nodes[0].client, "used_memory_peak_rss")
+        new_rss = await get_memory(client0, "used_memory_peak_rss")
         logging.debug(f"new rss {new_rss}, previous rss {rss}")
         assert new_rss < rss * 1.1
-
-    for i in range(-500, 500):
-        l = await nodes[1].client.lrange(f"l:{i}", 0, -1)
-        s = await nodes[1].client.smembers(f"s:{i}")
-        h = await nodes[1].client.hkeys(f"h:{i}")
-        z = await nodes[1].client.zrange(f"z:{i}", 0, -1)
-        assert set(l) == s
-        assert set(h) == s
-        assert set(z) == s
+        assert StaticSeeder.capture(client0) == capture
 
     await instances[0].cluster_client().close()
 
