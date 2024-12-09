@@ -215,8 +215,8 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       }
       break;
     case OBJ_STREAM:
-      return absl::GetFlag(FLAGS_stream_rdb_encode_v2) ? RDB_TYPE_STREAM_LISTPACKS
-                                                       : RDB_TYPE_STREAM_LISTPACKS_2;
+      return absl::GetFlag(FLAGS_stream_rdb_encode_v2) ? RDB_TYPE_STREAM_LISTPACKS_3
+                                                       : RDB_TYPE_STREAM_LISTPACKS;
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
     case OBJ_JSON:
@@ -713,8 +713,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
       RETURN_ON_ERR(SaveStreamPEL(cg->pel, true));
 
       /* Save the consumers of this group. */
-
-      RETURN_ON_ERR(SaveStreamConsumers(cg));
+      RETURN_ON_ERR(SaveStreamConsumers(rdb_type >= RDB_TYPE_STREAM_LISTPACKS_3, cg));
     }
   }
 
@@ -845,7 +844,7 @@ error_code RdbSerializer::SaveStreamPEL(rax* pel, bool nacks) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
+error_code RdbSerializer::SaveStreamConsumers(bool save_active, streamCG* cg) {
   /* Number of consumers in this consumer group. */
 
   RETURN_ON_ERR(SaveLen(raxSize(cg->consumers)));
@@ -867,11 +866,11 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
     absl::little_endian::Store64(buf, consumer->seen_time);
     RETURN_ON_ERR(WriteRaw(buf));
 
-    // TODO: enable this when we switch to RDB_TYPE_STREAM_LISTPACKS_3
-    /* Active time. */
-    // absl::little_endian::Store64(buf, consumer->active_time);
-    // RETURN_ON_ERR(WriteRaw(buf));
-
+    if (save_active) {
+      /* Active time. */
+      absl::little_endian::Store64(buf, consumer->active_time);
+      RETURN_ON_ERR(WriteRaw(buf));
+    }
     /* Consumer PEL, without the ACKs (see last parameter of the function
      * passed with value of 0), at loading time we'll lookup the ID
      * in the consumer group global PEL and will put a reference in the

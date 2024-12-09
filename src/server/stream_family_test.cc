@@ -4,6 +4,7 @@
 
 #include "server/stream_family.h"
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -13,6 +14,8 @@
 using namespace testing;
 using namespace std;
 using namespace util;
+
+ABSL_DECLARE_FLAG(bool, stream_rdb_encode_v2);
 
 namespace dfly {
 
@@ -862,8 +865,8 @@ TEST_F(StreamFamilyTest, XInfoConsumers) {
   Run({"xgroup", "createconsumer", "mystream", "mygroup", "second-consumer"});
   resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
   EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0], ArrLen(6));
-  EXPECT_THAT(resp.GetVec()[1], ArrLen(6));
+  EXPECT_THAT(resp.GetVec()[0], ArrLen(8));
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(8));
   EXPECT_THAT(resp.GetVec()[0].GetVec()[1], "first-consumer");
   EXPECT_THAT(resp.GetVec()[1].GetVec()[1], "second-consumer");
 
@@ -1021,7 +1024,7 @@ TEST_F(StreamFamilyTest, XInfoStream) {
                           "consumers", ArrLen(1)));
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec(),
               ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64),
-                          "pel-count", IntArg(0), "pending", ArrLen(0)));
+                          "active-time", IntArg(-1), "pel-count", IntArg(0), "pending", ArrLen(0)));
 
   // full with count less than number of messages in stream
   resp = Run({"xinfo", "stream", "mystream", "full", "count", "5"});
@@ -1045,9 +1048,9 @@ TEST_F(StreamFamilyTest, XInfoStream) {
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[9], IntArg(11));   // pel-count
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[11], ArrLen(11));  // pending list
   // consumer
-  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec()[5],
-              IntArg(11));  // pel-count
   EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec()[7],
+              IntArg(11));  // pel-count
+  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec()[9],
               ArrLen(11));  // pending list
 
   // delete message
@@ -1074,9 +1077,10 @@ TEST_F(StreamFamilyTest, XInfoStream) {
               ElementsAre("name", "mygroup", "last-delivered-id", "11-1", "entries-read",
                           IntArg(11), "lag", IntArg(0), "pel-count", IntArg(11), "pending",
                           ArrLen(11), "consumers", ArrLen(1)));
-  EXPECT_THAT(resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec(),
-              ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64),
-                          "pel-count", IntArg(11), "pending", ArrLen(11)));
+  EXPECT_THAT(
+      resp.GetVec()[17].GetVec()[0].GetVec()[13].GetVec()[0].GetVec(),
+      ElementsAre("name", "first-consumer", "seen-time", ArgType(RespExpr::INT64), "active-time",
+                  ArgType(RespExpr::INT64), "pel-count", IntArg(11), "pending", ArrLen(11)));
 }
 
 TEST_F(StreamFamilyTest, AutoClaimPelItemsFromAnotherConsumer) {
@@ -1193,6 +1197,53 @@ TEST_F(StreamFamilyTest, XsetIdSmallerMaxDeleted) {
 
   resp = Run({"XSETID", "x", "1-2"});
   ASSERT_THAT(resp, ErrArg("smaller"));
+}
+
+TEST_F(StreamFamilyTest, SeenActiveTime) {
+  TEST_current_time_ms = 1000;
+
+  Run({"XGROUP", "CREATE", "mystream", "mygroup", "$", "MKSTREAM"});
+  Run({"XREADGROUP", "GROUP", "mygroup", "Alice", "COUNT", "1", "STREAMS", "mystream", ">"});
+  AdvanceTime(100);
+  auto resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+  EXPECT_THAT(resp, RespElementsAre("name", "Alice", "pending", IntArg(0), "idle", IntArg(100),
+                                    "inactive", IntArg(-1)));
+
+  Run({"XADD", "mystream", "*", "f", "v"});
+  Run({"XREADGROUP", "GROUP", "mygroup", "Alice", "COUNT", "1", "STREAMS", "mystream", ">"});
+  AdvanceTime(50);
+
+  resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+  EXPECT_THAT(resp, RespElementsAre("name", "Alice", "pending", IntArg(1), "idle", IntArg(50),
+                                    "inactive", IntArg(50)));
+  AdvanceTime(100);
+  resp = Run({"XREADGROUP", "GROUP", "mygroup", "Alice", "COUNT", "1", "STREAMS", "mystream", ">"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+
+  resp = Run({"xinfo", "consumers", "mystream", "mygroup"});
+
+  // Idle is 0 because XREADGROUP just run, but inactive continues clocking because nothing was
+  // read.
+  EXPECT_THAT(resp, RespElementsAre("name", "Alice", "pending", IntArg(1), "idle", IntArg(0),
+                                    "inactive", IntArg(150)));
+
+  // Serialize/deserialize.
+  resp = Run({"XINFO", "STREAM", "mystream", "FULL"});
+  auto groups = resp.GetVec()[17];
+  auto consumers = groups.GetVec()[0].GetVec()[13].GetVec()[0];
+  EXPECT_THAT(consumers, RespElementsAre("name", "Alice", "seen-time", IntArg(1250), "active-time",
+                                         IntArg(1100), "pel-count", IntArg(1), "pending", _));
+
+  absl::SetFlag(&FLAGS_stream_rdb_encode_v2, true);
+  resp = Run({"DUMP", "mystream"});
+  Run({"del", "mystream"});
+  resp = Run({"RESTORE", "mystream", "0", resp.GetString()});
+  EXPECT_EQ(resp, "OK");
+  resp = Run({"XINFO", "STREAM", "mystream", "FULL"});
+  groups = resp.GetVec()[17];
+  consumers = groups.GetVec()[0].GetVec()[13].GetVec()[0];
+  EXPECT_THAT(consumers, RespElementsAre("name", "Alice", "seen-time", IntArg(1250), "active-time",
+                                         IntArg(1100), "pel-count", IntArg(1), "pending", _));
 }
 
 }  // namespace dfly
