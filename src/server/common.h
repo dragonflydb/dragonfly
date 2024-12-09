@@ -388,8 +388,6 @@ struct BorrowedInterpreter {
   bool owned_ = false;
 };
 
-extern size_t serialization_max_chunk_size;
-
 class LocalBlockingCounter {
  public:
   void lock() {
