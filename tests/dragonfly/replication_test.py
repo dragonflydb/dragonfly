@@ -137,6 +137,19 @@ async def test_replication_all(
     estimated_preemptions = key_target * (0.01)
     assert preemptions > estimated_preemptions
 
+    # Because data size could be 10k and for that case there will be almost a preemption
+    # per bucket.
+    if "data_size" not in seeder_config.keys():
+        total_buckets = info["num_buckets"]
+        # We care that we preempt less times than the total buckets such that we can be
+        # sure that we test both flows (with and without preemptions). Preemptions on 30%
+        # of buckets seems like a big number but that depends on a few parameters like
+        # the size of the hug value and the serialization max chunk size. For the test cases here,
+        # it's usually close to 10% but there are some that are close to 30.
+        total_buckets = info["num_buckets"]
+        logging.debug(f"Buckets {total_buckets}. Preemptions {preemptions}")
+        assert preemptions <= (total_buckets * 0.3)
+
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
     role = await c_replica.role()

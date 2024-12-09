@@ -110,12 +110,10 @@ ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
           "DENYOOM will fail with OOM error and new connections to non-admin port will be "
           "rejected. Negative value disables this feature.");
 
-using facade::operator""_MB;
-
-ABSL_FLAG(size_t, serialization_max_chunk_size, 32_MB,
+ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
-          "serialization. Set this to 0 to disable streaming mode");
+          "serialization. 0 - to disable streaming mode");
 
 namespace dfly {
 
