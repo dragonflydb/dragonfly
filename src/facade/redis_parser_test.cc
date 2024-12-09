@@ -170,7 +170,7 @@ TEST_F(RedisParserTest, Empty) {
 }
 
 TEST_F(RedisParserTest, LargeBulk) {
-  std::string_view prefix("*1\r\n$1024\r\n");
+  string_view prefix("*1\r\n$1024\r\n");
 
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(prefix));
   ASSERT_EQ(prefix.size(), consumed_);
@@ -191,6 +191,18 @@ TEST_F(RedisParserTest, LargeBulk) {
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(part1));
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(half));
   ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
+
+  prefix = "*1\r\n$270000000\r\n";
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(prefix));
+  ASSERT_EQ(prefix.size(), consumed_);
+  string chunk(1000000, 'a');
+  for (unsigned i = 0; i < 270; ++i) {
+    ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(chunk));
+    ASSERT_EQ(chunk.size(), consumed_);
+  }
+  ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
+  ASSERT_THAT(args_, ElementsAre(ArgType(RespExpr::STRING)));
+  EXPECT_EQ(270000000, args_[0].GetBuf().size());
 }
 
 TEST_F(RedisParserTest, NILs) {
