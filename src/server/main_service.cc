@@ -799,7 +799,7 @@ Service::Service(ProactorPool* pp)
 
 #ifdef PRINT_STACKTRACES_ON_SIGNAL
   LOG(INFO) << "PRINT STACKTRACES REGISTERED";
-  pp_.GetNextProactor()->RegisterSignal({SIGUSR1}, [this](int signal) {
+  ProactorBase::RegisterSignal({SIGUSR1}, pp_.GetNextProactor(), [this](int signal) {
     LOG(INFO) << "Received " << strsignal(signal);
     base::SetVLogLevel("uring_proactor", 2);
 
