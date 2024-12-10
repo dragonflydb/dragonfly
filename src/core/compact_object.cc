@@ -305,9 +305,9 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
       return DefragIntSet((intset*)ptr, ratio);
     }
 
-    // StringMap supports re-allocation of it's internal nodes
     case kEncodingStrMap2: {
-      return DefragStrMap2((StringMap*)ptr, ratio);
+      // Still not implemented
+      return {ptr, false};
     }
 
     default:
