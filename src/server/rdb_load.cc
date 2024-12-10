@@ -1010,6 +1010,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
         return;
       }
 
+      consumer->active_time = cons.active_time;
       /* Create the PEL (pending entries list) about entries owned by this specific
        * consumer. */
       for (const auto& rawid : cons.nack_arr) {

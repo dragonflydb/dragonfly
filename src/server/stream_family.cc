@@ -46,7 +46,7 @@ struct ParsedStreamId {
 
   // Whether to lookup messages after the last ID in the stream. Used for XREAD
   // when using ID '$'.
-  bool last_id = false;
+  bool resolve_last_id = false;
 };
 
 struct RangeId {
@@ -82,7 +82,8 @@ struct NACKInfo {
 
 struct ConsumerInfo {
   string name;
-  size_t seen_time;
+  mstime_t seen_time;
+  mstime_t active_time;
   size_t pel_count;
   vector<NACKInfo> pending;
   size_t idle;
@@ -769,6 +770,7 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
         LOG(DFATAL) << "Internal error";
         return OpStatus::SKIPPED;  // ("NACK half-created. Should not be possible.");
       }
+      opts.consumer->active_time = now_ms;
     }
     if (opts.count == result.size())
       break;
@@ -985,6 +987,7 @@ void GetConsumers(stream* s, streamCG* cg, long long count, GroupInfo* ginfo) {
 
     consumer_info.name = consumer->name;
     consumer_info.seen_time = consumer->seen_time;
+    consumer_info.active_time = consumer->active_time;
     consumer_info.pel_count = raxSize(consumer->pel);
 
     /* Consumer PEL */
@@ -1106,6 +1109,7 @@ OpResult<vector<ConsumerInfo>> OpConsumers(const DbContext& db_cntx, EngineShard
     consumer_info.name = consumer->name;
     consumer_info.pel_count = raxSize(consumer->pel);
     consumer_info.idle = idle;
+    consumer_info.active_time = consumer->active_time;
     result.push_back(std::move(consumer_info));
   }
   raxStop(&ri);
@@ -1181,6 +1185,18 @@ OpResult<FindGroupResult> FindGroup(const OpArgs& op_args, string_view key, stri
   return FindGroupResult{s, cg, std::move(res_it->post_updater), res_it->it};
 }
 
+// Try to get the consumer. If not found, create a new one.
+streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_ms) {
+  // Try to get the consumer. If not found, create a new one.
+  auto cname = WrapSds(name);
+  streamConsumer* consumer = streamLookupConsumer(cg, cname);
+  if (consumer)
+    consumer->seen_time = now_ms;
+  else  // TODO: notify xgroup-createconsumer event once we support stream events.
+    consumer = StreamCreateConsumer(cg, name, now_ms, SCC_DEFAULT);
+  return consumer;
+}
+
 constexpr uint8_t kClaimForce = 1 << 0;
 constexpr uint8_t kClaimJustID = 1 << 1;
 constexpr uint8_t kClaimLastID = 1 << 2;
@@ -1240,7 +1256,6 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
   auto cgr_res = FindGroup(op_args, key, opts.group);
   RETURN_ON_BAD_STATUS(cgr_res);
 
-  streamConsumer* consumer = nullptr;
   uint64_t now_ms = op_args.db_cntx.time_now_ms;
   ClaimInfo result;
   result.justid = (opts.flags & kClaimJustID);
@@ -1253,6 +1268,8 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
   }
 
   StreamMemTracker tracker;
+
+  streamConsumer* consumer = FindOrAddConsumer(opts.consumer, cgr_res->cg, now_ms);
 
   for (streamID id : ids) {
     std::array<uint8_t, sizeof(streamID)> buf;
@@ -1288,13 +1305,6 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
         }
       }
 
-      // Try to get the consumer. If not found, create a new one.
-      auto cname = WrapSds(opts.consumer);
-      if ((consumer = streamLookupConsumer(cgr_res->cg, cname, SLC_NO_REFRESH)) == nullptr) {
-        consumer = StreamCreateConsumer(cgr_res->cg, opts.consumer, now_ms,
-                                        SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
-      }
-
       // If the entry belongs to the same consumer, we don't have to
       // do anything. Else remove the entry from the old consumer.
       if (nack->consumer != consumer) {
@@ -1320,9 +1330,11 @@ OpResult<ClaimInfo> OpClaim(const OpArgs& op_args, string_view key, const ClaimO
         raxInsert(consumer->pel, buf.begin(), sizeof(buf), nack, nullptr);
         nack->consumer = consumer;
       }
+      consumer->active_time = now_ms;
 
       /* Send the reply for this entry. */
       AppendClaimResultItem(result, cgr_res->s, id);
+      // TODO: propagate this change with streamPropagateXCLAIM
     }
   }
   tracker.UpdateStreamSize(cgr_res->it->second);
@@ -1382,8 +1394,7 @@ OpResult<uint32_t> OpDelConsumer(const OpArgs& op_args, string_view key, string_
   StreamMemTracker mem_tracker;
 
   long long pending = 0;
-  streamConsumer* consumer =
-      streamLookupConsumer(cgroup_res->cg, WrapSds(consumer_name), SLC_NO_REFRESH);
+  streamConsumer* consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(consumer_name));
   if (consumer) {
     pending = raxSize(consumer->pel);
     streamDelConsumer(cgroup_res->cg, consumer);
@@ -1571,13 +1582,8 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
   uint64_t now_ms = op_args.db_cntx.time_now_ms;
   int count = opts.count;
 
-  auto cname = WrapSds(opts.consumer);
-  streamConsumer* consumer = streamLookupConsumer(group, cname, SLC_DEFAULT);
-  if (consumer == nullptr) {
-    consumer = StreamCreateConsumer(group, opts.consumer, now_ms, SCC_DEFAULT);
-    // TODO: notify xgroup-createconsumer event once we support stream events.
-  }
-  consumer->seen_time = now_ms;
+  streamConsumer* consumer = FindOrAddConsumer(opts.consumer, group, now_ms);
+
   while (attempts-- && count && raxNext(&ri)) {
     streamNACK* nack = (streamNACK*)ri.data;
 
@@ -1621,7 +1627,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
       raxInsert(consumer->pel, ri.key, ri.key_len, nack, nullptr);
       nack->consumer = consumer;
     }
-
+    consumer->active_time = now_ms;
     AppendClaimResultItem(result, stream, id);
     count--;
     // TODO: propagate xclaim to replica
@@ -1760,7 +1766,7 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
 
   streamConsumer* consumer = nullptr;
   if (!opts.consumer_name.empty()) {
-    consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name), SLC_NO_REFRESH);
+    consumer = streamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name));
   }
 
   PendingResult result;
@@ -2153,7 +2159,7 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
       }
       id.val.ms = 0;
       id.val.seq = 0;
-      id.last_id = true;
+      id.resolve_last_id = true;
       sitem.id = id;
       auto [_, is_inserted] = opts.stream_ids.emplace(key, sitem);
       if (!is_inserted) {
@@ -2329,12 +2335,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
 
       // Update consumer
       if (sitem.group) {
-        auto cname = WrapSds(opts->consumer_name);
-        range_opts.consumer = streamLookupConsumer(sitem.group, cname, SLC_NO_REFRESH);
-        if (!range_opts.consumer) {
-          range_opts.consumer = StreamCreateConsumer(
-              sitem.group, opts->consumer_name, GetCurrentTimeMs(), SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
-        }
+        range_opts.consumer =
+            FindOrAddConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs());
       }
 
       range_opts.noack = opts->noack;
@@ -2902,13 +2904,16 @@ void StreamFamily::XInfo(CmdArgList args, const CommandContext& cmd_cntx) {
             rb->SendBulkString("consumers");
             rb->StartArray(ginfo.consumer_info_vec.size());
             for (const auto& consumer_info : ginfo.consumer_info_vec) {
-              rb->StartCollection(4, RedisReplyBuilder::MAP);
+              rb->StartCollection(5, RedisReplyBuilder::MAP);
 
               rb->SendBulkString("name");
               rb->SendBulkString(consumer_info.name);
 
               rb->SendBulkString("seen-time");
               rb->SendLong(consumer_info.seen_time);
+
+              rb->SendBulkString("active-time");
+              rb->SendLong(consumer_info.active_time);
 
               rb->SendBulkString("pel-count");
               rb->SendLong(consumer_info.pel_count);
@@ -2961,14 +2966,20 @@ void StreamFamily::XInfo(CmdArgList args, const CommandContext& cmd_cntx) {
       OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));
       if (result) {
         rb->StartArray(result->size());
+        int64_t now_ms = GetCurrentTimeMs();
         for (const auto& consumer_info : *result) {
-          rb->StartCollection(3, RedisReplyBuilder::MAP);
+          int64_t active = consumer_info.active_time;
+          int64_t inactive = active != -1 ? now_ms - active : -1;
+
+          rb->StartCollection(4, RedisReplyBuilder::MAP);
           rb->SendBulkString("name");
           rb->SendBulkString(consumer_info.name);
           rb->SendBulkString("pending");
           rb->SendLong(consumer_info.pel_count);
           rb->SendBulkString("idle");
           rb->SendLong(consumer_info.idle);
+          rb->SendBulkString("inactive");
+          rb->SendLong(inactive);
         }
         return;
       }
@@ -3099,26 +3110,11 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
-    auto cname = WrapSds(opts->consumer_name);
-    consumer = streamLookupConsumer(group, cname, SLC_NO_REFRESH);
-    if (!consumer) {
-      consumer = StreamCreateConsumer(group, opts->consumer_name, op_args.db_cntx.time_now_ms,
-                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
-    }
+    consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms);
 
     requested_sitem.group = group;
     requested_sitem.consumer = consumer;
-  }
 
-  // Resolve $ to the last ID in the stream.
-  if (requested_sitem.id.last_id && !opts->read_group) {
-    requested_sitem.id.val = last_id;
-    streamIncrID(&requested_sitem.id.val);  // include id's strictly greater
-    requested_sitem.id.last_id = false;
-    return false;
-  }
-
-  if (opts->read_group) {
     // If '>' is not provided, consumer PEL is used. So don't need to block.
     if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
       opts->serve_history = true;
@@ -3129,6 +3125,14 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     if (streamCompareID(&last_id, &requested_sitem.group->last_id) > 0) {
       requested_sitem.id.val = requested_sitem.group->last_id;
       streamIncrID(&requested_sitem.id.val);
+    }
+  } else {
+    // Resolve $ to the last ID in the stream.
+    if (requested_sitem.id.resolve_last_id) {
+      requested_sitem.id.val = last_id;
+      streamIncrID(&requested_sitem.id.val);  // include id's strictly greater
+      requested_sitem.id.resolve_last_id = false;
+      return false;
     }
   }
 
