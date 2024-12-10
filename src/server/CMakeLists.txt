@@ -28,7 +28,7 @@ endif()
 
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
             command_registry.cc  cluster/cluster_utility.cc
-            journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
+            journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -43,7 +43,7 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
   cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
-add_library(dragonfly_lib bloom_family.cc
+add_library(dragonfly_lib bloom_family.cc journal/cmd_serializer.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc engine_shard.cc
             engine_shard_set.cc family_utils.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
@@ -115,6 +115,7 @@ cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
+cxx_test(journal/cmd_serializer_test dfly_test_lib LABELS DFLY)
 cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
