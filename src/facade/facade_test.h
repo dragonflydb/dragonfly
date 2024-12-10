@@ -91,6 +91,10 @@ inline bool operator==(const RespExpr& left, std::string_view s) {
   return left.type == RespExpr::STRING && ToSV(left.GetBuf()) == s;
 }
 
+inline bool operator==(const RespExpr& left, int64_t val) {
+  return left.type == RespExpr::INT64 && left.GetInt() == val;
+}
+
 inline bool operator!=(const RespExpr& left, std::string_view s) {
   return !(left == s);
 }
