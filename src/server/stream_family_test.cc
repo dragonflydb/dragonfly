@@ -404,8 +404,8 @@ TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   EXPECT_THAT(resp, ErrArg("syntax error"));
 
   // Unbalanced list of streams.
-  resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "s3", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer"));
 
   // Wrong type.
   Run({"set", "foo", "v"});
@@ -442,7 +442,12 @@ TEST_F(StreamFamilyTest, XReadGroupInvalidArgs) {
 
   // Unbalanced list of streams.
   resp = Run({"xreadgroup", "group", "group", "alice", "streams", "s1", "s2", "s3", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("Unbalanced 'xreadgroup' list of streams: for each stream key an ID or "
+                           "'>' must be specified"));
+
+  resp = Run({"XREAD", "COUNT", "1", "STREAMS", "mystream"});
+  ASSERT_THAT(resp, ErrArg("Unbalanced 'xread' list of streams: for each stream key an ID or '$' "
+                           "must be specified"));
 }
 
 TEST_F(StreamFamilyTest, XReadGroupEmpty) {

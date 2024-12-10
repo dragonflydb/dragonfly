@@ -361,7 +361,7 @@ int StreamAppendItem(stream* s, CmdArgList fields, uint64_t now_ms, streamID* ad
   }
 
   /* Avoid overflow when trying to add an element to the stream (listpack
-   * can only host up to 32bit length sttrings, and also a total listpack size
+   * can only host up to 32bit length strings, and also a total listpack size
    * can't be bigger than 32bit length. */
   size_t totelelen = 0;
   for (size_t i = 0; i < fields.size(); i++) {
@@ -2114,8 +2114,12 @@ std::optional<ReadOpts> ParseReadArgsOrReply(CmdArgList args, bool read_group,
 
       size_t pair_count = args.size() - opts.streams_arg;
       if ((pair_count % 2) != 0) {
-        const auto m = "Unbalanced list of streams: for each stream key an ID must be specified";
-        builder->SendError(m, kSyntaxErr);
+        const char* cmd_name = read_group ? "xreadgroup" : "xread";
+        const char* symbol = read_group ? ">" : "$";
+        const auto msg = absl::StrCat("Unbalanced '", cmd_name,
+                                      "' list of streams: for each stream key an ID or '", symbol,
+                                      "' must be specified");
+        builder->SendError(msg, kSyntaxErr);
         return std::nullopt;
       }
       streams_count = pair_count / 2;
