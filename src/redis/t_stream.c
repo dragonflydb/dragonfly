@@ -1068,9 +1068,8 @@ streamCG *streamLookupCG(stream *s, sds groupname) {
     return (cg == raxNotFound) ? NULL : cg;
 }
 
-/* Lookup the consumer with the specified name in the group 'cg'. Its last
- * seen time is updated unless the SLC_NO_REFRESH flag is specified. */
-streamConsumer *streamLookupConsumer(streamCG *cg, sds name, int flags) {
+/* Lookup the consumer with the specified name in the group 'cg' */
+streamConsumer *streamLookupConsumer(streamCG *cg, sds name) {
     if (cg == NULL) return NULL;
     streamConsumer *consumer = raxFind(cg->consumers,(unsigned char*)name,
                                        sdslen(name));

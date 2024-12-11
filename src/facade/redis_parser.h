@@ -22,8 +22,6 @@ namespace facade {
  */
 class RedisParser {
  public:
-  constexpr static long kMaxBulkLen = 256 * (1ul << 20);  // 256MB.
-
   enum Result : uint8_t {
     OK,
     INPUT_PENDING,

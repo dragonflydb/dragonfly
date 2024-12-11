@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/journal/cmd_serializer.h"
+#include "server/server_state.h"
 #include "util/fibers/synchronization.h"
 
 using namespace facade;
@@ -208,10 +209,10 @@ void RestoreStreamer::Run() {
   do {
     if (fiber_cancelled_)
       return;
-
-    cursor = pt->Traverse(cursor, [&](PrimeTable::bucket_iterator it) {
+    cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       std::lock_guard guard(big_value_mu_);
-      if (fiber_cancelled_)  // Traverse could have yieleded
+
+      if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
         return;
 
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
@@ -321,10 +322,12 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  CmdSerializer serializer([&](std::string s) {
-    Write(std::move(s));
-    ThrottleIfNeeded();
-  });
+  CmdSerializer serializer(
+      [&](std::string s) {
+        Write(std::move(s));
+        ThrottleIfNeeded();
+      },
+      ServerState::tlocal()->serialization_max_chunk_size);
   serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
