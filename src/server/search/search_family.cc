@@ -1004,8 +1004,7 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
     for (const auto& field : agg_results.fields_to_print) {
       rb->SendBulkString(field);
 
-      auto it = value.find(field);
-      if (it != value.end()) {
+      if (auto it = value.find(field); it != value.end()) {
         std::visit(sortable_value_sender, it->second);
       } else {
         rb->SendNull();
