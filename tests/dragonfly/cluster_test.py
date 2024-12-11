@@ -1614,7 +1614,7 @@ async def test_cluster_fuzzymigration(
                         res = False
         return res
 
-    @assert_eventually(times=500)
+    @assert_eventually(times=600)
     async def test_all_finished():
         assert await all_finished()
 

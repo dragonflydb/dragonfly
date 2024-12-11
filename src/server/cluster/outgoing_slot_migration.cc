@@ -20,7 +20,7 @@
 #include "server/server_family.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(int, slot_migration_connection_timeout_ms, 2000, "Timeout for network operations");
+ABSL_FLAG(int, slot_migration_connection_timeout_ms, 5000, "Timeout for network operations");
 
 using namespace std;
 using namespace facade;
@@ -288,10 +288,12 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     if (cntx_.GetError()) {
       return true;
     }
-    VLOG(1) << "Reconnecting to source";
+    VLOG(1) << "Reconnecting " << cf_->MyID() << " : " << migration_info_.node_info.id
+            << " attempt " << attempt;
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
-      LOG(WARNING) << "Couldn't connect to source.";
+      LOG(WARNING) << "Couldn't connect " << cf_->MyID() << " : " << migration_info_.node_info.id
+                   << " attempt " << attempt;
       return false;
     }
   }
@@ -306,7 +308,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
                   nullptr, ClientPause::WRITE, is_pause_in_progress);
 
   if (!pause_fb_opt) {
-    LOG(WARNING) << "Cluster migration finalization time out";
+    LOG(WARNING) << "Migration finalization time out " << cf_->MyID() << " : "
+                 << migration_info_.node_info.id << " attempt " << attempt;
   }
 
   absl::Cleanup cleanup([&is_block_active, &pause_fb_opt]() {
@@ -335,7 +338,8 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
     if (passed >= timeout) {
-      LOG(WARNING) << "Timeout fot ACK " << attempt;
+      LOG(WARNING) << "Timeout fot ACK " << cf_->MyID() << " : " << migration_info_.node_info.id
+                   << " attempt " << attempt;
       return false;
     }
 
@@ -345,15 +349,17 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     }
 
     if (!CheckRespFirstTypes({RespExpr::INT64})) {
-      LOG(WARNING) << "Incorrect response type: "
-                   << facade::ToSV(LastResponseArgs().front().GetBuf());
+      LOG(WARNING) << "Incorrect response type for " << cf_->MyID() << " : "
+                   << migration_info_.node_info.id << " attempt " << attempt
+                   << " msg: " << facade::ToSV(LastResponseArgs().front().GetBuf());
       return false;
     }
 
     if (const auto res = get<int64_t>(LastResponseArgs().front().u); res == attempt) {
       break;
     } else {
-      LOG(WARNING) << "Incorrect attempt payload, sent " << attempt << " received " << res;
+      LOG(WARNING) << "Incorrect attempt payload " << cf_->MyID() << " : "
+                   << migration_info_.node_info.id << ", sent " << attempt << " received " << res;
     }
   }
 

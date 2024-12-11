@@ -180,7 +180,7 @@ bool IncomingSlotMigration::Join(long attempt) {
     const absl::Duration passed = now - start;
     VLOG(1) << "Checking whether to continue with join " << passed << " vs " << timeout;
     if (passed >= timeout) {
-      LOG(WARNING) << "Can't join migration in time";
+      LOG(WARNING) << "Can't join migration in time for " << source_id_;
       ReportError(GenericError("Can't join migration in time"));
       return false;
     }
