@@ -66,16 +66,24 @@ void Aggregator::DoGroup(absl::Span<const std::string> fields, absl::Span<const 
 }
 
 void Aggregator::DoSort(std::string_view field, bool descending) {
-  std::sort(result.values.begin(), result.values.end(),
-            [field](const DocValues& l, const DocValues& r) {
-              auto it1 = l.find(field);
-              auto it2 = r.find(field);
-              return it1 == l.end() || (it2 != r.end() && it1->second < it2->second);
-            });
+  auto comparator = [&](const DocValues& l, const DocValues& r) {
+    auto l_it = l.find(field);
+    auto r_it = r.find(field);
 
-  if (descending) {
-    std::reverse(result.values.begin(), result.values.end());
-  }
+    // Handle cases where one of the fields is missing
+    if (l_it == l.end() || r_it == r.end()) {
+      return l_it != l.end() || r_it == r.end();
+    }
+    if (l_it->second < r_it->second) {
+      return !descending;
+    }
+    if (l_it->second > r_it->second) {
+      return descending;
+    }
+    return true;  // Elements are equal
+  };
+
+  std::sort(result.values.begin(), result.values.end(), std::move(comparator));
 
   result.fields_to_print.insert(field);
 }
