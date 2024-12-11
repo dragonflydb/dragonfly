@@ -578,7 +578,7 @@ TEST_F(CompactObjectTest, DefragHash) {
 
 TEST_F(CompactObjectTest, DefragSet) {
   // This is still not implemented
-  StringSet* s = new StringSet();
+  StringSet* s = CompactObj::AllocateMR<StringSet>();
   s->Add("str");
   cobj_.InitRobj(OBJ_SET, kEncodingStrMap2, s);
   ASSERT_FALSE(cobj_.DefragIfNeeded(0.8));
