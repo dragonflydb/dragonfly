@@ -216,6 +216,6 @@ class Seeder(SeederBase):
 
         msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
         if huge_keys > 0:
-            msg = f"{msg}. Total huge keys added {huge_keys} with {args[11]} elements each. Total extra modified huge entries {huge_entries}."
+            msg = f"{msg}. Total huge keys added {huge_keys} with {args[11]} elements each. Total huge entries {huge_entries}."
 
         logging.debug(msg)
