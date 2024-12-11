@@ -229,14 +229,16 @@ size_t CalculateEvictionBytes() {
   size_t goal_bytes = CalculateHowManyBytesToEvictOnShard(max_memory_limit, global_used_memory,
                                                           shard_memory_budget_threshold);
 
+  // TODO: Eviction due to rss usage is not working well as it causes eviction
+  // of to many keys untill we finally see decrease in rss. We need to improve
+  // this logic before we enable it.
+  /*
   const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
-
-  /* If rss_oom_deny_ratio is set, we should evict depending on rss memory too */
+  // If rss_oom_deny_ratio is set, we should evict depending on rss memory too
   if (rss_oom_deny_ratio > 0.0) {
     const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
-    /* We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
-     * memory */
-    const size_t shard_rss_memory_budget_threshold =
+    // We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
+    memory const size_t shard_rss_memory_budget_threshold =
         size_t(max_rss_memory * eviction_memory_budget_threshold) / shards_count;
 
     // Calculate how much rss memory is used by all shards
@@ -247,6 +249,8 @@ size_t CalculateEvictionBytes() {
         goal_bytes, CalculateHowManyBytesToEvictOnShard(max_rss_memory, global_used_rss_memory,
                                                         shard_rss_memory_budget_threshold));
   }
+  */
+
   return goal_bytes;
 }
 

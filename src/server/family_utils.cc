@@ -64,6 +64,7 @@ streamConsumer* StreamCreateConsumer(streamCG* cg, string_view name, uint64_t no
   consumer->name = sdsnewlen(name.data(), name.size());
   consumer->pel = raxNew();
   consumer->seen_time = now_ms;
+  consumer->active_time = -1;
 
   return consumer;
 }
