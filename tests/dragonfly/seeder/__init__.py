@@ -138,8 +138,8 @@ class Seeder(SeederBase):
         data_size=100,
         collection_size=None,
         types: typing.Optional[typing.List[str]] = None,
-        huge_value_percentage=1,
-        huge_value_size=512,
+        huge_value_percentage=0,
+        huge_value_size=10000,
         # 2 huge entries per container/key as default
         huge_value_csize=2,
     ):
