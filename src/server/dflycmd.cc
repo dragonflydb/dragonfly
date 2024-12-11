@@ -586,7 +586,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   }
 
   if (flow->start_partial_sync_at.has_value())
-    saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
+    saver->StartIncrementalSnapshotInShard(*flow->start_partial_sync_at, cntx, shard);
   else
     saver->StartSnapshotInShard(true, cntx, shard);
 
