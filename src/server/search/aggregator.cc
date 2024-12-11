@@ -77,10 +77,7 @@ void Aggregator::DoSort(std::string_view field, bool descending) {
     if (l_it->second < r_it->second) {
       return !descending;
     }
-    if (l_it->second > r_it->second) {
-      return descending;
-    }
-    return true;  // Elements are equal
+    return descending;  // l_it->second >= r_it->second
   };
 
   std::sort(result.values.begin(), result.values.end(), std::move(comparator));
