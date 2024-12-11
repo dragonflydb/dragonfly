@@ -11,10 +11,10 @@ namespace dfly::aggregate {
 namespace {
 
 struct GroupStep {
-  PipelineResult operator()(std::vector<DocValues> values) {
+  PipelineResult operator()(PipelineResult result) {
     // Separate items into groups
     absl::flat_hash_map<absl::FixedArray<Value>, std::vector<DocValues>> groups;
-    for (auto& value : values) {
+    for (auto& value : result.values) {
       groups[Extract(value)].push_back(std::move(value));
     }
 
@@ -28,7 +28,18 @@ struct GroupStep {
       }
       out.push_back(std::move(doc));
     }
-    return out;
+
+    absl::flat_hash_set<std::string> fields_to_print;
+    fields_to_print.reserve(fields_.size() + reducers_.size());
+
+    for (auto& field : fields_) {
+      fields_to_print.insert(std::move(field));
+    }
+    for (auto& reducer : reducers_) {
+      fields_to_print.insert(std::move(reducer.result_field));
+    }
+
+    return {std::move(out), std::move(fields_to_print)};
   }
 
   absl::FixedArray<Value> Extract(const DocValues& dv) {
@@ -104,34 +115,42 @@ PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
 }
 
 PipelineStep MakeSortStep(std::string_view field, bool descending) {
-  return [field = std::string(field), descending](std::vector<DocValues> values) -> PipelineResult {
+  return [field = std::string(field), descending](PipelineResult result) -> PipelineResult {
+    auto& values = result.values;
+
     std::sort(values.begin(), values.end(), [field](const DocValues& l, const DocValues& r) {
       auto it1 = l.find(field);
       auto it2 = r.find(field);
       return it1 == l.end() || (it2 != r.end() && it1->second < it2->second);
     });
-    if (descending)
+
+    if (descending) {
       std::reverse(values.begin(), values.end());
-    return values;
+    }
+
+    result.fields_to_print.insert(field);
+    return result;
   };
 }
 
 PipelineStep MakeLimitStep(size_t offset, size_t num) {
-  return [offset, num](std::vector<DocValues> values) -> PipelineResult {
+  return [offset, num](PipelineResult result) {
+    auto& values = result.values;
     values.erase(values.begin(), values.begin() + std::min(offset, values.size()));
     values.resize(std::min(num, values.size()));
-    return values;
+    return result;
   };
 }
 
-PipelineResult Process(std::vector<DocValues> values, absl::Span<const PipelineStep> steps) {
+PipelineResult Process(std::vector<DocValues> values,
+                       absl::Span<const std::string_view> fields_to_print,
+                       absl::Span<const PipelineStep> steps) {
+  PipelineResult result{std::move(values), {fields_to_print.begin(), fields_to_print.end()}};
   for (auto& step : steps) {
-    auto result = step(std::move(values));
-    if (!result.has_value())
-      return result;
-    values = std::move(result.value());
+    PipelineResult step_result = step(std::move(result));
+    result = std::move(step_result);
   }
-  return values;
+  return result;
 }
 
 }  // namespace dfly::aggregate

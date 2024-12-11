@@ -981,22 +981,34 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
                   make_move_iterator(sub_results.end()));
   }
 
-  auto agg_results = aggregate::Process(std::move(values), params->steps);
-  if (!agg_results.has_value())
-    return builder->SendError(agg_results.error());
+  std::vector<std::string_view> load_fields;
+  if (params->load_fields) {
+    load_fields.reserve(params->load_fields->size());
+    for (const auto& field : params->load_fields.value()) {
+      load_fields.push_back(field.GetShortName());
+    }
+  }
 
-  size_t result_size = agg_results->size();
+  auto agg_results = aggregate::Process(std::move(values), load_fields, params->steps);
+
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   auto sortable_value_sender = SortableValueSender(rb);
 
+  const size_t result_size = agg_results.values.size();
   rb->StartArray(result_size + 1);
   rb->SendLong(result_size);
 
-  for (const auto& result : agg_results.value()) {
-    rb->StartArray(result.size() * 2);
-    for (const auto& [k, v] : result) {
-      rb->SendBulkString(k);
-      std::visit(sortable_value_sender, v);
+  const size_t field_count = agg_results.fields_to_print.size();
+  for (const auto& value : agg_results.values) {
+    rb->StartArray(field_count * 2);
+    for (const auto& field : agg_results.fields_to_print) {
+      rb->SendBulkString(field);
+
+      if (auto it = value.find(field); it != value.end()) {
+        std::visit(sortable_value_sender, it->second);
+      } else {
+        rb->SendNull();
+      }
     }
   }
 }
