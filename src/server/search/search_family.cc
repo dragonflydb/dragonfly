@@ -325,7 +325,17 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
       std::vector<std::string> fields;
       fields.reserve(num_fields);
       while (num_fields > 0 && parser.HasNext()) {
-        fields.emplace_back(ParseFieldWithAtSign(&parser));
+        auto parsed_field = ParseFieldWithAtSign(&parser);
+
+        /*
+        TODO: Throw an error if the field has no '@' sign at the beginning
+        if (!parsed_field) {
+          builder->SendError(absl::StrCat("bad arguments for GROUPBY: Unknown property '", field,
+                                       "'. Did you mean '@", field, "`?"));
+          return nullopt;
+        } */
+
+        fields.emplace_back(parsed_field);
         num_fields--;
       }
 
