@@ -56,9 +56,7 @@ end
 
 function LG_funcs.add_list(key, keys)
     local is_huge = keys[key]
-    --- TODO -- investigate why second case of replication_test_all fails
-    --- we somehow create a quicklist that is circular and we deadlock
-    redis.apcall('LPUSH', key, unpack(randstr_sequence(false)))
+    redis.apcall('LPUSH', key, unpack(randstr_sequence(is_huge)))
 end
 
 function LG_funcs.mod_list(key, keys)

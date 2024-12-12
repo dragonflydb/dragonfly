@@ -391,7 +391,7 @@ string QList::Pop(Where where) {
     }
     DelPackedIndex(node, pos);
   }
-  DCHECK(head_->prev->next == nullptr);
+  DCHECK(head_ == nullptr || head_->prev->next == nullptr);
   return res;
 }
 
