@@ -38,8 +38,8 @@ constexpr size_t kMinBlobSize = 32_KB;
 }  // namespace
 
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                             SnapshotDataConsumer* output, Context* cntx)
-    : db_slice_(slice), compression_mode_(compression_mode), output_(output), cntx_(cntx) {
+                             SnapshotDataConsumerInterface* consumer, Context* cntx)
+    : db_slice_(slice), compression_mode_(compression_mode), consumer_(consumer), cntx_(cntx) {
   db_array_ = slice->databases();
   tl_slice_snapshots.insert(this);
 }
@@ -94,7 +94,7 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal] {
     this->IterateBucketsFb(stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
-    output_->Finalize();
+    consumer_->Finalize();
   });
 }
 
@@ -343,7 +343,7 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
   // Blocking point.
-  output_->ConsumeData(std::move(sfile.val), cntx_);
+  consumer_->ConsumeData(std::move(sfile.val), cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;

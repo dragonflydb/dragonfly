@@ -1158,7 +1158,7 @@ error_code AlignedBuffer::Flush() {
   return upstream_->Write(&ivec, 1);
 }
 
-class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumer {
+class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface {
  private:
   void CleanShardSnapshots();
 

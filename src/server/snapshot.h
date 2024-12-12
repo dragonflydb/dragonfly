@@ -50,17 +50,17 @@ struct Entry;
 class SliceSnapshot {
  public:
   // Represents a target for receiving snapshot data.
-  struct SnapshotDataConsumer {
+  struct SnapshotDataConsumerInterface {
+    virtual ~SnapshotDataConsumerInterface() = default;
+
     // Receives a chunk of snapshot data for processing
     virtual void ConsumeData(std::string data, Context* cntx) = 0;
     // Finalizes the snapshot writing
     virtual void Finalize() = 0;
-
-    virtual ~SnapshotDataConsumer() = default;
   };
 
-  SliceSnapshot(CompressionMode compression_mode, DbSlice* slice, SnapshotDataConsumer* output,
-                Context* cntx);
+  SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
+                SnapshotDataConsumerInterface* consumer, Context* cntx);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -180,7 +180,7 @@ class SliceSnapshot {
 
   ThreadLocalMutex big_value_mu_;
 
-  SnapshotDataConsumer* output_;
+  SnapshotDataConsumerInterface* consumer_;
   Context* cntx_;
 };
 
