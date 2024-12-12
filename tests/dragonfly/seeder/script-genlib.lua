@@ -114,19 +114,21 @@ end
 function LG_funcs.add_hash(key, keys)
     local blobs
     local is_huge = keys[key]
+    local limit = LG_funcs.csize
     if is_huge then
-        blobs  = dragonfly.randstr(LG_funcs.huge_value_size, LG_funcs.huge_value_csize)
+        limit = LG_funcs.huge_value_csize
+        blobs  = dragonfly.randstr(LG_funcs.huge_value_size, limit)
         huge_entries = huge_entries + 1
     else
         blobs  = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize / 2)
     end
 
     local htable = {}
-    for i = 1,  LG_funcs.csize, 2 do
+    for i = 1, limit, 2 do
         htable[i * 2 - 1] = tostring(i)
         htable[i * 2] = math.random(0, 1000)
     end
-    for i = 2,  LG_funcs.csize, 2 do
+    for i = 2, limit, 2 do
         htable[i * 2 - 1] = tostring(i)
         htable[i * 2] = blobs[i // 2]
     end
