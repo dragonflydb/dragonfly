@@ -85,7 +85,7 @@ void Aggregator::DoSort(std::string_view field, bool descending) {
 
     // If some of the values is not present
     if (l_it == l.end() || r_it == r.end()) {
-      return l_it != l.end() && r_it == r.end();
+      return l_it != l.end();
     }
 
     auto& lv = l_it->second;
