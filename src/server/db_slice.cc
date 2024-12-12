@@ -453,7 +453,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   }
 
   if (res.it->second.HasExpire()) {  // check expiry state
-    res = ExpireIfNeeded(cntx, res.it, true);
+    res = ExpireIfNeeded(cntx, res.it, false);
     if (!IsValid(res.it)) {
       return OpStatus::KEY_NOTFOUND;
     }
