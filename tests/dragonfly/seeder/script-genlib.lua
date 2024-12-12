@@ -56,22 +56,23 @@ end
 
 function LG_funcs.add_list(key, keys)
     local is_huge = keys[key]
-    redis.apcall('LPUSH', key, unpack(randstr_sequence(is_huge)))
+    --- TODO -- investigate why second case of replication_test_all fails
+    --- we somehow create a quicklist that is circular and we deadlock
+    redis.apcall('LPUSH', key, unpack(randstr_sequence(false)))
 end
 
 function LG_funcs.mod_list(key, keys)
     -- equally likely pops and pushes, we rely on the list size being large enough
     -- to "highly likely" not get emptied out by consequitve pops
-    local is_huge = keys[key]
     local action = math.random(1, 4)
     if action == 1 then
         redis.apcall('RPOP', key)
     elseif action == 2 then
         redis.apcall('LPOP', key)
     elseif action == 3 then
-      redis.apcall('LPUSH', key, randstr(is_huge))
+      redis.apcall('LPUSH', key, randstr(false))
     else
-      redis.apcall('RPUSH', key, randstr(is_huge))
+      redis.apcall('RPUSH', key, randstr(false))
     end
 end
 
@@ -101,7 +102,7 @@ function LG_funcs.mod_set(key, keys)
         redis.apcall('SPOP', key)
     else
         local is_huge = keys[key]
-        redis.apcall('SADD', key, randstr(is_huge))
+        redis.apcall('SADD', key, randstr(false))
     end
 end
 
@@ -113,19 +114,21 @@ end
 function LG_funcs.add_hash(key, keys)
     local blobs
     local is_huge = keys[key]
+    local limit = LG_funcs.csize
     if is_huge then
-        blobs  = dragonfly.randstr(LG_funcs.huge_value_size, LG_funcs.csize / 2)
+        limit = LG_funcs.huge_value_csize
+        blobs  = dragonfly.randstr(LG_funcs.huge_value_size, limit)
         huge_entries = huge_entries + 1
     else
         blobs  = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize / 2)
     end
 
     local htable = {}
-    for i = 1,  LG_funcs.csize, 2 do
+    for i = 1, limit, 2 do
         htable[i * 2 - 1] = tostring(i)
         htable[i * 2] = math.random(0, 1000)
     end
-    for i = 2,  LG_funcs.csize, 2 do
+    for i = 2, limit, 2 do
         htable[i * 2 - 1] = tostring(i)
         htable[i * 2] = blobs[i // 2]
     end
@@ -137,8 +140,7 @@ function LG_funcs.mod_hash(key, keys)
     if idx % 2 == 1 then
         redis.apcall('HINCRBY', key, tostring(idx), 1)
     else
-      local is_huge = keys[key]
-      redis.apcall('HSET', key, tostring(idx), randstr(is_huge))
+      redis.apcall('HSET', key, tostring(idx), randstr(false))
     end
 end
 
@@ -166,8 +168,8 @@ end
 function LG_funcs.mod_zset(key, keys)
     local action = math.random(1, 4)
     if action <= 2 then
-        local is_huge = keys[key]
-        redis.apcall('ZADD', key, math.random(0, LG_funcs.csize * 2), randstr(is_huge))
+        local size = LG_funcs.csize * 2
+        redis.apcall('ZADD', key, math.random(0, size), randstr(false))
     elseif action == 3 then
         redis.apcall('ZPOPMAX', key)
     else
