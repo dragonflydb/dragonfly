@@ -16,7 +16,7 @@
 #include "server/main_service.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_DECLARE_FLAG(int, slot_migration_connection_timeout_ms);
+ABSL_DECLARE_FLAG(int, migration_finalization_timeout_ms);
 
 namespace dfly::cluster {
 
@@ -173,7 +173,7 @@ void IncomingSlotMigration::Pause(bool pause) {
 bool IncomingSlotMigration::Join(long attempt) {
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
-      absl::Milliseconds(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+      absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
 
   while (true) {
     const absl::Time now = absl::Now();
@@ -209,7 +209,7 @@ void IncomingSlotMigration::Stop() {
   // we need to Join the migration process to prevent data corruption
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
-      absl::Milliseconds(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+      absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
 
   while (true) {
     const absl::Time now = absl::Now();

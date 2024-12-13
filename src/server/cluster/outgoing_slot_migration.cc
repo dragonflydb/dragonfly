@@ -20,7 +20,10 @@
 #include "server/server_family.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(int, slot_migration_connection_timeout_ms, 5000, "Timeout for network operations");
+ABSL_FLAG(int, slot_migration_connection_timeout_ms, 2000,
+          "Connection creating timeout for migration operations");
+ABSL_FLAG(int, migration_finalization_timeout_ms, 30000,
+          "Timeout for migration finalization operation");
 
 using namespace std;
 using namespace facade;
@@ -333,7 +336,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
-      absl::Milliseconds(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+      absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
