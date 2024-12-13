@@ -103,7 +103,7 @@ void JournalStreamer::AsyncWrite() {
   const auto& cur_buf = pending_buf_.PrepareSendingBuf();
 
   in_flight_bytes_ = cur_buf.mem_size;
-  total_sent_ += cur_buf.mem_size;
+  total_sent_ += in_flight_bytes_;
 
   const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 8> v(v_size);
@@ -113,7 +113,7 @@ void JournalStreamer::AsyncWrite() {
     v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
   }
 
-  dest_->AsyncWrite(v.data(), v.size(), [this, len = cur_buf.mem_size](std::error_code ec) {
+  dest_->AsyncWrite(v.data(), v.size(), [this, len = in_flight_bytes_](std::error_code ec) {
     OnCompletion(std::move(ec), len);
   });
 }
@@ -128,13 +128,11 @@ void JournalStreamer::Write(std::string str) {
 }
 
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
-  DCHECK_GE(in_flight_bytes_, len);
+  DCHECK_EQ(in_flight_bytes_, len);
 
-  DVLOG(3) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
-  in_flight_bytes_ -= len;
-  if (in_flight_bytes_ == 0) {
-    pending_buf_.Pop();
-  }
+  DVLOG(3) << "Completing " << in_flight_bytes_;
+  in_flight_bytes_ = 0;
+  pending_buf_.Pop();
   if (ec && !IsStopped()) {
     cntx_->ReportError(ec);
   } else if (!pending_buf_.Empty() && !IsStopped()) {
