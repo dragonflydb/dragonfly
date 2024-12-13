@@ -282,6 +282,15 @@ TEST_F(QListTest, CompressionPlain) {
   EXPECT_EQ(500, i);
 }
 
+TEST_F(QListTest, LargeValues) {
+  string val(100000, 'a');
+  ql_.Push(val, QList::HEAD);
+  ql_.Push(val, QList::HEAD);
+  ql_.Pop(QList::HEAD);
+  auto items = ToItems();
+  EXPECT_THAT(items, ElementsAre(val));
+}
+
 using FillCompress = tuple<int, unsigned>;
 
 class PrintToFillCompress {
