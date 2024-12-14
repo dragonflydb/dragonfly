@@ -3,6 +3,7 @@
 //
 #include "facade/redis_parser.h"
 
+#include <absl/strings/escaping.h>
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
@@ -17,6 +18,9 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
   DCHECK(!str.empty());
   *consumed = 0;
   res->clear();
+
+  DVLOG(2) << "Parsing: "
+           << absl::CHexEscape(string_view{reinterpret_cast<const char*>(str.data()), str.size()});
 
   if (state_ == CMD_COMPLETE_S) {
     if (InitStart(str[0], res)) {
@@ -76,6 +80,7 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
     }
 
     if (resultc.first == INPUT_PENDING) {
+      DCHECK(str.empty());
       StashState(res);
     }
     return resultc.first;
@@ -83,6 +88,8 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
 
   if (resultc.first == OK) {
     DCHECK(cached_expr_);
+    DCHECK_EQ(0, small_len_);
+
     if (res != cached_expr_) {
       DCHECK(!stash_.empty());
 
@@ -233,15 +240,27 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
   const char* s = reinterpret_cast<const char*>(str.data());
   const char* pos = reinterpret_cast<const char*>(memchr(s, '\n', str.size()));
   if (!pos) {
-    Result r = INPUT_PENDING;
-    if (str.size() >= 32) {
-      LOG(WARNING) << "Unexpected format " << string_view{s, str.size()};
-      r = BAD_ARRAYLEN;
+    if (str.size() + small_len_ < sizeof(small_buf_)) {
+      memcpy(small_buf_ + small_len_, str.data(), str.size());
+      small_len_ += str.size();
+      return {INPUT_PENDING, str.size()};
     }
-    return {r, 0};
+    LOG(WARNING) << "Unexpected format " << string_view{s, str.size()};
+    return ResultConsumed{BAD_ARRAYLEN, 0};
   }
 
   unsigned consumed = pos - s + 1;
+  if (small_len_ > 0) {
+    if (small_len_ + consumed >= sizeof(small_buf_)) {
+      return ResultConsumed{BAD_ARRAYLEN, consumed};
+    }
+    memcpy(small_buf_ + small_len_, str.data(), consumed);
+    small_len_ += consumed;
+    s = small_buf_;
+    pos = small_buf_ + small_len_ - 1;
+    small_len_ = 0;
+  }
+
   if (pos[-1] != '\r') {
     return {BAD_ARRAYLEN, consumed};
   }
@@ -320,12 +339,6 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
 auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
   DCHECK(!str.empty());
 
-  unsigned min_len = 2 + int(arg_c_ != '_');
-
-  if (str.size() < min_len) {
-    return {INPUT_PENDING, 0};
-  }
-
   if (arg_c_ == '$') {
     int64_t len;
 
@@ -352,16 +365,29 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
   }
 
   DCHECK(!server_mode_);
+
   if (arg_c_ == '_') {  // Resp3 NIL
-    // '\r','\n'
-    if (str[0] != '\r' || str[1] != '\n') {
+    // "_\r\n", with '_' consumed into arg_c_.
+    DCHECK_LT(small_len_, 2);  // must be because we never fill here with more than 2 bytes.
+    unsigned needed = 2 - small_len_;
+    unsigned consumed = min<unsigned>(needed, str.size());
+
+    for (unsigned i = 0; i < consumed; ++i) {
+      small_buf_[small_len_++] = str[i];
+    }
+
+    if (small_len_ < 2) {
+      return {INPUT_PENDING, consumed};
+    }
+
+    if (small_buf_[0] != '\r' || small_buf_[1] != '\n') {
       return {BAD_STRING, 0};
     }
 
     cached_expr_->emplace_back(RespExpr::NIL);
     cached_expr_->back().u = Buffer{};
     HandleFinishArg();
-    return {OK, 2};
+    return {OK, consumed};
   }
 
   if (arg_c_ == '*') {
@@ -370,6 +396,9 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
 
   char* s = reinterpret_cast<char*>(str.data());
   char* eol = reinterpret_cast<char*>(memchr(s, '\n', str.size()));
+
+  // TODO: in client mode we still may not consume everything (see INPUT_PENDING below).
+  // It's not a problem, because we need consume all the input only in server mode.
 
   if (arg_c_ == '+' || arg_c_ == '-') {  // Simple string or error.
     DCHECK(!server_mode_);
@@ -425,6 +454,26 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
 
   uint32_t consumed = 0;
 
+  if (small_len_ > 0) {
+    DCHECK(!is_broken_token_);
+    DCHECK_EQ(bulk_len_, 0u);
+
+    if (bulk_len_ == 0) {
+      DCHECK_EQ(small_len_, 1);
+      DCHECK_GE(str.size(), 1u);
+      if (small_buf_[0] != '\r' || str[0] != '\n') {
+        return {BAD_STRING, 0};
+      }
+      consumed = bulk_len_ + 2;
+      small_len_ = 0;
+      HandleFinishArg();
+
+      return {OK, 1};
+    }
+  }
+
+  DCHECK_EQ(small_len_, 0);
+
   if (str.size() >= bulk_len_) {
     consumed = bulk_len_;
     if (bulk_len_) {
@@ -446,6 +495,10 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
       }
       HandleFinishArg();
       return {OK, consumed + 2};
+    } else if (str.size() == 1) {
+      small_buf_[0] = str[0];
+      consumed++;
+      small_len_ = 1;
     }
     return {INPUT_PENDING, consumed};
   }
@@ -490,6 +543,7 @@ void RedisParser::HandleFinishArg() {
     }
     cached_expr_ = parse_stack_.back().second;
   }
+  small_len_ = 0;
 }
 
 void RedisParser::ExtendLastString(Buffer str) {
