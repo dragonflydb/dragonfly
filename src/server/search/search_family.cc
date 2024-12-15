@@ -998,16 +998,20 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
   rb->StartArray(result_size + 1);
   rb->SendLong(result_size);
 
-  const size_t field_count = agg_results.fields_to_print.size();
   for (const auto& value : agg_results.values) {
-    rb->StartArray(field_count * 2);
+    size_t fields_count = 0;
     for (const auto& field : agg_results.fields_to_print) {
-      rb->SendBulkString(field);
+      if (value.find(field) != value.end()) {
+        fields_count++;
+      }
+    }
 
-      if (auto it = value.find(field); it != value.end()) {
+    rb->StartArray(fields_count * 2);
+    for (const auto& field : agg_results.fields_to_print) {
+      auto it = value.find(field);
+      if (it != value.end()) {
+        rb->SendBulkString(field);
         std::visit(sortable_value_sender, it->second);
-      } else {
-        rb->SendNull();
       }
     }
   }
