@@ -1298,9 +1298,15 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
   Run({"JSON.SET", "j1", ".", R"({"data":1,"name":"doc_with_int"})"});
   Run({"JSON.SET", "j2", ".", R"({"data":"1","name":"doc_with_int_as_string"})"});
   Run({"JSON.SET", "j3", ".", R"({"data":"string","name":"doc_with_string"})"});
-  Run({"JSON.SET", "j4", ".", R"({"name":"no_data"})"});
-  Run({"JSON.SET", "j5", ".", R"({"data":[5,4,3],"name":"doc_with_vector"})"});
-  Run({"JSON.SET", "j6", ".", R"({"data":"[5,4,3]","name":"doc_with_vector_as_string"})"});
+  Run({"JSON.SET", "j4", ".",
+       R"({"data":["first", "second", "third"],"name":"doc_with_strings"})"});
+  Run({"JSON.SET", "j5", ".", R"({"name":"no_data"})"});
+  Run({"JSON.SET", "j6", ".", R"({"data":[5,4,3],"name":"doc_with_vector"})"});
+  Run({"JSON.SET", "j7", ".", R"({"data":"[5,4,3]","name":"doc_with_vector_as_string"})"});
+  Run({"JSON.SET", "j8", ".", R"({"data":null,"name":"doc_with_null"})"});
+  Run({"JSON.SET", "j9", ".", R"({"data":[null, null, null],"name":"doc_with_nulls"})"});
+  Run({"JSON.SET", "j10", ".", R"({"data":true,"name":"doc_with_boolean"})"});
+  Run({"JSON.SET", "j11", ".", R"({"data":[true, false, true],"name":"doc_with_booleans"})"});
 
   auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "NUMERIC"});
   EXPECT_EQ(resp, "OK");
@@ -1328,25 +1334,25 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"FT.SEARCH", "i1", "*"});
-  EXPECT_THAT(resp, AreDocIds("j1", "j4", "j5"));
+  EXPECT_THAT(resp, AreDocIds("j1", "j5", "j6", "j8", "j9"));
 
   resp = Run({"FT.SEARCH", "i2", "*"});
-  EXPECT_THAT(resp, AreDocIds("j1", "j4", "j5"));
+  EXPECT_THAT(resp, AreDocIds("j1", "j5", "j6", "j8", "j9"));
 
   resp = Run({"FT.SEARCH", "i3", "*"});
-  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j4", "j5", "j7", "j8", "j9", "j10", "j11"));
 
   resp = Run({"FT.SEARCH", "i4", "*"});
-  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j4", "j5", "j7", "j8", "j9", "j10", "j11"));
 
   resp = Run({"FT.SEARCH", "i5", "*"});
-  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j3", "j6"));
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j4", "j5", "j7", "j8", "j9"));
 
   resp = Run({"FT.SEARCH", "i6", "*"});
-  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j3", "j6"));
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j4", "j5", "j7", "j8", "j9"));
 
   resp = Run({"FT.SEARCH", "i7", "*"});
-  EXPECT_THAT(resp, AreDocIds("j4", "j5"));
+  EXPECT_THAT(resp, AreDocIds("j5", "j6", "j8"));
 }
 
 TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
@@ -1417,6 +1423,12 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
   Run({"JSON.SET", "j6", ".", R"({"name":"doc_with_no_field"})"});
   Run({"JSON.SET", "j7", ".",
        R"({"vector_field": [999999999999999999999999999999999999999, -999999999999999999999999999999999999999, 500000000000000000000000000000000000000], "name": "doc_with_out_of_range_values"})"});
+  Run({"JSON.SET", "j8", ".", R"({"vector_field":null, "name": "doc_with_null"})"});
+  Run({"JSON.SET", "j9", ".", R"({"vector_field":[null, null, null], "name": "doc_with_nulls"})"});
+  Run({"JSON.SET", "j10", ".", R"({"vector_field":true, "name": "doc_with_boolean"})"});
+  Run({"JSON.SET", "j11", ".",
+       R"({"vector_field":[true, false, true], "name": "doc_with_booleans"})"});
+  Run({"JSON.SET", "j12", ".", R"({"vector_field":1, "name": "doc_with_int"})"});
 
   auto resp =
       Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
@@ -1424,7 +1436,7 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"FT.SEARCH", "index", "*"});
-  EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4"));
+  EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4", "j8"));
 }
 
 #ifndef SANITIZERS
