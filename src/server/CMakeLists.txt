@@ -45,11 +45,12 @@ endif()
 
 add_library(dragonfly_lib bloom_family.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc engine_shard.cc
-            engine_shard_set.cc family_utils.cc
+            engine_shard_set.cc error.cc family_utils.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc
+            detail/decompress.cc
             detail/save_stages_controller.cc
             detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
