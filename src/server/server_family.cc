@@ -727,7 +727,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
-  shard_set->pool()->AwaitBrief([&tracker, pause_state](unsigned, util::ProactorBase*) {
+  shard_set->pool()->AwaitFiberOnAll([&tracker, pause_state](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
     // it's impossible to deadlock on waiting for a command that will be paused.
     tracker.TrackOnThread();
