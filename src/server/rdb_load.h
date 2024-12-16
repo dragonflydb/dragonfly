@@ -14,6 +14,7 @@ extern "C" {
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
+#include "server/detail/decompress.h"
 #include "server/journal/serializer.h"
 
 struct streamID;
@@ -24,8 +25,6 @@ class EngineShardSet;
 class ScriptMgr;
 class CompactObj;
 class Service;
-
-class DecompressImpl;
 
 using RdbVersion = std::uint16_t;
 
@@ -184,7 +183,7 @@ class RdbLoaderBase {
   std::error_code SkipModuleData();
   std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();
-  void AllocateDecompressOnce(int op_type);
+  std::error_code AllocateDecompressOnce(int op_type);
 
   std::error_code HandleJournalBlob(Service* service);
 
@@ -203,7 +202,7 @@ class RdbLoaderBase {
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
   base::PODArray<uint8_t> compr_buf_;
-  std::unique_ptr<DecompressImpl> decompress_impl_;
+  std::unique_ptr<detail::DecompressImpl> decompress_impl_;
   JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
   RdbVersion rdb_version_ = RDB_VERSION;
