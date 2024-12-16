@@ -81,8 +81,8 @@ TEST_F(RedisParserTest, Inline) {
   EXPECT_EQ(2, consumed_);
   EXPECT_THAT(args_, ElementsAre("1", "2", "45"));
 
-  // Empty queries return RESP_OK.
-  EXPECT_EQ(RedisParser::OK, Parse("\r\n"));
+  // Empty queries return INPUT_PENDING.
+  EXPECT_EQ(RedisParser::INPUT_PENDING, Parse("\r\n"));
   EXPECT_EQ(2, consumed_);
 }
 
@@ -107,10 +107,10 @@ TEST_F(RedisParserTest, Multi1) {
 
 TEST_F(RedisParserTest, Multi2) {
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*1\r\n$"));
-  EXPECT_EQ(4, consumed_);
+  EXPECT_EQ(5, consumed_);
 
-  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("$4\r\nMSET"));
-  EXPECT_EQ(8, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("4\r\nMSET"));
+  EXPECT_EQ(7, consumed_);
 
   ASSERT_EQ(RedisParser::OK, Parse("\r\n*2\r\n"));
   EXPECT_EQ(2, consumed_);
@@ -206,7 +206,7 @@ TEST_F(RedisParserTest, LargeBulk) {
 }
 
 TEST_F(RedisParserTest, NILs) {
-  ASSERT_EQ(RedisParser::BAD_BULKLEN, Parse("_\r\n"));
+  ASSERT_EQ(RedisParser::BAD_ARRAYLEN, Parse("_\r\n"));
   parser_.SetClientMode();
   ASSERT_EQ(RedisParser::OK, Parse("_\r\n"));
 }
@@ -241,6 +241,30 @@ TEST_F(RedisParserTest, UsedMemory) {
     stash.emplace_back(new RespExpr::Vec(vec));
   }
   EXPECT_GT(dfly::HeapSize(stash), 30000);
+}
+
+TEST_F(RedisParserTest, Eol) {
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*1\r"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("1\r\n$5\r\n"));
+  EXPECT_EQ(7, consumed_);
+}
+
+TEST_F(RedisParserTest, BulkSplit) {
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*1\r\n$4\r\nSADD"));
+  ASSERT_EQ(12, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
+}
+
+TEST_F(RedisParserTest, InlineSplit) {
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\n"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\nPING\n\n"));
+  EXPECT_EQ(6, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\n"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("P"));
+  ASSERT_EQ(RedisParser::OK, Parse("ING\n"));
 }
 
 }  // namespace facade
