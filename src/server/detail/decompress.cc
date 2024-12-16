@@ -93,14 +93,6 @@ class Lz4Decompress : public DecompressImpl {
   LZ4F_dctx* dctx_;
 };
 
-DecompressImpl* DecompressImpl::CreateLZ4() {
-  return new Lz4Decompress;
-}
-
-DecompressImpl* DecompressImpl::CreateZstd() {
-  return new ZstdDecompress;
-}
-
 io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
   LZ4F_frameInfo_t frame_info;
   size_t frame_size = data.size();
@@ -167,6 +159,14 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
   uncompressed_mem_buf_.CommitWrite(1);
 
   return &uncompressed_mem_buf_;
+}
+
+unique_ptr<DecompressImpl> DecompressImpl::CreateLZ4() {
+  return make_unique<Lz4Decompress>();
+}
+
+unique_ptr<DecompressImpl> DecompressImpl::CreateZstd() {
+  return make_unique<ZstdDecompress>();
 }
 
 }  // namespace detail

@@ -2306,9 +2306,9 @@ error_code RdbLoaderBase::AllocateDecompressOnce(int op_type) {
   }
 
   if (op_type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START) {
-    decompress_impl_.reset(detail::DecompressImpl::CreateZstd());
+    decompress_impl_ = detail::DecompressImpl::CreateZstd();
   } else if (op_type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
-    decompress_impl_.reset(detail::DecompressImpl::CreateLZ4());
+    decompress_impl_ = detail::DecompressImpl::CreateLZ4();
   } else {
     return RdbError(errc::unsupported_operation);
   }
