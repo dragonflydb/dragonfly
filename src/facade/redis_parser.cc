@@ -19,9 +19,10 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
   res->clear();
 
   if (state_ == CMD_COMPLETE_S) {
-    if (InitStart(str[0], res)) {  // We parsed the RESP protocol
+    if (InitStart(str[0], res)) {
+      // We recognized a non-INLINE state, starting with a special char.
       str.remove_prefix(1);
-      *consumed = 1;
+      *consumed += 1;
       if (server_mode_ && state_ == PARSE_ARG_S) {  // server requests start with ARRAY_LEN_S.
         state_ = CMD_COMPLETE_S;                    // reject and reset the state.
         return BAD_ARRAYLEN;
