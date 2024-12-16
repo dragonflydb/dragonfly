@@ -81,7 +81,14 @@ class ClusterShardMigration {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }
-        VLOG(2) << "Attempt failed to finalize flow " << source_shard_id_;
+        if (!tx_data->command.cmd_args.empty()) {
+          VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by "
+                  << tx_data->command.cmd_args[0];
+        } else {
+          VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by opcode "
+                  << (int)tx_data->opcode;
+        }
+
         bc_->Add();  // the flow isn't finished so we lock it again
       }
       if (tx_data->opcode == journal::Op::PING) {

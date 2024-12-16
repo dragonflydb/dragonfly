@@ -1256,7 +1256,7 @@ async def test_cluster_flushall_during_migration(
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="cluster_family=9,outgoing_slot_migration=9,incoming_slot_migration=9",
+            vmodule="cluster_family=9,outgoing_slot_migration=9,incoming_slot_migration=9,streamer=9",
             logtostdout=True,
         )
         for i in range(2)
@@ -1507,7 +1507,7 @@ async def test_cluster_fuzzymigration(
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
             serialization_max_chunk_size=huge_values,
             replication_stream_output_limit=10,
         )
