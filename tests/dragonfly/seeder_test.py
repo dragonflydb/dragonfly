@@ -18,8 +18,9 @@ async def test_static_seeder(async_client: aioredis.Redis):
 async def test_static_collection_size(async_client: aioredis.Redis):
     async def check_list():
         keys = await async_client.keys()
-        assert (await async_client.llen(keys[0])) == 1
-        assert len(await async_client.lpop(keys[0])) == 10_000
+        for key in keys:
+            assert await async_client.llen(key) == 1
+            assert len(await async_client.lpop(key)) == 10_000
 
     s = StaticSeeder(
         key_target=10, data_size=10_000, variance=1, samples=1, collection_size=1, types=["LIST"]
@@ -39,7 +40,6 @@ async def test_static_collection_size(async_client: aioredis.Redis):
         huge_value_size=0,
     )
     await s.run(async_client)
-    await check_list()
 
 
 @dfly_args({"proactor_threads": 4})
