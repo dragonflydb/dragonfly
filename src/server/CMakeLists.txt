@@ -50,6 +50,7 @@ add_library(dragonfly_lib bloom_family.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc
+            detail/compressor.cc
             detail/decompress.cc
             detail/save_stages_controller.cc
             detail/snapshot_storage.cc

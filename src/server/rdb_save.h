@@ -16,6 +16,7 @@ extern "C" {
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
+#include "server/detail/compressor.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/table.h"
@@ -67,7 +68,8 @@ enum class SaveMode {
   RDB,                        // Save .rdb file. Expected to read all shards.
 };
 
-enum class CompressionMode { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MULTI_ENTRY_LZ4 };
+enum class CompressionMode : uint8_t { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MULTI_ENTRY_LZ4 };
+
 CompressionMode GetDefaultCompressionMode();
 
 class RdbSaver {
@@ -147,8 +149,6 @@ class RdbSaver {
   CompressionMode compression_mode_;
 };
 
-class CompressorImpl;
-
 class SerializerBase {
  public:
   enum class FlushState { kFlushMidEntry, kFlushEndEntry };
@@ -196,7 +196,7 @@ class SerializerBase {
 
   CompressionMode compression_mode_;
   io::IoBuf mem_buf_;
-  std::unique_ptr<CompressorImpl> compressor_impl_;
+  std::unique_ptr<detail::CompressorImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr double kMinCompressionReductionPrecentage = 0.95;
