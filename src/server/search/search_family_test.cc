@@ -962,15 +962,12 @@ TEST_F(SearchFamilyTest, AggregateGroupBy) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "item2"),
                                          IsMap("foo_total", "50", "word", "item1")));
 
-  /*
-  Temporary not supported
-
   resp = Run({"ft.aggregate", "i1", "*", "LOAD", "2", "foo", "text", "GROUPBY", "2", "@word",
-  "@text", "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"}); EXPECT_THAT(resp,
-  IsUnordArrayWithSize(IsMap("foo_total", "20", "word", ArgType(RespExpr::NIL), "text", "\"second
-  key\""), IsMap("foo_total", "40", "word", ArgType(RespExpr::NIL), "text", "\"third key\""),
-  IsMap({"foo_total", "10", "word", ArgType(RespExpr::NIL), "text", "\"first key"})));
-  */
+              "@text", "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("foo_total", "40", "word", "item1", "text", "\"third key\""),
+                        IsMap("foo_total", "20", "word", "item2", "text", "\"second key\""),
+                        IsMap("foo_total", "10", "word", "item1", "text", "\"first key\"")));
 }
 
 TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
@@ -1630,6 +1627,45 @@ TEST_F(SearchFamilyTest, SearchLoadReturnHash) {
   // Search with LOAD @a
   resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@a"});
   EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+}
+
+// Test that FT.AGGREGATE prints only needed fields
+TEST_F(SearchFamilyTest, AggregateResultFields) {
+  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"2","c":"3"})"});
+  Run({"JSON.SET", "j2", ".", R"({"a":"4","b":"5","c":"6"})"});
+  Run({"JSON.SET", "j3", ".", R"({"a":"7","b":"8","c":"9"})"});
+
+  auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT", "SORTABLE",
+                   "$.b", "AS", "b", "TEXT", "$.c", "AS", "c", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.AGGREGATE", "i1", "*"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap(), IsMap(), IsMap()));
+
+  resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "1"), IsMap("a", "4"), IsMap("a", "7")));
+
+  resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
+  EXPECT_THAT(resp,
+              IsUnordArrayWithSize(IsMap("b", "\"2\"", "a", "1"), IsMap("b", "\"5\"", "a", "4"),
+                                   IsMap("b", "\"8\"", "a", "7")));
+
+  resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
+              "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("b", "\"8\"", "a", "7", "count", "1"),
+                                         IsMap("b", "\"2\"", "a", "1", "count", "1"),
+                                         IsMap("b", "\"5\"", "a", "4", "count", "1")));
+
+  Run({"JSON.SET", "j4", ".", R"({"id":1, "number":4})"});
+  Run({"JSON.SET", "j5", ".", R"({"id":2})"});
+
+  resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.id", "AS", "id", "NUMERIC", "$.number",
+              "AS", "number", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "@id", "@number"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("id", "1", "number", "4"), IsMap("id", "2"), IsMap(),
+                                         IsMap(), IsMap()));
 }
 
 }  // namespace dfly

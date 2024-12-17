@@ -468,6 +468,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
 
+    block_counter_.Wait();  // We must not change the bucket's internal order during serialization
     auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{&fetched_items_});
     if (bump_it != res.it) {  // the item was bumped
       res.it = bump_it;

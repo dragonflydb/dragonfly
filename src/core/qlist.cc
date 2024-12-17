@@ -371,6 +371,7 @@ string QList::Pop(Where where) {
 
   /* The head and tail should never be compressed */
   DCHECK(node->encoding != QUICKLIST_NODE_ENCODING_LZF);
+  DCHECK(head_->prev->next == nullptr);
 
   string res;
   if (ABSL_PREDICT_FALSE(QL_NODE_IS_PLAIN(node))) {
@@ -390,6 +391,7 @@ string QList::Pop(Where where) {
     }
     DelPackedIndex(node, pos);
   }
+  DCHECK(head_ == nullptr || head_->prev->next == nullptr);
   return res;
 }
 
@@ -479,11 +481,13 @@ bool QList::PushSentinel(string_view value, Where where) {
     if (len_ == 1) {  // sanity check
       DCHECK_EQ(malloc_size_, orig->sz);
     }
+    DCHECK(head_->prev->next == nullptr);
     return false;
   }
 
   quicklistNode* node = CreateFromSV(QUICKLIST_NODE_CONTAINER_PACKED, value);
   InsertNode(orig, node, opt);
+  DCHECK(head_->prev->next == nullptr);
   return true;
 }
 
@@ -837,13 +841,15 @@ quicklistNode* QList::ListpackMerge(quicklistNode* a, quicklistNode* b) {
 void QList::DelNode(quicklistNode* node) {
   if (node->next)
     node->next->prev = node->prev;
-  if (node->prev)
-    node->prev->next = node->next;
 
   if (node == head_) {
     head_ = node->next;
-  } else if (node == head_->prev) {  // tail
-    head_->prev = node->prev;
+  } else {
+    // for non-head nodes, update prev->next to point to node->next
+    // (If node==head, prev is tail and should always point to NULL).
+    node->prev->next = node->next;
+    if (node == head_->prev)  // tail
+      head_->prev = node->prev;
   }
 
   /* Update len first, so in Compress we know exactly len */

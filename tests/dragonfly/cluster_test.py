@@ -1255,7 +1255,7 @@ async def test_cluster_flushall_during_migration(
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="cluster_family=9,outgoing_slot_migration=9,incoming_slot_migration=9",
+            vmodule="cluster_family=9,outgoing_slot_migration=9,incoming_slot_migration=9,streamer=9",
             logtostdout=True,
         )
         for i in range(2)
@@ -1432,7 +1432,7 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "serialization_max_chunk_size": 0})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
         df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
@@ -1471,7 +1471,7 @@ async def test_network_disconnect_during_migration(df_factory):
 
     await proxy.start()
 
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 60)
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
     nodes[0].migrations = []
     nodes[0].slots = []
     nodes[1].slots = [(0, 16383)]
@@ -1506,7 +1506,7 @@ async def test_cluster_fuzzymigration(
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9",
+            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
             serialization_max_chunk_size=huge_values,
             replication_stream_output_limit=10,
         )
@@ -1613,7 +1613,7 @@ async def test_cluster_fuzzymigration(
                         res = False
         return res
 
-    @assert_eventually(times=500)
+    @assert_eventually(times=600)
     async def test_all_finished():
         assert await all_finished()
 
@@ -2469,7 +2469,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 
 
 @pytest.mark.asyncio
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "serialization_max_chunk_size": 0})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # Timeout set to 3 seconds because we must first saturate the socket before we get the timeout
     instances = [

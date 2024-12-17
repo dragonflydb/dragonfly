@@ -616,7 +616,7 @@ async def test_auth_resp3_bug(df_factory):
     await client.execute_command("ACL SETUSER kostas +@all ON >tmp")
     res = await client.execute_command("HELLO 3 AUTH kostas tmp")
     assert res["server"] == "redis"
-    assert res["version"] == "6.2.11"
+    assert res["version"] == "7.2.0"
     assert res["proto"] == 3
     assert res["mode"] == "standalone"
     assert res["role"] == "master"
