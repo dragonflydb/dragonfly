@@ -641,7 +641,7 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
 uint64_t GetDelayMs(uint64_t ts) {
   uint64_t now_ns = fb2::ProactorBase::GetMonotonicTimeNs();
   uint64_t delay_ns = 0;
-  if (ts < now_ns - 1000000) {  // handle states where ts is larger than now
+  if (ts < now_ns - 1000000) {  // if more than 1ms has passed between ts and now_ns
     delay_ns = (now_ns - ts) / 1000000;
   }
   return delay_ns;
