@@ -225,6 +225,7 @@ class RdbSerializer : public SerializerBase {
   // Must be called in the thread to which `it` belongs.
   // Returns the serialized rdb_type or the error.
   // expire_ms = 0 means no expiry.
+  // This function might preempt if flush_fun_ is used.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
                                 uint32_t mc_flags, DbIndex dbid);
 
