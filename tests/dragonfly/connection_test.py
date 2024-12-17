@@ -606,6 +606,14 @@ async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
     assert res == ["one", ["subscribe", "ch1", 1], "two", ["subscribe", "ch2", 2], "three"]
 
 
+async def test_match_http(df_server: DflyInstance):
+    client = df_server.client()
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    for i in range(2000):
+        writer.write(f"foo bar ".encode())
+        await writer.drain()
+
+
 """
 This test makes sure that Dragonfly can receive blocks of pipelined commands even
 while a script is still executing. This is a dangerous scenario because both the dispatch fiber
