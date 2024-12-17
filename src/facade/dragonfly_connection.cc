@@ -928,7 +928,7 @@ io::Result<bool> Connection::CheckForHttpProto() {
       return MatchHttp11Line(ib);
     }
     last_len = io_buf_.InputLen();
-    UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(io_buf_.Capacity()); });
+    UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(128); });
   } while (last_len < 1024);
 
   return false;
@@ -959,10 +959,7 @@ void Connection::ConnectionFlow() {
 
   // Main loop.
   if (parse_status != ERROR && !ec) {
-    if (io_buf_.AppendLen() < 64) {
-      UpdateIoBufCapacity(io_buf_, stats_,
-                          [&]() { io_buf_.EnsureCapacity(io_buf_.Capacity() * 2); });
-    }
+    UpdateIoBufCapacity(io_buf_, stats_, [&]() { io_buf_.EnsureCapacity(64); });
     auto res = IoLoop();
 
     if (holds_alternative<error_code>(res)) {
