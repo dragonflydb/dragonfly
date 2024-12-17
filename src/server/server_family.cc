@@ -2160,10 +2160,14 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
 
     auto& send_list = facade::SinkReplyBuilder::pending_list;
     if (!send_list.empty()) {
+      DCHECK(std::is_sorted(send_list.begin(), send_list.end(),
+                            [](const auto& left, const auto& right) {
+                              return left.timestamp_ns < right.timestamp_ns;
+                            }));
+
       auto& oldest_member = send_list.front();
-      if (oldest_member.timestamp_ns < result.oldest_pending_send_ts) {
-        result.oldest_pending_send_ts = oldest_member.timestamp_ns;
-      }
+      result.oldest_pending_send_ts =
+          min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_ns);
     }
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };  // cb

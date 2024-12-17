@@ -606,7 +606,6 @@ async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
     assert res == ["one", ["subscribe", "ch1", 1], "two", ["subscribe", "ch2", 2], "three"]
 
 
-@dfly_args({"proactor_threads": "2"})
 async def test_send_delay_metric(df_server: DflyInstance):
     client = df_server.client()
     await client.client_setname("client1")
