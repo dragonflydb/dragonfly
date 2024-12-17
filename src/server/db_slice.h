@@ -281,6 +281,10 @@ class DbSlice {
     Iterator it;
     ExpIterator exp_it;
     AutoUpdater post_updater;
+
+    bool IsValid() const {
+      return !it.is_done();
+    }
   };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
