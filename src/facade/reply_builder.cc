@@ -73,6 +73,8 @@ char* write_piece(string_view str, char* dest) {
 
 }  // namespace
 
+thread_local SinkReplyBuilder::PendingList SinkReplyBuilder::pending_list;
+
 SinkReplyBuilder::ReplyAggregator::~ReplyAggregator() {
   rb->batched_ = prev;
   if (!prev)
@@ -150,16 +152,22 @@ void SinkReplyBuilder::Send() {
   auto& reply_stats = tl_facade_stats->reply_stats;
 
   send_active_ = true;
-  uint64_t before_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
+  PendingPin pin(util::fb2::ProactorBase::GetMonotonicTimeNs());
+
+  pending_list.push_back(pin);
+
   reply_stats.io_write_cnt++;
   reply_stats.io_write_bytes += total_size_;
   DVLOG(2) << "Writing " << total_size_ << " bytes";
   if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
 
+  auto it = PendingList::s_iterator_to(pin);
+  pending_list.erase(it);
+
   uint64_t after_ns = util::fb2::ProactorBase::GetMonotonicTimeNs();
   reply_stats.send_stats.count++;
-  reply_stats.send_stats.total_duration += (after_ns - before_ns) / 1'000;
+  reply_stats.send_stats.total_duration += (after_ns - pin.timestamp_ns) / 1'000;
   DVLOG(2) << "Finished writing " << total_size_ << " bytes";
   send_active_ = false;
 }
