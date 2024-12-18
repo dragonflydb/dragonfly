@@ -715,7 +715,7 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   absl::StrAppend(&result, " ", command);
 
   for (auto arg : args) {
-    absl::StrAppend(&result, " ", facade::ToSV(arg));
+    absl::StrAppend(&result, " ", absl::CHexEscape(arg));
   }
 
   absl::StrAppend(&result, " failed with reason: ", reason);
