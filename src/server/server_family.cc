@@ -1541,6 +1541,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
+    util::http::SetMime(util::http::kTextMime, &resp);
     uint64_t uptime = time(NULL) - start_time_;
     PrintPrometheusMetrics(uptime, this->GetMetrics(&namespaces->GetDefaultNamespace()),
                            this->dfly_cmd_.get(), &resp);
