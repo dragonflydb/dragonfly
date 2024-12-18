@@ -461,8 +461,11 @@ class DflyInstanceFactory:
             except Exception as e:
                 exceptions.append(e)  # Collect the exception
         if exceptions:
-            # Raise the first exception while preserving the others as context
-            raise Exception("One or more errors occurred while stopping instances")
+            first_exception = exceptions[0]
+            raise Exception(
+                f"One or more errors occurred while stopping instances. "
+                f"First exception: {first_exception}"
+            ) from first_exception
 
     def __repr__(self) -> str:
         return f"Factory({self.args})"
