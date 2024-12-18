@@ -137,6 +137,7 @@ async def test_replication_all(
     )
 
     assert preemptions >= seeder.huge_value_target * 0.5
+    assert compressed_blobs > 0
     # Because data size could be 10k and for that case there will be almost a preemption
     # per bucket.
     if seeder.data_size < 1000:
@@ -2626,7 +2627,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("debug", "populate", "100000", "foo", "5000")
+    await c_master.execute_command("debug", "populate", "100000", "foo", "5000", "RAND")
 
     c_master = master.client()
     c_replica = replica.client()
