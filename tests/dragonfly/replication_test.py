@@ -2313,6 +2313,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
     await assert_replica_reconnections(replica, 0)
 
 
+@dfly_args({"proactor_threads": 1})
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked
     master = df_factory.create(replication_timeout=1000)
@@ -2323,7 +2324,7 @@ async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("debug", "populate", "200000", "foo", "500")
+    await c_master.execute_command("debug", "populate", "200000", "foo", "500", "RAND")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
     @assert_eventually
