@@ -172,6 +172,10 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     RespExpr resp = Run({"save", "df"});
     ASSERT_EQ(resp, "OK");
 
+    if (mode == CompressionMode::MULTI_ENTRY_ZSTD || mode == CompressionMode::MULTI_ENTRY_LZ4) {
+      EXPECT_GE(GetMetrics().coordinator_stats.compressed_blobs, 1);
+    }
+
     auto save_info = service_->server_family().GetLastSaveInfo();
     resp = Run({"dfly", "load", save_info.file_name});
     ASSERT_EQ(resp, "OK");

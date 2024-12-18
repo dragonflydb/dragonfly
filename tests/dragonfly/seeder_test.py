@@ -36,7 +36,7 @@ async def test_static_collection_size(async_client: aioredis.Redis):
         data_size=10_000,
         collection_size=1,
         types=["LIST"],
-        huge_value_percentage=0,
+        huge_value_target=0,
         huge_value_size=0,
     )
     await s.run(async_client)

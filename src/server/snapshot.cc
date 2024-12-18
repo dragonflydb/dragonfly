@@ -364,7 +364,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
     return false;
 
   // Flush any of the leftovers to avoid interleavings
-  size_t serialized = FlushSerialized(FlushState::kFlushMidEntry);
+  size_t serialized = FlushSerialized(FlushState::kFlushEndEntry);
 
   if (!delayed_entries_.empty()) {
     // Async bucket serialization might have accumulated some delayed values.
@@ -377,7 +377,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
     } while (!delayed_entries_.empty());
 
     // blocking point.
-    serialized += FlushSerialized(FlushState::kFlushMidEntry);
+    serialized += FlushSerialized(FlushState::kFlushEndEntry);
   }
   return serialized > 0;
 }

@@ -2374,6 +2374,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("rdb_save_usec", m.coordinator_stats.rdb_save_usec);
     append("rdb_save_count", m.coordinator_stats.rdb_save_count);
     append("big_value_preemptions", m.coordinator_stats.big_value_preemptions);
+    append("compressed_blobs", m.coordinator_stats.compressed_blobs);
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);

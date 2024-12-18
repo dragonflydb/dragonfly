@@ -162,15 +162,7 @@ std::string AbslUnparseFlag(dfly::CompressionMode flag) {
 }
 
 dfly::CompressionMode GetDefaultCompressionMode() {
-  const auto flag = absl::GetFlag(FLAGS_compression_mode);
-  if (ServerState::tlocal()->serialization_max_chunk_size == 0) {
-    return flag;
-  }
-
-  static bool once = flag != dfly::CompressionMode::NONE;
-  LOG_IF(WARNING, once) << "Setting CompressionMode to NONE because big value serialization is on";
-  once = false;
-  return dfly::CompressionMode::NONE;
+  return absl::GetFlag(FLAGS_compression_mode);
 }
 
 uint8_t RdbObjectType(const PrimeValue& pv) {
@@ -944,6 +936,7 @@ io::Bytes SerializerBase::PrepareFlush(SerializerBase::FlushState flush_state) {
     return mem_buf_.InputBuffer();
 
   bool is_last_chunk = flush_state == FlushState::kFlushEndEntry;
+  VLOG(2) << "PrepareFlush:" << is_last_chunk << " " << number_of_chunks_;
   if (is_last_chunk && number_of_chunks_ == 0) {
     if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD ||
         compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
@@ -1603,6 +1596,7 @@ void SerializerBase::CompressBlob() {
     compression_stats_.emplace(CompressionStats{});
   }
   Bytes blob_to_compress = mem_buf_.InputBuffer();
+  VLOG(2) << "CompressBlob size " << blob_to_compress.size();
   size_t blob_size = blob_to_compress.size();
   if (blob_size < kMinStrSizeToCompress) {
     ++compression_stats_->small_str_count;
@@ -1644,6 +1638,8 @@ void SerializerBase::CompressBlob() {
   memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
   mem_buf_.CommitWrite(compressed_blob.length());
   ++compression_stats_->compressed_blobs;
+  auto& stats = ServerState::tlocal()->stats;
+  ++stats.compressed_blobs;
 }
 
 size_t RdbSerializer::GetTempBufferSize() const {
