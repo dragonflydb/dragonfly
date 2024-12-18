@@ -10,62 +10,99 @@ namespace dfly::aggregate {
 
 namespace {
 
-struct GroupStep {
-  PipelineResult operator()(PipelineResult result) {
-    // Separate items into groups
-    absl::flat_hash_map<absl::FixedArray<Value>, std::vector<DocValues>> groups;
-    for (auto& value : result.values) {
-      groups[Extract(value)].push_back(std::move(value));
-    }
+using ValuesList = absl::FixedArray<Value>;
 
-    // Restore DocValues and apply reducers
-    std::vector<DocValues> out;
-    while (!groups.empty()) {
-      auto node = groups.extract(groups.begin());
-      DocValues doc = Unpack(std::move(node.key()));
-      for (auto& reducer : reducers_) {
-        doc[reducer.result_field] = reducer.func({reducer.source_field, node.mapped()});
-      }
-      out.push_back(std::move(doc));
-    }
-
-    absl::flat_hash_set<std::string> fields_to_print;
-    fields_to_print.reserve(fields_.size() + reducers_.size());
-
-    for (auto& field : fields_) {
-      fields_to_print.insert(std::move(field));
-    }
-    for (auto& reducer : reducers_) {
-      fields_to_print.insert(std::move(reducer.result_field));
-    }
-
-    return {std::move(out), std::move(fields_to_print)};
+ValuesList ExtractFieldsValues(const DocValues& dv, absl::Span<const std::string> fields) {
+  ValuesList out(fields.size());
+  for (size_t i = 0; i < fields.size(); i++) {
+    auto it = dv.find(fields[i]);
+    out[i] = (it != dv.end()) ? it->second : Value{};
   }
+  return out;
+}
 
-  absl::FixedArray<Value> Extract(const DocValues& dv) {
-    absl::FixedArray<Value> out(fields_.size());
-    for (size_t i = 0; i < fields_.size(); i++) {
-      auto it = dv.find(fields_[i]);
-      out[i] = (it != dv.end()) ? it->second : Value{};
-    }
-    return out;
-  }
-
-  DocValues Unpack(absl::FixedArray<Value>&& values) {
-    DCHECK_EQ(values.size(), fields_.size());
-    DocValues out;
-    for (size_t i = 0; i < fields_.size(); i++)
-      out[fields_[i]] = std::move(values[i]);
-    return out;
-  }
-
-  std::vector<std::string> fields_;
-  std::vector<Reducer> reducers_;
-};
+DocValues PackFields(ValuesList values, absl::Span<const std::string> fields) {
+  DCHECK_EQ(values.size(), fields.size());
+  DocValues out;
+  for (size_t i = 0; i < fields.size(); i++)
+    out[fields[i]] = std::move(values[i]);
+  return out;
+}
 
 const Value kEmptyValue = Value{};
 
 }  // namespace
+
+void Aggregator::DoGroup(absl::Span<const std::string> fields, absl::Span<const Reducer> reducers) {
+  // Separate items into groups
+  absl::flat_hash_map<ValuesList, std::vector<DocValues>> groups;
+  for (auto& value : result.values) {
+    groups[ExtractFieldsValues(value, fields)].push_back(std::move(value));
+  }
+
+  // Restore DocValues and apply reducers
+  auto& values = result.values;
+  values.clear();
+  values.reserve(groups.size());
+  while (!groups.empty()) {
+    auto node = groups.extract(groups.begin());
+    DocValues doc = PackFields(std::move(node.key()), fields);
+    for (auto& reducer : reducers) {
+      doc[reducer.result_field] = reducer.func({reducer.source_field, node.mapped()});
+    }
+    values.push_back(std::move(doc));
+  }
+
+  auto& fields_to_print = result.fields_to_print;
+  fields_to_print.clear();
+  fields_to_print.reserve(fields.size() + reducers.size());
+
+  for (auto& field : fields) {
+    fields_to_print.insert(field);
+  }
+  for (auto& reducer : reducers) {
+    fields_to_print.insert(reducer.result_field);
+  }
+}
+
+void Aggregator::DoSort(std::string_view field, bool descending) {
+  /*
+    Comparator for sorting DocValues by field.
+    If some of the fields is not present in the DocValues, comparator returns:
+    1. l_it == l.end() && r_it != r.end()
+      asc -> false
+      desc -> false
+    2. l_it != l.end() && r_it == r.end()
+      asc -> true
+      desc -> true
+    3. l_it == l.end() && r_it == r.end()
+      asc -> false
+      desc -> false
+  */
+  auto comparator = [&](const DocValues& l, const DocValues& r) {
+    auto l_it = l.find(field);
+    auto r_it = r.find(field);
+
+    // If some of the values is not present
+    if (l_it == l.end() || r_it == r.end()) {
+      return l_it != l.end();
+    }
+
+    auto& lv = l_it->second;
+    auto& rv = r_it->second;
+    return !descending ? lv < rv : lv > rv;
+  };
+
+  std::sort(result.values.begin(), result.values.end(), std::move(comparator));
+
+  result.fields_to_print.insert(field);
+}
+
+void Aggregator::DoLimit(size_t offset, size_t num) {
+  auto& values = result.values;
+  values.erase(values.begin(), values.begin() + std::min(offset, values.size()));
+  values.resize(std::min(num, values.size()));
+}
 
 const Value& ValueIterator::operator*() const {
   auto it = values_.front().find(field_);
@@ -109,48 +146,30 @@ Reducer::Func FindReducerFunc(ReducerFunc name) {
   return nullptr;
 }
 
-PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
-                           std::vector<Reducer> reducers) {
-  return GroupStep{std::vector<std::string>(fields.begin(), fields.end()), std::move(reducers)};
-}
-
-PipelineStep MakeSortStep(std::string_view field, bool descending) {
-  return [field = std::string(field), descending](PipelineResult result) -> PipelineResult {
-    auto& values = result.values;
-
-    std::sort(values.begin(), values.end(), [field](const DocValues& l, const DocValues& r) {
-      auto it1 = l.find(field);
-      auto it2 = r.find(field);
-      return it1 == l.end() || (it2 != r.end() && it1->second < it2->second);
-    });
-
-    if (descending) {
-      std::reverse(values.begin(), values.end());
-    }
-
-    result.fields_to_print.insert(field);
-    return result;
+AggregationStep MakeGroupStep(std::vector<std::string> fields, std::vector<Reducer> reducers) {
+  return [fields = std::move(fields), reducers = std::move(reducers)](Aggregator* aggregator) {
+    aggregator->DoGroup(fields, reducers);
   };
 }
 
-PipelineStep MakeLimitStep(size_t offset, size_t num) {
-  return [offset, num](PipelineResult result) {
-    auto& values = result.values;
-    values.erase(values.begin(), values.begin() + std::min(offset, values.size()));
-    values.resize(std::min(num, values.size()));
-    return result;
+AggregationStep MakeSortStep(std::string field, bool descending) {
+  return [field = std::move(field), descending](Aggregator* aggregator) {
+    aggregator->DoSort(field, descending);
   };
 }
 
-PipelineResult Process(std::vector<DocValues> values,
-                       absl::Span<const std::string_view> fields_to_print,
-                       absl::Span<const PipelineStep> steps) {
-  PipelineResult result{std::move(values), {fields_to_print.begin(), fields_to_print.end()}};
+AggregationStep MakeLimitStep(size_t offset, size_t num) {
+  return [=](Aggregator* aggregator) { aggregator->DoLimit(offset, num); };
+}
+
+AggregationResult Process(std::vector<DocValues> values,
+                          absl::Span<const std::string_view> fields_to_print,
+                          absl::Span<const AggregationStep> steps) {
+  Aggregator aggregator{std::move(values), {fields_to_print.begin(), fields_to_print.end()}};
   for (auto& step : steps) {
-    PipelineResult step_result = step(std::move(result));
-    result = std::move(step_result);
+    step(&aggregator);
   }
-  return result;
+  return aggregator.result;
 }
 
 }  // namespace dfly::aggregate

@@ -10,13 +10,15 @@ namespace dfly::aggregate {
 
 using namespace std::string_literals;
 
+using StepsList = std::vector<AggregationStep>;
+
 TEST(AggregatorTest, Sort) {
   std::vector<DocValues> values = {
       DocValues{{"a", 1.0}},
       DocValues{{"a", 0.5}},
       DocValues{{"a", 1.5}},
   };
-  PipelineStep steps[] = {MakeSortStep("a", false)};
+  StepsList steps = {MakeSortStep("a", false)};
 
   auto result = Process(values, {"a"}, steps);
 
@@ -32,7 +34,8 @@ TEST(AggregatorTest, Limit) {
       DocValues{{"i", 3.0}},
       DocValues{{"i", 4.0}},
   };
-  PipelineStep steps[] = {MakeLimitStep(1, 2)};
+
+  StepsList steps = {MakeLimitStep(1, 2)};
 
   auto result = Process(values, {"i"}, steps);
 
@@ -49,8 +52,8 @@ TEST(AggregatorTest, SimpleGroup) {
       DocValues{{"i", 4.0}, {"tag", "even"}},
   };
 
-  std::string_view fields[] = {"tag"};
-  PipelineStep steps[] = {MakeGroupStep(fields, {})};
+  std::vector<std::string> fields = {"tag"};
+  StepsList steps = {MakeGroupStep(std::move(fields), {})};
 
   auto result = Process(values, {"i", "tag"}, steps);
   EXPECT_EQ(result.values.size(), 2);
@@ -72,13 +75,14 @@ TEST(AggregatorTest, GroupWithReduce) {
     });
   }
 
-  std::string_view fields[] = {"tag"};
+  std::vector<std::string> fields = {"tag"};
   std::vector<Reducer> reducers = {
       Reducer{"", "count", FindReducerFunc(ReducerFunc::COUNT)},
       Reducer{"i", "sum-i", FindReducerFunc(ReducerFunc::SUM)},
       Reducer{"half-i", "distinct-hi", FindReducerFunc(ReducerFunc::COUNT_DISTINCT)},
       Reducer{"null-field", "distinct-null", FindReducerFunc(ReducerFunc::COUNT_DISTINCT)}};
-  PipelineStep steps[] = {MakeGroupStep(fields, std::move(reducers))};
+
+  StepsList steps = {MakeGroupStep(std::move(fields), std::move(reducers))};
 
   auto result = Process(values, {"i", "half-i", "tag"}, steps);
   EXPECT_EQ(result.values.size(), 2);

@@ -168,7 +168,7 @@ struct AggregateParams {
   search::QueryParams params;
 
   std::optional<SearchFieldsList> load_fields;
-  std::vector<aggregate::PipelineStep> steps;
+  std::vector<aggregate::AggregationStep> steps;
 };
 
 // Stores basic info about a document index.
