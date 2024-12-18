@@ -37,13 +37,9 @@ constexpr size_t kMinBlobSize = 32_KB;
 
 }  // namespace
 
-SliceSnapshot::SliceSnapshot(DbSlice* slice, CompressionMode compression_mode,
-                             std::function<void(std::string)> on_push_record,
-                             std::function<void()> on_snapshot_finish)
-    : db_slice_(slice),
-      compression_mode_(compression_mode),
-      on_push_(on_push_record),
-      on_snapshot_finish_(on_snapshot_finish) {
+SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
+                             SnapshotDataConsumerInterface* consumer, Context* cntx)
+    : db_slice_(slice), compression_mode_(compression_mode), consumer_(consumer), cntx_(cntx) {
   db_array_ = slice->databases();
   tl_slice_snapshots.insert(this);
 }
@@ -65,7 +61,7 @@ bool SliceSnapshot::IsSnaphotInProgress() {
   return tl_slice_snapshots.size() > 0;
 }
 
-void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, SnapshotFlush allow_flush) {
+void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
   auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
@@ -95,19 +91,18 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
-    IterateBucketsFb(cll, stream_journal);
+  snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal] {
+    this->IterateBucketsFb(stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
-    on_snapshot_finish_();
+    consumer_->Finalize();
   });
 }
 
-void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
+void SliceSnapshot::StartIncremental(LSN start_lsn) {
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
 
-  snapshot_fb_ = fb2::Fiber("incremental_snapshot", [cntx, start_lsn, this] {
-    this->SwitchIncrementalFb(cntx, start_lsn);
-  });
+  snapshot_fb_ = fb2::Fiber("incremental_snapshot",
+                            [start_lsn, this] { this->SwitchIncrementalFb(start_lsn); });
 }
 
 // Called only for replication use-case.
@@ -144,7 +139,7 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // and survived until it finished.
 
 // Serializes all the entries with version less than snapshot_version_.
-void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut) {
+void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   {
     auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
     ThisFiber::SetName(std::move(fiber_name));
@@ -156,7 +151,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
   }
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
-    if (cll->IsCancelled())
+    if (cntx_->IsCancelled())
       return;
 
     if (!db_array_[db_indx])
@@ -168,7 +163,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
-      if (cll->IsCancelled()) {
+      if (cntx_->IsCancelled()) {
         return;
       }
 
@@ -204,7 +199,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
           << stats_.loop_serialized << "/" << stats_.side_saved << "/" << stats_.savecb_calls;
 }
 
-void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
+void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
   auto* journal = db_slice_->shard_owner()->journal();
   DCHECK(journal);
   DCHECK_LE(lsn, journal->GetLsn()) << "The replica tried to sync from the future.";
@@ -212,7 +207,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
   VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
 
   // The replica sends the LSN of the next entry is wants to receive.
-  while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+  while (!cntx_->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
     serializer_->WriteJournalEntry(journal->GetEntry(lsn));
     PushSerialized(false);
     lsn++;
@@ -239,7 +234,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
     PushSerialized(true);
   } else {
     // We stopped but we didn't manage to send the whole stream.
-    cntx->ReportError(
+    cntx_->ReportError(
         std::make_error_code(errc::state_not_recoverable),
         absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
                      " was dropped from the buffer. Current lsn=", journal->GetLsn()));
@@ -348,7 +343,7 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
   // Blocking point.
-  on_push_(std::move(sfile.val));
+  consumer_->ConsumeData(std::move(sfile.val), cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;

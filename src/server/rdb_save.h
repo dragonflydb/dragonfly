@@ -94,7 +94,7 @@ class RdbSaver {
   void StartSnapshotInShard(bool stream_journal, Context* cntx, EngineShard* shard);
 
   // Send only the incremental snapshot since start_lsn.
-  void StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn);
+  void StartIncrementalSnapshotInShard(LSN start_lsn, Context* cntx, EngineShard* shard);
 
   // Stops full-sync serialization for replication in the shard's thread.
   std::error_code StopFullSyncInShard(EngineShard* shard);
@@ -107,7 +107,7 @@ class RdbSaver {
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
   // Called only for save rdb flow and save df on summary file.
-  std::error_code SaveBody(Context* cntx);
+  std::error_code SaveBody(const Context& cntx);
 
   // Fills freq_map with the histogram of rdb types.
   void FillFreqMap(RdbTypeFreqMap* freq_map);
