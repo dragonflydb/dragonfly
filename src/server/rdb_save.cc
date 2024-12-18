@@ -162,16 +162,7 @@ std::string AbslUnparseFlag(dfly::CompressionMode flag) {
 }
 
 dfly::CompressionMode GetDefaultCompressionMode() {
-  const auto flag = absl::GetFlag(FLAGS_compression_mode);
-  return flag;
-  if (ServerState::tlocal()->serialization_max_chunk_size == 0) {
-    return flag;
-  }
-
-  static bool once = flag != dfly::CompressionMode::NONE;
-  LOG_IF(WARNING, once) << "Setting CompressionMode to NONE because big value serialization is on";
-  once = false;
-  return dfly::CompressionMode::NONE;
+  return absl::GetFlag(FLAGS_compression_mode);
 }
 
 uint8_t RdbObjectType(const PrimeValue& pv) {

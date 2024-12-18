@@ -130,13 +130,13 @@ async def test_replication_all(
 
     info = await c_master.info()
     preemptions = info["big_value_preemptions"]
-    # assert preemptions >= seeder.huge_value_target * 0.5
-
+    total_buckets = info["num_buckets"]
     compressed_blobs = info["compressed_blobs"]
-    # TODO(adi): why some runs has compression is no affective
-    # assert compressed_blobs > 1
-    logging.debug(f"Compressed blobs {compressed_blobs}")
+    logging.debug(
+        f"Compressed blobs {compressed_blobs} .Buckets {total_buckets}. Preemptions {preemptions}"
+    )
 
+    assert preemptions >= seeder.huge_value_target * 0.5
     # Because data size could be 10k and for that case there will be almost a preemption
     # per bucket.
     if seeder.data_size < 1000:
@@ -145,8 +145,6 @@ async def test_replication_all(
         # of buckets seems like a big number but that depends on a few parameters like
         # the size of the hug value and the serialization max chunk size. For the test cases here,
         # it's usually close to 10% but there are some that are close to 30.
-        total_buckets = info["num_buckets"]
-        logging.debug(f"Buckets {total_buckets}. Preemptions {preemptions}")
         assert preemptions <= (total_buckets * 0.3)
 
 
