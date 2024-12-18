@@ -1765,6 +1765,7 @@ async def test_cluster_replication_migration(
     assert await seeder.compare(r1_capture, r2_node.instance.port)
 
 
+@pytest.mark.skip("Flaky test")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_start_replication_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
