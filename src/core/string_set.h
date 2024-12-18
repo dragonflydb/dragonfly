@@ -85,6 +85,10 @@ class StringSet : public DenseSet {
     using IteratorBase::ExpiryTime;
     using IteratorBase::HasExpiry;
     using IteratorBase::SetExpiryTime;
+
+    // Try reducing memory fragmentation of the value by re-allocating. Returns true if
+    // re-allocation happened.
+    bool ReallocIfNeeded(float ratio);
   };
 
   iterator begin() {
@@ -114,6 +118,9 @@ class StringSet : public DenseSet {
   void ObjDelete(void* obj, bool has_ttl) const override;
   void* ObjectClone(const void* obj, bool has_ttl, bool add_ttl) const override;
   sds MakeSetSds(std::string_view src, uint32_t ttl_sec) const;
+
+ private:
+  std::pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio);
 };
 
 template <typename T> unsigned StringSet::AddMany(absl::Span<T> span, uint32_t ttl_sec) {
