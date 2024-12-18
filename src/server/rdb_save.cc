@@ -1333,6 +1333,10 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
 
   auto cb = [this, &channel_bytes, &serializer_bytes](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
+    // before create a snapshot we save header so shard_snapshots_ are vector of nullptr until we
+    // start snapshots saving
+    if (!snapshot)
+      return;
     if (channel_.has_value())
       channel_bytes.fetch_add(channel_->GetSize(), memory_order_relaxed);
     serializer_bytes.store(snapshot->GetBufferCapacity() + snapshot->GetTempBuffersSize(),
@@ -1355,6 +1359,10 @@ RdbSaver::SnapshotStats RdbSaver::Impl::GetCurrentSnapshotProgress() const {
 
   auto cb = [this, &results](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
+    // before create a snapshot we save header so shard_snapshots_ are vector of nullptr until we
+    // start snapshots saving
+    if (!snapshot)
+      return;
     results[sid] = snapshot->GetCurrentSnapshotProgress();
   };
 
