@@ -453,9 +453,16 @@ class DflyInstanceFactory:
 
     async def stop_all(self):
         """Stop all launched instances."""
+        exceptions = []  # To collect exceptions
         for instance in self.instances:
             await instance.close_clients()
-            instance.stop()
+            try:
+                instance.stop()
+            except Exception as e:
+                exceptions.append(e)  # Collect the exception
+        if exceptions:
+            # Raise the first exception while preserving the others as context
+            raise Exception("One or more errors occurred while stopping instances")
 
     def __repr__(self) -> str:
         return f"Factory({self.args})"
