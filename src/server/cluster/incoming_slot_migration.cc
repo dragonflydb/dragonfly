@@ -76,8 +76,11 @@ class ClusterShardMigration {
         VLOG(2) << "Attempt to finalize flow " << source_shard_id_ << " attempt " << tx_data->lsn;
         last_attempt_.store(tx_data->lsn);
         bc_->Dec();  // we can Join the flow now
+        do {         // we can send several NOOP to force flush the data
+          tx_data = tx_reader.NextTxData(&reader, cntx);
+        } while (tx_data && tx_data->opcode == journal::Op::NOOP);
         // if we get new data, attempt is failed
-        if (tx_data = tx_reader.NextTxData(&reader, cntx); !tx_data) {
+        if (!tx_data) {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }

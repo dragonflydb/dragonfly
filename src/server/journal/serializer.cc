@@ -80,6 +80,8 @@ void JournalWriter::Write(const journal::Entry& entry) {
       Write(entry.shard_cnt);
       Write(entry.payload);
       break;
+    case journal::Op::NOOP:
+      break;
     default:
       break;
   };
@@ -191,7 +193,7 @@ io::Result<journal::ParsedEntry> JournalReader::ReadEntry() {
   entry.dbid = dbid_;
   entry.opcode = opcode;
 
-  if (opcode == journal::Op::PING || opcode == journal::Op::FIN) {
+  if (opcode == journal::Op::PING || opcode == journal::Op::NOOP) {
     return entry;
   }
 

@@ -14,15 +14,7 @@
 namespace dfly {
 namespace journal {
 
-enum class Op : uint8_t {
-  NOOP = 0,
-  SELECT = 6,
-  EXPIRED = 9,
-  COMMAND = 10,
-  PING = 13,
-  FIN = 14,
-  LSN = 15
-};
+enum class Op : uint8_t { NOOP = 0, SELECT = 6, EXPIRED = 9, COMMAND = 10, PING = 13, LSN = 15 };
 
 struct EntryBase {
   TxId txid;

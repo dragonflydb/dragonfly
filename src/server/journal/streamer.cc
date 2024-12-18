@@ -230,14 +230,19 @@ void RestoreStreamer::Run() {
 void RestoreStreamer::SendFinalize(long attempt) {
   VLOG(1) << "RestoreStreamer LSN opcode for : " << db_slice_->shard_id() << " attempt " << attempt;
   journal::Entry entry(journal::Op::LSN, attempt);
+  journal::Entry noop(journal::Op::NOOP, 0);
 
   io::StringSink sink;
   JournalWriter writer{&sink};
   writer.Write(entry);
+
+  // We do flush sending NOOP
+  for (int i = 0; i < 16; ++i) {
+    writer.Write(noop);
+  }
+
   Write(std::move(sink).str());
 
-  // TODO: is the intent here to flush everything?
-  //
   ThrottleIfNeeded();
 }
 
