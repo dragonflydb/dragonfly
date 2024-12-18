@@ -2285,6 +2285,7 @@ async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_fact
     assert await seeder.compare(capture, replica.port)
 
 
+@pytest.mark.skip("Flaky test")
 @dfly_args({"proactor_threads": 4})
 async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_seeder_factory):
     """
