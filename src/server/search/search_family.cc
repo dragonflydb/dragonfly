@@ -207,9 +207,9 @@ std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
   if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @
   } else {
-    // Temporary warning until we can throw an error
-    LOG(WARNING) << "bad arguments: Field name '" << field << "' should start with '@'. '@" << field
-                 << "' is expected";
+    // Temporary warning until we can throw an error. Log every 30 seconds
+    LOG_EVERY_T(WARNING, 30) << "bad arguments: Field name '" << field
+                             << "' should start with '@'. '@" << field << "' is expected";
   }
   return field;
 }
