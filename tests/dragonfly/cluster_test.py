@@ -2008,7 +2008,7 @@ async def test_cluster_migration_huge_container(
     seeder = Seeder(
         key_target=100_000,
         types=StaticSeeder.BIG_VALUE_TYPES,
-        huge_value_percentage=50,
+        huge_value_target=50_000,
         huge_value_size=1_000_000,
     )
     # Seeder v2 does not support cluster client? Maybe we need to limit to 1 key per operation?
