@@ -89,15 +89,14 @@ class SliceSnapshot {
   void SwitchIncrementalFb(Context* cntx, LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(PrimeTable::bucket_iterator it);
+  bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
 
   // Serialize entry into passed serializer.
-  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
-                      std::optional<uint64_t> expire, RdbSerializer* serializer);
+  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -109,11 +108,12 @@ class SliceSnapshot {
   // Push regardless of buffer size if force is true.
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
+  bool PushSerializedUnderLock(bool force) ABSL_EXCLUSIVE_LOCKS_REQUIRED(big_value_mu_);
 
   // Helper function that flushes the serialized items into the RecordStream.
   // Can block.
   using FlushState = SerializerBase::FlushState;
-  size_t FlushSerialized(FlushState flush_state);
+  size_t FlushSerialized(FlushState flush_state);  // ABSL_EXCLUSIVE_LOCKS_REQUIRED(big_value_mu_)
 
  public:
   uint64_t snapshot_version() const {
@@ -141,24 +141,25 @@ class SliceSnapshot {
   };
 
   DbSlice* db_slice_;
-  DbTableArray db_array_;
+  const DbTableArray db_array_;
 
-  DbIndex current_db_;
+  std::unique_ptr<RdbSerializer> serializer_;  // ABSL_GUARDED_BY(big_value_mu_);
 
-  std::unique_ptr<RdbSerializer> serializer_;
-  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+  // collected during atomic bucket traversal
+  std::vector<DelayedEntry> delayed_entries_ ABSL_GUARDED_BY(big_value_mu_);
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
   util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
   util::fb2::CondVarAny seq_cond_;
-  CompressionMode compression_mode_;
-  RdbTypeFreqMap type_freq_map_;
+  const CompressionMode compression_mode_;
+  RdbTypeFreqMap type_freq_map_ ABSL_GUARDED_BY(big_value_mu_);
 
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   uint32_t journal_cb_id_ = 0;
 
+  // TODO: remove or use mutex
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
   struct Stats {
@@ -167,9 +168,9 @@ class SliceSnapshot {
     size_t side_saved = 0;
     size_t savecb_calls = 0;
     size_t keys_total = 0;
-  } stats_;
+  } stats_;  // TODO: maybe need to lock
 
-  ThreadLocalMutex big_value_mu_;
+  mutable ThreadLocalMutex big_value_mu_;
 
   std::function<void(std::string)> on_push_;
   std::function<void()> on_snapshot_finish_;

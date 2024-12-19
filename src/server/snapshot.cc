@@ -41,10 +41,10 @@ SliceSnapshot::SliceSnapshot(DbSlice* slice, CompressionMode compression_mode,
                              std::function<void(std::string)> on_push_record,
                              std::function<void()> on_snapshot_finish)
     : db_slice_(slice),
+      db_array_(slice->databases()),
       compression_mode_(compression_mode),
       on_push_(on_push_record),
       on_snapshot_finish_(on_snapshot_finish) {
-  db_array_ = slice->databases();
   tl_slice_snapshots.insert(this);
 }
 
@@ -127,8 +127,9 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 
   journal->UnregisterOnChange(cb_id);
   if (!cancel) {
+    util::fb2::LockGuard guard(big_value_mu_);
     serializer_->SendJournalOffset(journal->GetLsn());
-    PushSerialized(true);
+    PushSerializedUnderLock(true);
   }
 }
 
@@ -164,7 +165,6 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 
     uint64_t last_yield = 0;
     PrimeTable* pt = &db_array_[db_indx]->prime;
-    current_db_ = db_indx;
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
@@ -172,8 +172,8 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
         return;
       }
 
-      PrimeTable::Cursor next =
-          pt->TraverseBuckets(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
+      PrimeTable::Cursor next = pt->TraverseBuckets(
+          cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this, db_indx));
       cursor = next;
       PushSerialized(false);
 
@@ -195,8 +195,9 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 
   CHECK(!serialize_bucket_running_);
   if (send_full_sync_cut) {
+    util::fb2::LockGuard guard(big_value_mu_);
     CHECK(!serializer_->SendFullSyncCut());
-    PushSerialized(true);
+    PushSerializedUnderLock(true);
   }
 
   // serialized + side_saved must be equal to the total saved.
@@ -213,8 +214,11 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
 
   // The replica sends the LSN of the next entry is wants to receive.
   while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
-    serializer_->WriteJournalEntry(journal->GetEntry(lsn));
-    PushSerialized(false);
+    {
+      util::fb2::LockGuard guard(big_value_mu_);
+      serializer_->WriteJournalEntry(journal->GetEntry(lsn));
+      PushSerializedUnderLock(false);
+    }
     lsn++;
   }
 
@@ -231,7 +235,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
   // GetLsn() is always the next lsn that we expect to create.
   if (journal->GetLsn() == lsn) {
     {
-      FiberAtomicGuard fg;
+      util::fb2::LockGuard guard(big_value_mu_);
       serializer_->SendFullSyncCut();
     }
     auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
@@ -247,9 +251,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
   }
 }
 
-bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
-  std::lock_guard guard(big_value_mu_);
-
+bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it) {
   ++stats_.savecb_calls;
 
   auto check = [&](auto v) {
@@ -266,7 +268,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
     return false;
   }
 
-  db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
+  db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
   auto* blocking_counter = db_slice_->BlockingCounter();
@@ -275,7 +277,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
   // zero.
   std::lock_guard blocking_counter_guard(*blocking_counter);
 
-  stats_.loop_serialized += SerializeBucket(current_db_, it);
+  stats_.loop_serialized += SerializeBucket(db_index, it);
 
   return false;
 }
@@ -291,20 +293,19 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   while (!it.is_done()) {
     ++result;
     // might preempt due to big value serialization.
-    SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
+    SerializeEntry(db_index, it->first, it->second);
     ++it;
   }
   serialize_bucket_running_ = false;
   return result;
 }
 
-void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
-                                   optional<uint64_t> expire, RdbSerializer* serializer) {
+void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
   if (pv.IsExternal() && pv.IsCool())
-    return SerializeEntry(db_indx, pk, pv.GetCool().record->value, expire, serializer);
+    return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
 
-  time_t expire_time = expire.value_or(0);
-  if (!expire && pv.HasExpire()) {
+  time_t expire_time = 0;
+  if (pv.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
     expire_time = db_slice_->ExpireTime(eit);
   }
@@ -317,11 +318,15 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
     EngineShard::tlocal()->tiered_storage()->Read(
         db_indx, pk.ToString(), pv,
         [future](const std::string& v) mutable { future.Resolve(PrimeValue(v)); });
-    delayed_entries_.push_back(
-        {db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time, mc_flags});
+
+    auto key = PrimeKey(pk.ToString());
+
+    util::fb2::LockGuard guard(big_value_mu_);
+    delayed_entries_.push_back({db_indx, std::move(key), std::move(future), expire_time, mc_flags});
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
-    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
+    util::fb2::LockGuard guard(big_value_mu_);
+    io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
   }
@@ -360,6 +365,11 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
 }
 
 bool SliceSnapshot::PushSerialized(bool force) {
+  util::fb2::LockGuard guard(big_value_mu_);
+  return PushSerializedUnderLock(force);
+}
+
+bool SliceSnapshot::PushSerializedUnderLock(bool force) {
   if (!force && serializer_->SerializedLen() < kMinBlobSize)
     return false;
 
@@ -383,8 +393,6 @@ bool SliceSnapshot::PushSerialized(bool force) {
 }
 
 void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
-  std::lock_guard guard(big_value_mu_);
-
   PrimeTable* table = db_slice_->GetTables(db_index).first;
   const PrimeTable::bucket_iterator* bit = req.update();
 
@@ -409,9 +417,9 @@ void SliceSnapshot::OnJournalEntry(const journal::JournalItem& item, bool await)
   // To enable journal flushing to sync after non auto journal command is executed we call
   // TriggerJournalWriteToSink. This call uses the NOOP opcode with await=true. Since there is no
   // additional journal change to serialize, it simply invokes PushSerialized.
-  std::lock_guard guard(big_value_mu_);
   if (item.opcode != journal::Op::NOOP) {
-    serializer_->WriteJournalEntry(item.data);
+    util::fb2::LockGuard guard(big_value_mu_);
+    CHECK(!serializer_->WriteJournalEntry(item.data));
   }
 
   if (await) {
