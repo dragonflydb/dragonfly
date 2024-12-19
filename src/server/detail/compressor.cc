@@ -52,32 +52,47 @@ io::Result<io::Bytes> ZstdCompressor::Compress(io::Bytes data) {
 class Lz4Compressor : public CompressorImpl {
  public:
   Lz4Compressor() {
-    lz4_pref_.compressionLevel = compression_level_;
+    LZ4F_errorCode_t code = LZ4F_createCompressionContext(&cctx_, LZ4F_VERSION);
+    CHECK(!LZ4F_isError(code));
   }
 
   ~Lz4Compressor() {
+    LZ4F_errorCode_t code = LZ4F_freeCompressionContext(cctx_);
+    CHECK(!LZ4F_isError(code));
   }
 
   // compress a string of data
   io::Result<io::Bytes> Compress(io::Bytes data);
 
  private:
-  LZ4F_preferences_t lz4_pref_ = LZ4F_INIT_PREFERENCES;
+  LZ4F_cctx* cctx_;
 };
 
 io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
-  lz4_pref_.frameInfo.contentSize = data.size();
-  size_t buf_size = LZ4F_compressFrameBound(data.size(), &lz4_pref_);
+  LZ4F_preferences_t lz4_pref = LZ4F_INIT_PREFERENCES;
+  lz4_pref.compressionLevel = compression_level_;
+  lz4_pref.frameInfo.contentSize = data.size();
+
+  size_t buf_size = LZ4F_compressFrameBound(data.size(), &lz4_pref);
   if (compr_buf_.capacity() < buf_size) {
     compr_buf_.reserve(buf_size);
   }
 
+// TODO: to remove LZ4F_compressFrame code once we confirm this code actually works.
+#if 1
+  size_t frame_size =
+      LZ4F_compressFrame_usingCDict(cctx_, compr_buf_.data(), compr_buf_.capacity(), data.data(),
+                                    data.size(), nullptr /* dict */, &lz4_pref);
+#else
   size_t frame_size = LZ4F_compressFrame(compr_buf_.data(), compr_buf_.capacity(), data.data(),
-                                         data.size(), &lz4_pref_);
+                                         data.size(), &lz4_pref);
+#endif
+
   if (LZ4F_isError(frame_size)) {
     LOG(ERROR) << "LZ4F_compressFrame failed with error " << LZ4F_getErrorName(frame_size);
     return nonstd::make_unexpected(make_error_code(errc::operation_not_supported));
   }
+
   compressed_size_total_ += frame_size;
   uncompressed_size_total_ += data.size();
   return io::Bytes(compr_buf_.data(), frame_size);
