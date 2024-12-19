@@ -40,8 +40,9 @@ struct BaseAccessor : public search::DocumentAccessor {
   virtual SearchDocData SerializeDocument(const search::Schema& schema) const;
 
   // Default implementation uses GetStrings
-  virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const;
-  virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const;
+  virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const override;
+  virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
+  virtual std::optional<StringList> GetTags(std::string_view active_field) const override;
 };
 
 // Accessor for hashes stored with listpack
@@ -81,6 +82,7 @@ struct JsonAccessor : public BaseAccessor {
   std::optional<StringList> GetStrings(std::string_view field) const override;
   std::optional<VectorInfo> GetVector(std::string_view field) const override;
   std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
+  std::optional<StringList> GetTags(std::string_view active_field) const override;
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
   SearchDocData Serialize(const search::Schema& schema,
@@ -91,6 +93,9 @@ struct JsonAccessor : public BaseAccessor {
   static void RemoveFieldFromCache(std::string_view field);
 
  private:
+  /* If accept_boolean_values is true, then json boolean values are converted to strings */
+  std::optional<StringList> GetStrings(std::string_view field, bool accept_boolean_values) const;
+
   /// Parses `field` into a JSON path. Caches the results internally.
   JsonPathContainer* GetPath(std::string_view field) const;
 
