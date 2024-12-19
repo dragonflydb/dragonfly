@@ -14,7 +14,7 @@ services:
     command: chown -R 11211:11211 /memcached
 
   prometheus:
-    image: prom/prometheus:v2.45.5
+    image: prom/prometheus:v3.0.0
     restart: always
     volumes:
       - ./prometheus:/etc/prometheus/

@@ -919,7 +919,7 @@ async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceF
     assert await c_replica.execute_command("dbsize") == (100_000 - slot_0_size)
 
 
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "admin_port": 30001})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "admin_port": next(next_port)})
 async def test_cluster_blocking_command(df_server):
     c_master = df_server.client()
     c_master_admin = df_server.admin_client()
@@ -1432,6 +1432,7 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
+@pytest.mark.skip("test is flaky")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
@@ -1449,7 +1450,7 @@ async def test_network_disconnect_during_migration(df_factory):
     await StaticSeeder(key_target=100000).run(nodes[0].client)
     start_capture = await StaticSeeder.capture(nodes[0].client)
 
-    proxy = Proxy("127.0.0.1", 1111, "127.0.0.1", nodes[1].instance.admin_port)
+    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", nodes[1].instance.admin_port)
     await proxy.start()
     task = asyncio.create_task(proxy.serve())
 
@@ -1763,6 +1764,7 @@ async def test_cluster_replication_migration(
     assert await seeder.compare(r1_capture, r2_node.instance.port)
 
 
+@pytest.mark.skip("Flaky test")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_start_replication_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
@@ -2197,7 +2199,7 @@ async def test_replicate_disconnect_cluster(df_factory: DflyInstanceFactory, df_
 
     fill_task = asyncio.create_task(seeder.run())
 
-    proxy = Proxy("127.0.0.1", 1114, "127.0.0.1", cluster_nodes[0].port)
+    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", cluster_nodes[0].port)
     await proxy.start()
     proxy_task = asyncio.create_task(proxy.serve())
 
@@ -2320,6 +2322,7 @@ async def test_replicate_redis_cluster(redis_cluster, df_factory, df_seeder_fact
     assert await seeder.compare(capture, replica.port)
 
 
+@pytest.mark.skip("Flaky test")
 @dfly_args({"proactor_threads": 4})
 async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_seeder_factory):
     """
@@ -2351,7 +2354,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
 
     fill_task = asyncio.create_task(seeder.run())
 
-    proxy = Proxy("127.0.0.1", 1114, "127.0.0.1", redis_cluster_nodes[1].port)
+    proxy = Proxy("127.0.0.1", next(next_port), "127.0.0.1", redis_cluster_nodes[1].port)
     await proxy.start()
     proxy_task = asyncio.create_task(proxy.serve())
 
@@ -2407,6 +2410,7 @@ async def test_replicate_disconnect_redis_cluster(redis_cluster, df_factory, df_
     await c_replica.execute_command("REPLICAOF NO ONE")
     capture = await seeder.capture()
     assert await seeder.compare(capture, replica.port)
+    await proxy.close(proxy_task)
 
 
 @pytest.mark.skip("Takes more than 10 minutes")

@@ -40,7 +40,7 @@ bool HasValidNodeIds(const ClusterShardInfos& new_config) {
 
 bool IsConfigValid(const ClusterShardInfos& new_config) {
   // Make sure that all slots are set exactly once.
-  array<bool, cluster::kMaxSlotNum + 1> slots_found = {};
+  vector<bool> slots_found(cluster::kMaxSlotNum + 1);
 
   if (!HasValidNodeIds(new_config)) {
     return false;

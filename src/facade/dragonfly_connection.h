@@ -67,7 +67,6 @@ class Connection : public util::Connection {
 
   using BreakerCb = std::function<void(uint32_t)>;
   using ShutdownCb = std::function<void()>;
-  using ShutdownHandle = unsigned;
 
   // PubSub message, either incoming message for active subscription or reply for new subscription.
   struct PubMessage {
@@ -116,7 +115,7 @@ class Connection : public util::Connection {
     dfly::acl::AclPubSub pub_sub;
   };
 
-  // Migration request message, the dispatch fiber stops to give way for thread migration.
+  // Migration request message, the async fiber stops to give way for thread migration.
   struct MigrationRequestMessage {};
 
   // Checkpoint message, used to track when the connection finishes executing the current command.
@@ -322,9 +321,7 @@ class Connection : public util::Connection {
  private:
   enum ParserStatus { OK, NEED_MORE, ERROR };
 
-  struct DispatchOperations;
-  struct DispatchCleanup;
-  struct Shutdown;
+  struct AsyncOperations;
 
   // Check protocol and handle connection.
   void HandleRequests() final;
@@ -345,8 +342,8 @@ class Connection : public util::Connection {
   void DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_cb,
                       absl::FunctionRef<MessageHandle()> cmd_msg_cb);
 
-  // Handles events from dispatch queue.
-  void ExecutionFiber();
+  // Handles events from the dispatch queue.
+  void AsyncFiber();
 
   void SendAsync(MessageHandle msg);
 
@@ -368,9 +365,9 @@ class Connection : public util::Connection {
   PipelineMessagePtr GetFromPipelinePool();
 
   void HandleMigrateRequest();
-  bool ShouldEndDispatchFiber(const MessageHandle& msg);
+  bool ShouldEndAsyncFiber(const MessageHandle& msg);
 
-  void LaunchDispatchFiberIfNeeded();  // Dispatch fiber is started lazily
+  void LaunchAsyncFiberIfNeeded();  // Async fiber is started lazily
 
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
   void SquashPipeline();
@@ -385,7 +382,7 @@ class Connection : public util::Connection {
 
   std::deque<MessageHandle> dispatch_q_;  // dispatch queue
   util::fb2::CondVarAny cnd_;             // dispatch queue waker
-  util::fb2::Fiber dispatch_fb_;          // dispatch fiber (if started)
+  util::fb2::Fiber async_fb_;             // async fiber (if started)
 
   uint64_t pending_pipeline_cmd_cnt_ = 0;  // how many queued Redis async commands in dispatch_q
 

@@ -638,6 +638,15 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
   return replicaof_args;
 }
 
+uint64_t GetDelayMs(uint64_t ts) {
+  uint64_t now_ns = fb2::ProactorBase::GetMonotonicTimeNs();
+  uint64_t delay_ns = 0;
+  if (ts < now_ns - 1000000) {  // if more than 1ms has passed between ts and now_ns
+    delay_ns = (now_ns - ts) / 1000000;
+  }
+  return delay_ns;
+}
+
 }  // namespace
 
 void SlowLogGet(dfly::CmdArgList args, std::string_view sub_cmd, util::ProactorPool* pp,
@@ -1294,6 +1303,10 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("send_delay_seconds", "",
+                            double(GetDelayMs(m.oldest_pending_send_ts)) / 1000.0,
+                            MetricType::GAUGE, &resp->body());
+
   AppendMetricWithoutLabels("pipeline_throttle_total", "", conn_stats.pipeline_throttle_count,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
@@ -1528,6 +1541,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
+    util::http::SetMime(util::http::kTextMime, &resp);
     uint64_t uptime = time(NULL) - start_time_;
     PrintPrometheusMetrics(uptime, this->GetMetrics(&namespaces->GetDefaultNamespace()),
                            this->dfly_cmd_.get(), &resp);
@@ -2145,6 +2159,17 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
       result.connections_lib_name_ver_map[k] += v;
     }
 
+    auto& send_list = facade::SinkReplyBuilder::pending_list;
+    if (!send_list.empty()) {
+      DCHECK(std::is_sorted(send_list.begin(), send_list.end(),
+                            [](const auto& left, const auto& right) {
+                              return left.timestamp_ns < right.timestamp_ns;
+                            }));
+
+      auto& oldest_member = send_list.front();
+      result.oldest_pending_send_ts =
+          min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_ns);
+    }
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };  // cb
 
@@ -2253,6 +2278,8 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
     append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries);
+
+    append("send_delay_ms", GetDelayMs(m.oldest_pending_send_ts));
   }
 
   if (should_enter("MEMORY")) {
@@ -2347,6 +2374,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("rdb_save_usec", m.coordinator_stats.rdb_save_usec);
     append("rdb_save_count", m.coordinator_stats.rdb_save_count);
     append("big_value_preemptions", m.coordinator_stats.big_value_preemptions);
+    append("compressed_blobs", m.coordinator_stats.compressed_blobs);
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
