@@ -90,7 +90,7 @@ jobs:
           touch /mnt/foo
           ls -la /mnt/foo
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.7
 
       - name: Configure Cache Env
         uses: actions/github-script@v7
