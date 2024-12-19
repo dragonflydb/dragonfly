@@ -84,7 +84,7 @@ add_third_party(
 
 add_third_party(
   lz4
-  URL https://github.com/lz4/lz4/archive/refs/tags/v1.9.4.tar.gz
+  URL https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz
 
   BUILD_IN_SOURCE 1
   CONFIGURE_COMMAND echo skip
