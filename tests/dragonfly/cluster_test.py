@@ -1433,11 +1433,15 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
-@pytest.mark.skip("test is flaky")
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
-        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="cluster_family=9,outgoing_slot_migration=9,incoming_slot_migration=9",
+        )
+        for i in range(2)
     ]
 
     df_factory.start_all(instances)
@@ -1467,21 +1471,24 @@ async def test_network_disconnect_during_migration(df_factory):
             logging.debug(
                 await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             )
-    finally:
+
         await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC")
+    finally:
         await proxy.close(task)
 
     await proxy.start()
+    task = asyncio.create_task(proxy.serve())
+    try:
+        await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
+        nodes[0].migrations = []
+        nodes[0].slots = []
+        nodes[1].slots = [(0, 16383)]
+        logging.debug("remove finished migrations")
+        await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
-    logging.debug("remove finished migrations")
-    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-
-    assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
-    await proxy.close()
+        assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
+    finally:
+        await proxy.close(task)
 
 
 @pytest.mark.parametrize(
