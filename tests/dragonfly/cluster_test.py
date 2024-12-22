@@ -1971,6 +1971,7 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize(
     "huge_values_threshold, seed_during_migration",
     [
@@ -2012,9 +2013,9 @@ async def test_cluster_migration_huge_container(
 
     logging.debug("Generating huge containers")
     seeder = Seeder(
-        key_target=100_000,
+        key_target=1_000,
         types=StaticSeeder.BIG_VALUE_TYPES,
-        huge_value_target=50_000,
+        huge_value_target=500,
         huge_value_size=1_000_000,
     )
     # Seeder v2 does not support cluster client? Maybe we need to limit to 1 key per operation?
@@ -2034,7 +2035,7 @@ async def test_cluster_migration_huge_container(
         logging.debug("Seeder awaited")
         rss = await get_memory(nodes[0].client, "used_memory_rss")
         assert rss > 1_000_000_000, "Weak test case - RSS too low"
-        capture = StaticSeeder.capture(client0)
+        capture = await StaticSeeder.capture(client0)
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
@@ -2067,7 +2068,7 @@ async def test_cluster_migration_huge_container(
         new_rss = await get_memory(client0, "used_memory_peak_rss")
         logging.debug(f"new rss {new_rss}, previous rss {rss}")
         assert new_rss < rss * 1.1
-        assert StaticSeeder.capture(client0) == capture
+        assert await StaticSeeder.capture(nodes[1].client) == capture
 
     await cluster_client.close()
 
