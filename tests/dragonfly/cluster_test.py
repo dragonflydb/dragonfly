@@ -1990,8 +1990,8 @@ async def test_cluster_migration_huge_container(
 ):
     instances = [
         df_factory.create(
-            port=BASE_PORT + i,
-            admin_port=BASE_PORT + i + 1000,
+            port=next(next_port),
+            admin_port=next(next_port),
             serialization_max_chunk_size=huge_values_threshold,
         )
         for i in range(2)
@@ -2005,11 +2005,6 @@ async def test_cluster_migration_huge_container(
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
     cluster_client = instances[0].cluster_client()
-    logging.debug("XXX deleting entry")
-    await cluster_client.set("x", "y")
-    logging.debug(f'XXX x {await cluster_client.get("x")}')
-    await cluster_client.delete("x")
-    logging.debug("XXX deleted entry")
 
     logging.debug("Generating huge containers")
     seeder = Seeder(
@@ -2028,11 +2023,8 @@ async def test_cluster_migration_huge_container(
     rss = 0
     capture = ""
     if not seed_during_migration:
-        logging.debug("Stopping seeder")
         await seeder.stop(cluster_client)
-        logging.debug("Seeder stopped")
         await seed
-        logging.debug("Seeder awaited")
         rss = await get_memory(nodes[0].client, "used_memory_rss")
         assert rss > 1_000_000_000, "Weak test case - RSS too low"
         capture = await StaticSeeder.capture(client0)
@@ -2053,16 +2045,8 @@ async def test_cluster_migration_huge_container(
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     if seed_during_migration:
-        logging.debug("XXX deleting entry")
-        await cluster_client.set("x", "y")
-        logging.debug(f'XXX x {await cluster_client.get("x")}')
-        await cluster_client.delete("x")
-        logging.debug("XXX deleted entry")
-        logging.debug("Stopping seeder")
         await seeder.stop(cluster_client)
-        logging.debug("Seeder stopped")
         await seed
-        logging.debug("Seeder awaited")
     else:
         # Only verify memory growth if we haven't pushed new data during migration
         new_rss = await get_memory(client0, "used_memory_peak_rss")
