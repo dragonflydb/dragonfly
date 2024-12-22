@@ -2013,7 +2013,6 @@ async def test_cluster_migration_huge_container(
         huge_value_target=500,
         huge_value_size=1_000_000,
     )
-    # Seeder v2 does not support cluster client? Maybe we need to limit to 1 key per operation?
     seed = seeder.run(cluster_client)
 
     async def get_memory(client, field):
