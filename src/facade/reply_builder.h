@@ -5,6 +5,7 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include <boost/intrusive/list.hpp>
 #include <optional>
 #include <string_view>
 
@@ -32,6 +33,20 @@ class SinkReplyBuilder {
  public:
   constexpr static size_t kMaxInlineSize = 32;
   constexpr static size_t kMaxBufferSize = 8192;
+
+  struct PendingPin : public boost::intrusive::list_base_hook<
+                          ::boost::intrusive::link_mode<::boost::intrusive::normal_link>> {
+    uint64_t timestamp_ns;
+
+    PendingPin(uint64_t v = 0) : timestamp_ns(v) {
+    }
+  };
+
+  using PendingList =
+      boost::intrusive::list<PendingPin, boost::intrusive::constant_time_size<false>,
+                             boost::intrusive::cache_last<false>>;
+
+  static thread_local PendingList pending_list;
 
   explicit SinkReplyBuilder(io::Sink* sink) : sink_(sink) {
   }

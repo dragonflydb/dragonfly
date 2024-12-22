@@ -434,7 +434,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
   facade::DispatchTracker tracker{sf_->GetNonPriviligedListeners(), cntx->conn()};
-  shard_set->pool()->AwaitBrief([&](unsigned index, auto* pb) {
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto* pb) {
     sf_->CancelBlockingOnThread();
     tracker.TrackOnThread();
   });
@@ -595,6 +595,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
 
 OpStatus DflyCmd::StopFullSyncInThread(FlowInfo* flow, Context* cntx, EngineShard* shard) {
   DCHECK(shard);
+
   error_code ec = flow->saver->StopFullSyncInShard(shard);
   if (ec) {
     cntx->ReportError(ec);
@@ -697,6 +698,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
     return;
 
   ShardId sid = EngineShard::tlocal()->shard_id();
+
   vector<uint32_t> deleted;
 
   for (auto [sync_id, replica_ptr] : replica_infos_) {
@@ -778,7 +780,7 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
 
         const auto& flow = info->flows[shard->shard_id()];
         if (flow.streamer)
-          streamer_bytes.fetch_add(flow.streamer->GetTotalBufferCapacities(), memory_order_relaxed);
+          streamer_bytes.fetch_add(flow.streamer->UsedBytes(), memory_order_relaxed);
         if (flow.saver)
           full_sync_bytes.fetch_add(flow.saver->GetTotalBuffersSize(), memory_order_relaxed);
       }

@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/journal/cmd_serializer.h"
+#include "server/server_state.h"
 #include "util/fibers/synchronization.h"
 
 using namespace facade;
@@ -72,7 +73,7 @@ void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
           io::StringSink sink;
           JournalWriter writer(&sink);
           writer.Write(Entry{journal::Op::LSN, item.lsn});
-          Write(sink.str());
+          Write(std::move(sink).str());
         }
       });
 }
@@ -86,67 +87,56 @@ void JournalStreamer::Cancel() {
   }
 }
 
-size_t JournalStreamer::GetTotalBufferCapacities() const {
-  return in_flight_bytes_ + pending_buf_.capacity();
+size_t JournalStreamer::UsedBytes() const {
+  return pending_buf_.Size();
 }
 
-void JournalStreamer::Write(std::string_view str) {
-  DCHECK(!str.empty());
-  DVLOG(3) << "Writing " << str.size() << " bytes";
-
-  size_t total_pending = pending_buf_.size() + str.size();
+void JournalStreamer::AsyncWrite() {
+  DCHECK(!pending_buf_.Empty());
 
   if (in_flight_bytes_ > 0) {
     // We can not flush data while there are in flight requests because AsyncWrite
     // is not atomic. Therefore, we just aggregate.
-    size_t tail = pending_buf_.size();
-    pending_buf_.resize(pending_buf_.size() + str.size());
-    memcpy(pending_buf_.data() + tail, str.data(), str.size());
     return;
   }
 
-  // If we do not have any in flight requests we send the string right a way.
-  // We can not aggregate it since we do not know when the next update will follow.
-  // because of potential SOO with strings, we allocate explicitly on heap.
-  uint8_t* buf(new uint8_t[str.size()]);
+  const auto& cur_buf = pending_buf_.PrepareSendingBuf();
 
-  // TODO: it is possible to remove these redundant copies if we adjust high level
-  // interfaces to pass reference-counted buffers.
-  memcpy(buf, str.data(), str.size());
-  in_flight_bytes_ += total_pending;
-  total_sent_ += total_pending;
+  in_flight_bytes_ = cur_buf.mem_size;
+  total_sent_ += in_flight_bytes_;
 
-  iovec v[2];
-  unsigned next_buf_id = 0;
+  const auto v_size = cur_buf.buf.size();
+  absl::InlinedVector<iovec, 8> v(v_size);
 
-  if (!pending_buf_.empty()) {
-    v[0] = IoVec(pending_buf_);
-    ++next_buf_id;
+  for (size_t i = 0; i < v_size; ++i) {
+    const auto* uptr = reinterpret_cast<const uint8_t*>(cur_buf.buf[i].data());
+    v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
   }
-  v[next_buf_id++] = IoVec(io::Bytes(buf, str.size()));
 
-  dest_->AsyncWrite(
-      v, next_buf_id,
-      [buf0 = std::move(pending_buf_), buf, this, len = total_pending](std::error_code ec) {
-        delete[] buf;
-        OnCompletion(ec, len);
-      });
+  dest_->AsyncWrite(v.data(), v.size(), [this, len = in_flight_bytes_](std::error_code ec) {
+    OnCompletion(std::move(ec), len);
+  });
+}
+
+void JournalStreamer::Write(std::string str) {
+  DCHECK(!str.empty());
+  DVLOG(2) << "Writing " << str.size() << " bytes";
+
+  pending_buf_.Push(std::move(str));
+
+  AsyncWrite();
 }
 
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
-  DCHECK_GE(in_flight_bytes_, len);
+  DCHECK_EQ(in_flight_bytes_, len);
 
-  DVLOG(3) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
-  in_flight_bytes_ -= len;
+  DVLOG(3) << "Completing " << in_flight_bytes_;
+  in_flight_bytes_ = 0;
+  pending_buf_.Pop();
   if (ec && !IsStopped()) {
     cntx_->ReportError(ec);
-  } else if (in_flight_bytes_ == 0 && !pending_buf_.empty() && !IsStopped()) {
-    // If everything was sent but we have a pending buf, flush it.
-    io::Bytes src(pending_buf_);
-    in_flight_bytes_ += src.size();
-    dest_->AsyncWrite(src, [buf = std::move(pending_buf_), this](std::error_code ec) {
-      OnCompletion(ec, buf.size());
-    });
+  } else if (!pending_buf_.Empty() && !IsStopped()) {
+    AsyncWrite();
   }
 
   // notify ThrottleIfNeeded or WaitForInflightToComplete that waits
@@ -186,7 +176,7 @@ void JournalStreamer::WaitForInflightToComplete() {
 }
 
 bool JournalStreamer::IsStalled() const {
-  return in_flight_bytes_ + pending_buf_.size() >= replication_stream_output_limit_cached;
+  return pending_buf_.Size() >= replication_stream_output_limit_cached;
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
@@ -217,8 +207,7 @@ void RestoreStreamer::Run() {
   do {
     if (fiber_cancelled_)
       return;
-
-    cursor = db_slice_->Traverse(pt, cursor, [&](PrimeTable::bucket_iterator it) {
+    cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
       if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
         return;
 
@@ -245,7 +234,7 @@ void RestoreStreamer::SendFinalize(long attempt) {
   io::StringSink sink;
   JournalWriter writer{&sink};
   writer.Write(entry);
-  Write(sink.str());
+  Write(std::move(sink).str());
 
   // TODO: is the intent here to flush everything?
   //
@@ -329,7 +318,8 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  CmdSerializer serializer([&](std::string s) { Write(s); });
+  CmdSerializer serializer([&](std::string s) { Write(std::move(s)); },
+                           ServerState::tlocal()->serialization_max_chunk_size);
   serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 

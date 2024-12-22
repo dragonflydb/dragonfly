@@ -301,7 +301,7 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
       continue;
     PrimeTable::Cursor cursor;
     do {
-      cursor = db_slice.Traverse(&dbt->prime, cursor, [&](PrimeIterator it) {
+      cursor = dbt->prime.Traverse(cursor, [&](PrimeIterator it) {
         unsigned obj_type = it->second.ObjType();
         auto& hist_ptr = (*obj_hist_map)[obj_type];
         if (!hist_ptr) {

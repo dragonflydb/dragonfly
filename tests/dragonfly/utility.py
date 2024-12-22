@@ -706,7 +706,7 @@ async def is_saving(c_client: aioredis.Redis):
 
 def assert_eventually(wrapped=None, *, times=100):
     if wrapped is None:
-        return functools.partial(assert_eventually, times=100)
+        return functools.partial(assert_eventually, times=times)
 
     @wrapt.decorator
     async def wrapper(wrapped, instance, args, kwargs):

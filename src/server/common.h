@@ -17,6 +17,7 @@
 #include "core/compact_object.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
+#include "helio/io/proc_reader.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
 
@@ -132,6 +133,8 @@ extern std::atomic_uint64_t rss_mem_peak;
 
 extern size_t max_memory_limit;
 
+size_t FetchRssMemory(io::StatusData sdata);
+
 extern Namespaces* namespaces;
 
 // version 5.11 maps to 511 etc.
@@ -140,8 +143,13 @@ extern unsigned kernel_version;
 
 const char* GlobalStateName(GlobalState gs);
 
-template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
+template <typename RandGen>
+std::string GetRandomHex(RandGen& gen, size_t len, size_t len_deviation = 0) {
   static_assert(std::is_same<uint64_t, decltype(gen())>::value);
+  if (len_deviation) {
+    len += (gen() % len_deviation);
+  }
+
   std::string res(len, '\0');
   size_t indx = 0;
 
@@ -380,6 +388,23 @@ struct BorrowedInterpreter {
   bool owned_ = false;
 };
 
-extern size_t serialization_max_chunk_size;
+class LocalBlockingCounter {
+ public:
+  void lock() {
+    ++mutating_;
+  }
+
+  void unlock();
+
+  void Wait();
+
+  bool IsBlocked() const {
+    return mutating_ > 0;
+  }
+
+ private:
+  util::fb2::CondVarAny cond_var_;
+  size_t mutating_ = 0;
+};
 
 }  // namespace dfly

@@ -7,8 +7,6 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
-#include <lz4frame.h>
-#include <zstd.h>
 
 #include <queue>
 
@@ -50,10 +48,15 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 1 for single entry lzf compression,"
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
-ABSL_FLAG(int, compression_level, 2, "The compression level to use on zstd/lz4 compression");
+
+// TODO: to retire both flags in v1.27 (Jan 2025)
 ABSL_FLAG(bool, list_rdb_encode_v2, true,
           "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
           "enconding of list uses ziplist encoding compatible with redis 6");
+
+ABSL_FLAG(bool, stream_rdb_encode_v2, false,
+          "V2 uses format, compatible with redis 7.2 and Dragonfly v1.26+, while v1 format "
+          "is compatible with redis 6");
 
 namespace dfly {
 
@@ -201,100 +204,17 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       }
       break;
     case OBJ_STREAM:
-      return RDB_TYPE_STREAM_LISTPACKS;
+      return absl::GetFlag(FLAGS_stream_rdb_encode_v2) ? RDB_TYPE_STREAM_LISTPACKS_3
+                                                       : RDB_TYPE_STREAM_LISTPACKS;
     case OBJ_MODULE:
       return RDB_TYPE_MODULE_2;
     case OBJ_JSON:
-      return RDB_TYPE_JSON;  // save with RDB_TYPE_JSON, deprecate RDB_TYPE_JSON_OLD after July
-                             // 2024.
+      return RDB_TYPE_JSON;
     case OBJ_SBF:
       return RDB_TYPE_SBF;
   }
   LOG(FATAL) << "Unknown encoding " << compact_enc << " for type " << type;
   return 0; /* avoid warning */
-}
-
-class CompressorImpl {
- public:
-  CompressorImpl() {
-    compression_level_ = absl::GetFlag(FLAGS_compression_level);
-  }
-  virtual ~CompressorImpl() {
-    VLOG(1) << "compressed size: " << compressed_size_total_;
-    VLOG(1) << "uncompressed size: " << uncompressed_size_total_;
-  }
-  virtual io::Result<io::Bytes> Compress(io::Bytes data) = 0;
-
- protected:
-  int compression_level_ = 1;
-  size_t compressed_size_total_ = 0;
-  size_t uncompressed_size_total_ = 0;
-  base::PODArray<uint8_t> compr_buf_;
-};
-
-class ZstdCompressor : public CompressorImpl {
- public:
-  ZstdCompressor() {
-    cctx_ = ZSTD_createCCtx();
-  }
-  ~ZstdCompressor() {
-    ZSTD_freeCCtx(cctx_);
-  }
-
-  io::Result<io::Bytes> Compress(io::Bytes data);
-
- private:
-  ZSTD_CCtx* cctx_;
-  base::PODArray<uint8_t> compr_buf_;
-};
-
-io::Result<io::Bytes> ZstdCompressor::Compress(io::Bytes data) {
-  size_t buf_size = ZSTD_compressBound(data.size());
-  if (compr_buf_.capacity() < buf_size) {
-    compr_buf_.reserve(buf_size);
-  }
-  size_t compressed_size = ZSTD_compressCCtx(cctx_, compr_buf_.data(), compr_buf_.capacity(),
-                                             data.data(), data.size(), compression_level_);
-
-  if (ZSTD_isError(compressed_size)) {
-    return make_unexpected(error_code{int(compressed_size), generic_category()});
-  }
-  compressed_size_total_ += compressed_size;
-  uncompressed_size_total_ += data.size();
-  return io::Bytes(compr_buf_.data(), compressed_size);
-}
-
-class Lz4Compressor : public CompressorImpl {
- public:
-  Lz4Compressor() {
-    lz4_pref_.compressionLevel = compression_level_;
-  }
-
-  ~Lz4Compressor() {
-  }
-
-  // compress a string of data
-  io::Result<io::Bytes> Compress(io::Bytes data);
-
- private:
-  LZ4F_preferences_t lz4_pref_ = LZ4F_INIT_PREFERENCES;
-};
-
-io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
-  lz4_pref_.frameInfo.contentSize = data.size();
-  size_t buf_size = LZ4F_compressFrameBound(data.size(), &lz4_pref_);
-  if (compr_buf_.capacity() < buf_size) {
-    compr_buf_.reserve(buf_size);
-  }
-
-  size_t frame_size = LZ4F_compressFrame(compr_buf_.data(), compr_buf_.capacity(), data.data(),
-                                         data.size(), &lz4_pref_);
-  if (LZ4F_isError(frame_size)) {
-    return make_unexpected(error_code{int(frame_size), generic_category()});
-  }
-  compressed_size_total_ += frame_size;
-  uncompressed_size_total_ += data.size();
-  return io::Bytes(compr_buf_.data(), frame_size);
 }
 
 SerializerBase::SerializerBase(CompressionMode compression_mode)
@@ -649,6 +569,22 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
   RETURN_ON_ERR(SaveLen(s->last_id.ms));
   RETURN_ON_ERR(SaveLen(s->last_id.seq));
 
+  uint8_t rdb_type = RdbObjectType(pv);
+
+  // 'first_id', 'max_deleted_entry_id' and 'entries_added' are added
+  // in RDB_TYPE_STREAM_LISTPACKS_2
+  if (rdb_type >= RDB_TYPE_STREAM_LISTPACKS_2) {
+    /* Save the first entry ID. */
+    RETURN_ON_ERR(SaveLen(s->first_id.ms));
+    RETURN_ON_ERR(SaveLen(s->first_id.seq));
+
+    /* Save the maximal tombstone ID. */
+    RETURN_ON_ERR(SaveLen(s->max_deleted_entry_id.ms));
+    RETURN_ON_ERR(SaveLen(s->max_deleted_entry_id.seq));
+
+    /* Save the offset. */
+    RETURN_ON_ERR(SaveLen(s->entries_added));
+  }
   /* The consumer groups and their clients are part of the stream
    * type, so serialize every consumer group. */
 
@@ -670,16 +606,20 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
       RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
 
       /* Last ID. */
-      RETURN_ON_ERR(SaveLen(s->last_id.ms));
+      RETURN_ON_ERR(SaveLen(cg->last_id.ms));
 
-      RETURN_ON_ERR(SaveLen(s->last_id.seq));
+      RETURN_ON_ERR(SaveLen(cg->last_id.seq));
+
+      if (rdb_type >= RDB_TYPE_STREAM_LISTPACKS_2) {
+        /* Save the group's logical reads counter. */
+        RETURN_ON_ERR(SaveLen(cg->entries_read));
+      }
 
       /* Save the global PEL. */
       RETURN_ON_ERR(SaveStreamPEL(cg->pel, true));
 
       /* Save the consumers of this group. */
-
-      RETURN_ON_ERR(SaveStreamConsumers(cg));
+      RETURN_ON_ERR(SaveStreamConsumers(rdb_type >= RDB_TYPE_STREAM_LISTPACKS_3, cg));
     }
   }
 
@@ -810,7 +750,7 @@ error_code RdbSerializer::SaveStreamPEL(rax* pel, bool nacks) {
   return error_code{};
 }
 
-error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
+error_code RdbSerializer::SaveStreamConsumers(bool save_active, streamCG* cg) {
   /* Number of consumers in this consumer group. */
 
   RETURN_ON_ERR(SaveLen(raxSize(cg->consumers)));
@@ -828,10 +768,15 @@ error_code RdbSerializer::SaveStreamConsumers(streamCG* cg) {
     /* Consumer name. */
     RETURN_ON_ERR(SaveString(ri.key, ri.key_len));
 
-    /* Last seen time. */
+    /* seen time. */
     absl::little_endian::Store64(buf, consumer->seen_time);
     RETURN_ON_ERR(WriteRaw(buf));
 
+    if (save_active) {
+      /* Active time. */
+      absl::little_endian::Store64(buf, consumer->active_time);
+      RETURN_ON_ERR(WriteRaw(buf));
+    }
     /* Consumer PEL, without the ACKs (see last parameter of the function
      * passed with value of 0), at loading time we'll lookup the ID
      * in the consumer group global PEL and will put a reference in the
@@ -991,6 +936,7 @@ io::Bytes SerializerBase::PrepareFlush(SerializerBase::FlushState flush_state) {
     return mem_buf_.InputBuffer();
 
   bool is_last_chunk = flush_state == FlushState::kFlushEndEntry;
+  VLOG(2) << "PrepareFlush:" << is_last_chunk << " " << number_of_chunks_;
   if (is_last_chunk && number_of_chunks_ == 0) {
     if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD ||
         compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
@@ -1380,6 +1326,10 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
 
   auto cb = [this, &channel_bytes, &serializer_bytes](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
+    // before create a snapshot we save header so shard_snapshots_ are vector of nullptr until we
+    // start snapshots saving
+    if (!snapshot)
+      return;
     if (channel_.has_value())
       channel_bytes.fetch_add(channel_->GetSize(), memory_order_relaxed);
     serializer_bytes.store(snapshot->GetBufferCapacity() + snapshot->GetTempBuffersSize(),
@@ -1402,6 +1352,10 @@ RdbSaver::SnapshotStats RdbSaver::Impl::GetCurrentSnapshotProgress() const {
 
   auto cb = [this, &results](ShardId sid) {
     auto& snapshot = shard_snapshots_[sid];
+    // before create a snapshot we save header so shard_snapshots_ are vector of nullptr until we
+    // start snapshots saving
+    if (!snapshot)
+      return;
     results[sid] = snapshot->GetCurrentSnapshotProgress();
   };
 
@@ -1629,11 +1583,11 @@ void SerializerBase::AllocateCompressorOnce() {
     return;
   }
   if (compression_mode_ == CompressionMode::MULTI_ENTRY_ZSTD) {
-    compressor_impl_.reset(new ZstdCompressor());
+    compressor_impl_ = detail::CompressorImpl::CreateZstd();
   } else if (compression_mode_ == CompressionMode::MULTI_ENTRY_LZ4) {
-    compressor_impl_.reset(new Lz4Compressor());
+    compressor_impl_ = detail::CompressorImpl::CreateLZ4();
   } else {
-    CHECK(false) << "Compressor allocation should not be done";
+    LOG(FATAL) << "Invalid compression mode " << unsigned(compression_mode_);
   }
 }
 
@@ -1642,6 +1596,7 @@ void SerializerBase::CompressBlob() {
     compression_stats_.emplace(CompressionStats{});
   }
   Bytes blob_to_compress = mem_buf_.InputBuffer();
+  VLOG(2) << "CompressBlob size " << blob_to_compress.size();
   size_t blob_size = blob_to_compress.size();
   if (blob_size < kMinStrSizeToCompress) {
     ++compression_stats_->small_str_count;
@@ -1683,6 +1638,8 @@ void SerializerBase::CompressBlob() {
   memcpy(dest.data(), compressed_blob.data(), compressed_blob.length());
   mem_buf_.CommitWrite(compressed_blob.length());
   ++compression_stats_->compressed_blobs;
+  auto& stats = ServerState::tlocal()->stats;
+  ++stats.compressed_blobs;
 }
 
 size_t RdbSerializer::GetTempBufferSize() const {

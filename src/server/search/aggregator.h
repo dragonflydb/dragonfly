@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
 
 #include <string>
@@ -19,10 +20,16 @@ namespace dfly::aggregate {
 using Value = ::dfly::search::SortableValue;
 using DocValues = absl::flat_hash_map<std::string, Value>;  // documents sent through the pipeline
 
-// TODO: Replace DocValues with compact linear search map instead of hash map
+struct PipelineResult {
+  // Values to be passed to the next step
+  // TODO: Replace DocValues with compact linear search map instead of hash map
+  std::vector<DocValues> values;
 
-using PipelineResult = io::Result<std::vector<DocValues>, facade::ErrorReply>;
-using PipelineStep = std::function<PipelineResult(std::vector<DocValues>)>;  // Group, Sort, etc.
+  // Fields from values to be printed
+  absl::flat_hash_set<std::string> fields_to_print;
+};
+
+using PipelineStep = std::function<PipelineResult(PipelineResult)>;  // Group, Sort, etc.
 
 // Iterator over Span<DocValues> that yields doc[field] or monostate if not present.
 // Extra clumsy for STL compatibility!
@@ -82,6 +89,8 @@ PipelineStep MakeSortStep(std::string_view field, bool descending = false);
 PipelineStep MakeLimitStep(size_t offset, size_t num);
 
 // Process values with given steps
-PipelineResult Process(std::vector<DocValues> values, absl::Span<const PipelineStep> steps);
+PipelineResult Process(std::vector<DocValues> values,
+                       absl::Span<const std::string_view> fields_to_print,
+                       absl::Span<const PipelineStep> steps);
 
 }  // namespace dfly::aggregate

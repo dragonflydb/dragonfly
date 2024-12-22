@@ -224,7 +224,7 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args,
 
 // Record expiry in journal with independent transaction. Must be called from shard thread holding
 // key.
-void RecordExpiry(DbIndex dbid, std::string_view key);
+void RecordExpiry(DbIndex dbid, std::string_view key, bool preempts = false);
 
 // Trigger journal write to sink, no journal record will be added to journal.
 // Must be called from shard thread of journal to sink.

@@ -38,7 +38,7 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     client = df_server.client()
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
-    cmd = f"DEBUG POPULATE {keys} {type} {val_size} RAND TYPE {type} ELEMENTS {elements}"
+    cmd = f"DEBUG POPULATE {keys} k {val_size} RAND TYPE {type} ELEMENTS {elements}"
     print(f"Running {cmd}")
     await client.execute_command(cmd)
 
@@ -51,11 +51,12 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     # It could be the case that the machine is configured to use swap if this assertion fails
     assert delta > 0
     assert delta < max_unaccounted
-    delta = info["used_memory_rss"] - info["object_used_memory"]
-    # TODO investigate why it fails on string
-    if type == "JSON" or type == "STREAM":
-        assert delta > 0
-        assert delta < max_unaccounted
+
+    if type != "STRING" and type != "JSON":
+        # STRINGs keep some of the data inline, so not all of it is accounted in object_used_memory
+        # We have a very small over-accounting bug in JSON
+        assert info["object_used_memory"] > keys * elements * val_size
+        assert info["used_memory"] > info["object_used_memory"]
 
 
 @pytest.mark.asyncio
@@ -160,3 +161,51 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
     info = await client.info("memory")
     logging.debug(f'Used memory {info["used_memory"]}, rss {info["used_memory_rss"]}')
     assert rss_before_eval * 1.01 > info["used_memory_rss"]
+
+
+@pytest.mark.skip("rss eviction disabled")
+@pytest.mark.asyncio
+@dfly_args(
+    {
+        "proactor_threads": 1,
+        "cache_mode": "true",
+        "maxmemory": "5gb",
+        "rss_oom_deny_ratio": 0.8,
+        "max_eviction_per_heartbeat": 100,
+    }
+)
+async def test_cache_eviction_with_rss_deny_oom(
+    async_client: aioredis.Redis,
+):
+    """
+    Test to verify that cache eviction is triggered even if used memory is small but rss memory is above limit
+    """
+
+    max_memory = 5 * 1024 * 1024 * 1024  # 5G
+    rss_max_memory = int(max_memory * 0.8)
+
+    data_fill_size = int(0.9 * rss_max_memory)  # 95% of rss_max_memory
+
+    val_size = 1024 * 5  # 5 kb
+    num_keys = data_fill_size // val_size
+
+    await async_client.execute_command("DEBUG", "POPULATE", num_keys, "key", val_size)
+    # Test that used memory is less than 90% of max memory
+    memory_info = await async_client.info("memory")
+    assert (
+        memory_info["used_memory"] < max_memory * 0.9
+    ), "Used memory should be less than 90% of max memory."
+    assert (
+        memory_info["used_memory_rss"] > rss_max_memory * 0.9
+    ), "RSS memory should be less than 90% of rss max memory (max_memory * rss_oom_deny_ratio)."
+
+    # Get RSS memory after creating new connections
+    memory_info = await async_client.info("memory")
+    while memory_info["used_memory_rss"] > rss_max_memory * 0.9:
+        await asyncio.sleep(1)
+        memory_info = await async_client.info("memory")
+        logging.info(
+            f'Current rss: {memory_info["used_memory_rss"]}. rss eviction threshold: {rss_max_memory * 0.9}.'
+        )
+        stats_info = await async_client.info("stats")
+        logging.info(f'Current evicted: {stats_info["evicted_keys"]}. Total keys: {num_keys}.')
