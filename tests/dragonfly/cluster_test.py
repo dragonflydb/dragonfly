@@ -2003,6 +2003,12 @@ async def test_cluster_migration_huge_container(
     client0 = nodes[0].client
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+    cluster_client = instances[0].cluster_client()
+    logging.debug("XXX deleting entry")
+    await cluster_client.set("x", "y")
+    logging.debug(f'XXX x {await cluster_client.get("x")}')
+    await cluster_client.delete("x")
+    logging.debug("XXX deleted entry")
 
     logging.debug("Generating huge containers")
     seeder = Seeder(
@@ -2012,7 +2018,7 @@ async def test_cluster_migration_huge_container(
         huge_value_size=1_000_000,
     )
     # Seeder v2 does not support cluster client? Maybe we need to limit to 1 key per operation?
-    seed = seeder.run(instances[0].cluster_client())
+    seed = seeder.run(cluster_client)
 
     async def get_memory(client, field):
         info = await client.info("memory")
@@ -2021,7 +2027,11 @@ async def test_cluster_migration_huge_container(
     rss = 0
     capture = ""
     if not seed_during_migration:
+        logging.debug("Stopping seeder")
+        await seeder.stop(cluster_client)
+        logging.debug("Seeder stopped")
         await seed
+        logging.debug("Seeder awaited")
         rss = await get_memory(nodes[0].client, "used_memory_rss")
         assert rss > 1_000_000_000, "Weak test case - RSS too low"
         capture = StaticSeeder.capture(client0)
@@ -2035,8 +2045,23 @@ async def test_cluster_migration_huge_container(
     logging.debug("Waiting for migration to finish")
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=30)
 
+    logging.debug("Finalizing migration")
+    nodes[0].slots = []
+    nodes[0].migrations = []
+    nodes[1].slots = [(0, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
     if seed_during_migration:
+        logging.debug("XXX deleting entry")
+        await cluster_client.set("x", "y")
+        logging.debug(f'XXX x {await cluster_client.get("x")}')
+        await cluster_client.delete("x")
+        logging.debug("XXX deleted entry")
+        logging.debug("Stopping seeder")
+        await seeder.stop(cluster_client)
+        logging.debug("Seeder stopped")
         await seed
+        logging.debug("Seeder awaited")
     else:
         # Only verify memory growth if we haven't pushed new data during migration
         new_rss = await get_memory(client0, "used_memory_peak_rss")
@@ -2044,7 +2069,7 @@ async def test_cluster_migration_huge_container(
         assert new_rss < rss * 1.1
         assert StaticSeeder.capture(client0) == capture
 
-    await instances[0].cluster_client().close()
+    await cluster_client.close()
 
 
 def parse_lag(replication_info: str):
