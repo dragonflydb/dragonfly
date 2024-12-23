@@ -320,20 +320,23 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   while (parser.HasNext()) {
     // GROUPBY nargs property [property ...]
     if (parser.Check("GROUPBY")) {
-      vector<string_view> fields(parser.Next<size_t>());
-      for (string_view& field : fields) {
+      size_t num_fields = parser.Next<size_t>();
+
+      std::vector<std::string> fields;
+      fields.reserve(num_fields);
+      while (num_fields > 0 && parser.HasNext()) {
         auto parsed_field = ParseFieldWithAtSign(&parser);
 
         /*
         TODO: Throw an error if the field has no '@' sign at the beginning
-
         if (!parsed_field) {
           builder->SendError(absl::StrCat("bad arguments for GROUPBY: Unknown property '", field,
                                        "'. Did you mean '@", field, "`?"));
           return nullopt;
         } */
 
-        field = parsed_field;
+        fields.emplace_back(parsed_field);
+        num_fields--;
       }
 
       vector<aggregate::Reducer> reducers;
@@ -363,7 +366,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
             aggregate::Reducer{std::move(source_field), std::move(result_field), std::move(func)});
       }
 
-      params.steps.push_back(aggregate::MakeGroupStep(fields, std::move(reducers)));
+      params.steps.push_back(aggregate::MakeGroupStep(std::move(fields), std::move(reducers)));
       continue;
     }
 
@@ -373,7 +376,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
       string_view field = parser.Next();
       bool desc = bool(parser.Check("DESC"));
 
-      params.steps.push_back(aggregate::MakeSortStep(field, desc));
+      params.steps.push_back(aggregate::MakeSortStep(std::string{field}, desc));
       continue;
     }
 
@@ -975,10 +978,18 @@ void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) 
     return OpStatus::OK;
   });
 
-  vector<aggregate::DocValues> values;
+  // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
+  // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
+  // Keys of values should point to the keys of the query_results
+  std::vector<aggregate::DocValues> values;
   for (auto& sub_results : query_results) {
-    values.insert(values.end(), make_move_iterator(sub_results.begin()),
-                  make_move_iterator(sub_results.end()));
+    for (auto& docs : sub_results) {
+      aggregate::DocValues doc_value;
+      for (auto& doc : docs) {
+        doc_value[doc.first] = std::move(doc.second);
+      }
+      values.push_back(std::move(doc_value));
+    }
   }
 
   std::vector<std::string_view> load_fields;
