@@ -65,9 +65,9 @@ void Aggregator::DoGroup(absl::Span<const std::string> fields, absl::Span<const 
   }
 }
 
-void Aggregator::DoSort(std::string_view field, bool descending) {
+void Aggregator::DoSort(const SortParams& sort_params) {
   /*
-    Comparator for sorting DocValues by field.
+    Comparator for sorting DocValues by fields.
     If some of the fields is not present in the DocValues, comparator returns:
     1. l_it == l.end() && r_it != r.end()
       asc -> false
@@ -80,22 +80,41 @@ void Aggregator::DoSort(std::string_view field, bool descending) {
       desc -> false
   */
   auto comparator = [&](const DocValues& l, const DocValues& r) {
-    auto l_it = l.find(field);
-    auto r_it = r.find(field);
+    for (const auto& [field, order] : sort_params.fields) {
+      auto l_it = l.find(field);
+      auto r_it = r.find(field);
 
-    // If some of the values is not present
-    if (l_it == l.end() || r_it == r.end()) {
-      return l_it != l.end();
+      // If some of the values is not present
+      if (l_it == l.end() || r_it == r.end()) {
+        if (l_it == l.end() && r_it == r.end()) {
+          continue;
+        }
+        return l_it != l.end();
+      }
+
+      const auto& lv = l_it->second;
+      const auto& rv = r_it->second;
+      if (lv == rv) {
+        continue;
+      }
+      return order == SortParams::SortOrder::ASC ? lv < rv : lv > rv;
     }
-
-    auto& lv = l_it->second;
-    auto& rv = r_it->second;
-    return !descending ? lv < rv : lv > rv;
+    return false;
   };
 
-  std::sort(result.values.begin(), result.values.end(), std::move(comparator));
+  auto& values = result.values;
+  if (sort_params.SortAll()) {
+    std::sort(values.begin(), values.end(), comparator);
+  } else {
+    DCHECK_GE(sort_params.max, 0);
+    const size_t limit = std::min(values.size(), size_t(sort_params.max));
+    std::partial_sort(values.begin(), values.begin() + limit, values.end(), comparator);
+    values.resize(limit);
+  }
 
-  result.fields_to_print.insert(field);
+  for (auto& field : sort_params.fields) {
+    result.fields_to_print.insert(field.first);
+  }
 }
 
 void Aggregator::DoLimit(size_t offset, size_t num) {
@@ -152,10 +171,8 @@ AggregationStep MakeGroupStep(std::vector<std::string> fields, std::vector<Reduc
   };
 }
 
-AggregationStep MakeSortStep(std::string field, bool descending) {
-  return [field = std::move(field), descending](Aggregator* aggregator) {
-    aggregator->DoSort(field, descending);
-  };
+AggregationStep MakeSortStep(SortParams sort_params) {
+  return [params = std::move(sort_params)](Aggregator* aggregator) { aggregator->DoSort(params); };
 }
 
 AggregationStep MakeLimitStep(size_t offset, size_t num) {

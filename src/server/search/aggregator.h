@@ -33,9 +33,27 @@ struct AggregationResult {
   absl::flat_hash_set<std::string_view> fields_to_print;
 };
 
+struct SortParams {
+  enum class SortOrder { ASC, DESC };
+
+  constexpr static int64_t kSortAll = -1;
+
+  bool SortAll() const {
+    return max == kSortAll;
+  }
+
+  /* Fields to sort by. If multiple fields are provided, sorting works hierarchically:
+     - First, the i-th field is compared.
+     - If the i-th field values are equal, the (i + 1)-th field is compared, and so on. */
+  absl::InlinedVector<std::pair<std::string, SortOrder>, 2> fields;
+  /* Max number of elements to include in the sorted result.
+     If set, only the first [max] elements are fully sorted using partial_sort. */
+  int64_t max = kSortAll;
+};
+
 struct Aggregator {
   void DoGroup(absl::Span<const std::string> fields, absl::Span<const Reducer> reducers);
-  void DoSort(std::string_view field, bool descending = false);
+  void DoSort(const SortParams& sort_params);
   void DoLimit(size_t offset, size_t num);
 
   AggregationResult result;
@@ -94,7 +112,7 @@ Reducer::Func FindReducerFunc(ReducerFunc name);
 AggregationStep MakeGroupStep(std::vector<std::string> fields, std::vector<Reducer> reducers);
 
 // Make `SORTBY field [DESC]` step
-AggregationStep MakeSortStep(std::string field, bool descending = false);
+AggregationStep MakeSortStep(SortParams sort_params);
 
 // Make `LIMIT offset num` step
 AggregationStep MakeLimitStep(size_t offset, size_t num);
