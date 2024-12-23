@@ -109,12 +109,16 @@ template <typename V> struct RaxTreeMap {
   }
 
   ~RaxTreeMap() {
-    for (auto it = begin(); it != end(); ++it) {
-      V* ptr = &(*it).second;
-      std::allocator_traits<decltype(alloc_)>::destroy(alloc_, ptr);
-      alloc_.deallocate(ptr, 1);
-    }
-    raxFree(tree_);
+    using Allocator = decltype(alloc_);
+
+    auto free_callback = [](void* data, void* context) {
+      Allocator* allocator = static_cast<Allocator*>(context);
+      V* ptr = static_cast<V*>(data);
+      std::allocator_traits<Allocator>::destroy(*allocator, ptr);
+      allocator->deallocate(ptr, 1);
+    };
+
+    raxFreeWithCallbackAndArgument(tree_, free_callback, &alloc_);
   }
 
   size_t size() const {
