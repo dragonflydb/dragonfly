@@ -10,7 +10,9 @@
 #include <absl/strings/str_split.h>
 
 #include <algorithm>
+#include <optional>
 #include <type_traits>
+#include <variant>
 
 namespace dfly::search {
 
@@ -18,27 +20,12 @@ using namespace std;
 
 namespace {}  // namespace
 
-template <typename T>
-SimpleValueSortIndex<T>::ParsedSortValue::ParsedSortValue() : no_value_was_found_{true} {
-}
-
-template <typename T> SimpleValueSortIndex<T>::ParsedSortValue::ParsedSortValue(std::nullopt_t) {
-}
-
-template <typename T>
-SimpleValueSortIndex<T>::ParsedSortValue::ParsedSortValue(T value) : value_(std::move(value)) {
-}
-
 template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::HasValue() const {
-  return !no_value_was_found_;
+  return !std::holds_alternative<std::monostate>(value);
 }
 
 template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::IsNullValue() const {
-  return HasValue() && !value_.has_value();
-}
-
-template <typename T> T&& SimpleValueSortIndex<T>::ParsedSortValue::Value() && {
-  return std::move(value_).value();
+  return std::holds_alternative<std::nullopt_t>(value);
 }
 
 template <typename T>
@@ -87,15 +74,14 @@ bool SimpleValueSortIndex<T>::Add(DocId id, const DocumentAccessor& doc, std::st
   if (id >= values_.size())
     values_.resize(id + 1);
 
-  values_[id] = std::move(field_value).Value();
+  values_[id] = std::move(std::get<T>(field_value.value));
   return true;
 }
 
 template <typename T>
 void SimpleValueSortIndex<T>::Remove(DocId id, const DocumentAccessor& doc,
                                      std::string_view field) {
-  auto it = null_values_.find(id);
-  if (it != null_values_.end()) {
+  if (auto it = null_values_.find(id); it != null_values_.end()) {
     null_values_.erase(it);
     return;
   }

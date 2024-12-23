@@ -20,19 +20,14 @@ namespace dfly::search {
 
 template <typename T> struct SimpleValueSortIndex : public BaseSortIndex {
  protected:
-  class ParsedSortValue {
-   public:
-    ParsedSortValue();
-    explicit ParsedSortValue(std::nullopt_t);
-    explicit ParsedSortValue(T value);
-
+  struct ParsedSortValue {
     bool HasValue() const;
     bool IsNullValue() const;
-    T&& Value() &&;
 
-   private:
-    bool no_value_was_found_ = false;
-    std::optional<T> value_;
+    // std::monostate - no value was found.
+    // std::nullopt - found value is null.
+    // T - found value.
+    std::variant<std::monostate, std::nullopt_t, T> value;
   };
 
  public:

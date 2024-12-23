@@ -9,6 +9,7 @@
 
 #include "server/search/doc_accessors.h"
 
+#include <absl/functional/any_invocable.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
@@ -237,9 +238,13 @@ std::optional<BaseAccessor::StringList> JsonAccessor::GetStrings(std::string_vie
   if (path_res.empty())
     return search::EmptyAccessResult<StringList>();
 
-  auto is_convertible_to_string = [&accept_boolean_values](const JsonType& json) -> bool {
-    return json.is_string() || (accept_boolean_values && json.is_bool());
-  };
+  auto is_convertible_to_string = [](bool accept_boolean_values) -> bool (*)(const JsonType& json) {
+    if (accept_boolean_values) {
+      return [](const JsonType& json) -> bool { return json.is_string() || json.is_bool(); };
+    } else {
+      return [](const JsonType& json) -> bool { return json.is_string(); };
+    }
+  }(accept_boolean_values);
 
   if (path_res.size() == 1 && !path_res[0].is_array()) {
     if (path_res[0].is_null())
