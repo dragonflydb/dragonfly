@@ -1065,7 +1065,7 @@ error_code AlignedBuffer::Flush() {
   return upstream_->Write(&ivec, 1);
 }
 
-class RdbSaver::Impl {
+class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface {
  private:
   void CleanShardSnapshots();
 
@@ -1078,10 +1078,15 @@ class RdbSaver::Impl {
   ~Impl();
 
   void StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard);
-  void StartIncrementalSnapshotting(Context* cntx, EngineShard* shard, LSN start_lsn);
+  void StartIncrementalSnapshotting(LSN start_lsn, Context* cntx, EngineShard* shard);
 
   void StopSnapshotting(EngineShard* shard);
   void WaitForSnapshottingFinish(EngineShard* shard);
+
+  // Pushes snapshot data. Called from SliceSnapshot
+  void ConsumeData(std::string data, Context* cntx) override;
+  // Finalizes the snapshot writing. Called from SliceSnapshot
+  void Finalize() override;
 
   // used only for legacy rdb save flows.
   error_code ConsumeChannel(const Cancellation* cll);
@@ -1115,8 +1120,6 @@ class RdbSaver::Impl {
   }
 
  private:
-  void PushSnapshotData(Context* cntx, string record);
-  void FinalizeSnapshotWriting();
   error_code WriteRecord(io::Bytes src);
 
   unique_ptr<SliceSnapshot>& GetSnapshot(EngineShard* shard);
@@ -1252,49 +1255,26 @@ error_code RdbSaver::Impl::WriteRecord(io::Bytes src) {
   return ec;
 }
 
-void RdbSaver::Impl::PushSnapshotData(Context* cntx, string record) {
-  if (cntx->IsCancelled()) {
-    return;
-  }
-  if (channel_) {  // Rdb write to channel
-    channel_->Push(record);
-  } else {  // Write directly to socket
-    auto ec = WriteRecord(io::Buffer(record));
-    if (ec) {
-      cntx->ReportError(ec);
-    }
-  }
-}
-
-void RdbSaver::Impl::FinalizeSnapshotWriting() {
-  if (channel_) {
-    channel_->StartClosing();
-  }
-}
-
 void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard) {
   auto& s = GetSnapshot(shard);
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
-  auto on_snapshot_finish = std::bind(&RdbSaver::Impl::FinalizeSnapshotWriting, this);
-  auto push_cb = std::bind(&RdbSaver::Impl::PushSnapshotData, this, cntx, std::placeholders::_1);
 
-  s = std::make_unique<SliceSnapshot>(&db_slice, compression_mode_, push_cb, on_snapshot_finish);
+  s = std::make_unique<SliceSnapshot>(compression_mode_, &db_slice, this, cntx);
 
   const auto allow_flush = (save_mode_ != SaveMode::RDB) ? SliceSnapshot::SnapshotFlush::kAllow
                                                          : SliceSnapshot::SnapshotFlush::kDisallow;
 
-  s->Start(stream_journal, cntx->GetCancellation(), allow_flush);
+  s->Start(stream_journal, allow_flush);
 }
 
-void RdbSaver::Impl::StartIncrementalSnapshotting(Context* cntx, EngineShard* shard,
-                                                  LSN start_lsn) {
+void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, Context* cntx,
+                                                  EngineShard* shard) {
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
-  auto on_finalize_cb = std::bind(&RdbSaver::Impl::FinalizeSnapshotWriting, this);
-  auto push_cb = std::bind(&RdbSaver::Impl::PushSnapshotData, this, cntx, std::placeholders::_1);
-  s = std::make_unique<SliceSnapshot>(&db_slice, compression_mode_, push_cb, on_finalize_cb);
 
-  s->StartIncremental(cntx, start_lsn);
+  s = std::make_unique<SliceSnapshot>(compression_mode_, &db_slice, this, cntx);
+
+  s->StartIncremental(start_lsn);
 }
 
 // called on save flow
@@ -1302,6 +1282,26 @@ void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
   auto& snapshot = GetSnapshot(shard);
   CHECK(snapshot);
   snapshot->WaitSnapshotting();
+}
+
+void RdbSaver::Impl::ConsumeData(std::string data, Context* cntx) {
+  if (cntx->IsCancelled()) {
+    return;
+  }
+  if (channel_) {  // Rdb write to channel
+    channel_->Push(std::move(data));
+  } else {  // Write directly to socket
+    auto ec = WriteRecord(io::Buffer(data));
+    if (ec) {
+      cntx->ReportError(ec);
+    }
+  }
+}
+
+void RdbSaver::Impl::Finalize() {
+  if (channel_) {
+    channel_->StartClosing();
+  }
 }
 
 // called from replication flow
@@ -1462,8 +1462,8 @@ void RdbSaver::StartSnapshotInShard(bool stream_journal, Context* cntx, EngineSh
   impl_->StartSnapshotting(stream_journal, cntx, shard);
 }
 
-void RdbSaver::StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn) {
-  impl_->StartIncrementalSnapshotting(cntx, shard, start_lsn);
+void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, Context* cntx, EngineShard* shard) {
+  impl_->StartIncrementalSnapshotting(start_lsn, cntx, shard);
 }
 
 error_code RdbSaver::WaitSnapshotInShard(EngineShard* shard) {
@@ -1489,17 +1489,17 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody(Context* cntx) {
+error_code RdbSaver::SaveBody(const Context& cntx) {
   RETURN_ON_ERR(impl_->FlushSerializer());
 
   if (save_mode_ == SaveMode::RDB) {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
-    error_code io_error = impl_->ConsumeChannel(cntx->GetCancellation());
+    error_code io_error = impl_->ConsumeChannel(cntx.GetCancellation());
     if (io_error) {
       return io_error;
     }
-    if (cntx->GetError()) {
-      return cntx->GetError();
+    if (cntx.GetError()) {
+      return cntx.GetError();
     }
   } else {
     DCHECK(save_mode_ == SaveMode::SUMMARY);
