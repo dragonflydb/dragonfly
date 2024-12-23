@@ -12,8 +12,6 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
-#include <jsoncons/json.hpp>
-
 #include "base/flags.h"
 #include "core/json/path.h"
 #include "core/overloaded.h"
@@ -86,7 +84,7 @@ SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
   for (const auto& field : fields) {
     const auto& fident = field.GetIdentifier(schema, false);
     const auto& fname = field.GetShortName(schema);
-    
+
     auto field_value =
         ExtractSortableValue(schema, fident, absl::StrJoin(GetStrings(fident).value(), ","));
     if (field_value) {
