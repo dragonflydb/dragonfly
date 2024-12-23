@@ -36,7 +36,7 @@ jobs:
           # -no-pie to disable address randomization so we could symbolize stacktraces
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
                 -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DPRINT_STACKTRACES_ON_SIGNAL=ON \
-                -DCMAKE_CXX_FLAGS=-no-pie
+                -DCMAKE_CXX_FLAGS=-no-pie -DHELIO_STACK_CHECK:STRING=4096
 
           cd ${GITHUB_WORKSPACE}/build  && ninja dragonfly
           pwd

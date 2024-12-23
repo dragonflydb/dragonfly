@@ -685,7 +685,7 @@ void Connection::HandleRequests() {
       FiberSocketBase::AcceptResult aresult = socket_->Accept();
 
       if (!aresult) {
-        LOG(WARNING) << "Error handshaking " << aresult.error().message();
+        LOG(INFO) << "Error handshaking " << aresult.error().message();
         return;
       }
       VLOG(1) << "TLS handshake succeeded";
