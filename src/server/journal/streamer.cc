@@ -219,6 +219,10 @@ void RestoreStreamer::Run() {
       if (fiber_cancelled_)  // Could have been cancelled in above call too
         return;
 
+      // Locking this never preempts. See snapshot.cc for why we need it.
+      auto* blocking_counter = db_slice_->BlockingCounter();
+      std::lock_guard blocking_counter_guard(*blocking_counter);
+
       WriteBucket(it);
     });
 
