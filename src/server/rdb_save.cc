@@ -1604,13 +1604,20 @@ void SerializerBase::CompressBlob() {
   }
 
   AllocateCompressorOnce();
-  // Compress the data
-  auto ec = compressor_impl_->Compress(blob_to_compress);
-  if (!ec) {
+
+  // Compress the data. We copy compressed data once into the internal buffer of compressor_impl_
+  // and then we copy it again into the mem_buf_.
+  //
+  // TODO: it is possible to avoid double copying here by changing the compressor interface,
+  // so that the compressor will accept the output buffer and return the final size. This requires
+  // exposing the additional compress bound interface as well.
+  io::Result<io::Bytes> res = compressor_impl_->Compress(blob_to_compress);
+  if (!res) {
     ++compression_stats_->compression_failed;
     return;
   }
-  Bytes compressed_blob = *ec;
+
+  Bytes compressed_blob = *res;
   if (compressed_blob.length() > blob_size * kMinCompressionReductionPrecentage) {
     ++compression_stats_->compression_no_effective;
     return;

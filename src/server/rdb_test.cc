@@ -42,6 +42,14 @@ class RdbTest : public BaseFamilyTest {
  protected:
   void SetUp();
 
+  static void SetUpTestSuite() {
+    static bool init = true;
+    if (exchange(init, false)) {
+      fb2::SetDefaultStackResource(&fb2::std_malloc_resource, 32_KB);
+    }
+    BaseFamilyTest::SetUpTestSuite();
+  }
+
   io::FileSource GetSource(string name);
 
   std::error_code LoadRdb(const string& filename) {
@@ -56,6 +64,7 @@ class RdbTest : public BaseFamilyTest {
 
 void RdbTest::SetUp() {
   InitWithDbFilename();
+  CHECK_EQ(zmalloc_used_memory_tl, 0);
   max_memory_limit = 40000000;
 }
 
@@ -457,6 +466,8 @@ TEST_F(RdbTest, JsonTest) {
 class HllRdbTest : public RdbTest, public testing::WithParamInterface<string> {};
 
 TEST_P(HllRdbTest, Hll) {
+  LOG(INFO) << " max memory: " << max_memory_limit
+            << " used_mem_current: " << used_mem_current.load();
   auto ec = LoadRdb("hll.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
