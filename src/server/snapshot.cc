@@ -4,7 +4,6 @@
 
 #include "server/snapshot.h"
 
-#include <absl/functional/bind_front.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
@@ -64,13 +63,18 @@ bool SliceSnapshot::IsSnaphotInProgress() {
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
-  auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
+  auto db_cb = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
+    OnDbChange(db_index, req);
+  };
+
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   if (stream_journal) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
-    auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
+    auto journal_cb = [this](const journal::JournalItem& item, bool await) {
+      OnJournalEntry(item, await);
+    };
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
@@ -168,7 +172,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
       }
 
       PrimeTable::Cursor next =
-          pt->TraverseBuckets(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
+          pt->TraverseBuckets(cursor, [this](auto it) { return BucketSaveCb(it); });
       cursor = next;
       PushSerialized(false);
 
@@ -229,7 +233,9 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
       FiberAtomicGuard fg;
       serializer_->SendFullSyncCut();
     }
-    auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
+    auto journal_cb = [this](const journal::JournalItem& item, bool await) {
+      OnJournalEntry(item, await);
+    };
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
     PushSerialized(true);
   } else {
