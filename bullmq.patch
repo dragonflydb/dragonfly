@@ -1,0 +1,22 @@
+diff --git a/tests/test_job.ts b/tests/test_job.ts
+index 0393fe0..57b06d6 100644
+--- a/tests/test_job.ts
++++ b/tests/test_job.ts
+@@ -1396,6 +1396,8 @@ describe('Job', function () {
+         expect(isDelayedAfterPromote).to.be.equal(false);
+         const isCompleted = await job.isCompleted();
+         expect(isCompleted).to.be.equal(true);
++
++        await worker.close();
+       });
+
+       describe('when re-adding same repeatable job after previous delayed one is promoted', () => {
+@@ -1456,6 +1458,8 @@ describe('Job', function () {
+           const delayedCountAfterReAddition = await queue.getDelayedCount();
+           expect(completedCountAfterReAddition).to.be.equal(1);
+           expect(delayedCountAfterReAddition).to.be.equal(1);
++
++          await worker.close();
+         });
+       });
+     });

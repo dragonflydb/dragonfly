@@ -47,6 +47,7 @@ jobs:
           mv taskforcesh-bullmq-* bullmq
           cd bullmq
           pwd
+          patch < $GITHUB_WORKSPACE/bullmq.patch
           yarn install
           yarn build
           BULLMQ_TEST_PREFIX={b} yarn test
