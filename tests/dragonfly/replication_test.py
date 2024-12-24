@@ -2277,7 +2277,7 @@ async def test_announce_ip_port(df_factory):
 @pytest.mark.skip("Flaky test")
 async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # setting replication_timeout to a very small value to force the replica to timeout
-    master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2")
+    master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2,snapshot=2")
     replica = df_factory.create()
 
     df_factory.start_all([master, replica])
