@@ -5,7 +5,6 @@ from redis import Redis
 import socket
 import random
 import time
-import warnings
 
 from . import dfly_args
 from .instance import DflyInstance
