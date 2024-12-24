@@ -10,7 +10,9 @@
 #include <absl/strings/str_split.h>
 
 #include <algorithm>
+#include <optional>
 #include <type_traits>
+#include <variant>
 
 namespace dfly::search {
 
@@ -18,11 +20,23 @@ using namespace std;
 
 namespace {}  // namespace
 
+template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::HasValue() const {
+  return !std::holds_alternative<std::monostate>(value);
+}
+
+template <typename T> bool SimpleValueSortIndex<T>::ParsedSortValue::IsNullValue() const {
+  return std::holds_alternative<std::nullopt_t>(value);
+}
+
 template <typename T>
 SimpleValueSortIndex<T>::SimpleValueSortIndex(PMR_NS::memory_resource* mr) : values_{mr} {
 }
 
 template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) const {
+  if (null_values_.contains(doc)) {
+    return std::monostate{};
+  }
+
   DCHECK_LT(doc, values_.size());
   if constexpr (is_same_v<T, PMR_NS::string>) {
     return std::string(values_[doc]);
@@ -48,21 +62,30 @@ std::vector<ResultScore> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, 
 template <typename T>
 bool SimpleValueSortIndex<T>::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
   auto field_value = Get(doc, field);
-  if (!field_value) {
+  if (!field_value.HasValue()) {
     return false;
   }
 
-  DCHECK_LE(id, values_.size());  // Doc ids grow at most by one
+  if (field_value.IsNullValue()) {
+    null_values_.insert(id);
+    return true;
+  }
+
   if (id >= values_.size())
     values_.resize(id + 1);
 
-  values_[id] = field_value.value();
+  values_[id] = std::move(std::get<T>(field_value.value));
   return true;
 }
 
 template <typename T>
 void SimpleValueSortIndex<T>::Remove(DocId id, const DocumentAccessor& doc,
                                      std::string_view field) {
+  if (auto it = null_values_.find(id); it != null_values_.end()) {
+    null_values_.erase(it);
+    return;
+  }
+
   DCHECK_LT(id, values_.size());
   values_[id] = T{};
 }
@@ -74,22 +97,28 @@ template <typename T> PMR_NS::memory_resource* SimpleValueSortIndex<T>::GetMemRe
 template struct SimpleValueSortIndex<double>;
 template struct SimpleValueSortIndex<PMR_NS::string>;
 
-std::optional<double> NumericSortIndex::Get(const DocumentAccessor& doc, std::string_view field) {
+SimpleValueSortIndex<double>::ParsedSortValue NumericSortIndex::Get(const DocumentAccessor& doc,
+                                                                    std::string_view field) {
   auto numbers_list = doc.GetNumbers(field);
   if (!numbers_list) {
-    return std::nullopt;
+    return {};
   }
-  return !numbers_list->empty() ? numbers_list->front() : 0.0;
+  if (numbers_list->empty()) {
+    return ParsedSortValue{std::nullopt};
+  }
+  return ParsedSortValue{numbers_list->front()};
 }
 
-std::optional<PMR_NS::string> StringSortIndex::Get(const DocumentAccessor& doc,
-                                                   std::string_view field) {
-  auto strings_list = doc.GetStrings(field);
+SimpleValueSortIndex<PMR_NS::string>::ParsedSortValue StringSortIndex::Get(
+    const DocumentAccessor& doc, std::string_view field) {
+  auto strings_list = doc.GetTags(field);
   if (!strings_list) {
-    return std::nullopt;
+    return {};
   }
-  return !strings_list->empty() ? PMR_NS::string{strings_list->front(), GetMemRes()}
-                                : PMR_NS::string{GetMemRes()};
+  if (strings_list->empty()) {
+    return ParsedSortValue{std::nullopt};
+  }
+  return ParsedSortValue{PMR_NS::string{strings_list->front(), GetMemRes()}};
 }
 
 }  // namespace dfly::search

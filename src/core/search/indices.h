@@ -47,9 +47,6 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
 
-  // Used by Add & Remove to tokenize text value
-  virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
-
   // Pointer is valid as long as index is not mutated. Nullptr if not found
   const Container* Matching(std::string_view str) const;
 
@@ -60,6 +57,15 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   std::vector<std::string> GetTerms() const;
 
  protected:
+  using StringList = DocumentAccessor::StringList;
+
+  // Used by Add & Remove to get strings from document
+  virtual std::optional<StringList> GetStrings(const DocumentAccessor& doc,
+                                               std::string_view field) const = 0;
+
+  // Used by Add & Remove to tokenize text value
+  virtual absl::flat_hash_set<std::string> Tokenize(std::string_view value) const = 0;
+
   Container* GetOrCreate(std::string_view word);
 
   bool case_sensitive_ = false;
@@ -75,6 +81,9 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
       : BaseStringIndex(mr, false), stopwords_{stopwords} {
   }
 
+ protected:
+  std::optional<StringList> GetStrings(const DocumentAccessor& doc,
+                                       std::string_view field) const override;
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
 
  private:
@@ -88,6 +97,9 @@ struct TagIndex : public BaseStringIndex<SortedVector> {
       : BaseStringIndex(mr, params.case_sensitive), separator_{params.separator} {
   }
 
+ protected:
+  std::optional<StringList> GetStrings(const DocumentAccessor& doc,
+                                       std::string_view field) const override;
   absl::flat_hash_set<std::string> Tokenize(std::string_view value) const override;
 
  private:
