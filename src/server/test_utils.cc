@@ -243,6 +243,7 @@ void BaseFamilyTest::ResetService() {
       absl::SetFlag(&FLAGS_alsologtostderr, true);
       fb2::Mutex m;
       shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+        ThisFiber::SetName("Watchdog");
         std::unique_lock lk(m);
         LOG(ERROR) << "Proactor " << index << ":\n";
         fb2::detail::FiberInterface::PrintAllFiberStackTraces();
@@ -359,7 +360,10 @@ bool BaseFamilyTest::WaitUntilCondition(std::function<bool()> condition_cb,
 
 RespExpr BaseFamilyTest::Run(ArgSlice list) {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->Run(list); });
+    return pp_->at(0)->Await([&] {
+      ThisFiber::SetName("Test::Run");
+      return this->Run(list);
+    });
   }
 
   return Run(GetId(), list);

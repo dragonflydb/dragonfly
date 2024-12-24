@@ -9,12 +9,6 @@
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
-#include <jsoncons/json.hpp>
-#include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
-#include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
-#include <jsoncons_ext/mergepatch/mergepatch.hpp>
-
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
@@ -35,6 +29,12 @@
 #include "server/string_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+
+// clang-format off
+#include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
+#include <jsoncons_ext/jsonpointer/jsonpointer.hpp>
+#include <jsoncons_ext/mergepatch/mergepatch.hpp>
+// clang-format on
 
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "

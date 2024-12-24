@@ -7,8 +7,6 @@
 #include <mimalloc.h>
 #include <xxhash.h>
 
-#include <jsoncons/json.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <random>
 
 #include "base/gtest.h"
