@@ -1680,4 +1680,149 @@ TEST_F(SearchFamilyTest, AggregateResultFields) {
                                          IsMap(), IsMap()));
 }
 
+TEST_F(SearchFamilyTest, AggregateSortByJson) {
+  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
+  Run({"JSON.SET", "j2", "$", R"({"name": "second", "number": 800, "group": "first"})"});
+  Run({"JSON.SET", "j3", "$", R"({"name": "third", "number": 300, "group": "first"})"});
+  Run({"JSON.SET", "j4", "$", R"({"name": "fourth", "number": 400, "group": "second"})"});
+  Run({"JSON.SET", "j5", "$", R"({"name": "fifth", "number": 900, "group": "second"})"});
+  Run({"JSON.SET", "j6", "$", R"({"name": "sixth", "number": 300, "group": "first"})"});
+  Run({"JSON.SET", "j7", "$", R"({"name": "seventh", "number": 400, "group": "second"})"});
+  Run({"JSON.SET", "j8", "$", R"({"name": "eighth", "group": "first"})"});
+  Run({"JSON.SET", "j9", "$", R"({"name": "ninth", "group": "second"})"});
+
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
+
+  // Test sorting by name (DESC) and number (ASC)
+  auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "4", "@name", "DESC", "@number", "ASC"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("name", "\"third\"", "number", "300"),
+                        IsMap("name", "\"sixth\"", "number", "300"),
+                        IsMap("name", "\"seventh\"", "number", "400"),
+                        IsMap("name", "\"second\"", "number", "800"), IsMap("name", "\"ninth\""),
+                        IsMap("name", "\"fourth\"", "number", "400"),
+                        IsMap("name", "\"first\"", "number", "1200"),
+                        IsMap("name", "\"fifth\"", "number", "900"), IsMap("name", "\"eighth\"")));
+
+  // Test sorting by name (ASC) and number (DESC)
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "4", "@name", "ASC", "@number", "DESC"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("name", "\"eighth\""), IsMap("name", "\"fifth\"", "number", "900"),
+                        IsMap("name", "\"first\"", "number", "1200"),
+                        IsMap("name", "\"fourth\"", "number", "400"), IsMap("name", "\"ninth\""),
+                        IsMap("name", "\"second\"", "number", "800"),
+                        IsMap("name", "\"seventh\"", "number", "400"),
+                        IsMap("name", "\"sixth\"", "number", "300"),
+                        IsMap("name", "\"third\"", "number", "300")));
+
+  // Test sorting by group (ASC), number (DESC), and name
+  resp = Run(
+      {"FT.AGGREGATE", "index", "*", "SORTBY", "5", "@group", "ASC", "@number", "DESC", "@name"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("group", "\"first\"", "number", "1200", "name", "\"first\""),
+                        IsMap("group", "\"first\"", "number", "800", "name", "\"second\""),
+                        IsMap("group", "\"first\"", "number", "300", "name", "\"sixth\""),
+                        IsMap("group", "\"first\"", "number", "300", "name", "\"third\""),
+                        IsMap("group", "\"first\"", "name", "\"eighth\""),
+                        IsMap("group", "\"second\"", "number", "900", "name", "\"fifth\""),
+                        IsMap("group", "\"second\"", "number", "400", "name", "\"fourth\""),
+                        IsMap("group", "\"second\"", "number", "400", "name", "\"seventh\""),
+                        IsMap("group", "\"second\"", "name", "\"ninth\"")));
+
+  // Test sorting by number (ASC), group (DESC), and name
+  resp = Run(
+      {"FT.AGGREGATE", "index", "*", "SORTBY", "5", "@number", "ASC", "@group", "DESC", "@name"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("number", "300", "group", "\"first\"", "name", "\"sixth\""),
+                        IsMap("number", "300", "group", "\"first\"", "name", "\"third\""),
+                        IsMap("number", "400", "group", "\"second\"", "name", "\"fourth\""),
+                        IsMap("number", "400", "group", "\"second\"", "name", "\"seventh\""),
+                        IsMap("number", "800", "group", "\"first\"", "name", "\"second\""),
+                        IsMap("number", "900", "group", "\"second\"", "name", "\"fifth\""),
+                        IsMap("number", "1200", "group", "\"first\"", "name", "\"first\""),
+                        IsMap("group", "\"second\"", "name", "\"ninth\""),
+                        IsMap("group", "\"first\"", "name", "\"eighth\"")));
+
+  // Test sorting with MAX 3
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@number", "MAX", "3"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("number", "300"), IsMap("number", "300"),
+                                         IsMap("number", "400")));
+
+  // Test sorting with MAX 3
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "2", "@number", "DESC", "MAX", "3"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("number", "1200"), IsMap("number", "900"),
+                                         IsMap("number", "800")));
+
+  // Test sorting by number (ASC) with MAX 999
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@number", "MAX", "999"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("number", "300"), IsMap("number", "300"),
+                                         IsMap("number", "400"), IsMap("number", "400"),
+                                         IsMap("number", "800"), IsMap("number", "900"),
+                                         IsMap("number", "1200"), IsMap(), IsMap()));
+
+  // Test sorting by name and number (DESC)
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "3", "@name", "@number", "DESC"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("name", "\"eighth\""), IsMap("name", "\"fifth\"", "number", "900"),
+                        IsMap("name", "\"first\"", "number", "1200"),
+                        IsMap("name", "\"fourth\"", "number", "400"), IsMap("name", "\"ninth\""),
+                        IsMap("name", "\"second\"", "number", "800"),
+                        IsMap("name", "\"seventh\"", "number", "400"),
+                        IsMap("name", "\"sixth\"", "number", "300"),
+                        IsMap("name", "\"third\"", "number", "300")));
+
+  // Test SORTBY with MAX, GROUPBY, and REDUCE COUNT
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "3", "GROUPBY", "1",
+              "@number", "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("number", "900", "count", "1"),
+                                         IsMap("number", ArgType(RespExpr::NIL), "count", "1"),
+                                         IsMap("number", "1200", "count", "1")));
+
+  // Test SORTBY with MAX, GROUPBY (0 fields), and REDUCE COUNT
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "3", "GROUPBY", "0",
+              "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("count", "3")));
+}
+
+TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
+  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
+  Run({"JSON.SET", "j2", "$", R"({"name": "second", "number": 800, "group": "first"})"});
+  Run({"JSON.SET", "j3", "$", R"({"name": "third", "number": 300, "group": "first"})"});
+  Run({"JSON.SET", "j4", "$", R"({"name": "fourth", "number": 400, "group": "second"})"});
+  Run({"JSON.SET", "j5", "$", R"({"name": "fifth", "number": 900, "group": "second"})"});
+  Run({"JSON.SET", "j6", "$", R"({"name": "sixth", "number": 300, "group": "first"})"});
+  Run({"JSON.SET", "j7", "$", R"({"name": "seventh", "number": 400, "group": "second"})"});
+  Run({"JSON.SET", "j8", "$", R"({"name": "eighth", "group": "first"})"});
+  Run({"JSON.SET", "j9", "$", R"({"name": "ninth", "group": "second"})"});
+
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
+
+  // Test SORTBY with invalid argument count
+  auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "999", "@name", "@number", "DESC"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+
+  // Test SORTBY with negative argument count
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "-3", "@name", "@number", "DESC"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Test MAX with invalid value
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "-10"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Test MAX without a value
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Test SORTBY with a non-existing field
+  /* Temporary unsupported
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@nonexistingfield"});
+  EXPECT_THAT(resp, ErrArg("Property `nonexistingfield` not loaded nor in schema")); */
+
+  // Test SORTBY with an invalid value
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+}
+
 }  // namespace dfly
