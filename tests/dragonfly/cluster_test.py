@@ -1971,18 +1971,6 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
         assert str(i) == await nodes[1].client.get(f"{{key50}}:{i}")
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize(
-    "huge_values_threshold, seed_during_migration",
-    [
-        pytest.param(10, True),
-        pytest.param(1_000, True),
-        pytest.param(1_000_000, True),
-        pytest.param(10, False),
-        pytest.param(1_000, False),
-        pytest.param(1_000_000, False),
-    ],
-)
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.asyncio
 async def test_cluster_migration_huge_container(
@@ -2054,6 +2042,83 @@ async def test_cluster_migration_huge_container(
         assert await StaticSeeder.capture(nodes[1].client) == capture
 
     await cluster_client.close()
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@pytest.mark.asyncio
+async def test_cluster_migration_huge_container_while_seeding(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+):
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            serialization_max_chunk_size=1_000,
+        )
+        for _ in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(instance) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    client0 = nodes[0].client
+    client1 = nodes[1].client
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    async def get_memory(client, field):
+        info = await client.info("memory")
+        return info[field]
+
+    # logging.debug("Generating huge containers")
+    # await StaticSeeder(key_target=500_000, data_size=1_000).run(client0)
+    # rss = await get_memory(client0, "used_memory_rss")
+    # assert rss > 1_000_000_000, f"RSS too low, weak test case: {rss}"
+
+    logging.debug("Seeding cluster")
+    seeder = df_seeder_factory.create(keys=100, port=instances[0].port, cluster_mode=True)
+    seed = asyncio.create_task(seeder.run())
+
+    await asyncio.sleep(1)  # Let seeder feed src before migration start
+
+    nodes[0].migrations = [
+        MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
+    ]
+    logging.debug("Migrating slots")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Waiting for migration to finish")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=300)
+    logging.debug("Migration finished")
+
+    seeder.stop()
+    await seed
+    logging.debug("Seeding finished")
+
+    # Send cancellation to master0, but finish to master1. This way we can compare them.
+    logging.debug("Cancel migration for node0")
+    nodes[0].slots = [(0, 16383)]
+    nodes[0].migrations = []
+    nodes[1].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [nodes[0].admin_client])
+
+    logging.debug("Finalizing migration for node1")
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [nodes[1].admin_client])
+
+    assert (
+        await get_memory(client0, "used_memory_peak_rss")
+        < await get_memory(client0, "used_memory_rss") * 1.1
+    )
+
+    capture = await seeder.capture()
+    assert await seeder.compare(capture, instances[1].port)
+
+    logging.debug("PRE CAPTURE - GO NOW!")
+    await asyncio.sleep(60)
+    assert await StaticSeeder.capture(client0) == await StaticSeeder.capture(client1)
 
 
 def parse_lag(replication_info: str):
