@@ -97,7 +97,7 @@ ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, JsonPathType path_
   if (absl::GetFlag(FLAGS_jsonpathv2)) {
     auto path_result = json::ParsePath(path.view());
     if (!path_result) {
-      VLOG(1) << "Invalid Json path: " << path << ' ' << path_result.error() << std::endl;
+      VLOG(1) << "Invalid Json path: " << path << ' ' << path_result.error();
       return nonstd::make_unexpected(kSyntaxErr);
     }
     return WrappedJsonPath{std::move(path_result).value(), std::move(path), path_type};
@@ -105,7 +105,7 @@ ParseResult<WrappedJsonPath> ParseJsonPath(StringOrView path, JsonPathType path_
 
   auto expr_result = ParseJsonPathAsExpression(path.view());
   if (!expr_result) {
-    VLOG(1) << "Invalid Json path: " << path << ' ' << expr_result.error() << std::endl;
+    VLOG(1) << "Invalid Json path: " << path << ' ' << expr_result.error();
     return nonstd::make_unexpected(kSyntaxErr);
   }
   return WrappedJsonPath{std::move(expr_result).value(), std::move(path), path_type};
