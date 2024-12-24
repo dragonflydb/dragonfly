@@ -1137,8 +1137,14 @@ auto Connection::ParseMemcache() -> ParserStatus {
 
   do {
     string_view str = ToSV(io_buf_.InputBuffer());
+
+    if (str.empty()) {
+      return OK;
+    }
+
     result = memcache_parser_->Parse(str, &consumed, &cmd);
 
+    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type " << cmd.type;
     if (result != MemcacheParser::OK) {
       io_buf_.ConsumeInput(consumed);
       break;

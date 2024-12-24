@@ -5,6 +5,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -39,6 +40,14 @@ class MemcacheParser {
     INCR = 32,
     DECR = 33,
     FLUSHALL = 34,
+
+    // META_COMMANDS
+    META_NOOP = 50,
+    META_SET = 51,
+    META_DEL = 52,
+    META_ARITHM = 53,
+    META_GET = 54,
+    META_DEBUG = 55,
   };
 
   // According to https://github.com/memcached/memcached/wiki/Commands#standard-protocol
@@ -56,7 +65,18 @@ class MemcacheParser {
         0;  // relative (expire_ts <= month) or unix time (expire_ts > month) in seconds
     uint32_t bytes_len = 0;
     uint32_t flags = 0;
-    bool no_reply = false;
+    bool no_reply = false;  // q
+    bool meta = false;
+
+    // meta flags
+    bool base64 = false;              // b
+    bool return_flags = false;        // f
+    bool return_value = false;        // v
+    bool return_ttl = false;          // t
+    bool return_access_time = false;  // l
+    bool return_hit = false;          // h
+    // Used internally by meta parsing.
+    std::string blob;
   };
 
   enum Result {
@@ -64,7 +84,7 @@ class MemcacheParser {
     INPUT_PENDING,
     UNKNOWN_CMD,
     BAD_INT,
-    PARSE_ERROR,
+    PARSE_ERROR,  // request parse error, but can continue parsing within the same connection.
     BAD_DELTA,
   };
 
