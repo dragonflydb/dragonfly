@@ -75,6 +75,8 @@ class MemcacheParser {
     bool return_ttl = false;          // t
     bool return_access_time = false;  // l
     bool return_hit = false;          // h
+    bool return_version = false;      // c
+
     // Used internally by meta parsing.
     std::string blob;
   };

@@ -274,6 +274,9 @@ MP::Result ParseMeta(ArgSlice tokens, MP::Command* res) {
       case 'h':
         res->return_hit = true;
         break;
+      case 'c':
+        res->return_version = true;
+        break;
       default:
         LOG(WARNING) << "unknown meta flag: " << token;  // not yet implemented
         return MP::PARSE_ERROR;
@@ -291,7 +294,7 @@ auto MP::Parse(string_view str, uint32_t* consumed, Command* cmd) -> Result {
   *consumed = 0;
   if (pos == string_view::npos) {
     // We need more data to parse the command. For get/gets commands this line can be very long.
-    // we limit maxmimum buffer capacity  in the higher levels using max_client_iobuf_len.
+    // we limit maximum buffer capacity in the higher levels using max_client_iobuf_len.
     return INPUT_PENDING;
   }
 
