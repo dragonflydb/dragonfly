@@ -208,8 +208,6 @@ void RestoreStreamer::Run() {
     if (fiber_cancelled_)
       return;
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
-      std::lock_guard guard(big_value_mu_);
-
       if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
         return;
 
@@ -218,6 +216,8 @@ void RestoreStreamer::Run() {
 
       if (fiber_cancelled_)  // Could have been cancelled in above call too
         return;
+
+      std::lock_guard guard(big_value_mu_);
 
       // Locking this never preempts. See snapshot.cc for why we need it.
       auto* blocking_counter = db_slice_->BlockingCounter();
