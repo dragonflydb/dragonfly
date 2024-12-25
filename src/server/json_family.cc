@@ -1280,6 +1280,7 @@ auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path, std::string_view json_str,
                      bool is_nx_condition, bool is_xx_condition) {
+  JsonMemTracker mem_tracker;
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
@@ -1303,14 +1304,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
       }
     }
 
-    JsonMemTracker mem_tracker;
-    // We need to deep copy parsed_json.value() and not use move! The reason is that otherwise
-    // it's really difficult to properly track memory deltas because even if we move below,
-    // the deallocation of parsed_json won't happen in the scope of SetJson but in the scope
-    // of this function. Because of this, the memory tracking will be off. Another solution here,
-    // is to use absl::Cleanup and dispatch another Find() but that's too complicated because then
-    // you need to take into account the order of destructors.
-    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, parsed_json.value());
+    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, std::move(*parsed_json));
     if (st.status() != OpStatus::OK) {
       return st.status();
     }
@@ -1326,14 +1320,13 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   bool path_exists = false;
   bool operation_result = false;
   const JsonType& new_json = parsed_json.value();
-  auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
+
+  auto cb = [&](std::optional<string_view>, JsonType* val) -> MutateCallbackResult<> {
     path_exists = true;
     if (!is_nx_condition) {
       operation_result = true;
-      static_assert(
-          std::is_same_v<std::allocator_traits<JsonType>::propagate_on_container_copy_assignment,
-                         std::false_type>);
-      *val = new_json;
+      *val =
+          JsonType(new_json, std::pmr::polymorphic_allocator<char>{CompactObj::memory_resource()});
     }
     return {};
   };

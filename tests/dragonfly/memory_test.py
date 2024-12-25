@@ -39,7 +39,7 @@ async def test_rss_used_mem_gap(df_server: DflyInstance, type, keys, val_size, e
     await asyncio.sleep(1)  # Wait for another RSS heartbeat update in Dragonfly
 
     cmd = f"DEBUG POPULATE {keys} k {val_size} RAND TYPE {type} ELEMENTS {elements}"
-    print(f"Running {cmd}")
+    logging.info(f"Running {cmd}")
     await client.execute_command(cmd)
 
     await asyncio.sleep(2)  # Wait for another RSS heartbeat update in Dragonfly
