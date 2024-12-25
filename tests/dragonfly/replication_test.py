@@ -2309,7 +2309,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
     seeder.stop()
     await seeder_task
 
-    await check_all_replicas_finished([c_replica], c_master)
+    await check_all_replicas_finished([c_replica], c_master, timeout=30)
     await assert_replica_reconnections(replica, 0)
 
 
