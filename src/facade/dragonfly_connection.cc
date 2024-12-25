@@ -421,8 +421,8 @@ struct Connection::AsyncOperations {
   }
 
   void operator()(const PubMessage& msg);
-  void operator()(Connection::PipelineMessage& msg);
-  void operator()(const Connection::MCPipelineMessage& msg);
+  void operator()(PipelineMessage& msg);
+  void operator()(const MCPipelineMessage& msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
@@ -479,7 +479,7 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
   self->skip_next_squashing_ = false;
 }
 
-void Connection::AsyncOperations::operator()(const Connection::MCPipelineMessage& msg) {
+void Connection::AsyncOperations::operator()(const MCPipelineMessage& msg) {
   self->service_->DispatchMC(msg.cmd, msg.value,
                              static_cast<MCReplyBuilder*>(self->reply_builder_.get()),
                              self->cc_.get());

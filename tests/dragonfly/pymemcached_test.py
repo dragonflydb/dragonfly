@@ -137,7 +137,7 @@ def test_version(memcached_client: MCClient):
     Our real version is being returned in the stats command.
     Also verified manually that php client parses correctly the version string that ends with "DF".
     """
-    assert b"1.5.0 DF" == memcached_client.version()
+    assert b"1.6.0 DF" == memcached_client.version()
     stats = memcached_client.stats()
     version = stats[b"version"].decode("utf-8")
     assert version.startswith("v") or version == "dev"
