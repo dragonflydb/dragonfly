@@ -98,15 +98,14 @@ class SliceSnapshot {
   void SwitchIncrementalFb(LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(PrimeTable::bucket_iterator it);
+  bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
 
   // Serialize entry into passed serializer.
-  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
-                      std::optional<uint64_t> expire, RdbSerializer* serializer);
+  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -119,10 +118,15 @@ class SliceSnapshot {
   // Return true if pushed. Can block. Is called from the snapshot thread.
   bool PushSerialized(bool force);
 
+  using FlushState = SerializerBase::FlushState;
+
   // Helper function that flushes the serialized items into the RecordStream.
   // Can block.
-  using FlushState = SerializerBase::FlushState;
+  // Lock big_value_mu_ before calling it
   size_t FlushSerialized(FlushState flush_state);
+
+  // Calls the provided callback with the serializer under a lock.
+  template <typename Callback> void CallSerializerUnderLock(Callback cb);
 
  public:
   uint64_t snapshot_version() const {
@@ -150,25 +154,26 @@ class SliceSnapshot {
   };
 
   DbSlice* db_slice_;
-  DbTableArray db_array_;
+  const DbTableArray db_array_;
 
-  DbIndex current_db_;
-
+  // Guarded by big_value_mu_
   std::unique_ptr<RdbSerializer> serializer_;
-  std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
+
+  // collected during atomic bucket traversal
+  std::vector<DelayedEntry> delayed_entries_;
 
   // Used for sanity checks.
   bool serialize_bucket_running_ = false;
   util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
   util::fb2::CondVarAny seq_cond_;
-  CompressionMode compression_mode_;
+  const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
   // version upper bound for entries that should be saved (not included).
   uint64_t snapshot_version_ = 0;
   uint32_t journal_cb_id_ = 0;
 
-  uint64_t rec_id_ = 1, last_pushed_id_ = 0;
+  uint64_t rec_id_ = 1;
 
   struct Stats {
     size_t loop_serialized = 0;
@@ -178,7 +183,7 @@ class SliceSnapshot {
     size_t keys_total = 0;
   } stats_;
 
-  ThreadLocalMutex big_value_mu_;
+  mutable ThreadLocalMutex big_value_mu_;
 
   SnapshotDataConsumerInterface* consumer_;
   Context* cntx_;
