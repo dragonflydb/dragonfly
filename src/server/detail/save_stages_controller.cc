@@ -124,7 +124,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 }
 
 error_code RdbSnapshot::SaveBody() {
-  return saver_->SaveBody(&cntx_);
+  return saver_->SaveBody(cntx_);
 }
 
 error_code RdbSnapshot::WaitSnapshotInShard(EngineShard* shard) {

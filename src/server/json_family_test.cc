@@ -6,8 +6,6 @@
 
 #include <absl/strings/str_replace.h>
 
-#include <jsoncons/json.hpp>
-
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"

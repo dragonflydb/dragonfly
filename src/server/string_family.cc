@@ -1360,11 +1360,13 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
     auto* rb = static_cast<MCReplyBuilder*>(builder);
     DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
     for (const auto& entry : res) {
-      if (!entry)
-        continue;
-      rb->SendValue(entry->key, entry->value, entry->mc_ver, entry->mc_flag);
+      if (entry) {
+        rb->SendValue(entry->key, entry->value, entry->mc_ver, entry->mc_flag);
+      } else {
+        rb->SendMiss();
+      }
     }
-    rb->SendSimpleString("END");
+    rb->SendGetEnd();
   } else {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->StartArray(res.size());

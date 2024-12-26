@@ -667,7 +667,6 @@ void Transaction::RunCallback(EngineShard* shard) {
   DCHECK_EQ(shard, EngineShard::tlocal());
 
   RunnableResult result;
-  auto& db_slice = GetDbSlice(shard->shard_id());
   try {
     result = (*cb_ptr_)(this, shard);
 
@@ -691,6 +690,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
+  auto& db_slice = GetDbSlice(shard->shard_id());
   db_slice.OnCbFinish();
 
   // Handle result flags to alter behaviour.

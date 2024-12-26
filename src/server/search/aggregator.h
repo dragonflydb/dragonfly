@@ -17,19 +17,49 @@
 
 namespace dfly::aggregate {
 
-using Value = ::dfly::search::SortableValue;
-using DocValues = absl::flat_hash_map<std::string, Value>;  // documents sent through the pipeline
+struct Reducer;
 
-struct PipelineResult {
+using Value = ::dfly::search::SortableValue;
+
+// DocValues sent through the pipeline
+// TODO: Replace DocValues with compact linear search map instead of hash map
+using DocValues = absl::flat_hash_map<std::string_view, Value>;
+
+struct AggregationResult {
   // Values to be passed to the next step
-  // TODO: Replace DocValues with compact linear search map instead of hash map
   std::vector<DocValues> values;
 
   // Fields from values to be printed
-  absl::flat_hash_set<std::string> fields_to_print;
+  absl::flat_hash_set<std::string_view> fields_to_print;
 };
 
-using PipelineStep = std::function<PipelineResult(PipelineResult)>;  // Group, Sort, etc.
+struct SortParams {
+  enum class SortOrder { ASC, DESC };
+
+  constexpr static int64_t kSortAll = -1;
+
+  bool SortAll() const {
+    return max == kSortAll;
+  }
+
+  /* Fields to sort by. If multiple fields are provided, sorting works hierarchically:
+     - First, the i-th field is compared.
+     - If the i-th field values are equal, the (i + 1)-th field is compared, and so on. */
+  absl::InlinedVector<std::pair<std::string, SortOrder>, 2> fields;
+  /* Max number of elements to include in the sorted result.
+     If set, only the first [max] elements are fully sorted using partial_sort. */
+  int64_t max = kSortAll;
+};
+
+struct Aggregator {
+  void DoGroup(absl::Span<const std::string> fields, absl::Span<const Reducer> reducers);
+  void DoSort(const SortParams& sort_params);
+  void DoLimit(size_t offset, size_t num);
+
+  AggregationResult result;
+};
+
+using AggregationStep = std::function<void(Aggregator*)>;  // Group, Sort, etc.
 
 // Iterator over Span<DocValues> that yields doc[field] or monostate if not present.
 // Extra clumsy for STL compatibility!
@@ -79,18 +109,17 @@ enum class ReducerFunc { COUNT, COUNT_DISTINCT, SUM, AVG, MAX, MIN };
 Reducer::Func FindReducerFunc(ReducerFunc name);
 
 // Make `GROUPBY [fields...]`  with REDUCE step
-PipelineStep MakeGroupStep(absl::Span<const std::string_view> fields,
-                           std::vector<Reducer> reducers);
+AggregationStep MakeGroupStep(std::vector<std::string> fields, std::vector<Reducer> reducers);
 
 // Make `SORTBY field [DESC]` step
-PipelineStep MakeSortStep(std::string_view field, bool descending = false);
+AggregationStep MakeSortStep(SortParams sort_params);
 
 // Make `LIMIT offset num` step
-PipelineStep MakeLimitStep(size_t offset, size_t num);
+AggregationStep MakeLimitStep(size_t offset, size_t num);
 
 // Process values with given steps
-PipelineResult Process(std::vector<DocValues> values,
-                       absl::Span<const std::string_view> fields_to_print,
-                       absl::Span<const PipelineStep> steps);
+AggregationResult Process(std::vector<DocValues> values,
+                          absl::Span<const std::string_view> fields_to_print,
+                          absl::Span<const AggregationStep> steps);
 
 }  // namespace dfly::aggregate
