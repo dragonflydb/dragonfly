@@ -6,6 +6,7 @@ from . import dfly_args
 from .instance import DflyInstance, DflyInstanceFactory
 
 
+@pytest.mark.slow
 @pytest.mark.opt_only
 @pytest.mark.parametrize(
     "type, keys, val_size, elements",

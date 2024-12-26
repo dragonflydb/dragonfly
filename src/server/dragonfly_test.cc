@@ -10,7 +10,6 @@ extern "C" {
 #include <absl/strings/ascii.h>
 #include <absl/strings/charconv.h>
 #include <absl/strings/str_join.h>
-#include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
 #include <fast_float/fast_float.h>
 #include <gmock/gmock.h>
@@ -808,30 +807,14 @@ TEST_F(DflyEngineTest, StreamMemInfo) {
     Run({"XADD", "test", std::to_string(i), "var", "val" + std::to_string(i)});
   }
 
-  auto resp = Run({"info", "memory"});
-  auto str_resp = absl::StrSplit(resp.GetString(), "\r\n");
-  int64_t stream_mem_first;
-  for (const auto& s : str_resp) {
-    if (absl::StartsWith(s, "type_used_memory_stream")) {
-      std::vector<std::string> stream_mem = absl::StrSplit(s, ":");
-      stream_mem_first = std::stol(stream_mem[1]);
-    }
-  }
+  int64_t stream_mem_first = GetMetrics().db_stats[0].memory_usage_by_type[OBJ_STREAM];
   EXPECT_GT(stream_mem_first, 0);
 
   auto dump = Run({"dump", "test"});
   Run({"del", "test"});
   Run({"restore", "test", "0", facade::ToSV(dump.GetBuf())});
 
-  resp = Run({"info", "memory"});
-  auto str_resp1 = absl::StrSplit(resp.GetString(), "\r\n");
-  int64_t stream_mem_second;
-  for (const auto& s : str_resp1) {
-    if (absl::StartsWith(s, "type_used_memory_stream")) {
-      std::vector<std::string> stream_mem = absl::StrSplit(s, ":");
-      stream_mem_second = std::stol(stream_mem[1]);
-    }
-  }
+  int64_t stream_mem_second = GetMetrics().db_stats[0].memory_usage_by_type[OBJ_STREAM];
 
   // stream_mem_first != stream_mem_second due to a preallocation in XADD command (see
   // STREAM_LISTPACK_MAX_PRE_ALLOCATE)
