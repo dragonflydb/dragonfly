@@ -603,14 +603,18 @@ class DflySeeder:
                 queue.task_done()
                 break
 
-            pipe = client.pipeline(transaction=tx_data[1])
-            for cmd in tx_data[0]:
-                pipe.execute_command(*cmd)
-                if self.fake_redis is not None:
-                    await self.fake_redis.execute_command(*cmd)
-
             try:
-                await pipe.execute()
+                if self.fake_redis is None:
+                    pipe = client.pipeline(transaction=tx_data[1])
+                    for cmd in tx_data[0]:
+                        pipe.execute_command(*cmd)
+                    await pipe.execute()
+                else:
+                    # To mirror consistently to Fake Redis we must only send to it successful
+                    # commands. We can't use pipes because they might succeed partially.
+                    for cmd in tx_data[0]:
+                        await client.execute_command(*cmd)
+                        await self.fake_redis.execute_command(*cmd)
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
                     await self._close_client(client)
