@@ -98,15 +98,14 @@ class SliceSnapshot {
   void SwitchIncrementalFb(LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(PrimeTable::bucket_iterator it);
+  bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
 
   // Serialize entry into passed serializer.
-  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
-                      std::optional<uint64_t> expire, RdbSerializer* serializer);
+  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -150,9 +149,7 @@ class SliceSnapshot {
   };
 
   DbSlice* db_slice_;
-  DbTableArray db_array_;
-
-  DbIndex current_db_;
+  const DbTableArray db_array_;
 
   std::unique_ptr<RdbSerializer> serializer_;
   std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
@@ -161,7 +158,7 @@ class SliceSnapshot {
   bool serialize_bucket_running_ = false;
   util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
   util::fb2::CondVarAny seq_cond_;
-  CompressionMode compression_mode_;
+  const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
   // version upper bound for entries that should be saved (not included).
