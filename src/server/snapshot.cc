@@ -331,12 +331,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
 
 size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   io::StringFile sfile;
-
-  error_code ec = serializer_->FlushToSink(&sfile, flush_state);
-  if (ec) {
-    VLOG(2) << "Failed to flush to sink: " << ec.message();
-    return 0;
-  }
+  serializer_->FlushToSink(&sfile, flush_state);
 
   size_t serialized = sfile.val.size();
   if (serialized == 0)
