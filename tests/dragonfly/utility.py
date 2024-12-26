@@ -438,12 +438,14 @@ class DflySeeder:
         self.multi_transaction_probability = multi_transaction_probability
         self.stop_flag = False
         self.stop_on_failure = stop_on_failure
+        self.fake_redis = None
 
         self.log_file = log_file
         if self.log_file is not None:
             open(self.log_file, "w").close()
 
         if mirror_to_fake_redis:
+            logging.debug("Creating FakeRedis instance")
             self.fake_redis = fakeredis.FakeAsyncRedis()
 
     async def run(self, target_ops=None, target_deviation=None):
@@ -479,10 +481,11 @@ class DflySeeder:
         """Reset internal state. Needs to be called after flush or restart"""
         self.gen.reset()
 
-    async def capture_fake(self):
+    async def capture_fake_redis(self):
         keys = sorted(list(self.gen.keys_and_types()))
         # TODO: support multiple databases
         assert self.dbcount == 1
+        assert self.fake_redis != None
         capture = DataCapture(await self._capture_entries(self.fake_redis, keys))
         return [capture]
 
@@ -603,7 +606,7 @@ class DflySeeder:
             pipe = client.pipeline(transaction=tx_data[1])
             for cmd in tx_data[0]:
                 pipe.execute_command(*cmd)
-                if self.fake_redis:
+                if self.fake_redis is not None:
                     await self.fake_redis.execute_command(*cmd)
 
             try:

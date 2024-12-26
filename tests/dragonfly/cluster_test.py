@@ -2079,7 +2079,7 @@ async def test_cluster_migration_huge_container_while_seeding(
         < await get_memory(client0, "used_memory_rss") * 1.1
     )
 
-    capture = await seeder.capture_fake()
+    capture = await seeder.capture_fake_redis()
     assert await seeder.compare(capture, instances[1].port)
 
 

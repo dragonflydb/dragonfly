@@ -132,6 +132,6 @@ async def test_seeder_fake_redis(
 
     await seeder.run(target_ops=5_000)
 
-    capture = await seeder.capture_fake()
+    capture = await seeder.capture_fake_redis()
 
     assert await seeder.compare(capture, instance.port)
