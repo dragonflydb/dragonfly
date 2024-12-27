@@ -802,6 +802,25 @@ TEST_F(DflyEngineTest, DebugObject) {
   EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
 }
 
+TEST_F(DflyEngineTest, StreamMemInfo) {
+  for (int i = 1; i < 2; ++i) {
+    Run({"XADD", "test", std::to_string(i), "var", "val" + std::to_string(i)});
+  }
+
+  int64_t stream_mem_first = GetMetrics().db_stats[0].memory_usage_by_type[OBJ_STREAM];
+  EXPECT_GT(stream_mem_first, 0);
+
+  auto dump = Run({"dump", "test"});
+  Run({"del", "test"});
+  Run({"restore", "test", "0", facade::ToSV(dump.GetBuf())});
+
+  int64_t stream_mem_second = GetMetrics().db_stats[0].memory_usage_by_type[OBJ_STREAM];
+
+  // stream_mem_first != stream_mem_second due to a preallocation in XADD command (see
+  // STREAM_LISTPACK_MAX_PRE_ALLOCATE)
+  EXPECT_GT(stream_mem_second, 0);
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
