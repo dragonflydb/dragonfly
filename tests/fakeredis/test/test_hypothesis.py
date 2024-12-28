@@ -148,6 +148,14 @@ def default_normalize(x: Any) -> Any:
     return x
 
 
+def optional(arg):
+    return st.none() | st.just(arg)
+
+
+def zero_or_more(*args):
+    return [optional(arg) for arg in args]
+
+
 class Command:
     def __init__(self, *args):
         args = list(flatten(args))
@@ -226,9 +234,7 @@ common_commands = (
         | commands(
     st.just("sort"),
     keys,
-    st.none() | st.just("asc"),
-    st.none() | st.just("desc"),
-    st.none() | st.just("alpha"),
+    *zero_or_more("asc", "desc", "alpha")
 )
 )
 
@@ -251,10 +257,7 @@ zset_no_score_commands = (  # TODO: test incr
         commands(
             st.just("zadd"),
             keys,
-            st.none() | st.just("nx"),
-            st.none() | st.just("xx"),
-            st.none() | st.just("ch"),
-            st.none() | st.just("incr"),
+            *zero_or_more("nx", "xx", "ch", "incr"),
             st.lists(st.tuples(st.just(0), fields)),
         )
         | commands(st.just("zlexcount"), keys, string_tests, string_tests)
@@ -466,9 +469,7 @@ class TestString(BaseTest):
         st.just("set"),
         keys,
         values,
-        st.none() | st.just("nx"),
-        st.none() | st.just("xx"),
-        st.none() | st.just("keepttl"),
+        *zero_or_more("nx", "xx", "keepttl"),
     )
             | commands(st.just("setex"), keys, expires_seconds, values)
             | commands(st.just("psetex"), keys, expires_ms, values)
@@ -516,10 +517,7 @@ class TestHash(BaseTest):
         keys,
         expires_seconds,
         # TODO: Dragonfly does not support the following arguments
-        # st.none() | st.just("nx"),
-        # st.none() | st.just("xx"),
-        # st.none() | st.just("gt"),
-        # st.none() | st.just("lt"),
+        # *zero_or_more("nx", "xx", "gt", "lt"),
         st.just("fields"),
         st.just(2),
         st.lists(fields, min_size=2, max_size=2),
@@ -529,10 +527,7 @@ class TestHash(BaseTest):
         keys,
         expires_ms,
         # TODO: Dragonfly does not support the following arguments
-        # st.none() | st.just("nx"),
-        # st.none() | st.just("xx"),
-        # st.none() | st.just("gt"),
-        # st.none() | st.just("lt"),
+        # *zero_or_more("nx", "xx", "gt", "lt"),
         st.just("fields"),
         st.just(2),
         st.lists(fields, min_size=2, max_size=2),
@@ -613,10 +608,7 @@ class TestZSet(BaseTest):
             commands(
                 st.just("zadd"),
                 keys,
-                st.none() | st.just("nx"),
-                st.none() | st.just("xx"),
-                st.none() | st.just("ch"),
-                st.none() | st.just("incr"),
+                *zero_or_more("nx", "xx", "ch", "incr"),
                 st.lists(st.tuples(scores, fields)),
             )
             | commands(st.just("zcard"), keys)
@@ -627,7 +619,7 @@ class TestZSet(BaseTest):
         keys,
         counts,
         counts,
-        st.none() | st.just("withscores"),
+        optional("withscores"),
     )
             | commands(
         st.sampled_from(["zrangebyscore", "zrevrangebyscore"]),
@@ -635,7 +627,7 @@ class TestZSet(BaseTest):
         score_tests,
         score_tests,
         limits,
-        st.none() | st.just("withscores"),
+        optional("withscores"),
     )
             | commands(st.sampled_from(["zrank", "zrevrank"]), keys, fields)
             | commands(st.just("zrem"), keys, st.lists(fields))
@@ -690,9 +682,7 @@ class TestTransaction(BaseTest):
         st.just("set"),
         keys,
         values,
-        st.none() | st.just("nx"),
-        st.none() | st.just("xx"),
-        st.none() | st.just("keepttl"),
+        *zero_or_more("nx", "xx", "keepttl"),
     )
             | commands(st.just("setex"), keys, expires_seconds, values)
             | commands(st.just("psetex"), keys, expires_ms, values)
