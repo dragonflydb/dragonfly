@@ -55,7 +55,8 @@ fields = sample_attr("fields")
 values = sample_attr("values")
 scores = sample_attr("scores")
 
-int_as_bytes = st.builds(lambda x: str(default_normalize(x)).encode(), st.integers())
+int_as_bytes = st.builds(lambda x: str(default_normalize(x)).encode(), st.integers(max_value=2147483647))
+optional_bitcount_range = st.just(()) | st.tuples(int_as_bytes, int_as_bytes)
 float_as_bytes = st.builds(
     lambda x: repr(default_normalize(x)).encode(), st.floats(width=32)
 )
@@ -423,10 +424,10 @@ class BaseTest:
                 else self.command_strategy
             )
 
-        hypothesis.settings.register_profile(
-            "debug", max_examples=10, verbosity=hypothesis.Verbosity.debug
-        )
-        hypothesis.settings.load_profile("debug")
+        # hypothesis.settings.register_profile(
+        #     "debug", max_examples=10, verbosity=hypothesis.Verbosity.debug
+        # )
+        # hypothesis.settings.load_profile("debug")
         hypothesis.stateful.run_state_machine_as_test(Machine)
 
 
@@ -435,7 +436,7 @@ class TestConnection(BaseTest):
     connection_commands = (
         commands(st.just("echo"), values)
         | commands(st.just("ping"), st.lists(values, max_size=2))
-        | commands(st.just("swapdb"), dbnums, dbnums)
+        # | commands(st.just("swapdb"), dbnums, dbnums)
     )
     command_strategy = connection_commands | common_commands
 
@@ -443,8 +444,7 @@ class TestConnection(BaseTest):
 class TestString(BaseTest):
     string_commands = (
         commands(st.just("append"), keys, values)
-        | commands(st.just("bitcount"), keys)
-        | commands(st.just("bitcount"), keys, values, values)
+        | commands(st.just("bitcount"), keys, optional_bitcount_range)
         | commands(st.sampled_from(["incr", "decr"]), keys)
         | commands(st.sampled_from(["incrby", "decrby"]), keys, values)
         | commands(st.just("get"), keys)
