@@ -415,17 +415,12 @@ class BaseTest:
 
     command_strategy: SearchStrategy
     create_command_strategy = st.nothing()
-    command_strategy_redis7 = st.nothing()
 
     @pytest.mark.slow
     def test(self):
         class Machine(CommonMachine):
             create_command_strategy = self.create_command_strategy
-            command_strategy = (
-                self.command_strategy | self.command_strategy_redis7
-                if redis_ver >= (7,)
-                else self.command_strategy
-            )
+            command_strategy = self.command_strategy
 
         # hypothesis.settings.register_profile(
         #     "debug", max_examples=10, verbosity=hypothesis.Verbosity.debug
@@ -498,14 +493,12 @@ class TestHash(BaseTest):
             | commands(st.just("hset"), keys, st.lists(st.tuples(fields, values)))
             | commands(st.just("hsetnx"), keys, fields, values)
             | commands(st.just("hstrlen"), keys, fields)
+            | commands(
+        st.just("hpersist"),
+        st.just("fields"),
+        st.just(2),
+        st.lists(fields, min_size=2, max_size=2),
     )
-    command_strategy_redis7 = (
-            commands(
-                st.just("hpersist"),
-                st.just("fields"),
-                st.just(2),
-                st.lists(fields, min_size=2, max_size=2),
-            )
             | commands(
         st.just("hexpiretime"),
         st.just("fields"),
@@ -522,10 +515,11 @@ class TestHash(BaseTest):
         st.just("hexpire"),
         keys,
         expires_seconds,
-        st.none() | st.just("nx"),
-        st.none() | st.just("xx"),
-        st.none() | st.just("gt"),
-        st.none() | st.just("lt"),
+        # TODO: Dragonfly does not support the following arguments
+        # st.none() | st.just("nx"),
+        # st.none() | st.just("xx"),
+        # st.none() | st.just("gt"),
+        # st.none() | st.just("lt"),
         st.just("fields"),
         st.just(2),
         st.lists(fields, min_size=2, max_size=2),
@@ -534,10 +528,11 @@ class TestHash(BaseTest):
         st.just("hpexpire"),
         keys,
         expires_ms,
-        st.none() | st.just("nx"),
-        st.none() | st.just("xx"),
-        st.none() | st.just("gt"),
-        st.none() | st.just("lt"),
+        # TODO: Dragonfly does not support the following arguments
+        # st.none() | st.just("nx"),
+        # st.none() | st.just("xx"),
+        # st.none() | st.just("gt"),
+        # st.none() | st.just("lt"),
         st.just("fields"),
         st.just(2),
         st.lists(fields, min_size=2, max_size=2),
