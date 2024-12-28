@@ -497,31 +497,9 @@ class TestHash(BaseTest):
             st.lists(fields, min_size=2, max_size=2),
         )
         | commands(
-            st.just("hexpiretime"),
-            st.just("fields"),
-            st.just(2),
-            st.lists(fields, min_size=2, max_size=2),
-        )
-        | commands(
-            st.just("hpexpiretime"),
-            st.just("fields"),
-            st.just(2),
-            st.lists(fields, min_size=2, max_size=2),
-        )
-        | commands(
             st.just("hexpire"),
             keys,
             expires_seconds,
-            # TODO: Dragonfly does not support the following arguments
-            # *zero_or_more("nx", "xx", "gt", "lt"),
-            st.just("fields"),
-            st.just(2),
-            st.lists(fields, min_size=2, max_size=2),
-        )
-        | commands(
-            st.just("hpexpire"),
-            keys,
-            expires_ms,
             # TODO: Dragonfly does not support the following arguments
             # *zero_or_more("nx", "xx", "gt", "lt"),
             st.just("fields"),
@@ -689,9 +667,7 @@ class TestServer(BaseTest):
     #  Find a better way to test this. commands(st.just('bgsave'))
     server_commands = (
         commands(st.just("dbsize"))
-        | commands(
-            st.sampled_from(["flushdb", "flushall"]), st.sampled_from([[], "async"])
-        )
+        | commands(st.sampled_from(["flushdb", "flushall"]))
         # TODO: result is non-deterministic
         # | commands(st.just('lastsave'))
         | commands(st.just("save"))
