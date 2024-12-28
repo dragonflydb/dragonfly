@@ -220,22 +220,18 @@ def commands(*args, **kwargs):
 
 # # TODO: all expiry-related commands
 common_commands = (
-        commands(st.sampled_from(["del", "persist", "type", "unlink"]), keys)
-        | commands(st.just("exists"), st.lists(keys))
-        | commands(st.just("keys"), st.just("*"))
-        # Disabled for now due to redis giving wrong answers
-        # (https://github.com/antirez/redis/issues/5632)
-        # | commands(st.just('keys'), patterns)
-        | commands(st.just("move"), keys, dbnums)
-        | commands(st.sampled_from(["rename", "renamenx"]), keys, keys)
-        # TODO: find a better solution to sort instability than throwing
-        #  away the sort entirely with normalize. This also prevents us
-        #  using LIMIT.
-        | commands(
-    st.just("sort"),
-    keys,
-    *zero_or_more("asc", "desc", "alpha")
-)
+    commands(st.sampled_from(["del", "persist", "type", "unlink"]), keys)
+    | commands(st.just("exists"), st.lists(keys))
+    | commands(st.just("keys"), st.just("*"))
+    # Disabled for now due to redis giving wrong answers
+    # (https://github.com/antirez/redis/issues/5632)
+    # | commands(st.just('keys'), patterns)
+    | commands(st.just("move"), keys, dbnums)
+    | commands(st.sampled_from(["rename", "renamenx"]), keys, keys)
+    # TODO: find a better solution to sort instability than throwing
+    #  away the sort entirely with normalize. This also prevents us
+    #  using LIMIT.
+    | commands(st.just("sort"), keys, *zero_or_more("asc", "desc", "alpha"))
 )
 
 
@@ -254,21 +250,21 @@ zset_no_score_create_commands = commands(
     st.just("zadd"), keys, st.lists(st.tuples(st.just(0), fields), min_size=1)
 )
 zset_no_score_commands = (  # TODO: test incr
-        commands(
-            st.just("zadd"),
-            keys,
-            *zero_or_more("nx", "xx", "ch", "incr"),
-            st.lists(st.tuples(st.just(0), fields)),
-        )
-        | commands(st.just("zlexcount"), keys, string_tests, string_tests)
-        | commands(
-    st.sampled_from(["zrangebylex", "zrevrangebylex"]),
-    keys,
-    string_tests,
-    string_tests,
-    limits,
-)
-        | commands(st.just("zremrangebylex"), keys, string_tests, string_tests)
+    commands(
+        st.just("zadd"),
+        keys,
+        *zero_or_more("nx", "xx", "ch", "incr"),
+        st.lists(st.tuples(st.just(0), fields)),
+    )
+    | commands(st.just("zlexcount"), keys, string_tests, string_tests)
+    | commands(
+        st.sampled_from(["zrangebylex", "zrevrangebylex"]),
+        keys,
+        string_tests,
+        string_tests,
+        limits,
+    )
+    | commands(st.just("zremrangebylex"), keys, string_tests, string_tests)
 )
 
 bad_commands = (
@@ -357,10 +353,10 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
                 real_exc
             )
         elif (
-                real_exc is None
-                and isinstance(real_result, list)
-                and command.args
-                and command.args[0].lower() == "exec"
+            real_exc is None
+            and isinstance(real_result, list)
+            and command.args
+            and command.args[0].lower() == "exec"
         ):
             assert fake_result is not None
             # Transactions need to use the normalize functions of the
@@ -372,7 +368,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             self.transaction_normalize = []
         else:
             assert fake_result == real_result or (
-                    type(fake_result) is float and fake_result == pytest.approx(real_result)
+                type(fake_result) is float and fake_result == pytest.approx(real_result)
             ), "Discrepancy when running command {}, fake({}) != real({})".format(
                 command, fake_result, real_result
             )
@@ -383,8 +379,8 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
                 # find such examples.
                 self.transaction_normalize.append(command.normalize)
         if len(command.args) == 1 and Command.encode(command.args[0]).lower() in (
-                b"discard",
-                b"exec",
+            b"discard",
+            b"exec",
         ):
             self.transaction_normalize = []
 
@@ -438,8 +434,8 @@ class BaseTest:
 class TestConnection(BaseTest):
     # TODO: tests for select
     connection_commands = (
-            commands(st.just("echo"), values)
-            | commands(st.just("ping"), st.lists(values, max_size=2))
+        commands(st.just("echo"), values)
+        | commands(st.just("ping"), st.lists(values, max_size=2))
         # | commands(st.just("swapdb"), dbnums, dbnums)
     )
     command_strategy = connection_commands | common_commands
@@ -447,35 +443,35 @@ class TestConnection(BaseTest):
 
 class TestString(BaseTest):
     string_commands = (
-            commands(st.just("append"), keys, values)
-            | commands(st.just("bitcount"), keys, optional_bitcount_range)
-            | commands(st.sampled_from(["incr", "decr"]), keys)
-            | commands(st.sampled_from(["incrby", "decrby"]), keys, values)
-            | commands(st.just("get"), keys)
-            | commands(st.just("getbit"), keys, counts)
-            | commands(
-        st.just("setbit"),
-        keys,
-        counts,
-        st.integers(min_value=0, max_value=1) | ints,
-    )
-            | commands(st.sampled_from(["substr", "getrange"]), keys, counts, counts)
-            | commands(st.just("getset"), keys, values)
-            | commands(st.just("mget"), st.lists(keys))
-            | commands(
-        st.sampled_from(["mset", "msetnx"]), st.lists(st.tuples(keys, values))
-    )
-            | commands(
-        st.just("set"),
-        keys,
-        values,
-        *zero_or_more("nx", "xx", "keepttl"),
-    )
-            | commands(st.just("setex"), keys, expires_seconds, values)
-            | commands(st.just("psetex"), keys, expires_ms, values)
-            | commands(st.just("setnx"), keys, values)
-            | commands(st.just("setrange"), keys, counts, values)
-            | commands(st.just("strlen"), keys)
+        commands(st.just("append"), keys, values)
+        | commands(st.just("bitcount"), keys, optional_bitcount_range)
+        | commands(st.sampled_from(["incr", "decr"]), keys)
+        | commands(st.sampled_from(["incrby", "decrby"]), keys, values)
+        | commands(st.just("get"), keys)
+        | commands(st.just("getbit"), keys, counts)
+        | commands(
+            st.just("setbit"),
+            keys,
+            counts,
+            st.integers(min_value=0, max_value=1) | ints,
+        )
+        | commands(st.sampled_from(["substr", "getrange"]), keys, counts, counts)
+        | commands(st.just("getset"), keys, values)
+        | commands(st.just("mget"), st.lists(keys))
+        | commands(
+            st.sampled_from(["mset", "msetnx"]), st.lists(st.tuples(keys, values))
+        )
+        | commands(
+            st.just("set"),
+            keys,
+            values,
+            *zero_or_more("nx", "xx", "keepttl"),
+        )
+        | commands(st.just("setex"), keys, expires_seconds, values)
+        | commands(st.just("psetex"), keys, expires_ms, values)
+        | commands(st.just("setnx"), keys, values)
+        | commands(st.just("setrange"), keys, counts, values)
+        | commands(st.just("strlen"), keys)
     )
     create_command_strategy = commands(st.just("set"), keys, values)
     command_strategy = string_commands | common_commands
@@ -483,55 +479,55 @@ class TestString(BaseTest):
 
 class TestHash(BaseTest):
     hash_commands = (
-            commands(st.just("hset"), keys, st.lists(st.tuples(fields, values)))
-            | commands(st.just("hdel"), keys, st.lists(fields))
-            | commands(st.just("hexists"), keys, fields)
-            | commands(st.just("hget"), keys, fields)
-            | commands(st.sampled_from(["hgetall", "hkeys", "hvals"]), keys)
-            | commands(st.just("hincrby"), keys, fields, ints)
-            | commands(st.just("hlen"), keys)
-            | commands(st.just("hmget"), keys, st.lists(fields))
-            | commands(st.just("hset"), keys, st.lists(st.tuples(fields, values)))
-            | commands(st.just("hsetnx"), keys, fields, values)
-            | commands(st.just("hstrlen"), keys, fields)
-            | commands(
-        st.just("hpersist"),
-        st.just("fields"),
-        st.just(2),
-        st.lists(fields, min_size=2, max_size=2),
-    )
-            | commands(
-        st.just("hexpiretime"),
-        st.just("fields"),
-        st.just(2),
-        st.lists(fields, min_size=2, max_size=2),
-    )
-            | commands(
-        st.just("hpexpiretime"),
-        st.just("fields"),
-        st.just(2),
-        st.lists(fields, min_size=2, max_size=2),
-    )
-            | commands(
-        st.just("hexpire"),
-        keys,
-        expires_seconds,
-        # TODO: Dragonfly does not support the following arguments
-        # *zero_or_more("nx", "xx", "gt", "lt"),
-        st.just("fields"),
-        st.just(2),
-        st.lists(fields, min_size=2, max_size=2),
-    )
-            | commands(
-        st.just("hpexpire"),
-        keys,
-        expires_ms,
-        # TODO: Dragonfly does not support the following arguments
-        # *zero_or_more("nx", "xx", "gt", "lt"),
-        st.just("fields"),
-        st.just(2),
-        st.lists(fields, min_size=2, max_size=2),
-    )
+        commands(st.just("hset"), keys, st.lists(st.tuples(fields, values)))
+        | commands(st.just("hdel"), keys, st.lists(fields))
+        | commands(st.just("hexists"), keys, fields)
+        | commands(st.just("hget"), keys, fields)
+        | commands(st.sampled_from(["hgetall", "hkeys", "hvals"]), keys)
+        | commands(st.just("hincrby"), keys, fields, ints)
+        | commands(st.just("hlen"), keys)
+        | commands(st.just("hmget"), keys, st.lists(fields))
+        | commands(st.just("hset"), keys, st.lists(st.tuples(fields, values)))
+        | commands(st.just("hsetnx"), keys, fields, values)
+        | commands(st.just("hstrlen"), keys, fields)
+        | commands(
+            st.just("hpersist"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+        | commands(
+            st.just("hexpiretime"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+        | commands(
+            st.just("hpexpiretime"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+        | commands(
+            st.just("hexpire"),
+            keys,
+            expires_seconds,
+            # TODO: Dragonfly does not support the following arguments
+            # *zero_or_more("nx", "xx", "gt", "lt"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
+        | commands(
+            st.just("hpexpire"),
+            keys,
+            expires_ms,
+            # TODO: Dragonfly does not support the following arguments
+            # *zero_or_more("nx", "xx", "gt", "lt"),
+            st.just("fields"),
+            st.just(2),
+            st.lists(fields, min_size=2, max_size=2),
+        )
     )
     create_command_strategy = commands(
         st.just("hset"), keys, st.lists(st.tuples(fields, values), min_size=1)
@@ -542,30 +538,30 @@ class TestHash(BaseTest):
 class TestList(BaseTest):
     # TODO: blocking commands
     list_commands = (
-            commands(st.just("lindex"), keys, counts)
-            | commands(
-        st.just("linsert"),
-        keys,
-        st.sampled_from(["before", "after", "BEFORE", "AFTER"]) | st.binary(),
-        values,
-        values,
-    )
-            | commands(st.just("llen"), keys)
-            | commands(
-        st.sampled_from(["lpop", "rpop"]),
-        keys,
-        st.just(None) | st.just([]) | ints,
-    )
-            | commands(
-        st.sampled_from(["lpush", "lpushx", "rpush", "rpushx"]),
-        keys,
-        st.lists(values),
-    )
-            | commands(st.just("lrange"), keys, counts, counts)
-            | commands(st.just("lrem"), keys, counts, values)
-            | commands(st.just("lset"), keys, counts, values)
-            | commands(st.just("ltrim"), keys, counts, counts)
-            | commands(st.just("rpoplpush"), keys, keys)
+        commands(st.just("lindex"), keys, counts)
+        | commands(
+            st.just("linsert"),
+            keys,
+            st.sampled_from(["before", "after", "BEFORE", "AFTER"]) | st.binary(),
+            values,
+            values,
+        )
+        | commands(st.just("llen"), keys)
+        | commands(
+            st.sampled_from(["lpop", "rpop"]),
+            keys,
+            st.just(None) | st.just([]) | ints,
+        )
+        | commands(
+            st.sampled_from(["lpush", "lpushx", "rpush", "rpushx"]),
+            keys,
+            st.lists(values),
+        )
+        | commands(st.just("lrange"), keys, counts, counts)
+        | commands(st.just("lrem"), keys, counts, values)
+        | commands(st.just("lset"), keys, counts, values)
+        | commands(st.just("ltrim"), keys, counts, counts)
+        | commands(st.just("rpoplpush"), keys, keys)
     )
     create_command_strategy = commands(
         st.just("rpush"), keys, st.lists(values, min_size=1)
@@ -575,24 +571,18 @@ class TestList(BaseTest):
 
 class TestSet(BaseTest):
     set_commands = (
-            commands(
-                st.just("sadd"),
-                keys,
-                st.lists(
-                    fields,
-                ),
-            )
-            | commands(st.just("scard"), keys)
-            | commands(st.sampled_from(["sdiff", "sinter", "sunion"]), st.lists(keys))
-            | commands(
-        st.sampled_from(["sdiffstore", "sinterstore", "sunionstore"]),
-        keys,
-        st.lists(keys),
-    )
-            | commands(st.just("sismember"), keys, fields)
-            | commands(st.just("smembers"), keys)
-            | commands(st.just("smove"), keys, keys, fields)
-            | commands(st.just("srem"), keys, st.lists(fields))
+        commands(st.just("sadd"), keys, st.lists(fields))
+        | commands(st.just("scard"), keys)
+        | commands(st.sampled_from(["sdiff", "sinter", "sunion"]), st.lists(keys))
+        | commands(
+            st.sampled_from(["sdiffstore", "sinterstore", "sunionstore"]),
+            keys,
+            st.lists(keys),
+        )
+        | commands(st.just("sismember"), keys, fields)
+        | commands(st.just("smembers"), keys)
+        | commands(st.just("smove"), keys, keys, fields)
+        | commands(st.just("srem"), keys, st.lists(fields))
     )
     # TODO:
     # - find a way to test srandmember, spop which are random
@@ -605,43 +595,43 @@ class TestSet(BaseTest):
 
 class TestZSet(BaseTest):
     zset_commands = (
-            commands(
-                st.just("zadd"),
-                keys,
-                *zero_or_more("nx", "xx", "ch", "incr"),
-                st.lists(st.tuples(scores, fields)),
-            )
-            | commands(st.just("zcard"), keys)
-            | commands(st.just("zcount"), keys, score_tests, score_tests)
-            | commands(st.just("zincrby"), keys, scores, fields)
-            | commands(
-        st.sampled_from(["zrange", "zrevrange"]),
-        keys,
-        counts,
-        counts,
-        optional("withscores"),
-    )
-            | commands(
-        st.sampled_from(["zrangebyscore", "zrevrangebyscore"]),
-        keys,
-        score_tests,
-        score_tests,
-        limits,
-        optional("withscores"),
-    )
-            | commands(st.sampled_from(["zrank", "zrevrank"]), keys, fields)
-            | commands(st.just("zrem"), keys, st.lists(fields))
-            | commands(st.just("zremrangebyrank"), keys, counts, counts)
-            | commands(st.just("zremrangebyscore"), keys, score_tests, score_tests)
-            | commands(st.just("zscore"), keys, fields)
-            | st.builds(
-        build_zstore,
-        command=st.sampled_from(["zunionstore", "zinterstore"]),
-        dest=keys,
-        sources=st.lists(st.tuples(keys, float_as_bytes)),
-        weights=st.booleans(),
-        aggregate=st.sampled_from([None, "sum", "min", "max"]),
-    )
+        commands(
+            st.just("zadd"),
+            keys,
+            *zero_or_more("nx", "xx", "ch", "incr"),
+            st.lists(st.tuples(scores, fields)),
+        )
+        | commands(st.just("zcard"), keys)
+        | commands(st.just("zcount"), keys, score_tests, score_tests)
+        | commands(st.just("zincrby"), keys, scores, fields)
+        | commands(
+            st.sampled_from(["zrange", "zrevrange"]),
+            keys,
+            counts,
+            counts,
+            optional("withscores"),
+        )
+        | commands(
+            st.sampled_from(["zrangebyscore", "zrevrangebyscore"]),
+            keys,
+            score_tests,
+            score_tests,
+            limits,
+            optional("withscores"),
+        )
+        | commands(st.sampled_from(["zrank", "zrevrank"]), keys, fields)
+        | commands(st.just("zrem"), keys, st.lists(fields))
+        | commands(st.just("zremrangebyrank"), keys, counts, counts)
+        | commands(st.just("zremrangebyscore"), keys, score_tests, score_tests)
+        | commands(st.just("zscore"), keys, fields)
+        | st.builds(
+            build_zstore,
+            command=st.sampled_from(["zunionstore", "zinterstore"]),
+            dest=keys,
+            sources=st.lists(st.tuples(keys, float_as_bytes)),
+            weights=st.booleans(),
+            aggregate=st.sampled_from([None, "sum", "min", "max"]),
+        )
     )
     # TODO: zscan, zpopmin/zpopmax, bzpopmin/bzpopmax, probably more
     create_command_strategy = commands(
@@ -657,38 +647,38 @@ class TestZSetNoScores(BaseTest):
 
 class TestTransaction(BaseTest):
     transaction_commands = (
-            commands(st.sampled_from(["multi", "discard", "exec", "unwatch"]))
-            | commands(st.just("watch"), keys)
-            | commands(st.just("append"), keys, values)
-            | commands(st.just("bitcount"), keys)
-            | commands(st.just("bitcount"), keys, values, values)
-            | commands(st.sampled_from(["incr", "decr"]), keys)
-            | commands(st.sampled_from(["incrby", "decrby"]), keys, values)
-            | commands(st.just("get"), keys)
-            | commands(st.just("getbit"), keys, counts)
-            | commands(
-        st.just("setbit"),
-        keys,
-        counts,
-        st.integers(min_value=0, max_value=1) | ints,
-    )
-            | commands(st.sampled_from(["substr", "getrange"]), keys, counts, counts)
-            | commands(st.just("getset"), keys, values)
-            | commands(st.just("mget"), st.lists(keys))
-            | commands(
-        st.sampled_from(["mset", "msetnx"]), st.lists(st.tuples(keys, values))
-    )
-            | commands(
-        st.just("set"),
-        keys,
-        values,
-        *zero_or_more("nx", "xx", "keepttl"),
-    )
-            | commands(st.just("setex"), keys, expires_seconds, values)
-            | commands(st.just("psetex"), keys, expires_ms, values)
-            | commands(st.just("setnx"), keys, values)
-            | commands(st.just("setrange"), keys, counts, values)
-            | commands(st.just("strlen"), keys)
+        commands(st.sampled_from(["multi", "discard", "exec", "unwatch"]))
+        | commands(st.just("watch"), keys)
+        | commands(st.just("append"), keys, values)
+        | commands(st.just("bitcount"), keys)
+        | commands(st.just("bitcount"), keys, values, values)
+        | commands(st.sampled_from(["incr", "decr"]), keys)
+        | commands(st.sampled_from(["incrby", "decrby"]), keys, values)
+        | commands(st.just("get"), keys)
+        | commands(st.just("getbit"), keys, counts)
+        | commands(
+            st.just("setbit"),
+            keys,
+            counts,
+            st.integers(min_value=0, max_value=1) | ints,
+        )
+        | commands(st.sampled_from(["substr", "getrange"]), keys, counts, counts)
+        | commands(st.just("getset"), keys, values)
+        | commands(st.just("mget"), st.lists(keys))
+        | commands(
+            st.sampled_from(["mset", "msetnx"]), st.lists(st.tuples(keys, values))
+        )
+        | commands(
+            st.just("set"),
+            keys,
+            values,
+            *zero_or_more("nx", "xx", "keepttl"),
+        )
+        | commands(st.just("setex"), keys, expires_seconds, values)
+        | commands(st.just("psetex"), keys, expires_ms, values)
+        | commands(st.just("setnx"), keys, values)
+        | commands(st.just("setrange"), keys, counts, values)
+        | commands(st.just("strlen"), keys)
     )
     create_command_strategy = TestString.create_command_strategy
     command_strategy = transaction_commands | common_commands
@@ -698,13 +688,13 @@ class TestServer(BaseTest):
     # TODO: real redis raises an error if there is a save already in progress.
     #  Find a better way to test this. commands(st.just('bgsave'))
     server_commands = (
-            commands(st.just("dbsize"))
-            | commands(
-        st.sampled_from(["flushdb", "flushall"]), st.sampled_from([[], "async"])
-    )
-            # TODO: result is non-deterministic
-            # | commands(st.just('lastsave'))
-            | commands(st.just("save"))
+        commands(st.just("dbsize"))
+        | commands(
+            st.sampled_from(["flushdb", "flushall"]), st.sampled_from([[], "async"])
+        )
+        # TODO: result is non-deterministic
+        # | commands(st.just('lastsave'))
+        | commands(st.just("save"))
     )
     create_command_strategy = TestString.create_command_strategy
     command_strategy = server_commands | TestString.string_commands | common_commands
@@ -712,122 +702,20 @@ class TestServer(BaseTest):
 
 class TestJoint(BaseTest):
     create_command_strategy = (
-            TestString.create_command_strategy
-            | TestHash.create_command_strategy
-            | TestList.create_command_strategy
-            | TestSet.create_command_strategy
-            | TestZSet.create_command_strategy
+        TestString.create_command_strategy
+        | TestHash.create_command_strategy
+        | TestList.create_command_strategy
+        | TestSet.create_command_strategy
+        | TestZSet.create_command_strategy
     )
     command_strategy = (
-            TestServer.server_commands
-            | TestConnection.connection_commands
-            | TestString.string_commands
-            | TestHash.hash_commands
-            | TestList.list_commands
-            | TestSet.set_commands
-            | TestZSet.zset_commands
-            | common_commands
-            | bad_commands
-    )
-
-
-@st.composite
-def delete_arg(draw, commands):
-    command = draw(commands)
-    if command.args:
-        pos = draw(st.integers(min_value=0, max_value=len(command.args) - 1))
-        command.args = command.args[:pos] + command.args[pos + 1:]
-    return command
-
-
-@st.composite
-def command_args(draw, commands):
-    """Generate an argument from some command"""
-    command = draw(commands)
-    hypothesis.assume(len(command.args))
-    return draw(st.sampled_from(command.args))
-
-
-def mutate_arg(draw, commands, mutate):
-    command = draw(commands)
-    if command.args:
-        pos = draw(st.integers(min_value=0, max_value=len(command.args) - 1))
-        arg = mutate(Command.encode(command.args[pos]))
-        command.args = command.args[:pos] + (arg,) + command.args[pos + 1:]
-    return command
-
-
-@st.composite
-def replace_arg(draw, commands, replacements):
-    return mutate_arg(draw, commands, lambda arg: draw(replacements))
-
-
-@st.composite
-def uppercase_arg(draw, commands):
-    return mutate_arg(draw, commands, lambda arg: arg.upper())
-
-
-@st.composite
-def prefix_arg(draw, commands, prefixes):
-    return mutate_arg(draw, commands, lambda arg: draw(prefixes) + arg)
-
-
-@st.composite
-def suffix_arg(draw, commands, suffixes):
-    return mutate_arg(draw, commands, lambda arg: arg + draw(suffixes))
-
-
-@st.composite
-def add_arg(draw, commands, arguments):
-    command = draw(commands)
-    arg = draw(arguments)
-    pos = draw(st.integers(min_value=0, max_value=len(command.args)))
-    command.args = command.args[:pos] + (arg,) + command.args[pos:]
-    return command
-
-
-@st.composite
-def swap_args(draw, commands):
-    command = draw(commands)
-    if len(command.args) >= 2:
-        pos1 = draw(st.integers(min_value=0, max_value=len(command.args) - 1))
-        pos2 = draw(st.integers(min_value=0, max_value=len(command.args) - 1))
-        hypothesis.assume(pos1 != pos2)
-        args = list(command.args)
-        arg1 = args[pos1]
-        arg2 = args[pos2]
-        args[pos1] = arg2
-        args[pos2] = arg1
-        command.args = tuple(args)
-    return command
-
-
-def mutated_commands(commands):
-    args = st.sampled_from(
-        [
-            b"withscores",
-            b"xx",
-            b"nx",
-            b"ex",
-            b"px",
-            b"weights",
-            b"aggregate",
-            b"",
-            b"0",
-            b"-1",
-            b"nan",
-            b"inf",
-            b"-inf",
-        ]
-    ) | command_args(commands)
-    affixes = st.sampled_from([b"\0", b"-", b"+", b"\t", b"\n", b"0000"]) | st.binary()
-    return st.recursive(
-        commands,
-        lambda x: delete_arg(x)
-                  | replace_arg(x, args)
-                  | uppercase_arg(x)
-                  | prefix_arg(x, affixes)
-                  | suffix_arg(x, affixes)
-                  | add_arg(x, args)
-                  | swap_args(x),
+        TestServer.server_commands
+        | TestConnection.connection_commands
+        | TestString.string_commands
+        | TestHash.hash_commands
+        | TestList.list_commands
+        | TestSet.set_commands
+        | TestZSet.zset_commands
+        | common_commands
+        | bad_commands
     )
