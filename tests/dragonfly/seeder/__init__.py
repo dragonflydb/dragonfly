@@ -19,6 +19,7 @@ class SeederBase:
     UID_COUNTER = 1  # multiple generators should not conflict on keys
     CACHED_SCRIPTS = {}
     DEFAULT_TYPES = ["STRING", "LIST", "SET", "HASH", "ZSET", "JSON"]
+    BIG_VALUE_TYPES = ["LIST", "SET", "HASH", "ZSET"]
 
     def __init__(self, types: typing.Optional[typing.List[str]] = None):
         self.uid = SeederBase.UID_COUNTER
@@ -137,6 +138,8 @@ class Seeder(SeederBase):
         data_size=100,
         collection_size=None,
         types: typing.Optional[typing.List[str]] = None,
+        huge_value_target=5,
+        huge_value_size=100000,
     ):
         SeederBase.__init__(self, types)
         self.key_target = key_target
@@ -145,6 +148,9 @@ class Seeder(SeederBase):
             self.collection_size = math.ceil(data_size ** (1 / 3))
         else:
             self.collection_size = collection_size
+
+        self.huge_value_target = huge_value_target
+        self.huge_value_size = huge_value_size
 
         self.units = [
             Seeder.Unit(
@@ -166,6 +172,8 @@ class Seeder(SeederBase):
             target_deviation if target_deviation is not None else -1,
             self.data_size,
             self.collection_size,
+            self.huge_value_target / len(self.units),
+            self.huge_value_size,
         ]
 
         sha = await client.script_load(Seeder._load_script("generate"))
@@ -196,8 +204,13 @@ class Seeder(SeederBase):
             unit.stop_key if using_stopkey else "",
         ] + args
 
-        unit.counter = await client.evalsha(sha, 0, *args)
+        result = await client.evalsha(sha, 0, *args)
+        result = result.split()
+        unit.counter = int(result[0])
+        huge_entries = int(result[1])
 
-        logging.debug(
-            f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
-        )
+        msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
+        if huge_entries > 0:
+            msg = f"{msg}. Total huge entries {huge_entries} added."
+
+        logging.debug(msg)

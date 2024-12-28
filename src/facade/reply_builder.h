@@ -5,6 +5,7 @@
 
 #include <absl/container/flat_hash_map.h>
 
+#include <boost/intrusive/list.hpp>
 #include <optional>
 #include <string_view>
 
@@ -32,6 +33,20 @@ class SinkReplyBuilder {
  public:
   constexpr static size_t kMaxInlineSize = 32;
   constexpr static size_t kMaxBufferSize = 8192;
+
+  struct PendingPin : public boost::intrusive::list_base_hook<
+                          ::boost::intrusive::link_mode<::boost::intrusive::normal_link>> {
+    uint64_t timestamp_ns;
+
+    PendingPin(uint64_t v = 0) : timestamp_ns(v) {
+    }
+  };
+
+  using PendingList =
+      boost::intrusive::list<PendingPin, boost::intrusive::constant_time_size<false>,
+                             boost::intrusive::cache_last<false>>;
+
+  static thread_local PendingList pending_list;
 
   explicit SinkReplyBuilder(io::Sink* sink) : sink_(sink) {
   }
@@ -156,6 +171,8 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendClientError(std::string_view str);
   void SendNotFound();
+  void SendMiss();
+  void SendGetEnd();
 
   void SendValue(std::string_view key, std::string_view value, uint64_t mc_ver, uint32_t mc_flag);
   void SendSimpleString(std::string_view str) final;
@@ -164,15 +181,45 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendRaw(std::string_view str);
 
   void SetNoreply(bool noreply) {
-    noreply_ = noreply;
+    flag_.noreply = noreply;
   }
 
   bool NoReply() const {
-    return noreply_;
+    return flag_.noreply;
+  }
+
+  void SetMeta(bool meta) {
+    flag_.meta = meta;
+  }
+
+  void SetBase64(bool base64) {
+    flag_.base64 = base64;
+  }
+
+  void SetReturnMCFlag(bool val) {
+    flag_.return_mcflag = val;
+  }
+
+  void SetReturnValue(bool val) {
+    flag_.return_value = val;
+  }
+
+  void SetReturnVersion(bool val) {
+    flag_.return_version = val;
   }
 
  private:
-  bool noreply_ = false;
+  union {
+    struct {
+      uint8_t noreply : 1;
+      uint8_t meta : 1;
+      uint8_t base64 : 1;
+      uint8_t return_value : 1;
+      uint8_t return_mcflag : 1;
+      uint8_t return_version : 1;
+    } flag_;
+    uint8_t all_;
+  };
 };
 
 // Redis reply builder interface for sending RESP data.

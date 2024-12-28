@@ -60,6 +60,9 @@ struct Schema {
 
   // Return identifier for alias if found, otherwise return passed value
   std::string_view LookupAlias(std::string_view alias) const;
+
+  // Return alias for identifier if found, otherwise return passed value
+  std::string_view LookupIdentifier(std::string_view identifier) const;
 };
 
 struct IndicesOptions {
@@ -88,10 +91,7 @@ class FieldIndices {
   const std::vector<DocId>& GetAllDocs() const;
   const Schema& GetSchema() const;
 
-  // Extract values stored in sort indices
-  std::vector<std::pair<std::string, SortableValue>> ExtractStoredValues(DocId doc) const;
-
-  absl::flat_hash_set<std::string_view> GetSortIndiciesFields() const;
+  SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
@@ -100,8 +100,8 @@ class FieldIndices {
   const Schema& schema_;
   const IndicesOptions& options_;
   std::vector<DocId> all_ids_;
-  absl::flat_hash_map<std::string, std::unique_ptr<BaseIndex>> indices_;
-  absl::flat_hash_map<std::string, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
+  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
 };
 
 struct AlgorithmProfile {

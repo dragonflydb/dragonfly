@@ -59,6 +59,8 @@ class IncomingSlotMigration {
 
   size_t GetKeyCount() const;
 
+  void Pause(bool pause);
+
  private:
   std::string source_id_;
   Service& service_;

@@ -60,6 +60,12 @@ ABSL_FLAG(float, tiered_offload_threshold, 0.5,
 ABSL_FLAG(bool, enable_heartbeat_eviction, true,
           "Enable eviction during heartbeat when memory is under pressure.");
 
+ABSL_FLAG(double, eviction_memory_budget_threshold, 0.1,
+          "Eviction starts when the free memory (including RSS memory) drops below "
+          "eviction_memory_budget_threshold * max_memory_limit.");
+
+ABSL_DECLARE_FLAG(uint32_t, max_eviction_per_heartbeat);
+
 namespace dfly {
 
 using absl::GetFlag;
@@ -198,6 +204,56 @@ optional<uint32_t> GetPeriodicCycleMs() {
   return clock_cycle_ms;
 }
 
+size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t global_used_memory,
+                                           size_t shard_memory_threshold) {
+  if (global_used_memory > global_memory_limit) {
+    // Used memory is above the limit, we need to evict all bytes
+    return (global_used_memory - global_memory_limit) / shard_set->size() + shard_memory_threshold;
+  }
+
+  const size_t shard_budget = (global_memory_limit - global_used_memory) / shard_set->size();
+  return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
+}
+
+/* Calculates the number of bytes to evict based on memory and rss memory usage. */
+size_t CalculateEvictionBytes() {
+  const size_t shards_count = shard_set->size();
+  const double eviction_memory_budget_threshold = GetFlag(FLAGS_eviction_memory_budget_threshold);
+
+  const size_t shard_memory_budget_threshold =
+      size_t(max_memory_limit * eviction_memory_budget_threshold) / shards_count;
+
+  const size_t global_used_memory = used_mem_current.load(memory_order_relaxed);
+
+  // Calculate how many bytes we need to evict on this shard
+  size_t goal_bytes = CalculateHowManyBytesToEvictOnShard(max_memory_limit, global_used_memory,
+                                                          shard_memory_budget_threshold);
+
+  // TODO: Eviction due to rss usage is not working well as it causes eviction
+  // of to many keys untill we finally see decrease in rss. We need to improve
+  // this logic before we enable it.
+  /*
+  const double rss_oom_deny_ratio = ServerState::tlocal()->rss_oom_deny_ratio;
+  // If rss_oom_deny_ratio is set, we should evict depending on rss memory too
+  if (rss_oom_deny_ratio > 0.0) {
+    const size_t max_rss_memory = size_t(rss_oom_deny_ratio * max_memory_limit);
+    // We start eviction when we have less than eviction_memory_budget_threshold * 100% of free rss
+    memory const size_t shard_rss_memory_budget_threshold =
+        size_t(max_rss_memory * eviction_memory_budget_threshold) / shards_count;
+
+    // Calculate how much rss memory is used by all shards
+    const size_t global_used_rss_memory = rss_mem_current.load(memory_order_relaxed);
+
+    // Try to evict more bytes if we are close to the rss memory limit
+    goal_bytes = std::max(
+        goal_bytes, CalculateHowManyBytesToEvictOnShard(max_rss_memory, global_used_rss_memory,
+                                                        shard_rss_memory_budget_threshold));
+  }
+  */
+
+  return goal_bytes;
+}
+
 }  // namespace
 
 __thread EngineShard* EngineShard::shard_ = nullptr;
@@ -329,7 +385,7 @@ bool EngineShard::DoDefrag() {
   uint64_t attempts = 0;
 
   do {
-    cur = slice.Traverse(prime_table, cur, [&](PrimeIterator it) {
+    cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
       // seats on underutilized page of memory, and if so, do it.
       bool did = it->second.DefragIfNeeded(threshold);
@@ -403,11 +459,10 @@ void EngineShard::Shutdown() {
   queue2_.Shutdown();
   DCHECK(!fiber_heartbeat_periodic_.IsJoinable());
   DCHECK(!fiber_shard_handler_periodic_.IsJoinable());
-
-  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
 }
 
 void EngineShard::StopPeriodicFiber() {
+  ProactorBase::me()->RemoveOnIdleTask(defrag_task_);
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
     fiber_heartbeat_periodic_.Join();
@@ -661,12 +716,23 @@ void EngineShard::Heartbeat() {
 
   CacheStats();
 
+  // TODO: iterate over all namespaces
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+  // Skip heartbeat if we are serializing a big value
+  static auto start = std::chrono::system_clock::now();
+  if (db_slice.WillBlockOnJournalWrite()) {
+    const auto elapsed = std::chrono::system_clock::now() - start;
+    if (elapsed > std::chrono::seconds(1)) {
+      LOG_EVERY_T(WARNING, 5) << "Stalled heartbeat() fiber for " << elapsed.count()
+                              << " seconds because of big value serialization";
+    }
+    return;
+  }
+  start = std::chrono::system_clock::now();
+
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
     RetireExpiredAndEvict();
   }
-
-  // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
 
   // Offset CoolMemoryUsage when consider background offloading.
   // TODO: Another approach could be is to align the approach  similarly to how we do with
@@ -691,55 +757,55 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RetireExpiredAndEvict() {
-  // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-  // Some of the functions below might acquire the same lock again so we need to unlock it
-  // asap. We won't yield before we relock the mutex again, so the code below is atomic
-  // in respect to preemptions of big values. An example of that is the call to
-  // DeleteExpiredStep() below, which eventually calls ExpireIfNeeded()
-  // and within that the call to RecordExpiry() will trigger the registered
-  // callback OnJournalEntry which locks the exact same mutex.
-  // We need to lock below and immediately release because there should be no other fiber
-  // that is serializing a big value.
-  { std::unique_lock lk(db_slice.GetSerializationMutex()); }
-  constexpr double kTtlDeleteLimit = 200;
-  constexpr double kRedLimitFactor = 0.1;
+  {
+    FiberAtomicGuard guard;
+    // TODO: iterate over all namespaces
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+    constexpr double kTtlDeleteLimit = 200;
 
-  uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
-  uint32_t deleted = GetMovingSum6(TTL_DELETE);
-  unsigned ttl_delete_target = 5;
+    uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
+    uint32_t deleted = GetMovingSum6(TTL_DELETE);
+    unsigned ttl_delete_target = 5;
 
-  if (deleted > 10) {
-    // deleted should be <= traversed.
-    // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
-    // The higher ttl_delete_target the more likely we have lots of expired items that need
-    // to be deleted.
-    ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
-  }
-
-  ssize_t eviction_redline = size_t(max_memory_limit * kRedLimitFactor) / shard_set->size();
-
-  DbContext db_cntx;
-  db_cntx.time_now_ms = GetCurrentTimeMs();
-
-  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-    if (!db_slice.IsDbValid(i))
-      continue;
-
-    db_cntx.db_index = i;
-    auto [pt, expt] = db_slice.GetTables(i);
-    if (expt->size() > pt->size() / 4) {
-      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
-
-      counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-      counter_[TTL_DELETE].IncBy(stats.deleted);
+    if (deleted > 10) {
+      // deleted should be <= traversed.
+      // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
+      // The higher ttl_delete_target the more likely we have lots of expired items that need
+      // to be deleted.
+      ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
     }
 
-    // if our budget is below the limit
-    if (db_slice.memory_budget() < eviction_redline && GetFlag(FLAGS_enable_heartbeat_eviction)) {
-      uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-      db_slice.FreeMemWithEvictionStep(i, starting_segment_id,
-                                       eviction_redline - db_slice.memory_budget());
+    DbContext db_cntx;
+    db_cntx.time_now_ms = GetCurrentTimeMs();
+
+    size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
+
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (!db_slice.IsDbValid(i))
+        continue;
+
+      db_cntx.db_index = i;
+      auto [pt, expt] = db_slice.GetTables(i);
+      if (expt->size() > pt->size() / 4) {
+        DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
+
+        eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
+        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+        counter_[TTL_DELETE].IncBy(stats.deleted);
+      }
+
+      if (eviction_goal) {
+        uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
+        auto [evicted_items, evicted_bytes] =
+            db_slice.FreeMemWithEvictionStep(i, starting_segment_id, eviction_goal);
+
+        DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
+                 << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
+                 << " bytes. Max eviction per heartbeat: "
+                 << GetFlag(FLAGS_max_eviction_per_heartbeat);
+
+        eviction_goal -= std::min(eviction_goal, evicted_bytes);
+      }
     }
   }
 

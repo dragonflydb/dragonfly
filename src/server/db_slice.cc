@@ -140,6 +140,11 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
 
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
+
+  if (db_slice_->WillBlockOnJournalWrite()) {
+    return res;
+  }
+
   // bool should_print = (eb.key_hash % 128) == 0;
 
   // based on tests - it's more efficient to pass regular buckets to gc.
@@ -165,7 +170,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
 }
 
 unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
-  if (!can_evict_)
+  if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
     return 0;
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.by_type.stash_buckets);
@@ -190,10 +195,8 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
     // log the evicted keys to journal.
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
-      RecordExpiry(cntx_.db_index, key);
+      RecordExpiry(cntx_.db_index, key, false);
     }
-    // Safe we already acquired util::fb2::LockGuard lk(db_slice_->GetSerializationMutex());
-    // on the flows that call this function
     db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
 
     ++evicted_;
@@ -450,7 +453,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   }
 
   if (res.it->second.HasExpire()) {  // check expiry state
-    res = ExpireIfNeeded(cntx, res.it);
+    res = ExpireIfNeeded(cntx, res.it, true);
     if (!IsValid(res.it)) {
       return OpStatus::KEY_NOTFOUND;
     }
@@ -459,13 +462,13 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   if (caching_mode_ && IsValid(res.it)) {
     if (!change_cb_.empty()) {
       FetchedItemsRestorer fetched_restorer(&fetched_items_);
-      util::fb2::LockGuard lk(local_mu_);
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
 
+    block_counter_.Wait();  // We must not change the bucket's internal order during serialization
     auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{&fetched_items_});
     if (bump_it != res.it) {  // the item was bumped
       res.it = bump_it;
@@ -552,7 +555,6 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  util::fb2::LockGuard lk(local_mu_);
 
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
@@ -668,8 +670,6 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
 }
 
 bool DbSlice::Del(Context cntx, Iterator it) {
-  util::fb2::LockGuard lk(local_mu_);
-
   if (!IsValid(it)) {
     return false;
   }
@@ -735,7 +735,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   PrimeTable::Cursor cursor;
   uint64_t i = 0;
   do {
-    PrimeTable::Cursor next = Traverse(pt, cursor, del_entry_cb);
+    PrimeTable::Cursor next = pt->Traverse(cursor, del_entry_cb);
     ++i;
     cursor = next;
     if (i % 100 == 0) {
@@ -792,10 +792,6 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
 }
 
 void DbSlice::FlushDb(DbIndex db_ind) {
-  // We should not flush if serialization of a big value is in progress because this
-  // could lead to UB or assertion failures (while DashTable::Traverse is iterating over
-  // a logical bucket).
-  util::fb2::LockGuard lk(local_mu_);
   // clear client tracking map.
   client_tracking_map_.clear();
 
@@ -817,7 +813,6 @@ void DbSlice::FlushDb(DbIndex db_ind) {
 }
 
 void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
-  util::fb2::LockGuard lk(local_mu_);
   uint64_t delta = at - expire_base_[0];  // TODO: employ multigen expire updates.
   auto& db = *db_arr_[db_ind];
   size_t table_before = db.expire.mem_usage();
@@ -827,7 +822,6 @@ void DbSlice::AddExpire(DbIndex db_ind, Iterator main_it, uint64_t at) {
 }
 
 bool DbSlice::RemoveExpire(DbIndex db_ind, Iterator main_it) {
-  util::fb2::LockGuard lk(local_mu_);
   if (main_it->second.HasExpire()) {
     auto& db = *db_arr_[db_ind];
     size_t table_before = db.expire.mem_usage();
@@ -1000,6 +994,7 @@ bool DbSlice::Acquire(IntentLock::Mode mode, const KeyLockArgs& lock_args) {
   if (lock_args.fps.empty()) {  // Can be empty for NO_KEY_TRANSACTIONAL commands.
     return true;
   }
+  DCHECK_LT(lock_args.db_index, db_array_size());
 
   auto& lt = db_arr_[lock_args.db_index]->trans_locks;
   bool lock_acquired = true;
@@ -1055,7 +1050,6 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  util::fb2::LockGuard lk(local_mu_);
   CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
@@ -1087,11 +1081,12 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
 }
 
 DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) const {
-  auto res = ExpireIfNeeded(cntx, it.GetInnerIt());
+  auto res = ExpireIfNeeded(cntx, it.GetInnerIt(), false);
   return {.it = Iterator::FromPrime(res.it), .exp_it = ExpIterator::FromPrime(res.exp_it)};
 }
 
-DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
+DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
+                                               bool preempts) const {
   if (!it->second.HasExpire()) {
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
@@ -1121,7 +1116,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
 
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
-    RecordExpiry(cntx.db_index, key);
+    RecordExpiry(cntx.db_index, key, preempts);
   }
 
   if (expired_keys_events_recording_)
@@ -1135,12 +1130,17 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
   const_cast<DbSlice*>(this)->PerformDeletion(Iterator(it, StringOrView::FromView(key)),
                                               ExpIterator(expire_it, StringOrView::FromView(key)),
                                               db.get());
+
   ++events_.expired_keys;
 
   return {PrimeIterator{}, ExpireIterator{}};
 }
 
 void DbSlice::ExpireAllIfNeeded() {
+  // We hold no locks to any of the keys so we should Wait() here such that
+  // we don't preempt in ExpireIfNeeded
+  block_counter_.Wait();
+
   for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
     if (!db_arr_[db_index])
       continue;
@@ -1152,12 +1152,12 @@ void DbSlice::ExpireAllIfNeeded() {
         LOG(ERROR) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
         return;
       }
-      ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
+      ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it, false);
     };
 
     ExpireTable::Cursor cursor;
     do {
-      cursor = Traverse(&db.expire, cursor, cb);
+      cursor = db.expire.Traverse(cursor, cb);
     } while (cursor);
   }
 }
@@ -1168,6 +1168,7 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
   FetchedItemsRestorer fetched_restorer(&fetched_items_);
+  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
 
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
@@ -1191,7 +1192,7 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
 
 //! Unregisters the callback.
 void DbSlice::UnregisterOnChange(uint64_t id) {
-  util::fb2::LockGuard lk(local_mu_);
+  block_counter_.Wait();
   auto it = find_if(change_cb_.begin(), change_cb_.end(),
                     [id](const auto& cb) { return cb.first == id; });
   CHECK(it != change_cb_.end());
@@ -1214,7 +1215,8 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
       CHECK(!prime_it.is_done());
-      ExpireIfNeeded(cntx, prime_it);
+      result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
+      ExpireIfNeeded(cntx, prime_it, false);
       ++result.deleted;
     } else {
       result.survivor_ttl_sum += ttl;
@@ -1282,7 +1284,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
     // fiber preemption could happen in this phase.
     for (string_view key : keys_to_journal) {
       if (auto journal = owner_->journal(); journal)
-        RecordExpiry(db_ind, key);
+        RecordExpiry(db_ind, key, false);
 
       if (expired_keys_events_recording_)
         db_table->expired_keys_events_.emplace_back(key);
@@ -1290,9 +1292,6 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
 
     auto time_finish = absl::GetCurrentTimeNanos();
     events_.evicted_keys += evicted_items;
-    DVLOG(2) << "Evicted: " << evicted_bytes;
-    DVLOG(2) << "Number of keys evicted / max eviction per hb: " << evicted_items << "/"
-             << max_eviction_per_hb;
     DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
     return pair<uint64_t, size_t>{evicted_items, evicted_bytes};
   };
@@ -1326,7 +1325,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
           if (record_keys)
             keys_to_journal.emplace_back(key);
 
-          evicted_bytes += evict_it->second.MallocUsed();
+          evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
           ++evicted_items;
           PerformDeletion(Iterator(evict_it, StringOrView::FromView(key)), db_table.get());
 
@@ -1352,13 +1351,10 @@ void DbSlice::CreateDb(DbIndex db_ind) {
 void DbSlice::RegisterWatchedKey(DbIndex db_indx, std::string_view key,
                                  ConnectionState::ExecInfo* exec_info) {
   // Because we might insert while another fiber is preempted
-  util::fb2::LockGuard lk(local_mu_);
   db_arr_[db_indx]->watched_keys[key].push_back(exec_info);
 }
 
 void DbSlice::UnregisterConnectionWatches(const ConnectionState::ExecInfo* exec_info) {
-  // Because we might remove while another fiber is preempted and miss a notification
-  util::fb2::LockGuard lk(local_mu_);
   for (const auto& [db_indx, key] : exec_info->watched_keys) {
     auto& watched_keys = db_arr_[db_indx]->watched_keys;
     if (auto it = watched_keys.find(key); it != watched_keys.end()) {
@@ -1534,6 +1530,7 @@ void DbSlice::OnCbFinish() {
 }
 
 void DbSlice::CallChangeCallbacks(DbIndex id, std::string_view key, const ChangeReq& cr) const {
+  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
   if (change_cb_.empty())
     return;
 

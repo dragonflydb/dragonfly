@@ -16,7 +16,7 @@
 #include "server/main_service.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_DECLARE_FLAG(int, slot_migration_connection_timeout_ms);
+ABSL_DECLARE_FLAG(int, migration_finalization_timeout_ms);
 
 namespace dfly::cluster {
 
@@ -38,6 +38,10 @@ class ClusterShardMigration {
         bc_(bc) {
   }
 
+  void Pause(bool pause) {
+    pause_ = pause;
+  }
+
   void Start(Context* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
     {
       util::fb2::LockGuard lk(mu_);
@@ -56,6 +60,11 @@ class ClusterShardMigration {
     TransactionReader tx_reader;
 
     while (!cntx->IsCancelled()) {
+      if (pause_) {
+        ThisFiber::SleepFor(100ms);
+        continue;
+      }
+
       auto tx_data = tx_reader.NextTxData(&reader, cntx);
       if (!tx_data) {
         in_migration_->ReportError(GenericError("No tx data"));
@@ -72,7 +81,14 @@ class ClusterShardMigration {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }
-        VLOG(2) << "Attempt failed to finalize flow " << source_shard_id_;
+        if (!tx_data->command.cmd_args.empty()) {
+          VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by "
+                  << tx_data->command.cmd_args[0];
+        } else {
+          VLOG(1) << "Flow finalization failed " << source_shard_id_ << " by opcode "
+                  << (int)tx_data->opcode;
+        }
+
         bc_->Add();  // the flow isn't finished so we lock it again
       }
       if (tx_data->opcode == journal::Op::PING) {
@@ -135,6 +151,7 @@ class ClusterShardMigration {
   IncomingSlotMigration* in_migration_;
   util::fb2::BlockingCounter bc_;
   atomic_long last_attempt_{-1};
+  atomic_bool pause_ = false;
 };
 
 IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots,
@@ -153,18 +170,25 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 IncomingSlotMigration::~IncomingSlotMigration() {
 }
 
+void IncomingSlotMigration::Pause(bool pause) {
+  VLOG(1) << "Pausing migration " << pause;
+  for (auto& flow : shard_flows_) {
+    flow->Pause(pause);
+  }
+}
+
 bool IncomingSlotMigration::Join(long attempt) {
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
-      absl::Milliseconds(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+      absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
 
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG_EVERY_N(1, 1000) << "Checking whether to continue with join " << passed << " vs "
-                          << timeout;
+    VLOG_EVERY_N(1, 10000) << "Checking whether to continue with join " << passed << " vs "
+                           << timeout;
     if (passed >= timeout) {
-      LOG(WARNING) << "Can't join migration in time";
+      LOG(WARNING) << "Can't join migration in time for " << source_id_;
       ReportError(GenericError("Can't join migration in time"));
       return false;
     }
@@ -193,13 +217,12 @@ void IncomingSlotMigration::Stop() {
   // we need to Join the migration process to prevent data corruption
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
-      absl::Milliseconds(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+      absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
 
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG_EVERY_N(1, 1000) << "Checking whether to continue with stop " << passed << " vs "
-                          << timeout;
+    VLOG(1) << "Checking whether to continue with stop " << passed << " vs " << timeout;
 
     if (bc_->WaitFor(absl::ToInt64Milliseconds(timeout - passed) * 1ms)) {
       return;

@@ -14,7 +14,10 @@ extern "C" {
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
+#include "server/detail/decompress.h"
 #include "server/journal/serializer.h"
+
+struct streamID;
 
 namespace dfly {
 
@@ -22,8 +25,6 @@ class EngineShardSet;
 class ScriptMgr;
 class CompactObj;
 class Service;
-
-class DecompressImpl;
 
 using RdbVersion = std::uint16_t;
 
@@ -79,14 +80,20 @@ class RdbLoaderBase {
   struct StreamConsumerTrace {
     RdbVariant name;
     int64_t seen_time;
+    int64_t active_time;
     std::vector<std::array<uint8_t, 16>> nack_arr;
+  };
+
+  struct StreamID {
+    uint64_t ms = 0;
+    uint64_t seq = 0;
   };
 
   struct StreamCGTrace {
     RdbVariant name;
     uint64_t ms;
     uint64_t seq;
-
+    uint64_t entries_read;
     std::vector<StreamPelTrace> pel_arr;
     std::vector<StreamConsumerTrace> cons_arr;
   };
@@ -94,7 +101,10 @@ class RdbLoaderBase {
   struct StreamTrace {
     size_t lp_len;
     size_t stream_len;
-    uint64_t ms, seq;
+    StreamID last_id;
+    StreamID first_id;             /* The first non-tombstone entry, zero if empty. */
+    StreamID max_deleted_entry_id; /* The maximal ID that was deleted. */
+    uint64_t entries_added = 0;    /* All time count of elements added. */
     std::vector<StreamCGTrace> cgroup;
   };
 
@@ -139,7 +149,6 @@ class RdbLoaderBase {
 
   template <typename T> io::Result<T> FetchInt();
 
-  static std::error_code FromOpaque(const OpaqueObj& opaque, CompactObj* pv);
   static std::error_code FromOpaque(const OpaqueObj& opaque, LoadConfig config, CompactObj* pv);
 
   io::Result<uint64_t> LoadLen(bool* is_encoded);
@@ -166,7 +175,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSetZL();
   ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
-  ::io::Result<OpaqueObj> ReadStreams();
+  ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
   ::io::Result<OpaqueObj> ReadRedisJson();
   ::io::Result<OpaqueObj> ReadJson();
   ::io::Result<OpaqueObj> ReadSBF();
@@ -174,7 +183,7 @@ class RdbLoaderBase {
   std::error_code SkipModuleData();
   std::error_code HandleCompressedBlob(int op_type);
   std::error_code HandleCompressedBlobFinish();
-  void AllocateDecompressOnce(int op_type);
+  std::error_code AllocateDecompressOnce(int op_type);
 
   std::error_code HandleJournalBlob(Service* service);
 
@@ -184,6 +193,8 @@ class RdbLoaderBase {
 
   std::error_code EnsureReadInternal(size_t min_to_read);
 
+  static void CopyStreamId(const StreamID& src, struct streamID* dest);
+
   base::IoBuf* mem_buf_ = nullptr;
   base::IoBuf origin_mem_buf_;
   ::io::Source* src_ = nullptr;
@@ -191,7 +202,7 @@ class RdbLoaderBase {
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
   base::PODArray<uint8_t> compr_buf_;
-  std::unique_ptr<DecompressImpl> decompress_impl_;
+  std::unique_ptr<detail::DecompressImpl> decompress_impl_;
   JournalReader journal_reader_{nullptr, 0};
   std::optional<uint64_t> journal_offset_ = std::nullopt;
   RdbVersion rdb_version_ = RDB_VERSION;

@@ -52,6 +52,10 @@ struct MockedDocument : public DocumentAccessor {
     return StringList{string_view{it->second}};
   }
 
+  std::optional<StringList> GetTags(string_view field) const override {
+    return GetStrings(field);
+  }
+
   std::optional<VectorInfo> GetVector(string_view field) const override {
     auto strings_list = GetStrings(field);
     if (!strings_list)

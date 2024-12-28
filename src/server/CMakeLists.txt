@@ -28,7 +28,7 @@ endif()
 
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
             command_registry.cc  cluster/cluster_utility.cc
-            journal/tx_executor.cc namespaces.cc
+            journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -45,11 +45,13 @@ endif()
 
 add_library(dragonfly_lib bloom_family.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc engine_shard.cc
-            engine_shard_set.cc family_utils.cc
+            engine_shard_set.cc error.cc family_utils.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc
+            detail/compressor.cc
+            detail/decompress.cc
             detail/save_stages_controller.cc
             detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
@@ -109,7 +111,8 @@ cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
-         testdata/redis_json.rdb LABELS DFLY)
+         testdata/redis_json.rdb testdata/RDB_TYPE_STREAM_LISTPACKS_2.rdb
+         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)

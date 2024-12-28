@@ -1,7 +1,9 @@
+#include <random>
 #include <string>
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
@@ -123,6 +125,96 @@ TEST(Journal, WriteRead) {
     ASSERT_EQ(expected.dbid, res->dbid);
     ASSERT_EQ(ExtractPayload(expected), ExtractPayload(*res));
   }
+}
+
+TEST(Journal, PendingBuf) {
+  PendingBuf pbuf;
+
+  ASSERT_TRUE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), 0);
+
+  pbuf.Push("one");
+  pbuf.Push(" smallllllllllllllllllllllllllllllll");
+  pbuf.Push(" test");
+
+  ASSERT_FALSE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), 44);
+
+  {
+    auto& sending_buf = pbuf.PrepareSendingBuf();
+    ASSERT_EQ(sending_buf.buf.size(), 3);
+    ASSERT_EQ(sending_buf.mem_size, 44);
+
+    ASSERT_EQ(sending_buf.buf[0], "one");
+    ASSERT_EQ(sending_buf.buf[1], " smallllllllllllllllllllllllllllllll");
+    ASSERT_EQ(sending_buf.buf[2], " test");
+  }
+
+  const size_t string_num = PendingBuf::Buf::kMaxBufSize + 1000;
+  std::vector<std::string> test_data;
+  test_data.reserve(string_num);
+
+  absl::InsecureBitGen gen;
+
+  for (size_t i = 0; i < string_num; ++i) {
+    auto str = GetRandomHex(gen, 10, 90);
+    test_data.push_back(str);
+    pbuf.Push(std::move(str));
+  }
+
+  const size_t test_data_size =
+      std::accumulate(test_data.begin(), test_data.end(), 0,
+                      [](size_t size, const auto& s) { return s.size() + size; });
+
+  ASSERT_FALSE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), 44 + test_data_size);
+
+  pbuf.Pop();
+
+  ASSERT_FALSE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), test_data_size);
+
+  {
+    auto& sending_buf = pbuf.PrepareSendingBuf();
+
+    const size_t send_buf_size =
+        std::accumulate(test_data.begin(), test_data.begin() + PendingBuf::Buf::kMaxBufSize, 0,
+                        [](size_t size, const auto& s) { return s.size() + size; });
+
+    ASSERT_EQ(sending_buf.buf.size(), PendingBuf::Buf::kMaxBufSize);
+    ASSERT_EQ(sending_buf.mem_size, send_buf_size);
+
+    for (size_t i = 0; i < sending_buf.buf.size(); ++i) {
+      ASSERT_EQ(sending_buf.buf[i], test_data[i]);
+    }
+  }
+
+  pbuf.Pop();
+
+  test_data.erase(test_data.begin(), test_data.begin() + PendingBuf::Buf::kMaxBufSize);
+
+  const size_t last_buf_size =
+      std::accumulate(test_data.begin(), test_data.end(), 0,
+                      [](size_t size, const auto& s) { return s.size() + size; });
+
+  ASSERT_FALSE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), last_buf_size);
+
+  {
+    auto& sending_buf = pbuf.PrepareSendingBuf();
+
+    ASSERT_EQ(sending_buf.buf.size(), 1000);
+    ASSERT_EQ(sending_buf.mem_size, last_buf_size);
+
+    for (size_t i = 0; i < sending_buf.buf.size(); ++i) {
+      ASSERT_EQ(sending_buf.buf[i], test_data[i]);
+    }
+  }
+
+  pbuf.Pop();
+
+  ASSERT_TRUE(pbuf.Empty());
+  ASSERT_EQ(pbuf.Size(), 0);
 }
 
 }  // namespace journal

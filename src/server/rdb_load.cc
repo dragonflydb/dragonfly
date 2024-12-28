@@ -22,8 +22,6 @@ extern "C" {
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
-#include <lz4frame.h>
-#include <zstd.h>
 
 #include <cstring>
 
@@ -41,6 +39,7 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/executor.h"
 #include "server/journal/serializer.h"
@@ -51,7 +50,7 @@ extern "C" {
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
-#include "server/tiering/common.h"  // for _KB literal
+#include "server/stream_family.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
@@ -71,52 +70,11 @@ using namespace tiering::literals;
 
 namespace {
 
-constexpr char kErrCat[] = "dragonfly.rdbload";
-
 // Maximum length of each LoadTrace segment.
 //
 // Note kMaxBlobLen must be a multiple of 6 to avoid truncating elements
 // containing 2 or 3 items.
 constexpr size_t kMaxBlobLen = 4092;
-
-class error_category : public std::error_category {
- public:
-  const char* name() const noexcept final {
-    return kErrCat;
-  }
-
-  string message(int ev) const final;
-
-  error_condition default_error_condition(int ev) const noexcept final;
-
-  bool equivalent(int ev, const error_condition& condition) const noexcept final {
-    return condition.value() == ev && &condition.category() == this;
-  }
-
-  bool equivalent(const error_code& error, int ev) const noexcept final {
-    return error.value() == ev && &error.category() == this;
-  }
-};
-
-string error_category::message(int ev) const {
-  switch (ev) {
-    case errc::wrong_signature:
-      return "Wrong signature while trying to load from rdb file";
-    default:
-      return absl::StrCat("Internal error when loading RDB file ", ev);
-      break;
-  }
-}
-
-error_condition error_category::default_error_condition(int ev) const noexcept {
-  return error_condition{ev, *this};
-}
-
-error_category rdb_category;
-
-inline error_code RdbError(errc ev) {
-  return error_code{ev, rdb_category};
-}
 
 inline auto Unexpected(errc ev) {
   return make_unexpected(RdbError(ev));
@@ -236,152 +194,6 @@ bool RdbTypeAllowedEmpty(int type) {
 
 }  // namespace
 
-class DecompressImpl {
- public:
-  DecompressImpl() : uncompressed_mem_buf_{16_KB} {
-  }
-  virtual ~DecompressImpl() {
-  }
-  virtual io::Result<io::IoBuf*> Decompress(std::string_view str) = 0;
-
- protected:
-  io::IoBuf uncompressed_mem_buf_;
-};
-
-class ZstdDecompress : public DecompressImpl {
- public:
-  ZstdDecompress() {
-    dctx_ = ZSTD_createDCtx();
-  }
-  ~ZstdDecompress() {
-    ZSTD_freeDCtx(dctx_);
-  }
-
-  io::Result<io::IoBuf*> Decompress(std::string_view str);
-
- private:
-  ZSTD_DCtx* dctx_;
-};
-
-io::Result<io::IoBuf*> ZstdDecompress::Decompress(std::string_view str) {
-  // Prepare membuf memory to uncompressed string.
-  auto uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
-  if (uncomp_size == ZSTD_CONTENTSIZE_UNKNOWN) {
-    LOG(ERROR) << "Zstd compression missing frame content size";
-    return Unexpected(errc::invalid_encoding);
-  }
-  if (uncomp_size == ZSTD_CONTENTSIZE_ERROR) {
-    LOG(ERROR) << "Invalid ZSTD compressed string";
-    return Unexpected(errc::invalid_encoding);
-  }
-
-  uncompressed_mem_buf_.Reserve(uncomp_size + 1);
-
-  // Uncompress string to membuf
-  IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
-  if (dest.size() < uncomp_size) {
-    return Unexpected(errc::out_of_memory);
-  }
-  size_t const d_size =
-      ZSTD_decompressDCtx(dctx_, dest.data(), dest.size(), str.data(), str.size());
-  if (d_size == 0 || d_size != uncomp_size) {
-    LOG(ERROR) << "Invalid ZSTD compressed string";
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-  uncompressed_mem_buf_.CommitWrite(d_size);
-
-  // Add opcode of compressed blob end to membuf.
-  dest = uncompressed_mem_buf_.AppendBuffer();
-  if (dest.size() < 1) {
-    return Unexpected(errc::out_of_memory);
-  }
-  dest[0] = RDB_OPCODE_COMPRESSED_BLOB_END;
-  uncompressed_mem_buf_.CommitWrite(1);
-
-  return &uncompressed_mem_buf_;
-}
-
-class Lz4Decompress : public DecompressImpl {
- public:
-  Lz4Decompress() {
-    auto result = LZ4F_createDecompressionContext(&dctx_, LZ4F_VERSION);
-    CHECK(!LZ4F_isError(result));
-  }
-  ~Lz4Decompress() {
-    auto result = LZ4F_freeDecompressionContext(dctx_);
-    CHECK(!LZ4F_isError(result));
-  }
-
-  io::Result<base::IoBuf*> Decompress(std::string_view str);
-
- private:
-  LZ4F_dctx* dctx_;
-};
-
-io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
-  LZ4F_frameInfo_t frame_info;
-  size_t frame_size = data.size();
-
-  // Get content size from frame data
-  size_t consumed = frame_size;  // The nb of bytes consumed from data will be written into consumed
-  size_t res = LZ4F_getFrameInfo(dctx_, &frame_info, data.data(), &consumed);
-  if (LZ4F_isError(res)) {
-    return make_unexpected(error_code{int(res), generic_category()});
-  }
-  if (frame_info.contentSize == 0) {
-    LOG(ERROR) << "Missing frame content size";
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  // reserve place for uncompressed data and end opcode
-  size_t reserve = frame_info.contentSize + 1;
-  uncompressed_mem_buf_.Reserve(reserve);
-  IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
-  if (dest.size() < reserve) {
-    return Unexpected(errc::out_of_memory);
-  }
-
-  // Uncompress data to membuf
-  string_view src = data.substr(consumed);
-  size_t src_size = src.size();
-
-  size_t ret = 1;
-  while (ret != 0) {
-    IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
-    size_t dest_capacity = dest.size();
-
-    // It will read up to src_size bytes from src,
-    // and decompress data into dest, of capacity dest_capacity
-    // The nb of bytes consumed from src will be written into src_size
-    // The nb of bytes decompressed into dest will be written into dest_capacity
-    ret = LZ4F_decompress(dctx_, dest.data(), &dest_capacity, src.data(), &src_size, nullptr);
-    if (LZ4F_isError(ret)) {
-      return make_unexpected(error_code{int(ret), generic_category()});
-    }
-    consumed += src_size;
-
-    uncompressed_mem_buf_.CommitWrite(dest_capacity);
-    src = src.substr(src_size);
-    src_size = src.size();
-  }
-  if (consumed != frame_size) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-  if (uncompressed_mem_buf_.InputLen() != frame_info.contentSize) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  // Add opcode of compressed blob end to membuf.
-  dest = uncompressed_mem_buf_.AppendBuffer();
-  if (dest.size() < 1) {
-    return Unexpected(errc::out_of_memory);
-  }
-  dest[0] = RDB_OPCODE_COMPRESSED_BLOB_END;
-  uncompressed_mem_buf_.CommitWrite(1);
-
-  return &uncompressed_mem_buf_;
-}
-
 class RdbLoaderBase::OpaqueObjLoader {
  public:
   OpaqueObjLoader(int rdb_type, PrimeValue* pv, LoadConfig config)
@@ -474,6 +286,8 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
       CreateZSet(ptr.get());
       break;
     case RDB_TYPE_STREAM_LISTPACKS:
+    case RDB_TYPE_STREAM_LISTPACKS_2:
+    case RDB_TYPE_STREAM_LISTPACKS_3:
       CreateStream(ptr.get());
       break;
     default:
@@ -890,6 +704,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   stream* s;
+  StreamMemTracker mem_tracker;
   if (config_.append) {
     if (!EnsureObjEncoding(OBJ_STREAM, OBJ_ENCODING_STREAM)) {
       return;
@@ -952,8 +767,16 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   }
 
   s->length = ltrace->stream_trace->stream_len;
-  s->last_id.ms = ltrace->stream_trace->ms;
-  s->last_id.seq = ltrace->stream_trace->seq;
+  CopyStreamId(ltrace->stream_trace->last_id, &s->last_id);
+  CopyStreamId(ltrace->stream_trace->first_id, &s->first_id);
+  CopyStreamId(ltrace->stream_trace->max_deleted_entry_id, &s->max_deleted_entry_id);
+  s->entries_added = ltrace->stream_trace->entries_added;
+
+  if (rdb_type_ == RDB_TYPE_STREAM_LISTPACKS) {
+    /* Since the rax is already loaded, we can find the first entry's
+     * ID. */
+    streamGetEdgeID(s, 1, 1, &s->first_id);
+  }
 
   for (const auto& cg : ltrace->stream_trace->cgroup) {
     string_view cgname = ToSV(cg.name);
@@ -961,7 +784,12 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     cg_id.ms = cg.ms;
     cg_id.seq = cg.seq;
 
-    streamCG* cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, 0);
+    uint64_t entries_read = cg.entries_read;
+    if (rdb_type_ == RDB_TYPE_STREAM_LISTPACKS) {
+      entries_read = streamEstimateDistanceFromFirstEverEntry(s, &cg_id);
+    }
+
+    streamCG* cgroup = streamCreateCG(s, cgname.data(), cgname.size(), &cg_id, entries_read);
     if (cgroup == NULL) {
       LOG(ERROR) << "Duplicated consumer group name " << cgname;
       ec_ = RdbError(errc::duplicate_key);
@@ -969,9 +797,10 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     }
 
     for (const auto& pel : cg.pel_arr) {
-      streamNACK* nack = streamCreateNACK(NULL);
+      streamNACK* nack = reinterpret_cast<streamNACK*>(zmalloc(sizeof(*nack)));
       nack->delivery_time = pel.delivery_time;
       nack->delivery_count = pel.delivery_count;
+      nack->consumer = nullptr;
 
       if (!raxTryInsert(cgroup->pel, const_cast<uint8_t*>(pel.rawid.data()), pel.rawid.size(), nack,
                         NULL)) {
@@ -983,18 +812,15 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
     }
 
     for (const auto& cons : cg.cons_arr) {
-      sds cname = ToSds(cons.name);
-
-      streamConsumer* consumer =
-          streamCreateConsumer(cgroup, cname, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
-      sdsfree(cname);
+      streamConsumer* consumer = StreamCreateConsumer(cgroup, ToSV(cons.name), cons.seen_time,
+                                                      SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
       if (!consumer) {
         LOG(ERROR) << "Duplicate stream consumer detected.";
         ec_ = RdbError(errc::duplicate_key);
         return;
       }
-      consumer->seen_time = cons.seen_time;
 
+      consumer->active_time = cons.active_time;
       /* Create the PEL (pending entries list) about entries owned by this specific
        * consumer. */
       for (const auto& rawid : cons.nack_arr) {
@@ -1024,6 +850,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   if (!config_.append) {
     pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
   }
+  mem_tracker.UpdateStreamSize(*pv_);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
@@ -1500,7 +1327,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadListQuicklist(rdbtype);
       break;
     case RDB_TYPE_STREAM_LISTPACKS:
-      iores = ReadStreams();
+    case RDB_TYPE_STREAM_LISTPACKS_2:
+    case RDB_TYPE_STREAM_LISTPACKS_3:
+      iores = ReadStreams(rdbtype);
       break;
     case RDB_TYPE_JSON:
       iores = ReadJson();
@@ -1510,7 +1339,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
       // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
       if (rdb_version_ < 10) {
-        // consider it RDB_TYPE_JSON_OLD
+        // consider it RDB_TYPE_JSON_OLD (20)
         iores = ReadJson();
       } else {
         iores = ReadGeneric(rdbtype);
@@ -1826,7 +1655,7 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
-auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   size_t listpacks;
   if (pending_read_.remaining > 0) {
     listpacks = pending_read_.remaining;
@@ -1874,21 +1703,38 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
   // so if there are still unread elements return the partial stream.
   if (listpacks > n) {
     pending_read_.remaining = listpacks - n;
-    return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
-  } else if (pending_read_.remaining > 0) {
-    pending_read_.remaining = 0;
+    return OpaqueObj{std::move(load_trace), rdbtype};
   }
 
-  // Load stream metadata.
+  pending_read_.remaining = 0;
 
+  // Load stream metadata.
   load_trace->stream_trace.reset(new StreamTrace);
 
   /* Load total number of items inside the stream. */
   SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->stream_len);
 
   /* Load the last entry ID. */
-  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->ms);
-  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->seq);
+  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->last_id.ms);
+  SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->last_id.seq);
+
+  if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_2) {
+    /* Load the first entry ID. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->first_id.ms);
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->first_id.seq);
+
+    /* Load the maximal deleted entry ID. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->max_deleted_entry_id.ms);
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->max_deleted_entry_id.seq);
+
+    /* Load the offset. */
+    SET_OR_UNEXPECT(LoadLen(nullptr), load_trace->stream_trace->entries_added);
+  } else {
+    /* During migration the offset can be initialized to the stream's
+     * length. At this point, we also don't care about tombstones
+     * because CG offsets will be later initialized as well. */
+    load_trace->stream_trace->entries_added = load_trace->stream_trace->stream_len;
+  }
 
   /* Consumer groups loading */
   uint64_t cgroups_count;
@@ -1911,6 +1757,11 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.ms);
     SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.seq);
 
+    cgroup.entries_read = 0;
+    if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_2) {
+      SET_OR_UNEXPECT(LoadLen(nullptr), cgroup.entries_read);
+    }
+
     /* Load the global PEL for this consumer group, however we'll
      * not yet populate the NACK structures with the message
      * owner, since consumers for this group and their messages will
@@ -1929,17 +1780,8 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
         return make_unexpected(ec);
       }
 
-      // streamNACK* nack = streamCreateNACK(NULL);
-      // auto cleanup2 = absl::Cleanup([&] { streamFreeNACK(nack); });
-
       SET_OR_UNEXPECT(FetchInt<int64_t>(), pel.delivery_time);
       SET_OR_UNEXPECT(LoadLen(nullptr), pel.delivery_count);
-
-      /*if (!raxTryInsert(cgroup->pel, rawid, sizeof(rawid), nack, NULL)) {
-        LOG(ERROR) << "Duplicated global PEL entry loading stream consumer group";
-        return Unexpected(errc::duplicate_key);
-      }
-      std::move(cleanup2).Cancel();*/
     }
 
     /* Now that we loaded our global PEL, we need to load the
@@ -1955,6 +1797,13 @@ auto RdbLoaderBase::ReadStreams() -> io::Result<OpaqueObj> {
         return make_unexpected(ec);
 
       SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.seen_time);
+
+      if (rdbtype >= RDB_TYPE_STREAM_LISTPACKS_3) {
+        SET_OR_UNEXPECT(FetchInt<int64_t>(), consumer.active_time);
+      } else {
+        /* That's the best estimate we got */
+        consumer.active_time = consumer.seen_time;
+      }
 
       /* Load the PEL about entries owned by this specific
        * consumer. */
@@ -2181,7 +2030,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
   /* Key-specific attributes, set by opcodes before the key type. */
   ObjSettings settings;
-  settings.now = mstime();
+  settings.now = GetCurrentTimeMs();
   size_t keys_loaded = 0;
 
   auto cleanup = absl::Cleanup([&] { FinishLoad(start, &keys_loaded); });
@@ -2454,17 +2303,19 @@ io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
   return res;
 }
 
-void RdbLoaderBase::AllocateDecompressOnce(int op_type) {
+error_code RdbLoaderBase::AllocateDecompressOnce(int op_type) {
   if (decompress_impl_) {
-    return;
+    return {};
   }
+
   if (op_type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START) {
-    decompress_impl_.reset(new ZstdDecompress());
+    decompress_impl_ = detail::DecompressImpl::CreateZstd();
   } else if (op_type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
-    decompress_impl_.reset(new Lz4Decompress());
+    decompress_impl_ = detail::DecompressImpl::CreateLZ4();
   } else {
-    CHECK(false) << "Decompressor allocation should not be done";
+    return RdbError(errc::unsupported_operation);
   }
+  return {};
 }
 
 error_code RdbLoaderBase::SkipModuleData() {
@@ -2512,7 +2363,8 @@ error_code RdbLoaderBase::SkipModuleData() {
 }
 
 error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
-  AllocateDecompressOnce(op_type);
+  RETURN_ON_ERR(AllocateDecompressOnce(op_type));
+
   // Fetch uncompress blob
   string res;
   SET_OR_RETURN(FetchGenericString(), res);
@@ -2596,7 +2448,9 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "lua") {
     LoadScriptFromAux(std::move(auxval));
   } else if (auxkey == "redis-ver") {
-    VLOG(1) << "Loading RDB produced by version " << auxval;
+    VLOG(1) << "Loading RDB produced by Redis version " << auxval;
+  } else if (auxkey == "df-ver") {
+    VLOG(1) << "Loading RDB produced by Dragonfly version " << auxval;
   } else if (auxkey == "ctime") {
     int64_t ctime;
     if (absl::SimpleAtoi(auxval, &ctime)) {
@@ -2606,9 +2460,14 @@ error_code RdbLoader::HandleAux() {
       VLOG(1) << "RDB age " << strings::HumanReadableElapsedTime(age);
     }
   } else if (auxkey == "used-mem") {
-    long long usedmem;
+    int64_t usedmem;
     if (absl::SimpleAtoi(auxval, &usedmem)) {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
+      if (usedmem > ssize_t(max_memory_limit)) {
+        LOG(WARNING) << "Could not load snapshot - its used memory is " << usedmem
+                     << " but the limit is " << max_memory_limit;
+        return RdbError(errc::out_of_memory);
+      }
     }
   } else if (auxkey == "aof-preamble") {
     long long haspreamble;
@@ -2667,16 +2526,17 @@ void RdbLoader::FlushAllShards() {
     FlushShardAsync(i);
 }
 
-std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, CompactObj* pv) {
-  return RdbLoaderBase::FromOpaque(opaque, LoadConfig{}, pv);
-}
-
 std::error_code RdbLoaderBase::FromOpaque(const OpaqueObj& opaque, LoadConfig config,
                                           CompactObj* pv) {
   OpaqueObjLoader visitor(opaque.rdb_type, pv, config);
   std::visit(visitor, opaque.obj);
 
   return visitor.ec();
+}
+
+void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
+  dest->ms = src.ms;
+  dest->seq = src.seq;
 }
 
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
@@ -2733,7 +2593,7 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
     }
 
     if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
-      VLOG(1) << "Expire key on load: " << item->key;
+      VLOG(2) << "Expire key on load: " << item->key;
       continue;
     }
 

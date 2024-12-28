@@ -49,8 +49,18 @@ struct Entry;
 // over the sink until explicitly stopped.
 class SliceSnapshot {
  public:
-  SliceSnapshot(DbSlice* slice, CompressionMode compression_mode,
-                std::function<void(std::string)> on_push, std::function<void()> on_snapshot_finish);
+  // Represents a target for receiving snapshot data.
+  struct SnapshotDataConsumerInterface {
+    virtual ~SnapshotDataConsumerInterface() = default;
+
+    // Receives a chunk of snapshot data for processing
+    virtual void ConsumeData(std::string data, Context* cntx) = 0;
+    // Finalizes the snapshot writing
+    virtual void Finalize() = 0;
+  };
+
+  SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
+                SnapshotDataConsumerInterface* consumer, Context* cntx);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -60,15 +70,14 @@ class SliceSnapshot {
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
   enum class SnapshotFlush { kAllow, kDisallow };
 
-  void Start(bool stream_journal, const Cancellation* cll,
-             SnapshotFlush allow_flush = SnapshotFlush::kDisallow);
+  void Start(bool stream_journal, SnapshotFlush allow_flush = SnapshotFlush::kDisallow);
 
   // Initialize a snapshot that sends only the missing journal updates
   // since start_lsn and then registers a callback switches into the
   // journal streaming mode until stopped.
   // If we're slower than the buffer and can't continue, `Cancel()` is
   // called.
-  void StartIncremental(Context* cntx, LSN start_lsn);
+  void StartIncremental(LSN start_lsn);
 
   // Finalizes journal streaming writes. Only called for replication.
   // Blocking. Must be called from the Snapshot thread.
@@ -83,21 +92,20 @@ class SliceSnapshot {
  private:
   // Main snapshotting fiber that iterates over all buckets in the db slice
   // and submits them to SerializeBucket.
-  void IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut);
+  void IterateBucketsFb(bool send_full_sync_cut);
 
   // A fiber function that switches to the incremental mode
-  void SwitchIncrementalFb(Context* cntx, LSN lsn);
+  void SwitchIncrementalFb(LSN lsn);
 
   // Called on traversing cursor by IterateBucketsFb.
-  bool BucketSaveCb(PrimeTable::bucket_iterator it);
+  bool BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it);
 
   // Serialize single bucket.
   // Returns number of serialized entries, updates bucket version to snapshot version.
   unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator bucket_it);
 
   // Serialize entry into passed serializer.
-  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
-                      std::optional<uint64_t> expire, RdbSerializer* serializer);
+  void SerializeEntry(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv);
 
   // DbChange listener
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
@@ -141,9 +149,7 @@ class SliceSnapshot {
   };
 
   DbSlice* db_slice_;
-  DbTableArray db_array_;
-
-  DbIndex current_db_;
+  const DbTableArray db_array_;
 
   std::unique_ptr<RdbSerializer> serializer_;
   std::vector<DelayedEntry> delayed_entries_;  // collected during atomic bucket traversal
@@ -152,7 +158,7 @@ class SliceSnapshot {
   bool serialize_bucket_running_ = false;
   util::fb2::Fiber snapshot_fb_;  // IterateEntriesFb
   util::fb2::CondVarAny seq_cond_;
-  CompressionMode compression_mode_;
+  const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
   // version upper bound for entries that should be saved (not included).
@@ -169,8 +175,10 @@ class SliceSnapshot {
     size_t keys_total = 0;
   } stats_;
 
-  std::function<void(std::string)> on_push_;
-  std::function<void()> on_snapshot_finish_;
+  ThreadLocalMutex big_value_mu_;
+
+  SnapshotDataConsumerInterface* consumer_;
+  Context* cntx_;
 };
 
 }  // namespace dfly

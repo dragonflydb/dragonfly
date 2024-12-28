@@ -176,7 +176,8 @@ void Transaction::Shutdown() {
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   InitTxTime();
   string_view cmd_name(cid_->name());
-  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
+  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVAL_RO" || cmd_name == "EVALSHA" ||
+      cmd_name == "EVALSHA_RO") {
     multi_.reset(new MultiData);
     multi_->mode = NOT_DETERMINED;
     multi_->role = DEFAULT;
@@ -666,7 +667,6 @@ void Transaction::RunCallback(EngineShard* shard) {
   DCHECK_EQ(shard, EngineShard::tlocal());
 
   RunnableResult result;
-  auto& db_slice = GetDbSlice(shard->shard_id());
   try {
     result = (*cb_ptr_)(this, shard);
 
@@ -690,6 +690,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
+  auto& db_slice = GetDbSlice(shard->shard_id());
   db_slice.OnCbFinish();
 
   // Handle result flags to alter behaviour.
@@ -1562,9 +1563,6 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
         string_view arg = ArgS(args, i);
         if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
           size_t left = args.size() - i - 1;
-          if (left < 2 || left % 2 != 0)
-            return OpStatus::SYNTAX_ERR;
-
           return KeyIndex(i + 1, i + 1 + (left / 2));
         }
       }

@@ -72,11 +72,18 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
-search::SchemaField::TagParams ParseTagParams(CmdArgParser* parser) {
+std::optional<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser,
+                                                             SinkReplyBuilder* builder) {
   search::SchemaField::TagParams params{};
   while (parser->HasNext()) {
     if (parser->Check("SEPARATOR")) {
-      string_view separator = parser->Next();
+      std::string_view separator = parser->NextOrDefault();
+      if (separator.size() != 1) {
+        builder->SendError(
+            absl::StrCat("Tag separator must be a single character. Got `", separator, "`"),
+            kSyntaxErrType);
+        return std::nullopt;
+      }
       params.separator = separator.front();
       continue;
     }
@@ -127,7 +134,11 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
     // Vector fields include: {algorithm} num_args args...
     search::SchemaField::ParamsVariant params(monostate{});
     if (type == search::SchemaField::TAG) {
-      params = ParseTagParams(&parser);
+      auto tag_params = ParseTagParams(&parser, builder);
+      if (!tag_params) {
+        return std::nullopt;
+      }
+      params = tag_params.value();
     } else if (type == search::SchemaField::VECTOR) {
       auto vector_params = ParseVectorParams(&parser);
       if (parser.HasError()) {
@@ -185,7 +196,7 @@ optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParse
 
 std::string_view ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (!field.empty() && field.front() == '@') {
+  if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @ if exists
   }
   return field;
@@ -193,26 +204,37 @@ std::string_view ParseField(CmdArgParser* parser) {
 
 std::string_view ParseFieldWithAtSign(CmdArgParser* parser) {
   std::string_view field = parser->Next();
-  if (!field.empty() && field.front() == '@') {
+  if (absl::StartsWith(field, "@"sv)) {
     field.remove_prefix(1);  // remove leading @
   } else {
-    // Temporary warning until we can throw an error
-    LOG(WARNING) << "bad arguments: Field name '" << field << "' should start with '@'. '@" << field
-                 << "' is expected";
+    // Temporary warning until we can throw an error. Log every 30 seconds
+    LOG_EVERY_T(WARNING, 30) << "bad arguments: Field name '" << field
+                             << "' should start with '@'. '@" << field << "' is expected";
   }
   return field;
 }
 
-void ParseLoadFields(CmdArgParser* parser, std::optional<OwnedSearchFieldsList>* load_fields) {
+void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load_fields) {
+  // TODO: Change to num_strings. In Redis strings number is expected. For example: LOAD 3 $.a AS a
   size_t num_fields = parser->Next<size_t>();
   if (!load_fields->has_value()) {
     load_fields->emplace();
   }
 
   while (num_fields--) {
-    string_view field = ParseField(parser);
-    string_view alias = parser->Check("AS") ? parser->Next() : field;
-    load_fields->value().emplace_back(field, alias);
+    string_view str = parser->Next();
+
+    if (absl::StartsWith(str, "@"sv)) {
+      str.remove_prefix(1);  // remove leading @
+    }
+
+    StringOrView name = StringOrView::FromString(std::string{str});
+    if (parser->Check("AS")) {
+      load_fields->value().emplace_back(name, true,
+                                        StringOrView::FromString(parser->Next<std::string>()));
+    } else {
+      load_fields->value().emplace_back(name, true);
+    }
   }
 }
 
@@ -248,12 +270,19 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
       }
 
       // RETURN {num} [{ident} AS {name}...]
+      /* TODO: Change to num_strings. In Redis strings number is expected. For example: RETURN 3 $.a
+       * AS a */
       size_t num_fields = parser->Next<size_t>();
       params.return_fields.emplace();
       while (params.return_fields->size() < num_fields) {
-        string_view ident = parser->Next();
-        string_view alias = parser->Check("AS") ? parser->Next() : ident;
-        params.return_fields->emplace_back(ident, alias);
+        StringOrView name = StringOrView::FromString(parser->Next<std::string>());
+
+        if (parser->Check("AS")) {
+          params.return_fields->emplace_back(std::move(name), true,
+                                             StringOrView::FromString(parser->Next<std::string>()));
+        } else {
+          params.return_fields->emplace_back(std::move(name), true);
+        }
       }
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
       params.load_fields.emplace();
@@ -261,7 +290,8 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
-      params.sort_option = search::SortOption{string{parser->Next()}, bool(parser->Check("DESC"))};
+      params.sort_option =
+          search::SortOption{parser->Next<std::string>(), bool(parser->Check("DESC"))};
     } else {
       // Unsupported parameters are ignored for now
       parser->Skip(1);
@@ -274,6 +304,42 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
   }
 
   return params;
+}
+
+std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
+  using SordOrder = aggregate::SortParams::SortOrder;
+
+  size_t strings_num = parser->Next<size_t>();
+
+  aggregate::SortParams sort_params;
+  sort_params.fields.reserve(strings_num / 2);
+
+  while (parser->HasNext() && strings_num > 0) {
+    // TODO: Throw an error if the field has no '@' sign at the beginning
+    std::string_view parsed_field = ParseFieldWithAtSign(parser);
+    strings_num--;
+
+    SordOrder sord_order = SordOrder::ASC;
+    if (strings_num > 0) {
+      auto order = parser->TryMapNext("ASC", SordOrder::ASC, "DESC", SordOrder::DESC);
+      if (order) {
+        sord_order = order.value();
+        strings_num--;
+      }
+    }
+
+    sort_params.fields.emplace_back(parsed_field, sord_order);
+  }
+
+  if (strings_num) {
+    return std::nullopt;
+  }
+
+  if (parser->Check("MAX")) {
+    sort_params.max = parser->Next<size_t>();
+  }
+
+  return sort_params;
 }
 
 optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
@@ -290,20 +356,23 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
   while (parser.HasNext()) {
     // GROUPBY nargs property [property ...]
     if (parser.Check("GROUPBY")) {
-      vector<string_view> fields(parser.Next<size_t>());
-      for (string_view& field : fields) {
+      size_t num_fields = parser.Next<size_t>();
+
+      std::vector<std::string> fields;
+      fields.reserve(num_fields);
+      while (num_fields > 0 && parser.HasNext()) {
         auto parsed_field = ParseFieldWithAtSign(&parser);
 
         /*
         TODO: Throw an error if the field has no '@' sign at the beginning
-
         if (!parsed_field) {
           builder->SendError(absl::StrCat("bad arguments for GROUPBY: Unknown property '", field,
                                        "'. Did you mean '@", field, "`?"));
           return nullopt;
         } */
 
-        field = parsed_field;
+        fields.emplace_back(parsed_field);
+        num_fields--;
       }
 
       vector<aggregate::Reducer> reducers;
@@ -333,17 +402,19 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
             aggregate::Reducer{std::move(source_field), std::move(result_field), std::move(func)});
       }
 
-      params.steps.push_back(aggregate::MakeGroupStep(fields, std::move(reducers)));
+      params.steps.push_back(aggregate::MakeGroupStep(std::move(fields), std::move(reducers)));
       continue;
     }
 
     // SORTBY nargs
     if (parser.Check("SORTBY")) {
-      parser.ExpectTag("1");
-      string_view field = parser.Next();
-      bool desc = bool(parser.Check("DESC"));
+      auto sort_params = ParseAggregatorSortParams(&parser);
+      if (!sort_params) {
+        builder->SendError("bad arguments for SORTBY: specified invalid number of strings");
+        return nullopt;
+      }
 
-      params.steps.push_back(aggregate::MakeSortStep(field, desc));
+      params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
       continue;
     }
 
@@ -485,9 +556,9 @@ void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
 
 }  // namespace
 
-void SearchFamily::FtCreate(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                            ConnectionContext* cntx) {
-  if (cntx->conn_state.db_index != 0) {
+void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto* builder = cmd_cntx.rb;
+  if (cmd_cntx.conn_cntx->conn_state.db_index != 0) {
     return builder->SendError("Cannot create index on db != 0"sv);
   }
 
@@ -537,7 +608,7 @@ void SearchFamily::FtCreate(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
 
   // Check if index already exists
   atomic_uint exists_cnt = 0;
-  tx->Execute(
+  cmd_cntx.tx->Execute(
       [idx_name, &exists_cnt](auto* tx, auto* es) {
         if (es->search_indices()->GetIndex(idx_name) != nullptr)
           exists_cnt.fetch_add(1, std::memory_order_relaxed);
@@ -548,12 +619,12 @@ void SearchFamily::FtCreate(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
   DCHECK(exists_cnt == 0u || exists_cnt == shard_set->size());
 
   if (exists_cnt.load(memory_order_relaxed) > 0) {
-    tx->Conclude();
+    cmd_cntx.tx->Conclude();
     return builder->SendError("Index already exists");
   }
 
   auto idx_ptr = make_shared<DocIndex>(std::move(index));
-  tx->Execute(
+  cmd_cntx.tx->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
         return OpStatus::OK;
@@ -563,12 +634,12 @@ void SearchFamily::FtCreate(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
   builder->SendOk();
 }
 
-void SearchFamily::FtAlter(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
   parser.ExpectTag("SCHEMA");
   parser.ExpectTag("ADD");
-
+  auto* builder = cmd_cntx.rb;
   if (auto err = parser.Error(); err)
     return builder->SendError(err->MakeReply());
 
@@ -582,17 +653,17 @@ void SearchFamily::FtAlter(CmdArgList args, Transaction* tx, SinkReplyBuilder* b
       index_info = make_shared<DocIndex>(idx->GetInfo().base_index);
     return OpStatus::OK;
   };
-  tx->Execute(idx_cb, false);
+  cmd_cntx.tx->Execute(idx_cb, false);
 
   if (!index_info) {
-    tx->Conclude();
+    cmd_cntx.tx->Conclude();
     return builder->SendError("Index not found");
   }
 
   // Parse additional schema
   optional<search::Schema> new_fields = ParseSchemaOrReply(index_info->type, parser, builder);
   if (!new_fields) {
-    tx->Conclude();
+    cmd_cntx.tx->Conclude();
     return;
   }
 
@@ -611,17 +682,17 @@ void SearchFamily::FtAlter(CmdArgList args, Transaction* tx, SinkReplyBuilder* b
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info);
     return OpStatus::OK;
   };
-  tx->Execute(upd_cb, true);
+  cmd_cntx.tx->Execute(upd_cb, true);
 
   builder->SendOk();
 }
 
-void SearchFamily::FtDropIndex(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SearchFamily::FtDropIndex(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
   // TODO: Handle optional DD param
 
   atomic_uint num_deleted{0};
-  tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (es->search_indices()->DropIndex(idx_name))
       num_deleted.fetch_add(1);
     return OpStatus::OK;
@@ -629,17 +700,17 @@ void SearchFamily::FtDropIndex(CmdArgList args, Transaction* tx, SinkReplyBuilde
 
   DCHECK(num_deleted == 0u || num_deleted == shard_set->size());
   if (num_deleted == 0u)
-    return builder->SendError("-Unknown Index name");
-  return builder->SendOk();
+    return cmd_cntx.rb->SendError("-Unknown Index name");
+  return cmd_cntx.rb->SendOk();
 }
 
-void SearchFamily::FtInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SearchFamily::FtInfo(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view idx_name = ArgS(args, 0);
 
   atomic_uint num_notfound{0};
   vector<DocIndexInfo> infos(shard_set->size());
 
-  tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(idx_name);
     if (index == nullptr)
       num_notfound.fetch_add(1);
@@ -649,9 +720,10 @@ void SearchFamily::FtInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
   });
 
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   if (num_notfound > 0u)
-    return builder->SendError("Unknown Index name");
+    return rb->SendError("Unknown Index name");
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -663,7 +735,6 @@ void SearchFamily::FtInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartCollection(4, RedisReplyBuilder::MAP);
 
   rb->SendSimpleString("index_name");
@@ -701,25 +772,25 @@ void SearchFamily::FtInfo(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
   rb->SendLong(total_num_docs);
 }
 
-void SearchFamily::FtList(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SearchFamily::FtList(CmdArgList args, const CommandContext& cmd_cntx) {
   atomic_int first{0};
   vector<string> names;
 
-  tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     // Using `first` to assign `names` only once without a race
     if (first.fetch_add(1) == 0)
       names = es->search_indices()->GetIndexNames();
     return OpStatus::OK;
   });
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendBulkStrArr(names);
 }
 
-void SearchFamily::FtSearch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
-
+  auto* builder = cmd_cntx.rb;
   auto params = ParseSearchParamsOrReply(&parser, builder);
   if (!params.has_value())
     return;
@@ -733,7 +804,7 @@ void SearchFamily::FtSearch(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
   atomic<bool> index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
 
-  tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       docs[es->shard_id()] = index->Search(t->GetOpArgs(es), *params, &search_algo);
     else
@@ -755,13 +826,14 @@ void SearchFamily::FtSearch(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     ReplyWithResults(*params, absl::MakeSpan(docs), builder);
 }
 
-void SearchFamily::FtProfile(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
 
   string_view index_name = parser.Next();
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   if (!parser.Check("SEARCH") && !parser.Check("AGGREGATE")) {
-    return builder->SendError("no `SEARCH` or `AGGREGATE` provided");
+    return rb->SendError("no `SEARCH` or `AGGREGATE` provided");
   }
 
   parser.Check("LIMITED");  // TODO: Implement limited profiling
@@ -769,14 +841,14 @@ void SearchFamily::FtProfile(CmdArgList args, Transaction* tx, SinkReplyBuilder*
 
   string_view query_str = parser.Next();
 
-  optional<SearchParams> params = ParseSearchParamsOrReply(&parser, builder);
+  optional<SearchParams> params = ParseSearchParamsOrReply(&parser, rb);
   if (!params.has_value())
     return;
 
   search::SearchAlgorithm search_algo;
   search::SortOption* sort_opt = params->sort_option.has_value() ? &*params->sort_option : nullptr;
   if (!search_algo.Init(query_str, &params->query_params, sort_opt))
-    return builder->SendError("query syntax error");
+    return rb->SendError("query syntax error");
 
   search_algo.EnableProfiling();
 
@@ -788,7 +860,7 @@ void SearchFamily::FtProfile(CmdArgList args, Transaction* tx, SinkReplyBuilder*
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
-  tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(index_name);
     if (!index) {
       index_not_found.store(true, memory_order_relaxed);
@@ -805,7 +877,7 @@ void SearchFamily::FtProfile(CmdArgList args, Transaction* tx, SinkReplyBuilder*
   });
 
   if (index_not_found.load())
-    return builder->SendError(std::string{index_name} + ": no such index");
+    return rb->SendError(std::string{index_name} + ": no such index");
 
   auto took = absl::Now() - start;
 
@@ -821,7 +893,6 @@ void SearchFamily::FtProfile(CmdArgList args, Transaction* tx, SinkReplyBuilder*
     }
   }
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   // First element -> Result of the search command
   // Second element -> Profile information
   rb->StartArray(2);
@@ -830,9 +901,9 @@ void SearchFamily::FtProfile(CmdArgList args, Transaction* tx, SinkReplyBuilder*
   if (!result_is_empty) {
     auto agg = search_algo.HasAggregation();
     if (agg) {
-      ReplySorted(*agg, *params, absl::MakeSpan(search_results), builder);
+      ReplySorted(*agg, *params, absl::MakeSpan(search_results), rb);
     } else {
-      ReplyWithResults(*params, absl::MakeSpan(search_results), builder);
+      ReplyWithResults(*params, absl::MakeSpan(search_results), rb);
     }
   } else {
     rb->StartArray(1);
@@ -888,14 +959,14 @@ void SearchFamily::FtProfile(CmdArgList args, Transaction* tx, SinkReplyBuilder*
   }
 }
 
-void SearchFamily::FtTagVals(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view index_name = ArgS(args, 0);
   string_view field_name = ArgS(args, 1);
   VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
 
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
 
-  tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
     else
@@ -905,6 +976,7 @@ void SearchFamily::FtTagVals(CmdArgList args, Transaction* tx, SinkReplyBuilder*
   });
 
   absl::flat_hash_set<string> result_set;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   // Check first if either shard had errors. Also merge the results into a single set.
   for (auto& res : shard_results) {
@@ -912,18 +984,18 @@ void SearchFamily::FtTagVals(CmdArgList args, Transaction* tx, SinkReplyBuilder*
       result_set.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
     } else {
       res.error().kind = facade::kSearchErrType;
-      return builder->SendError(res.error());
+      return rb->SendError(res.error());
     }
   }
 
   shard_results.clear();
   vector<string> vec(result_set.begin(), result_set.end());
 
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->SendBulkStrArr(vec, RedisReplyBuilder::SET);
 }
 
-void SearchFamily::FtAggregate(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto* builder = cmd_cntx.rb;
   const auto params = ParseAggregatorParamsOrReply(args, builder);
   if (!params)
     return;
@@ -936,7 +1008,7 @@ void SearchFamily::FtAggregate(CmdArgList args, Transaction* tx, SinkReplyBuilde
       declval<OpArgs>(), params.value(), &search_algo));
 
   vector<ResultContainer> query_results(shard_set->size());
-  tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+  cmd_cntx.tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     if (auto* index = es->search_indices()->GetIndex(params->index); index) {
       query_results[es->shard_id()] =
           index->SearchForAggregator(t->GetOpArgs(es), params.value(), &search_algo);
@@ -944,28 +1016,52 @@ void SearchFamily::FtAggregate(CmdArgList args, Transaction* tx, SinkReplyBuilde
     return OpStatus::OK;
   });
 
-  vector<aggregate::DocValues> values;
+  // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
+  // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
+  // Keys of values should point to the keys of the query_results
+  std::vector<aggregate::DocValues> values;
   for (auto& sub_results : query_results) {
-    values.insert(values.end(), make_move_iterator(sub_results.begin()),
-                  make_move_iterator(sub_results.end()));
+    for (auto& docs : sub_results) {
+      aggregate::DocValues doc_value;
+      for (auto& doc : docs) {
+        doc_value[doc.first] = std::move(doc.second);
+      }
+      values.push_back(std::move(doc_value));
+    }
   }
 
-  auto agg_results = aggregate::Process(std::move(values), params->steps);
-  if (!agg_results.has_value())
-    return builder->SendError(agg_results.error());
+  std::vector<std::string_view> load_fields;
+  if (params->load_fields) {
+    load_fields.reserve(params->load_fields->size());
+    for (const auto& field : params->load_fields.value()) {
+      load_fields.push_back(field.GetShortName());
+    }
+  }
 
-  size_t result_size = agg_results->size();
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto agg_results = aggregate::Process(std::move(values), load_fields, params->steps);
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   auto sortable_value_sender = SortableValueSender(rb);
 
+  const size_t result_size = agg_results.values.size();
   rb->StartArray(result_size + 1);
   rb->SendLong(result_size);
 
-  for (const auto& result : agg_results.value()) {
-    rb->StartArray(result.size() * 2);
-    for (const auto& [k, v] : result) {
-      rb->SendBulkString(k);
-      std::visit(sortable_value_sender, v);
+  for (const auto& value : agg_results.values) {
+    size_t fields_count = 0;
+    for (const auto& field : agg_results.fields_to_print) {
+      if (value.find(field) != value.end()) {
+        fields_count++;
+      }
+    }
+
+    rb->StartArray(fields_count * 2);
+    for (const auto& field : agg_results.fields_to_print) {
+      auto it = value.find(field);
+      if (it != value.end()) {
+        rb->SendBulkString(field);
+        std::visit(sortable_value_sender, it->second);
+      }
     }
   }
 }

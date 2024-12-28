@@ -6,7 +6,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read 
+  contents: read
 
 concurrency:
   group: dragonfly-${{ github.workflow }}-${{ github.ref }}

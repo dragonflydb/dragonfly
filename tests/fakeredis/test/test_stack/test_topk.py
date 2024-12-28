@@ -3,8 +3,14 @@ import redis
 
 topk_tests = pytest.importorskip("probables")
 
+pytestmark = []
+pytestmark.extend(
+    [
+        pytest.mark.unsupported_server_types("dragonfly"),
+    ]
+)
 
-@pytest.mark.unsupported_server_types("dragonfly")
+
 def test_topk_incrby(r: redis.Redis):
     assert r.topk().reserve("topk", 3, 10, 3, 1)
     assert [None, None, None] == r.topk().incrby(
@@ -17,7 +23,6 @@ def test_topk_incrby(r: redis.Redis):
         )
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_topk(r: redis.Redis):
     # test list with empty buckets
     assert r.topk().reserve("topk", 3, 50, 4, 0.9)

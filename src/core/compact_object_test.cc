@@ -7,8 +7,6 @@
 #include <mimalloc.h>
 #include <xxhash.h>
 
-#include <jsoncons/json.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <random>
 
 #include "base/gtest.h"
@@ -16,6 +14,7 @@
 #include "core/detail/bitpacking.h"
 #include "core/flat_set.h"
 #include "core/mi_memory_resource.h"
+#include "core/string_set.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -573,6 +572,14 @@ TEST_F(CompactObjectTest, DefragHash) {
     if (lps[i] != target_lp)
       lpFree(lps[i]);
   }
+}
+
+TEST_F(CompactObjectTest, DefragSet) {
+  // This is still not implemented
+  StringSet* s = CompactObj::AllocateMR<StringSet>();
+  s->Add("str");
+  cobj_.InitRobj(OBJ_SET, kEncodingStrMap2, s);
+  ASSERT_FALSE(cobj_.DefragIfNeeded(0.8));
 }
 
 TEST_F(CompactObjectTest, RawInterface) {

@@ -33,8 +33,6 @@ class SetFamily {
 
   static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
                                                CmdArgList values, PrimeValue* pv);
-
- private:
 };
 
 }  // namespace dfly

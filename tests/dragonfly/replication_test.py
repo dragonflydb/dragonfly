@@ -44,23 +44,23 @@ Test full replication pipeline. Test full sync with streaming changes and stable
 
 
 @pytest.mark.parametrize(
-    "t_master, t_replicas, seeder_config, stream_target, big_value",
+    "t_master, t_replicas, seeder_config, stream_target",
     [
         # Quick general test that replication is working
-        (1, 3 * [1], dict(key_target=1_000), 500, False),
-        (4, [4, 4], dict(key_target=10_000), 1_000, False),
-        pytest.param(6, [6, 6, 6], dict(key_target=100_000), 20_000, False, marks=M_OPT),
+        (1, 3 * [1], dict(key_target=1_000), 500),
+        # A lot of huge values
+        (2, 2 * [1], dict(key_target=1_000, huge_value_target=30), 500),
+        (4, [4, 4], dict(key_target=10_000), 1_000),
+        pytest.param(6, [6, 6, 6], dict(key_target=100_000), 20_000, marks=M_OPT),
         # Skewed tests with different thread ratio
-        pytest.param(8, 6 * [1], dict(key_target=5_000), 2_000, False, marks=M_SLOW),
-        pytest.param(2, [8, 8], dict(key_target=10_000), 2_000, False, marks=M_SLOW),
-        # Test with big value size
-        pytest.param(2, [2], dict(key_target=1_000, data_size=10_000), 100, False, marks=M_SLOW),
-        # Test with big value and big value serialization
-        pytest.param(2, [2], dict(key_target=1_000, data_size=10_000), 100, True, marks=M_SLOW),
-        # Stress test
+        pytest.param(8, 6 * [1], dict(key_target=5_000), 2_000, marks=M_SLOW),
+        pytest.param(2, [8, 8], dict(key_target=10_000), 2_000, marks=M_SLOW),
+        # Everything is big because data size is 10k
         pytest.param(
-            8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, False, marks=M_STRESS
+            2, [2], dict(key_target=1_000, data_size=10_000, huge_value_target=0), 100, marks=M_SLOW
         ),
+        # Stress test
+        pytest.param(8, [8, 8], dict(key_target=1_000_000, units=16), 50_000, marks=M_STRESS),
     ],
 )
 @pytest.mark.parametrize("mode", [({}), ({"cache_mode": "true"})])
@@ -70,16 +70,12 @@ async def test_replication_all(
     t_replicas,
     seeder_config,
     stream_target,
-    big_value,
     mode,
 ):
     args = {}
     if mode:
         args["cache_mode"] = "true"
         args["maxmemory"] = str(t_master * 256) + "mb"
-
-    if big_value:
-        args["serialization_max_chunk_size"] = 4096
 
     master = df_factory.create(admin_port=ADMIN_PORT, proactor_threads=t_master, **args)
     replicas = [
@@ -131,6 +127,26 @@ async def test_replication_all(
 
     # Check data after stable state stream
     await check()
+
+    info = await c_master.info()
+    preemptions = info["big_value_preemptions"]
+    total_buckets = info["num_buckets"]
+    compressed_blobs = info["compressed_blobs"]
+    logging.debug(
+        f"Compressed blobs {compressed_blobs} .Buckets {total_buckets}. Preemptions {preemptions}"
+    )
+
+    assert preemptions >= seeder.huge_value_target * 0.5
+    assert compressed_blobs > 0
+    # Because data size could be 10k and for that case there will be almost a preemption
+    # per bucket.
+    if seeder.data_size < 1000:
+        # We care that we preempt less times than the total buckets such that we can be
+        # sure that we test both flows (with and without preemptions). Preemptions on 30%
+        # of buckets seems like a big number but that depends on a few parameters like
+        # the size of the hug value and the serialization max chunk size. For the test cases here,
+        # it's usually close to 10% but there are some that are close to 30.
+        assert preemptions <= (total_buckets * 0.3)
 
 
 async def check_replica_finished_exec(c_replica: aioredis.Redis, m_offset):
@@ -195,7 +211,6 @@ disconnect_cases = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
 async def test_disconnect_replica(
     df_factory: DflyInstanceFactory,
@@ -327,7 +342,6 @@ master_crash_cases = [
 ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.slow
 @pytest.mark.parametrize("t_master, t_replicas, n_random_crashes, n_keys", master_crash_cases)
 async def test_disconnect_master(
@@ -397,7 +411,6 @@ Test re-connecting replica to different masters.
 rotating_master_cases = [(4, [4, 4, 4, 4], dict(keys=2_000, dbcount=4))]
 
 
-@pytest.mark.asyncio
 @pytest.mark.slow
 @pytest.mark.parametrize("t_replica, t_masters, seeder_config", rotating_master_cases)
 async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_masters, seeder_config):
@@ -433,7 +446,6 @@ async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_mast
         fill_task.cancel()
 
 
-@pytest.mark.asyncio
 @pytest.mark.slow
 async def test_cancel_replication_immediately(df_factory, df_seeder_factory: DflySeederFactory):
     """
@@ -491,7 +503,6 @@ Check replica keys at the end.
 """
 
 
-@pytest.mark.asyncio
 async def test_flushall(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=2)
@@ -542,7 +553,6 @@ Test journal rewrites.
 
 
 @dfly_args({"proactor_threads": 4})
-@pytest.mark.asyncio
 async def test_rewrites(df_factory):
     CLOSE_TIMESTAMP = int(time.time()) + 100
     CLOSE_TIMESTAMP_MS = CLOSE_TIMESTAMP * 1000
@@ -727,7 +737,6 @@ Test automatic replication of expiry.
 
 
 @dfly_args({"proactor_threads": 4})
-@pytest.mark.asyncio
 async def test_expiry(df_factory: DflyInstanceFactory, n_keys=1000):
     master = df_factory.create()
     replica = df_factory.create()
@@ -866,7 +875,6 @@ return 'OK'
 """
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replicas, num_ops, num_keys, num_par, flags", script_cases)
 async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_par, flags):
     master = df_factory.create(proactor_threads=t_master)
@@ -900,7 +908,6 @@ async def test_scripts(df_factory, t_master, t_replicas, num_ops, num_keys, num_
 
 
 @dfly_args({"proactor_threads": 4})
-@pytest.mark.asyncio
 async def test_auth_master(df_factory, n_keys=20):
     masterpass = "requirepass"
     replicapass = "replicapass"
@@ -966,7 +973,6 @@ async def test_script_transfer(df_factory):
 
 
 @dfly_args({"proactor_threads": 4})
-@pytest.mark.asyncio
 async def test_role_command(df_factory, n_keys=20):
     master = df_factory.create()
     replica = df_factory.create()
@@ -1064,10 +1070,9 @@ async def assert_replica_reconnections(replica_inst, initial_reconnects_count):
 
 
 @dfly_args({"proactor_threads": 2})
-@pytest.mark.asyncio
 async def test_replication_info(df_factory: DflyInstanceFactory, df_seeder_factory, n_keys=2000):
     master = df_factory.create()
-    replica = df_factory.create(logtostdout=True, replication_acks_interval=100)
+    replica = df_factory.create(replication_acks_interval=100)
     df_factory.start_all([master, replica])
     c_master = master.client()
     c_replica = replica.client()
@@ -1096,7 +1101,6 @@ More details in https://github.com/dragonflydb/dragonfly/issues/1231
 """
 
 
-@pytest.mark.asyncio
 @pytest.mark.slow
 async def test_flushall_in_full_sync(df_factory):
     master = df_factory.create(proactor_threads=4)
@@ -1155,10 +1159,9 @@ redis.call('SET', 'A', 'ErrroR')
 """
 
 
-@pytest.mark.asyncio
 async def test_readonly_script(df_factory):
-    master = df_factory.create(proactor_threads=2, logtostdout=True)
-    replica = df_factory.create(proactor_threads=2, logtostdout=True)
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
 
     df_factory.start_all([master, replica])
 
@@ -1188,7 +1191,6 @@ take_over_cases = [
 
 
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
-@pytest.mark.asyncio
 async def test_take_over_counters(df_factory, master_threads, replica_threads):
     master = df_factory.create(proactor_threads=master_threads)
     replica1 = df_factory.create(proactor_threads=replica_threads)
@@ -1243,7 +1245,6 @@ async def test_take_over_counters(df_factory, master_threads, replica_threads):
 
 
 @pytest.mark.parametrize("master_threads, replica_threads", take_over_cases)
-@pytest.mark.asyncio
 async def test_take_over_seeder(
     request, df_factory, df_seeder_factory, master_threads, replica_threads
 ):
@@ -1299,7 +1300,6 @@ async def test_take_over_seeder(
 
 
 @pytest.mark.parametrize("master_threads, replica_threads", [[4, 4]])
-@pytest.mark.asyncio
 async def test_take_over_read_commands(df_factory, master_threads, replica_threads):
     master = df_factory.create(proactor_threads=master_threads)
     replica = df_factory.create(proactor_threads=replica_threads)
@@ -1333,7 +1333,6 @@ async def test_take_over_read_commands(df_factory, master_threads, replica_threa
     await promt_task
 
 
-@pytest.mark.asyncio
 async def test_take_over_timeout(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=2)
     replica = df_factory.create(proactor_threads=2)
@@ -1379,7 +1378,6 @@ async def test_take_over_timeout(df_factory, df_seeder_factory):
 replication_cases = [(8, 8)]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replica", replication_cases)
 async def test_no_tls_on_admin_port(
     df_factory: DflyInstanceFactory,
@@ -1428,7 +1426,6 @@ async def test_no_tls_on_admin_port(
 replication_cases = [(8, 8, False), (8, 8, True)]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("t_master, t_replica, test_admin_port", replication_cases)
 async def test_tls_replication(
     df_factory,
@@ -1521,7 +1518,6 @@ async def wait_for_replica_status(
     raise RuntimeError("Client did not become available in time!")
 
 
-@pytest.mark.asyncio
 async def test_replicaof_flag(df_factory):
     # tests --replicaof works under normal conditions
     master = df_factory.create(
@@ -1555,7 +1551,6 @@ async def test_replicaof_flag(df_factory):
     assert "VALUE" == val
 
 
-@pytest.mark.asyncio
 async def test_replicaof_flag_replication_waits(df_factory):
     # tests --replicaof works when we launch replication before the master
     BASE_PORT = 1111
@@ -1599,7 +1594,6 @@ async def test_replicaof_flag_replication_waits(df_factory):
     assert "VALUE" == val
 
 
-@pytest.mark.asyncio
 async def test_replicaof_flag_disconnect(df_factory):
     # test stopping replication when started using --replicaof
     master = df_factory.create(
@@ -1639,7 +1633,6 @@ async def test_replicaof_flag_disconnect(df_factory):
     assert role[0] == "master"
 
 
-@pytest.mark.asyncio
 async def test_df_crash_on_memcached_error(df_factory):
     master = df_factory.create(
         memcached_port=11211,
@@ -1667,7 +1660,6 @@ async def test_df_crash_on_memcached_error(df_factory):
         memcached_client.set("key", "data", noreply=False)
 
 
-@pytest.mark.asyncio
 async def test_df_crash_on_replicaof_flag(df_factory):
     master = df_factory.create(
         proactor_threads=2,
@@ -1931,7 +1923,6 @@ async def test_search_with_stream(df_factory: DflyInstanceFactory):
 
 
 # @pytest.mark.slow
-@pytest.mark.asyncio
 async def test_client_pause_with_replica(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -2003,7 +1994,6 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
 
-@pytest.mark.asyncio
 async def test_heartbeat_eviction_propagation(df_factory):
     master = df_factory.create(
         proactor_threads=1, cache_mode="true", maxmemory="256mb", enable_heartbeat_eviction="false"
@@ -2039,7 +2029,6 @@ async def test_heartbeat_eviction_propagation(df_factory):
     assert set(keys_master) == set(keys_replica)
 
 
-@pytest.mark.asyncio
 async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     master = df_factory.create(
         proactor_threads=2,
@@ -2076,7 +2065,6 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
     assert set(keys_master).difference(keys_replica) == set()
 
 
-@pytest.mark.asyncio
 async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     """
     Issues many SETEX commands through a Lua script so that no yields are done between them.
@@ -2129,7 +2117,6 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     assert set(keys_master) == set(keys_replica)
 
 
-@pytest.mark.asyncio
 async def test_saving_replica(df_factory):
     master = df_factory.create(proactor_threads=1)
     replica = df_factory.create(proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}")
@@ -2157,7 +2144,6 @@ async def test_saving_replica(df_factory):
     assert not await is_saving(c_replica)
 
 
-@pytest.mark.asyncio
 async def test_start_replicating_while_save(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4, dbfilename=f"dump_{tmp_file_name()}")
@@ -2183,7 +2169,6 @@ async def test_start_replicating_while_save(df_factory):
     assert not await is_saving(c_replica)
 
 
-@pytest.mark.asyncio
 async def test_user_acl_replication(df_factory):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -2217,7 +2202,6 @@ async def test_user_acl_replication(df_factory):
 
 
 @pytest.mark.parametrize("break_conn", [False, True])
-@pytest.mark.asyncio
 async def test_replica_reconnect(df_factory, break_conn):
     """
     Test replica does not connect to master if master restarted
@@ -2270,7 +2254,6 @@ async def test_replica_reconnect(df_factory, break_conn):
     assert await c_replica.execute_command("get k") == "6789"
 
 
-@pytest.mark.asyncio
 async def test_announce_ip_port(df_factory):
     master = df_factory.create()
     replica = df_factory.create(replica_announce_ip="overrode-host", announce_port="1337")
@@ -2291,7 +2274,6 @@ async def test_announce_ip_port(df_factory):
     assert port == "1337"
 
 
-@pytest.mark.asyncio
 async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # setting replication_timeout to a very small value to force the replica to timeout
     master = df_factory.create(replication_timeout=100, vmodule="replica=2,dflycmd=2")
@@ -2302,7 +2284,7 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("debug", "populate", "200000", "foo", "5000")
+    await c_master.execute_command("debug", "populate", "200000", "foo", "5000", "RAND")
     seeder = df_seeder_factory.create(port=master.port)
     seeder_task = asyncio.create_task(seeder.run())
 
@@ -2326,10 +2308,11 @@ async def test_replication_timeout_on_full_sync(df_factory: DflyInstanceFactory,
     seeder.stop()
     await seeder_task
 
-    await check_all_replicas_finished([c_replica], c_master)
+    await check_all_replicas_finished([c_replica], c_master, timeout=30)
     await assert_replica_reconnections(replica, 0)
 
 
+@dfly_args({"proactor_threads": 1})
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked
     master = df_factory.create(replication_timeout=1000)
@@ -2340,7 +2323,7 @@ async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("debug", "populate", "200000", "foo", "500")
+    await c_master.execute_command("debug", "populate", "200000", "foo", "500", "RAND")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
 
     @assert_eventually
@@ -2406,9 +2389,15 @@ async def test_replicate_old_master(
 
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
-    master = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode=cluster_mode)
+    master = df_factory.create(
+        version=1.19,
+        path=released_dfly_path,
+        cluster_mode=cluster_mode,
+    )
     replica = df_factory.create(
-        cluster_mode=cluster_mode, cluster_announce_ip=announce_ip, announce_port=announce_port
+        cluster_mode=cluster_mode,
+        cluster_announce_ip=announce_ip,
+        announce_port=announce_port,
     )
 
     df_factory.start_all([master, replica])
@@ -2435,7 +2424,6 @@ async def test_replicate_old_master(
 # For more information plz refer to the issue on gh:
 # https://github.com/dragonflydb/dragonfly/issues/3504
 @dfly_args({"proactor_threads": 1})
-@pytest.mark.asyncio
 async def test_empty_hash_map_replicate_old_master(df_factory):
     cpu = platform.processor()
     if cpu != "x86_64":
@@ -2494,7 +2482,6 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
 # For more information plz refer to the issue on gh:
 # https://github.com/dragonflydb/dragonfly/issues/3504
 @dfly_args({"proactor_threads": 1})
-@pytest.mark.asyncio
 async def test_empty_hashmap_loading_bug(df_factory: DflyInstanceFactory):
     cpu = platform.processor()
     if cpu != "x86_64":
@@ -2565,7 +2552,6 @@ async def test_replicating_mc_flags(df_factory):
         assert c_mc_replica.get(f"key{i}") == str.encode(f"value{i}")
 
 
-@pytest.mark.asyncio
 async def test_double_take_over(df_factory, df_seeder_factory):
     master = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT)
     replica = df_factory.create(proactor_threads=4, dbfilename="", admin_port=ADMIN_PORT + 1)
@@ -2607,7 +2593,6 @@ async def test_double_take_over(df_factory, df_seeder_factory):
     assert await seeder.compare(capture, port=master.port)
 
 
-@pytest.mark.asyncio
 async def test_replica_of_replica(df_factory):
     # Can't connect a replica to a replica, but OK to connect 2 replicas to the same master
     master = df_factory.create(proactor_threads=2)
@@ -2627,7 +2612,6 @@ async def test_replica_of_replica(df_factory):
     assert await c_replica2.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
 
 
-@pytest.mark.asyncio
 async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     df_factory: DflyInstanceFactory, df_seeder_factory
 ):
@@ -2643,7 +2627,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_command("debug", "populate", "100000", "foo", "5000")
+    await c_master.execute_command("debug", "populate", "100000", "foo", "5000", "RAND")
 
     c_master = master.client()
     c_replica = replica.client()
@@ -2680,7 +2664,6 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     "element_size, elements_number",
     [(16, 20000), (20000, 16)],
 )
-@pytest.mark.asyncio
 async def test_big_containers(df_factory, element_size, elements_number):
     master = df_factory.create(proactor_threads=4)
     replica = df_factory.create(proactor_threads=4)
@@ -2708,3 +2691,18 @@ async def test_big_containers(df_factory, element_size, elements_number):
     replica_data = await StaticSeeder.capture(c_replica)
     master_data = await StaticSeeder.capture(c_master)
     assert master_data == replica_data
+
+
+async def test_master_too_big(df_factory):
+    master = df_factory.create(proactor_threads=4)
+    replica = df_factory.create(proactor_threads=2, maxmemory="600mb")
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+    await c_master.execute_command("DEBUG POPULATE 1000000 key 1000 RAND")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    # We should never sync due to used memory too high during full sync
+    with pytest.raises(TimeoutError):
+        await wait_available_async(c_replica, timeout=10)

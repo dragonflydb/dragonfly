@@ -96,7 +96,12 @@ namespace {
 // Default stack size for fibers. We decrease it by 16 bytes because some allocators
 // need additional 8-16 bytes for their internal structures, thus over reserving additional
 // memory pages if using round sizes.
+#ifdef NDEBUG
 constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
+#else
+// Increase stack size for debug builds.
+constexpr size_t kFiberDefaultStackSize = 40_KB - 16;
+#endif
 
 using util::http::TlsClient;
 
@@ -165,12 +170,12 @@ template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
   return res;
 }
 
-bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
+void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   uint64_t maxmemory = GetMaxMemoryFlag();
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
     LOG(ERROR) << "There are " << pool->size() << " threads, so "
                << HumanReadableNumBytes(pool->size() * 256_MB) << " are required. Exiting...";
-    return false;
+    exit(1);
   }
 
   Service service(pool);
@@ -310,8 +315,6 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   version_monitor.Shutdown();
   service.Shutdown();
-
-  return true;
 }
 
 bool CreatePidFile(const string& path) {
@@ -764,40 +767,42 @@ Usage: dragonfly [FLAGS]
 
   fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 
-  unique_ptr<util::ProactorPool> pool;
+  {
+    unique_ptr<util::ProactorPool> pool;
 
 #ifdef __linux__
-  base::sys::KernelVersion kver;
-  base::sys::GetKernelVersion(&kver);
+    base::sys::KernelVersion kver;
+    base::sys::GetKernelVersion(&kver);
 
-  CHECK_LT(kver.major, 99u);
-  dfly::kernel_version = kver.kernel * 100 + kver.major;
+    CHECK_LT(kver.major, 99u);
+    dfly::kernel_version = kver.kernel * 100 + kver.major;
 
-  bool use_epoll = ShouldUseEpollAPI(kver);
+    bool use_epoll = ShouldUseEpollAPI(kver);
 
-  if (use_epoll) {
-    pool.reset(fb2::Pool::Epoll(max_available_threads));
-  } else {
-    pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
-  }
+    if (use_epoll) {
+      pool.reset(fb2::Pool::Epoll(max_available_threads));
+    } else {
+      pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
+    }
 #else
-  pool.reset(fb2::Pool::Epoll(max_available_threads));
+    pool.reset(fb2::Pool::Epoll(max_available_threads));
 #endif
 
-  pool->Run();
+    pool->Run();
 
-  SetupAllocationTracker(pool.get());
+    SetupAllocationTracker(pool.get());
 
-  AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
-  acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
+    AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
+    acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
-  int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
+    dfly::RunEngine(pool.get(), &acceptor);
 
-  pool->Stop();
+    pool->Stop();
 
-  if (!pidfile_path.empty()) {
-    unlink(pidfile_path.c_str());
+    if (!pidfile_path.empty()) {
+      unlink(pidfile_path.c_str());
+    }
   }
 
-  return res;
+  return 0;
 }

@@ -13,7 +13,7 @@ class SinkReplyBuilder;
 namespace dfly {
 
 class CommandRegistry;
-class ConnectionContext;
+struct CommandContext;
 
 class BloomFamily {
  public:
@@ -22,11 +22,11 @@ class BloomFamily {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Reserve(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Add(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void MAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void Exists(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
-  static void MExists(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder);
+  static void Reserve(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Add(CmdArgList args, const CommandContext& cmd_cntx);
+  static void MAdd(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Exists(CmdArgList args, const CommandContext& cmd_cntx);
+  static void MExists(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly

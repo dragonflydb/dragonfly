@@ -37,7 +37,7 @@ class RobjWrapper {
   RobjWrapper() : sz_(0), type_(0), encoding_(0) {
   }
 
-  size_t MallocUsed() const;
+  size_t MallocUsed(bool slow) const;
 
   uint64_t HashCode() const;
   bool Equal(const RobjWrapper& ow) const;
@@ -46,6 +46,8 @@ class RobjWrapper {
   void Free(MemoryResource* mr);
 
   void SetString(std::string_view s, MemoryResource* mr);
+  // Used when sz_ is used to denote memory usage
+  void SetSize(uint64_t size);
   void Init(unsigned type, unsigned encoding, void* inner);
 
   unsigned type() const {
@@ -315,6 +317,8 @@ class CompactObj {
   void SetJson(const uint8_t* buf, size_t len);
   // Adjusts the size used by json
   void SetJsonSize(int64_t size);
+  // Adjusts the size used by a stream
+  void AddStreamSize(int64_t size);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
@@ -359,9 +363,9 @@ class CompactObj {
   // Postcondition: The object is an in-memory string.
   void Materialize(std::string_view str, bool is_raw);
 
-  // In case this object a single blob, returns number of bytes allocated on heap
-  // for that blob. Otherwise returns 0.
-  size_t MallocUsed() const;
+  // Returns the approximation of memory used by the object.
+  // If slow is true, may use more expensive methods to calculate the precise size.
+  size_t MallocUsed(bool slow = false) const;
 
   // Resets the object to empty state (string).
   void Reset();

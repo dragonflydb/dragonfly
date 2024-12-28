@@ -63,8 +63,9 @@ add_third_party(
 
 add_third_party(
   reflex
-  URL https://github.com/Genivia/RE-flex/archive/refs/tags/v3.5.1.tar.gz
-  CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-avx --prefix=${THIRD_PARTY_LIB_DIR}/reflex
+  URL https://github.com/Genivia/RE-flex/archive/refs/tags/v5.1.0.tar.gz
+  PATCH_COMMAND autoreconf -fi
+  CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-avx2 --prefix=${THIRD_PARTY_LIB_DIR}/reflex
           CXX=${CMAKE_CXX_COMPILER} CC=${CMAKE_C_COMPILER}
 )
 
@@ -83,7 +84,7 @@ add_third_party(
 
 add_third_party(
   lz4
-  URL https://github.com/lz4/lz4/archive/refs/tags/v1.9.4.tar.gz
+  URL https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz
 
   BUILD_IN_SOURCE 1
   CONFIGURE_COMMAND echo skip

@@ -20,8 +20,6 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 
-#include <jsoncons/json.hpp>
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/pod_array.h"
@@ -46,9 +44,15 @@ constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
 
 // Approximation since does not account for listpacks.
-size_t QlMAllocSize(quicklist* ql) {
-  size_t res = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
-  return res + ql->count * 16;  // we account for each member 16 bytes.
+size_t QlMAllocSize(quicklist* ql, bool slow) {
+  size_t node_size = ql->len * sizeof(quicklistNode) + znallocx(sizeof(quicklist));
+  if (slow) {
+    for (quicklistNode* node = ql->head; node; node = node->next) {
+      node_size += zmalloc_usable_size(node->entry);
+    }
+    return node_size;
+  }
+  return node_size + ql->count * 16;  // we account for each member 16 bytes.
 }
 
 inline void FreeObjSet(unsigned encoding, void* ptr, MemoryResource* mr) {
@@ -119,9 +123,93 @@ size_t MallocUsedZSet(unsigned encoding, void* ptr) {
   return 0;
 }
 
-size_t MallocUsedStream(unsigned encoding, void* streamv) {
-  // stream* str_obj = (stream*)streamv;
-  return 0;  // TODO
+/* This is a helper function with the goal of estimating the memory
+ * size of a radix tree that is used to store Stream IDs.
+ *
+ * Note: to guess the size of the radix tree is not trivial, so we
+ * approximate it considering 16 bytes of data overhead for each
+ * key (the ID), and then adding the number of bare nodes, plus some
+ * overhead due by the data and child pointers. This secret recipe
+ * was obtained by checking the average radix tree created by real
+ * workloads, and then adjusting the constants to get numbers that
+ * more or less match the real memory usage.
+ *
+ * Actually the number of nodes and keys may be different depending
+ * on the insertion speed and thus the ability of the radix tree
+ * to compress prefixes. */
+size_t streamRadixTreeMemoryUsage(rax* rax) {
+  size_t size = sizeof(*rax);
+  size = rax->numele * sizeof(streamID);
+  size += rax->numnodes * sizeof(raxNode);
+  /* Add a fixed overhead due to the aux data pointer, children, ... */
+  size += rax->numnodes * sizeof(long) * 30;
+  return size;
+}
+
+size_t MallocUsedStream(stream* s) {
+  size_t asize = sizeof(*s);
+  asize += streamRadixTreeMemoryUsage(s->rax_tree);
+
+  /* Now we have to add the listpacks. The last listpack is often non
+   * complete, so we estimate the size of the first N listpacks, and
+   * use the average to compute the size of the first N-1 listpacks, and
+   * finally add the real size of the last node. */
+  raxIterator ri;
+  raxStart(&ri, s->rax_tree);
+  raxSeek(&ri, "^", NULL, 0);
+  size_t lpsize = 0, samples = 0;
+  while (raxNext(&ri)) {
+    uint8_t* lp = (uint8_t*)ri.data;
+    /* Use the allocated size, since we overprovision the node initially. */
+    lpsize += zmalloc_size(lp);
+    samples++;
+  }
+  if (s->rax_tree->numele <= samples) {
+    asize += lpsize;
+  } else {
+    if (samples)
+      lpsize /= samples; /* Compute the average. */
+    asize += lpsize * (s->rax_tree->numele - 1);
+    /* No need to check if seek succeeded, we enter this branch only
+     * if there are a few elements in the radix tree. */
+    raxSeek(&ri, "$", NULL, 0);
+    raxNext(&ri);
+    /* Use the allocated size, since we overprovision the node initially. */
+    asize += zmalloc_size(ri.data);
+  }
+  raxStop(&ri);
+
+  /* Consumer groups also have a non trivial memory overhead if there
+   * are many consumers and many groups, let's count at least the
+   * overhead of the pending entries in the groups and consumers
+   * PELs. */
+  if (s->cgroups) {
+    raxStart(&ri, s->cgroups);
+    raxSeek(&ri, "^", NULL, 0);
+    while (raxNext(&ri)) {
+      streamCG* cg = (streamCG*)ri.data;
+      asize += sizeof(*cg);
+      asize += streamRadixTreeMemoryUsage(cg->pel);
+      asize += sizeof(streamNACK) * raxSize(cg->pel);
+
+      /* For each consumer we also need to add the basic data
+       * structures and the PEL memory usage. */
+      raxIterator cri;
+      raxStart(&cri, cg->consumers);
+      raxSeek(&cri, "^", NULL, 0);
+      while (raxNext(&cri)) {
+        const streamConsumer* consumer = (const streamConsumer*)cri.data;
+        asize += sizeof(*consumer);
+        asize += sdslen(consumer->name);
+        asize += streamRadixTreeMemoryUsage(consumer->pel);
+        /* Don't count NACKs again, they are shared with the
+         * consumer group PEL. */
+      }
+      raxStop(&cri);
+    }
+    raxStop(&ri);
+  }
+  return asize;
 }
 
 inline void FreeObjHash(unsigned encoding, void* ptr) {
@@ -215,9 +303,9 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
       return DefragIntSet((intset*)ptr, ratio);
     }
 
-    // StringMap supports re-allocation of it's internal nodes
     case kEncodingStrMap2: {
-      return DefragStrMap2((StringMap*)ptr, ratio);
+      // Still not implemented
+      return {ptr, false};
     }
 
     default:
@@ -291,7 +379,7 @@ static_assert(sizeof(CompactObj) == 18);
 
 namespace detail {
 
-size_t RobjWrapper::MallocUsed() const {
+size_t RobjWrapper::MallocUsed(bool slow) const {
   if (!inner_obj_)
     return 0;
 
@@ -301,8 +389,8 @@ size_t RobjWrapper::MallocUsed() const {
       return InnerObjMallocUsed();
     case OBJ_LIST:
       if (encoding_ == OBJ_ENCODING_QUICKLIST)
-        return QlMAllocSize((quicklist*)inner_obj_);
-      return ((QList*)inner_obj_)->MallocUsed();
+        return QlMAllocSize((quicklist*)inner_obj_, slow);
+      return ((QList*)inner_obj_)->MallocUsed(slow);
     case OBJ_SET:
       return MallocUsedSet(encoding_, inner_obj_);
     case OBJ_HASH:
@@ -310,7 +398,7 @@ size_t RobjWrapper::MallocUsed() const {
     case OBJ_ZSET:
       return MallocUsedZSet(encoding_, inner_obj_);
     case OBJ_STREAM:
-      return MallocUsedStream(encoding_, inner_obj_);
+      return slow ? MallocUsedStream((stream*)inner_obj_) : sz_;
 
     default:
       LOG(FATAL) << "Not supported " << type_;
@@ -364,7 +452,12 @@ size_t RobjWrapper::Size() const {
           StringMap* sm = (StringMap*)inner_obj_;
           return sm->UpperBoundSize();
         }
+        default:
+          LOG(FATAL) << "Unexpected encoding " << encoding_;
       }
+    case OBJ_STREAM:
+      // Size mean malloc bytes for streams
+      return sz_;
     default:;
   }
   return 0;
@@ -453,6 +546,10 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
     memcpy(inner_obj_, s.data(), s.size());
     sz_ = s.size();
   }
+}
+
+void RobjWrapper::SetSize(uint64_t size) {
+  sz_ = size;
 }
 
 bool RobjWrapper::DefragIfNeeded(float ratio) {
@@ -805,6 +902,17 @@ void CompactObj::SetJsonSize(int64_t size) {
   }
 }
 
+void CompactObj::AddStreamSize(int64_t size) {
+  if (size < 0) {
+    // We might have a negative size. For example, if we remove a consumer,
+    // the tracker will report a negative net (since we deallocated),
+    // so the object now consumes less memory than it did before. This DCHECK
+    // is for fanity and to catch any potential issues with our tracking approach.
+    DCHECK(static_cast<int64_t>(u_.r_obj.Size()) >= size);
+  }
+  u_.r_obj.SetSize((u_.r_obj.Size() + size));
+}
+
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
   SetMeta(JSON_TAG);
   u_.json_obj.flat.flat_ptr = (uint8_t*)tl.local_mr->allocate(len, kAlignSize);
@@ -1132,12 +1240,12 @@ void CompactObj::Free() {
   memset(u_.inline_str, 0, kInlineLen);
 }
 
-size_t CompactObj::MallocUsed() const {
+size_t CompactObj::MallocUsed(bool slow) const {
   if (!HasAllocated())
     return 0;
 
   if (taglen_ == ROBJ_TAG) {
-    return u_.r_obj.MallocUsed();
+    return u_.r_obj.MallocUsed(slow);
   }
 
   if (taglen_ == JSON_TAG) {
