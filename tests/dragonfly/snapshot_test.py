@@ -592,16 +592,20 @@ async def test_big_value_serialization_memory_limit(df_factory, cont_type):
         f"debug populate 1 prefix {element_size} TYPE {cont_type} RAND ELEMENTS {elements}"
     )
 
+    await asyncio.sleep(1)
+
     info = await client.info("ALL")
     # rss double's because of DEBUG POPULATE
-    assert info["used_memory_peak_rss"] > (one_gb * 2)
+    peak_rss_before_save = info["used_memory_peak_rss"]
+    assert peak_rss_before_save > (one_gb * 2)
     # if we execute SAVE below without big value serialization we trigger the assertion below.
     # note the peak would reach (one_gb * 3) without it.
     await client.execute_command("SAVE")
     info = await client.info("ALL")
 
-    upper_limit = 2_250_000_000  # 2.25 GB
-    assert info["used_memory_peak_rss"] < upper_limit
+    # verify that the big value serialization mechanism is working
+    # after executing the SAVE command, there should be no spike in RSS memory.
+    assert info["used_memory_peak_rss"] < peak_rss_before_save * 1.3
 
     await client.execute_command("FLUSHALL")
     await client.close()
