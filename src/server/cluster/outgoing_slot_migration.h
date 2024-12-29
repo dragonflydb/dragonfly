@@ -59,7 +59,6 @@ class OutgoingMigration : private ProtocolClient {
 
   size_t GetKeyCount() const ABSL_LOCKS_EXCLUDED(state_mu_);
 
-  static constexpr long kInvalidAttempt = -1;
   static constexpr std::string_view kUnknownMigration = "UNKNOWN_MIGRATION";
 
  private:
