@@ -569,12 +569,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 @dfly_args({"serialization_max_chunk_size": 4096, "proactor_threads": 1})
 @pytest.mark.parametrize(
     "cont_type",
-    [
-        ("HASH"),
-        ("SET"),
-        ("ZSET"),
-        ("LIST"),
-    ],
+    [("HASH"), ("SET"), ("ZSET"), ("LIST"), ("STREAM")],
 )
 @pytest.mark.slow
 async def test_big_value_serialization_memory_limit(df_factory, cont_type):
