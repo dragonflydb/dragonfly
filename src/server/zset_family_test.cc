@@ -816,7 +816,11 @@ TEST_F(ZSetFamilyTest, ZMPopInvalidSyntax) {
 
   // Count number is not uint.
   resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "boo"});
-  EXPECT_THAT(resp, ErrArg("value is out of range, must be positive"));
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Too many arguments.
+  resp = Run({"zmpop", "1", "c", "MAX", "COUNT", "2", "foo"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(ZSetFamilyTest, ZMPop) {
@@ -831,12 +835,18 @@ TEST_F(ZSetFamilyTest, ZMPop) {
   resp = Run({"zmpop", "1", "a", "MIN"});
   EXPECT_THAT(resp, ContainsLabeledScoredArray("a", {{"a1", "1"}}));
 
+  resp = Run({"ZRANGE", "a", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("a2", "2")));
+
   // Max operation.
   resp = Run({"zadd", "b", "1", "b1", "2", "b2"});
   EXPECT_THAT(resp, IntArg(2));
 
   resp = Run({"zmpop", "1", "b", "MAX"});
   EXPECT_THAT(resp, ContainsLabeledScoredArray("b", {{"b2", "2"}}));
+
+  resp = Run({"ZRANGE", "b", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("b1", "1")));
 
   // Count > 1.
   resp = Run({"zadd", "c", "1", "c1", "2", "c2"});
@@ -845,15 +855,34 @@ TEST_F(ZSetFamilyTest, ZMPop) {
   resp = Run({"zmpop", "1", "c", "MAX", "COUNT", "2"});
   EXPECT_THAT(resp, ContainsLabeledScoredArray("c", {{"c1", "1"}, {"c2", "2"}}));
 
+  resp = Run({"zcard", "c"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Count > #elements in set.
+  resp = Run({"zadd", "d", "1", "d1", "2", "d2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"zmpop", "1", "d", "MAX", "COUNT", "3"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("d", {{"d1", "1"}, {"d2", "2"}}));
+
+  resp = Run({"zcard", "d"});
+  EXPECT_THAT(resp, IntArg(0));
+
   // First non empty set is not the first set.
-  resp = Run({"zadd", "d", "1", "d1"});
+  resp = Run({"zadd", "x", "1", "x1"});
   EXPECT_THAT(resp, IntArg(1));
 
-  resp = Run({"zmpop", "2", "empty", "d", "MAX"});
-  EXPECT_THAT(resp, ContainsLabeledScoredArray("d", {{"d1", "1"}}));
+  resp = Run({"zadd", "y", "1", "y1"});
+  EXPECT_THAT(resp, IntArg(1));
 
-  // TODO: Add tests that check that sets that appear after the first non empty set are not
-  // modified?
+  resp = Run({"zmpop", "3", "empty", "x", "y", "MAX"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("x", {{"x1", "1"}}));
+
+  resp = Run({"zcard", "x"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"ZRANGE", "y", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("y1", "1")));
 }
 
 TEST_F(ZSetFamilyTest, ZPopMin) {

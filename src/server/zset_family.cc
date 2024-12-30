@@ -1846,7 +1846,6 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
   };
 
   tx->Execute(std::move(cb), true);
-  tx->Conclude();
 
   return result;
 }
@@ -2078,11 +2077,9 @@ void ZRemRangeGeneric(string_view key, const ZSetFamily::ZRangeSpec& range_spec,
 
 // Returns the key of the first non empty set found in the list of shard arguments.
 // Returns nullopt if none.
-std::optional<std::string> GetFirstNonEmptyKeyFound(EngineShard* shard, Transaction* t) {
+std::optional<std::string_view> GetFirstNonEmptyKeyFound(EngineShard* shard, Transaction* t) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
-
-  std::optional<std::string> result;
 
   auto& db_slice = t->GetDbSlice(shard->shard_id());
 
@@ -2091,55 +2088,53 @@ std::optional<std::string> GetFirstNonEmptyKeyFound(EngineShard* shard, Transact
     if (!it) {
       continue;
     }
-    return std::optional<std::string>(key);
+    return std::optional<std::string_view>(key);
   }
 
-  return std::optional<std::string>();
+  return std::nullopt;
 }
 
 // Validates the ZMPop command arguments and extracts the values to the output params.
 // If the arguments are invalid sends the appropiate error to builder and returns false.
 bool ValidateZMPopCommand(CmdArgList args, uint32* num_keys, bool* is_max, int* pop_count,
                           SinkReplyBuilder* builder) {
-  if (!SimpleAtoi(ArgS(args, 0), num_keys)) {
+  CmdArgParser parser{args};
+
+  if (!SimpleAtoi(parser.Next(), num_keys)) {
     builder->SendError(kUintErr);
     return false;
   }
 
-  if (*num_keys <= 0 || args.size() < *num_keys + 2) {
-    // We should have at least num_keys + #keys + MIN/MAX args.
+  if (*num_keys <= 0 || !parser.HasAtLeast(*num_keys + 1)) {
+    // We should have at least num_keys keys + a MIN/MAX arg.
     builder->SendError(kSyntaxErr);
     return false;
   }
+  // Skip over the keys themselves.
+  parser.Skip(*num_keys);
 
-  const string min_max_keyword = absl::AsciiStrToUpper(ArgS(args, *num_keys + 1));
-  if (min_max_keyword == "MAX") {
+  // We know we have at least one more arg (we checked above).
+  if (parser.Check("MAX")) {
     *is_max = true;
-
-  } else if (min_max_keyword == "MIN") {
+  } else if (parser.Check("MIN")) {
     *is_max = false;
   } else {
     builder->SendError(kSyntaxErr);
     return false;
   }
 
-  // Check if we have additional arguments.
   *pop_count = 1;
-  if (args.size() > *num_keys + 2) {
-    if (args.size() != *num_keys + 4) {
-      // The only possible additonal arguments are "COUNT count".
+  // Check if we have additional COUNT argument.
+  if (parser.HasNext()) {
+    if (!parser.Check("COUNT", pop_count)) {
       builder->SendError(kSyntaxErr);
       return false;
     }
-    const string count_keyword = absl::AsciiStrToUpper(ArgS(args, *num_keys + 2));
-    if (count_keyword != "COUNT") {
-      builder->SendError(kSyntaxErr);
+  }
+
+  if (!parser.Finalize()) {
+      builder->SendError(parser.Error()->MakeReply());
       return false;
-    }
-    if (!SimpleAtoi(ArgS(args, *num_keys + 3), pop_count)) {
-      builder->SendError(kUintErr);
-      return false;
-    }
   }
 
   return true;
@@ -2449,53 +2444,60 @@ void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
   }
   auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  // From the list of input keys, keeps the first (in the order of keys in the command) key found in
+  // From the list of input keys, keep the first (in the order of keys in the command) key found in
   // the current shard.
-  absl::flat_hash_set<std::string> first_found_key_in_shard;
-  // We can have at most one result from each shard.
-  first_found_key_in_shard.reserve(std::min(shard_set->size(), num_keys));
+  std::vector<std::optional<std::string_view>> first_found_key_per_shard_vec(shard_set->size(),
+                                                                             std::nullopt);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    std::optional<std::string> result = GetFirstNonEmptyKeyFound(shard, t);
+    std::optional<std::string_view> result = GetFirstNonEmptyKeyFound(shard, t);
     if (result.has_value()) {
-      first_found_key_in_shard.insert(std::move(*result));
+      first_found_key_per_shard_vec[shard->shard_id()] = result;
     }
     return OpStatus::OK;
   };
 
   cmd_cntx.tx->Execute(std::move(cb), false /* possibly another hop */);
 
+  // Keep all the keys found (first only for each shard) in a set for fast lookups.
+  absl::flat_hash_set<std::string_view> first_found_keys_for_shard;
+  // We can have at most one result from each shard.
+  first_found_keys_for_shard.reserve(std::min(shard_set->size(), num_keys));
+  for (const auto& key : first_found_key_per_shard_vec) {
+    if (!key.has_value()) {
+      continue;
+    }
+    first_found_keys_for_shard.insert(*key);
+  }
+
   // Now that we have the first non empty key from each shard, find the first overall first key and
   // pop elements from it.
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-
-  std::string_view key_to_pop;
+  std::optional<std::string_view> key_to_pop = std::nullopt;
   ArgRange arg_keys(args.subspan(1, num_keys));
   // Find the first arg_key which exists in any shard and is not empty.
   for (std::string_view key : arg_keys) {
-    if (first_found_key_in_shard.contains(key)) {
+    if (first_found_keys_for_shard.contains(key)) {
       key_to_pop = key;
       break;
     }
   }
 
-  if (key_to_pop.empty()) {
+  if (!key_to_pop.has_value()) {
     cmd_cntx.tx->Conclude();
-    rb->SendNull();
+    response_builder->SendNull();
     return;
   }
 
   // Pop elements from relevant set.
   OpResult<ScoredArray> pop_result =
-      ZPopMinMaxInternal(key_to_pop, FilterShards::YES, pop_count, is_max, cmd_cntx.tx);
+      ZPopMinMaxInternal(*key_to_pop, FilterShards::YES, pop_count, is_max, cmd_cntx.tx);
 
   if (pop_result.status() == OpStatus::WRONG_TYPE) {
-    return cmd_cntx.rb->SendError(kWrongTypeErr);
+    return response_builder->SendError(kWrongTypeErr);
   }
 
   LOG_IF(WARNING, !pop_result) << "Unexpected status " << pop_result.status();
-  response_builder->SendLabeledScoredArray(key_to_pop, pop_result.value());
+  response_builder->SendLabeledScoredArray(*key_to_pop, pop_result.value());
 }
 
 void ZSetFamily::ZPopMax(CmdArgList args, const CommandContext& cmd_cntx) {
