@@ -124,12 +124,13 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
       args.push_back(GenerateValue(val_size, random_value, gen));
     }
   } else if (type == "JSON") {
-    cid = registry.Find("JSON.SET");
+    cid = registry.Find("JSON.MERGE");
     args.push_back("$");
 
     string json = "{";
     for (size_t i = 0; i < elements; ++i) {
-      absl::StrAppend(&json, "\"", i, "\":\"", GenerateValue(val_size, random_value, gen), "\",");
+      absl::StrAppend(&json, "\"", GenerateValue(val_size / 2, random_value, gen), "\":\"",
+                      GenerateValue(val_size / 2, random_value, gen), "\",");
     }
     json[json.size() - 1] = '}';  // Replace last ',' with '}'
     args.push_back(json);

@@ -69,6 +69,7 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
     await client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
 
     await check_memory()
+    await client.execute_command("FLUSHALL")
 
 
 @pytest.mark.asyncio
