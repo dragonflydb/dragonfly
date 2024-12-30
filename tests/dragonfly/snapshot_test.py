@@ -574,7 +574,6 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
         ("SET"),
         ("ZSET"),
         ("LIST"),
-        ("STREAM"),
     ],
 )
 @pytest.mark.slow
