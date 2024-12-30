@@ -775,6 +775,27 @@ TEST_F(RedisReplyBuilderTest, SendScoredArray) {
       << "Resp3 WITHSCORES failed.";
 }
 
+TEST_F(RedisReplyBuilderTest, SendLabeledScoredArray) {
+  const std::vector<std::pair<std::string, double>> scored_array{
+      {"e1", 1.1}, {"e2", 2.2}, {"e3", 3.3}};
+
+  builder_->SetResp3(false);
+  builder_->SendLabeledScoredArray("foobar", scored_array);
+  ASSERT_TRUE(NoErrors());
+  ASSERT_EQ(TakePayload(),
+            "*2\r\n$6\r\nfoobar\r\n*3\r\n*2\r\n$2\r\ne1\r\n$3\r\n1.1\r\n*2\r\n$2\r\ne2\r\n$3\r\n2."
+            "2\r\n*2\r\n$2\r\ne3\r\n$3\r\n3.3\r\n")
+      << "Resp3 failed.\n";
+
+  builder_->SetResp3(true);
+  builder_->SendLabeledScoredArray("foobar", scored_array);
+  ASSERT_TRUE(NoErrors());
+  ASSERT_EQ(TakePayload(),
+            "*2\r\n$6\r\nfoobar\r\n*3\r\n*2\r\n$2\r\ne1\r\n,1.1\r\n*2\r\n$2\r\ne2\r\n,2.2\r\n*"
+            "2\r\n$2\r\ne3\r\n,3.3\r\n")
+      << "Resp3 failed.";
+}
+
 TEST_F(RedisReplyBuilderTest, BasicCapture) {
   GTEST_SKIP() << "Unmark when CaptuingReplyBuilder is updated";
 

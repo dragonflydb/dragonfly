@@ -52,6 +52,7 @@ enum CommandOpt : uint32_t {
   // The same callback can be run multiple times without corrupting the result. Used for
   // opportunistic optimizations where inconsistencies can only be detected afterwards.
   IDEMPOTENT = 1U << 18,
+  SLOW = 1U << 19  // Unused?
 };
 
 const char* OptName(CommandOpt fl);
