@@ -577,6 +577,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
         ("STREAM"),
     ],
 )
+@pytest.mark.repeat(30)
 @pytest.mark.slow
 async def test_big_value_serialization_memory_limit(df_factory, cont_type):
     dbfilename = f"dump_{tmp_file_name()}"
