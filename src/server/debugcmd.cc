@@ -161,26 +161,31 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = absl::StrCat(prefix, ":", batch.index[i]);
+    int32_t elements_left = elements;
+    while (elements_left) {
+      int32_t populate_elements = std::min(5, elements_left);
+      elements_left -= populate_elements;
+      auto [cid, args] =
+          GeneratePopulateCommand(type, key, val_size, random_value, populate_elements,
+                                  *sf->service().mutable_registry(), &gen);
+      if (!cid) {
+        LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
+        break;
+      }
 
-    auto [cid, args] = GeneratePopulateCommand(type, std::move(key), val_size, random_value,
-                                               elements, *sf->service().mutable_registry(), &gen);
-    if (!cid) {
-      LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
-      break;
+      args_view.clear();
+      for (auto& arg : args) {
+        args_view.push_back(arg);
+      }
+      auto args_span = absl::MakeSpan(args_view);
+
+      stub_tx->MultiSwitchCmd(cid);
+      local_cntx.cid = cid;
+      crb.SetReplyMode(ReplyMode::NONE);
+      stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
+
+      sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
     }
-
-    args_view.clear();
-    for (auto& arg : args) {
-      args_view.push_back(arg);
-    }
-    auto args_span = absl::MakeSpan(args_view);
-
-    stub_tx->MultiSwitchCmd(cid);
-    local_cntx.cid = cid;
-    crb.SetReplyMode(ReplyMode::NONE);
-    stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
-
-    sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
   }
 
   local_tx->UnlockMulti();
