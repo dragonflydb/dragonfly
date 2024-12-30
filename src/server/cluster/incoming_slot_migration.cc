@@ -94,7 +94,7 @@ class ClusterShardMigration {
       if (tx_data->opcode == journal::Op::PING) {
         // TODO check about ping logic
       } else {
-        ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+        ExecuteTx(std::move(*tx_data), cntx);
       }
     }
 
@@ -125,11 +125,10 @@ class ClusterShardMigration {
   }
 
  private:
-  void ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
+  void ExecuteTx(TransactionData&& tx_data, Context* cntx) {
     if (cntx->IsCancelled()) {
       return;
     }
-    CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
     if (!tx_data.IsGlobalCmd()) {
       executor_.Execute(tx_data.dbid, tx_data.command);
     } else {

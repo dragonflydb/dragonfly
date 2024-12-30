@@ -60,7 +60,6 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
       command = std::move(entry.cmd);
-      shard_cnt = entry.shard_cnt;
       dbid = entry.dbid;
       txid = entry.txid;
       return;

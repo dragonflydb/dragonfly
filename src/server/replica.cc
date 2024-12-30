@@ -966,7 +966,8 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
     return;
   }
 
-  bool inserted_by_me = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, tx_data.shard_cnt);
+  bool inserted_by_me =
+      multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, master_context_.num_flows);
 
   auto& multi_shard_data = multi_shard_exe_->Find(tx_data.txid);
 

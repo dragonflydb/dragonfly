@@ -28,7 +28,8 @@ struct EntryBase {
   TxId txid;
   Op opcode;
   DbIndex dbid;
-  uint32_t shard_cnt;
+  uint32_t shard_cnt;  // This field is no longer used by the replica, but we continue to serialize
+                       // and deserialize it to maintain backward compatibility.
   std::optional<cluster::SlotId> slot;
   LSN lsn{0};
 };

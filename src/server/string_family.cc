@@ -399,17 +399,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
     if (stored * 2 == args.Size()) {
       RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
       DCHECK_EQ(result, OpStatus::OK);
-      return result;
+    } else if (stored > 0) {
+      vector<string_view> store_args(args.begin(), args.end());
+      store_args.resize(stored * 2);
+      RecordJournal(op_args, "MSET", store_args, op_args.tx->GetUniqueShardCnt());
     }
-
-    // Even without changes, we have to send a dummy command like PING for the
-    // replica to ack
-    string_view cmd = stored == 0 ? "PING" : "MSET";
-    vector<string_view> store_args(args.begin(), args.end());
-    store_args.resize(stored * 2);
-    RecordJournal(op_args, cmd, store_args, op_args.tx->GetUniqueShardCnt());
   }
-
   return result;
 }
 
