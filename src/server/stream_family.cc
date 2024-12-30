@@ -27,6 +27,18 @@ namespace dfly {
 using namespace facade;
 using namespace std;
 
+StreamMemTracker::StreamMemTracker() {
+  start_size_ = zmalloc_used_memory_tl;
+}
+
+void StreamMemTracker::UpdateStreamSize(PrimeValue& pv) const {
+  const size_t current = zmalloc_used_memory_tl;
+  int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
+  pv.AddStreamSize(diff);
+  // Under any flow we must not end up with this special value.
+  DCHECK(pv.MallocUsed() != 0);
+}
+
 namespace {
 
 struct Record {
@@ -611,24 +623,6 @@ int StreamTrim(const AddTrimOpts& opts, stream* s) {
 
   return 0;
 }
-
-class StreamMemTracker {
- public:
-  StreamMemTracker() {
-    start_size_ = zmalloc_used_memory_tl;
-  }
-
-  void UpdateStreamSize(PrimeValue& pv) const {
-    const size_t current = zmalloc_used_memory_tl;
-    int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
-    pv.AddStreamSize(diff);
-    // Under any flow we must not end up with this special value.
-    DCHECK(pv.MallocUsed() != 0);
-  }
-
- private:
-  size_t start_size_{0};
-};
 
 OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);

@@ -319,7 +319,9 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
   }
 }
 
-OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view key, JsonType value) {
+template <typename Callback>
+OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view key,
+                                           Callback parse_json_value) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -329,14 +331,17 @@ OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view ke
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
+  OpResult<JsonType> json_value = parse_json_value();
+  RETURN_ON_BAD_STATUS(json_value);
+
   if (JsonEnconding() == kEncodingJsonFlat) {
     flexbuffers::Builder fbb;
-    json::FromJsonType(value, &fbb);
+    json::FromJsonType(json_value.value(), &fbb);
     fbb.Finish();
     const auto& buf = fbb.GetBuffer();
     res.it->second.SetJson(buf.data(), buf.size());
   } else {
-    res.it->second.SetJson(std::move(value));
+    res.it->second.SetJson(*std::move(json_value));
   }
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
   return std::move(res);
@@ -1280,11 +1285,14 @@ auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path, std::string_view json_str,
                      bool is_nx_condition, bool is_xx_condition) {
-  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
-  if (!parsed_json) {
-    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::SYNTAX_ERR;
-  }
+  auto parse_json = [&json_str]() -> OpResult<JsonType> {
+    std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+    if (!parsed_json) {
+      VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+      return OpStatus::SYNTAX_ERR;
+    }
+    return parsed_json.value();
+  };
 
   // The whole key should be replaced.
   // NOTE: unlike in Redis, we are overriding the value when the path is "$"
@@ -1310,10 +1318,8 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     // of this function. Because of this, the memory tracking will be off. Another solution here,
     // is to use absl::Cleanup and dispatch another Find() but that's too complicated because then
     // you need to take into account the order of destructors.
-    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, parsed_json.value());
-    if (st.status() != OpStatus::OK) {
-      return st.status();
-    }
+    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, std::move(parse_json));
+    RETURN_ON_BAD_STATUS(st);
     mem_tracker.SetJsonSize(st->it->second, st->is_new);
     return true;
   }
@@ -1325,7 +1331,11 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   // then the assign here is called N times, where N == array.size().
   bool path_exists = false;
   bool operation_result = false;
+
+  OpResult<JsonType> parsed_json = parse_json();
+  RETURN_ON_BAD_STATUS(parsed_json);
   const JsonType& new_json = parsed_json.value();
+
   auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
     path_exists = true;
     if (!is_nx_condition) {

@@ -2097,6 +2097,54 @@ std::optional<std::string> GetFirstNonEmptyKeyFound(EngineShard* shard, Transact
   return std::optional<std::string>();
 }
 
+// Validates the ZMPop command arguments and extracts the values to the output params.
+// If the arguments are invalid sends the appropiate error to builder and returns false.
+bool ValidateZMPopCommand(CmdArgList args, uint32* num_keys, bool* is_max, int* pop_count,
+                          SinkReplyBuilder* builder) {
+  if (!SimpleAtoi(ArgS(args, 0), num_keys)) {
+    builder->SendError(kUintErr);
+    return false;
+  }
+
+  if (*num_keys <= 0 || args.size() < *num_keys + 2) {
+    // We should have at least num_keys + #keys + MIN/MAX args.
+    builder->SendError(kSyntaxErr);
+    return false;
+  }
+
+  const string min_max_keyword = absl::AsciiStrToUpper(ArgS(args, *num_keys + 1));
+  if (min_max_keyword == "MAX") {
+    *is_max = true;
+
+  } else if (min_max_keyword == "MIN") {
+    *is_max = false;
+  } else {
+    builder->SendError(kSyntaxErr);
+    return false;
+  }
+
+  // Check if we have additional arguments.
+  *pop_count = 1;
+  if (args.size() > *num_keys + 2) {
+    if (args.size() != *num_keys + 4) {
+      // The only possible additonal arguments are "COUNT count".
+      builder->SendError(kSyntaxErr);
+      return false;
+    }
+    const string count_keyword = absl::AsciiStrToUpper(ArgS(args, *num_keys + 2));
+    if (count_keyword != "COUNT") {
+      builder->SendError(kSyntaxErr);
+      return false;
+    }
+    if (!SimpleAtoi(ArgS(args, *num_keys + 3), pop_count)) {
+      builder->SendError(kUintErr);
+      return false;
+    }
+  }
+
+  return true;
+}
+
 }  // namespace
 
 void ZSetFamily::BZPopMin(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2390,54 +2438,6 @@ void ZSetFamily::ZInterCard(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendLong(limit);
   }
   builder->SendLong(result.value().size());
-}
-
-// Validates the ZMPop command arguments and extracts the values to the output params.
-// If the arguments are invalid sends the appropiate error to builder and returns false.
-bool ValidateZMPopCommand(CmdArgList args, uint32* num_keys, bool* is_max, int* pop_count,
-                          SinkReplyBuilder* builder) {
-  if (!SimpleAtoi(ArgS(args, 0), num_keys)) {
-    builder->SendError(kUintErr);
-    return false;
-  }
-
-  if (*num_keys <= 0 || args.size() < *num_keys + 2) {
-    // We should have at least num_keys + #keys + MIN/MAX args.
-    builder->SendError(kSyntaxErr);
-    return false;
-  }
-
-  const string min_max_keyword = absl::AsciiStrToUpper(ArgS(args, *num_keys + 1));
-  if (min_max_keyword == "MAX") {
-    *is_max = true;
-
-  } else if (min_max_keyword == "MIN") {
-    *is_max = false;
-  } else {
-    builder->SendError(kSyntaxErr);
-    return false;
-  }
-
-  // Check if we have additional arguments.
-  *pop_count = 1;
-  if (args.size() > *num_keys + 2) {
-    if (args.size() != *num_keys + 4) {
-      // The only possible additonal arguments are "COUNT count".
-      builder->SendError(kSyntaxErr);
-      return false;
-    }
-    const string count_keyword = absl::AsciiStrToUpper(ArgS(args, *num_keys + 2));
-    if (count_keyword != "COUNT") {
-      builder->SendError(kSyntaxErr);
-      return false;
-    }
-    if (!SimpleAtoi(ArgS(args, *num_keys + 3), pop_count)) {
-      builder->SendError(kUintErr);
-      return false;
-    }
-  }
-
-  return true;
 }
 
 void ZSetFamily::ZMPop(CmdArgList args, const CommandContext& cmd_cntx) {
