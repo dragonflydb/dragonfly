@@ -50,6 +50,7 @@ extern "C" {
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
+#include "server/stream_family.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
@@ -703,6 +704,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   stream* s;
+  StreamMemTracker mem_tracker;
   if (config_.append) {
     if (!EnsureObjEncoding(OBJ_STREAM, OBJ_ENCODING_STREAM)) {
       return;
@@ -848,6 +850,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   if (!config_.append) {
     pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
   }
+  mem_tracker.UpdateStreamSize(*pv_);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {

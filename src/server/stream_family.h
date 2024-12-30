@@ -15,6 +15,19 @@ namespace dfly {
 class CommandRegistry;
 struct CommandContext;
 
+class CompactObj;
+using PrimeValue = CompactObj;
+
+class StreamMemTracker {
+ public:
+  StreamMemTracker();
+
+  void UpdateStreamSize(PrimeValue& pv) const;
+
+ private:
+  size_t start_size_{0};
+};
+
 class StreamFamily {
  public:
   static void Register(CommandRegistry* registry);

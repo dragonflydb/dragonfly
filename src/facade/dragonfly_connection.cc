@@ -421,8 +421,8 @@ struct Connection::AsyncOperations {
   }
 
   void operator()(const PubMessage& msg);
-  void operator()(Connection::PipelineMessage& msg);
-  void operator()(const Connection::MCPipelineMessage& msg);
+  void operator()(PipelineMessage& msg);
+  void operator()(const MCPipelineMessage& msg);
   void operator()(const MonitorMessage& msg);
   void operator()(const AclUpdateMessage& msg);
   void operator()(const MigrationRequestMessage& msg);
@@ -479,7 +479,7 @@ void Connection::AsyncOperations::operator()(Connection::PipelineMessage& msg) {
   self->skip_next_squashing_ = false;
 }
 
-void Connection::AsyncOperations::operator()(const Connection::MCPipelineMessage& msg) {
+void Connection::AsyncOperations::operator()(const MCPipelineMessage& msg) {
   self->service_->DispatchMC(msg.cmd, msg.value,
                              static_cast<MCReplyBuilder*>(self->reply_builder_.get()),
                              self->cc_.get());
@@ -1137,8 +1137,14 @@ auto Connection::ParseMemcache() -> ParserStatus {
 
   do {
     string_view str = ToSV(io_buf_.InputBuffer());
+
+    if (str.empty()) {
+      return OK;
+    }
+
     result = memcache_parser_->Parse(str, &consumed, &cmd);
 
+    DVLOG(2) << "mc_result " << result << " consumed: " << consumed << " type " << cmd.type;
     if (result != MemcacheParser::OK) {
       io_buf_.ConsumeInput(consumed);
       break;

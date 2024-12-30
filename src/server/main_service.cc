@@ -1490,6 +1490,13 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
   char ttl_op[] = "EXAT";
 
   mc_builder->SetNoreply(cmd.no_reply);
+  mc_builder->SetMeta(cmd.meta);
+  if (cmd.meta) {
+    mc_builder->SetBase64(cmd.base64);
+    mc_builder->SetReturnMCFlag(cmd.return_flags);
+    mc_builder->SetReturnValue(cmd.return_value);
+    mc_builder->SetReturnVersion(cmd.return_version);
+  }
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
@@ -1533,7 +1540,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       server_family_.StatsMC(cmd.key, mc_builder);
       return;
     case MemcacheParser::VERSION:
-      mc_builder->SendSimpleString("VERSION 1.5.0 DF");
+      mc_builder->SendSimpleString("VERSION 1.6.0 DF");
       return;
     default:
       mc_builder->SendClientError("bad command line format");

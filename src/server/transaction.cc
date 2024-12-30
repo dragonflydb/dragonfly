@@ -704,7 +704,7 @@ void Transaction::RunCallback(EngineShard* shard) {
 
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
-    LogAutoJournalOnShard(shard, result);
+    LogAutoJournalOnShard(shard);
     MaybeInvokeTrackingCb();
   }
 }
@@ -1346,7 +1346,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto result = cb(this, shard);
   db_slice.OnCbFinish();
 
-  LogAutoJournalOnShard(shard, result);
+  LogAutoJournalOnShard(shard);
   MaybeInvokeTrackingCb();
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
@@ -1438,7 +1438,7 @@ optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
   return ArgS(full_args_, sd.wake_key_pos);
 }
 
-void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult result) {
+void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   // TODO: For now, we ignore non shard coordination.
   if (shard == nullptr)
     return;
@@ -1455,20 +1455,8 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   if (journal == nullptr)
     return;
 
-  if (result.status != OpStatus::OK) {
-    // We log NOOP even for NO_AUTOJOURNAL commands because the non-success status could have been
-    // due to OOM in a single shard, while other shards succeeded
-    journal->RecordEntry(txid_, journal::Op::NOOP, db_index_, unique_shard_cnt_,
-                         unique_slot_checker_.GetUniqueSlotId(), journal::Entry::Payload{}, true);
-    return;
-  }
-
   // If autojournaling was disabled and not re-enabled the callback is writing to journal.
-  // We do not allow preemption in callbacks and therefor the call to RecordJournal from
-  // from callbacks does not allow await.
-  // To make sure we flush the changes to sync we call TriggerJournalWriteToSink here.
   if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_) {
-    TriggerJournalWriteToSink();
     return;
   }
 

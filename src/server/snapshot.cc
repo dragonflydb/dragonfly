@@ -38,8 +38,11 @@ constexpr size_t kMinBlobSize = 32_KB;
 
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
                              SnapshotDataConsumerInterface* consumer, Context* cntx)
-    : db_slice_(slice), compression_mode_(compression_mode), consumer_(consumer), cntx_(cntx) {
-  db_array_ = slice->databases();
+    : db_slice_(slice),
+      db_array_(slice->databases()),
+      compression_mode_(compression_mode),
+      consumer_(consumer),
+      cntx_(cntx) {
   tl_slice_snapshots.insert(this);
 }
 
@@ -163,7 +166,6 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
     uint64_t last_yield = 0;
     PrimeTable* pt = &db_array_[db_indx]->prime;
-    current_db_ = db_indx;
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
@@ -171,8 +173,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
         return;
       }
 
-      PrimeTable::Cursor next =
-          pt->TraverseBuckets(cursor, [this](auto it) { return BucketSaveCb(it); });
+      PrimeTable::Cursor next = pt->TraverseBuckets(
+          cursor, [this, &db_indx](auto it) { return BucketSaveCb(db_indx, it); });
       cursor = next;
       PushSerialized(false);
 
@@ -248,7 +250,7 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
   }
 }
 
-bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
+bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it) {
   std::lock_guard guard(big_value_mu_);
 
   ++stats_.savecb_calls;
@@ -267,7 +269,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
     return false;
   }
 
-  db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
+  db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
   auto* blocking_counter = db_slice_->BlockingCounter();
@@ -276,7 +278,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
   // zero.
   std::lock_guard blocking_counter_guard(*blocking_counter);
 
-  stats_.loop_serialized += SerializeBucket(current_db_, it);
+  stats_.loop_serialized += SerializeBucket(db_index, it);
 
   return false;
 }
@@ -292,20 +294,19 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   while (!it.is_done()) {
     ++result;
     // might preempt due to big value serialization.
-    SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
+    SerializeEntry(db_index, it->first, it->second);
     ++it;
   }
   serialize_bucket_running_ = false;
   return result;
 }
 
-void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
-                                   optional<uint64_t> expire, RdbSerializer* serializer) {
+void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
   if (pv.IsExternal() && pv.IsCool())
-    return SerializeEntry(db_indx, pk, pv.GetCool().record->value, expire, serializer);
+    return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
 
-  time_t expire_time = expire.value_or(0);
-  if (!expire && pv.HasExpire()) {
+  time_t expire_time = 0;
+  if (pv.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
     expire_time = db_slice_->ExpireTime(eit);
   }
@@ -322,7 +323,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
         {db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time, mc_flags});
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
-    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
+    io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
   }
