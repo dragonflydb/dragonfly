@@ -1433,8 +1433,7 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
-@pytest.mark.skip("Flaky test")
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 5})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
         df_factory.create(
@@ -1473,7 +1472,7 @@ async def test_network_disconnect_during_migration(df_factory):
                 await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
             )
 
-        await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC")
+        await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC", 20)
     finally:
         await proxy.close(task)
 
