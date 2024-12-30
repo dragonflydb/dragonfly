@@ -158,13 +158,15 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx, stub_tx.get()};
-
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = absl::StrCat(prefix, ":", batch.index[i]);
-    int32_t elements_left = elements;
+    uint32_t elements_left = elements;
+
     while (elements_left) {
-      int32_t populate_elements = std::min(5, elements_left);
+      // limit rss grow by 32K by limiting the element count in each command.
+      uint32_t max_batch_elements = std::max(32_KB / val_size, 1ULL);
+      uint32_t populate_elements = std::min(max_batch_elements, elements_left);
       elements_left -= populate_elements;
       auto [cid, args] =
           GeneratePopulateCommand(type, key, val_size, random_value, populate_elements,
