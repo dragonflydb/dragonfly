@@ -28,28 +28,28 @@ TEST_F(ExtentTreeTest, Basic) {
   tree_.Add(0, 256);
   auto op = tree_.GetRange(64, 16);
   EXPECT_TRUE(op);
-  EXPECT_THAT(*op, testing::Pair(0, 64));
+  EXPECT_THAT(*op, testing::Pair(0, 64));  // [64, 256)
 
   tree_.Add(56, 8);
   op = tree_.GetRange(64, 16);
   EXPECT_TRUE(op);
-  EXPECT_THAT(*op, testing::Pair(64, 128));
+  EXPECT_THAT(*op, testing::Pair(64, 128));  // {[56, 64), [128, 256)}
 
   op = tree_.GetRange(18, 2);
   EXPECT_TRUE(op);
-  EXPECT_THAT(*op, testing::Pair(128, 146));
+  EXPECT_THAT(*op, testing::Pair(128, 146));  // {[56, 64), [146, 256)}
 
   op = tree_.GetRange(80, 16);
   EXPECT_TRUE(op);
-  EXPECT_THAT(*op, testing::Pair(160, 240));
+  EXPECT_THAT(*op, testing::Pair(160, 240));  // {[56, 64), [146, 160), [240, 256)}
 
   op = tree_.GetRange(4, 1);
   EXPECT_TRUE(op);
-  EXPECT_THAT(*op, testing::Pair(56, 60));
+  EXPECT_THAT(*op, testing::Pair(56, 60));  // {[60, 64), [146, 160), [240, 256)}
 
   op = tree_.GetRange(32, 1);
   EXPECT_FALSE(op);
-  tree_.Add(64, 240 - 64);
+  tree_.Add(64, 146 - 64);
   op = tree_.GetRange(32, 4);
   EXPECT_TRUE(op);
   EXPECT_THAT(*op, testing::Pair(60, 92));
