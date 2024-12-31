@@ -76,29 +76,38 @@ void DeallocateAtRandom(size_t steps, std::vector<void*>* ptrs) {
   }
 }
 
+static void InitThreadStructs() {
+  auto* tlh = mi_heap_get_backing();
+  init_zmalloc_threadlocal(tlh);
+  SmallString::InitThreadLocal(tlh);
+  thread_local MiMemoryResource mi_resource(tlh);
+  CompactObj::InitThreadLocal(&mi_resource);
+};
+
+static void CheckEverythingDeallocated() {
+  mi_heap_collect(mi_heap_get_backing(), true);
+
+  auto cb_visit = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
+                     size_t block_size, void* arg) {
+    LOG(ERROR) << "Unfreed allocations: block_size " << block_size
+               << ", allocated: " << area->used * block_size;
+    return true;
+  };
+
+  mi_heap_visit_blocks(mi_heap_get_backing(), false /* do not visit all blocks*/, cb_visit,
+                       nullptr);
+}
+
 class CompactObjectTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
     InitRedisTables();  // to initialize server struct.
 
-    auto* tlh = mi_heap_get_backing();
-    init_zmalloc_threadlocal(tlh);
-    SmallString::InitThreadLocal(tlh);
-    CompactObj::InitThreadLocal(PMR_NS::get_default_resource());
+    InitThreadStructs();
   }
 
   static void TearDownTestSuite() {
-    mi_heap_collect(mi_heap_get_backing(), true);
-
-    auto cb_visit = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
-                       size_t block_size, void* arg) {
-      LOG(ERROR) << "Unfreed allocations: block_size " << block_size
-                 << ", allocated: " << area->used * block_size;
-      return true;
-    };
-
-    mi_heap_visit_blocks(mi_heap_get_backing(), false /* do not visit all blocks*/, cb_visit,
-                         nullptr);
+    CheckEverythingDeallocated();
   }
 
   CompactObj cobj_;

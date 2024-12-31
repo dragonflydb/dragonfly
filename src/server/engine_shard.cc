@@ -426,11 +426,10 @@ bool EngineShard::DoDefrag() {
 //     priority.
 //     otherwise lower the task priority so that it would not use the CPU when not required
 uint32_t EngineShard::DefragTask() {
-  if (!namespaces) {
-    return util::ProactorBase::kOnIdleMaxLevel;
-  }
-
   constexpr uint32_t kRunAtLowPriority = 0u;
+  if (!namespaces) {
+    return kRunAtLowPriority;
+  }
 
   if (defrag_state_.CheckRequired()) {
     VLOG(2) << shard_id_ << ": need to run defrag memory cursor state: " << defrag_state_.cursor;

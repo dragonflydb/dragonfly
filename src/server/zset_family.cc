@@ -965,7 +965,9 @@ OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams, string_
 
   if (zparams.override && members.empty()) {
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    db_slice.Del(op_args.db_cntx, it);
+    if (IsValid(it)) {
+      db_slice.Del(op_args.db_cntx, it);
+    }
     return OpStatus::OK;
   }
 
@@ -1220,7 +1222,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   auto zlen = pv.Size();
   if (zlen == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
-    CHECK(db_slice.Del(t->GetDbContext(), it_res->it));
+    db_slice.Del(t->GetDbContext(), it_res->it);
   }
 
   OpArgs op_args = t->GetOpArgs(shard);
@@ -1331,7 +1333,7 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
 
   auto zlen = pv.Size();
   if (zlen == 0) {
-    CHECK(op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it));
+    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
   }
 
   return iv.PopResult();
@@ -1385,7 +1387,7 @@ OpResult<unsigned> OpRemRange(const OpArgs& op_args, string_view key,
 
   auto zlen = pv.Size();
   if (zlen == 0) {
-    CHECK(op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it));
+    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
   }
 
   return iv.removed();
@@ -1564,7 +1566,7 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
   res_it->post_updater.Run();
 
   if (zlen == 0) {
-    CHECK(op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it));
+    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
   }
 
   return deleted;
