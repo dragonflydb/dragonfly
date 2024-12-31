@@ -15,47 +15,39 @@ void ExtentTree::Add(size_t start, size_t len) {
   DCHECK_GT(len, 0u);
   DCHECK_EQ(len_extents_.size(), extents_.size());
 
-  size_t end = start + len;
-
-  if (extents_.empty()) {
-    extents_.emplace(start, end);
-    len_extents_.emplace(len, start);
-
-    return;
-  }
-
   auto it = extents_.lower_bound(start);
-  bool merged = false;
+  optional<absl::btree_map<size_t, size_t>::iterator> prev_extent;
 
   if (it != extents_.begin()) {
     auto prev = it;
     --prev;
 
     DCHECK_LE(prev->second, start);
-    if (prev->second == start) {  // [first, second = start, end)
-      merged = true;
-      len_extents_.erase(pair{prev->second - prev->first, prev->first});
-
-      // check if we join: prev, [start, end), [it->first, it->second]
-      if (it != extents_.end() && end == it->first) {  // [first, end = it->first, it->second)
-        prev->second = it->second;
-        len_extents_.erase(pair{it->second - it->first, it->first});
-        extents_.erase(it);
-      } else {
-        prev->second = end;  // just extend prev
-      }
-      len_extents_.emplace(prev->second - prev->first, prev->first);
+    if (prev->second == start) {  // combine with the previous extent
+      size_t prev_len = prev->second - prev->first;
+      CHECK_EQ(1u, len_extents_.erase(pair{prev_len, prev->first}));
+      prev->second += len;
+      start = prev->first;
+      len += prev_len;
+      prev_extent = prev;
     }
   }
 
-  if (!merged) {
-    if (end == it->first) {  // [start, end), [it->first, it->second]
-      len_extents_.erase(pair{it->second - it->first, it->first});
-      end = it->second;
+  if (it != extents_.end()) {
+    DCHECK_GE(it->first, start + len);
+    if (start + len == it->first) {  // merge with the next extent
+      size_t it_len = it->second - it->first;
+      CHECK_EQ(1u, len_extents_.erase(pair{it_len, it->first}));
       extents_.erase(it);
+      len += it_len;
     }
-    extents_.emplace(start, end);
-    len_extents_.emplace(end - start, start);
+  }
+
+  len_extents_.emplace(len, start);
+  if (prev_extent) {
+    (*prev_extent)->second = start + len;
+  } else {
+    extents_.emplace(start, start + len);
   }
 }
 
