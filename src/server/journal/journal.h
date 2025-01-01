@@ -35,10 +35,33 @@ class Journal {
   LSN GetLsn() const;
 
   void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                   std::optional<cluster::SlotId> slot, Entry::Payload payload, bool await);
+                   std::optional<cluster::SlotId> slot, Entry::Payload payload);
+
+  void SetFlushToSink(bool allow_flush);
 
  private:
   mutable util::fb2::Mutex state_mu_;
+};
+
+class JournalFlushGuard {
+ public:
+  explicit JournalFlushGuard(Journal* journal) : journal_(journal) {
+    if (journal_) {
+      journal_->SetFlushToSink(false);
+    }
+  }
+
+  ~JournalFlushGuard() {
+    if (journal_) {
+      journal_->SetFlushToSink(true);  // Restore the state on destruction
+    }
+  }
+
+  JournalFlushGuard(const JournalFlushGuard&) = delete;
+  JournalFlushGuard& operator=(const JournalFlushGuard&) = delete;
+
+ private:
+  Journal* journal_;
 };
 
 }  // namespace journal

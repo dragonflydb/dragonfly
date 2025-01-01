@@ -12,8 +12,8 @@
 extern "C" {
 #include "redis/zmalloc.h"
 }
-
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
@@ -757,6 +757,8 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RetireExpiredAndEvict() {
+  // Disable flush journal changes to prevent preemtion
+  journal::JournalFlushGuard journal_flush_guard(journal_);
   {
     FiberAtomicGuard guard;
     // TODO: iterate over all namespaces
@@ -807,12 +809,6 @@ void EngineShard::RetireExpiredAndEvict() {
         eviction_goal -= std::min(eviction_goal, evicted_bytes);
       }
     }
-  }
-
-  // Journal entries for expired entries are not writen to socket in the loop above.
-  // Trigger write to socket when loop finishes.
-  if (auto journal = EngineShard::tlocal()->journal(); journal) {
-    TriggerJournalWriteToSink();
   }
 }
 

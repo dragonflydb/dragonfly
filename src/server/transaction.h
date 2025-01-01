@@ -341,8 +341,8 @@ class Transaction {
   void PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, DbIndex db, CmdArgList args);
 
   // Write a journal entry to a shard journal with the given payload.
-  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload, uint32_t shard_cnt,
-                         bool allow_await) const;
+  void LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
+                         uint32_t shard_cnt) const;
 
   // Re-enable auto journal for commands marked as NO_AUTOJOURNAL. Call during setup.
   void ReviveAutoJournal();
