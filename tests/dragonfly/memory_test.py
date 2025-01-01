@@ -17,7 +17,7 @@ from .instance import DflyInstance, DflyInstanceFactory
         ("ZSET", 250_000, 100, 100),
         ("LIST", 300_000, 100, 100),
         ("STRING", 3_500_000, 1000, 1),
-        ("STREAM", 260_000, 100, 100),
+        ("STREAM", 280_000, 100, 100),
     ],
 )
 # We limit to 5gb just in case to sanity check the gh runner. Otherwise, if we ask for too much
@@ -69,6 +69,7 @@ async def test_rss_used_mem_gap(df_factory, type, keys, val_size, elements):
     await client.execute_command("DFLY", "LOAD", f"{dbfilename}-summary.dfs")
 
     await check_memory()
+    await client.execute_command("FLUSHALL")
 
 
 @pytest.mark.asyncio
