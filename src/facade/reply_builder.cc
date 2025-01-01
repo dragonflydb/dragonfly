@@ -408,8 +408,7 @@ void RedisReplyBuilder::SendBulkStrArr(const facade::ArgRange& strs, CollectionT
     SendBulkString(str);
 }
 
-void RedisReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                                        bool with_scores) {
+void RedisReplyBuilder::SendScoredArray(ScoredArray arr, bool with_scores) {
   ReplyScope scope(this);
   StartArray((with_scores && !IsResp3()) ? arr.size() * 2 : arr.size());
   for (const auto& [str, score] : arr) {
@@ -419,6 +418,21 @@ void RedisReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, 
     if (with_scores)
       SendDouble(score);
   }
+}
+
+void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr) {
+  ReplyScope scope(this);
+  
+  StartArray(2);
+
+  SendBulkString(arr_label);
+  StartArray(arr.size());
+  for (const auto& [str, score] : arr) {
+    StartArray(2);
+    SendBulkString(str);
+    SendDouble(score);
+  }
+  
 }
 
 void RedisReplyBuilder::SendStored() {
