@@ -2020,7 +2020,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.asyncio
-async def test_cluster_migration_huge_container_while_seeding(
+async def test_cluster_migration_while_seeding(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
 ):
     instances = [
@@ -2047,11 +2047,11 @@ async def test_cluster_migration_huge_container_while_seeding(
 
     logging.debug("Seeding cluster")
     seeder = df_seeder_factory.create(
-        keys=100, port=instances[0].port, cluster_mode=True, mirror_to_fake_redis=True
+        keys=10_000, port=instances[0].port, cluster_mode=True, mirror_to_fake_redis=True
     )
-    seed = asyncio.create_task(seeder.run())
+    await seeder.run(target_deviation=0.1)
 
-    await asyncio.sleep(1)  # Let seeder feed src before migration start
+    seed = asyncio.create_task(seeder.run())
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
