@@ -12,8 +12,8 @@
 extern "C" {
 #include "redis/zmalloc.h"
 }
-
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
@@ -756,62 +756,56 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RetireExpiredAndEvict() {
-  {
-    FiberAtomicGuard guard;
-    // TODO: iterate over all namespaces
-    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-    constexpr double kTtlDeleteLimit = 200;
+  // Disable flush journal changes to prevent preemtion
+  journal::JournalFlushGuard journal_flush_guard(journal_);
 
-    uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
-    uint32_t deleted = GetMovingSum6(TTL_DELETE);
-    unsigned ttl_delete_target = 5;
+  // TODO: iterate over all namespaces
+  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
+  constexpr double kTtlDeleteLimit = 200;
 
-    if (deleted > 10) {
-      // deleted should be <= traversed.
-      // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
-      // The higher ttl_delete_target the more likely we have lots of expired items that need
-      // to be deleted.
-      ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
-    }
+  uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
+  uint32_t deleted = GetMovingSum6(TTL_DELETE);
+  unsigned ttl_delete_target = 5;
 
-    DbContext db_cntx;
-    db_cntx.time_now_ms = GetCurrentTimeMs();
-
-    size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
-
-    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-      if (!db_slice.IsDbValid(i))
-        continue;
-
-      db_cntx.db_index = i;
-      auto [pt, expt] = db_slice.GetTables(i);
-      if (expt->size() > pt->size() / 4) {
-        DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
-
-        eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
-        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-        counter_[TTL_DELETE].IncBy(stats.deleted);
-      }
-
-      if (eviction_goal) {
-        uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-        auto [evicted_items, evicted_bytes] =
-            db_slice.FreeMemWithEvictionStep(i, starting_segment_id, eviction_goal);
-
-        DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
-                 << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
-                 << " bytes. Max eviction per heartbeat: "
-                 << GetFlag(FLAGS_max_eviction_per_heartbeat);
-
-        eviction_goal -= std::min(eviction_goal, evicted_bytes);
-      }
-    }
+  if (deleted > 10) {
+    // deleted should be <= traversed.
+    // hence we map our delete/traversed ratio into a range [0, kTtlDeleteLimit).
+    // The higher ttl_delete_target the more likely we have lots of expired items that need
+    // to be deleted.
+    ttl_delete_target = kTtlDeleteLimit * double(deleted) / (double(traversed) + 10);
   }
 
-  // Journal entries for expired entries are not writen to socket in the loop above.
-  // Trigger write to socket when loop finishes.
-  if (auto journal = EngineShard::tlocal()->journal(); journal) {
-    TriggerJournalWriteToSink();
+  DbContext db_cntx;
+  db_cntx.time_now_ms = GetCurrentTimeMs();
+
+  size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
+
+  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+    if (!db_slice.IsDbValid(i))
+      continue;
+
+    db_cntx.db_index = i;
+    auto [pt, expt] = db_slice.GetTables(i);
+    if (expt->size() > pt->size() / 4) {
+      DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, ttl_delete_target);
+
+      eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
+      counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+      counter_[TTL_DELETE].IncBy(stats.deleted);
+    }
+
+    if (eviction_goal) {
+      uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
+      auto [evicted_items, evicted_bytes] =
+          db_slice.FreeMemWithEvictionStep(i, starting_segment_id, eviction_goal);
+
+      DVLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
+               << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
+               << " bytes. Max eviction per heartbeat: "
+               << GetFlag(FLAGS_max_eviction_per_heartbeat);
+
+      eviction_goal -= std::min(eviction_goal, evicted_bytes);
+    }
   }
 }
 

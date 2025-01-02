@@ -78,7 +78,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   // We don't want any writes to the journal after we send the `PING`,
   // and expirations could ruin that.
   namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
-  shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {}, true);
+  shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
   while (flow->last_acked_lsn < shard->journal()->GetLsn()) {

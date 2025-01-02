@@ -543,7 +543,7 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
     // TODO: Break slot migration upon FLUSHSLOTS
     journal->RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
                          /* shard_cnt= */ shard_set->size(), nullopt,
-                         Payload("DFLYCLUSTER", args_view), false);
+                         Payload("DFLYCLUSTER", args_view));
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
