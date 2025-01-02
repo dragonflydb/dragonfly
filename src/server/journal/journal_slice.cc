@@ -142,7 +142,8 @@ std::string_view JournalSlice::GetEntry(LSN lsn) const {
   return (*ring_buffer_)[lsn - start].data;
 }
 
-void JournalSlice::SetFlushToSink(bool allow_flush) {
+void JournalSlice::SetFlushMode(bool allow_flush) {
+  DCHECK(allow_flush != enable_journal_flush_);
   enable_journal_flush_ = allow_flush;
   if (allow_flush) {
     JournalItem item;

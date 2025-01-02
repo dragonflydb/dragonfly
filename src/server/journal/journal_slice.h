@@ -54,7 +54,13 @@ class JournalSlice {
   /// from the buffer.
   bool IsLSNInBuffer(LSN lsn) const;
   std::string_view GetEntry(LSN lsn) const;
-  void SetFlushToSink(bool allow_flush);
+  // SetFlushMode with allow_flush=false is used to disable preemptions during
+  // subsequent calls to AddLogRecord.
+  // SetFlushMode with allow_flush=true flushes all log records aggregated
+  // since the last call with allow_flush=false. This call may preempt.
+  // The caller must ensure that no preemptions occur between the initial call
+  // with allow_flush=false and the subsequent call with allow_flush=true.
+  void SetFlushMode(bool allow_flush);
 
  private:
   void CallOnChange(const JournalItem& item);

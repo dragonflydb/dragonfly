@@ -88,8 +88,8 @@ void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt
   journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)});
 }
 
-void Journal::SetFlushToSink(bool allow_flush) {
-  journal_slice.SetFlushToSink(allow_flush);
+void Journal::SetFlushMode(bool allow_flush) {
+  journal_slice.SetFlushMode(allow_flush);
 }
 
 }  // namespace journal
