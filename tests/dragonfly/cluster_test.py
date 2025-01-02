@@ -2499,3 +2499,62 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
+
+
+@pytest.mark.slow
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_snapshot_bigger_than_maxmemory(df_factory: DflyInstanceFactory, df_seeder_factory):
+    """
+    Test load snapshot that is bigger than max_memory, but contains more slots and should be load without OOM:
+
+    1) Create snapshot
+    2) split slots between 2 instances and reduce maxmemory
+    3) load snapshot to both instances
+
+    The result should be the same: instances contain all the data that was in snapshot
+    """
+    dbfilename = f"dump_{tmp_file_name()}"
+    instances = [
+        df_factory.create(
+            port=next(next_port), admin_port=next(next_port), maxmemory="3G", dbfilename=dbfilename
+        ),
+        df_factory.create(port=next(next_port), admin_port=next(next_port), maxmemory="1G"),
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(n) for n in instances]
+
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    logging.debug("Push initial config")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("create data")
+    seeder = df_seeder_factory.create(
+        keys=30000, val_size=10000, port=nodes[0].instance.port, cluster_mode=True
+    )
+    await seeder.run(target_deviation=0.05)
+    capture = await seeder.capture()
+
+    logging.debug("SAVE")
+    await nodes[0].client.execute_command("SAVE", "rdb")
+
+    logging.debug("flushall")
+    for node in nodes:
+        await node.client.execute_command("flushall")
+        await node.client.execute_command("CONFIG SET maxmemory 1G")
+
+    nodes[0].slots = [(0, 8191)]
+    nodes[1].slots = [(8192, 16383)]
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    for node in nodes:
+        await node.client.execute_command("DFLY", "LOAD", f"{dbfilename}.rdb")
+
+    assert await seeder.compare(capture, nodes[0].instance.port)
+
+    # prevent saving during shutdown
+    for node in nodes:
+        await node.client.execute_command("flushall")
