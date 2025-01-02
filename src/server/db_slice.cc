@@ -1479,9 +1479,13 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   }
 
   DbTableStats& stats = table->stats;
-  const PrimeValue& pv = del_it->second;
+  PrimeValue& pv = del_it->second;
 
-  if (pv.IsExternal() && shard_owner()->tiered_storage()) {
+  if (pv.HasStashPending()) {
+    string scratch;
+    string_view key = del_it->first.GetSlice(&scratch);
+    shard_owner()->tiered_storage()->CancelStash(table->index, key, &pv);
+  } else if (pv.IsExternal()) {
     shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
   }
 
