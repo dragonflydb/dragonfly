@@ -32,6 +32,11 @@ def monotonically_increasing_port_number():
 next_port = monotonically_increasing_port_number()
 
 
+async def get_memory(client, field):
+    info = await client.info("memory")
+    return info[field]
+
+
 class RedisClusterNode:
     def __init__(self, port):
         self.port = port
@@ -2004,6 +2009,8 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     await seeder.run(nodes[0].client)
     source_data = await StaticSeeder.capture(nodes[0].client)
 
+    mem_before = await get_memory(nodes[0].client, "used_memory_rss")
+
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
     ]
@@ -2015,6 +2022,11 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 
     target_data = await StaticSeeder.capture(nodes[1].client)
     assert source_data == target_data
+
+    # Get peak memory, because migration removes the data
+    mem_after = await get_memory(nodes[0].client, "used_memory_peak_rss")
+    logging.debug(f"Memory before {mem_before} after {mem_after}")
+    assert mem_after < mem_before * 1.1
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
@@ -2040,10 +2052,6 @@ async def test_cluster_migration_while_seeding(
     client1 = nodes[1].client
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
-
-    async def get_memory(client, field):
-        info = await client.info("memory")
-        return info[field]
 
     logging.debug("Seeding cluster")
     seeder = df_seeder_factory.create(
