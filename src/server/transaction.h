@@ -559,7 +559,7 @@ class Transaction {
 
   // Log command in shard's journal, if this is a write command with auto-journaling enabled.
   // Should be called immediately after the last hop.
-  void LogAutoJournalOnShard(EngineShard* shard);
+  void LogAutoJournalOnShard(EngineShard* shard, RunnableResult shard_result);
 
   // Whether the callback can be run directly on this thread without dispatching on the shard queue
   bool CanRunInlined() const;

@@ -704,7 +704,7 @@ void Transaction::RunCallback(EngineShard* shard) {
 
   // Log to journal only once the command finished running
   if ((coordinator_state_ & COORD_CONCLUDING) || (multi_ && multi_->concluding)) {
-    LogAutoJournalOnShard(shard);
+    LogAutoJournalOnShard(shard, result);
     MaybeInvokeTrackingCb();
   }
 }
@@ -1346,7 +1346,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto result = cb(this, shard);
   db_slice.OnCbFinish();
 
-  LogAutoJournalOnShard(shard);
+  LogAutoJournalOnShard(shard, result);
   MaybeInvokeTrackingCb();
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
@@ -1438,7 +1438,7 @@ optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
   return ArgS(full_args_, sd.wake_key_pos);
 }
 
-void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
+void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult result) {
   // TODO: For now, we ignore non shard coordination.
   if (shard == nullptr)
     return;
@@ -1454,6 +1454,10 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard) {
   auto journal = shard->journal();
   if (journal == nullptr)
     return;
+
+  if (result.status != OpStatus::OK) {
+    return;  // Do not log to journal if command execution failed.
+  }
 
   // If autojournaling was disabled and not re-enabled the callback is writing to journal.
   if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_) {
