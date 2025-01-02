@@ -317,4 +317,13 @@ TEST_F(TieredStorageTest, MemoryPressure) {
   EXPECT_LT(used_mem_peak.load(), 20_MB);
 }
 
+TEST_F(TieredStorageTest, Expiry) {
+  string val = BuildString(100);
+  Run({"psetex", "key1", "1", val});
+  AdvanceTime(10);
+  Run({"psetex", "key1", "1", val});
+  auto resp = Run({"get", "key1"});
+  EXPECT_EQ(resp, val);
+}
+
 }  // namespace dfly
