@@ -3,8 +3,8 @@
 //
 
 #pragma once
-
 #include "server/journal/types.h"
+#include "util/fibers/detail/fiber_interface.h"
 #include "util/proactor_pool.h"
 
 namespace dfly {
@@ -35,10 +35,35 @@ class Journal {
   LSN GetLsn() const;
 
   void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                   std::optional<cluster::SlotId> slot, Entry::Payload payload, bool await);
+                   std::optional<cluster::SlotId> slot, Entry::Payload payload);
+
+  void SetFlushMode(bool allow_flush);
 
  private:
   mutable util::fb2::Mutex state_mu_;
+};
+
+class JournalFlushGuard {
+ public:
+  explicit JournalFlushGuard(Journal* journal) : journal_(journal) {
+    if (journal_) {
+      journal_->SetFlushMode(false);
+    }
+    util::fb2::detail::EnterFiberAtomicSection();
+  }
+
+  ~JournalFlushGuard() {
+    util::fb2::detail::LeaveFiberAtomicSection();
+    if (journal_) {
+      journal_->SetFlushMode(true);  // Restore the state on destruction
+    }
+  }
+
+  JournalFlushGuard(const JournalFlushGuard&) = delete;
+  JournalFlushGuard& operator=(const JournalFlushGuard&) = delete;
+
+ private:
+  Journal* journal_;
 };
 
 }  // namespace journal

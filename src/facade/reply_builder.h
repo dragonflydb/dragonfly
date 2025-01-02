@@ -273,6 +273,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 class RedisReplyBuilder : public RedisReplyBuilderBase {
  public:
   using RedisReplyBuilderBase::CollectionType;
+  using ScoredArray = absl::Span<const std::pair<std::string, double>>;
 
   RedisReplyBuilder(io::Sink* sink) : RedisReplyBuilderBase(sink) {
   }
@@ -281,8 +282,8 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
 
   void SendSimpleStrArr(const facade::ArgRange& strs);
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
-  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr, bool with_scores);
-
+  void SendScoredArray(ScoredArray arr, bool with_scores);
+  void SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr);
   void SendStored() final;
   void SendSetSkipped() final;
 

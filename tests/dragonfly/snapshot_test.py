@@ -569,12 +569,7 @@ async def test_tiered_entries_throttle(async_client: aioredis.Redis):
 @dfly_args({"serialization_max_chunk_size": 4096, "proactor_threads": 1})
 @pytest.mark.parametrize(
     "cont_type",
-    [
-        ("HASH"),
-        ("SET"),
-        ("ZSET"),
-        ("LIST"),
-    ],
+    [("HASH"), ("SET"), ("ZSET"), ("LIST"), ("STREAM")],
 )
 @pytest.mark.slow
 async def test_big_value_serialization_memory_limit(df_factory, cont_type):
@@ -590,17 +585,16 @@ async def test_big_value_serialization_memory_limit(df_factory, cont_type):
     await client.execute_command(
         f"debug populate 1 prefix {element_size} TYPE {cont_type} RAND ELEMENTS {elements}"
     )
+    await asyncio.sleep(1)
 
     info = await client.info("ALL")
-    # rss double's because of DEBUG POPULATE
-    assert info["used_memory_peak_rss"] > (one_gb * 2)
+    assert info["used_memory_peak_rss"] < (one_gb * 1.2)
     # if we execute SAVE below without big value serialization we trigger the assertion below.
     # note the peak would reach (one_gb * 3) without it.
     await client.execute_command("SAVE")
     info = await client.info("ALL")
 
-    upper_limit = 2_250_000_000  # 2.25 GB
-    assert info["used_memory_peak_rss"] < upper_limit
+    assert info["used_memory_peak_rss"] < (one_gb * 1.3)
 
     await client.execute_command("FLUSHALL")
     await client.close()

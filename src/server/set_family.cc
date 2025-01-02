@@ -443,9 +443,11 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   // key if it exists.
   if (overwrite && (vals_it.begin() == vals_it.end())) {
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    db_slice.Del(op_args.db_cntx, it);
-    if (journal_update && op_args.shard->journal()) {
-      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    if (IsValid(it)) {
+      db_slice.Del(op_args.db_cntx, it);
+      if (journal_update && op_args.shard->journal()) {
+        RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+      }
     }
     return 0;
   }
@@ -561,7 +563,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, facade::ArgRang
   find_res->post_updater.Run();
 
   if (isempty) {
-    CHECK(db_slice.Del(op_args.db_cntx, find_res->it));
+    db_slice.Del(op_args.db_cntx, find_res->it);
   }
   if (journal_rewrite && op_args.shard->journal()) {
     vector<string_view> mapped(vals.Size() + 1);
@@ -886,7 +888,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, unsigned count
 
     // Delete the set as it is now empty
     find_res->post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx, find_res->it));
+    db_slice.Del(op_args.db_cntx, find_res->it);
 
     // Replicate as DEL.
     if (op_args.shard->journal()) {
