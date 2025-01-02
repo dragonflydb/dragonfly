@@ -2019,15 +2019,16 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@pytest.mark.parametrize("chunk_size", [1_000_000, 30])
 @pytest.mark.asyncio
 async def test_cluster_migration_while_seeding(
-    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, chunk_size
 ):
     instances = [
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            serialization_max_chunk_size=1_000,
+            serialization_max_chunk_size=chunk_size,
         )
         for _ in range(2)
     ]
