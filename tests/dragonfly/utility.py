@@ -613,8 +613,9 @@ class DflySeeder:
                     # To mirror consistently to Fake Redis we must only send to it successful
                     # commands. We can't use pipes because they might succeed partially.
                     for cmd in tx_data[0]:
-                        await client.execute_command(*cmd)
-                        await self.fake_redis.execute_command(*cmd)
+                        dfly_resp = await client.execute_command(*cmd)
+                        fake_resp = await self.fake_redis.execute_command(*cmd)
+                        assert dfly_resp == fake_resp
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
                     await self._close_client(client)
