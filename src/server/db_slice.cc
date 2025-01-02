@@ -669,10 +669,8 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-bool DbSlice::Del(Context cntx, Iterator it) {
-  if (!IsValid(it)) {
-    return false;
-  }
+void DbSlice::Del(Context cntx, Iterator it) {
+  CHECK(IsValid(it));
 
   auto& db = db_arr_[cntx.db_index];
   auto obj_type = it->second.ObjType();
@@ -683,8 +681,6 @@ bool DbSlice::Del(Context cntx, Iterator it) {
     doc_del_cb_(key, cntx, it->second);
   }
   PerformDeletion(it, db.get());
-
-  return true;
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
@@ -917,7 +913,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   if (rel_msec <= 0) {  // implicit - don't persist
-    CHECK(Del(cntx, prime_it));
+    Del(cntx, prime_it);
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
     auto current = ExpireTime(expire_it);

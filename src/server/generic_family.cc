@@ -440,7 +440,7 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
   DVLOG(1) << "Rename: removing the key '" << src_key_;
 
   res.post_updater.Run();
-  CHECK(db_slice.Del(t->GetDbContext(), it));
+  db_slice.Del(t->GetDbContext(), it);
   if (shard->journal()) {
     RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_}, 2);
   }
@@ -462,7 +462,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   if (dest_found_) {
     DVLOG(1) << "Rename: deleting the destiny key '" << dest_key_;
     dest_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx, dest_res.it));
+    db_slice.Del(op_args.db_cntx, dest_res.it);
   }
 
   if (restore_args.Expired()) {
@@ -554,7 +554,7 @@ OpResult<bool> OpRestore(const OpArgs& op_args, std::string_view key, std::strin
         VLOG(1) << "restore command is running with replace, found old key '" << key
                 << "' and removing it";
         res.post_updater.Run();
-        CHECK(db_slice.Del(op_args.db_cntx, res.it));
+        db_slice.Del(op_args.db_cntx, res.it);
       } else {
         // we are not allowed to replace it.
         return OpStatus::KEY_EXISTS;
@@ -812,7 +812,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   // Restore expire flag after std::move.
   from_res.it->second.SetExpire(IsValid(from_res.exp_it));
 
-  CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
+  db_slice.Del(op_args.db_cntx, from_res.it);
   auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
   RETURN_ON_BAD_STATUS(op_result);
   auto& add_res = *op_result;
@@ -868,13 +868,13 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     to_res.post_updater.Run();
 
     from_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
+    db_slice.Del(op_args.db_cntx, from_res.it);
   } else {
     // Here we first delete from_it because AddNew below could invalidate from_it.
     // On the other hand, AddNew does not rely on the iterators - this is why we keep
     // the value in `from_obj`.
     from_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
+    db_slice.Del(op_args.db_cntx, from_res.it);
     auto op_result = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);
@@ -995,35 +995,14 @@ std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, SinkRepl
   return flags;
 }
 
-}  // namespace
-
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
-  DVLOG(1) << "Del: " << keys.Front();
-  auto& db_slice = op_args.GetDbSlice();
-
-  uint32_t res = 0;
-
-  for (string_view key : keys) {
-    auto fres = db_slice.FindMutable(op_args.db_cntx, key);
-    if (!IsValid(fres.it))
-      continue;
-    fres.post_updater.Run();
-    res += int(db_slice.Del(op_args.db_cntx, fres.it));
-  }
-
-  return res;
-}
-
-void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
-  VLOG(1) << "Del " << ArgS(args, 0);
-
+void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
   atomic_uint32_t result{0};
   auto* builder = cmd_cntx.rb;
   bool is_mc = (builder->GetProtocol() == Protocol::MEMCACHE);
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
-    auto res = OpDel(t->GetOpArgs(shard), args);
+    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
     return OpStatus::OK;
@@ -1047,6 +1026,36 @@ void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
   } else {
     builder->SendLong(del_cnt);
   }
+}
+
+}  // namespace
+
+OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
+  DVLOG(1) << "Del: " << keys.Front();
+  auto& db_slice = op_args.GetDbSlice();
+
+  uint32_t res = 0;
+
+  for (string_view key : keys) {
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
+    if (!IsValid(it))
+      continue;
+
+    db_slice.Del(op_args.db_cntx, it);
+    ++res;
+  }
+
+  return res;
+}
+
+void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
+  VLOG(1) << "Del " << ArgS(args, 0);
+
+  DeleteGeneric(args, cmd_cntx);
+}
+
+void GenericFamily::Unlink(CmdArgList args, const CommandContext& cmd_cntx) {
+  DeleteGeneric(args, cmd_cntx);
 }
 
 void GenericFamily::Ping(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1886,7 +1895,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::WRITE, -2, 1, -1, acl::kUnlink}.HFUNC(Del)
+      << CI{"UNLINK", CO::WRITE, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
       << CI{"STICK", CO::WRITE, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::READONLY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(

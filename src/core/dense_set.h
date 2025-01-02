@@ -215,8 +215,12 @@ class DenseSet {
   virtual ~DenseSet();
 
   void Clear() {
-    ClearInternal(0, entries_.size());
+    ClearStep(0, entries_.size());
   }
+
+  // Returns the next bucket index that should be cleared.
+  // Returns BucketCount when all objects are erased.
+  uint32_t ClearStep(uint32_t start, uint32_t count);
 
   // Returns the number of elements in the map. Note that it might be that some of these elements
   // have expired and can't be accessed.
@@ -302,11 +306,6 @@ class DenseSet {
   }
 
   void* PopInternal();
-
-  // Note this does not free any dynamic allocations done by derived classes, that a DensePtr
-  // in the set may point to. This function only frees the allocated DenseLinkKeys created by
-  // DenseSet. All data allocated by a derived class should be freed before calling this
-  uint32_t ClearInternal(uint32_t start, uint32_t count);
 
   void IncreaseMallocUsed(size_t delta) {
     obj_malloc_used_ += delta;

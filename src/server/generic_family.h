@@ -35,6 +35,7 @@ class GenericFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
   static void Del(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Unlink(CmdArgList args, const CommandContext& cmd_cntx);
   static void Ping(CmdArgList args, const CommandContext& cmd_cntx);
   static void Exists(CmdArgList args, const CommandContext& cmd_cntx);
   static void Expire(CmdArgList args, const CommandContext& cmd_cntx);

@@ -346,7 +346,8 @@ class DbSlice {
   // Delete a key referred by its iterator.
   void PerformDeletion(Iterator del_it, DbTable* table);
 
-  bool Del(Context cntx, Iterator it);
+  // Deletes the iterator. The iterator must be valid.
+  void Del(Context cntx, Iterator it);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
