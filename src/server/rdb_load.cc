@@ -2464,9 +2464,14 @@ error_code RdbLoader::HandleAux() {
     if (absl::SimpleAtoi(auxval, &usedmem)) {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
       if (usedmem > ssize_t(max_memory_limit)) {
-        LOG(WARNING) << "Could not load snapshot - its used memory is " << usedmem
-                     << " but the limit is " << max_memory_limit;
-        return RdbError(errc::out_of_memory);
+        if (cluster::IsClusterEnabled()) {
+          LOG(INFO) << "Attempting to load a snapshot of size " << usedmem
+                    << ", despite memory limit of " << max_memory_limit;
+        } else {
+          LOG(WARNING) << "Could not load snapshot - its used memory is " << usedmem
+                       << " but the limit is " << max_memory_limit;
+          return RdbError(errc::out_of_memory);
+        }
       }
     }
   } else if (auxkey == "aof-preamble") {
