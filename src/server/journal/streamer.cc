@@ -218,6 +218,12 @@ void RestoreStreamer::Run() {
       if (fiber_cancelled_)  // Could have been cancelled in above call too
         return;
 
+      std::lock_guard guard(big_value_mu_);
+
+      // Locking this never preempts. See snapshot.cc for why we need it.
+      auto* blocking_counter = db_slice_->BlockingCounter();
+      std::lock_guard blocking_counter_guard(*blocking_counter);
+
       WriteBucket(it);
     });
 
@@ -281,7 +287,6 @@ bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
 
 void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   if (it.GetVersion() < snapshot_version_) {
-    FiberAtomicGuard fg;
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
     for (; !it.is_done(); ++it) {
@@ -302,6 +307,7 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
   PrimeTable* table = db_slice_->GetTables(0).first;
@@ -319,8 +325,12 @@ void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  CmdSerializer serializer([&](std::string s) { Write(std::move(s)); },
-                           ServerState::tlocal()->serialization_max_chunk_size);
+  CmdSerializer serializer(
+      [&](std::string s) {
+        Write(std::move(s));
+        ThrottleIfNeeded();
+      },
+      ServerState::tlocal()->serialization_max_chunk_size);
   serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 

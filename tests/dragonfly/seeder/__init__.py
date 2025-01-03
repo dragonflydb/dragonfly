@@ -177,14 +177,16 @@ class Seeder(SeederBase):
         ]
 
         sha = await client.script_load(Seeder._load_script("generate"))
-        await asyncio.gather(
-            *(self._run_unit(client, sha, unit, using_stopkey, args) for unit in self.units)
-        )
+        for unit in self.units:
+            # Must be serial, otherwise cluster clients throws an exception
+            await self._run_unit(client, sha, unit, using_stopkey, args)
 
     async def stop(self, client: aioredis.Redis):
         """Request seeder seeder if it's running without a target, future returned from start() must still be awaited"""
 
-        await asyncio.gather(*(client.set(unit.stop_key, "X") for unit in self.units))
+        for unit in self.units:
+            # Must be serial, otherwise cluster clients throws an exception
+            await client.set(unit.stop_key, "X")
 
     def change_key_target(self, target: int):
         """Change key target, applied only on succeeding runs"""

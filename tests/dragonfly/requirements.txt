@@ -25,3 +25,4 @@ pytest-emoji==0.2.0
 pytest-icdiff==0.8
 pytest-timeout==2.2.0
 asyncio==3.4.3
+fakeredis[json]==2.26.2
