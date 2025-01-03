@@ -600,7 +600,7 @@ error_code Replica::ConsumeRedisStream() {
   conn_context.ns = &namespaces->GetDefaultNamespace();
 
   // we never reply back on the commands.
-  facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};
+  facade::CapturingReplyBuilder null_builder{false, facade::ReplyMode::NONE};
   ResetParser(true);
 
   // Master waits for this command in order to start sending replication stream.

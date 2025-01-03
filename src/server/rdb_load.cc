@@ -2745,7 +2745,7 @@ void RdbLoader::LoadScriptFromAux(string&& body) {
 }
 
 void RdbLoader::LoadSearchIndexDefFromAux(string&& def) {
-  facade::CapturingReplyBuilder crb{};
+  facade::CapturingReplyBuilder crb{false};
   ConnectionContext cntx{nullptr, nullptr};
   cntx.is_replicating = true;
   cntx.journal_emulated = true;

@@ -156,7 +156,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
       new Transaction{local_tx.get(), EngineShard::tlocal()->shard_id(), nullopt};
 
   absl::InlinedVector<string_view, 5> args_view;
-  facade::CapturingReplyBuilder crb;
+  facade::CapturingReplyBuilder crb(false);
   ConnectionContext local_cntx{cntx, stub_tx.get()};
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
