@@ -1023,7 +1023,7 @@ void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
     if (del_cnt == 0) {
       mc_builder->SendNotFound();
     } else {
-      mc_builder->SendSimpleString("DELETED");
+      mc_builder->SendDeleted();
     }
   } else {
     builder->SendLong(del_cnt);

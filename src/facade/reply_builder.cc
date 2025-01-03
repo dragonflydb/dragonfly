@@ -283,6 +283,10 @@ void MCReplyBuilder::SendMiss() {
     SendSimpleString("EN");
 }
 
+void MCReplyBuilder::SendDeleted() {
+  SendSimpleString(flag_.meta ? "HD" : "DELETED");
+}
+
 void MCReplyBuilder::SendRaw(std::string_view str) {
   ReplyScope scope(this);
   WriteRef(str);
@@ -422,7 +426,7 @@ void RedisReplyBuilder::SendScoredArray(ScoredArray arr, bool with_scores) {
 
 void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr) {
   ReplyScope scope(this);
-  
+
   StartArray(2);
 
   SendBulkString(arr_label);
@@ -432,7 +436,6 @@ void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, Score
     SendBulkString(str);
     SendDouble(score);
   }
-  
 }
 
 void RedisReplyBuilder::SendStored() {
