@@ -2696,10 +2696,10 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   int proto_version = 2;
   if (is_resp3) {
     proto_version = 3;
-    rb->SetResp3(true);
+    rb->SetRespVersion(RespVersion::kResp3);
   } else {
     // Issuing hello 2 again is valid and should switch back to RESP2
-    rb->SetResp3(false);
+    rb->SetRespVersion(RespVersion::kResp2);
   }
 
   SinkReplyBuilder::ReplyAggregator agg(rb);
