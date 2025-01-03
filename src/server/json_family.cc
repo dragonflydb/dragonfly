@@ -657,11 +657,29 @@ bool LegacyModeIsEnabled(const std::vector<std::pair<std::string_view, WrappedJs
 
 OpResult<std::string> OpJsonGet(const OpArgs& op_args, string_view key,
                                 const JsonGetParams& params) {
-  OpResult<JsonType*> result = GetJson(op_args, key);
-  RETURN_ON_BAD_STATUS(result);
+  auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key).it;
+  if (!IsValid(it))
+    return OpStatus::KEY_NOTFOUND;
+
+  const JsonType* json_ptr = nullptr;
+  JsonType json;
+  if (it->second.ObjType() == OBJ_JSON) {
+    json_ptr = it->second.GetJson();
+  } else if (it->second.ObjType() == OBJ_STRING) {
+    string tmp;
+    it->second.GetString(&tmp);
+    auto parsed_json = ShardJsonFromString(tmp);
+    if (!parsed_json) {
+      return OpStatus::WRONG_TYPE;
+    }
+    json.swap(*parsed_json);
+    json_ptr = &json;
+  } else {
+    return OpStatus::WRONG_TYPE;
+  }
 
   const auto& paths = params.paths;
-  const JsonType& json_entry = *(result.value());
+  const JsonType& json_entry = *json_ptr;
 
   if (paths.empty()) {
     // this implicitly means that we're using . which
