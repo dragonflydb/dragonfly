@@ -191,7 +191,7 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
   facade::ConnectionContext* context = (facade::ConnectionContext*)http_cntx->user_data();
   DCHECK(context);
 
-  facade::CapturingReplyBuilder reply_builder;
+  facade::CapturingReplyBuilder reply_builder(false);
 
   // TODO: to finish this.
   service->DispatchCommand(absl::MakeSpan(cmd_slices), &reply_builder, context);

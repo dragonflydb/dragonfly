@@ -1726,7 +1726,7 @@ optional<CapturingReplyBuilder::Payload> Service::FlushEvalAsyncCmds(ConnectionC
   DCHECK(eval_cid);
   tx->MultiSwitchCmd(eval_cid);
 
-  CapturingReplyBuilder crb{ReplyMode::ONLY_ERR};
+  CapturingReplyBuilder crb{false, ReplyMode::ONLY_ERR};
   MultiCommandSquasher::Execute(absl::MakeSpan(info->async_cmds), &crb, cntx, this, true, true);
 
   info->async_cmds_heap_mem = 0;

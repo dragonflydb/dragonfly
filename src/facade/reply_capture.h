@@ -43,8 +43,9 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   struct SimpleString : public std::string {};  // SendSimpleString
   struct BulkString : public std::string {};    // SendBulkString
 
-  CapturingReplyBuilder(ReplyMode mode = ReplyMode::FULL)
+  CapturingReplyBuilder(bool is_resp_3, ReplyMode mode = ReplyMode::FULL)
       : RedisReplyBuilder{nullptr}, reply_mode_{mode}, stack_{}, current_{} {
+    SetResp3(is_resp_3);
   }
 
   using Payload = std::variant<std::monostate, Null, Error, long, double, SimpleString, BulkString,
