@@ -99,6 +99,7 @@ class ZSetFamily {
   static void GeoPos(CmdArgList args, const CommandContext& cmd_cntx);
   static void GeoDist(CmdArgList args, const CommandContext& cmd_cntx);
   static void GeoSearch(CmdArgList args, const CommandContext& cmd_cntx);
+  static void GeoSearchStore(CmdArgList args, const CommandContext& cmd_cntx);
   static void GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cntx);
 };
 

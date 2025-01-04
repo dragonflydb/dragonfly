@@ -3123,21 +3123,29 @@ void GeoSearchStoreGeneric(Transaction* tx, SinkReplyBuilder* builder, const Geo
     rb->SendLong(smvec.size());
   }
 }
-}  // namespace
 
-void ZSetFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
-  // parse arguments
-  string_view key = ArgS(args, 0);
-  GeoShape shape = {};
+void GeoSearchGeneric(CmdArgList args, bool store, const CommandContext& cmd_cntx) {
+  string_view key;
   GeoSearchOpts geo_ops;
-  string_view member;
+  if (store) {
+    geo_ops.store = GeoStoreType::kStoreHash;
+    geo_ops.store_key = ArgS(args, 0);
+    key = ArgS(args, 1);
+  } else {
+    key = ArgS(args, 0);
+  }
 
   // FROMMEMBER or FROMLONLAT is set
   bool from_set = false;
+  string_view member;
+
   // BYRADIUS or BYBOX is set
   bool by_set = false;
+  GeoShape shape = {};
+
   auto* builder = cmd_cntx.rb;
-  for (size_t i = 1; i < args.size(); ++i) {
+  size_t next_arg = (store) ? 2 : 1;
+  for (size_t i = next_arg; i < args.size(); ++i) {
     string cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
 
     if (cur_arg == "FROMMEMBER") {
@@ -3232,13 +3240,15 @@ void ZSetFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
         geo_ops.any = true;
         i++;
       }
-    } else if (cur_arg == "WITHCOORD") {
+    } else if (!store && cur_arg == "WITHCOORD") {
       geo_ops.withcoord = true;
-    } else if (cur_arg == "WITHDIST") {
+    } else if (!store && cur_arg == "WITHDIST") {
       geo_ops.withdist = true;
-    } else if (cur_arg == "WITHHASH")
+    } else if (!store && cur_arg == "WITHHASH") {
       geo_ops.withhash = true;
-    else {
+    } else if (store && cur_arg == "STOREDIST") {
+      geo_ops.store = GeoStoreType::kStoreDist;
+    } else {
       return builder->SendError(kSyntaxErr);
     }
   }
@@ -3253,6 +3263,16 @@ void ZSetFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   // parsing completed
 
   GeoSearchStoreGeneric(cmd_cntx.tx, builder, shape, key, member, geo_ops);
+}
+
+}  // namespace
+
+void ZSetFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
+  GeoSearchGeneric(args, false, cmd_cntx);
+}
+
+void ZSetFamily::GeoSearchStore(CmdArgList args, const CommandContext& cmd_cntx) {
+  GeoSearchGeneric(args, true, cmd_cntx);
 }
 
 void ZSetFamily::GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -3391,6 +3411,7 @@ constexpr uint32_t kGeoHash = READ | GEO | SLOW;
 constexpr uint32_t kGeoPos = READ | GEO | SLOW;
 constexpr uint32_t kGeoDist = READ | GEO | SLOW;
 constexpr uint32_t kGeoSearch = READ | GEO | SLOW;
+constexpr uint32_t kGeoSearchStore = WRITE | GEO | SLOW;
 constexpr uint32_t kGeoRadiusByMember = WRITE | GEO | SLOW;
 }  // namespace acl
 
@@ -3446,6 +3467,8 @@ void ZSetFamily::Register(CommandRegistry* registry) {
       << CI{"GEOPOS", CO::FAST | CO::READONLY, -2, 1, 1, acl::kGeoPos}.HFUNC(GeoPos)
       << CI{"GEODIST", CO::READONLY, -4, 1, 1, acl::kGeoDist}.HFUNC(GeoDist)
       << CI{"GEOSEARCH", CO::READONLY, -4, 1, 1, acl::kGeoSearch}.HFUNC(GeoSearch)
+      << CI{"GEOSEARCHSTORE", CO::WRITE | CO::DENYOOM, -5, 1, 2, acl::kGeoSearchStore}.HFUNC(
+             GeoSearchStore)
       << CI{"GEORADIUSBYMEMBER", CO::WRITE | CO::STORE_LAST_KEY, -4, 1, 1, acl::kGeoRadiusByMember}
              .HFUNC(GeoRadiusByMember);
 }

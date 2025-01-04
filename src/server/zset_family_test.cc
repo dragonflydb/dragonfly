@@ -1260,6 +1260,29 @@ TEST_F(ZSetFamilyTest, GeoSearch) {
                                 RespArray(ElementsAre(DoubleArg(9.1427), DoubleArg(38.7369))))))));
 }
 
+TEST_F(ZSetFamilyTest, GeoSearchStore) {
+  EXPECT_EQ(10, CheckedInt({"GEOADD",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
+                            "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
+                            "48.8566", "Paris",     "16.3738", "48.2082", "Vienna",   "4.8952",
+                            "52.3702", "Amsterdam", "10.7522", "59.9139", "Oslo",     "23.7275",
+                            "37.9838", "Athens",    "19.0402", "47.4979", "Budapest", "6.2603",
+                            "53.3498", "Dublin"}));
+
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "key1", "Europe", "FROMLONLAT", "13.4050", "52.5200",
+                           "BYRADIUS", "500", "KM"}));
+
+  auto resp = Run({"ZRANGE", "key1", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp,
+              RespArray(ElementsAre("Berlin", "3673983950397063", "Dublin", "3678981558208417")));
+
+  EXPECT_EQ(2, CheckedInt({"GEOSEARCHSTORE", "key2", "Europe", "FROMLONLAT", "13.4050", "52.5200",
+                           "BYRADIUS", "500", "KM", "STOREDIST"}));
+
+  resp = Run({"ZRANGE", "key2", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378), "Dublin",
+                                          DoubleArg(487.5619030644293))));
+}
+
 TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
