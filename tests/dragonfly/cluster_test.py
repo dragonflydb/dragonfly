@@ -14,8 +14,7 @@ from .replication_test import check_all_replicas_finished
 from redis.cluster import RedisCluster
 from redis.cluster import ClusterNode
 from .proxy import Proxy
-from .seeder import SeederBase
-from .seeder import StaticSeeder
+from .seeder import Seeder, SeederBase, StaticSeeder
 
 from . import dfly_args
 
@@ -31,6 +30,11 @@ def monotonically_increasing_port_number():
 
 # Create a generator object
 next_port = monotonically_increasing_port_number()
+
+
+async def get_memory(client, field):
+    info = await client.info("memory")
+    return info[field]
 
 
 class RedisClusterNode:
@@ -1981,6 +1985,7 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.asyncio
+@pytest.mark.opt_only
 async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory):
     instances = [
         df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
@@ -1995,7 +2000,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 
     logging.debug("Generating huge containers")
     seeder = StaticSeeder(
-        key_target=10,
+        key_target=100,
         data_size=10_000_000,
         collection_size=10_000,
         variance=1,
@@ -2004,6 +2009,8 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     )
     await seeder.run(nodes[0].client)
     source_data = await StaticSeeder.capture(nodes[0].client)
+
+    mem_before = await get_memory(nodes[0].client, "used_memory_rss")
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
@@ -2016,6 +2023,74 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 
     target_data = await StaticSeeder.capture(nodes[1].client)
     assert source_data == target_data
+
+    # Get peak memory, because migration removes the data
+    mem_after = await get_memory(nodes[0].client, "used_memory_peak_rss")
+    logging.debug(f"Memory before {mem_before} after {mem_after}")
+    assert mem_after < mem_before * 1.1
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+@pytest.mark.parametrize("chunk_size", [1_000_000, 30])
+@pytest.mark.asyncio
+async def test_cluster_migration_while_seeding(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, chunk_size
+):
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            serialization_max_chunk_size=chunk_size,
+        )
+        for _ in range(2)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [await create_node_info(instance) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    client0 = nodes[0].client
+    client1 = nodes[1].client
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Seeding cluster")
+    seeder = df_seeder_factory.create(
+        keys=10_000, port=instances[0].port, cluster_mode=True, mirror_to_fake_redis=True
+    )
+    await seeder.run(target_deviation=0.1)
+
+    seed = asyncio.create_task(seeder.run())
+    await asyncio.sleep(1)
+
+    nodes[0].migrations = [
+        MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
+    ]
+    logging.debug("Migrating slots")
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Waiting for migration to finish")
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=300)
+    logging.debug("Migration finished")
+
+    logging.debug("Finalizing migration")
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await asyncio.sleep(1)  # Let seeder feed dest before migration finishes
+
+    seeder.stop()
+    await seed
+    logging.debug("Seeding finished")
+
+    assert (
+        await get_memory(client0, "used_memory_peak_rss")
+        < await get_memory(client0, "used_memory_rss") * 1.1
+    )
+
+    capture = await seeder.capture_fake_redis()
+    assert await seeder.compare(capture, instances[1].port)
 
 
 def parse_lag(replication_info: str):

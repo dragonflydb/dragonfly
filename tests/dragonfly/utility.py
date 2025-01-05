@@ -14,6 +14,7 @@ import json
 import subprocess
 import pytest
 import os
+import fakeredis
 from typing import Iterable, Union
 from enum import Enum
 
@@ -271,7 +272,7 @@ class CommandGenerator:
         ("LPUSH {k} {val}", ValueType.LIST),
         ("LPOP {k}", ValueType.LIST),
         ("SADD {k} {val}", ValueType.SET),
-        ("SPOP {k}", ValueType.SET),
+        # ("SPOP {k}", ValueType.SET),  # Disabled because it is inconsistent
         ("HSETNX {k} v0 {val}", ValueType.HSET),
         ("HINCRBY {k} v1 1", ValueType.HSET),
         ("ZPOPMIN {k} 1", ValueType.ZSET),
@@ -423,6 +424,7 @@ class DflySeeder:
         unsupported_types=[],
         stop_on_failure=True,
         cluster_mode=False,
+        mirror_to_fake_redis=False,
     ):
         if cluster_mode:
             max_multikey = 1
@@ -436,10 +438,15 @@ class DflySeeder:
         self.multi_transaction_probability = multi_transaction_probability
         self.stop_flag = False
         self.stop_on_failure = stop_on_failure
+        self.fake_redis = None
 
         self.log_file = log_file
         if self.log_file is not None:
             open(self.log_file, "w").close()
+
+        if mirror_to_fake_redis:
+            logging.debug("Creating FakeRedis instance")
+            self.fake_redis = fakeredis.FakeAsyncRedis()
 
     async def run(self, target_ops=None, target_deviation=None):
         """
@@ -473,6 +480,14 @@ class DflySeeder:
     def reset(self):
         """Reset internal state. Needs to be called after flush or restart"""
         self.gen.reset()
+
+    async def capture_fake_redis(self):
+        keys = sorted(list(self.gen.keys_and_types()))
+        # TODO: support multiple databases
+        assert self.dbcount == 1
+        assert self.fake_redis != None
+        capture = DataCapture(await self._capture_entries(self.fake_redis, keys))
+        return [capture]
 
     async def capture(self, port=None):
         """Create DataCapture for all dbs"""
@@ -588,12 +603,19 @@ class DflySeeder:
                 queue.task_done()
                 break
 
-            pipe = client.pipeline(transaction=tx_data[1])
-            for cmd in tx_data[0]:
-                pipe.execute_command(*cmd)
-
             try:
-                await pipe.execute()
+                if self.fake_redis is None:
+                    pipe = client.pipeline(transaction=tx_data[1])
+                    for cmd in tx_data[0]:
+                        pipe.execute_command(*cmd)
+                    await pipe.execute()
+                else:
+                    # To mirror consistently to Fake Redis we must only send to it successful
+                    # commands. We can't use pipes because they might succeed partially.
+                    for cmd in tx_data[0]:
+                        dfly_resp = await client.execute_command(*cmd)
+                        fake_resp = await self.fake_redis.execute_command(*cmd)
+                        assert dfly_resp == fake_resp
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
                     await self._close_client(client)
