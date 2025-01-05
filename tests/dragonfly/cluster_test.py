@@ -1999,7 +1999,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
 
     logging.debug("Generating huge containers")
     seeder = StaticSeeder(
-        key_target=10,
+        key_target=100,
         data_size=10_000_000,
         collection_size=10_000,
         variance=1,
