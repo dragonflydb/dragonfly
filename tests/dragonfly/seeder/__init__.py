@@ -118,6 +118,7 @@ class StaticSeeder(SeederBase):
 
         args = ["DEBUG", "POPULATE", key_target, prefix, math.ceil(dsize)]
         args += ["RAND", "TYPE", dtype, "ELEMENTS", csize]
+        logging.debug(args)
         return await client.execute_command(*args)
 
 
