@@ -3087,9 +3087,6 @@ void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) 
     }
   }
 
-  service_.proactor_pool().AwaitFiberOnAll(
-      [](ProactorBase* pb) { ServerState::tlocal()->EnterLameDuck(); });
-
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();
 }
