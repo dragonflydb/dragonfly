@@ -159,8 +159,6 @@ jobs:
           FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
 
           timeout 5m ./dragonfly_test
-          timeout 5m ./multi_test --multi_exec_mode=1
-          timeout 5m ./multi_test --multi_exec_mode=3
           timeout 5m ./json_family_test --jsonpathv2=false
           timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
       - name: Upload unit logs on failure

@@ -76,13 +76,13 @@ ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
-ABSL_FLAG(uint32_t, multi_exec_mode, 2,
-          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
+ABSL_RETIRED_FLAG(uint32_t, multi_exec_mode, 2, "DEPRECATED. Sets multi exec atomicity mode");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
-ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
+ABSL_RETIRED_FLAG(bool, track_exec_frequencies, true,
+                  "DEPRECATED. Whether to track exec frequencies for multi exec");
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
@@ -651,8 +651,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
                                       const ScriptMgr& script_mgr) {
   // Check if script most LIKELY has global eval transactions
   bool contains_global = false;
-  Transaction::MultiMode multi_mode =
-      static_cast<Transaction::MultiMode>(absl::GetFlag(FLAGS_multi_exec_mode));
+  Transaction::MultiMode multi_mode = Transaction::LOCK_AHEAD;
 
   if (state == ExecScriptUse::SCRIPT_RUN) {
     contains_global = script_mgr.AreGlobalByDefault();
@@ -2207,10 +2206,8 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {
-    if (GetFlag(FLAGS_track_exec_frequencies)) {
-      string descr = CreateExecDescriptor(exec_info.body, cmd_cntx.tx->GetUniqueShardCnt());
-      ServerState::tlocal()->exec_freq_count[descr]++;
-    }
+    string descr = CreateExecDescriptor(exec_info.body, cmd_cntx.tx->GetUniqueShardCnt());
+    ServerState::tlocal()->exec_freq_count[descr]++;
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
