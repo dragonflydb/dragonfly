@@ -22,6 +22,8 @@ enum class ReplyMode {
   FULL       // All replies are recorded
 };
 
+enum class RespVersion { kResp2, kResp3 };
+
 // Base class for all reply builders. Offer a simple high level interface for controlling output
 // modes and sending basic response types.
 class SinkReplyBuilder {
@@ -259,15 +261,19 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   static std::string SerializeCommand(std::string_view command);
 
   bool IsResp3() const {
-    return resp3_;
+    return resp_ == RespVersion::kResp3;
   }
 
-  void SetResp3(bool resp3) {
-    resp3_ = resp3;
+  void SetRespVersion(RespVersion resp_version) {
+    resp_ = resp_version;
+  }
+
+  RespVersion GetRespVersion() {
+    return resp_;
   }
 
  private:
-  bool resp3_ = false;
+  RespVersion resp_ = RespVersion::kResp2;
 };
 
 // Non essential redis reply builder functions implemented on top of the base resp protocol

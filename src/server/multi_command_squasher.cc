@@ -172,12 +172,13 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   return true;
 }
 
-OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
+OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es,
+                                             RespVersion resp_v) {
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.cmds.empty());
 
   auto* local_tx = sinfo.local_tx.get();
-  facade::CapturingReplyBuilder crb;
+  facade::CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
   ConnectionContext local_cntx{cntx_, local_tx};
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
@@ -244,14 +245,15 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     cntx_->cid = base_cid_;
     auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
-    tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
+    tx->ScheduleSingleHop(
+        [this, rb](auto* tx, auto* es) { return SquashedHopCb(tx, es, rb->GetRespVersion()); });
   } else {
 #if 1
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    auto cb = [this, tx, bc]() mutable {
-      this->SquashedHopCb(tx, EngineShard::tlocal());
+    auto cb = [this, tx, bc, rb]() mutable {
+      this->SquashedHopCb(tx, EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
 
@@ -261,8 +263,9 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     }
     bc->Wait();
 #else
-    shard_set->RunBlockingInParallel([this, tx](auto* es) { SquashedHopCb(tx, es); },
-                                     [this](auto sid) { return !sharded_[sid].cmds.empty(); });
+    shard_set->RunBlockingInParallel(
+        [this, tx, rb](auto* es) { SquashedHopCb(tx, es, rb->GetRespVersion()); },
+        [this](auto sid) { return !sharded_[sid].cmds.empty(); });
 #endif
   }
 
