@@ -46,7 +46,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        timeout 50m pytest -m "${{inputs.filter}}" --durations=10 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
+        timeout 50m pytest -m "${{inputs.filter}}" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
