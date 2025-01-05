@@ -2061,6 +2061,7 @@ async def test_cluster_migration_while_seeding(
     await seeder.run(target_deviation=0.1)
 
     seed = asyncio.create_task(seeder.run())
+    await asyncio.sleep(1)
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", instances[1].admin_port, [(0, 16383)], nodes[1].id)
