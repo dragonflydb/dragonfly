@@ -34,6 +34,12 @@ sudo zypper install automake boost-devel gcc-c++ git cmake libtool ninja libzstd
      libboost_context-devel libboost_system-devel
 ```
 
+On FreeBSD:
+
+```bash
+pkg install -y git bash cmake ninja libunwind boost-libs autoconf automake libtool gmake bison
+```
+
 ## Step 2 - clone the project
 
 ```bash
