@@ -37,7 +37,7 @@ class JournalSlice {
     return slice_index_ != UINT32_MAX;
   }
 
-  void AddLogRecord(const Entry& entry, bool await);
+  void AddLogRecord(const Entry& entry);
 
   // Register a callback that will be called every time a new entry is
   // added to the journal.
@@ -54,8 +54,16 @@ class JournalSlice {
   /// from the buffer.
   bool IsLSNInBuffer(LSN lsn) const;
   std::string_view GetEntry(LSN lsn) const;
+  // SetFlushMode with allow_flush=false is used to disable preemptions during
+  // subsequent calls to AddLogRecord.
+  // SetFlushMode with allow_flush=true flushes all log records aggregated
+  // since the last call with allow_flush=false. This call may preempt.
+  // The caller must ensure that no preemptions occur between the initial call
+  // with allow_flush=false and the subsequent call with allow_flush=true.
+  void SetFlushMode(bool allow_flush);
 
  private:
+  void CallOnChange(const JournalItem& item);
   // std::string shard_path_;
   // std::unique_ptr<LinuxFile> shard_file_;
   std::optional<base::RingBuffer<JournalItem>> ring_buffer_;
@@ -69,6 +77,7 @@ class JournalSlice {
   uint32_t slice_index_ = UINT32_MAX;
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
+  bool enable_journal_flush_ = true;
 };
 
 }  // namespace journal

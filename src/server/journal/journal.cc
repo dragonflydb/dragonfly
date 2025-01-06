@@ -84,8 +84,12 @@ LSN Journal::GetLsn() const {
 }
 
 void Journal::RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                          std::optional<cluster::SlotId> slot, Entry::Payload payload, bool await) {
-  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)}, await);
+                          std::optional<cluster::SlotId> slot, Entry::Payload payload) {
+  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, shard_cnt, slot, std::move(payload)});
+}
+
+void Journal::SetFlushMode(bool allow_flush) {
+  journal_slice.SetFlushMode(allow_flush);
 }
 
 }  // namespace journal

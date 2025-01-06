@@ -18,21 +18,21 @@ class SlotSet {
   using TBitSet = std::bitset<kSlotsNumber>;
 
   SlotSet(bool full_house = false) {
+    slots_ = std::make_unique<TBitSet>();
     if (full_house)
       slots_->flip();
   }
 
   SlotSet(const SlotRanges& slot_ranges) {
+    slots_ = std::make_unique<TBitSet>();
     Set(slot_ranges, true);
   }
 
-  SlotSet(const TBitSet& s) {
-    *slots_ = s;
+  SlotSet(const SlotSet& s) {
+    slots_ = std::make_unique<TBitSet>(*s.slots_);
   }
 
-  SlotSet(const SlotSet& s) {
-    *slots_ = *s.slots_;
-  }
+  SlotSet(SlotSet&& s) = default;
 
   bool Contains(SlotId slot) const {
     return slots_->test(slot);
@@ -64,7 +64,11 @@ class SlotSet {
 
   // Get SlotSet that are absent in the slots
   SlotSet GetRemovedSlots(const SlotSet& slots) const {
-    return *slots_ & ~*slots.slots_;
+    // we need to avoid stack usage to prevent stack overflow
+    SlotSet res(slots);
+    res.slots_->flip();
+    *res.slots_ &= *slots_;
+    return res;
   }
 
   SlotRanges ToSlotRanges() const {
@@ -85,7 +89,12 @@ class SlotSet {
   }
 
  private:
-  std::unique_ptr<TBitSet> slots_{std::make_unique<TBitSet>()};
+  SlotSet(std::unique_ptr<TBitSet> s) {
+    slots_ = std::move(s);
+  }
+
+ private:
+  std::unique_ptr<TBitSet> slots_;
 };
 
 }  // namespace dfly::cluster

@@ -4,6 +4,8 @@ import string
 from redis import asyncio as aioredis
 from . import dfly_args
 from .seeder import Seeder, StaticSeeder
+from .instance import DflyInstanceFactory, DflyInstance
+from .utility import *
 
 
 @dfly_args({"proactor_threads": 4})
@@ -114,3 +116,22 @@ async def test_seeder_capture(async_client: aioredis.Redis):
     # Do another change
     await async_client.spop("set1")
     assert capture != await Seeder.capture(async_client)
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 2})
+async def test_seeder_fake_redis(
+    df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
+):
+    instance = df_factory.create()
+    df_factory.start_all([instance])
+
+    seeder = df_seeder_factory.create(
+        keys=100, port=instance.port, unsupported_types=[ValueType.JSON], mirror_to_fake_redis=True
+    )
+
+    await seeder.run(target_ops=5_000)
+
+    capture = await seeder.capture_fake_redis()
+
+    assert await seeder.compare(capture, instance.port)

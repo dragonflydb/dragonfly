@@ -283,6 +283,10 @@ void MCReplyBuilder::SendMiss() {
     SendSimpleString("EN");
 }
 
+void MCReplyBuilder::SendDeleted() {
+  SendSimpleString(flag_.meta ? "HD" : "DELETED");
+}
+
 void MCReplyBuilder::SendRaw(std::string_view str) {
   ReplyScope scope(this);
   WriteRef(str);
@@ -290,7 +294,7 @@ void MCReplyBuilder::SendRaw(std::string_view str) {
 
 void RedisReplyBuilderBase::SendNull() {
   ReplyScope scope(this);
-  resp3_ ? WritePieces(kNullStringR3) : WritePieces(kNullStringR2);
+  IsResp3() ? WritePieces(kNullStringR3) : WritePieces(kNullStringR2);
 }
 
 void RedisReplyBuilderBase::SendSimpleString(std::string_view str) {
@@ -323,7 +327,7 @@ void RedisReplyBuilderBase::SendDouble(double val) {
   static_assert(ABSL_ARRAYSIZE(buf) < kMaxInlineSize, "Write temporary string from buf inline");
   string_view val_str = FormatDouble(val, buf, ABSL_ARRAYSIZE(buf));
 
-  if (!resp3_)
+  if (!IsResp3())
     return SendBulkString(val_str);
 
   ReplyScope scope(this);
@@ -408,8 +412,7 @@ void RedisReplyBuilder::SendBulkStrArr(const facade::ArgRange& strs, CollectionT
     SendBulkString(str);
 }
 
-void RedisReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                                        bool with_scores) {
+void RedisReplyBuilder::SendScoredArray(ScoredArray arr, bool with_scores) {
   ReplyScope scope(this);
   StartArray((with_scores && !IsResp3()) ? arr.size() * 2 : arr.size());
   for (const auto& [str, score] : arr) {
@@ -418,6 +421,20 @@ void RedisReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, 
     SendBulkString(str);
     if (with_scores)
       SendDouble(score);
+  }
+}
+
+void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr) {
+  ReplyScope scope(this);
+
+  StartArray(2);
+
+  SendBulkString(arr_label);
+  StartArray(arr.size());
+  for (const auto& [str, score] : arr) {
+    StartArray(2);
+    SendBulkString(str);
+    SendDouble(score);
   }
 }
 

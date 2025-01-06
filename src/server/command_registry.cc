@@ -283,6 +283,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "no-key-tx-span-all";
     case IDEMPOTENT:
       return "idempotent";
+    case SLOW:
+      return "slow";
   }
   return "unknown";
 }

@@ -791,8 +791,8 @@ uint64_t CompactObj::HashCode() const {
   }
 
   if (encoded) {
-    GetString(&tl.tmp_str);
-    return XXH3_64bits_withSeed(tl.tmp_str.data(), tl.tmp_str.size(), kHashSeed);
+    string_view sv = GetSlice(&tl.tmp_str);
+    return XXH3_64bits_withSeed(sv.data(), sv.size(), kHashSeed);
   }
 
   switch (taglen_) {

@@ -913,8 +913,13 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
   if (json_path.RefersToRootElement()) {
     auto& db_slice = op_args.GetDbSlice();
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    return static_cast<long>(db_slice.Del(op_args.db_cntx, it));
+    if (IsValid(it)) {
+      db_slice.Del(op_args.db_cntx, it);
+      return 1;
+    }
+    return 0;
   }
+
   JsonMemTracker tracker;
   // FindMutable because we need to run the AutoUpdater at the end which will account
   // the deltas calculated from the MemoryTracker

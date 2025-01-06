@@ -2662,11 +2662,12 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
 @pytest.mark.parametrize(
     "element_size, elements_number",
-    [(16, 20000), (20000, 16)],
+    [(16, 30000), (30000, 16)],
 )
+@dfly_args({"proactor_threads": 1})
 async def test_big_containers(df_factory, element_size, elements_number):
-    master = df_factory.create(proactor_threads=4)
-    replica = df_factory.create(proactor_threads=4)
+    master = df_factory.create()
+    replica = df_factory.create()
 
     df_factory.start_all([master, replica])
     c_master = master.client()
@@ -2674,18 +2675,38 @@ async def test_big_containers(df_factory, element_size, elements_number):
 
     logging.debug("Fill master with test data")
     seeder = StaticSeeder(
-        key_target=10,
+        key_target=50,
         data_size=element_size * elements_number,
         collection_size=elements_number,
         variance=1,
-        samples=5,
-        types=["LIST", "SET", "ZSET", "HASH"],
+        samples=1,
+        types=["LIST", "SET", "ZSET", "HASH", "STREAM"],
     )
     await seeder.run(c_master)
+
+    async def get_memory(client, field):
+        info = await client.info("memory")
+        return info[field]
+
+    await asyncio.sleep(1)  # wait for heartbeat to update rss memory
+    used_memory = await get_memory(c_master, "used_memory_rss")
 
     logging.debug("Start replication and wait for full sync")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_for_replicas_state(c_replica)
+
+    peak_memory = await get_memory(c_master, "used_memory_peak_rss")
+
+    logging.info(f"Used memory {used_memory}, peak memory {peak_memory}")
+    assert peak_memory < 1.1 * used_memory
+
+    await c_replica.execute_command("memory decommit")
+    await asyncio.sleep(1)
+    replica_peak_memory = await get_memory(c_replica, "used_memory_peak_rss")
+    replica_used_memory = await get_memory(c_replica, "used_memory_rss")
+
+    logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
+    assert replica_peak_memory < 1.1 * replica_used_memory
 
     # Check replica data consisten
     replica_data = await StaticSeeder.capture(c_replica)

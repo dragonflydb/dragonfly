@@ -28,3 +28,5 @@ def test_basic(df_server: DflyInstance):
     response = pool.meta_get(Key("key1"), flags=request_flags)
     assert isinstance(response, Success)
     assert pool.get("key2") is None
+    assert pool.delete("key1")
+    assert pool.delete("key1") is False
