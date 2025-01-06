@@ -66,6 +66,18 @@ auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> R
       case BULK_STR_S:
         resultc = ConsumeBulk(str);
         break;
+      case SLASH_N_S:
+        if (str[0] != '\n') {
+          resultc.first = BAD_STRING;
+        } else {
+          resultc = {OK, 1};
+          if (arg_c_ == '_') {
+            cached_expr_->emplace_back(RespExpr::NIL);
+            cached_expr_->back().u = Buffer{};
+          }
+          HandleFinishArg();
+        }
+        break;
       default:
         LOG(FATAL) << "Unexpected state " << int(state_);
     }
@@ -240,8 +252,8 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
   const char* s = reinterpret_cast<const char*>(str.data());
   const char* pos = reinterpret_cast<const char*>(memchr(s, '\n', str.size()));
   if (!pos) {
-    if (str.size() + small_len_ < sizeof(small_buf_)) {
-      memcpy(small_buf_ + small_len_, str.data(), str.size());
+    if (str.size() + small_len_ < small_buf_.size()) {
+      memcpy(&small_buf_[small_len_], str.data(), str.size());
       small_len_ += str.size();
       return {INPUT_PENDING, str.size()};
     }
@@ -251,13 +263,13 @@ auto RedisParser::ParseLen(Buffer str, int64_t* res) -> ResultConsumed {
 
   unsigned consumed = pos - s + 1;
   if (small_len_ > 0) {
-    if (small_len_ + consumed >= sizeof(small_buf_)) {
+    if (small_len_ + consumed >= small_buf_.size()) {
       return ResultConsumed{BAD_ARRAYLEN, consumed};
     }
-    memcpy(small_buf_ + small_len_, str.data(), consumed);
+    memcpy(&small_buf_[small_len_], str.data(), consumed);
     small_len_ += consumed;
-    s = small_buf_;
-    pos = small_buf_ + small_len_ - 1;
+    s = small_buf_.data();
+    pos = s + small_len_ - 1;
     small_len_ = 0;
   }
 
@@ -368,26 +380,22 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
 
   if (arg_c_ == '_') {  // Resp3 NIL
     // "_\r\n", with '_' consumed into arg_c_.
-    DCHECK_LT(small_len_, 2);  // must be because we never fill here with more than 2 bytes.
-    unsigned needed = 2 - small_len_;
-    unsigned consumed = min<unsigned>(needed, str.size());
+    DCHECK_LT(small_len_, 2u);  // must be because we never fill here with more than 2 bytes.
+    DCHECK_GE(str.size(), 1u);
 
-    for (unsigned i = 0; i < consumed; ++i) {
-      small_buf_[small_len_++] = str[i];
-    }
-
-    if (small_len_ < 2) {
-      return {INPUT_PENDING, consumed};
-    }
-
-    if (small_buf_[0] != '\r' || small_buf_[1] != '\n') {
+    if (str[0] != '\r' || (str.size() > 1 && str[1] != '\n')) {
       return {BAD_STRING, 0};
+    }
+
+    if (str.size() == 1) {
+      state_ = SLASH_N_S;
+      return {INPUT_PENDING, 1};
     }
 
     cached_expr_->emplace_back(RespExpr::NIL);
     cached_expr_->back().u = Buffer{};
     HandleFinishArg();
-    return {OK, consumed};
+    return {OK, 2};
   }
 
   if (arg_c_ == '*') {
@@ -450,29 +458,9 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
 }
 
 auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
-  auto& bulk_str = get<Buffer>(cached_expr_->back().u);
-
-  uint32_t consumed = 0;
-
-  if (small_len_ > 0) {
-    DCHECK(!is_broken_token_);
-    DCHECK_EQ(bulk_len_, 0u);
-
-    if (bulk_len_ == 0) {
-      DCHECK_EQ(small_len_, 1);
-      DCHECK_GE(str.size(), 1u);
-      if (small_buf_[0] != '\r' || str[0] != '\n') {
-        return {BAD_STRING, 0};
-      }
-      consumed = bulk_len_ + 2;
-      small_len_ = 0;
-      HandleFinishArg();
-
-      return {OK, 1};
-    }
-  }
-
   DCHECK_EQ(small_len_, 0);
+  uint32_t consumed = 0;
+  auto& bulk_str = get<Buffer>(cached_expr_->back().u);
 
   if (str.size() >= bulk_len_) {
     consumed = bulk_len_;
@@ -496,9 +484,11 @@ auto RedisParser::ConsumeBulk(Buffer str) -> ResultConsumed {
       HandleFinishArg();
       return {OK, consumed + 2};
     } else if (str.size() == 1) {
-      small_buf_[0] = str[0];
+      if (str[0] != '\r') {
+        return {BAD_STRING, consumed};
+      }
+      state_ = SLASH_N_S;
       consumed++;
-      small_len_ = 1;
     }
     return {INPUT_PENDING, consumed};
   }

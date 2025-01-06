@@ -156,6 +156,9 @@ TEST_F(RedisParserTest, ClientMode) {
   EXPECT_THAT(args_, ElementsAre(ArgType(RespExpr::NIL)));
   ASSERT_EQ(RedisParser::OK, Parse("*2\r\n_\r\n_\r\n"));
   ASSERT_EQ(10, consumed_);
+
+  ASSERT_EQ(RedisParser::OK, Parse("*3\r\n+OK\r\n$1\r\n1\r\n*2\r\n$1\r\n1\r\n$-1\r\n"));
+  ASSERT_THAT(args_, ElementsAre("OK", "1", ArrLen(2)));
 }
 
 TEST_F(RedisParserTest, Hierarchy) {

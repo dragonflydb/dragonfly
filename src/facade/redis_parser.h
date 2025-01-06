@@ -91,6 +91,7 @@ class RedisParser {
     PARSE_ARG_TYPE,  // Parse [$:+-]
     PARSE_ARG_S,     // Parse string\r\n
     BULK_STR_S,
+    SLASH_N_S,
     CMD_COMPLETE_S,
   };
 
@@ -114,7 +115,7 @@ class RedisParser {
 
   using Blob = std::vector<uint8_t>;
   std::vector<Blob> buf_stash_;
-  char small_buf_[32];
+  std::array<char, 32> small_buf_;
 };
 
 }  // namespace facade
