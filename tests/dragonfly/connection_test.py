@@ -1051,3 +1051,14 @@ async def test_hiredis(df_factory):
     server.start()
     client = base_redis.Redis(port=server.port, protocol=3, cache_config=CacheConfig())
     client.ping()
+
+
+@dfly_args({"timeout": 1})
+async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
+    another_client = df_server.client()
+    await another_client.ping()
+    clients = await async_client.client_list()
+    assert len(clients) == 2
+    await asyncio.sleep(2)
+    clients = await async_client.client_list()
+    assert len(clients) == 1
