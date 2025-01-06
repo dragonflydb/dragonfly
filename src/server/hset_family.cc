@@ -585,10 +585,10 @@ OpResult<vector<string>> OpGetAll(const OpArgs& op_args, string_view key, uint8_
   // and the enconding is guaranteed to be a DenseSet since we only support expiring
   // value with that enconding.
   if (res.empty()) {
-    auto mutable_res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH);
-    // Run postupdater, it means that we deleted the keys
-    mutable_res->post_updater.Run();
-    db_slice.Del(op_args.db_cntx, mutable_res->it);
+    // post_updater will run immediately
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
+
+    db_slice.Del(op_args.db_cntx, it);
   }
 
   return res;
@@ -1169,10 +1169,10 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
         }
       }
 
-      if (string_map->Empty()) {
-        auto it_mutable = db_slice.FindMutable(db_context, key, OBJ_HASH);
-        it_mutable->post_updater.Run();
-        db_slice.Del(db_context, it_mutable->it);
+      if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
+        // post_updater will run immediately
+        auto it = db_slice.FindMutable(db_context, key).it;
+        db_slice.Del(db_context, it);
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
@@ -1207,8 +1207,7 @@ void HSetFamily::HRandField(CmdArgList args, const CommandContext& cmd_cntx) {
         }
       }
     } else {
-      LOG(ERROR) << "Invalid encoding " << pv.Encoding();
-      return OpStatus::INVALID_VALUE;
+      LOG(FATAL) << "Invalid encoding " << pv.Encoding();
     }
     return str_vec;
   };

@@ -50,6 +50,7 @@ extern "C" {
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/set_family.h"
+#include "server/stream_family.h"
 #include "server/transaction.h"
 #include "strings/human_readable.h"
 
@@ -703,6 +704,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   stream* s;
+  StreamMemTracker mem_tracker;
   if (config_.append) {
     if (!EnsureObjEncoding(OBJ_STREAM, OBJ_ENCODING_STREAM)) {
       return;
@@ -848,6 +850,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
   if (!config_.append) {
     pv_->InitRobj(OBJ_STREAM, OBJ_ENCODING_STREAM, s);
   }
+  mem_tracker.UpdateStreamSize(*pv_);
 }
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
@@ -2461,9 +2464,14 @@ error_code RdbLoader::HandleAux() {
     if (absl::SimpleAtoi(auxval, &usedmem)) {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
       if (usedmem > ssize_t(max_memory_limit)) {
-        LOG(WARNING) << "Could not load snapshot - its used memory is " << usedmem
-                     << " but the limit is " << max_memory_limit;
-        return RdbError(errc::out_of_memory);
+        if (cluster::IsClusterEnabled()) {
+          LOG(INFO) << "Attempting to load a snapshot of size " << usedmem
+                    << ", despite memory limit of " << max_memory_limit;
+        } else {
+          LOG(WARNING) << "Could not load snapshot - its used memory is " << usedmem
+                       << " but the limit is " << max_memory_limit;
+          return RdbError(errc::out_of_memory);
+        }
       }
     }
   } else if (auxkey == "aof-preamble") {

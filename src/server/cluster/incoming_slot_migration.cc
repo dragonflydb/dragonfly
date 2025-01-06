@@ -94,7 +94,7 @@ class ClusterShardMigration {
       if (tx_data->opcode == journal::Op::PING) {
         // TODO check about ping logic
       } else {
-        ExecuteTxWithNoShardSync(std::move(*tx_data), cntx);
+        ExecuteTx(std::move(*tx_data), cntx);
       }
     }
 
@@ -125,11 +125,10 @@ class ClusterShardMigration {
   }
 
  private:
-  void ExecuteTxWithNoShardSync(TransactionData&& tx_data, Context* cntx) {
+  void ExecuteTx(TransactionData&& tx_data, Context* cntx) {
     if (cntx->IsCancelled()) {
       return;
     }
-    CHECK(tx_data.shard_cnt <= 1);  // we don't support sync for multishard execution
     if (!tx_data.IsGlobalCmd()) {
       executor_.Execute(tx_data.dbid, tx_data.command);
     } else {
@@ -185,7 +184,8 @@ bool IncomingSlotMigration::Join(long attempt) {
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;
-    VLOG(1) << "Checking whether to continue with join " << passed << " vs " << timeout;
+    VLOG_EVERY_N(1, 10000) << "Checking whether to continue with join " << passed << " vs "
+                           << timeout;
     if (passed >= timeout) {
       LOG(WARNING) << "Can't join migration in time for " << source_id_;
       ReportError(GenericError("Can't join migration in time"));

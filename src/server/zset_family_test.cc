@@ -81,6 +81,32 @@ MATCHER_P(UnorderedScoredElementsAreMatcher, elements_list, "") {
                              elements_list.end());
 }
 
+MATCHER_P2(ContainsLabeledScoredArrayMatcher, label, elements, "") {
+  auto label_vec = arg.GetVec();
+  if (label_vec.size() != 2) {
+    *result_listener << "Labeled Scored Array does no contain two elements.";
+    return false;
+  }
+
+  if (!ExplainMatchResult(Eq(label), label_vec[0].GetString(), result_listener)) {
+    return false;
+  }
+
+  auto value_pairs_vec = label_vec[1].GetVec();
+  std::set<std::pair<std::string, std::string>> actual_elements;
+  for (const auto& scored_element : value_pairs_vec) {
+    actual_elements.insert(std::make_pair(scored_element.GetVec()[0].GetString(),
+                                          scored_element.GetVec()[1].GetString()));
+  }
+  if (actual_elements != elements) {
+    *result_listener << "Scored elements do not match: ";
+    ExplainMatchResult(ElementsAreArray(elements), actual_elements, result_listener);
+    return false;
+  }
+
+  return true;
+}
+
 auto ConsistsOf(std::initializer_list<std::string> elements) {
   return ConsistsOfMatcher(std::unordered_set<std::string>{elements});
 }
@@ -96,6 +122,12 @@ auto IsScoredSubsetOf(std::initializer_list<std::pair<std::string, std::string>>
 auto UnorderedScoredElementsAre(
     std::initializer_list<std::pair<std::string, std::string>> elements) {
   return UnorderedScoredElementsAreMatcher(elements);
+}
+
+auto ContainsLabeledScoredArray(
+    std::string_view label, std::initializer_list<std::pair<std::string, std::string>> elements) {
+  return ContainsLabeledScoredArrayMatcher(label,
+                                           std::set<std::pair<std::string, std::string>>{elements});
 }
 
 TEST_F(ZSetFamilyTest, Add) {
@@ -755,6 +787,102 @@ TEST_F(ZSetFamilyTest, ZInterCard) {
 TEST_F(ZSetFamilyTest, ZAddBug148) {
   auto resp = Run({"zadd", "key", "1", "9fe9f1eb"});
   EXPECT_THAT(resp, IntArg(1));
+}
+
+TEST_F(ZSetFamilyTest, ZMPopInvalidSyntax) {
+  // Not enough arguments.
+  auto resp = Run({"zmpop", "1", "a"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  // Zero keys.
+  resp = Run({"zmpop", "0", "MIN", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Number of keys not uint.
+  resp = Run({"zmpop", "aa", "a", "MIN"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Missing MIN/MAX.
+  resp = Run({"zmpop", "1", "a", "COUNT", "1"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Wrong number of keys.
+  resp = Run({"zmpop", "1", "a", "b", "MAX"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Count with no number.
+  resp = Run({"zmpop", "1", "a", "MAX", "COUNT"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Count number is not uint.
+  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "boo"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Too many arguments.
+  resp = Run({"zmpop", "1", "c", "MAX", "COUNT", "2", "foo"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(ZSetFamilyTest, ZMPop) {
+  // All sets are empty.
+  auto resp = Run({"zmpop", "1", "e", "MIN"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Min operation.
+  resp = Run({"zadd", "a", "1", "a1", "2", "a2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"zmpop", "1", "a", "MIN"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("a", {{"a1", "1"}}));
+
+  resp = Run({"ZRANGE", "a", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("a2", "2")));
+
+  // Max operation.
+  resp = Run({"zadd", "b", "1", "b1", "2", "b2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"zmpop", "1", "b", "MAX"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("b", {{"b2", "2"}}));
+
+  resp = Run({"ZRANGE", "b", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("b1", "1")));
+
+  // Count > 1.
+  resp = Run({"zadd", "c", "1", "c1", "2", "c2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"zmpop", "1", "c", "MAX", "COUNT", "2"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("c", {{"c1", "1"}, {"c2", "2"}}));
+
+  resp = Run({"zcard", "c"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // Count > #elements in set.
+  resp = Run({"zadd", "d", "1", "d1", "2", "d2"});
+  EXPECT_THAT(resp, IntArg(2));
+
+  resp = Run({"zmpop", "1", "d", "MAX", "COUNT", "3"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("d", {{"d1", "1"}, {"d2", "2"}}));
+
+  resp = Run({"zcard", "d"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  // First non empty set is not the first set.
+  resp = Run({"zadd", "x", "1", "x1"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"zadd", "y", "1", "y1"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  resp = Run({"zmpop", "3", "empty", "x", "y", "MAX"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("x", {{"x1", "1"}}));
+
+  resp = Run({"zcard", "x"});
+  EXPECT_THAT(resp, IntArg(0));
+
+  resp = Run({"ZRANGE", "y", "0", "-1", "WITHSCORES"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("y1", "1")));
 }
 
 TEST_F(ZSetFamilyTest, ZPopMin) {

@@ -168,14 +168,14 @@ auto DenseSet::PopPtrFront(DenseSet::ChainVectorIterator it) -> DensePtr {
   return front;
 }
 
-uint32_t DenseSet::ClearInternal(uint32_t start, uint32_t count) {
+uint32_t DenseSet::ClearStep(uint32_t start, uint32_t count) {
   constexpr unsigned kArrLen = 32;
   ClearItem arr[kArrLen];
   unsigned len = 0;
 
   size_t end = min<size_t>(entries_.size(), start + count);
   for (size_t i = start; i < end; ++i) {
-    DensePtr ptr = entries_[i];
+    DensePtr& ptr = entries_[i];
     if (ptr.IsEmpty())
       continue;
 
@@ -190,6 +190,7 @@ uint32_t DenseSet::ClearInternal(uint32_t start, uint32_t count) {
       dest.ptr = ptr;
       dest.obj = nullptr;
     }
+    ptr.Reset();
     if (len == kArrLen) {
       ClearBatch(kArrLen, arr);
       len = 0;

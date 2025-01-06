@@ -61,7 +61,8 @@ class MultiCommandSquasher {
   bool ExecuteStandalone(facade::RedisReplyBuilder* rb, StoredCmd* cmd);
 
   // Callback that runs on shards during squashed hop.
-  facade::OpStatus SquashedHopCb(Transaction* parent_tx, EngineShard* es);
+  facade::OpStatus SquashedHopCb(Transaction* parent_tx, EngineShard* es,
+                                 facade::RespVersion resp_v);
 
   // Execute all currently squashed commands. Return false if aborting on error.
   bool ExecuteSquashed(facade::RedisReplyBuilder* rb);

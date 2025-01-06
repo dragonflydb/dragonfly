@@ -543,7 +543,7 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
     // TODO: Break slot migration upon FLUSHSLOTS
     journal->RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
                          /* shard_cnt= */ shard_set->size(), nullopt,
-                         Payload("DFLYCLUSTER", args_view), false);
+                         Payload("DFLYCLUSTER", args_view));
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
@@ -1012,7 +1012,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
                    [source_id = source_id](const auto& m) { return m.node_info.id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
-    return builder->SendLong(OutgoingMigration::kInvalidAttempt);
+    return builder->SendError(OutgoingMigration::kUnknownMigration);
   }
 
   auto migration = GetIncomingMigration(source_id);

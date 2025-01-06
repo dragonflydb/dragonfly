@@ -124,12 +124,13 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
       args.push_back(GenerateValue(val_size, random_value, gen));
     }
   } else if (type == "JSON") {
-    cid = registry.Find("JSON.SET");
+    cid = registry.Find("JSON.MERGE");
     args.push_back("$");
 
     string json = "{";
     for (size_t i = 0; i < elements; ++i) {
-      absl::StrAppend(&json, "\"", i, "\":\"", GenerateValue(val_size, random_value, gen), "\",");
+      absl::StrAppend(&json, "\"", GenerateValue(val_size / 2, random_value, gen), "\":\"",
+                      GenerateValue(val_size / 2, random_value, gen), "\",");
     }
     json[json.size() - 1] = '}';  // Replace last ',' with '}'
     args.push_back(json);
@@ -157,30 +158,37 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx, stub_tx.get()};
-
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = absl::StrCat(prefix, ":", batch.index[i]);
+    uint32_t elements_left = elements;
 
-    auto [cid, args] = GeneratePopulateCommand(type, std::move(key), val_size, random_value,
-                                               elements, *sf->service().mutable_registry(), &gen);
-    if (!cid) {
-      LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
-      break;
+    while (elements_left) {
+      // limit rss grow by 32K by limiting the element count in each command.
+      uint32_t max_batch_elements = std::max(32_KB / val_size, 1ULL);
+      uint32_t populate_elements = std::min(max_batch_elements, elements_left);
+      elements_left -= populate_elements;
+      auto [cid, args] =
+          GeneratePopulateCommand(type, key, val_size, random_value, populate_elements,
+                                  *sf->service().mutable_registry(), &gen);
+      if (!cid) {
+        LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
+        break;
+      }
+
+      args_view.clear();
+      for (auto& arg : args) {
+        args_view.push_back(arg);
+      }
+      auto args_span = absl::MakeSpan(args_view);
+
+      stub_tx->MultiSwitchCmd(cid);
+      local_cntx.cid = cid;
+      crb.SetReplyMode(ReplyMode::NONE);
+      stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
+
+      sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
     }
-
-    args_view.clear();
-    for (auto& arg : args) {
-      args_view.push_back(arg);
-    }
-    auto args_span = absl::MakeSpan(args_view);
-
-    stub_tx->MultiSwitchCmd(cid);
-    local_cntx.cid = cid;
-    crb.SetReplyMode(ReplyMode::NONE);
-    stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
-
-    sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
   }
 
   local_tx->UnlockMulti();

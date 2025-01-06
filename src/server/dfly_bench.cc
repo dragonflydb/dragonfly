@@ -487,7 +487,7 @@ void Driver::ParseRESP() {
       PopRequest();
     }
     io_buf_.ConsumeInput(consumed);
-  } while (result == RedisParser::OK);
+  } while (result == RedisParser::OK && io_buf_.InputLen() > 0);
 }
 
 void Driver::ParseMC() {

@@ -90,7 +90,7 @@ jobs:
           touch /mnt/foo
           ls -la /mnt/foo
       - name: Run sccache-cache
-        uses: mozilla-actions/sccache-action@v0.0.6
+        uses: mozilla-actions/sccache-action@v0.0.7
 
       - name: Configure Cache Env
         uses: actions/github-script@v7
@@ -111,6 +111,7 @@ jobs:
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
+            -DHELIO_STACK_CHECK:STRING=4096 \
             -L
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
@@ -158,8 +159,6 @@ jobs:
           FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
 
           timeout 5m ./dragonfly_test
-          timeout 5m ./multi_test --multi_exec_mode=1
-          timeout 5m ./multi_test --multi_exec_mode=3
           timeout 5m ./json_family_test --jsonpathv2=false
           timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
       - name: Upload unit logs on failure

@@ -4,7 +4,6 @@
 
 #include "server/snapshot.h"
 
-#include <absl/functional/bind_front.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 
@@ -37,14 +36,13 @@ constexpr size_t kMinBlobSize = 32_KB;
 
 }  // namespace
 
-SliceSnapshot::SliceSnapshot(DbSlice* slice, CompressionMode compression_mode,
-                             std::function<void(std::string)> on_push_record,
-                             std::function<void()> on_snapshot_finish)
+SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
+                             SnapshotDataConsumerInterface* consumer, Context* cntx)
     : db_slice_(slice),
+      db_array_(slice->databases()),
       compression_mode_(compression_mode),
-      on_push_(on_push_record),
-      on_snapshot_finish_(on_snapshot_finish) {
-  db_array_ = slice->databases();
+      consumer_(consumer),
+      cntx_(cntx) {
   tl_slice_snapshots.insert(this);
 }
 
@@ -65,16 +63,21 @@ bool SliceSnapshot::IsSnaphotInProgress() {
   return tl_slice_snapshots.size() > 0;
 }
 
-void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, SnapshotFlush allow_flush) {
+void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
-  auto db_cb = absl::bind_front(&SliceSnapshot::OnDbChange, this);
+  auto db_cb = [this](DbIndex db_index, const DbSlice::ChangeReq& req) {
+    OnDbChange(db_index, req);
+  };
+
   snapshot_version_ = db_slice_->RegisterOnChange(std::move(db_cb));
 
   if (stream_journal) {
     auto* journal = db_slice_->shard_owner()->journal();
     DCHECK(journal);
-    auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
+    auto journal_cb = [this](const journal::JournalItem& item, bool await) {
+      OnJournalEntry(item, await);
+    };
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
   }
 
@@ -95,19 +98,18 @@ void SliceSnapshot::Start(bool stream_journal, const Cancellation* cll, Snapshot
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
 
-  snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal, cll] {
-    IterateBucketsFb(cll, stream_journal);
+  snapshot_fb_ = fb2::Fiber("snapshot", [this, stream_journal] {
+    this->IterateBucketsFb(stream_journal);
     db_slice_->UnregisterOnChange(snapshot_version_);
-    on_snapshot_finish_();
+    consumer_->Finalize();
   });
 }
 
-void SliceSnapshot::StartIncremental(Context* cntx, LSN start_lsn) {
+void SliceSnapshot::StartIncremental(LSN start_lsn) {
   serializer_ = std::make_unique<RdbSerializer>(compression_mode_);
 
-  snapshot_fb_ = fb2::Fiber("incremental_snapshot", [cntx, start_lsn, this] {
-    this->SwitchIncrementalFb(cntx, start_lsn);
-  });
+  snapshot_fb_ = fb2::Fiber("incremental_snapshot",
+                            [start_lsn, this] { this->SwitchIncrementalFb(start_lsn); });
 }
 
 // Called only for replication use-case.
@@ -144,7 +146,7 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // and survived until it finished.
 
 // Serializes all the entries with version less than snapshot_version_.
-void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_sync_cut) {
+void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   {
     auto fiber_name = absl::StrCat("SliceSnapshot-", ProactorBase::me()->GetPoolIndex());
     ThisFiber::SetName(std::move(fiber_name));
@@ -156,7 +158,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
   }
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
-    if (cll->IsCancelled())
+    if (cntx_->IsCancelled())
       return;
 
     if (!db_array_[db_indx])
@@ -164,16 +166,15 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
 
     uint64_t last_yield = 0;
     PrimeTable* pt = &db_array_[db_indx]->prime;
-    current_db_ = db_indx;
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
-      if (cll->IsCancelled()) {
+      if (cntx_->IsCancelled()) {
         return;
       }
 
-      PrimeTable::Cursor next =
-          pt->TraverseBuckets(cursor, absl::bind_front(&SliceSnapshot::BucketSaveCb, this));
+      PrimeTable::Cursor next = pt->TraverseBuckets(
+          cursor, [this, &db_indx](auto it) { return BucketSaveCb(db_indx, it); });
       cursor = next;
       PushSerialized(false);
 
@@ -204,7 +205,7 @@ void SliceSnapshot::IterateBucketsFb(const Cancellation* cll, bool send_full_syn
           << stats_.loop_serialized << "/" << stats_.side_saved << "/" << stats_.savecb_calls;
 }
 
-void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
+void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
   auto* journal = db_slice_->shard_owner()->journal();
   DCHECK(journal);
   DCHECK_LE(lsn, journal->GetLsn()) << "The replica tried to sync from the future.";
@@ -212,7 +213,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
   VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
 
   // The replica sends the LSN of the next entry is wants to receive.
-  while (!cntx->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+  while (!cntx_->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
     serializer_->WriteJournalEntry(journal->GetEntry(lsn));
     PushSerialized(false);
     lsn++;
@@ -234,12 +235,14 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
       FiberAtomicGuard fg;
       serializer_->SendFullSyncCut();
     }
-    auto journal_cb = absl::bind_front(&SliceSnapshot::OnJournalEntry, this);
+    auto journal_cb = [this](const journal::JournalItem& item, bool await) {
+      OnJournalEntry(item, await);
+    };
     journal_cb_id_ = journal->RegisterOnChange(std::move(journal_cb));
     PushSerialized(true);
   } else {
     // We stopped but we didn't manage to send the whole stream.
-    cntx->ReportError(
+    cntx_->ReportError(
         std::make_error_code(errc::state_not_recoverable),
         absl::StrCat("Partial sync was unsuccessful because entry #", lsn,
                      " was dropped from the buffer. Current lsn=", journal->GetLsn()));
@@ -247,7 +250,7 @@ void SliceSnapshot::SwitchIncrementalFb(Context* cntx, LSN lsn) {
   }
 }
 
-bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
+bool SliceSnapshot::BucketSaveCb(DbIndex db_index, PrimeTable::bucket_iterator it) {
   std::lock_guard guard(big_value_mu_);
 
   ++stats_.savecb_calls;
@@ -266,7 +269,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
     return false;
   }
 
-  db_slice_->FlushChangeToEarlierCallbacks(current_db_, DbSlice::Iterator::FromPrime(it),
+  db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                            snapshot_version_);
 
   auto* blocking_counter = db_slice_->BlockingCounter();
@@ -275,7 +278,7 @@ bool SliceSnapshot::BucketSaveCb(PrimeTable::bucket_iterator it) {
   // zero.
   std::lock_guard blocking_counter_guard(*blocking_counter);
 
-  stats_.loop_serialized += SerializeBucket(current_db_, it);
+  stats_.loop_serialized += SerializeBucket(db_index, it);
 
   return false;
 }
@@ -291,20 +294,19 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   while (!it.is_done()) {
     ++result;
     // might preempt due to big value serialization.
-    SerializeEntry(db_index, it->first, it->second, nullopt, serializer_.get());
+    SerializeEntry(db_index, it->first, it->second);
     ++it;
   }
   serialize_bucket_running_ = false;
   return result;
 }
 
-void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv,
-                                   optional<uint64_t> expire, RdbSerializer* serializer) {
+void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const PrimeValue& pv) {
   if (pv.IsExternal() && pv.IsCool())
-    return SerializeEntry(db_indx, pk, pv.GetCool().record->value, expire, serializer);
+    return SerializeEntry(db_indx, pk, pv.GetCool().record->value);
 
-  time_t expire_time = expire.value_or(0);
-  if (!expire && pv.HasExpire()) {
+  time_t expire_time = 0;
+  if (pv.HasExpire()) {
     auto eit = db_array_[db_indx]->expire.Find(pk);
     expire_time = db_slice_->ExpireTime(eit);
   }
@@ -321,7 +323,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
         {db_indx, PrimeKey(pk.ToString()), std::move(future), expire_time, mc_flags});
     ++type_freq_map_[RDB_TYPE_STRING];
   } else {
-    io::Result<uint8_t> res = serializer->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
+    io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
     CHECK(res);
     ++type_freq_map_[*res];
   }
@@ -348,7 +350,7 @@ size_t SliceSnapshot::FlushSerialized(SerializerBase::FlushState flush_state) {
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
 
   // Blocking point.
-  on_push_(std::move(sfile.val));
+  consumer_->ConsumeData(std::move(sfile.val), cntx_);
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
   last_pushed_id_ = id;

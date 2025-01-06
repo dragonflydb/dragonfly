@@ -22,6 +22,8 @@ enum class ReplyMode {
   FULL       // All replies are recorded
 };
 
+enum class RespVersion { kResp2, kResp3 };
+
 // Base class for all reply builders. Offer a simple high level interface for controlling output
 // modes and sending basic response types.
 class SinkReplyBuilder {
@@ -171,6 +173,9 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendClientError(std::string_view str);
   void SendNotFound();
+  void SendMiss();
+  void SendDeleted();
+  void SendGetEnd();
 
   void SendValue(std::string_view key, std::string_view value, uint64_t mc_ver, uint32_t mc_flag);
   void SendSimpleString(std::string_view str) final;
@@ -179,15 +184,45 @@ class MCReplyBuilder : public SinkReplyBuilder {
   void SendRaw(std::string_view str);
 
   void SetNoreply(bool noreply) {
-    noreply_ = noreply;
+    flag_.noreply = noreply;
   }
 
   bool NoReply() const {
-    return noreply_;
+    return flag_.noreply;
+  }
+
+  void SetMeta(bool meta) {
+    flag_.meta = meta;
+  }
+
+  void SetBase64(bool base64) {
+    flag_.base64 = base64;
+  }
+
+  void SetReturnMCFlag(bool val) {
+    flag_.return_mcflag = val;
+  }
+
+  void SetReturnValue(bool val) {
+    flag_.return_value = val;
+  }
+
+  void SetReturnVersion(bool val) {
+    flag_.return_version = val;
   }
 
  private:
-  bool noreply_ = false;
+  union {
+    struct {
+      uint8_t noreply : 1;
+      uint8_t meta : 1;
+      uint8_t base64 : 1;
+      uint8_t return_value : 1;
+      uint8_t return_mcflag : 1;
+      uint8_t return_version : 1;
+    } flag_;
+    uint8_t all_;
+  };
 };
 
 // Redis reply builder interface for sending RESP data.
@@ -226,21 +261,26 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   static std::string SerializeCommand(std::string_view command);
 
   bool IsResp3() const {
-    return resp3_;
+    return resp_ == RespVersion::kResp3;
   }
 
-  void SetResp3(bool resp3) {
-    resp3_ = resp3;
+  void SetRespVersion(RespVersion resp_version) {
+    resp_ = resp_version;
+  }
+
+  RespVersion GetRespVersion() {
+    return resp_;
   }
 
  private:
-  bool resp3_ = false;
+  RespVersion resp_ = RespVersion::kResp2;
 };
 
 // Non essential redis reply builder functions implemented on top of the base resp protocol
 class RedisReplyBuilder : public RedisReplyBuilderBase {
  public:
   using RedisReplyBuilderBase::CollectionType;
+  using ScoredArray = absl::Span<const std::pair<std::string, double>>;
 
   RedisReplyBuilder(io::Sink* sink) : RedisReplyBuilderBase(sink) {
   }
@@ -249,8 +289,8 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
 
   void SendSimpleStrArr(const facade::ArgRange& strs);
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = ARRAY);
-  void SendScoredArray(absl::Span<const std::pair<std::string, double>> arr, bool with_scores);
-
+  void SendScoredArray(ScoredArray arr, bool with_scores);
+  void SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr);
   void SendStored() final;
   void SendSetSkipped() final;
 

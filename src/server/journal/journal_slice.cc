@@ -142,34 +142,37 @@ std::string_view JournalSlice::GetEntry(LSN lsn) const {
   return (*ring_buffer_)[lsn - start].data;
 }
 
-void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
+void JournalSlice::SetFlushMode(bool allow_flush) {
+  DCHECK(allow_flush != enable_journal_flush_);
+  enable_journal_flush_ = allow_flush;
+  if (allow_flush) {
+    JournalItem item;
+    item.lsn = -1;
+    item.opcode = Op::NOOP;
+    item.data = "";
+    item.slot = {};
+    CallOnChange(item);
+  }
+}
+
+void JournalSlice::AddLogRecord(const Entry& entry) {
   DCHECK(ring_buffer_);
 
-  JournalItem dummy;
-  JournalItem* item;
-  if (entry.opcode == Op::NOOP) {
-    item = &dummy;
-    item->lsn = -1;
-    item->opcode = entry.opcode;
-    item->data = "";
-    item->slot = entry.slot;
-  } else {
+  JournalItem item;
+  {
     FiberAtomicGuard fg;
-    // GetTail gives a pointer to a new tail entry in the buffer, possibly overriding the last entry
-    // if the buffer is full.
-    item = &dummy;
-    item->opcode = entry.opcode;
-    item->lsn = lsn_++;
-    item->cmd = entry.payload.cmd;
-    item->slot = entry.slot;
+    item.opcode = entry.opcode;
+    item.lsn = lsn_++;
+    item.cmd = entry.payload.cmd;
+    item.slot = entry.slot;
 
     io::BufSink buf_sink{&ring_serialize_buf_};
     JournalWriter writer{&buf_sink};
     writer.Write(entry);
 
-    item->data = io::View(ring_serialize_buf_.InputBuffer());
+    item.data = io::View(ring_serialize_buf_.InputBuffer());
     ring_serialize_buf_.Clear();
-    VLOG(2) << "Writing item [" << item->lsn << "]: " << entry.ToString();
+    VLOG(2) << "Writing item [" << item.lsn << "]: " << entry.ToString();
   }
 
 #if 0
@@ -180,19 +183,17 @@ void JournalSlice::AddLogRecord(const Entry& entry, bool await) {
       file_offset_ += line.size();
     }
 #endif
+  CallOnChange(item);
+}
 
-  // TODO: Remove the callbacks, replace with notifiers
-  {
-    std::shared_lock lk(cb_mu_);
-    DVLOG(2) << "AddLogRecord: run callbacks for " << entry.ToString()
-             << " num callbacks: " << change_cb_arr_.size();
+void JournalSlice::CallOnChange(const JournalItem& item) {
+  std::shared_lock lk(cb_mu_);
 
-    const size_t size = change_cb_arr_.size();
-    auto k_v = change_cb_arr_.begin();
-    for (size_t i = 0; i < size; ++i) {
-      k_v->second(*item, await);
-      ++k_v;
-    }
+  const size_t size = change_cb_arr_.size();
+  auto k_v = change_cb_arr_.begin();
+  for (size_t i = 0; i < size; ++i) {
+    k_v->second(item, enable_journal_flush_);
+    ++k_v;
   }
 }
 

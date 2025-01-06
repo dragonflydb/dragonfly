@@ -204,27 +204,40 @@ void SinkReplyBuilder::NextVec(std::string_view str) {
   vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
 }
 
-MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), noreply_(false) {
+MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), all_(0) {
 }
 
 void MCReplyBuilder::SendValue(std::string_view key, std::string_view value, uint64_t mc_ver,
                                uint32_t mc_flag) {
   ReplyScope scope(this);
-  WritePieces("VALUE ", key, " ", mc_flag, " ", value.size());
-  if (mc_ver)
-    WritePieces(" ", mc_ver);
-
-  if (value.size() <= kMaxInlineSize) {
-    WritePieces(kCRLF, value, kCRLF);
+  if (flag_.meta) {
+    string flags;
+    if (flag_.return_mcflag)
+      absl::StrAppend(&flags, " f", mc_flag);
+    if (flag_.return_version)
+      absl::StrAppend(&flags, " c", mc_ver);
+    if (flag_.return_value) {
+      WritePieces("VA ", value.size(), flags, kCRLF, value, kCRLF);
+    } else {
+      WritePieces("HD ", flags, kCRLF);
+    }
   } else {
-    WritePieces(kCRLF);
-    WriteRef(value);
-    WritePieces(kCRLF);
+    WritePieces("VALUE ", key, " ", mc_flag, " ", value.size());
+    if (mc_ver)
+      WritePieces(" ", mc_ver);
+
+    if (value.size() <= kMaxInlineSize) {
+      WritePieces(kCRLF, value, kCRLF);
+    } else {
+      WritePieces(kCRLF);
+      WriteRef(value);
+      WritePieces(kCRLF);
+    }
   }
 }
 
 void MCReplyBuilder::SendSimpleString(std::string_view str) {
-  if (noreply_)
+  if (flag_.noreply)
     return;
 
   ReplyScope scope(this);
@@ -232,7 +245,7 @@ void MCReplyBuilder::SendSimpleString(std::string_view str) {
 }
 
 void MCReplyBuilder::SendStored() {
-  SendSimpleString("STORED");
+  SendSimpleString(flag_.meta ? "HD" : "STORED");
 }
 
 void MCReplyBuilder::SendLong(long val) {
@@ -253,11 +266,25 @@ void MCReplyBuilder::SendClientError(string_view str) {
 }
 
 void MCReplyBuilder::SendSetSkipped() {
-  SendSimpleString("NOT_STORED");
+  SendSimpleString(flag_.meta ? "NS" : "NOT_STORED");
 }
 
 void MCReplyBuilder::SendNotFound() {
-  SendSimpleString("NOT_FOUND");
+  SendSimpleString(flag_.meta ? "NF" : "NOT_FOUND");
+}
+
+void MCReplyBuilder::SendGetEnd() {
+  if (!flag_.meta)
+    SendSimpleString("END");
+}
+
+void MCReplyBuilder::SendMiss() {
+  if (flag_.meta)
+    SendSimpleString("EN");
+}
+
+void MCReplyBuilder::SendDeleted() {
+  SendSimpleString(flag_.meta ? "HD" : "DELETED");
 }
 
 void MCReplyBuilder::SendRaw(std::string_view str) {
@@ -267,7 +294,7 @@ void MCReplyBuilder::SendRaw(std::string_view str) {
 
 void RedisReplyBuilderBase::SendNull() {
   ReplyScope scope(this);
-  resp3_ ? WritePieces(kNullStringR3) : WritePieces(kNullStringR2);
+  IsResp3() ? WritePieces(kNullStringR3) : WritePieces(kNullStringR2);
 }
 
 void RedisReplyBuilderBase::SendSimpleString(std::string_view str) {
@@ -300,7 +327,7 @@ void RedisReplyBuilderBase::SendDouble(double val) {
   static_assert(ABSL_ARRAYSIZE(buf) < kMaxInlineSize, "Write temporary string from buf inline");
   string_view val_str = FormatDouble(val, buf, ABSL_ARRAYSIZE(buf));
 
-  if (!resp3_)
+  if (!IsResp3())
     return SendBulkString(val_str);
 
   ReplyScope scope(this);
@@ -385,8 +412,7 @@ void RedisReplyBuilder::SendBulkStrArr(const facade::ArgRange& strs, CollectionT
     SendBulkString(str);
 }
 
-void RedisReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, double>> arr,
-                                        bool with_scores) {
+void RedisReplyBuilder::SendScoredArray(ScoredArray arr, bool with_scores) {
   ReplyScope scope(this);
   StartArray((with_scores && !IsResp3()) ? arr.size() * 2 : arr.size());
   for (const auto& [str, score] : arr) {
@@ -395,6 +421,20 @@ void RedisReplyBuilder::SendScoredArray(absl::Span<const std::pair<std::string, 
     SendBulkString(str);
     if (with_scores)
       SendDouble(score);
+  }
+}
+
+void RedisReplyBuilder::SendLabeledScoredArray(std::string_view arr_label, ScoredArray arr) {
+  ReplyScope scope(this);
+
+  StartArray(2);
+
+  SendBulkString(arr_label);
+  StartArray(arr.size());
+  for (const auto& [str, score] : arr) {
+    StartArray(2);
+    SendBulkString(str);
+    SendDouble(score);
   }
 }
 

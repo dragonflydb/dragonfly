@@ -16,7 +16,6 @@
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
-ABSL_DECLARE_FLAG(uint32_t, multi_exec_mode);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
@@ -194,11 +193,6 @@ TEST_F(MultiTest, MultiSeq) {
 }
 
 TEST_F(MultiTest, MultiConsistent) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
-    GTEST_SKIP() << "Skipped MultiConsistent test because multi_exec_mode is non atomic";
-    return;
-  }
-
   Run({"mset", kKey1, "base", kKey4, "base"});
 
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
@@ -244,11 +238,6 @@ TEST_F(MultiTest, MultiConsistent) {
 }
 
 TEST_F(MultiTest, MultiConsistent2) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
-    GTEST_SKIP() << "Skipped MultiConsistent2 test because multi_exec_mode is non atomic";
-    return;
-  }
-
   const int kKeyCount = 50;
   const int kRuns = 50;
   const int kJobs = 20;
@@ -589,11 +578,7 @@ TEST_F(MultiTest, MultiOOO) {
   auto metrics = GetMetrics();
 
   // OOO works in LOCK_AHEAD mode.
-  int mode = absl::GetFlag(FLAGS_multi_exec_mode);
-  if (mode == Transaction::LOCK_AHEAD || mode == Transaction::NON_ATOMIC)
-    EXPECT_EQ(200, metrics.shard_stats.tx_ooo_total);
-  else
-    EXPECT_EQ(0, metrics.shard_stats.tx_ooo_total);
+  EXPECT_EQ(200, metrics.shard_stats.tx_ooo_total);
 }
 
 // Lua scripts lock their keys ahead and thus can run out of order.
@@ -693,26 +678,11 @@ TEST_F(MultiTest, MultiCauseUnblocking) {
 }
 
 TEST_F(MultiTest, ExecGlobalFallback) {
-  absl::FlagSaver fs;
-  // Check global command MOVE falls back to global mode from lock ahead.
-  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
   Run({"multi"});
   Run({"set", "a", "1"});  // won't run ooo, because it became part of global
   Run({"move", "a", "1"});
   Run({"exec"});
   EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_global_cnt);
-
-  ClearMetrics();
-
-  // Check non atomic mode does not fall back to global.
-  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::NON_ATOMIC);
-  Run({"multi"});
-  Run({"set", "a", "1"});  // will run ooo(quick)
-  Run({"move", "a", "1"});
-  Run({"exec"});
-
-  auto stats = GetMetrics().coordinator_stats;
-  EXPECT_EQ(1, stats.tx_normal_cnt);  // move is global
 }
 
 #ifndef SANITIZERS
@@ -774,11 +744,6 @@ TEST_F(MultiTest, ScriptFlagsEmbedded) {
 // Flaky because of https://github.com/google/sanitizers/issues/1760
 #ifndef SANITIZERS
 TEST_F(MultiTest, UndeclaredKeyFlag) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode != Transaction::LOCK_AHEAD) {
-    GTEST_SKIP() << "Skipped test because multi_exec_mode is not default";
-    return;
-  }
-
   absl::FlagSaver fs;  // lua_undeclared_keys_shas changed via CONFIG cmd below
 
   const char* script = "return redis.call('GET', 'random-key');";
@@ -829,11 +794,6 @@ TEST_F(MultiTest, ScriptBadCommand) {
 #endif
 
 TEST_F(MultiTest, MultiEvalModeConflict) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::GLOBAL) {
-    GTEST_SKIP() << "Skipped MultiEvalModeConflict test because multi_exec_mode is global";
-    return;
-  }
-
   const char* s1 = R"(
   --!df flags=allow-undeclared-keys
   return redis.call('GET', 'random-key');
@@ -851,11 +811,6 @@ TEST_F(MultiTest, MultiEvalModeConflict) {
 // Run multi-exec transactions that move values from a source list
 // to destination list through two contended channels.
 TEST_F(MultiTest, ContendedList) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
-    GTEST_SKIP() << "Skipped ContendedList test because multi_exec_mode is non atomic";
-    return;
-  }
-
   constexpr int listSize = 50;
   constexpr int stepSize = 5;
 
@@ -896,7 +851,6 @@ TEST_F(MultiTest, ContendedList) {
 TEST_F(MultiTest, TestSquashing) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_multi_exec_squash, true);
-  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
 
   const char* keys[] = {kKeySid0, kKeySid1, kKeySid2};
 
@@ -930,11 +884,6 @@ TEST_F(MultiTest, TestSquashing) {
 }
 
 TEST_F(MultiTest, MultiLeavesTxQueue) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
-    GTEST_SKIP() << "Skipped MultiLeavesTxQueue test because multi_exec_mode is non atomic";
-    return;
-  }
-
   // Tests the scenario, where the OOO multi-tx is scheduled into tx queue and there is another
   // tx (mget) after it that runs and tests for atomicity.
   absl::FlagSaver fs;
@@ -1010,10 +959,6 @@ TEST_F(MultiTest, MultiLeavesTxQueue) {
 }
 
 TEST_F(MultiTest, TestLockedKeys) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode != Transaction::LOCK_AHEAD) {
-    GTEST_SKIP() << "Skipped TestLockedKeys test because multi_exec_mode is not lock ahead";
-    return;
-  }
   auto condition = [&]() { return IsLocked(0, "key1") && IsLocked(0, "key2"); };
   auto fb = ExpectConditionWithSuspension(condition);
 
@@ -1034,8 +979,6 @@ TEST_F(MultiTest, EvalExpiration) {
     return;
   }
 
-  absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_multi_exec_mode, Transaction::LOCK_AHEAD);
   Run({"eval", "redis.call('set', 'x', 0, 'ex', 5, 'nx')", "1", "x"});
   EXPECT_LE(CheckedInt({"pttl", "x"}), 5000);
 }
@@ -1064,11 +1007,6 @@ class MultiEvalTest : public BaseFamilyTest {
 };
 
 TEST_F(MultiEvalTest, MultiAllEval) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
-    GTEST_SKIP() << "Skipped MultiAllEval test because multi_exec_mode is non atomic";
-    return;
-  }
-
   RespExpr brpop_resp;
 
   // Run the fiber at creation.
@@ -1087,10 +1025,6 @@ TEST_F(MultiEvalTest, MultiAllEval) {
 }
 
 TEST_F(MultiEvalTest, MultiSomeEval) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
-    GTEST_SKIP() << "Skipped MultiAllEval test because multi_exec_mode is non atomic";
-    return;
-  }
   RespExpr brpop_resp;
 
   // Run the fiber at creation.
@@ -1131,11 +1065,6 @@ TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
 #endif
 
 TEST_F(MultiEvalTest, MultiAndEval) {
-  if (auto mode = absl::GetFlag(FLAGS_multi_exec_mode); mode == Transaction::NON_ATOMIC) {
-    GTEST_SKIP() << "Skipped MultiAndEval test because multi_exec_mode is non atomic";
-    return;
-  }
-
   // We had a bug in borrowing interpreters which caused a crash in this scenario
   Run({"multi"});
   Run({"eval", "return redis.call('set', 'x', 'y1')", "1", "x"});
