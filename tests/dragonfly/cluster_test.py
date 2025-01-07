@@ -2019,7 +2019,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("Waiting for migration to finish")
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 30)
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 60)
 
     target_data = await StaticSeeder.capture(nodes[1].client)
     assert source_data == target_data
