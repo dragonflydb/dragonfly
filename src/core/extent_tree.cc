@@ -16,7 +16,7 @@ void ExtentTree::Add(size_t start, size_t len) {
   DCHECK_EQ(len_extents_.size(), extents_.size());
 
   auto it = extents_.lower_bound(start);
-  optional<absl::btree_map<size_t, size_t>::iterator> prev_extent;
+  optional<size_t> prev_extent_key;
 
   if (it != extents_.begin()) {
     auto prev = it;
@@ -29,7 +29,7 @@ void ExtentTree::Add(size_t start, size_t len) {
       prev->second += len;
       start = prev->first;
       len += prev_len;
-      prev_extent = prev;
+      prev_extent_key = prev->first;
     }
   }
 
@@ -44,8 +44,9 @@ void ExtentTree::Add(size_t start, size_t len) {
   }
 
   len_extents_.emplace(len, start);
-  if (prev_extent) {
-    (*prev_extent)->second = start + len;
+  if (prev_extent_key) {
+    DCHECK(extents_.find(*prev_extent_key) != extents_.end());
+    extents_[*prev_extent_key] = start + len;
   } else {
     extents_.emplace(start, start + len);
   }
