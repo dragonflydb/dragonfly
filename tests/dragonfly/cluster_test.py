@@ -1260,7 +1260,7 @@ async def test_cluster_flushall_during_migration(
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="cluster_family=9,outgoing_slot_migration=9,incoming_slot_migration=9,streamer=9",
+            vmodule="cluster_family=2,outgoing_slot_migration=2,incoming_slot_migration=2,streamer=2",
             logtostdout=True,
         )
         for i in range(2)
@@ -1313,7 +1313,7 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
         )
         for i in range(2)
     ]
@@ -1524,7 +1524,7 @@ async def test_cluster_fuzzymigration(
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
             serialization_max_chunk_size=huge_values,
             replication_stream_output_limit=10,
             cache_mode=cache_mode,
@@ -2474,7 +2474,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
             maxmemory="15G",
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="streamer=9",
+            vmodule="streamer=2",
         )
         for i in range(3)
     ]
@@ -2533,7 +2533,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
             port=next(next_port),
             admin_port=next(next_port),
             replication_timeout=3000,
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=2",
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
         )
         for i in range(2)
     ]

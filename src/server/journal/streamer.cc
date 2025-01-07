@@ -121,7 +121,7 @@ void JournalStreamer::AsyncWrite() {
 
 void JournalStreamer::Write(std::string str) {
   DCHECK(!str.empty());
-  DVLOG(2) << "Writing " << str.size() << " bytes";
+  DVLOG(3) << "Writing " << str.size() << " bytes";
 
   pending_buf_.Push(std::move(str));
 
