@@ -20,7 +20,6 @@ extern "C" {
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
-#include "server/cluster/cluster_defs.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -1652,7 +1651,7 @@ void GenericFamily::Select(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!absl::SimpleAtoi(key, &index)) {
     return builder->SendError(kInvalidDbIndErr);
   }
-  if (cluster::IsClusterEnabled() && index != 0) {
+  if (IsClusterEnabled() && index != 0) {
     return builder->SendError("SELECT is not allowed in cluster mode");
   }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {

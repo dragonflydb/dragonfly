@@ -184,8 +184,7 @@ Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   }
 }
 
-Transaction::Transaction(const Transaction* parent, ShardId shard_id,
-                         std::optional<cluster::SlotId> slot_id)
+Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
@@ -1017,7 +1016,7 @@ ShardId Transaction::GetUniqueShard() const {
   return unique_shard_id_;
 }
 
-optional<cluster::SlotId> Transaction::GetUniqueSlotId() const {
+optional<SlotId> Transaction::GetUniqueSlotId() const {
   return unique_slot_checker_.GetUniqueSlotId();
 }
 

@@ -99,7 +99,7 @@ class RestoreStreamer : public JournalStreamer {
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
-  bool ShouldWrite(cluster::SlotId slot_id) const;
+  bool ShouldWrite(SlotId slot_id) const;
 
   // Returns whether anything was written
   void WriteBucket(PrimeTable::bucket_iterator it);
