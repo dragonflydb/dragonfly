@@ -1258,6 +1258,9 @@ TEST_F(ZSetFamilyTest, GeoSearch) {
                                 RespArray(ElementsAre(DoubleArg(3.7038), DoubleArg(40.4168))))),
           RespArray(ElementsAre("Lisbon", DoubleArg(502.20769462704084),
                                 RespArray(ElementsAre(DoubleArg(9.1427), DoubleArg(38.7369))))))));
+
+  resp = Run({"GEOSEARCH", "Europe", "FROMMEMBER", "Madrid", "BYRADIUS", "700", "KM"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
 }
 
 TEST_F(ZSetFamilyTest, GeoRadiusByMember) {
