@@ -55,7 +55,7 @@ add_library(dragonfly_lib bloom_family.cc
             detail/save_stages_controller.cc
             detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
-            zset_family.cc version.cc bitops_family.cc container_utils.cc
+            zset_family.cc geo_family.cc version.cc bitops_family.cc container_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc
             ${DF_SEARCH_SRCS}
             ${DF_LINUX_SRCS}

@@ -43,6 +43,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/geo_family.h"
 #include "server/hll_family.h"
 #include "server/hset_family.h"
 #include "server/http_api.h"
@@ -2672,6 +2673,7 @@ void Service::RegisterCommands() {
   SetFamily::Register(&registry_);
   HSetFamily::Register(&registry_);
   ZSetFamily::Register(&registry_);
+  GeoFamily::Register(&registry_);
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);
