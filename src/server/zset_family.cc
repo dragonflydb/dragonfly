@@ -67,10 +67,10 @@ struct GeoPoint {
   double dist;
   double score;
   std::string member;
-  GeoPoint() : longitude(0.0), latitude(0.0), dist(0.0), score(0.0) {};
+  GeoPoint() : longitude(0.0), latitude(0.0), dist(0.0), score(0.0){};
   GeoPoint(double _longitude, double _latitude, double _dist, double _score,
            const std::string& _member)
-      : longitude(_longitude), latitude(_latitude), dist(_dist), score(_score), member(_member) {};
+      : longitude(_longitude), latitude(_latitude), dist(_dist), score(_score), member(_member){};
 };
 using GeoArray = std::vector<GeoPoint>;
 
@@ -86,6 +86,10 @@ struct GeoSearchOpts {
   bool withhash = 0;
   GeoStoreType store = GeoStoreType::kNoStore;
   string_view store_key;
+
+  bool HasWithStatement() const {
+    return withdist || withcoord || withhash;
+  }
 };
 
 inline zrangespec GetZrangeSpec(bool reverse, const ZSetFamily::ScoreInterval& si) {
@@ -2135,8 +2139,8 @@ bool ValidateZMPopCommand(CmdArgList args, uint32* num_keys, bool* is_max, int* 
   }
 
   if (!parser.Finalize()) {
-      builder->SendError(parser.Error()->MakeReply());
-      return false;
+    builder->SendError(parser.Error()->MakeReply());
+    return false;
   }
 
   return true;
@@ -3079,7 +3083,9 @@ void GeoSearchStoreGeneric(Transaction* tx, SinkReplyBuilder* builder, const Geo
     rb->StartArray(ga.size());
     for (const auto& p : ga) {
       // [member, dist, x, y, hash]
-      rb->StartArray(record_size);
+      if (geo_ops.HasWithStatement()) {
+        rb->StartArray(record_size);
+      }
       rb->SendBulkString(p.member);
       if (geo_ops.withdist) {
         rb->SendDouble(p.dist / geo_ops.conversion);
@@ -3137,6 +3143,7 @@ void ZSetFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   // BYRADIUS or BYBOX is set
   bool by_set = false;
   auto* builder = cmd_cntx.rb;
+
   for (size_t i = 1; i < args.size(); ++i) {
     string cur_arg = absl::AsciiStrToUpper(ArgS(args, i));
 
@@ -3236,9 +3243,9 @@ void ZSetFamily::GeoSearch(CmdArgList args, const CommandContext& cmd_cntx) {
       geo_ops.withcoord = true;
     } else if (cur_arg == "WITHDIST") {
       geo_ops.withdist = true;
-    } else if (cur_arg == "WITHHASH")
+    } else if (cur_arg == "WITHHASH") {
       geo_ops.withhash = true;
-    else {
+    } else {
       return builder->SendError(kSyntaxErr);
     }
   }
