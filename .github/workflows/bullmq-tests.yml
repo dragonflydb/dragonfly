@@ -40,7 +40,7 @@ jobs:
           #ninja dragonfly
           wget https://github.com/dragonflydb/dragonfly/releases/download/v1.24.0/dragonfly-x86_64.tar.gz
           tar -zxvf dragonfly-x86_64.tar.gz
-          mv tar -zxvf dragonfly-x86_64 dragonfly
+          mv dragonfly-x86_64 dragonfly
           ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
       - name: Build and Test BullMQ
         run: |
