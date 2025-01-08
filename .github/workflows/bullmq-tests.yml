@@ -25,7 +25,7 @@ jobs:
           submodules: true
       - name: Install NodeJs
         run: |
-          apk add --no-cache nodejs npm yarn jq
+          apk add --no-cache nodejs-current npm yarn jq
           node --version
           npm --version
           yarn --version
