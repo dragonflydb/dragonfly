@@ -35,9 +35,9 @@ values = sample_attr("values")
 scores = sample_attr("scores")
 
 ints = st.integers(min_value=MIN_INT, max_value=MAX_INT)
-int_as_bytes = st.builds(lambda x: str(default_normalize(x)).encode(), ints)
+int_as_bytes = st.builds(lambda x: str(_default_normalize(x)).encode(), ints)
 float_as_bytes = st.builds(
-    lambda x: repr(default_normalize(x)).encode(), st.floats(width=32)
+    lambda x: repr(_default_normalize(x)).encode(), st.floats(width=32)
 )
 counts = st.integers(min_value=-3, max_value=3) | ints
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
@@ -51,7 +51,6 @@ patterns = st.text(
 ) | st.binary().filter(lambda x: b"\0" not in x)
 
 # Redis has integer overflow bugs in time computations, which is why we set a maximum.
-
 expires_seconds = st.integers(min_value=100000, max_value=MAX_INT)
 expires_ms = st.integers(min_value=100000000, max_value=MAX_INT)
 
@@ -82,23 +81,23 @@ class WrappedException:
         return not self == other
 
 
-def wrap_exceptions(obj):
+def _wrap_exceptions(obj):
     if isinstance(obj, list):
-        return [wrap_exceptions(item) for item in obj]
+        return [_wrap_exceptions(item) for item in obj]
     elif isinstance(obj, Exception):
         return WrappedException(obj)
     else:
         return obj
 
 
-def sort_list(lst):
+def _sort_list(lst):
     if isinstance(lst, list):
         return sorted(lst)
     else:
         return lst
 
 
-def normalize_if_number(x):
+def _normalize_if_number(x):
     try:
         res = float(x)
         return x if math.isnan(res) else res
@@ -106,33 +105,25 @@ def normalize_if_number(x):
         return x
 
 
-def flatten(args):
+def _flatten(args):
     if isinstance(args, (list, tuple)):
         for arg in args:
-            yield from flatten(arg)
+            yield from _flatten(arg)
     elif args is not None:
         yield args
 
 
-def default_normalize(x: Any) -> Any:
+def _default_normalize(x: Any) -> Any:
     if redis_ver >= (7,) and (isinstance(x, float) or isinstance(x, int)):
         return 0 + x
 
     return x
 
 
-def optional(arg):
-    return st.none() | st.just(arg)
-
-
-def zero_or_more(*args):
-    return [optional(arg) for arg in args]
-
-
 class Command:
     def __init__(self, *args):
-        args = list(flatten(args))
-        args = [default_normalize(x) for x in args]
+        args = list(_flatten(args))
+        args = [_default_normalize(x) for x in args]
         self.args = tuple(args)
 
     def __repr__(self):
@@ -160,9 +151,9 @@ class Command:
             b"smembers",
         }
         if command in unordered:
-            return sort_list
+            return _sort_list
         else:
-            return normalize_if_number
+            return _normalize_if_number
 
     @property
     def testable(self):
@@ -185,6 +176,10 @@ class Command:
         if b"\0" in command:
             return False
         return True
+
+
+def zero_or_more(*args):
+    return [st.none() | st.just(arg) for arg in args]
 
 
 def commands(*args, **kwargs):
@@ -268,7 +263,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             exc = None
         except Exception as e:
             result = exc = e
-        return wrap_exceptions(result), exc
+        return _wrap_exceptions(result), exc
 
     def _compare(self, command):
         fake_result, fake_exc = self._evaluate(self.fake, command)

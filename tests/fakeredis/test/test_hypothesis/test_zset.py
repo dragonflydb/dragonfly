@@ -11,7 +11,6 @@ from test.test_hypothesis.base import (
     fields,
     zero_or_more,
     scores,
-    optional,
     Command,
     float_as_bytes,
 )
@@ -41,6 +40,10 @@ zset_no_score_commands = (  # TODO: test incr
     )
     | commands(st.just("zremrangebylex"), keys, string_tests, string_tests)
 )
+
+
+def optional(arg):
+    return st.none() | st.just(arg)
 
 
 def build_zstore(command, dest, sources, weights, aggregate) -> Command:
