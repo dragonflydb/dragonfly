@@ -48,9 +48,10 @@ jobs:
           cd $GITHUB_WORKSPACE/../bullmq
           DOWNLOAD_URL=$(curl -s https://api.github.com/repos/taskforcesh/bullmq/releases/latest | jq -r '.tarball_url')
           echo "Downloading latest BullMQ release from ${DOWNLOAD_URL}"
-          wget -O bullmq.tar.gz ${DOWNLOAD_URL}
-          tar -zxvf bullmq.tar.gz
-          mv taskforcesh-bullmq-* bullmq
+          #wget -O bullmq.tar.gz ${DOWNLOAD_URL}
+          #tar -zxvf bullmq.tar.gz
+          #mv taskforcesh-bullmq-* bullmq
+          git clone https://github.com/taskforcesh/bullmq
           cd bullmq
           pwd
           patch -p1 -f < $GITHUB_WORKSPACE/bullmq.patch
