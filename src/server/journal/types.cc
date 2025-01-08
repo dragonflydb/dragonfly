@@ -4,8 +4,6 @@
 
 #include "server/journal/types.h"
 
-#include "server/cluster/cluster_defs.h"
-
 namespace dfly::journal {
 
 using namespace std;

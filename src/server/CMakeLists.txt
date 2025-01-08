@@ -27,7 +27,7 @@ endif()
 
 
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
-            command_registry.cc  cluster/cluster_utility.cc
+            command_registry.cc  cluster_support.cc
             journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
@@ -60,7 +60,7 @@ add_library(dragonfly_lib bloom_family.cc
             ${DF_SEARCH_SRCS}
             ${DF_LINUX_SRCS}
             cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
-            cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc
+            cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc cluster/cluster_utility.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc)
 

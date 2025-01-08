@@ -583,7 +583,7 @@ std::string_view GetOSString() {
 }
 
 string_view GetRedisMode() {
-  return cluster::IsClusterEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
+  return IsClusterEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
 }
 
 struct ReplicaOfArgs {
@@ -622,7 +622,7 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
       return nullopt;
     }
     if (parser.HasNext()) {
-      auto [slot_start, slot_end] = parser.Next<cluster::SlotId, cluster::SlotId>();
+      auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
       replicaof_args.slot_range = cluster::SlotRange{slot_start, slot_end};
       if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
         builder->SendError("Invalid slot range");
@@ -2636,7 +2636,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 #endif
 
   if (should_enter("CLUSTER")) {
-    append("cluster_enabled", cluster::IsClusterEnabledOrEmulated());
+    append("cluster_enabled", IsClusterEnabledOrEmulated());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);

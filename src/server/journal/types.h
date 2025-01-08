@@ -7,7 +7,6 @@
 #include <string>
 #include <variant>
 
-#include "server/cluster/cluster_defs.h"
 #include "server/common.h"
 #include "server/table.h"
 
@@ -30,7 +29,7 @@ struct EntryBase {
   DbIndex dbid;
   uint32_t shard_cnt;  // This field is no longer used by the replica, but we continue to serialize
                        // and deserialize it to maintain backward compatibility.
-  std::optional<cluster::SlotId> slot;
+  std::optional<SlotId> slot;
   LSN lsn{0};
 };
 
@@ -52,12 +51,12 @@ struct Entry : public EntryBase {
     }
   };
 
-  Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt,
-        std::optional<cluster::SlotId> slot_id, Payload pl)
+  Entry(TxId txid, Op opcode, DbIndex dbid, uint32_t shard_cnt, std::optional<SlotId> slot_id,
+        Payload pl)
       : EntryBase{txid, opcode, dbid, shard_cnt, slot_id}, payload{pl} {
   }
 
-  Entry(journal::Op opcode, DbIndex dbid, std::optional<cluster::SlotId> slot_id)
+  Entry(journal::Op opcode, DbIndex dbid, std::optional<SlotId> slot_id)
       : EntryBase{0, opcode, dbid, 0, slot_id, 0} {
   }
 
@@ -65,7 +64,7 @@ struct Entry : public EntryBase {
   }
 
   Entry(TxId txid, journal::Op opcode, DbIndex dbid, uint32_t shard_cnt,
-        std::optional<cluster::SlotId> slot_id)
+        std::optional<SlotId> slot_id)
       : EntryBase{txid, opcode, dbid, shard_cnt, slot_id, 0} {
   }
 
@@ -93,7 +92,7 @@ struct JournalItem {
   Op opcode;
   std::string data;
   std::string_view cmd;
-  std::optional<cluster::SlotId> slot;
+  std::optional<SlotId> slot;
 };
 
 using ChangeCallback = std::function<void(const JournalItem&, bool await)>;

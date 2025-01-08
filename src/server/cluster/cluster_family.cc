@@ -406,7 +406,7 @@ void ClusterFamily::KeySlot(CmdArgList args, SinkReplyBuilder* builder) {
     return builder->SendError(WrongNumArgsError("CLUSTER KEYSLOT"));
   }
 
-  SlotId id = cluster::KeySlot(ArgS(args, 1));
+  SlotId id = dfly::KeySlot(ArgS(args, 1));
   return builder->SendLong(id);
 }
 

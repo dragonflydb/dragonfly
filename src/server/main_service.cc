@@ -39,7 +39,6 @@ extern "C" {
 #include "server/bloom_family.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_family.h"
-#include "server/cluster/cluster_utility.h"
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
@@ -573,15 +572,13 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
 
   auto print_kb = [&](string_view k, bool v) { print_kv(k, v ? "True" : "False"); };
 
-  print_kv("Mode", cluster::IsClusterEmulated()  ? "Emulated"
-                   : cluster::IsClusterEnabled() ? "Enabled"
-                                                 : "Disabled");
+  print_kv("Mode", IsClusterEmulated() ? "Emulated" : IsClusterEnabled() ? "Enabled" : "Disabled");
 
-  if (cluster::IsClusterEnabledOrEmulated()) {
+  if (IsClusterEnabledOrEmulated()) {
     print_kb("Lock on hashtags", LockTagOptions::instance().enabled);
   }
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     if (cluster::ClusterFamily::cluster_config() == nullptr) {
       resp.body() += "<h2>Not yet configured.</h2>\n";
     } else {
@@ -932,11 +929,11 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   const auto& key_index = *key_index_res;
-  optional<cluster::SlotId> keys_slot;
+  optional<SlotId> keys_slot;
   bool cross_slot = false;
   // Iterate keys and check to which slot they belong.
   for (string_view key : key_index.Range(args)) {
-    if (cluster::SlotId slot = cluster::KeySlot(key); keys_slot && slot != *keys_slot) {
+    if (SlotId slot = KeySlot(key); keys_slot && slot != *keys_slot) {
       cross_slot = true;  // keys belong to different slots
       break;
     } else {
@@ -1104,7 +1101,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;
   }
@@ -1935,7 +1932,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   optional<ShardId> sid;
 
-  cluster::UniqueSlotChecker slot_checker;
+  UniqueSlotChecker slot_checker;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
     slot_checker.Add(key);
@@ -2255,7 +2252,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("PUBLISH is not supported in cluster mode yet");
   }
   string_view channel = ArgS(args, 0);
@@ -2266,7 +2263,7 @@ void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
   }
   cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args),
@@ -2275,7 +2272,7 @@ void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
   }
 
@@ -2289,7 +2286,7 @@ void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
 void Service::PSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return rb->SendError("PSUBSCRIBE is not supported in cluster mode yet");
   }
   cmd_cntx.conn_cntx->ChangePSubscription(true, true, args, rb);
@@ -2298,7 +2295,7 @@ void Service::PSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
 void Service::PUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return rb->SendError("PUNSUBSCRIBE is not supported in cluster mode yet");
   }
   if (args.size() == 0) {
@@ -2353,7 +2350,7 @@ void Service::Monitor(CmdArgList args, const CommandContext& cmd_cntx) {
 void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return rb->SendError("PUBSUB is not supported in cluster mode yet");
   }
   if (args.size() < 1) {
