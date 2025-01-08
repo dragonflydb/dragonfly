@@ -25,7 +25,10 @@ jobs:
           submodules: true
       - name: Install NodeJs
         run: |
-          apk add --no-cache nodejs-current npm yarn jq
+          wget https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-musl.tar.xz
+          tar -xf node-v22.12.0-linux-x64-musl.tar.xz
+          cp -r node-v22.12.0-linux-x64-musl/* /usr/local/
+          apk add --no-cache yarn jq
           node --version
           npm --version
           yarn --version
