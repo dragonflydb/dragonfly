@@ -74,6 +74,7 @@ class ZSetFamily {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
   template <typename T> using OpResult = facade::OpResult<T>;
 
+  // Used by GeoFamily also
   static void ZAddGeneric(std::string_view key, const ZParams& zparams, ScoredMemberSpan memb_sp,
                           Transaction* tx, SinkReplyBuilder* builder);
 

@@ -8,10 +8,6 @@
 
 #include "server/common.h"
 
-namespace facade {
-class SinkReplyBuilder;
-}  // namespace facade
-
 namespace dfly {
 
 class CommandRegistry;
@@ -20,7 +16,6 @@ struct CommandContext;
 class GeoFamily {
  public:
   static void Register(CommandRegistry* registry);
-  using SinkReplyBuilder = facade::SinkReplyBuilder;
 
  private:
   static void GeoAdd(CmdArgList args, const CommandContext& cmd_cntx);
