@@ -4,8 +4,10 @@ from test.test_hypothesis.base import (
     BaseTest,
     commands,
     common_commands,
+    keys,
+    values,
 )
-from test.test_hypothesis.test_string import TestString
+from test.test_hypothesis.test_string import string_commands
 
 
 class TestServer(BaseTest):
@@ -18,5 +20,5 @@ class TestServer(BaseTest):
         # | commands(st.just('lastsave'))
         | commands(st.just("save"))
     )
-    create_command_strategy = TestString.create_command_strategy
-    command_strategy = server_commands | TestString.string_commands | common_commands
+    create_command_strategy = commands(st.just("set"), keys, values)
+    command_strategy = server_commands | string_commands | common_commands
