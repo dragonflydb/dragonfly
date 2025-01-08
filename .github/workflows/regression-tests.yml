@@ -14,6 +14,9 @@ jobs:
         proactor: [Uring, Epoll]
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        exclude:
+          - proactor: Epoll
+            build-type: Debug
 
     runs-on: ${{ matrix.runner }}
 
@@ -35,9 +38,6 @@ jobs:
           env
 
       - name: Configure & Build
-        # We do not run debug epoll
-        if: ${{ matrix.proactor != 'Epoll' || matrix.build-type == 'Release' }}
-
         run: |
           # -no-pie to disable address randomization so we could symbolize stacktraces
           cmake -B ${GITHUB_WORKSPACE}/build -DCMAKE_BUILD_TYPE=${{matrix.build-type}} -GNinja \
@@ -50,8 +50,6 @@ jobs:
 
       - name: Run regression tests action
         uses: ./.github/actions/regression-tests
-        # We do not run debug epoll
-        if: ${{ matrix.proactor != 'Epoll' || matrix.build-type == 'Release' }}
         with:
           dfly-executable: dragonfly
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
