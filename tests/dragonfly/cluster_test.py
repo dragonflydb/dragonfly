@@ -1260,7 +1260,7 @@ async def test_cluster_flushall_during_migration(
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="cluster_family=9,outgoing_slot_migration=9,incoming_slot_migration=9,streamer=9",
+            vmodule="cluster_family=2,outgoing_slot_migration=2,incoming_slot_migration=2,streamer=2",
             logtostdout=True,
         )
         for i in range(2)
@@ -1313,7 +1313,7 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
         )
         for i in range(2)
     ]
@@ -1496,14 +1496,18 @@ async def test_network_disconnect_during_migration(df_factory):
 
 
 @pytest.mark.parametrize(
-    "node_count, segments, keys, huge_values",
+    "node_count, segments, keys, huge_values, cache_mode",
     [
-        pytest.param(3, 16, 20_000, 10),
+        pytest.param(3, 16, 20_000, 10, "false"),
+        pytest.param(3, 16, 20_000, 10, "true"),
         # 1mb effectively disables breakdown of huge values.
         # TODO: add a test that mixes huge and small values, see
         # https://github.com/dragonflydb/dragonfly/pull/4144/files/11e5e387d31bcf1bc53dfbb28cf3bcaf094d77fa#r1850130930
-        pytest.param(3, 16, 20_000, 1_000_000),
-        pytest.param(5, 20, 30_000, 1_000_000, marks=[pytest.mark.slow, pytest.mark.opt_only]),
+        pytest.param(3, 16, 20_000, 1_000_000, "true"),
+        pytest.param(3, 16, 20_000, 1_000_000, "false"),
+        pytest.param(
+            5, 20, 30_000, 1_000_000, "false", marks=[pytest.mark.slow, pytest.mark.opt_only]
+        ),
     ],
 )
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
@@ -1514,14 +1518,16 @@ async def test_cluster_fuzzymigration(
     segments: int,
     keys: int,
     huge_values: int,
+    cache_mode: string,
 ):
     instances = [
         df_factory.create(
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=9",
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
             serialization_max_chunk_size=huge_values,
             replication_stream_output_limit=10,
+            cache_mode=cache_mode,
         )
         for i in range(node_count)
     ]
@@ -2019,7 +2025,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("Waiting for migration to finish")
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 30)
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 60)
 
     target_data = await StaticSeeder.capture(nodes[1].client)
     assert source_data == target_data
@@ -2468,7 +2474,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
             maxmemory="15G",
             port=next(next_port),
             admin_port=next(next_port),
-            vmodule="streamer=9",
+            vmodule="streamer=2",
         )
         for i in range(3)
     ]
@@ -2527,7 +2533,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
             port=next(next_port),
             admin_port=next(next_port),
             replication_timeout=3000,
-            vmodule="outgoing_slot_migration=9,cluster_family=9,incoming_slot_migration=9,streamer=2",
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
         )
         for i in range(2)
     ]

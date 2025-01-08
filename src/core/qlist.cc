@@ -12,6 +12,7 @@ extern "C" {
 
 #include <absl/base/macros.h>
 #include <absl/base/optimization.h>
+#include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 
 #include "base/logging.h"
@@ -354,12 +355,43 @@ void QList::Clear() {
 }
 
 void QList::Push(string_view value, Where where) {
+  DVLOG(2) << "Push " << absl::CHexEscape(value) << " " << (where == HEAD ? "HEAD" : "TAIL");
+
   /* The head and tail should never be compressed (we don't attempt to decompress them) */
   if (head_) {
     DCHECK(head_->encoding != QUICKLIST_NODE_ENCODING_LZF);
     DCHECK(head_->prev->encoding != QUICKLIST_NODE_ENCODING_LZF);
   }
-  PushSentinel(value, where);
+
+  quicklistNode* orig = head_;
+  if (where == TAIL && orig) {
+    orig = orig->prev;
+  }
+
+  InsertOpt opt = where == HEAD ? BEFORE : AFTER;
+
+  size_t sz = value.size();
+  if (ABSL_PREDICT_FALSE(IsLargeElement(sz, fill_))) {
+    InsertPlainNode(orig, value, opt);
+    return;
+  }
+
+  count_++;
+
+  if (ABSL_PREDICT_TRUE(NodeAllowInsert(orig, fill_, sz))) {
+    auto func = (where == HEAD) ? LP_Prepend : LP_Append;
+    malloc_size_ += NodeSetEntry(orig, func(orig->entry, value));
+    orig->count++;
+    if (len_ == 1) {  // sanity check
+      DCHECK_EQ(malloc_size_, orig->sz);
+    }
+    DCHECK(head_->prev->next == nullptr);
+    return;
+  }
+
+  quicklistNode* node = CreateFromSV(QUICKLIST_NODE_CONTAINER_PACKED, value);
+  InsertNode(orig, node, opt);
+  DCHECK(head_->prev->next == nullptr);
 }
 
 string QList::Pop(Where where) {
@@ -456,39 +488,6 @@ void QList::Iterate(IterateFunc cb, long start, long end) const {
       break;
     start++;
   }
-}
-
-bool QList::PushSentinel(string_view value, Where where) {
-  quicklistNode* orig = head_;
-  if (where == TAIL && orig) {
-    orig = orig->prev;
-  }
-
-  InsertOpt opt = where == HEAD ? BEFORE : AFTER;
-
-  size_t sz = value.size();
-  if (ABSL_PREDICT_FALSE(IsLargeElement(sz, fill_))) {
-    InsertPlainNode(orig, value, opt);
-    return true;
-  }
-
-  count_++;
-
-  if (ABSL_PREDICT_TRUE(NodeAllowInsert(orig, fill_, sz))) {
-    auto func = (where == HEAD) ? LP_Prepend : LP_Append;
-    malloc_size_ += NodeSetEntry(orig, func(orig->entry, value));
-    orig->count++;
-    if (len_ == 1) {  // sanity check
-      DCHECK_EQ(malloc_size_, orig->sz);
-    }
-    DCHECK(head_->prev->next == nullptr);
-    return false;
-  }
-
-  quicklistNode* node = CreateFromSV(QUICKLIST_NODE_CONTAINER_PACKED, value);
-  InsertNode(orig, node, opt);
-  DCHECK(head_->prev->next == nullptr);
-  return true;
 }
 
 quicklistNode* QList::InsertPlainNode(quicklistNode* old_node, string_view value,
@@ -981,7 +980,7 @@ auto QList::Erase(Iterator it) -> Iterator {
       it.current_ = next;
       it.offset_ = 0;
     } else if (it.direction_ == REV) {
-      it.current_ = prev;
+      it.current_ = len_ ? prev : nullptr;
       it.offset_ = -1;
     }
   }

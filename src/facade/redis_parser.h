@@ -45,8 +45,6 @@ class RedisParser {
    * part of str because parser caches the intermediate state internally according to 'consumed'
    * result.
    *
-   * Note: A parser does not always guarantee progress, i.e. if a small buffer was passed it may
-   * returns INPUT_PENDING with consumed == 0.
    *
    */
 
@@ -93,13 +91,16 @@ class RedisParser {
     PARSE_ARG_TYPE,  // Parse [$:+-]
     PARSE_ARG_S,     // Parse string\r\n
     BULK_STR_S,
+    SLASH_N_S,
     CMD_COMPLETE_S,
   };
 
   State state_ = CMD_COMPLETE_S;
   bool is_broken_token_ = false;  // true, if a token (inline or bulk) is broken during the parsing.
   bool server_mode_ = true;
+  uint8_t small_len_ = 0;
   char arg_c_ = 0;
+
   uint32_t bulk_len_ = 0;
   uint32_t last_stashed_level_ = 0, last_stashed_index_ = 0;
   uint32_t max_arr_len_;
@@ -114,6 +115,7 @@ class RedisParser {
 
   using Blob = std::vector<uint8_t>;
   std::vector<Blob> buf_stash_;
+  std::array<char, 32> small_buf_;
 };
 
 }  // namespace facade

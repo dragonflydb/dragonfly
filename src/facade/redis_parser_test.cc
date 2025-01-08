@@ -146,6 +146,19 @@ TEST_F(RedisParserTest, ClientMode) {
 
   ASSERT_EQ(RedisParser::OK, Parse("-ERR foo bar\r\n"));
   EXPECT_THAT(args_, ElementsAre(ErrArg("ERR foo")));
+
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("_"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\r"));
+  EXPECT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\n"));
+  EXPECT_EQ(1, consumed_);
+  EXPECT_THAT(args_, ElementsAre(ArgType(RespExpr::NIL)));
+  ASSERT_EQ(RedisParser::OK, Parse("*2\r\n_\r\n_\r\n"));
+  ASSERT_EQ(10, consumed_);
+
+  ASSERT_EQ(RedisParser::OK, Parse("*3\r\n+OK\r\n$1\r\n1\r\n*2\r\n$1\r\n1\r\n$-1\r\n"));
+  ASSERT_THAT(args_, ElementsAre("OK", "1", ArrLen(2)));
 }
 
 TEST_F(RedisParserTest, Hierarchy) {
@@ -183,9 +196,9 @@ TEST_F(RedisParserTest, LargeBulk) {
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(half));
   ASSERT_EQ(512, consumed_);
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\r"));
-  ASSERT_EQ(0, consumed_);
-  ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
-  ASSERT_EQ(2, consumed_);
+  ASSERT_EQ(1, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\n"));
+  EXPECT_EQ(1, consumed_);
 
   string part1 = absl::StrCat(prefix, half);
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse(part1));
@@ -208,7 +221,8 @@ TEST_F(RedisParserTest, LargeBulk) {
 TEST_F(RedisParserTest, NILs) {
   ASSERT_EQ(RedisParser::BAD_ARRAYLEN, Parse("_\r\n"));
   parser_.SetClientMode();
-  ASSERT_EQ(RedisParser::OK, Parse("_\r\n"));
+  ASSERT_EQ(RedisParser::OK, Parse("_\r\nfooobar"));
+  EXPECT_EQ(3, consumed_);
 }
 
 TEST_F(RedisParserTest, NestedArray) {
@@ -245,15 +259,15 @@ TEST_F(RedisParserTest, UsedMemory) {
 
 TEST_F(RedisParserTest, Eol) {
   ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*1\r"));
-  EXPECT_EQ(1, consumed_);
-  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("1\r\n$5\r\n"));
-  EXPECT_EQ(7, consumed_);
+  EXPECT_EQ(3, consumed_);
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\n$5\r\n"));
+  EXPECT_EQ(5, consumed_);
 }
 
 TEST_F(RedisParserTest, BulkSplit) {
-  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*1\r\n$4\r\nSADD"));
-  ASSERT_EQ(12, consumed_);
-  ASSERT_EQ(RedisParser::OK, Parse("\r\n"));
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("*1\r\n$4\r\nSADD\r"));
+  ASSERT_EQ(13, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("\n"));
 }
 
 TEST_F(RedisParserTest, InlineSplit) {
