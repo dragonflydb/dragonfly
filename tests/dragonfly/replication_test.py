@@ -1971,23 +1971,27 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"DEBUG POPULATE 8000000")
+    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 1000 RAND type set elements 2000")
 
     replica.stop()
     replica.start()
     c_replica = replica.client()
+
+    @assert_eventually
+    async def check_replica_isloading():
+        persistence = await c_replica.info("PERSISTENCE")
+        assert persistence["loading"] == 1
+
+    # If this fails adjust load of DEBUG POPULATE above.
+    await check_replica_isloading()
+
     # Check replica of not alowed while loading snapshot
-    try:
-        # If this fails adjust `keys` and the `assert dbsize >= 30000` above.
-        # Keep in mind that if the assert False is triggered below, it doesn't mean
-        # that there is a bug because it could be the case that while executing
-        # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
-        # is no longer in loading state and the assertion false is triggered.
-        assert "loading:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
+    # Keep in mind that if the exception has not been raised, it doesn't mean
+    # that there is a bug because it could be the case that while executing
+    # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
+    # is no longer in loading state and the assertion false is triggered.
+    with pytest.raises(aioredis.BusyLoadingError):
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        assert False
-    except aioredis.BusyLoadingError as e:
-        assert "Dragonfly is loading the dataset in memory" in str(e)
 
     # Check one we finish loading snapshot replicaof success
     await wait_available_async(c_replica, timeout=180)

@@ -885,7 +885,11 @@ void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
   // We mark that we are shutting down. After this incoming requests will be
-  // rejected
+  // rejected.
+  mu_.lock();
+  global_state_ = GlobalState::SHUTTING_DOWN;
+  mu_.unlock();
+
   pp_.AwaitFiberOnAll([](ProactorBase* pb) {
     ServerState::tlocal()->EnterLameDuck();
     facade::Connection::ShutdownThreadLocal();
@@ -2504,38 +2508,26 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   return to;
 }
 
-void Service::RequestLoadingState() {
-  bool switch_state = false;
-  {
+bool Service::RequestLoadingState() {
+  if (SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING) {
     util::fb2::LockGuard lk(mu_);
-    ++loading_state_counter_;
-    if (global_state_ != GlobalState::LOADING) {
-      DCHECK_EQ(global_state_, GlobalState::ACTIVE);
-      switch_state = true;
-    }
+    loading_state_counter_++;
+    return true;
   }
-  if (switch_state) {
-    SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  }
+  return false;
 }
 
 void Service::RemoveLoadingState() {
   bool switch_state = false;
   {
     util::fb2::LockGuard lk(mu_);
-    DCHECK_EQ(global_state_, GlobalState::LOADING);
-    DCHECK_GT(loading_state_counter_, 0u);
+    CHECK_GT(loading_state_counter_, 0u);
     --loading_state_counter_;
     switch_state = loading_state_counter_ == 0;
   }
   if (switch_state) {
     SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
   }
-}
-
-GlobalState Service::GetGlobalState() const {
-  util::fb2::LockGuard lk(mu_);
-  return global_state_;
 }
 
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
