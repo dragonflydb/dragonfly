@@ -15,6 +15,9 @@ from test.test_hypothesis.base import (
 )
 
 optional_bitcount_range = st.just(()) | st.tuples(int_as_bytes, int_as_bytes)
+str_len = st.integers(min_value=-3, max_value=3) | st.integers(
+    min_value=-2147483647, max_value=2147483648
+)
 
 string_commands = (
     commands(st.just("append"), keys, values)
@@ -29,7 +32,7 @@ string_commands = (
         counts,
         st.integers(min_value=0, max_value=1) | ints,
     )
-    | commands(st.sampled_from(["substr", "getrange"]), keys, counts, counts)
+    | commands(st.sampled_from(["substr", "getrange"]), keys, str_len, counts)
     | commands(st.just("getset"), keys, values)
     | commands(st.just("mget"), st.lists(keys))
     | commands(st.sampled_from(["mset", "msetnx"]), st.lists(st.tuples(keys, values)))
@@ -42,7 +45,7 @@ string_commands = (
     | commands(st.just("setex"), keys, expires_seconds, values)
     | commands(st.just("psetex"), keys, expires_ms, values)
     | commands(st.just("setnx"), keys, values)
-    | commands(st.just("setrange"), keys, counts, values)
+    | commands(st.just("setrange"), keys, str_len, values)
     | commands(st.just("strlen"), keys)
 )
 
