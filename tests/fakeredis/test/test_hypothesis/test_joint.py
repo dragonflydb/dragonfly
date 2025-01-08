@@ -1,4 +1,4 @@
-from turtle import st
+import hypothesis.strategies as st
 
 from test.test_hypothesis.base import BaseTest, common_commands, commands
 from test.test_hypothesis.test_connection import TestConnection

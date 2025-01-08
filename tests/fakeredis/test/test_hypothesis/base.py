@@ -1,6 +1,5 @@
 import functools
 import math
-import operator
 import sys
 from typing import Any
 
@@ -41,7 +40,6 @@ float_as_bytes = st.builds(
     lambda x: repr(default_normalize(x)).encode(), st.floats(width=32)
 )
 counts = st.integers(min_value=-3, max_value=3) | ints
-limits = st.just(()) | st.tuples(st.just("limit"), counts, counts)
 # Redis has an integer overflow bug in swapdb, so we confine the numbers to
 # a limited range (https://github.com/antirez/redis/issues/5737).
 dbnums = st.integers(min_value=0, max_value=3) | st.integers(
@@ -51,11 +49,9 @@ dbnums = st.integers(min_value=0, max_value=3) | st.integers(
 patterns = st.text(
     alphabet=st.sampled_from("[]^$*.?-azAZ\\\r\n\t")
 ) | st.binary().filter(lambda x: b"\0" not in x)
-score_tests = scores | st.builds(lambda x: b"(" + repr(x).encode(), scores)
-string_tests = st.sampled_from([b"+", b"-"]) | st.builds(
-    operator.add, st.sampled_from([b"(", b"["]), fields
-)
+
 # Redis has integer overflow bugs in time computations, which is why we set a maximum.
+
 expires_seconds = st.integers(min_value=100000, max_value=MAX_INT)
 expires_ms = st.integers(min_value=100000000, max_value=MAX_INT)
 
@@ -209,39 +205,6 @@ common_commands = (
     #  away the sort entirely with normalize. This also prevents us
     #  using LIMIT.
     | commands(st.just("sort"), keys, *zero_or_more("asc", "desc", "alpha"))
-)
-
-
-def build_zstore(command, dest, sources, weights, aggregate):
-    args = [command, dest, len(sources)]
-    args += [source[0] for source in sources]
-    if weights:
-        args.append("weights")
-        args += [source[1] for source in sources]
-    if aggregate:
-        args += ["aggregate", aggregate]
-    return Command(args)
-
-
-zset_no_score_create_commands = commands(
-    st.just("zadd"), keys, st.lists(st.tuples(st.just(0), fields), min_size=1)
-)
-zset_no_score_commands = (  # TODO: test incr
-    commands(
-        st.just("zadd"),
-        keys,
-        *zero_or_more("nx", "xx", "ch", "incr"),
-        st.lists(st.tuples(st.just(0), fields)),
-    )
-    | commands(st.just("zlexcount"), keys, string_tests, string_tests)
-    | commands(
-        st.sampled_from(["zrangebylex", "zrevrangebylex"]),
-        keys,
-        string_tests,
-        string_tests,
-        limits,
-    )
-    | commands(st.just("zremrangebylex"), keys, string_tests, string_tests)
 )
 
 attrs = st.fixed_dictionaries(

@@ -1,7 +1,8 @@
-from fakeredis._server import _create_version
-from typing import Any, Tuple, Union
-import redis
+from typing import Tuple, Union
+
 import pytest
+import redis
+from fakeredis._server import _create_version
 
 
 def server_info() -> Tuple[str, Union[None, Tuple[int, ...]]]:
