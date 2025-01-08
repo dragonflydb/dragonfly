@@ -35,8 +35,6 @@ class TestHash(BaseTest):
             st.just("hexpire"),
             keys,
             expires_seconds,
-            # TODO: Dragonfly does not support the following arguments
-            # *zero_or_more("nx", "xx", "gt", "lt"),
             st.just("fields"),
             st.just(2),
             st.lists(fields, min_size=2, max_size=2),

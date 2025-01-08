@@ -2,7 +2,6 @@ from typing import Tuple, Union
 
 import pytest
 import redis
-from fakeredis._server import _create_version
 
 
 def server_info() -> Tuple[str, Union[None, Tuple[int, ...]]]:
@@ -12,10 +11,7 @@ def server_info() -> Tuple[str, Union[None, Tuple[int, ...]]]:
         client = redis.Redis("localhost", port=6380, db=2)
         client_info = client.info()
         server_type = "dragonfly" if "dragonfly_version" in client_info else "redis"
-        server_version = (
-            client_info["redis_version"] if server_type != "dragonfly" else (7, 0)
-        )
-        server_version = _create_version(server_version) or (7,)
+        server_version = (7, 0)
         return server_type, server_version
     except redis.ConnectionError as e:
         print(e)
