@@ -74,8 +74,10 @@ set(REFLEX "${THIRD_PARTY_LIB_DIR}/reflex/bin/reflex")
 add_third_party(
   jsoncons
   GIT_REPOSITORY https://github.com/dragonflydb/jsoncons
-  GIT_TAG Dragonfly.178
+  # URL https://github.com/danielaparker/jsoncons/archive/refs/tags/v0.171.1.tar.gz
+  GIT_TAG Dragonfly
   GIT_SHALLOW 1
+  # PATCH_COMMAND patch -p1 -i "${CMAKE_SOURCE_DIR}/patches/jsoncons-v0.171.0.patch"
   CMAKE_PASS_FLAGS "-DJSONCONS_BUILD_TESTS=OFF -DJSONCONS_HAS_POLYMORPHIC_ALLOCATOR=ON"
   LIB "none"
 )
