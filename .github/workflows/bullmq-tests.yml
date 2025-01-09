@@ -29,7 +29,7 @@ jobs:
         run: |
           wget https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
           tar -xf node-v22.12.0-linux-x64-glibc-217.tar.xz
-          cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
+          sudo cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
           apk add --no-cache yarn jq
           node --version
           npm --version
