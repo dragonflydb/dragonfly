@@ -858,6 +858,9 @@ TEST_F(GenericFamilyTest, RestoreOOM) {
   auto resp = Run({"dump", "src"});
 
   string dump = resp.GetString();
+
+  // Let Dragonfly propagate max_memory_limit to shards. It does not have to be precise,
+  // the loop should have enough time for the internal processes to progress.
   usleep(10000);
   unsigned i = 0;
   for (; i < 10000; ++i) {
