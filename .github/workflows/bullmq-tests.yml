@@ -12,12 +12,12 @@ jobs:
     name: Build
 
     timeout-minutes: 60
-    container:
-      image: ghcr.io/romange/alpine-dev:latest
-      options: --security-opt seccomp=unconfined
-      credentials:
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+    #container:
+    #  image: ghcr.io/romange/alpine-dev:latest
+    #  options: --security-opt seccomp=unconfined
+    #  credentials:
+    #    username: ${{ github.repository_owner }}
+    #    password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - uses: actions/checkout@v4
