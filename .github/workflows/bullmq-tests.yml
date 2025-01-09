@@ -27,16 +27,16 @@ jobs:
           submodules: true
           node-version: lts/*
           cache: 'yarn'
-#      - name: Install NodeJs
-#        run: |
+      - name: Install NodeJs
 #          wget https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-musl.tar.xz
 #          tar -xf node-v22.12.0-linux-x64-musl.tar.xz
 #          cp -r node-v22.12.0-linux-x64-musl/* /usr/local/
 #          apk add --no-cache yarn jq
-#          node --version
-#          npm --version
-#          yarn --version
-#          mkdir -p $GITHUB_WORKSPACE/build
+        run: |
+          node --version
+          npm --version
+          yarn --version
+          mkdir -p $GITHUB_WORKSPACE/build
       - name: Configure/Build
         run: |
           cd $GITHUB_WORKSPACE/build
