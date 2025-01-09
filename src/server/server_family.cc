@@ -2255,7 +2255,8 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("dragonfly_version", GetVersion());
     append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
-    if (!absl::GetFlag(FLAGS_managed_service_info)) {
+
+    if (!absl::GetFlag(FLAGS_managed_service_info) || cmd_cntx.conn_cntx->conn()->IsPrivileged()) {
       append("os", GetOSString());
       append("thread_count", service_.proactor_pool().size());
     }
@@ -2526,7 +2527,8 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
       append("role", "master");
       append("connected_slaves", replicas_info.size());
 
-      if (!absl::GetFlag(FLAGS_managed_service_info)) {
+      if (!absl::GetFlag(FLAGS_managed_service_info) ||
+          cmd_cntx.conn_cntx->conn()->IsPrivileged()) {
         for (size_t i = 0; i < replicas_info.size(); i++) {
           auto& r = replicas_info[i];
           // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
