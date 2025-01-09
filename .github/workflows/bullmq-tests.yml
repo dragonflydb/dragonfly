@@ -21,13 +21,22 @@ jobs:
     #env:
     #  node-version: lts/*
 
+    services:
+      dragonflydb:
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.24.0
+        env:
+          DFLY_cluster_mode: emulated
+          DFLY_lock_on_hashtags: true
+          HEALTHCHECK_PORT: 6379
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
       - name: Install NodeJs
         run: |
-          wget https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
+          wget -q https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
           tar -xf node-v22.12.0-linux-x64-glibc-217.tar.xz
           sudo cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
           sudo apt install yarn jq
@@ -35,22 +44,22 @@ jobs:
           npm --version
           yarn --version
           mkdir -p $GITHUB_WORKSPACE/build
-      - name: Configure/Build
-        run: |
-          cd $GITHUB_WORKSPACE/build
-          #cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
-          #ninja dragonfly
-          wget https://github.com/dragonflydb/dragonfly/releases/download/v1.24.0/dragonfly-x86_64.tar.gz
-          tar -zxvf dragonfly-x86_64.tar.gz
-          mv dragonfly-x86_64 dragonfly
-          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
+#      - name: Configure/Build
+#        run: |
+#          cd $GITHUB_WORKSPACE/build
+#          #cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
+#          #ninja dragonfly
+#          wget -q https://github.com/dragonflydb/dragonfly/releases/download/v1.24.0/dragonfly-x86_64.tar.gz
+#          tar -zxvf dragonfly-x86_64.tar.gz
+#          mv dragonfly-x86_64 dragonfly
+#          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
       - name: Build and Test BullMQ
         run: |
           mkdir -p $GITHUB_WORKSPACE/../bullmq
           cd $GITHUB_WORKSPACE/../bullmq
           DOWNLOAD_URL=$(curl -s https://api.github.com/repos/taskforcesh/bullmq/releases/latest | jq -r '.tarball_url')
           echo "Downloading latest BullMQ release from ${DOWNLOAD_URL}"
-          wget -O bullmq.tar.gz ${DOWNLOAD_URL}
+          wget -q -O bullmq.tar.gz ${DOWNLOAD_URL}
           tar -zxvf bullmq.tar.gz
           mv taskforcesh-bullmq-* bullmq
           #git clone https://github.com/taskforcesh/bullmq
