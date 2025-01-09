@@ -53,6 +53,7 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
     return std::nullopt;
   }
 
+  // The footer looks like this: version (2 bytes) | crc64 (8 bytes)
   const std::uint8_t* footer =
       reinterpret_cast<const std::uint8_t*>(msg.data()) + (msg.size() - DUMP_FOOTER_SIZE);
   const RdbVersion version = (*(footer + 1) << 8 | (*footer));
@@ -63,9 +64,10 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
     return std::nullopt;
   }
 
-  uint64_t expected_cs =
+  // Compute expected crc64 based on the actual data upto the expected crc64 field.
+  uint64_t actual_cs =
       crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
-  uint64_t actual_cs = absl::little_endian::Load64(footer + sizeof(version));
+  uint64_t expected_cs = absl::little_endian::Load64(footer + 2);  // skip the version
 
   if (actual_cs != expected_cs) {
     LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
@@ -155,12 +157,9 @@ class RdbRestoreValue : protected RdbLoaderBase {
     rdb_version_ = rdb_version;
   }
 
-  // Returns default ItAndUpdater if Add failed.
-  // In case a valid ItAndUpdater is returned, then second is true in case a new key is added,
-  // false if the existing key is updated (should not happen unless we have a bug).
-  pair<DbSlice::ItAndUpdater, bool> Add(string_view key, string_view payload, const DbContext& cntx,
-                                        const RestoreArgs& args, DbSlice* db_slice,
-                                        EngineShard* shard);
+  OpResult<DbSlice::AddOrFindResult> Add(string_view key, string_view payload,
+                                         const DbContext& cntx, const RestoreArgs& args,
+                                         DbSlice* db_slice);
 
  private:
   std::optional<OpaqueObj> Parse(io::Source* source);
@@ -191,17 +190,17 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* sourc
   return std::optional<OpaqueObj>(std::move(obj));
 }
 
-pair<DbSlice::ItAndUpdater, bool> RdbRestoreValue::Add(string_view key, string_view data,
-                                                       const DbContext& cntx,
-                                                       const RestoreArgs& args, DbSlice* db_slice,
-                                                       EngineShard* shard) {
+OpResult<DbSlice::AddOrFindResult> RdbRestoreValue::Add(string_view key, string_view data,
+                                                        const DbContext& cntx,
+                                                        const RestoreArgs& args,
+                                                        DbSlice* db_slice) {
   InMemSource data_src(data);
   PrimeValue pv;
   bool first_parse = true;
   do {
     auto opaque_res = Parse(&data_src);
     if (!opaque_res) {
-      return {};
+      return OpStatus::INVALID_VALUE;
     }
 
     LoadConfig config;
@@ -217,18 +216,16 @@ pair<DbSlice::ItAndUpdater, bool> RdbRestoreValue::Add(string_view key, string_v
     if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
       // we failed - report and exit
       LOG(WARNING) << "error while trying to read data: " << ec;
-      return {};
+      return OpStatus::INVALID_VALUE;
     }
   } while (pending_read_.remaining > 0);
 
-  if (auto res = db_slice->AddOrUpdate(cntx, key, std::move(pv), args.ExpirationTime()); res) {
+  auto res = db_slice->AddOrUpdate(cntx, key, std::move(pv), args.ExpirationTime());
+  if (res) {
     res->it->first.SetSticky(args.Sticky());
-    shard->search_indices()->AddDoc(key, cntx, res->it->second);
-    return {DbSlice::ItAndUpdater{
-                .it = res->it, .exp_it = res->exp_it, .post_updater = std::move(res->post_updater)},
-            res->is_new};
+    db_slice->shard_owner()->search_indices()->AddDoc(key, cntx, res->it->second);
   }
-  return {};
+  return res;
 }
 
 [[nodiscard]] bool RestoreArgs::UpdateExpiration(int64_t now_msec) {
@@ -477,15 +474,17 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   restore_args.SetSticky(serialized_value_.sticky);
 
   RdbRestoreValue loader(serialized_value_.version.value());
-  auto [restored_dest_it, is_new] = loader.Add(dest_key_, serialized_value_.value, op_args.db_cntx,
-                                               restore_args, &db_slice, shard);
+  auto add_res =
+      loader.Add(dest_key_, serialized_value_.value, op_args.db_cntx, restore_args, &db_slice);
 
-  if (restored_dest_it.IsValid()) {
-    LOG_IF(DFATAL, !is_new) << "Unexpected override for key " << dest_key_ << " " << dest_found_;
-    auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
-    if (bc) {
-      bc->AwakeWatched(t->GetDbIndex(), dest_key_);
-    }
+  if (!add_res)
+    return add_res.status();
+
+  LOG_IF(DFATAL, !add_res->is_new)
+      << "Unexpected override for key " << dest_key_ << " " << dest_found_;
+  auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+  if (bc) {
+    bc->AwakeWatched(t->GetDbIndex(), dest_key_);
   }
 
   if (shard->journal()) {
@@ -534,8 +533,8 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
   return OpStatus::KEY_NOTFOUND;
 }
 
-OpResult<bool> OpRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
-                         RestoreArgs restore_args, RdbVersion rdb_version) {
+OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
+                   RestoreArgs restore_args, RdbVersion rdb_version) {
   if (!restore_args.UpdateExpiration(op_args.db_cntx.time_now_ms)) {
     return OpStatus::OUT_OF_RANGE;
   }
@@ -563,18 +562,17 @@ OpResult<bool> OpRestore(const OpArgs& op_args, std::string_view key, std::strin
 
   if (restore_args.Expired()) {
     VLOG(1) << "the new key '" << key << "' already expired, will not save the value";
-    return true;
+    return OpStatus::OK;
   }
 
   RdbRestoreValue loader(rdb_version);
-  auto [res_it, is_new] =
-      loader.Add(key, payload, op_args.db_cntx, restore_args, &db_slice, op_args.shard);
-  LOG_IF(DFATAL, res_it.IsValid() && !is_new)
+  auto add_res = loader.Add(key, payload, op_args.db_cntx, restore_args, &db_slice);
+  LOG_IF(DFATAL, add_res && !add_res->is_new)
       << "Unexpected override for key " << key << ", found previous " << found_prev
       << " override: " << restore_args.Replace()
-      << ", type: " << ObjTypeToString(res_it.it->second.ObjType());
+      << ", type: " << ObjTypeToString(add_res->it->second.ObjType());
 
-  return res_it.IsValid();
+  return add_res.status();
 }
 
 bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, string* scratch,
@@ -1505,18 +1503,17 @@ void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
                      rdb_version.value());
   };
 
-  OpResult<bool> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpStatus result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
 
-  if (result) {
-    if (result.value()) {
+  switch (result) {
+    case OpStatus::OK:
       return builder->SendOk();
-    } else {
+    case OpStatus::KEY_EXISTS:
+      return builder->SendError("BUSYKEY Target key name already exists.");
+    case OpStatus::INVALID_VALUE:
       return builder->SendError("Bad data format");
-    }
-  } else if (result.status() == OpStatus::KEY_EXISTS) {
-    return builder->SendError("BUSYKEY: key name already exists.");
-  } else {
-    return builder->SendError(result.status());
+    default:
+      return builder->SendError(result);
   }
 }
 
