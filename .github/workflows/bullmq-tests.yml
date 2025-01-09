@@ -21,15 +21,15 @@ jobs:
     #env:
     #  node-version: lts/*
 
-#    services:
-#      dragonflydb:
-#        image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.24.0
-#        env:
-#          DFLY_cluster_mode: emulated
-#          DFLY_lock_on_hashtags: true
-#          HEALTHCHECK_PORT: 6379
-#        ports:
-#          - 6379:6379
+    services:
+      dragonflydb:
+        image: ghcr.io/dragonflydb/dragonfly-weekly:latest
+        env:
+          DFLY_cluster_mode: emulated
+          DFLY_lock_on_hashtags: true
+          HEALTHCHECK_PORT: 6379
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,16 +44,15 @@ jobs:
           npm --version
           yarn --version
           mkdir -p $GITHUB_WORKSPACE/build
-      - name: Configure/Build
-        run: |
-          cd $GITHUB_WORKSPACE/build
-          #cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
-          #ninja dragonfly
-          wget -q https://github.com/dragonflydb/dragonfly/releases/download/v1.24.0/dragonfly-x86_64.tar.gz
-          tar -zxvf dragonfly-x86_64.tar.gz
-          mv dragonfly-x86_64 dragonfly
-          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
-          sleep 30
+#      - name: Configure/Build
+#        run: |
+#          cd $GITHUB_WORKSPACE/build
+#          #cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
+#          #ninja dragonfly
+#          wget -q https://github.com/dragonflydb/dragonfly/releases/download/v1.24.0/dragonfly-x86_64.tar.gz
+#          tar -zxvf dragonfly-x86_64.tar.gz
+#          mv dragonfly-x86_64 dragonfly
+#          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
       - name: Build and Test BullMQ
         run: |
           mkdir -p $GITHUB_WORKSPACE/../bullmq
