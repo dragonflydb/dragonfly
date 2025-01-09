@@ -30,7 +30,7 @@ jobs:
           wget https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
           tar -xf node-v22.12.0-linux-x64-glibc-217.tar.xz
           sudo cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
-          apt install yarn jq
+          sudo apt install yarn jq
           node --version
           npm --version
           yarn --version
