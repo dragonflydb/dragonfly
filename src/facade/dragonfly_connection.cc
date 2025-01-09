@@ -87,6 +87,7 @@ ABSL_FLAG(bool, migrate_connections, true,
           "happen at most once per connection.");
 
 using namespace util;
+using namespace std;
 using absl::GetFlag;
 using nonstd::make_unexpected;
 
@@ -239,7 +240,7 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
   }
 
   // Write the data itself.
-  std::array<iovec, 16> blobs;
+  array<iovec, 16> blobs;
   unsigned index = 0;
   if (next != stack_buf) {
     blobs[index++] = iovec{.iov_base = stack_buf, .iov_len = size_t(next - stack_buf)};
@@ -283,7 +284,7 @@ struct Connection::QueueBackpressure {
   // Used by publisher/subscriber actors to make sure we do not publish too many messages
   // into the queue. Thread-safe to allow safe access in EnsureBelowLimit.
   util::fb2::EventCount pubsub_ec;
-  std::atomic_size_t subscriber_bytes = 0;
+  atomic_size_t subscriber_bytes = 0;
 
   // Used by pipelining/execution fiber to throttle the incoming pipeline messages.
   // Used together with pipeline_buffer_limit to limit the pipeline usage per thread.
@@ -504,7 +505,7 @@ void Connection::AsyncOperations::operator()(const InvalidationMessage& msg) {
   if (msg.invalidate_due_to_flush) {
     rbuilder->SendNull();
   } else {
-    std::string_view keys[] = {msg.key};
+    string_view keys[] = {msg.key};
     rbuilder->SendBulkStrArr(keys);
   }
 }
@@ -552,7 +553,7 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   // Create shared_ptr with empty value and associate it with `this` pointer (aliasing constructor).
   // We use it for reference counting and accessing `this` (without managing it).
-  self_ = {std::make_shared<std::monostate>(), this};
+  self_ = {make_shared<std::monostate>(), this};
 
 #ifdef DFLY_USE_SSL
   // Increment reference counter so Listener won't free the context while we're
@@ -688,6 +689,7 @@ void Connection::HandleRequests() {
         LOG(INFO) << "Error handshaking " << aresult.error().message();
         return;
       }
+      is_tls_ = 1;
       VLOG(1) << "TLS handshake succeeded";
     }
   }
@@ -756,7 +758,7 @@ void Connection::RegisterBreakHook(BreakerCb breaker_cb) {
   breaker_cb_ = breaker_cb;
 }
 
-std::pair<std::string, std::string> Connection::GetClientInfoBeforeAfterTid() const {
+pair<string, string> Connection::GetClientInfoBeforeAfterTid() const {
   if (!socket_) {
     LOG(DFATAL) << "unexpected null socket_ "
                 << " phase " << unsigned(phase_) << ", is_http: " << unsigned(is_http_);
@@ -854,18 +856,18 @@ bool Connection::IsMain() const {
   return static_cast<Listener*>(listener())->IsMainInterface();
 }
 
-void Connection::SetName(std::string name) {
+void Connection::SetName(string name) {
   util::ThisFiber::SetName(absl::StrCat("DflyConnection_", name));
   name_ = std::move(name);
 }
 
-void Connection::SetLibName(std::string name) {
+void Connection::SetLibName(string name) {
   UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
   lib_name_ = std::move(name);
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
 }
 
-void Connection::SetLibVersion(std::string version) {
+void Connection::SetLibVersion(string version) {
   UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
   lib_ver_ = std::move(version);
   UpdateLibNameVerMap(lib_name_, lib_ver_, +1);
@@ -1154,7 +1156,7 @@ auto Connection::ParseMemcache() -> ParserStatus {
     if (MemcacheParser::IsStoreCmd(cmd.type)) {
       total_len += cmd.bytes_len + 2;
       if (io_buf_.InputLen() >= total_len) {
-        std::string_view parsed_value = str.substr(consumed, cmd.bytes_len + 2);
+        string_view parsed_value = str.substr(consumed, cmd.bytes_len + 2);
         if (parsed_value[cmd.bytes_len] != '\r' && parsed_value[cmd.bytes_len + 1] != '\n') {
           builder->SendClientError("bad data chunk");
           // We consume the whole buffer because we don't really know where it ends
@@ -1241,6 +1243,29 @@ void Connection::HandleMigrateRequest() {
   }
 }
 
+error_code Connection::HandleRecvSocket() {
+  io::MutableBytes append_buf = io_buf_.AppendBuffer();
+  DCHECK(!append_buf.empty());
+
+  phase_ = READ_SOCKET;
+  error_code ec;
+
+  ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
+  last_interaction_ = time(nullptr);
+
+  if (!recv_sz) {
+    return recv_sz.error();
+  }
+
+  size_t commit_sz = *recv_sz;
+
+  io_buf_.CommitWrite(commit_sz);
+  stats_->io_read_bytes += commit_sz;
+  ++stats_->io_read_cnt;
+
+  return ec;
+}
+
 auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
   error_code ec;
   ParserStatus parse_status = OK;
@@ -1250,24 +1275,10 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
 
   do {
     HandleMigrateRequest();
-
-    io::MutableBytes append_buf = io_buf_.AppendBuffer();
-    DCHECK(!append_buf.empty());
-
-    phase_ = READ_SOCKET;
-
-    ::io::Result<size_t> recv_sz = peer->Recv(append_buf);
-    last_interaction_ = time(nullptr);
-
-    if (!recv_sz) {
-      ec = recv_sz.error();
-      parse_status = OK;
-      break;
+    ec = HandleRecvSocket();
+    if (ec) {
+      return ec;
     }
-
-    io_buf_.CommitWrite(*recv_sz);
-    stats_->io_read_bytes += *recv_sz;
-    ++stats_->io_read_cnt;
 
     phase_ = PROCESS;
     bool is_iobuf_full = io_buf_.AppendLen() == 0;
@@ -1411,8 +1422,8 @@ void Connection::ClearPipelinedMessages() {
   queue_backpressure_->pubsub_ec.notifyAll();
 }
 
-std::string Connection::DebugInfo() const {
-  std::string info = "{";
+string Connection::DebugInfo() const {
+  string info = "{";
 
   absl::StrAppend(&info, "address=", uint64_t(this), ", ");
   absl::StrAppend(&info, "phase=", phase_, ", ");
