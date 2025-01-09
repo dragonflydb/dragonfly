@@ -2247,6 +2247,9 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 
   ServerState* ss = ServerState::tlocal();
 
+  bool show_managed_info =
+      !absl::GetFlag(FLAGS_managed_service_info) || cmd_cntx.conn_cntx->conn()->IsPrivileged();
+
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
@@ -2255,7 +2258,8 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("dragonfly_version", GetVersion());
     append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
-    if (!absl::GetFlag(FLAGS_managed_service_info)) {
+
+    if (show_managed_info) {
       append("os", GetOSString());
       append("thread_count", service_.proactor_pool().size());
     }
@@ -2526,7 +2530,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
       append("role", "master");
       append("connected_slaves", replicas_info.size());
 
-      if (!absl::GetFlag(FLAGS_managed_service_info)) {
+      if (show_managed_info) {
         for (size_t i = 0; i < replicas_info.size(); i++) {
           auto& r = replicas_info[i];
           // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
