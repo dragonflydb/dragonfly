@@ -184,6 +184,10 @@ extern __thread FacadeStats* tl_facade_stats;
 
 void ResetStats();
 
+// Constants for socket bufring.
+constexpr uint16_t kRecvSockGid = 0;
+constexpr size_t kRecvBufSize = 128;
+
 }  // namespace facade
 
 namespace std {

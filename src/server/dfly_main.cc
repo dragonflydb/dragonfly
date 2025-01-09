@@ -23,7 +23,7 @@
 #endif
 
 #ifdef __linux__
-#include <liburing.h>
+#include "util/fibers/uring_proactor.h"
 #endif
 
 #include <mimalloc.h>
@@ -81,6 +81,9 @@ ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
 
 ABSL_FLAG(uint16_t, tcp_backlog, 256, "TCP listen(2) backlog parameter.");
+ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
+          "How many socket recv buffers of size 256 to allocate per thread."
+          "Relevant only for modern kernels with io_uring enabled");
 
 using namespace util;
 using namespace facade;
@@ -603,6 +606,35 @@ void SetupAllocationTracker(ProactorPool* pool) {
 #endif
 }
 
+void RegisterBufRings(ProactorPool* pool) {
+#ifdef __linux__
+  auto bufcnt = absl::GetFlag(FLAGS_uring_recv_buffer_cnt);
+  if (bufcnt == 0) {
+    return;
+  }
+
+  if (dfly::kernel_version < 602 || pool->at(0)->GetKind() != ProactorBase::IOURING) {
+    LOG(WARNING) << "uring_recv_buffer_cnt is only supported on kernels >= 6.2 and with "
+                    "io_uring proactor";
+    return;
+  }
+
+  // We need a power of 2 length.
+  bufcnt = absl::bit_ceil(bufcnt);
+  pool->AwaitBrief([&](unsigned, ProactorBase* pb) {
+    auto up = static_cast<fb2::UringProactor*>(pb);
+    int res = up->RegisterBufferRing(facade::kRecvSockGid, bufcnt, facade::kRecvBufSize);
+    if (res != 0) {
+      LOG(ERROR) << "Failed to register buf ring for proactor "
+                 << util::detail::SafeErrorMessage(res);
+      exit(1);
+    }
+  });
+  LOG(INFO) << "Registered a bufring with " << bufcnt << " buffers of size " << facade::kRecvBufSize
+            << " per thread ";
+#endif
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -791,6 +823,7 @@ Usage: dragonfly [FLAGS]
     pool->Run();
 
     SetupAllocationTracker(pool.get());
+    RegisterBufRings(pool.get());
 
     AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
     acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
