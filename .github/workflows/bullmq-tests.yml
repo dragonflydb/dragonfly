@@ -18,21 +18,19 @@ jobs:
     #  credentials:
     #    username: ${{ github.repository_owner }}
     #    password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      node-version: lts/*
+    #env:
+    #  node-version: lts/*
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          node-version: lts/*
-          cache: 'yarn'
       - name: Install NodeJs
-#          wget https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-musl.tar.xz
-#          tar -xf node-v22.12.0-linux-x64-musl.tar.xz
-#          cp -r node-v22.12.0-linux-x64-musl/* /usr/local/
-#          apk add --no-cache yarn jq
         run: |
+          wget https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc.tar.xz
+          tar -xf node-v22.12.0-linux-x64-glibc.tar.xz
+          cp -r node-v22.12.0-linux-x64-glibc/* /usr/local/
+          apk add --no-cache yarn jq
           node --version
           npm --version
           yarn --version
