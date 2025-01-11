@@ -917,6 +917,23 @@ TEST_F(RedisReplyBuilderTest, Issue3449) {
   EXPECT_EQ(10000, parse_result.args.size());
 }
 
+TEST_F(RedisReplyBuilderTest, Issue4424) {
+  vector<string> records;
+  for (unsigned i = 0; i < 800; ++i) {
+    records.push_back(string(100, 'a'));
+  }
+
+  for (unsigned j = 0; j < 2; ++j) {
+    builder_->SendBulkStrArr(records);
+    ASSERT_TRUE(NoErrors());
+    ParsingResults parse_result = Parse();
+    ASSERT_FALSE(parse_result.IsError()) << int(parse_result.result);
+    ASSERT_TRUE(parse_result.Verify(SinkSize()));
+    EXPECT_EQ(800, parse_result.args.size());
+    sink_.Clear();
+  }
+}
+
 static void BM_FormatDouble(benchmark::State& state) {
   vector<double> values;
   char buf[64];
