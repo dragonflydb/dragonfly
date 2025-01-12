@@ -23,7 +23,8 @@ jobs:
 
     services:
       dragonflydb:
-        image: ghcr.io/dragonflydb/dragonfly-weekly:latest
+        #image: ghcr.io/dragonflydb/dragonfly-weekly:latest
+        image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.24.0
         env:
           DFLY_cluster_mode: emulated
           DFLY_lock_on_hashtags: true
