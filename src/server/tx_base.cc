@@ -66,7 +66,7 @@ void RecordExpiry(DbIndex dbid, string_view key) {
   auto journal = EngineShard::tlocal()->journal();
   CHECK(journal);
 
-  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, cluster::KeySlot(key),
+  journal->RecordEntry(0, journal::Op::EXPIRED, dbid, 1, KeySlot(key),
                        Payload("DEL", ArgSlice{key}));
 }
 

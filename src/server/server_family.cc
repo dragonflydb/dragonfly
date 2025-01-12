@@ -583,7 +583,7 @@ std::string_view GetOSString() {
 }
 
 string_view GetRedisMode() {
-  return cluster::IsClusterEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
+  return IsClusterEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
 }
 
 struct ReplicaOfArgs {
@@ -622,7 +622,7 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
       return nullopt;
     }
     if (parser.HasNext()) {
-      auto [slot_start, slot_end] = parser.Next<cluster::SlotId, cluster::SlotId>();
+      auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
       replicaof_args.slot_range = cluster::SlotRange{slot_start, slot_end};
       if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
         builder->SendError("Invalid slot range");
@@ -1168,10 +1168,12 @@ void ServerFamily::SnapshotScheduling() {
     return;
   }
 
-  const auto loading_check_interval = std::chrono::seconds(10);
-  while (service_.GetGlobalState() == GlobalState::LOADING) {
-    schedule_done_.WaitFor(loading_check_interval);
-  }
+  ServerState* ss = ServerState::tlocal();
+  do {
+    if (schedule_done_.WaitFor(100ms)) {
+      return;
+    }
+  } while (ss->gstate() == GlobalState::LOADING);
 
   while (true) {
     const std::chrono::time_point now = std::chrono::system_clock::now();
@@ -1657,9 +1659,10 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
                                                Transaction* trans, bool ignore_state) {
-  auto state = service_.GetGlobalState();
+  auto state = ServerState::tlocal()->gstate();
+
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
-  if (!ignore_state && (state != GlobalState::ACTIVE)) {
+  if (!ignore_state && (state != GlobalState::ACTIVE && state != GlobalState::SHUTTING_DOWN)) {
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
@@ -2242,6 +2245,8 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
+  ServerState* ss = ServerState::tlocal();
+
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
@@ -2467,7 +2472,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("last_saved_file", save_info.file_name);
     append("last_success_save_duration_sec", save_info.success_duration_sec);
 
-    size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
+    unsigned is_loading = (ss->gstate() == GlobalState::LOADING);
     append("loading", is_loading);
     append("saving", is_saving);
     append("current_save_duration_sec", curent_durration_sec);
@@ -2631,7 +2636,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 #endif
 
   if (should_enter("CLUSTER")) {
-    append("cluster_enabled", cluster::IsClusterEnabledOrEmulated());
+    append("cluster_enabled", IsClusterEnabledOrEmulated());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);
@@ -2752,7 +2757,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
     util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
     // We should not execute replica of command while loading from snapshot.
-    if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
+    ServerState* ss = ServerState::tlocal();
+    if (ss->is_master && ss->gstate() == GlobalState::LOADING) {
       builder->SendError(kLoadingErr);
       return;
     }
@@ -2766,7 +2772,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
 
     // If NO ONE was supplied, just stop the current replica (if it exists)
     if (replicaof_args->IsReplicaOfNoOne()) {
-      if (!ServerState::tlocal()->is_master) {
+      if (!ss->is_master) {
         CHECK(replica_);
 
         SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
@@ -2776,8 +2782,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
         StopAllClusterReplicas();
       }
 
-      CHECK_EQ(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::ACTIVE)
-          << "Server is set to replica no one, yet state is not active!";
+      // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
 
       return builder->SendOk();
     }

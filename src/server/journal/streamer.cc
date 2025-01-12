@@ -121,7 +121,7 @@ void JournalStreamer::AsyncWrite() {
 
 void JournalStreamer::Write(std::string str) {
   DCHECK(!str.empty());
-  DVLOG(2) << "Writing " << str.size() << " bytes";
+  DVLOG(3) << "Writing " << str.size() << " bytes";
 
   pending_buf_.Push(std::move(str));
 
@@ -278,10 +278,10 @@ bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
 }
 
 bool RestoreStreamer::ShouldWrite(std::string_view key) const {
-  return ShouldWrite(cluster::KeySlot(key));
+  return ShouldWrite(KeySlot(key));
 }
 
-bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
+bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 

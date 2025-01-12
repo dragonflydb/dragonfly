@@ -34,7 +34,6 @@ extern "C" {
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
-#include "server/cluster/cluster_defs.h"
 #include "server/cluster/cluster_family.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -2464,7 +2463,7 @@ error_code RdbLoader::HandleAux() {
     if (absl::SimpleAtoi(auxval, &usedmem)) {
       VLOG(1) << "RDB memory usage when created " << strings::HumanReadableNumBytes(usedmem);
       if (usedmem > ssize_t(max_memory_limit)) {
-        if (cluster::IsClusterEnabled()) {
+        if (IsClusterEnabled()) {
           LOG(INFO) << "Attempting to load a snapshot of size " << usedmem
                     << ", despite memory limit of " << max_memory_limit;
         } else {
@@ -2709,7 +2708,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 }
 
 bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) const {
-  if (!load_unowned_slots_ && cluster::IsClusterEnabled()) {
+  if (!load_unowned_slots_ && IsClusterEnabled()) {
     const cluster::ClusterConfig* cluster_config = cluster::ClusterFamily::cluster_config();
     if (cluster_config != nullptr && !cluster_config->IsMySlot(key)) {
       return true;

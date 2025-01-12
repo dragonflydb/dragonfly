@@ -18,7 +18,6 @@
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 #include "facade/op_status.h"
-#include "server/cluster/cluster_utility.h"
 #include "server/common.h"
 #include "server/journal/types.h"
 #include "server/namespaces.h"
@@ -184,8 +183,7 @@ class Transaction {
   explicit Transaction(const CommandId* cid);
 
   // Initialize transaction for squashing placed on a specific shard with a given parent tx
-  explicit Transaction(const Transaction* parent, ShardId shard_id,
-                       std::optional<cluster::SlotId> slot_id);
+  explicit Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id);
 
   // Initialize from command (args) on specific db.
   OpStatus InitByArgs(Namespace* ns, DbIndex index, CmdArgList args);
@@ -290,7 +288,7 @@ class Transaction {
   // This method is meaningless if GetUniqueShardCnt() != 1.
   ShardId GetUniqueShard() const;
 
-  std::optional<cluster::SlotId> GetUniqueSlotId() const;
+  std::optional<SlotId> GetUniqueSlotId() const;
 
   bool IsMulti() const {
     return bool(multi_);
@@ -633,7 +631,7 @@ class Transaction {
 
   uint32_t unique_shard_cnt_{0};          // Number of unique shards active
   ShardId unique_shard_id_{kInvalidSid};  // Set if unique_shard_cnt_ = 1
-  cluster::UniqueSlotChecker unique_slot_checker_;
+  UniqueSlotChecker unique_slot_checker_;
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};

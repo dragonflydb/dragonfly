@@ -9,7 +9,6 @@
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
-#include "server/cluster/cluster_utility.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -79,7 +78,7 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(
-    ShardId sid, optional<cluster::SlotId> slot_id) {
+    ShardId sid, optional<SlotId> slot_id) {
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
@@ -122,7 +121,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
     return SquashResult::NOT_SQUASHED;
 
   // Check if all commands belong to one shard
-  cluster::UniqueSlotChecker slot_checker;
+  UniqueSlotChecker slot_checker;
   ShardId last_sid = kInvalidSid;
 
   for (string_view key : keys->Range(args)) {

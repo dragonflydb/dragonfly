@@ -1,9 +1,10 @@
-// Copyright 2022, DragonflyDB authors.  All rights reserved.
+// Copyright 2025, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
 
+#include <string_view>
 #include <variant>
 
 #include "facade/op_status.h"
@@ -17,6 +18,8 @@ namespace dfly {
 
 class CommandRegistry;
 struct CommandContext;
+class Transaction;
+class OpArgs;
 
 class ZSetFamily {
  public:
@@ -57,10 +60,46 @@ class ZSetFamily {
     ZRangeSpec(const ScoreInterval& si, const RangeParams& rp) : interval(si), params(rp){};
   };
 
- private:
-  template <typename T> using OpResult = facade::OpResult<T>;
-  using SinkReplyBuilder = facade::SinkReplyBuilder;
+  struct ZParams {
+    unsigned flags = 0;  // mask of ZADD_IN_ macros.
+    bool ch = false;     // Corresponds to CH option.
+    bool override = false;
+  };
 
+  using ScoredMember = std::pair<std::string, double>;
+  using ScoredArray = std::vector<ScoredMember>;
+  using ScoredMemberView = std::pair<double, std::string_view>;
+  using ScoredMemberSpan = absl::Span<const ScoredMemberView>;
+
+  using SinkReplyBuilder = facade::SinkReplyBuilder;
+  template <typename T> using OpResult = facade::OpResult<T>;
+
+  // Used by GeoFamily also
+  static void ZAddGeneric(std::string_view key, const ZParams& zparams, ScoredMemberSpan memb_sp,
+                          Transaction* tx, SinkReplyBuilder* builder);
+
+  static OpResult<MScoreResponse> ZGetMembers(CmdArgList args, Transaction* tx,
+                                              SinkReplyBuilder* builder);
+
+  static OpResult<std::vector<ScoredArray>> OpRanges(const std::vector<ZRangeSpec>& range_specs,
+                                                     const OpArgs& op_args, std::string_view key);
+
+  struct AddResult {
+    double new_score = 0;
+    unsigned num_updated = 0;
+
+    bool is_nan = false;
+  };
+
+  static OpResult<AddResult> OpAdd(const OpArgs& op_args, const ZParams& zparams,
+                                   std::string_view key, ScoredMemberSpan members);
+
+  static OpResult<void> OpKeyExisted(const OpArgs& op_args, std::string_view key);
+
+  static OpResult<double> OpScore(const OpArgs& op_args, std::string_view key,
+                                  std::string_view member);
+
+ private:
   static void BZPopMin(CmdArgList args, const CommandContext& cmd_cntx);
   static void BZPopMax(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZAdd(CmdArgList args, const CommandContext& cmd_cntx);
@@ -94,12 +133,6 @@ class ZSetFamily {
   static void ZScan(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZUnion(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZUnionStore(CmdArgList args, const CommandContext& cmd_cntx);
-  static void GeoAdd(CmdArgList args, const CommandContext& cmd_cntx);
-  static void GeoHash(CmdArgList args, const CommandContext& cmd_cntx);
-  static void GeoPos(CmdArgList args, const CommandContext& cmd_cntx);
-  static void GeoDist(CmdArgList args, const CommandContext& cmd_cntx);
-  static void GeoSearch(CmdArgList args, const CommandContext& cmd_cntx);
-  static void GeoRadiusByMember(CmdArgList args, const CommandContext& cmd_cntx);
 };
 
 }  // namespace dfly

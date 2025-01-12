@@ -2998,4 +2998,23 @@ TEST_F(JsonFamilyTest, MergeLegacy) {
   EXPECT_EQ(resp, R"({"y":{"doubled":true},"z":{"answers":["xxx","yyy"],"doubled":false}})");
 }
 
+TEST_F(JsonFamilyTest, GetString) {
+  string json = R"(
+  { "a": "b",
+    "c": {
+      "d": "e",
+      "f": "g"
+    }
+  }
+  )";
+
+  auto resp = Run({"SET", "json", json});
+  EXPECT_THAT(resp, "OK");
+  resp = Run({"JSON.GET", "json", "$.c"});
+  EXPECT_EQ(resp, R"([{"d":"e","f":"g"}])");
+  Run({"SET", "not_json", "not_json"});
+  resp = Run({"JSON.GET", "not_json", "$.c"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+}
+
 }  // namespace dfly

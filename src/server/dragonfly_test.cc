@@ -821,6 +821,14 @@ TEST_F(DflyEngineTest, StreamMemInfo) {
   EXPECT_GT(stream_mem_second, 0);
 }
 
+TEST_F(DflyEngineTest, ReplicaofRejectOnLoad) {
+  service_->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+
+  RespExpr res = Run({"REPLICAOF", "localhost", "3779"});
+
+  ASSERT_THAT(res, ErrArg("LOADING Dragonfly is loading the dataset in memory"));
+}
+
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.

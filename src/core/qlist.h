@@ -165,12 +165,6 @@ class QList {
   void OnPreUpdate(quicklistNode* node);
   void OnPostUpdate(quicklistNode* node);
 
-  // Returns false if used existing sentinel, true if a new sentinel was created.
-  bool PushSentinel(std::string_view value, Where where);
-
-  // Returns false if used existing head, true if new head created.
-  bool PushTail(std::string_view value);
-
   // Returns newly created plain node.
   quicklistNode* InsertPlainNode(quicklistNode* old_node, std::string_view, InsertOpt insert_opt);
   void InsertNode(quicklistNode* old_node, quicklistNode* new_node, InsertOpt insert_opt);

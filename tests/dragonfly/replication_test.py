@@ -1971,23 +1971,27 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     df_factory.start_all([master, replica])
 
     c_replica = replica.client()
-    await c_replica.execute_command(f"DEBUG POPULATE 8000000")
+    await c_replica.execute_command(f"DEBUG POPULATE 1000 key 1000 RAND type set elements 2000")
 
     replica.stop()
     replica.start()
     c_replica = replica.client()
+
+    @assert_eventually
+    async def check_replica_isloading():
+        persistence = await c_replica.info("PERSISTENCE")
+        assert persistence["loading"] == 1
+
+    # If this fails adjust load of DEBUG POPULATE above.
+    await check_replica_isloading()
+
     # Check replica of not alowed while loading snapshot
-    try:
-        # If this fails adjust `keys` and the `assert dbsize >= 30000` above.
-        # Keep in mind that if the assert False is triggered below, it doesn't mean
-        # that there is a bug because it could be the case that while executing
-        # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
-        # is no longer in loading state and the assertion false is triggered.
-        assert "loading:1" in (await c_replica.execute_command("INFO PERSISTENCE"))
+    # Keep in mind that if the exception has not been raised, it doesn't mean
+    # that there is a bug because it could be the case that while executing
+    # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df
+    # is no longer in loading state and the assertion false is triggered.
+    with pytest.raises(aioredis.BusyLoadingError):
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        assert False
-    except aioredis.BusyLoadingError as e:
-        assert "Dragonfly is loading the dataset in memory" in str(e)
 
     # Check one we finish loading snapshot replicaof success
     await wait_available_async(c_replica, timeout=180)
@@ -2662,11 +2666,12 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
 @pytest.mark.parametrize(
     "element_size, elements_number",
-    [(16, 20000), (20000, 16)],
+    [(16, 30000), (30000, 16)],
 )
+@dfly_args({"proactor_threads": 1})
 async def test_big_containers(df_factory, element_size, elements_number):
-    master = df_factory.create(proactor_threads=4)
-    replica = df_factory.create(proactor_threads=4)
+    master = df_factory.create()
+    replica = df_factory.create()
 
     df_factory.start_all([master, replica])
     c_master = master.client()
@@ -2674,18 +2679,38 @@ async def test_big_containers(df_factory, element_size, elements_number):
 
     logging.debug("Fill master with test data")
     seeder = StaticSeeder(
-        key_target=10,
+        key_target=50,
         data_size=element_size * elements_number,
         collection_size=elements_number,
         variance=1,
-        samples=5,
-        types=["LIST", "SET", "ZSET", "HASH"],
+        samples=1,
+        types=["LIST", "SET", "ZSET", "HASH", "STREAM"],
     )
     await seeder.run(c_master)
+
+    async def get_memory(client, field):
+        info = await client.info("memory")
+        return info[field]
+
+    await asyncio.sleep(1)  # wait for heartbeat to update rss memory
+    used_memory = await get_memory(c_master, "used_memory_rss")
 
     logging.debug("Start replication and wait for full sync")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_for_replicas_state(c_replica)
+
+    peak_memory = await get_memory(c_master, "used_memory_peak_rss")
+
+    logging.info(f"Used memory {used_memory}, peak memory {peak_memory}")
+    assert peak_memory < 1.1 * used_memory
+
+    await c_replica.execute_command("memory decommit")
+    await asyncio.sleep(1)
+    replica_peak_memory = await get_memory(c_replica, "used_memory_peak_rss")
+    replica_used_memory = await get_memory(c_replica, "used_memory_rss")
+
+    logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
+    assert replica_peak_memory < 1.1 * replica_used_memory
 
     # Check replica data consisten
     replica_data = await StaticSeeder.capture(c_replica)

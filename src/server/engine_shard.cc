@@ -260,7 +260,7 @@ __thread EngineShard* EngineShard::shard_ = nullptr;
 uint64_t TEST_current_time_ms = 0;
 
 ShardId Shard(string_view v, ShardId shard_num) {
-  if (cluster::IsClusterShardedByTag()) {
+  if (IsClusterShardedByTag()) {
     v = LockTagOptions::instance().Tag(v);
   }
 
