@@ -129,9 +129,7 @@ class SinkReplyBuilder {
   void WritePieces(Ts&&... pieces);     // Copy pieces into buffer and reference buffer
   void WriteRef(std::string_view str);  // Add iovec bypassing buffer
 
-  void FinishScope();  // Called when scope ends
-  void NextVec(std::string_view str);
-
+  void FinishScope();  // Called when scope ends to flush buffer if needed
   void Send();
 
  protected:
