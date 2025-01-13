@@ -10,7 +10,6 @@
 #include "base/logging.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
-#include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -63,8 +62,8 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
 
   stats.AddTypeMemoryUsage(type, size);
 
-  if (cluster::IsClusterEnabled()) {
-    db->slots_stats[cluster::KeySlot(key)].memory_bytes += size;
+  if (IsClusterEnabled()) {
+    db->slots_stats[KeySlot(key)].memory_bytes += size;
   }
 }
 
@@ -129,11 +128,20 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   // we estimate how much memory we will take with the current capacity
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
-  size_t table_free_items = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
-  size_t obj_bytes_estimation =
-      db_slice_->bytes_per_object() * table_free_items * GetFlag(FLAGS_table_growth_margin);
+  size_t table_free_items = ((tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity) *
+                            GetFlag(FLAGS_table_growth_margin);
+
+  size_t obj_bytes_estimation = db_slice_->bytes_per_object() * table_free_items;
   bool res = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
-  VLOG(2) << "available: " << table_free_items << ", res: " << res;
+  if (res) {
+    VLOG(1) << "free_items: " << table_free_items
+            << ", obj_bytes: " << db_slice_->bytes_per_object() << " "
+            << " mem_available: " << mem_available;
+  } else {
+    LOG_EVERY_T(INFO, 1) << "Can't grow, free_items " << table_free_items
+                         << ", obj_bytes: " << db_slice_->bytes_per_object() << " "
+                         << " mem_available: " << mem_available;
+  }
 
   return res;
 }
@@ -312,7 +320,7 @@ auto DbSlice::GetStats() const -> Stats {
   return s;
 }
 
-SlotStats DbSlice::GetSlotStats(cluster::SlotId sid) const {
+SlotStats DbSlice::GetSlotStats(SlotId sid) const {
   CHECK(db_arr_[0]);
   return db_arr_[0]->slots_stats[sid];
 }
@@ -487,8 +495,8 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
-      if (cluster::IsClusterEnabled()) {
-        db.slots_stats[cluster::KeySlot(key)].total_reads++;
+      if (IsClusterEnabled()) {
+        db.slots_stats[KeySlot(key)].total_reads++;
       }
       if (res.it->second.IsExternal()) {
         if (res.it->second.IsCool())
@@ -651,8 +659,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
-  if (cluster::IsClusterEnabled()) {
-    cluster::SlotId sid = cluster::KeySlot(key);
+  if (IsClusterEnabled()) {
+    SlotId sid = KeySlot(key);
     db.slots_stats[sid].key_count += 1;
   }
 
@@ -696,7 +704,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   std::string tmp;
   auto del_entry_cb = [&](PrimeTable::iterator it) {
     std::string_view key = it->first.GetSlice(&tmp);
-    cluster::SlotId sid = cluster::KeySlot(key);
+    SlotId sid = KeySlot(key);
     if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
       PerformDeletion(Iterator::FromPrime(it), db_arr_[0].get());
     }
@@ -1073,8 +1081,8 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
 
   ++events_.update;
 
-  if (cluster::IsClusterEnabled()) {
-    db.slots_stats[cluster::KeySlot(key)].total_writes += 1;
+  if (IsClusterEnabled()) {
+    db.slots_stats[KeySlot(key)].total_writes += 1;
   }
 
   SendInvalidationTrackingMessage(key);
@@ -1377,7 +1385,7 @@ void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
 
 void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
   for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
-    cluster::SlotId sid = cluster::KeySlot(key);
+    SlotId sid = KeySlot(key);
     if (!slot_ids.Contains(sid)) {
       continue;
     }
@@ -1500,8 +1508,8 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
     --stats.listpack_blob_cnt;
   }
 
-  if (cluster::IsClusterEnabled()) {
-    cluster::SlotId sid = cluster::KeySlot(del_it.key());
+  if (IsClusterEnabled()) {
+    SlotId sid = KeySlot(del_it.key());
     table->slots_stats[sid].key_count -= 1;
   }
 

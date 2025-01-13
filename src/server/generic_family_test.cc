@@ -698,6 +698,13 @@ TEST_F(GenericFamilyTest, Restore) {
   EXPECT_EQ(resp.GetString(), "OK");
   resp = Run({"zrange", "my-zset", "0", "-1"});
   EXPECT_EQ("elon", resp.GetString());
+
+  // corrupt the dump file but keep the crc correct.
+  ZSET_LISTPACK_DUMP[0] = 0x12;
+  uint8_t crc64[8] = {0x4e, 0xa3, 0x4c, 0x89, 0xc4, 0x8b, 0xd9, 0xe4};
+  memcpy(ZSET_LISTPACK_DUMP + 19, crc64, 8);
+  resp = Run({"restore", "invalid", "0", ToSV(ZSET_LISTPACK_DUMP)});
+  EXPECT_THAT(resp, ErrArg("ERR Bad data format"));
 }
 
 TEST_F(GenericFamilyTest, Info) {
@@ -843,6 +850,26 @@ TEST_F(GenericFamilyTest, ExpireTime) {
   Run({"pexpireat", "foo", absl::StrCat(expire_time_in_ms)});
   EXPECT_EQ(expire_time_in_seconds, CheckedInt({"EXPIRETIME", "foo"}));
   EXPECT_EQ(expire_time_in_ms, CheckedInt({"PEXPIRETIME", "foo"}));
+}
+
+TEST_F(GenericFamilyTest, RestoreOOM) {
+  max_memory_limit = 20000000;
+  Run({"set", "src", string(5000, 'x')});
+  auto resp = Run({"dump", "src"});
+
+  string dump = resp.GetString();
+
+  // Let Dragonfly propagate max_memory_limit to shards. It does not have to be precise,
+  // the loop should have enough time for the internal processes to progress.
+  usleep(10000);
+  unsigned i = 0;
+  for (; i < 10000; ++i) {
+    resp = Run({"restore", absl::StrCat("dst", i), "0", dump});
+    if (resp != "OK")
+      break;
+  }
+  ASSERT_LT(i, 10000);
+  EXPECT_THAT(resp, ErrArg("Out of memory"));
 }
 
 }  // namespace dfly

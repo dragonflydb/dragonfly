@@ -923,7 +923,7 @@ std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() 
     switch (lua_type(lua_, idx)) {
       case LUA_TNUMBER:
         if (lua_isinteger(lua_, idx)) {
-          blob_len += absl::AlphaNum{lua_tointeger(lua_, idx)}.size();
+          blob_len += absl::AlphaNum(lua_tointeger(lua_, idx)).size();
         } else {
           int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
           CHECK_GT(fmt_len, 0);

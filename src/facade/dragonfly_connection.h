@@ -365,6 +365,8 @@ class Connection : public util::Connection {
   PipelineMessagePtr GetFromPipelinePool();
 
   void HandleMigrateRequest();
+  std::error_code HandleRecvSocket();
+
   bool ShouldEndAsyncFiber(const MessageHandle& msg);
 
   void LaunchAsyncFiberIfNeeded();  // Async fiber is started lazily
@@ -449,6 +451,7 @@ class Connection : public util::Connection {
       bool migration_enabled_ : 1;
       bool migration_in_process_ : 1;
       bool is_http_ : 1;
+      bool is_tls_ : 1;
     };
   };
 };

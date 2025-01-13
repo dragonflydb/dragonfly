@@ -417,7 +417,11 @@ error_code Replica::InitiatePSync() {
     io::PrefixSource ps{io_buf.InputBuffer(), Sock()};
 
     // Set LOADING state.
-    service_.RequestLoadingState();
+    if (!service_.RequestLoadingState()) {
+      return cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                               "Failed to enter LOADING state");
+    }
+
     absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
 
     if (slot_range_.has_value()) {
@@ -502,10 +506,14 @@ error_code Replica::InitiateDflySync() {
     for (auto& flow : shard_flows_)
       flow->Cancel();
   };
+
   RETURN_ON_ERR(cntx_.SwitchErrorHandler(std::move(err_handler)));
 
   // Make sure we're in LOADING state.
-  service_.RequestLoadingState();
+  if (!service_.RequestLoadingState()) {
+    return cntx_.ReportError(std::make_error_code(errc::state_not_recoverable),
+                             "Failed to enter LOADING state");
+  }
 
   // Start full sync flows.
   state_mask_.fetch_or(R_SYNCING);
@@ -637,7 +645,7 @@ error_code Replica::ConsumeRedisStream() {
     }
 
     if (!LastResponseArgs().empty()) {
-      string_view cmd = absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()));
+      string cmd = absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()));
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
       // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply

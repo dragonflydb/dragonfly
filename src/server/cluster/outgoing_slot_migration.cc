@@ -261,7 +261,7 @@ void OutgoingMigration::SyncFb() {
       continue;
     }
 
-    OnAllShards([this](auto& migration) { migration->RunSync(); });
+    OnAllShards([](auto& migration) { migration->RunSync(); });
 
     if (cntx_.GetError()) {
       continue;

@@ -35,7 +35,7 @@ class Journal {
   LSN GetLsn() const;
 
   void RecordEntry(TxId txid, Op opcode, DbIndex dbid, unsigned shard_cnt,
-                   std::optional<cluster::SlotId> slot, Entry::Payload payload);
+                   std::optional<SlotId> slot, Entry::Payload payload);
 
   void SetFlushMode(bool allow_flush);
 

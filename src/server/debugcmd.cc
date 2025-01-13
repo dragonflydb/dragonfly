@@ -726,7 +726,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         if (!absl::SimpleAtoi(slot_str, &slot_id)) {
           return facade::OpStatus::INVALID_INT;
         }
-        if (slot_id > cluster::kMaxSlotNum) {
+        if (slot_id > kMaxSlotNum) {
           return facade::OpStatus::INVALID_VALUE;
         }
         return slot_id;
@@ -742,8 +742,8 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         builder->SendError(end.status());
         return nullopt;
       }
-      options.slot_range = cluster::SlotRange{.start = static_cast<cluster::SlotId>(start.value()),
-                                              .end = static_cast<cluster::SlotId>(end.value())};
+      options.slot_range = cluster::SlotRange{.start = static_cast<SlotId>(start.value()),
+                                              .end = static_cast<SlotId>(end.value())};
 
     } else {
       builder->SendError(kSyntaxErr);
@@ -815,7 +815,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
       // <key_prefix>:<from+total_count+num_of_keys-1> and continue until num_of_keys are added.
 
       // Add keys only in slot range.
-      cluster::SlotId sid = cluster::KeySlot(key);
+      SlotId sid = KeySlot(key);
       if (sid < options.slot_range->start || sid > options.slot_range->end) {
         ++index;
         continue;

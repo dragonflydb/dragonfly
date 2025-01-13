@@ -239,7 +239,7 @@ class DbSlice {
   Stats GetStats() const;
 
   // Returns slot statistics for db 0.
-  SlotStats GetSlotStats(cluster::SlotId sid) const;
+  SlotStats GetSlotStats(SlotId sid) const;
 
   void UpdateExpireBase(uint64_t now, unsigned generation) {
     expire_base_[generation & 1] = now;
