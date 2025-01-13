@@ -1773,8 +1773,9 @@ void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> stat
     }
   };
 
-  for (auto* listener : listeners_)
-    listener->TraverseConnectionsOnThread(cb);
+  for (auto* listener : listeners_) {
+    listener->TraverseConnectionsOnThread(cb, UINT32_MAX, nullptr);
+  }
 }
 
 string GetPassword() {
