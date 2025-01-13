@@ -93,28 +93,7 @@ TEST_F(StreamFamilyTest, AddExtended) {
   EXPECT_THAT(Run({"xlen", "key4"}), IntArg(601));
 }
 
-TEST_F(StreamFamilyTest, Xrange) {
-}
-
-TEST_F(StreamFamilyTest, Range) {
-  Run({"xadd", "key", "1-*", "f1", "v1"});
-  Run({"xadd", "key", "1-*", "f2", "v2"});
-  auto resp = Run({"xrange", "key", "-", "+"});
-  EXPECT_THAT(resp, ArrLen(2));
-  auto sub_arr = resp.GetVec();
-  EXPECT_THAT(sub_arr, ElementsAre(ArrLen(2), ArrLen(2)));
-  auto sub0 = sub_arr[0].GetVec();
-  auto sub1 = sub_arr[1].GetVec();
-  EXPECT_THAT(sub0, ElementsAre("1-0", ArrLen(2)));
-  EXPECT_THAT(sub1, ElementsAre("1-1", ArrLen(2)));
-
-  resp = Run({"xrevrange", "key", "+", "-"});
-  sub_arr = resp.GetVec();
-  sub0 = sub_arr[0].GetVec();
-  sub1 = sub_arr[1].GetVec();
-  EXPECT_THAT(sub0, ElementsAre("1-1", ArrLen(2)));
-  EXPECT_THAT(sub1, ElementsAre("1-0", ArrLen(2)));
-
+TEST_F(StreamFamilyTest, XrangeRangeAutocomplete) {
   Run({"xadd", "mystream", "1609459200000-0", "0", "0"});
   Run({"xadd", "mystream", "1609459200001-0", "1", "1"});
   Run({"xadd", "mystream", "1609459200001-1", "2", "2"});
@@ -137,6 +116,26 @@ TEST_F(StreamFamilyTest, Range) {
   sub1 = sub_arr[1].GetVec();
   EXPECT_THAT(sub0, ElementsAre("1609459200000-0", ArrLen(2)));
   EXPECT_THAT(sub1, ElementsAre("1609459200001-0", ArrLen(2)));
+}
+
+TEST_F(StreamFamilyTest, Range) {
+  Run({"xadd", "key", "1-*", "f1", "v1"});
+  Run({"xadd", "key", "1-*", "f2", "v2"});
+  auto resp = Run({"xrange", "key", "-", "+"});
+  EXPECT_THAT(resp, ArrLen(2));
+  auto sub_arr = resp.GetVec();
+  EXPECT_THAT(sub_arr, ElementsAre(ArrLen(2), ArrLen(2)));
+  auto sub0 = sub_arr[0].GetVec();
+  auto sub1 = sub_arr[1].GetVec();
+  EXPECT_THAT(sub0, ElementsAre("1-0", ArrLen(2)));
+  EXPECT_THAT(sub1, ElementsAre("1-1", ArrLen(2)));
+
+  resp = Run({"xrevrange", "key", "+", "-"});
+  sub_arr = resp.GetVec();
+  sub0 = sub_arr[0].GetVec();
+  sub1 = sub_arr[1].GetVec();
+  EXPECT_THAT(sub0, ElementsAre("1-1", ArrLen(2)));
+  EXPECT_THAT(sub1, ElementsAre("1-0", ArrLen(2)));
 }
 
 TEST_F(StreamFamilyTest, GroupCreate) {
