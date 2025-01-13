@@ -49,7 +49,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        if [[ ${{inputs.epoll}} == 'true'  ]]; then
+        if [[ "${{inputs.epoll}}" == 'true' ]]; then
           filter = "${{inputs.filter}} and not exclude_epoll"
         else
           filter = "${{inputs.filter}}"
