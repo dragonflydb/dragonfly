@@ -163,9 +163,11 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
 int streamDeleteItem(stream *s, streamID *id);
 void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_id);
 long long streamEstimateDistanceFromFirstEverEntry(stream *s, streamID *id);
-int64_t streamTrim(stream *s, streamAddTrimArgs *args);
-int64_t streamTrimByLength(stream *s, long long maxlen, int approx);
-int64_t streamTrimByID(stream *s, streamID minid, int approx);
+int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id);
+int64_t streamTrimByLength(stream *s, long long maxlen, int approx, streamID *last_id);
+int64_t streamTrimByLengthLimited(stream *s, long long maxlen, int approx, long long limit, streamID *last_id);
+int64_t streamTrimByID(stream *s, streamID minid, int approx, streamID *last_id);
+int64_t streamTrimByIDLimited(stream *s, streamID minid, int approx, long long limit, streamID *last_id);
 void streamFreeCG(streamCG *cg);
 void streamDelConsumer(streamCG *cg, streamConsumer *consumer);
 void streamLastValidID(stream *s, streamID *maxid);
