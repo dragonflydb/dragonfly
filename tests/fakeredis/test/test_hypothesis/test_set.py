@@ -24,9 +24,6 @@ class TestSet(BaseTest):
         | commands(st.just("smove"), keys, keys, fields)
         | commands(st.just("srem"), keys, st.lists(fields))
     )
-    # TODO:
-    # - find a way to test srandmember, spop which are random
-    # - sscan
     create_command_strategy = commands(
         st.just("sadd"), keys, st.lists(fields, min_size=1)
     )
