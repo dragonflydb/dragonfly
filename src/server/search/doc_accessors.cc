@@ -81,8 +81,8 @@ FieldValue ExtractSortableValueFromJson(const search::Schema& schema, string_vie
 }
 
 /* Returns true if json elements were successfully processed. */
-template <typename Callback>
-bool ProcessJsonElements(const std::vector<JsonType>& json_elements, Callback&& cb) {
+bool ProcessJsonElements(const std::vector<JsonType>& json_elements,
+                         absl::FunctionRef<bool(const JsonType&)> cb) {
   auto process = [&cb](const auto& json_range) -> bool {
     for (const auto& json : json_range) {
       if (!json.is_null() && !cb(json)) {
