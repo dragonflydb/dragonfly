@@ -51,12 +51,13 @@ runs:
 
         if [[ "${{inputs.epoll}}" == 'true' ]]; then
           export FILTER="${{inputs.filter}} and not exclude_epoll"
+          # Run only replication tests with epoll
+          timeout 50m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly/replication_test.py --df force_epoll=true --log-cli-level=INFO || code=$?
         else
           export FILTER="${{inputs.filter}}"
+          # Run only replication tests with epoll
+          timeout 50m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly/replication_test.py --log-cli-level=INFO || code=$?
         fi
-
-        # Run only replication tests with epoll
-        timeout 50m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly/replication_test.py --df force_epoll=true --log-cli-level=INFO || code=$?
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
