@@ -56,7 +56,7 @@ runs:
         fi
 
         # Run only replication tests with epoll
-        timeout 50m pytest -m "$filter" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly/replication_test.py --df force_epoll=true --log-cli-level=INFO || code=$?
+        timeout 50m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly/replication_test.py --df force_epoll=true --log-cli-level=INFO || code=$?
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then
