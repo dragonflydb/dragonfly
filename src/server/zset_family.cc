@@ -1553,7 +1553,7 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
   }
   auto cb = [&](Transaction* t, EngineShard* shard) {
     if (!key_shard.has_value() || *key_shard == shard->shard_id()) {
-      result = std::move(OpPopCount(range_spec, t->GetOpArgs(shard), key));
+      result = OpPopCount(range_spec, t->GetOpArgs(shard), key);
     }
     return OpStatus::OK;
   };
