@@ -1437,6 +1437,7 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_finalization_timeout_ms": 5})
 async def test_network_disconnect_during_migration(df_factory):
     instances = [
@@ -1927,6 +1928,7 @@ async def test_snapshoting_during_migration(
     assert await seeder.compare(capture_before_migration, nodes[1].instance.port)
 
 
+@pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 @pytest.mark.asyncio
 async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
@@ -2524,6 +2526,7 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
     await check_for_no_state_status([node.admin_client for node in nodes])
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):

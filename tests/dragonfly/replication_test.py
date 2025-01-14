@@ -2666,6 +2666,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     await assert_replica_reconnections(replica, 0)
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize(
     "element_size, elements_number",
     [(16, 30000), (30000, 16)],
