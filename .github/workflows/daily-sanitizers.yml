@@ -59,7 +59,7 @@ jobs:
 
       - name: Configure & Build
         run: |
-          sudo apt install clang
+          apt install clang
           which clang
           echo "ulimit is"
           ulimit -s
