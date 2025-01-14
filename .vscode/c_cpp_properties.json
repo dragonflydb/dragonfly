@@ -3,12 +3,15 @@
         {
             "name": "Linux",
             "includePath": [
-                "${default}"
+                "${default}",
+                "/usr/include/x86_64-linux-gnu"
             ],
             "cStandard": "c17",
             "cppStandard": "c++17",
             "intelliSenseMode": "${default}",
-            "compileCommands": "${workspaceFolder}/build-dbg/compile_commands.json",
+            "compileCommands": [
+                "${workspaceFolder}/build-dbg/compile_commands.json"
+            ],
             "configurationProvider": "ms-vscode.cmake-tools"
         }
     ],

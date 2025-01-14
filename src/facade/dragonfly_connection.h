@@ -393,6 +393,7 @@ class Connection : public util::Connection {
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
 
+  util::FiberSocketBase::ProvidedBuffer recv_buf_;
   io::IoBuf io_buf_;  // used in io loop and parsers
   std::unique_ptr<RedisParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
@@ -447,6 +448,7 @@ class Connection : public util::Connection {
       bool migration_in_process_ : 1;
       bool is_http_ : 1;
       bool is_tls_ : 1;
+      bool recv_provided_ : 1;
     };
   };
 };

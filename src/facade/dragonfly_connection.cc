@@ -31,6 +31,8 @@
 
 #ifdef __linux__
 #include "util/fibers/uring_file.h"
+#include "util/fibers/uring_proactor.h"
+#include "util/fibers/uring_socket.h"
 #endif
 
 using namespace std;
@@ -942,6 +944,17 @@ io::Result<bool> Connection::CheckForHttpProto() {
 void Connection::ConnectionFlow() {
   DCHECK(reply_builder_);
 
+  if (!is_tls_ && socket_->proactor()->GetKind() == ProactorBase::IOURING) {
+#ifdef __linux__
+    auto* up = static_cast<fb2::UringProactor*>(socket_->proactor());
+    recv_provided_ = up->BufRingEntrySize(kRecvSockGid) > 0;
+    if (recv_provided_) {
+      auto* us = static_cast<fb2::UringSocket*>(socket_.get());
+      us->set_bufring_id(kRecvSockGid);
+      us->EnableRecvMultishot();
+    }
+#endif
+  }
   ++stats_->num_conns;
   ++stats_->conn_received_cnt;
   stats_->read_buf_capacity += io_buf_.Capacity();
@@ -1105,8 +1118,35 @@ Connection::ParserStatus Connection::ParseRedis() {
     return {FromArgs(std::move(parse_args), tlh)};
   };
 
+  bool use_recv_buf = recv_buf_.res_len > 0;
+  RedisParser::Buffer input_buf;
+  size_t available_to_parse = 0;
+
+  if (use_recv_buf) {
+    uint8_t* src = nullptr;
+#ifdef __linux__
+    fb2::UringProactor* up = static_cast<fb2::UringProactor*>(socket_->proactor());
+    src = up->GetBufRingPtr(kRecvSockGid, recv_buf_.buf_id);
+#endif
+    available_to_parse = recv_buf_.res_len;
+    input_buf = {src, std::min<size_t>(kRecvBufSize, available_to_parse)};
+
+  } else {
+    input_buf = io_buf_.InputBuffer();
+    available_to_parse = io_buf_.InputLen();
+  }
+
   do {
-    result = redis_parser_->Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
+    if (input_buf.empty()) {  // can happen only with bundles
+      ++recv_buf_.buf_pos;
+#ifdef __linux__
+      fb2::UringProactor* up = static_cast<fb2::UringProactor*>(socket_->proactor());
+      recv_buf_.buf_id = up->GetBufIdByPos(kRecvSockGid, recv_buf_.buf_pos);
+      uint8_t* src = up->GetBufRingPtr(kRecvSockGid, recv_buf_.buf_id);
+      input_buf = {src, std::min<size_t>(kRecvBufSize, available_to_parse)};
+#endif
+    }
+    result = redis_parser_->Parse(input_buf, &consumed, &parse_args);
     request_consumed_bytes_ += consumed;
     if (result == RedisParser::OK && !parse_args.empty()) {
       if (RespExpr& first = parse_args.front(); first.type == RespExpr::STRING)
@@ -1115,7 +1155,7 @@ Connection::ParserStatus Connection::ParseRedis() {
       if (io_req_size_hist)
         io_req_size_hist->Add(request_consumed_bytes_);
       request_consumed_bytes_ = 0;
-      bool has_more = consumed < io_buf_.InputLen();
+      bool has_more = consumed < available_to_parse;
 
       if (tl_traffic_logger.log_file && IsMain() /* log only on the main interface */) {
         LogTraffic(id_, has_more, absl::MakeSpan(parse_args), service_->GetContextInfo(cc_.get()));
@@ -1123,15 +1163,24 @@ Connection::ParserStatus Connection::ParseRedis() {
 
       DispatchSingle(has_more, dispatch_sync, dispatch_async);
     }
-    io_buf_.ConsumeInput(consumed);
-  } while (RedisParser::OK == result && io_buf_.InputLen() > 0 && !reply_builder_->GetError());
+    available_to_parse -= consumed;
+    input_buf.remove_prefix(consumed);
+  } while (RedisParser::OK == result && available_to_parse > 0 && !reply_builder_->GetError());
 
+  if (use_recv_buf) {
+    socket_->ReturnProvided(recv_buf_);
+    recv_buf_.res_len = 0;
+  } else {
+    io_buf_.ConsumeInput(io_buf_.InputLen());
+  }
   parser_error_ = result;
   if (result == RedisParser::OK)
     return OK;
 
   if (result == RedisParser::INPUT_PENDING)
     return NEED_MORE;
+
+  VLOG(1) << "Parser error " << result;
 
   return ERROR;
 }
@@ -1260,23 +1309,37 @@ void Connection::HandleMigrateRequest() {
 }
 
 error_code Connection::HandleRecvSocket() {
-  io::MutableBytes append_buf = io_buf_.AppendBuffer();
-  DCHECK(!append_buf.empty());
-
   phase_ = READ_SOCKET;
   error_code ec;
 
-  ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
-  last_interaction_ = time(nullptr);
+  if (!is_tls_ && recv_provided_ && io_buf_.InputBuffer().empty()) {
+    stats_->num_recv_provided_calls++;
 
-  if (!recv_sz) {
-    return recv_sz.error();
+    unsigned res = socket_->RecvProvided(1, &recv_buf_);
+    CHECK_EQ(res, 1u);
+    if (recv_buf_.res_len < 0) {
+      return error_code{-recv_buf_.res_len, system_category()};
+    }
+
+    CHECK_GT(recv_buf_.res_len, 0);
+    CHECK_EQ(recv_buf_.type, FiberSocketBase::kBufRingType);  // We only support this type.
+    stats_->io_read_bytes += recv_buf_.res_len;
+  } else {
+    io::MutableBytes append_buf = io_buf_.AppendBuffer();
+    DCHECK(!append_buf.empty());
+
+    ::io::Result<size_t> recv_sz = socket_->Recv(append_buf);
+    last_interaction_ = time(nullptr);
+
+    if (!recv_sz) {
+      return recv_sz.error();
+    }
+
+    size_t commit_sz = *recv_sz;
+    io_buf_.CommitWrite(commit_sz);
+    stats_->io_read_bytes += commit_sz;
   }
 
-  size_t commit_sz = *recv_sz;
-
-  io_buf_.CommitWrite(commit_sz);
-  stats_->io_read_bytes += commit_sz;
   ++stats_->io_read_cnt;
 
   return ec;
@@ -1288,6 +1351,7 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
 
   size_t max_iobfuf_len = GetFlag(FLAGS_max_client_iobuf_len);
   auto* peer = socket_.get();
+  recv_buf_.res_len = 0;
 
   do {
     HandleMigrateRequest();
@@ -1306,7 +1370,7 @@ auto Connection::IoLoop() -> variant<error_code, ParserStatus> {
       parse_status = ParseMemcache();
     }
 
-    if (parse_status == NEED_MORE) {
+    if (parse_status == NEED_MORE && recv_buf_.res_len == 0) {
       parse_status = OK;
 
       size_t capacity = io_buf_.Capacity();

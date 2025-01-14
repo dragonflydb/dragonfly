@@ -107,6 +107,7 @@ struct ConnectionStats {
   uint32_t num_conns = 0;
   uint32_t num_blocked_clients = 0;
   uint64_t num_migrations = 0;
+  uint64_t num_recv_provided_calls = 0;
 
   // Number of events when the pipeline queue was over the limit and was throttled.
   uint64_t pipeline_throttle_count = 0;
