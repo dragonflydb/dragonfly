@@ -1,7 +1,7 @@
 import functools
 import math
 import sys
-from typing import Any
+from typing import Any, List, Tuple, Type, Optional
 
 import fakeredis
 import hypothesis
@@ -156,11 +156,10 @@ class Command:
             return _normalize_if_number
 
     @property
-    def testable(self):
+    def testable(self) -> bool:
         """Whether this command is suitable for a test.
 
-        The fuzzer can create commands with behaviour that is
-        non-deterministic, not supported, or which hits redis bugs.
+        The fuzzer can create commands with behaviour that is non-deterministic, not supported, or which hits redis bugs.
         """
         N = len(self.args)
         if N == 0:
@@ -178,7 +177,7 @@ class Command:
         return True
 
 
-def zero_or_more(*args):
+def zero_or_more(*args) -> List[SearchStrategy]:
     return [st.none() | st.just(arg) for arg in args]
 
 
@@ -249,13 +248,15 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             pass
         self.real.flushall()
 
-    def teardown(self):
+    def teardown(self) -> None:
         self.real.connection_pool.disconnect()
         self.fake.connection_pool.disconnect()
         super().teardown()
 
     @staticmethod
-    def _evaluate(client, command):
+    def _evaluate(
+        client: redis.Redis, command
+    ) -> Tuple[Any, Optional[Type[Exception]]]:
         try:
             result = client.execute_command(*command.args)
             if result != "QUEUED":
@@ -265,20 +266,18 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             result = exc = e
         return _wrap_exceptions(result), exc
 
-    def _compare(self, command):
+    def _compare(self, command) -> None:
         fake_result, fake_exc = self._evaluate(self.fake, command)
         real_result, real_exc = self._evaluate(self.real, command)
 
         if fake_exc is not None and real_exc is None:
             print(
-                "{} raised on only on fake when running {}".format(fake_exc, command),
+                f"{fake_exc} raised on only on fake when running {command}",
                 file=sys.stderr,
             )
             raise fake_exc
         elif real_exc is not None and fake_exc is None:
-            assert real_exc == fake_exc, "Expected exception {} not raised".format(
-                real_exc
-            )
+            assert real_exc == fake_exc, f"Expected exception {real_exc} not raised"
         elif (
             real_exc is None
             and isinstance(real_result, list)
@@ -286,8 +285,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             and command.args[0].lower() == "exec"
         ):
             assert fake_result is not None
-            # Transactions need to use the normalize functions of the
-            # component commands.
+            # Transactions need to use the normalize functions of the component commands.
             assert len(self.transaction_normalize) == len(real_result)
             assert len(self.transaction_normalize) == len(fake_result)
             for n, r, f in zip(self.transaction_normalize, real_result, fake_result):
@@ -296,9 +294,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
         else:
             assert fake_result == real_result or (
                 type(fake_result) is float and fake_result == pytest.approx(real_result)
-            ), "Discrepancy when running command {}, fake({}) != real({})".format(
-                command, fake_result, real_result
-            )
+            ), f"Discrepancy when running command {command}, fake({fake_result}) != real({real_result})"
             if real_result == b"QUEUED":
                 # Since redis removes the distinction between simple strings and
                 # bulk strings, this might not actually indicate that we're in a
@@ -325,7 +321,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             lambda self: st.lists(self.create_command_strategy)
         )
     )
-    def init_data(self, commands):
+    def init_data(self, commands: SearchStrategy[List]):
         for command in commands:
             self._compare(command)
         self.initialized_data = True
