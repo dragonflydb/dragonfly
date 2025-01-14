@@ -2713,7 +2713,7 @@ async def test_big_containers(df_factory, element_size, elements_number):
     replica_used_memory = await get_memory(c_replica, "used_memory_rss")
 
     logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
-    assert replica_peak_memory < 1.4 * replica_used_memory
+    assert replica_peak_memory < 1.1 * replica_used_memory
 
     # Check replica data consisten
     replica_data = await StaticSeeder.capture(c_replica)
