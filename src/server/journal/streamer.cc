@@ -224,6 +224,7 @@ void RestoreStreamer::Run() {
       auto* blocking_counter = db_slice_->BlockingCounter();
       std::lock_guard blocking_counter_guard(*blocking_counter);
 
+      stats_.buckets_loop++;
       WriteBucket(it);
     });
 
@@ -232,10 +233,19 @@ void RestoreStreamer::Run() {
       last_yield = 0;
     }
   } while (cursor);
+
+  VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
+          << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
 }
 
 void RestoreStreamer::SendFinalize(long attempt) {
-  VLOG(1) << "RestoreStreamer LSN opcode for : " << db_slice_->shard_id() << " attempt " << attempt;
+  VLOG(1) << "RestoreStreamer LSN of " << my_slots_.ToSlotRanges().ToString() << ", shard "
+          << db_slice_->shard_id() << " attempt " << attempt << " with " << stats_.commands
+          << " commands. Buckets looped " << stats_.buckets_loop << ", buckets on_db_update "
+          << stats_.buckets_on_db_update << ", buckets skipped " << stats_.buckets_skipped
+          << ", buckets written " << stats_.buckets_written << ". Keys skipped "
+          << stats_.keys_skipped << ", keys written " << stats_.keys_written;
+
   journal::Entry entry(journal::Op::LSN, attempt);
 
   io::StringSink sink;
@@ -287,12 +297,15 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
 
 void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   if (it.GetVersion() < snapshot_version_) {
+    stats_.buckets_written++;
+
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
     for (; !it.is_done(); ++it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
       if (ShouldWrite(key)) {
+        stats_.keys_written++;
         uint64_t expire = 0;
         if (pv.HasExpire()) {
           auto eit = db_slice_->databases()[0]->expire.Find(it->first);
@@ -300,8 +313,12 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
         }
 
         WriteEntry(key, it->first, pv, expire);
+      } else {
+        stats_.keys_skipped++;
       }
     }
+  } else {
+    stats_.buckets_skipped++;
   }
   ThrottleIfNeeded();
 }
@@ -309,6 +326,8 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
+
+  stats_.buckets_on_db_update++;
 
   PrimeTable* table = db_slice_->GetTables(0).first;
 
@@ -331,7 +350,7 @@ void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const Pr
         ThrottleIfNeeded();
       },
       ServerState::tlocal()->serialization_max_chunk_size);
-  serializer.SerializeEntry(key, pk, pv, expire_ms);
+  stats_.commands += serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
 }  // namespace dfly

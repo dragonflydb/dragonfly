@@ -106,6 +106,16 @@ class RestoreStreamer : public JournalStreamer {
   void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
 
+  struct Stats {
+    size_t buckets_skipped = 0;
+    size_t buckets_written = 0;
+    size_t buckets_loop = 0;
+    size_t buckets_on_db_update = 0;
+    size_t keys_written = 0;
+    size_t keys_skipped = 0;
+    size_t commands = 0;
+  };
+
   DbSlice* db_slice_;
   DbTableArray db_array_;
   uint64_t snapshot_version_ = 0;
@@ -113,6 +123,7 @@ class RestoreStreamer : public JournalStreamer {
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
   ThreadLocalMutex big_value_mu_;
+  Stats stats_;
 };
 
 }  // namespace dfly
