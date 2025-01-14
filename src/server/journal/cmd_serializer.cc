@@ -34,7 +34,10 @@ class CommandAggregator {
 
     if (commit_mode != CommitMode::kNoCommit && agg_bytes_ >= max_aggragation_bytes_) {
       CommitPending();
+      return true;
     }
+
+    return false;
   }
 
  private:
