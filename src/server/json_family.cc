@@ -319,9 +319,18 @@ bool JsonAreEquals(const JsonType& lhs, const JsonType& rhs) {
   }
 }
 
-template <typename Callback>
+// Use this method on the coordinator thread
+std::optional<JsonType> JsonFromString(std::string_view input) {
+  return dfly::JsonFromString(input, PMR_NS::get_default_resource());
+}
+
+// Use this method on the shard thread
+std::optional<JsonType> ShardJsonFromString(std::string_view input) {
+  return dfly::JsonFromString(input, CompactObj::memory_resource());
+}
+
 OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view key,
-                                           Callback parse_json_value) {
+                                           string_view json_str) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
@@ -331,17 +340,20 @@ OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view ke
 
   op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, res.it->second);
 
-  OpResult<JsonType> json_value = parse_json_value();
-  RETURN_ON_BAD_STATUS(json_value);
+  std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+  if (!parsed_json) {
+    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    return OpStatus::INVALID_VALUE;
+  }
 
   if (JsonEnconding() == kEncodingJsonFlat) {
     flexbuffers::Builder fbb;
-    json::FromJsonType(json_value.value(), &fbb);
+    json::FromJsonType(*parsed_json, &fbb);
     fbb.Finish();
     const auto& buf = fbb.GetBuffer();
     res.it->second.SetJson(buf.data(), buf.size());
   } else {
-    res.it->second.SetJson(*std::move(json_value));
+    res.it->second.SetJson(std::move(*parsed_json));
   }
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, res.it->second);
   return std::move(res);
@@ -386,16 +398,6 @@ string JsonTypeToName(const JsonType& val) {
   }
 
   return std::string{};
-}
-
-// Use this method on the coordinator thread
-std::optional<JsonType> JsonFromString(std::string_view input) {
-  return dfly::JsonFromString(input, PMR_NS::get_default_resource());
-}
-
-// Use this method on the shard thread
-std::optional<JsonType> ShardJsonFromString(std::string_view input) {
-  return dfly::JsonFromString(input, CompactObj::memory_resource());
 }
 
 OpResult<JsonType*> GetJson(const OpArgs& op_args, string_view key) {
@@ -953,8 +955,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
 
   if (json_path.HoldsJsonPath()) {
     const json::Path& path = json_path.AsJsonPath();
-    long deletions = json::MutatePath(
-        path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
+    long deletions =
+        json::MutatePath(path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
     return deletions;
   }
 
@@ -1308,15 +1310,6 @@ auto OpResp(const OpArgs& op_args, string_view key, const WrappedJsonPath& json_
 OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
                      const WrappedJsonPath& json_path, std::string_view json_str,
                      bool is_nx_condition, bool is_xx_condition) {
-  auto parse_json = [&json_str]() -> OpResult<JsonType> {
-    std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
-    if (!parsed_json) {
-      VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-      return OpStatus::SYNTAX_ERR;
-    }
-    return parsed_json.value();
-  };
-
   // The whole key should be replaced.
   // NOTE: unlike in Redis, we are overriding the value when the path is "$"
   // this is regardless of the current key type. In redis if the key exists
@@ -1335,13 +1328,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
     }
 
     JsonMemTracker mem_tracker;
-    // We need to deep copy parsed_json.value() and not use move! The reason is that otherwise
-    // it's really difficult to properly track memory deltas because even if we move below,
-    // the deallocation of parsed_json won't happen in the scope of SetJson but in the scope
-    // of this function. Because of this, the memory tracking will be off. Another solution here,
-    // is to use absl::Cleanup and dispatch another Find() but that's too complicated because then
-    // you need to take into account the order of destructors.
-    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, std::move(parse_json));
+    OpResult<DbSlice::AddOrFindResult> st = SetJson(op_args, key, json_str);
     RETURN_ON_BAD_STATUS(st);
     mem_tracker.SetJsonSize(st->it->second, st->is_new);
     return true;
@@ -1355,18 +1342,19 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   bool path_exists = false;
   bool operation_result = false;
 
-  OpResult<JsonType> parsed_json = parse_json();
-  RETURN_ON_BAD_STATUS(parsed_json);
+  optional<JsonType> parsed_json = ShardJsonFromString(json_str);
+  if (!parsed_json) {
+    VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
+    return OpStatus::INVALID_VALUE;
+  }
   const JsonType& new_json = parsed_json.value();
 
   auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
     path_exists = true;
     if (!is_nx_condition) {
       operation_result = true;
-      static_assert(
-          std::is_same_v<std::allocator_traits<JsonType>::propagate_on_container_copy_assignment,
-                         std::false_type>);
-      *val = new_json;
+      *val =
+          JsonType(new_json, std::pmr::polymorphic_allocator<char>{CompactObj::memory_resource()});
     }
     return {};
   };

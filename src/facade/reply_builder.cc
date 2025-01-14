@@ -30,13 +30,7 @@ namespace facade {
 
 namespace {
 
-inline iovec constexpr IoVec(std::string_view s) {
-  iovec r{const_cast<char*>(s.data()), s.size()};
-  return r;
-}
-
 constexpr char kCRLF[] = "\r\n";
-constexpr char kErrPref[] = "-ERR ";
 constexpr char kSimplePref[] = "+";
 constexpr char kLengthPrefix[] = "$";
 constexpr char kDoublePref[] = ",";
@@ -108,12 +102,20 @@ template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
   if (size_t required = (piece_size(pieces) + ...); buffer_.AppendLen() <= required)
     Flush(required);
 
+  auto iovec_end = [](const iovec& v) { return reinterpret_cast<char*>(v.iov_base) + v.iov_len; };
+
   // Ensure last iovec points to buffer segment
   char* dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
-  if (vecs_.empty() || ((char*)vecs_.back().iov_base) + vecs_.back().iov_len != dest)
-    NextVec({dest, 0});
+  if (vecs_.empty()) {
+    vecs_.push_back(iovec{dest, 0});
+  } else if (iovec_end(vecs_.back()) != dest) {
+    if (vecs_.size() >= IOV_MAX - 2)
+      Flush();
+    dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
+    vecs_.push_back(iovec{dest, 0});
+  }
 
-  dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
+  DCHECK(iovec_end(vecs_.back()) == dest);
   char* ptr = dest;
   ([&]() { ptr = write_piece(pieces, ptr); }(), ...);
 
@@ -124,7 +126,9 @@ template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
 }
 
 void SinkReplyBuilder::WriteRef(std::string_view str) {
-  NextVec(str);
+  if (vecs_.size() >= IOV_MAX - 2)
+    Flush();
+  vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
   total_size_ += str.size();
 }
 
@@ -183,7 +187,7 @@ void SinkReplyBuilder::FinishScope() {
   if (ref_bytes > buffer_.AppendLen())
     return Flush(ref_bytes);
 
-  // Copy all extenral references to buffer to safely keep batching
+  // Copy all external references to buffer to safely keep batching
   for (size_t i = guaranteed_pieces_; i < vecs_.size(); i++) {
     auto ib = buffer_.InputBuffer();
     if (vecs_[i].iov_base >= ib.data() && vecs_[i].iov_base <= ib.data() + ib.size())
@@ -196,12 +200,6 @@ void SinkReplyBuilder::FinishScope() {
     vecs_[i].iov_base = dest;
   }
   guaranteed_pieces_ = vecs_.size();  // all vecs are pieces
-}
-
-void SinkReplyBuilder::NextVec(std::string_view str) {
-  if (vecs_.size() >= IOV_MAX - 2)
-    Flush();
-  vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
 }
 
 MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink), all_(0) {
@@ -312,6 +310,7 @@ void RedisReplyBuilderBase::SendBulkString(std::string_view str) {
   if (str.size() <= kMaxInlineSize)
     return WritePieces(kLengthPrefix, uint32_t(str.size()), kCRLF, str, kCRLF);
 
+  DVLOG(1) << "SendBulk " << str.size();
   WritePieces(kLengthPrefix, uint32_t(str.size()), kCRLF);
   WriteRef(str);
   WritePieces(kCRLF);

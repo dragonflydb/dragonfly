@@ -19,7 +19,7 @@ namespace dfly {
 class CommandRegistry;
 struct CommandContext;
 class Transaction;
-class OpArgs;
+struct OpArgs;
 
 class ZSetFamily {
  public:
