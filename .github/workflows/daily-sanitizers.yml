@@ -59,6 +59,8 @@ jobs:
 
       - name: Configure & Build
         run: |
+          apt update
+          apt upgrade
           apt install clang
           which clang
           echo "ulimit is"
