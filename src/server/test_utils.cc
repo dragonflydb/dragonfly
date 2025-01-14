@@ -57,8 +57,8 @@ static vector<string> SplitLines(const std::string& src) {
   return res;
 }
 
-TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
-    : facade::Connection(protocol, nullptr, nullptr, nullptr), sink_(sink) {
+TestConnection::TestConnection(Protocol protocol)
+    : facade::Connection(protocol, nullptr, nullptr, nullptr) {
   cc_.reset(new dfly::ConnectionContext(this, {}));
   cc_->skip_acl_validation = true;
   SetSocket(ProactorBase::me()->CreateSocket());
@@ -141,7 +141,7 @@ class BaseFamilyTest::TestConnWrapper {
 };
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
-    : dummy_conn_(new TestConnection(proto, &sink_)) {
+    : dummy_conn_(new TestConnection(proto)) {
   switch (proto) {
     case Protocol::REDIS:
       builder_.reset(new RedisReplyBuilder{&sink_});

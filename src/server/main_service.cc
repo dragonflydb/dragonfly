@@ -1486,7 +1486,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
                          MCReplyBuilder* mc_builder, facade::ConnectionContext* cntx) {
   absl::InlinedVector<MutableSlice, 8> args;
   char cmd_name[16];
-  char ttl[16];
+  char ttl[absl::numbers_internal::kFastToBufferSize];
   char store_opt[32] = {0};
   char ttl_op[] = "EXAT";
 

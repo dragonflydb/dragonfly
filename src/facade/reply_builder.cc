@@ -30,13 +30,7 @@ namespace facade {
 
 namespace {
 
-inline iovec constexpr IoVec(std::string_view s) {
-  iovec r{const_cast<char*>(s.data()), s.size()};
-  return r;
-}
-
 constexpr char kCRLF[] = "\r\n";
-constexpr char kErrPref[] = "-ERR ";
 constexpr char kSimplePref[] = "+";
 constexpr char kLengthPrefix[] = "$";
 constexpr char kDoublePref[] = ",";

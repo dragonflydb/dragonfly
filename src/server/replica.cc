@@ -645,7 +645,7 @@ error_code Replica::ConsumeRedisStream() {
     }
 
     if (!LastResponseArgs().empty()) {
-      string_view cmd = absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()));
+      string cmd = absl::CHexEscape(ToSV(LastResponseArgs()[0].GetBuf()));
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
       // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we simply

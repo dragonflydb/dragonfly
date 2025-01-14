@@ -112,11 +112,17 @@ std::optional<double> ParseNumericField(std::string_view value);
    suppress this false warning, we temporarily disable it around this block of code using GCC
    diagnostic directives. */
 template <typename InlinedVector> std::optional<InlinedVector> EmptyAccessResult() {
+#if !defined(__clang__)
   // GCC 13.1 throws spurious warnings around this code.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
+
   return InlinedVector{};
+
+#if !defined(__clang__)
 #pragma GCC diagnostic pop
+#endif
 }
 
 }  // namespace dfly::search
