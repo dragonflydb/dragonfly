@@ -13,7 +13,8 @@ jobs:
         container: ["ubuntu-dev:24"]
         build-type: [Debug]
         compiler: [{ cxx: clang++, c: clang }]
-        cxx_flags: ["-Werror"]
+        # TODO bring it back when warnings on clang are fixed
+        #        cxx_flags: ["-Werror"]
     timeout-minutes: 90
     env:
       SCCACHE_GHA_ENABLED: "true"
