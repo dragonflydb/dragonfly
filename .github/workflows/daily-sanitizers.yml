@@ -12,7 +12,7 @@ jobs:
       matrix:
         container: ["ubuntu-dev:24"]
         build-type: [Debug]
-        compiler: [{ cxx: g++, c: gcc }]
+        compiler: [{ cxx: clang++, c: clang }]
         cxx_flags: ["-Werror"]
     timeout-minutes: 90
     env:
@@ -59,6 +59,8 @@ jobs:
 
       - name: Configure & Build
         run: |
+          sudo apt install clang
+          which clang
           echo "ulimit is"
           ulimit -s
           echo "-----------------------------"
