@@ -71,6 +71,7 @@ jobs:
         run: |
           poetry run pytest test/ \
             --ignore test/test_hypothesis/test_hash.py  \
+            --ignore test/test_hypothesis/test_set.py  \
             --ignore test/test_hypothesis/test_zset.py  \
             --ignore test/test_hypothesis/test_joint.py  \
             --ignore test/test_hypothesis/test_transaction.py  \

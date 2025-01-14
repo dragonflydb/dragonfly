@@ -266,7 +266,7 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             result = exc = e
         return _wrap_exceptions(result), exc
 
-    def _compare(self, command) -> None:
+    def _compare(self, command: Command) -> None:
         fake_result, fake_exc = self._evaluate(self.fake, command)
         real_result, real_exc = self._evaluate(self.real, command)
 
@@ -321,14 +321,14 @@ class CommonMachine(hypothesis.stateful.RuleBasedStateMachine):
             lambda self: st.lists(self.create_command_strategy)
         )
     )
-    def init_data(self, commands: SearchStrategy[List]):
+    def init_data(self, commands) -> None:
         for command in commands:
             self._compare(command)
         self.initialized_data = True
 
     @precondition(lambda self: self.initialized_data)
     @rule(command=self_strategy.flatmap(lambda self: self.command_strategy))
-    def one_command(self, command):
+    def one_command(self, command: Command) -> None:
         self._compare(command)
 
 
