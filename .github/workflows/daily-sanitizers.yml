@@ -61,7 +61,7 @@ jobs:
         run: |
           apt -y update
           apt -y upgrade
-          apt install clang
+          apt install -y clang
           which clang
           echo "ulimit is"
           ulimit -s
