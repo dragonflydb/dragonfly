@@ -85,7 +85,8 @@ jobs:
             # Because compiler-rt warns that it's being unused even though it
             # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
             # TODO test with clang-wunused-command-line
-            -DBENCHMARK_ENABLE_WERROR=off
+            -DCMAKE_C_FLAGS=-Wno-error=unused-command-line-argument
+            -DCMAKE_CXX_FLAGS=-Wno-error=unused-command-line-argument
 
           ninja src/all
 
