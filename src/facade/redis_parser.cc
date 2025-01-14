@@ -232,8 +232,12 @@ auto RedisParser::ParseInline(Buffer str) -> ResultConsumed {
   }
 
   uint32_t last_consumed = ptr - str.data();
-  if (ptr == end) {                   // we have not finished parsing.
-    is_broken_token_ = ptr[-1] > 32;  // we stopped in the middle of the token.
+  if (ptr == end) {  // we have not finished parsing.
+    if (cached_expr_->empty()) {
+      state_ = CMD_COMPLETE_S;  // have not found anything besides whitespace.
+    } else {
+      is_broken_token_ = ptr[-1] > 32;  // we stopped in the middle of the token.
+    }
     return {INPUT_PENDING, last_consumed};
   }
 
