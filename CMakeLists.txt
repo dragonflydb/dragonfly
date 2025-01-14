@@ -52,6 +52,8 @@ if (SUPPORT_USAN AND WITH_USAN)
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=undefined")
 endif()
 
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -rtlib=compiler-rt")
+
 include(third_party)
 include(internal)
 
