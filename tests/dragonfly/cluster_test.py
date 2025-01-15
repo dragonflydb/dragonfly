@@ -2612,3 +2612,103 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
+
+
+@pytest.mark.slow
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "cache_mode": "true"})
+async def test_cache_cluster_data_migration(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # Check data migration from one node to another with eviction and expiration
+    # not cluster clients are used to avoid processing -MOVE error and have ability compare results
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
+            maxmemory="1G" if i == 0 else "3G",
+        )
+        for i in range(2)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Start seeder")
+    await nodes[0].client.execute_command("DEBUG POPULATE 700000 test 1500 RAND SLOTS 0 16383")
+    # cluster_mode=False, to avoid processing MOVE error and prevent eviction on the target node after migration is finished
+    # stop_on_failure=False, the test shouldn't failed because of unprocessed MOVE error
+    # multi_transaction_probability=0 and max_multikey=1, because cluster can't work with them
+    seeder = df_seeder_factory.create(
+        val_size=1500,
+        stop_on_failure=False,
+        port=nodes[0].instance.port,
+        cluster_mode=False,
+        multi_transaction_probability=0,
+        max_multikey=1,
+    )
+
+    fill_evict_task = asyncio.create_task(seeder.run())
+
+    gen_stop = False
+
+    async def expiration_gen():
+        i = 0
+        try:
+            while not gen_stop:
+                await nodes[0].client.execute_command(f"SET exp_key_{i} val_{i} EX 20")
+                i += 1
+        except redis.exceptions.ResponseError:
+            return
+
+    fill_exp_task = asyncio.create_task(expiration_gen())
+
+    # some time to fill data
+    await asyncio.sleep(20)
+
+    stats = await nodes[0].client.info("STATS")
+    evicted_before_migration = stats["evicted_keys"]
+
+    logging.debug("Start migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", 200)
+
+    logging.debug("Stop seeders")
+    seeder.stop()
+    await fill_evict_task
+    gen_stop = True
+    await fill_exp_task
+
+    # different configs are provided for target and source nodes
+    # to get data from the source node, the migration is canceled
+    # for the same reason, the migration is finished on the target node
+    # in such a way every node should contain and provide the same data
+    logging.debug("drop migration for 0th node")
+    nodes[0].migrations = []
+    await push_config(json.dumps(generate_config(nodes)), [nodes[0].admin_client])
+
+    logging.debug("finish migration for 1st")
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [nodes[1].admin_client])
+
+    # wait to expire all keys
+    await asyncio.sleep(20)
+
+    source_capture_task = asyncio.create_task(StaticSeeder.capture(nodes[0].client))
+    assert await StaticSeeder.capture(nodes[1].client) == await source_capture_task
+
+    stats = await nodes[0].client.info("STATS")
+    assert stats["evicted_keys"] > evicted_before_migration
+    assert stats["expired_keys"] > 0
+
+    stats = await nodes[1].client.info("STATS")
+    assert stats["evicted_keys"] == 0
+    assert stats["expired_keys"] > 0
