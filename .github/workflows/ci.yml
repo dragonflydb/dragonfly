@@ -171,6 +171,7 @@ jobs:
 
       - name: C++ Unit Tests sanitizers
         if: matrix.sanitizers == Yes
+        run: |
             ctest -V -L DFLY
 
       - name: C++ Unit Tests plain
