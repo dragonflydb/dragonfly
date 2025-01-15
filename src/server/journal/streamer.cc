@@ -224,8 +224,7 @@ void RestoreStreamer::Run() {
       auto* blocking_counter = db_slice_->BlockingCounter();
       std::lock_guard blocking_counter_guard(*blocking_counter);
 
-      stats_.buckets_loop++;
-      WriteBucket(it);
+      stats_.buckets_loop += WriteBucket(it);
     });
 
     if (++last_yield >= 100) {
@@ -295,7 +294,9 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+  bool written = false;
+
   if (it.GetVersion() < snapshot_version_) {
     stats_.buckets_written++;
 
@@ -313,6 +314,7 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
         }
 
         WriteEntry(key, it->first, pv, expire);
+        written = true;
       } else {
         stats_.keys_skipped++;
       }
@@ -321,23 +323,23 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
     stats_.buckets_skipped++;
   }
   ThrottleIfNeeded();
+
+  return written;
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
   std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
-  stats_.buckets_on_db_update++;
-
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    WriteBucket(*bit);
+    stats_.buckets_on_db_update += WriteBucket(*bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
       DCHECK_LT(it.GetVersion(), snapshot_version_);
-      WriteBucket(it);
+      stats_.buckets_on_db_update += WriteBucket(it);
     });
   }
 }

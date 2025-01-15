@@ -101,8 +101,9 @@ class RestoreStreamer : public JournalStreamer {
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
-  // Returns whether anything was written
-  void WriteBucket(PrimeTable::bucket_iterator it);
+  // Returns true if any entry was actually written
+  bool WriteBucket(PrimeTable::bucket_iterator it);
+
   void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
 

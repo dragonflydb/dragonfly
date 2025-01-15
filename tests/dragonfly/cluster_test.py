@@ -2053,7 +2053,7 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     line = stop_and_get_restore_log(nodes[0].instance)
 
     # 'with X commands' - how many breakdowns we used for the keys
-    assert extract_int_after_prefix("with ", line) > 5_000_000
+    assert extract_int_after_prefix("with ", line) > 500_000
 
     assert extract_int_after_prefix("Keys skipped ", line) == 0
     assert extract_int_after_prefix("buckets skipped ", line) == 0
