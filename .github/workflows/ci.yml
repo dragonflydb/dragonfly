@@ -173,6 +173,7 @@ jobs:
       - name: C++ Unit Tests sanitizers
         if: matrix.sanitizers == 'Sanitizers'
         run: |
+            cd ${GITHUB_WORKSPACE}/build
             ctest -V -L DFLY
 
       - name: C++ Unit Tests plain
