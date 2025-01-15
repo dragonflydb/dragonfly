@@ -43,7 +43,7 @@ namespace {
 constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
 #else
 // Increase stack size for debug and sanitizers builds.
-constexpr size_t kFiberDefaultStackSize = 40_KB - 16;
+constexpr size_t kFiberDefaultStackSize = 64_KB - 16;
 #endif
 
 }  // namespace
