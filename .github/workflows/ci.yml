@@ -44,7 +44,7 @@ jobs:
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
-        sanitizers: [No]
+        sanitizers: ["No"]
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
@@ -54,10 +54,10 @@ jobs:
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
-            sanitizers: Yes
+            sanitizers: "Yes"
         exclude:
           - container: "ubuntu-dev:24"
-            sanitizers: No
+            sanitizers: "No"
 
     runs-on: ubuntu-latest
     env:
