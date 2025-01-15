@@ -74,23 +74,23 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, cons
                                      uint64_t expire_ms) {
   // We send RESTORE commands for small objects, or objects we don't support breaking.
   bool use_restore_serialization = true;
-  size_t commits = 1;
+  size_t flushes = 1;
   if (max_serialization_buffer_size_ > 0 && pv.MallocUsed() > max_serialization_buffer_size_) {
     switch (pv.ObjType()) {
       case OBJ_SET:
-        commits = SerializeSet(key, pv);
+        flushes = SerializeSet(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_ZSET:
-        commits = SerializeZSet(key, pv);
+        flushes = SerializeZSet(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_HASH:
-        commits = SerializeHash(key, pv);
+        flushes = SerializeHash(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_LIST:
-        commits = SerializeList(key, pv);
+        flushes = SerializeList(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_STRING:
@@ -111,7 +111,7 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, cons
     SerializeStickIfNeeded(key, pk);
     SerializeExpireIfNeeded(key, expire_ms);
   }
-  return commits;
+  return flushes;
 }
 
 void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_view> args) {
@@ -151,12 +151,12 @@ size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
       key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
       max_serialization_buffer_size_);
 
-  size_t commits = 0;
+  size_t flushes = 0;
   container_utils::IterateSet(pv, [&](container_utils::ContainerEntry ce) {
-    commits += aggregator.AddArg(ce.ToString());
+    flushes += aggregator.AddArg(ce.ToString());
     return true;
   });
-  return commits;
+  return flushes;
 }
 
 size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
@@ -164,16 +164,16 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
       key, [&](absl::Span<const string_view> args) { SerializeCommand("ZADD", args); },
       max_serialization_buffer_size_);
 
-  size_t commits = 0;
+  size_t flushes = 0;
   container_utils::IterateSortedSet(
       pv.GetRobjWrapper(),
       [&](container_utils::ContainerEntry ce, double score) {
         aggregator.AddArg(absl::StrCat(score), CommandAggregator::CommitMode::kNoCommit);
-        commits += aggregator.AddArg(ce.ToString());
+        flushes += aggregator.AddArg(ce.ToString());
         return true;
       },
       /*start=*/0, /*end=*/-1, /*reverse=*/false, /*use_score=*/true);
-  return commits;
+  return flushes;
 }
 
 size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
@@ -181,14 +181,14 @@ size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
       key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
       max_serialization_buffer_size_);
 
-  size_t commits = 0;
+  size_t flushes = 0;
   container_utils::IterateMap(
       pv, [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
         aggregator.AddArg(k.ToString(), CommandAggregator::CommitMode::kNoCommit);
-        commits += aggregator.AddArg(v.ToString());
+        flushes += aggregator.AddArg(v.ToString());
         return true;
       });
-  return commits;
+  return flushes;
 }
 
 size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
@@ -196,12 +196,12 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
       key, [&](absl::Span<const string_view> args) { SerializeCommand("RPUSH", args); },
       max_serialization_buffer_size_);
 
-  size_t commits = 0;
+  size_t flushes = 0;
   container_utils::IterateList(pv, [&](container_utils::ContainerEntry ce) {
-    commits += aggregator.AddArg(ce.ToString());
+    flushes += aggregator.AddArg(ce.ToString());
     return true;
   });
-  return commits;
+  return flushes;
 }
 
 void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, const PrimeValue& pv,
