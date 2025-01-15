@@ -50,6 +50,7 @@ constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
 #endif
 
 }  // namespace
+
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
   os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_used_bytes
      << ", tiered_entries: " << stats.tiered_entries << "\n";
