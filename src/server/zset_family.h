@@ -29,7 +29,8 @@ class ZSetFamily {
   using MScoreResponse = std::vector<std::optional<double>>;
 
   struct Bound {
-    double val;
+    Bound() = default;
+    double val = 0;
     bool is_open = false;
   };
 
