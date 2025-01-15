@@ -604,18 +604,20 @@ class DflySeeder:
                 break
 
             try:
-                if self.fake_redis is None:
-                    pipe = client.pipeline(transaction=tx_data[1])
-                    for cmd in tx_data[0]:
-                        pipe.execute_command(*cmd)
-                    await pipe.execute()
-                else:
+                if tx_data[1] is False and self.fake_redis is not None:
                     # To mirror consistently to Fake Redis we must only send to it successful
                     # commands. We can't use pipes because they might succeed partially.
+                    # Transactions (MULTI/EXEC) are OK to send because Dragonfly finalizes
+                    # migrations after
                     for cmd in tx_data[0]:
                         dfly_resp = await client.execute_command(*cmd)
                         fake_resp = await self.fake_redis.execute_command(*cmd)
                         assert dfly_resp == fake_resp
+                else:
+                    pipe = client.pipeline(transaction=tx_data[1])
+                    for cmd in tx_data[0]:
+                        pipe.execute_command(*cmd)
+                    await pipe.execute()
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
                     await self._close_client(client)
