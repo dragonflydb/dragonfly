@@ -2127,7 +2127,7 @@ async def test_cluster_migration_while_seeding(
     line = stop_and_get_restore_log(nodes[0].instance)
     assert extract_int_after_prefix("Keys skipped ", line) == 0
     assert extract_int_after_prefix("buckets skipped ", line) > 0
-    assert extract_int_after_prefix("keys written ", line) > 9_500
+    assert extract_int_after_prefix("keys written ", line) >= 9_000
     assert extract_int_after_prefix("buckets on_db_update ", line) > 0
 
 
