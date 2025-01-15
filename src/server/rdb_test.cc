@@ -42,14 +42,6 @@ class RdbTest : public BaseFamilyTest {
  protected:
   void SetUp();
 
-  static void SetUpTestSuite() {
-    static bool init = true;
-    if (exchange(init, false)) {
-      fb2::SetDefaultStackResource(&fb2::std_malloc_resource, 32_KB);
-    }
-    BaseFamilyTest::SetUpTestSuite();
-  }
-
   io::FileSource GetSource(string name);
 
   std::error_code LoadRdb(const string& filename) {
