@@ -281,4 +281,11 @@ TEST_F(RedisParserTest, InlineSplit) {
   ASSERT_EQ(RedisParser::OK, Parse("ING\n"));
 }
 
+TEST_F(RedisParserTest, InlineReset) {
+  ASSERT_EQ(RedisParser::INPUT_PENDING, Parse("\t \r\n"));
+  EXPECT_EQ(4, consumed_);
+  ASSERT_EQ(RedisParser::OK, Parse("*1\r\n$3\r\nfoo\r\n"));
+  EXPECT_EQ(13, consumed_);
+}
+
 }  // namespace facade
