@@ -44,20 +44,21 @@ jobs:
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
-        sanitizers: ["No"]
+        sanitizers: ["Plain"]
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
+            sanitizers: "Plain"
           - container: "ubuntu-dev:24"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
-            sanitizers: "Yes"
+            sanitizers: "Sanitizers"
         exclude:
           - container: "ubuntu-dev:24"
-            sanitizers: "No"
+            sanitizers: "Plain"
 
     runs-on: ubuntu-latest
     env:
@@ -109,7 +110,7 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
       - name: Configure CMake for plain build
-        if: matrix.sanitizers == 'No'
+        if: matrix.sanitizers == 'Plain'
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
@@ -127,7 +128,7 @@ jobs:
           du -hcs _deps/
 
       - name: Configure CMake for sanitizers build
-        if: matrix.sanitizers == 'Yes'
+        if: matrix.sanitizers == 'Sanitizers'
         run: |
           apt -y update
           apt -y upgrade
@@ -170,12 +171,12 @@ jobs:
           df -h
 
       - name: C++ Unit Tests sanitizers
-        if: matrix.sanitizers == 'Yes'
+        if: matrix.sanitizers == 'Sanitizers'
         run: |
             ctest -V -L DFLY
 
       - name: C++ Unit Tests plain
-        if: matrix.sanitizers == 'No'
+        if: matrix.sanitizers == 'Plain'
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
