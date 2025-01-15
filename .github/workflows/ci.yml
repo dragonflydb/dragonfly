@@ -40,15 +40,24 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20", "alpine-dev:latest"]
+        container: ["ubuntu-dev:20", "alpine-dev:latest", "ubuntu-dev:24"]
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
+        sanitizers: [No]
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            cxx_flags: ""
+            sanitizers: Yes
+        exclude:
+          - container: "ubuntu-dev:24"
+            sanitizers: No
 
     runs-on: ubuntu-latest
     env:
@@ -99,7 +108,8 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
-      - name: Configure CMake
+      - name: Configure CMake for plain build
+        if: matrix.sanitizers == No
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
@@ -116,6 +126,35 @@ jobs:
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
 
+      - name: Configure CMake for sanitizers build
+        if: matrix.sanitizers == Yes
+        run: |
+          apt -y update
+          apt -y upgrade
+          apt install -y clang
+          which clang
+          echo "ulimit is"
+          ulimit -s
+          echo "-----------------------------"
+          echo "disk space is:"
+          df -h
+          echo "-----------------------------"
+          mkdir -p $GITHUB_WORKSPACE/build
+          cd $GITHUB_WORKSPACE/build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -GNinja \
+            -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
+            -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
+            -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
+            -DWITH_ASAN=ON \
+            -DWITH_USAN=ON \
+            -DCMAKE_C_FLAGS=-Wno-error=unused-command-line-argument \
+            -DCMAKE_CXX_FLAGS=-Wno-error=unused-command-line-argument
+            # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
+
       - name: Build
         run: |
           cd ${GITHUB_WORKSPACE}/build
@@ -130,7 +169,12 @@ jobs:
           echo "disk space is:"
           df -h
 
-      - name: C++ Unit Tests
+      - name: C++ Unit Tests sanitizers
+        if: matrix.sanitizers == Yes
+            ctest -V -L DFLY
+
+      - name: C++ Unit Tests plain
+        if: matrix.sanitizers == No
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
@@ -161,6 +205,7 @@ jobs:
           timeout 5m ./dragonfly_test
           timeout 5m ./json_family_test --jsonpathv2=false
           timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+
       - name: Upload unit logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
