@@ -8,14 +8,10 @@
 #include <optional>
 #include <string_view>
 
-#include "common.h"
-
 namespace dfly {
 
 using SlotId = std::uint16_t;
-
 constexpr SlotId kMaxSlotNum = 0x3FFF;
-constexpr SlotId kInvalidSlotId = kMaxSlotNum + 1;
 
 // A simple utility class that "aggregates" SlotId-s and can tell whether all inputs were the same.
 // Only works when cluster is enabled.
@@ -26,8 +22,17 @@ class UniqueSlotChecker {
 
   std::optional<SlotId> GetUniqueSlotId() const;
 
+  void Reset() {
+    slot_id_ = kNoSlotId;
+  }
+
  private:
-  std::optional<SlotId> slot_id_;
+  // kNoSlotId - if slot wasn't set at all
+  static constexpr SlotId kNoSlotId = kMaxSlotNum + 1;
+  // kInvalidSlotId - if several different slots were set
+  static constexpr SlotId kInvalidSlotId = kNoSlotId + 1;
+
+  SlotId slot_id_ = kNoSlotId;
 };
 
 SlotId KeySlot(std::string_view key);
