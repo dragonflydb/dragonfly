@@ -109,7 +109,7 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
       - name: Configure CMake for plain build
-        if: matrix.sanitizers == No
+        if: matrix.sanitizers == 'No'
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
@@ -127,7 +127,7 @@ jobs:
           du -hcs _deps/
 
       - name: Configure CMake for sanitizers build
-        if: matrix.sanitizers == Yes
+        if: matrix.sanitizers == 'Yes'
         run: |
           apt -y update
           apt -y upgrade
@@ -170,12 +170,12 @@ jobs:
           df -h
 
       - name: C++ Unit Tests sanitizers
-        if: matrix.sanitizers == Yes
+        if: matrix.sanitizers == 'Yes'
         run: |
             ctest -V -L DFLY
 
       - name: C++ Unit Tests plain
-        if: matrix.sanitizers == No
+        if: matrix.sanitizers == 'No'
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
