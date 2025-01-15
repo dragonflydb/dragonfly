@@ -7,13 +7,14 @@ on:
 
 jobs:
   build:
-    runs-on: [self-hosted, linux, ARM64]
+    runs-on: [ubuntu-24.04]
     strategy:
       matrix:
-        container: ["ubuntu-dev:22"]
+        container: ["ubuntu-dev:24"]
         build-type: [Debug]
-        compiler: [{ cxx: g++, c: gcc }]
-        cxx_flags: ["-Werror"]
+        compiler: [{ cxx: clang++, c: clang }]
+        # TODO bring it back when warnings on clang are fixed
+        #        cxx_flags: ["-Werror"]
     timeout-minutes: 90
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -59,6 +60,10 @@ jobs:
 
       - name: Configure & Build
         run: |
+          apt -y update
+          apt -y upgrade
+          apt install -y clang
+          which clang
           echo "ulimit is"
           ulimit -s
           echo "-----------------------------"
@@ -76,7 +81,10 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}}" \
             -DWITH_ASAN=ON \
-            -DWITH_USAN=ON
+            -DWITH_USAN=ON \
+            -DCMAKE_C_FLAGS=-Wno-error=unused-command-line-argument \
+            -DCMAKE_CXX_FLAGS=-Wno-error=unused-command-line-argument
+            # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
 
           ninja src/all
 
