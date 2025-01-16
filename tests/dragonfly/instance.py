@@ -380,16 +380,17 @@ class DflyInstance:
             for metric_family in text_string_to_metric_families(data)
         }
 
-    def is_in_logs(self, pattern):
+    def find_in_logs(self, pattern):
         if self.proc is not None:
             raise RuntimeError("Must close server first")
 
+        results = []
         matcher = re.compile(pattern)
         for path in self.log_files:
             for line in open(path):
                 if matcher.search(line):
-                    return True
-        return False
+                    results.append(line)
+        return results
 
     @property
     def rss(self):
@@ -416,7 +417,7 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1"
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
 

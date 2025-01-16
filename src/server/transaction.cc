@@ -325,6 +325,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   // Stub transactions always operate only on single shard.
   bool is_stub = multi_ && multi_->role == SQUASHED_STUB;
 
+  unique_slot_checker_.Reset();
   if ((key_index.NumArgs() == 1 && !IsAtomicMulti()) || is_stub) {
     DCHECK(!IsActiveMulti() || multi_->mode == NON_ATOMIC);
 

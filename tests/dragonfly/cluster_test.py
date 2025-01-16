@@ -214,6 +214,21 @@ async def get_node_id(connection):
     return id
 
 
+def stop_and_get_restore_log(instance):
+    instance.stop()
+    lines = instance.find_in_logs("RestoreStreamer LSN")
+    assert len(lines) == 1
+    line = lines[0]
+    logging.debug(f"Streamer log line: {line}")
+    return line
+
+
+def extract_int_after_prefix(prefix, line):
+    match = re.search(prefix + "(\\d+)", line)
+    assert match
+    return int(match.group(1))
+
+
 @dfly_args({})
 class TestNotEmulated:
     async def test_cluster_commands_fails_when_not_emulate(self, async_client: aioredis.Redis):
@@ -2035,6 +2050,18 @@ async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory)
     logging.debug(f"Memory before {mem_before} after {mem_after}")
     assert mem_after < mem_before * 1.1
 
+    line = stop_and_get_restore_log(nodes[0].instance)
+
+    # 'with X commands' - how many breakdowns we used for the keys
+    assert extract_int_after_prefix("with ", line) > 500_000
+
+    assert extract_int_after_prefix("Keys skipped ", line) == 0
+    assert extract_int_after_prefix("buckets skipped ", line) == 0
+    assert extract_int_after_prefix("keys written ", line) > 90
+
+    # We don't send updates during the migration
+    assert extract_int_after_prefix("buckets on_db_update ", line) == 0
+
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
@@ -2056,7 +2083,6 @@ async def test_cluster_migration_while_seeding(
     nodes[0].slots = [(0, 16383)]
     nodes[1].slots = []
     client0 = nodes[0].client
-    client1 = nodes[1].client
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
@@ -2097,6 +2123,12 @@ async def test_cluster_migration_while_seeding(
 
     capture = await seeder.capture_fake_redis()
     assert await seeder.compare(capture, instances[1].port)
+
+    line = stop_and_get_restore_log(nodes[0].instance)
+    assert extract_int_after_prefix("Keys skipped ", line) == 0
+    assert extract_int_after_prefix("buckets skipped ", line) > 0
+    assert extract_int_after_prefix("keys written ", line) >= 9_000
+    assert extract_int_after_prefix("buckets on_db_update ", line) > 0
 
 
 def parse_lag(replication_info: str):
