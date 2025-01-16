@@ -40,7 +40,9 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20", "alpine-dev:latest"]
+        container: ["ubuntu-dev:20"]
+          # TODO bring it back once it's fixed
+          # "alpine-dev:latest"]
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
@@ -143,12 +145,12 @@ jobs:
             -GNinja \
             -DCMAKE_C_COMPILER="${{matrix.compiler.c}}" \
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
             -DHELIO_STACK_CHECK:STRING=4096 \
             -DWITH_ASAN=${ASAN} \
             -DWITH_USAN=${USAN} \
             -L
-            #-DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
 
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
