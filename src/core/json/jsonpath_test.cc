@@ -465,7 +465,7 @@ TYPED_TEST(JsonPathTest, Mutate) {
   Path path = this->driver_.TakePath();
 
   TypeParam json = ValidJson<TypeParam>(R"([1, 2, 3, 5, 6])");
-  MutateCallback cb = [&](optional<string_view>, JsonType* val) {
+  auto cb = [](optional<string_view>, JsonType* val) {
     int intval = val->as<int>();
     *val = intval + 1;
     return false;
@@ -496,7 +496,7 @@ TYPED_TEST(JsonPathTest, Mutate) {
   ASSERT_EQ(0, this->Parse("$..a.*"));
   path = this->driver_.TakePath();
 
-  MutateCallback cb2 = [&](optional<string_view> key, JsonType* val) {
+  auto cb2 = [](optional<string_view> key, JsonType* val) {
     if (val->is_int64() && !key) {  // array element
       *val = 42;
       return false;

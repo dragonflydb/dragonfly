@@ -774,7 +774,7 @@ TEST_F(DflyEngineTest, MemoryUsage) {
   }
 
   for (unsigned i = 0; i < 1000; ++i) {
-    Run({"rpush", "l2", StrCat(string('a', 200), i)});
+    Run({"rpush", "l2", StrCat(string(200, 'a'), i)});
   }
   auto resp = Run({"memory", "usage", "l1"});
   EXPECT_GT(*resp.GetInt(), 8000);
