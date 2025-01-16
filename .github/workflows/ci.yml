@@ -40,7 +40,7 @@ jobs:
     strategy:
       matrix:
         # Test of these containers
-        container: ["ubuntu-dev:20", "alpine-dev:latest", "ubuntu-dev:24"]
+        container: ["ubuntu-dev:20", "alpine-dev:latest"]
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
@@ -57,9 +57,6 @@ jobs:
             # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
             cxx_flags: "-Wno-error=unused-command-line-argument"
             sanitizers: "Sanitizers"
-        exclude:
-          - container: "ubuntu-dev:24"
-            sanitizers: "NoSanitizers"
 
     runs-on: ubuntu-latest
     env:
