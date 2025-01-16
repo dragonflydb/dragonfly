@@ -45,8 +45,6 @@ jobs:
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
         sanitizers: ["NoSanitizers"]
-        asan: [OFF]
-        usan: [OFF]
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
@@ -59,8 +57,6 @@ jobs:
             # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
             cxx_flags: "-Wno-error=unused-command-line-argument"
             sanitizers: "Sanitizers"
-            asan: [ON]
-            usan: [ON]
         exclude:
           - container: "ubuntu-dev:24"
             sanitizers: "NoSanitizers"
@@ -127,12 +123,18 @@ jobs:
           df -h
           echo "-----------------------------"
 
-          # TODO remove this once the weekly is done
-          apt -y update
-          apt -y upgrade
-          apt install -y clang
-          which clang
-          #
+          ASAN = "OFF"
+          USAN = "OFF"
+
+          if  [[ ${{matrix.sanitizers}} == "Sanitizers" ]]; then
+            # TODO remove this once the weekly is done
+            apt -y update
+            apt -y upgrade
+            apt install -y clang
+            which clang
+            ASAN = "ON"
+            USAN = "ON"
+          fi
 
           # -no-pie to disable address randomization so we could symbolize stacktraces
           cmake -B ${GITHUB_WORKSPACE}/build \
@@ -143,9 +145,10 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
             -DHELIO_STACK_CHECK:STRING=4096 \
-            -DWITH_ASAN="${{matrix.asan}} \
-            -DWITH_USAN="${{matrix.usan}} \
+            -DWITH_ASAN=$ASAN \
+            -DWITH_USAN=$USAN \
             -L
+
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
 
@@ -163,14 +166,7 @@ jobs:
           echo "disk space is:"
           df -h
 
-      - name: C++ Unit Tests with sanitizers
-        if: matrix.sanitizers == 'Sanitizers'
-        run: |
-            cd ${GITHUB_WORKSPACE}/build
-            ctest -V -L DFLY
-
-      - name: C++ Unit Tests without sanitizers
-        if: matrix.sanitizers == 'NoSanitizers'
+      - name: C++ Unit Tests
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
