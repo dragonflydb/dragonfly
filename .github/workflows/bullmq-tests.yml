@@ -7,19 +7,11 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  bullmq:
     runs-on: ubuntu-latest
-    name: Build
+    name: bullmq-test
 
     timeout-minutes: 60
-    #container:
-    #  image: ghcr.io/romange/alpine-dev:latest
-    #  options: --security-opt seccomp=unconfined
-    #  credentials:
-    #    username: ${{ github.repository_owner }}
-    #    password: ${{ secrets.GITHUB_TOKEN }}
-    #env:
-    #  node-version: lts/*
 
     services:
       dragonflydb:
@@ -28,32 +20,41 @@ jobs:
         env:
           DFLY_cluster_mode: emulated
           DFLY_lock_on_hashtags: true
+          DFLY_proactor_threads: 2
           HEALTHCHECK_PORT: 6379
         ports:
           - 6379:6379
+
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
+
+      - name: Print DragonflyDB logs
+        run: |
+          echo "DragonflyDB service logs:"
+          docker logs $(docker ps --filter "ancestor=docker.dragonflydb.io/dragonflydb/dragonfly:v1.24.0" --format "{{.ID}}")
+
+      - name: install Rediscli
+        run: |
+          apt-get update && apt-get install -y redis-tools
+      - name: install yarn
+        run: |
+          #npm -g install yarn --no-lockfile
+          sudo apt update
+          sudo apt install yarn jq
+          apk add --no-cache nodejs npm yarn
+
       - name: Install NodeJs
         run: |
           wget -q https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
           tar -xf node-v22.12.0-linux-x64-glibc-217.tar.xz
           sudo cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
-          sudo apt install yarn jq
+
           node --version
           npm --version
           yarn --version
-          mkdir -p $GITHUB_WORKSPACE/build
-#      - name: Configure/Build
-#        run: |
-#          cd $GITHUB_WORKSPACE/build
-#          #cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
-#          #ninja dragonfly
-#          wget -q https://github.com/dragonflydb/dragonfly/releases/download/v1.24.0/dragonfly-x86_64.tar.gz
-#          tar -zxvf dragonfly-x86_64.tar.gz
-#          mv dragonfly-x86_64 dragonfly
-#          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
+
       - name: Build and Test BullMQ
         run: |
           mkdir -p $GITHUB_WORKSPACE/../bullmq
@@ -69,7 +70,16 @@ jobs:
           #patch -p1 -f < $GITHUB_WORKSPACE/bullmq.patch
           yarn install
           yarn build
-          BULLMQ_TEST_PREFIX={b} yarn test
+          for i in {1..1}; do  BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy"; done
+
+      - name: Print DragonflyDB logs
+        run: |
+          echo "DragonflyDB service logs:"
+          docker logs $(docker ps --filter "ancestor=docker.dragonflydb.io/dragonflydb/dragonfly:v1.24.0" --format "{{.ID}}")
+      - name: Print INFO ALL
+        run: |
+          redis-cli info all
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
