@@ -53,7 +53,7 @@ jobs:
           #            compiler: { cxx: clang++, c: clang }
           #            cxx_flags: ""
           #            sanitizers: "NoSanitizers"
-          #          - container: "ubuntu-dev:24"
+          - container: "ubuntu-dev:24"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
@@ -134,7 +134,8 @@ jobs:
           export ASAN="OFF"
           export USAN="OFF"
 
-          if [ ${{matrix.sanitizers}} == "Sanitizers" ]; then
+          if [ '${{matrix.sanitizers}}' = 'Sanitizers' ]; then
+            echo "ASAN/USAN"
             export ASAN="ON"
             export USAN="ON"
           fi
@@ -148,8 +149,8 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
             -DHELIO_STACK_CHECK:STRING=4096 \
-            -DWITH_ASAN=${ASAN} \
-            -DWITH_USAN=${USAN} \
+            -DWITH_ASAN="${ASAN}" \
+            -DWITH_USAN="${USAN}" \
             -L
 
           cd ${GITHUB_WORKSPACE}/build && pwd
