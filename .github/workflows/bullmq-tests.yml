@@ -70,7 +70,10 @@ jobs:
           yarn install
           yarn build
           sed -i 's/timeout: 4000/timeout: 10000/' .mocharc.js
-          for i in {1..30}; do  BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy"; done
+          for i in {1..30}; do
+            BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy";
+            redis-cli info Commandstats
+          done
 
       - name: Print DragonflyDB logs
         if: always()
