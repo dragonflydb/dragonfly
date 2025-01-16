@@ -43,7 +43,6 @@ jobs:
           #npm -g install yarn --no-lockfile
           sudo apt update
           sudo apt install yarn jq
-          apk add --no-cache nodejs npm yarn
 
       - name: Install NodeJs
         run: |
