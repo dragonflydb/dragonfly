@@ -111,7 +111,6 @@ jobs:
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
-            -DHELIO_STACK_CHECK:STRING=4096 \
             -L
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
@@ -135,7 +134,7 @@ jobs:
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
           GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
-          FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY
+          FLAGS_fiber_safety_margin=4096 FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY
 
           echo "Running tests with --force_epoll"
 
@@ -148,19 +147,20 @@ jobs:
           EOF
 
           gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
-          FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY
+          FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 timeout 20m ctest -V -L DFLY
 
           echo "Finished running tests with --force_epoll"
 
           echo "Running tests with --cluster_mode=emulated"
-          FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
+          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY
 
           echo "Running tests with both --cluster_mode=emulated & --lock_on_hashtags"
-          FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
+          FLAGS_fiber_safety_margin=4096 FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY
 
           timeout 5m ./dragonfly_test
           timeout 5m ./json_family_test --jsonpathv2=false
           timeout 5m ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+
       - name: Upload unit logs on failure
         if: failure()
         uses: actions/upload-artifact@v4

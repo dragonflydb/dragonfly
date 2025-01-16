@@ -78,16 +78,9 @@ io::Result<io::Bytes> Lz4Compressor::Compress(io::Bytes data) {
     compr_buf_.reserve(buf_size);
   }
 
-// TODO: to remove LZ4F_compressFrame code once we confirm this code actually works.
-#if 1
   size_t frame_size =
       LZ4F_compressFrame_usingCDict(cctx_, compr_buf_.data(), compr_buf_.capacity(), data.data(),
                                     data.size(), nullptr /* dict */, &lz4_pref);
-#else
-  size_t frame_size = LZ4F_compressFrame(compr_buf_.data(), compr_buf_.capacity(), data.data(),
-                                         data.size(), &lz4_pref);
-#endif
-
   if (LZ4F_isError(frame_size)) {
     LOG(ERROR) << "LZ4F_compressFrame failed with error " << LZ4F_getErrorName(frame_size);
     return nonstd::make_unexpected(make_error_code(errc::operation_not_supported));
