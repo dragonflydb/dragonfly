@@ -37,7 +37,7 @@ jobs:
 
       - name: install Rediscli
         run: |
-          sudo apt-get update && apt-get install -y redis-tools
+          sudo apt-get update && sudo apt-get install -y redis-tools
       - name: install yarn
         run: |
           #npm -g install yarn --no-lockfile
