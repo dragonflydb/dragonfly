@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: [ubuntu-24.04]
+    runs-on: [self-hosted, linux, ARM64]
     strategy:
       matrix:
         container: ["ubuntu-dev:24"]
