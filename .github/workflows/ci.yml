@@ -123,8 +123,8 @@ jobs:
           df -h
           echo "-----------------------------"
 
-          ASAN = "OFF"
-          USAN = "OFF"
+          export ASAN="OFF"
+          export USAN="OFF"
 
           if  [[ ${{matrix.sanitizers}} == "Sanitizers" ]]; then
             # TODO remove this once the weekly is done
@@ -132,8 +132,8 @@ jobs:
             apt -y upgrade
             apt install -y clang
             which clang
-            ASAN = "ON"
-            USAN = "ON"
+            export ASAN="ON"
+            export USAN="ON"
           fi
 
           # -no-pie to disable address randomization so we could symbolize stacktraces
@@ -145,8 +145,8 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
             -DHELIO_STACK_CHECK:STRING=4096 \
-            -DWITH_ASAN=$ASAN \
-            -DWITH_USAN=$USAN \
+            -DWITH_ASAN=${ASAN} \
+            -DWITH_USAN=${USAN} \
             -L
 
           cd ${GITHUB_WORKSPACE}/build && pwd
