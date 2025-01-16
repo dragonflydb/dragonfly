@@ -1807,7 +1807,7 @@ void DestroyGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilde
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname](Transaction* t, EngineShard* shard) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
@@ -1833,7 +1833,8 @@ void CreateConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuil
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
+                                                                  EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
   OpResult<uint32_t> result = tx->ScheduleSingleHopT(cb);
@@ -1861,7 +1862,8 @@ void DelConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
+                                                                  EngineShard* shard) {
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
 
@@ -1894,7 +1896,7 @@ void SetId(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* buil
   if (auto err = parser->Error(); err)
     return builder->SendError(err->MakeReply());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname, &id = id](Transaction* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
   };
 
