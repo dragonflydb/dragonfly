@@ -72,10 +72,12 @@ jobs:
           for i in {1..30}; do  BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy"; done
 
       - name: Print DragonflyDB logs
+        if: always()
         run: |
           echo "DragonflyDB service logs:"
           docker logs $(docker ps --filter "ancestor=docker.dragonflydb.io/dragonflydb/dragonfly:v1.24.0" --format "{{.ID}}")
       - name: Print INFO ALL
+        if: always()
         run: |
           redis-cli info all
 
