@@ -69,7 +69,7 @@ jobs:
           #patch -p1 -f < $GITHUB_WORKSPACE/bullmq.patch
           yarn install
           yarn build
-          for i in {1..1}; do  BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy"; done
+          for i in {1..30}; do  BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy"; done
 
       - name: Print DragonflyDB logs
         run: |
