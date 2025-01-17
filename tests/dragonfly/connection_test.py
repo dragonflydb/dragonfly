@@ -441,7 +441,7 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
         client = aioredis.Redis(connection_pool=async_pool)
         for i in range(0, 2000):
             await client.publish("channel", f"message-{i}")
-        await client.close()
+        await client.aclose()
 
     async def channel_reader(channel: aioredis.client.PubSub):
         for i in range(0, 150):
@@ -779,7 +779,7 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factor
     client = server.client(password="XXX")
     with pytest.raises((ResponseError)):
         await client.dbsize()
-    await client.close()
+    await client.aclose()
 
     client = server.admin_client(password="XXX")
     assert await client.dbsize() == 0
@@ -809,7 +809,7 @@ async def test_tls_reject(
 
     client = server.client(**with_tls_client_args, ssl_cert_reqs=None)
     await client.ping()
-    await client.close()
+    await client.aclose()
 
     client = server.client(**with_tls_client_args)
     with pytest.raises(redis_conn_error):

@@ -528,7 +528,7 @@ class DflySeeder:
     async def _close_client(self, client):
         if not self.cluster_mode:
             await client.connection_pool.disconnect()
-        await client.close()
+        await client.aclose()
 
     async def _capture_db(self, port, target_db, keys):
         client = self._make_client(port=port, db=target_db)

@@ -361,6 +361,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
             "connected": True,
             "epoch": "0",
             "flags": "myself,master",
+            "hostname": "",
             "last_ping_sent": "0",
             "last_pong_rcvd": "0",
             "master_id": "-",
@@ -375,6 +376,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
             "connected": True,
             "epoch": "0",
             "flags": "myself,master",
+            "hostname": "",
             "last_ping_sent": "0",
             "last_pong_rcvd": "0",
             "master_id": "-",
@@ -386,6 +388,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
             "connected": True,
             "epoch": "0",
             "flags": "slave",
+            "hostname": "",
             "last_ping_sent": "0",
             "last_pong_rcvd": "0",
             "master_id": master_id,
@@ -397,6 +400,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
             "connected": True,
             "epoch": "0",
             "flags": "slave",
+            "hostname": "",
             "last_ping_sent": "0",
             "last_pong_rcvd": "0",
             "master_id": master_id,
@@ -459,6 +463,7 @@ async def test_cluster_managed_service_info(df_factory):
             "connected": True,
             "epoch": "0",
             "flags": "myself,master",
+            "hostname": "",
             "last_ping_sent": "0",
             "last_pong_rcvd": "0",
             "master_id": "-",
@@ -472,6 +477,7 @@ async def test_cluster_managed_service_info(df_factory):
         "connected": True,
         "epoch": "0",
         "flags": "slave",
+        "hostname": "",
         "last_ping_sent": "0",
         "last_pong_rcvd": "0",
         "master_id": master_id,
@@ -1667,7 +1673,7 @@ async def test_cluster_fuzzymigration(
     # Compare capture
     assert await seeder.compare(capture, nodes[0].instance.port)
 
-    await asyncio.gather(*[c.close() for c in counter_connections])
+    await asyncio.gather(*[c.aclose() for c in counter_connections])
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
