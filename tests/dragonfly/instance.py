@@ -420,7 +420,6 @@ class DflyInstanceFactory:
         vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
-        args.setdefault("fiber_safety_margin=4096")
 
         # If path is not set, we assume that we are running the latest dragonfly.
         if not path:
@@ -429,6 +428,9 @@ class DflyInstanceFactory:
 
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
             args.setdefault("serialization_max_chunk_size", 300000)
+
+        if version >= 1.26:
+            args.setdefault("fiber_safety_margin=4096")
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
