@@ -1994,6 +1994,7 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 @pytest.mark.asyncio
 @pytest.mark.opt_only
+@pytest.mark.exclude_epoll
 async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory):
     instances = [
         df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)

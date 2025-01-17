@@ -482,6 +482,7 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE")
 
 
+@pytest.mark.exclude_epoll
 @dfly_args(
     {
         **BASIC_ARGS,
