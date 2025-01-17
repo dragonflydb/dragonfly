@@ -91,7 +91,7 @@ jobs:
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ctest -V -L DFLY
+            FLAGS_fiber_safety_margin=4096 ctest -V -L DFLY
 
       - name: Send notifications on failure
         if: failure() && github.ref == 'refs/heads/main'
