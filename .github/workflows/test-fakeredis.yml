@@ -70,7 +70,11 @@ jobs:
         working-directory: tests/fakeredis
         run: |
           poetry run pytest test/ \
-            --ignore test/test_hypothesis.py  \
+            --ignore test/test_hypothesis/test_hash.py  \
+            --ignore test/test_hypothesis/test_set.py  \
+            --ignore test/test_hypothesis/test_zset.py  \
+            --ignore test/test_hypothesis/test_joint.py  \
+            --ignore test/test_hypothesis/test_transaction.py  \
             --ignore test/test_mixins/test_bitmap_commands.py \
             --junit-xml=results-tests.xml  --html=report-tests.html -v
         continue-on-error: true  # For now to mark the flow as successful
