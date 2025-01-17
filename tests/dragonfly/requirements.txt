@@ -1,14 +1,14 @@
-async-timeout==4.0.2
+async-timeout==4.0.3
 attrs==22.1.0
 Deprecated==1.2.13
 iniconfig==1.1.1
-packaging==21.3
+packaging==23.1
 pluggy==1.0.0
 py==1.11.0
 pyparsing==3.0.9
 pytest==7.1.2
-redis==5.0.0
-tomli==2.0.2
+redis==5.2.1
+tomli==2.0.1
 wrapt==1.14.1
 pytest-asyncio==0.20.1
 pytest-repeat==0.9.3
@@ -26,3 +26,4 @@ pytest-icdiff==0.8
 pytest-timeout==2.2.0
 asyncio==3.4.3
 fakeredis[json]==2.26.2
+hiredis==2.4.0

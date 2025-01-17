@@ -230,7 +230,7 @@ using strings::HumanReadableNumBytes;
 
 namespace {
 
-const auto kRedisVersion = "7.2.0";
+const auto kRedisVersion = "7.4.0";
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, const CommandContext&);
 

@@ -9,7 +9,12 @@ from threading import Thread
 import random
 import ssl
 from redis import asyncio as aioredis
+import redis as base_redis
+import hiredis
+from redis.cache import CacheConfig
+
 from redis.exceptions import ConnectionError as redis_conn_error, ResponseError
+
 import async_timeout
 from dataclasses import dataclass
 from aiohttp import ClientSession
@@ -1038,3 +1043,10 @@ async def test_lib_name_ver(async_client: aioredis.Redis):
     assert len(list) == 1
     assert list[0]["lib-name"] == "dragonfly"
     assert list[0]["lib-ver"] == "1.2.3.4"
+
+
+async def test_hiredis(df_factory):
+    server = df_factory.create(proactor_threads=1)
+    server.start()
+    client = base_redis.Redis(port=server.port, protocol=3, cache_config=CacheConfig())
+    client.ping()
