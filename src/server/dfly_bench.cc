@@ -45,7 +45,7 @@ ABSL_FLAG(uint32_t, pipeline, 1, "maximum number of pending requests per connect
 ABSL_FLAG(string, ratio, "1:10", "Set:Get ratio");
 ABSL_FLAG(string, command, "",
           "custom command with __key__ placeholder for keys, "
-          "__data_ for values, __score__ for doubles");
+          "__data__ for values, __score__ for doubles");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
 
