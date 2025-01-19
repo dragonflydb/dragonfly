@@ -69,6 +69,7 @@ using namespace std;
 using namespace facade;
 using absl::GetFlag;
 using time_point = Transaction::time_point;
+using absl::SimpleAtoi;
 
 namespace {
 
@@ -1173,7 +1174,158 @@ void BPopGeneric(ListDir dir, CmdArgList args, Transaction* tx, SinkReplyBuilder
   return rb->SendNullArray();
 }
 
+struct LMPopParams {
+  uint32_t num_keys;
+  ListDir dir;
+  int pop_count;
+};
+
+facade::ErrorReply ParseLMPop(CmdArgList args, LMPopParams* params) {
+  CmdArgParser parser{args};
+
+  if (!SimpleAtoi(parser.Next(), &params->num_keys)) {
+    return facade::ErrorReply(kUintErr);
+  }
+
+  if (params->num_keys <= 0 || !parser.HasAtLeast(params->num_keys + 1)) {
+    return facade::ErrorReply(kSyntaxErr);
+  }
+
+  parser.Skip(params->num_keys);
+
+  if (parser.Check("LEFT")) {
+    params->dir = ListDir::LEFT;
+  } else if (parser.Check("RIGHT")) {
+    params->dir = ListDir::RIGHT;
+  } else {
+    return facade::ErrorReply(kSyntaxErr);
+  }
+
+  params->pop_count = 1;
+  if (parser.HasNext()) {
+    if (!parser.Check("COUNT", &params->pop_count)) {
+      return facade::ErrorReply(kSyntaxErr);
+    }
+  }
+
+  if (!parser.Finalize()) {
+    return facade::ErrorReply(parser.Error()->MakeReply());
+  }
+
+  return facade::ErrorReply(OpStatus::OK);
+}
+
+// Returns the first non-empty key found in the shard arguments along with its type validity.
+// Returns a pair of (key, is_valid_type) where is_valid_type is true if the key exists
+// and has the correct type (LIST). If a wrong type is found, returns that key with false.
+// Returns nullopt if no suitable key is found.
+optional<pair<string_view, bool>> GetFirstNonEmptyKeyFound(EngineShard* shard, Transaction* t) {
+  ShardArgs keys = t->GetShardArgs(shard->shard_id());
+  DCHECK(!keys.Empty());
+
+  auto& db_slice = t->GetDbSlice(shard->shard_id());
+  optional<pair<string_view, bool>> result;
+
+  for (string_view key : keys) {
+    auto res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_LIST);
+    if (res) {
+      result = {key, true};
+      break;
+    }
+
+    // If the key is not found, check if it's a wrong type error
+    if (res.status() == OpStatus::WRONG_TYPE) {
+      result = {key, false};
+      break;
+    }
+  }
+
+  return result;
+}
+
 }  // namespace
+
+void ListFamily::LMPop(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto* response_builder = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  LMPopParams params;
+  facade::ErrorReply parse_result = ParseLMPop(args, &params);
+
+  if (parse_result.status != OpStatus::OK) {
+    response_builder->SendError(parse_result);
+    return;
+  }
+
+  // Create a vector to store first found key for each shard
+  vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
+
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    // Each shard writes results to its own space
+    found_keys_per_shard[shard->shard_id()] = GetFirstNonEmptyKeyFound(shard, t);
+    return OpStatus::OK;
+  };
+
+  cmd_cntx.tx->Execute(std::move(cb), false /* followed by another hop */);
+
+  // Find the first existing key from command arguments
+  optional<string_view> key_to_pop;
+  bool found_wrong_type = false;
+  size_t min_index = numeric_limits<size_t>::max();
+
+  // Iterate over each shard to find the key with the smallest index
+  for (ShardId sid = 0; sid < found_keys_per_shard.size(); ++sid) {
+    if (!found_keys_per_shard[sid])
+      continue;
+
+    const auto& [found_key, is_valid_type] = *found_keys_per_shard[sid];
+    ShardArgs shard_args = cmd_cntx.tx->GetShardArgs(sid);
+
+    for (auto it = shard_args.begin(); it != shard_args.end(); ++it) {
+      if (found_key == *it && it.index() < min_index) {
+        min_index = it.index();
+        key_to_pop = found_key;
+        found_wrong_type = !is_valid_type;
+        break;
+      }
+    }
+  }
+
+  // Handle errors and empty cases first
+  if (!key_to_pop || found_wrong_type) {
+    cmd_cntx.tx->Conclude();
+    if (found_wrong_type) {
+      response_builder->SendError(kWrongTypeErr);
+    } else {
+      response_builder->SendNull();
+    }
+    return;
+  }
+
+  // Pop values from the found key
+  optional<ShardId> key_shard = Shard(*key_to_pop, shard_set->size());
+  OpResult<StringVec> result;
+
+  auto cb_pop = [&params, key_shard, &result, key = *key_to_pop](Transaction* t,
+                                                                 EngineShard* shard) {
+    if (*key_shard == shard->shard_id()) {
+      result = OpPop(t->GetOpArgs(shard), key, params.dir, params.pop_count, true, false);
+    }
+    return OpStatus::OK;
+  };
+
+  cmd_cntx.tx->Execute(std::move(cb_pop), true);
+
+  if (result) {
+    response_builder->StartArray(2);
+    response_builder->SendBulkString(*key_to_pop);
+    response_builder->StartArray(result->size());
+    for (const auto& val : *result) {
+      response_builder->SendBulkString(val);
+    }
+  } else {
+    response_builder->SendNull();
+  }
+}
 
 void ListFamily::LPush(CmdArgList args, const CommandContext& cmd_cntx) {
   return PushGeneric(ListDir::LEFT, false, std::move(args), cmd_cntx.tx, cmd_cntx.rb);
@@ -1442,6 +1594,7 @@ namespace acl {
 constexpr uint32_t kLPush = WRITE | LIST | FAST;
 constexpr uint32_t kLPushX = WRITE | LIST | FAST;
 constexpr uint32_t kLPop = WRITE | LIST | FAST;
+constexpr uint32_t kLMPop = WRITE | LIST | FAST;
 constexpr uint32_t kRPush = WRITE | LIST | FAST;
 constexpr uint32_t kRPushX = WRITE | LIST | FAST;
 constexpr uint32_t kRPop = WRITE | LIST | FAST;
@@ -1467,6 +1620,7 @@ void ListFamily::Register(CommandRegistry* registry) {
       << CI{"LPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPush}.HFUNC(LPush)
       << CI{"LPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kLPushX}.HFUNC(LPushX)
       << CI{"LPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kLPop}.HFUNC(LPop)
+      << CI{"LMPOP", CO::WRITE | CO::SLOW | CO::VARIADIC_KEYS, -4, 2, 2, acl::kLMPop}.HFUNC(LMPop)
       << CI{"RPUSH", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPush}.HFUNC(RPush)
       << CI{"RPUSHX", CO::WRITE | CO::FAST | CO::DENYOOM, -3, 1, 1, acl::kRPushX}.HFUNC(RPushX)
       << CI{"RPOP", CO::WRITE | CO::FAST, -2, 1, 1, acl::kRPop}.HFUNC(RPop)
