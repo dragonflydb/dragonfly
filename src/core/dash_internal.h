@@ -1193,8 +1193,6 @@ template <typename Key, typename Value, typename Policy>
 void Segment<Key, Value, Policy>::Prefetch(Hash_t key_hash) const {
   uint8_t bidx = BucketIndex(key_hash);
   const Bucket& target = bucket_[bidx];
-  uint8_t nid = NextBid(bidx);
-  const Bucket& probe = bucket_[nid];
 
   // Prefetch the home bucket that might hold the key with high probability.
   __builtin_prefetch(&target, 0, 1);
