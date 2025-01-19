@@ -1,3 +1,18 @@
+diff --git a/src/classes/worker.ts b/src/classes/worker.ts
+index b79ddf464..307b6e345 100644
+--- a/src/classes/worker.ts
++++ b/src/classes/worker.ts
+@@ -702,7 +702,10 @@ will never work with more accuracy than 1ms. */
+
+           // Markers should only be used for un-blocking, so we will handle them in this
+           // function only.
++          const gettime = () => '[' + new Date().toJSON() + ']';
++          console.log(`${gettime()} Pre bzpopmin`);
+           const result = await bclient.bzpopmin(this.keys.marker, blockTimeout);
++          console.log(`${gettime()} Post bzpopmin`);
+
+           if (result) {
+             const [_key, member, score] = result;
 diff --git a/tests/test_bulk.ts b/tests/test_bulk.ts
 index cdaa97ea7..ccf5e9d9c 100644
 --- a/tests/test_bulk.ts
