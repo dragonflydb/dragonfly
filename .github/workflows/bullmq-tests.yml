@@ -66,11 +66,11 @@ jobs:
           #git clone https://github.com/taskforcesh/bullmq
           cd bullmq
           pwd
-          #patch -p1 -f < $GITHUB_WORKSPACE/bullmq.patch
+          patch -p1 -f < $GITHUB_WORKSPACE/bullmq.patch
           yarn install
           yarn build
           sed -i 's/timeout: 4000/timeout: 10000/' .mocharc.js
-          for i in {1..30}; do
+          for i in {1..100}; do
             BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy";
             redis-cli info Commandstats
           done
