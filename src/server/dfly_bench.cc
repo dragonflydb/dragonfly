@@ -73,16 +73,15 @@ static string GetRandomHex(size_t len) {
   std::string res(len, '\0');
   size_t indx = 0;
 
-  for (size_t i = 0; i < len / 16; ++i) {  // 2 chars per byte
+  for (; indx < len; indx += 16) {  // 2 chars per byte
     absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), res.data() + indx);
-    indx += 16;
   }
 
-  if (indx < res.size()) {
-    char buf[32];
+  if (indx < len) {
+    char buf[24];
     absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), buf);
 
-    for (unsigned j = 0; indx < res.size(); indx++, j++) {
+    for (unsigned j = 0; indx < len; indx++, j++) {
       res[indx] = buf[j];
     }
   }
