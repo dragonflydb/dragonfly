@@ -43,7 +43,9 @@ ABSL_FLAG(uint64_t, key_stddev, 0,
           " a default value of (max-min)/6");
 ABSL_FLAG(uint32_t, pipeline, 1, "maximum number of pending requests per connection");
 ABSL_FLAG(string, ratio, "1:10", "Set:Get ratio");
-ABSL_FLAG(string, command, "", "custom command with __key__ placeholder for keys");
+ABSL_FLAG(string, command, "",
+          "custom command with __key__ placeholder for keys, "
+          "__data__ for values, __score__ for doubles");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
 
@@ -56,8 +58,6 @@ using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
 using absl::StrCat;
 
-constexpr string_view kKeyPlaceholder = "__key__"sv;
-
 thread_local base::Xoroshiro128p bit_gen;
 
 #if __INTELLISENSE__
@@ -66,6 +66,28 @@ thread_local base::Xoroshiro128p bit_gen;
 
 enum Protocol { RESP, MC_TEXT } protocol;
 enum DistType { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
+
+string_view kTmplPatterns[] = {"__key__"sv, "__data__"sv, "__score__"sv};
+
+static string GetRandomHex(size_t len) {
+  std::string res(len, '\0');
+  size_t indx = 0;
+
+  for (; indx < len; indx += 16) {  // 2 chars per byte
+    absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), res.data() + indx);
+  }
+
+  if (indx < len) {
+    char buf[24];
+    absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), buf);
+
+    for (unsigned j = 0; indx < len; indx++, j++) {
+      res[indx] = buf[j];
+    }
+  }
+
+  return res;
+}
 
 class KeyGenerator {
  public:
@@ -92,14 +114,18 @@ class CommandGenerator {
   }
 
  private:
+  enum TemplateType { KEY, VALUE, SCORE };
+
   void FillSet(string_view key);
   void FillGet(string_view key);
+  void AddTemplateIndices(string_view pattern, TemplateType t);
 
   KeyGenerator* keygen_;
   uint32_t ratio_set_ = 0, ratio_get_ = 0;
   string command_;
   string cmd_;
-  std::vector<size_t> key_indices_;
+
+  vector<pair<size_t, TemplateType>> key_indices_;
   string value_;
   bool might_hit_ = false;
 };
@@ -113,32 +139,46 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
     CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set_));
     CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get_));
   } else {
-    for (size_t pos = 0; (pos = command_.find(kKeyPlaceholder, pos)) != string::npos;
-         pos += kKeyPlaceholder.size()) {
-      key_indices_.push_back(pos);
-    }
+    AddTemplateIndices(kTmplPatterns[KEY], KEY);
+    AddTemplateIndices(kTmplPatterns[VALUE], VALUE);
+    AddTemplateIndices(kTmplPatterns[SCORE], SCORE);
+    sort(key_indices_.begin(), key_indices_.end());
   }
 }
 
 string CommandGenerator::Next() {
   cmd_.clear();
-  string key;
   if (command_.empty()) {
-    key = (*keygen_)();
+    string key = (*keygen_)();
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
       FillSet(key);
       might_hit_ = false;
     } else {
       FillGet(key);
+
       might_hit_ = true;
     }
   } else {
     size_t last_pos = 0;
-    for (size_t pos : key_indices_) {
-      key = (*keygen_)();
-      absl::StrAppend(&cmd_, command_.substr(last_pos, pos - last_pos), key);
-      last_pos = pos + kKeyPlaceholder.size();
+    const size_t kPatLen[] = {kTmplPatterns[KEY].size(), kTmplPatterns[VALUE].size(),
+                              kTmplPatterns[SCORE].size()};
+    string str;
+    for (auto [pos, type] : key_indices_) {
+      switch (type) {
+        case KEY:
+          str = (*keygen_)();
+          break;
+        case VALUE:
+          str = GetRandomHex(value_.size());
+          break;
+        case SCORE: {
+          uniform_real_distribution<double> uniform(0, 1);
+          str = absl::StrCat(uniform(bit_gen));
+        }
+      }
+      absl::StrAppend(&cmd_, command_.substr(last_pos, pos - last_pos), str);
+      last_pos = pos + kPatLen[type];
     }
     absl::StrAppend(&cmd_, command_.substr(last_pos), "\r\n");
   }
@@ -157,6 +197,12 @@ void CommandGenerator::FillSet(string_view key) {
 
 void CommandGenerator::FillGet(string_view key) {
   absl::StrAppend(&cmd_, "get ", key, "\r\n");
+}
+
+void CommandGenerator::AddTemplateIndices(string_view pattern, TemplateType t) {
+  for (size_t pos = 0; (pos = command_.find(pattern, pos)) != string::npos; pos += pattern.size()) {
+    key_indices_.emplace_back(pos, t);
+  }
 }
 
 struct ClientStats {
