@@ -334,7 +334,8 @@ io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
 
   // Find snapshot shard files if we're loading DFS.
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
-  auto paths = proactor->Await([&]() -> io::Result<vector<string>, GenericError> {
+  auto paths = proactor->Await([&, &bucket_name =
+                                       bucket_name]() -> io::Result<vector<string>, GenericError> {
     vector<string> res;
     cloud::GCS gcs(&creds_provider_, ctx_, proactor);
 
@@ -458,7 +459,8 @@ io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
   const size_t pos = obj_path.find_last_of('/');
   const std::string prefix = (pos == std::string_view::npos) ? "" : obj_path.substr(0, pos);
 
-  auto paths = proactor->Await([&]() -> io::Result<vector<string>, GenericError> {
+  auto paths = proactor->Await([&, &bucket_name =
+                                       bucket_name]() -> io::Result<vector<string>, GenericError> {
     const io::Result<std::vector<SnapStat>, GenericError> keys = ListObjects(bucket_name, prefix);
     if (!keys) {
       return nonstd::make_unexpected(keys.error());

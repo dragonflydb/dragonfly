@@ -1453,7 +1453,7 @@ void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
     return cmnd_cntx.rb->SendError(err->MakeReply());
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
@@ -1477,7 +1477,7 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
     return builder->SendError("string exceeds maximum allowed size");
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
   auto res = cmnd_cntx.tx->ScheduleSingleHopT(cb);

@@ -234,8 +234,8 @@ class Driver {
   }
 
   Driver(const Driver&) = delete;
-  Driver(Driver&&) = default;
-  Driver& operator=(Driver&&) = default;
+  Driver(Driver&&) = delete;
+  Driver& operator=(Driver&&) = delete;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
   void Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen);
@@ -458,7 +458,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
     ThisFiber::SleepFor(1ms);
   }
 
-  socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
+  std::ignore = socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
   receive_fb_.Join();
   std::ignore = socket_->Close();
   stats_.num_clients--;

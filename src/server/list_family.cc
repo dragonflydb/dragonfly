@@ -1248,7 +1248,7 @@ void ListFamily::LPos(CmdArgList args, const CommandContext& cmd_cntx) {
   if (auto err = parser.Error(); err)
     return rb->SendError(err->MakeReply());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &elem = elem](Transaction* t, EngineShard* shard) {
     return OpPos(t->GetOpArgs(shard), key, elem, rank, count, max_len);
   };
 
@@ -1314,7 +1314,7 @@ void ListFamily::LInsert(CmdArgList args, const CommandContext& cmd_cntx) {
 
   DCHECK(pivot.data() && elem.data());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &pivot = pivot, &elem = elem](Transaction* t, EngineShard* shard) {
     return OpInsert(t->GetOpArgs(shard), key, pivot, elem, where);
   };
 

@@ -48,7 +48,6 @@ jobs:
           - container: "alpine-dev:latest"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
-            cxx_flags: ""
 
     runs-on: ubuntu-latest
     env:
