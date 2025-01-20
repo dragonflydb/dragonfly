@@ -14,7 +14,7 @@ index b79ddf464..307b6e345 100644
            if (result) {
              const [_key, member, score] = result;
 diff --git a/tests/test_bulk.ts b/tests/test_bulk.ts
-index cdaa97ea7..ccf5e9d9c 100644
+index cdaa97ea7..ab20c5b7c 100644
 --- a/tests/test_bulk.ts
 +++ b/tests/test_bulk.ts
 @@ -123,18 +123,23 @@ describe('bulk jobs', () => {
@@ -41,3 +41,19 @@ index cdaa97ea7..ccf5e9d9c 100644
        },
        { connection, prefix },
      );
+@@ -158,10 +163,15 @@ describe('bulk jobs', () => {
+
+     await queue.addBulk(jobs);
+
++    console.log(`${gettime()} pre completed`);
+     await completed;
++    console.log(`${gettime()} pre close 1`);
+     await worker.close();
++    console.log(`${gettime()} pre close 2`);
+     await worker2.close();
++    console.log(`${gettime()} pre close queue events`);
+     await queueEvents.close();
++    console.log(`${gettime()} done`);
+   });
+
+   it('should process jobs with custom ids', async () => {
