@@ -28,6 +28,7 @@ DISCONNECT_NORMAL_STABLE_SYNC = 2
 M_OPT = [pytest.mark.opt_only]
 M_SLOW = [pytest.mark.slow]
 M_STRESS = [pytest.mark.slow, pytest.mark.opt_only]
+M_NOT_EPOLL = [pytest.mark.exclude_epoll]
 
 
 async def wait_for_replicas_state(*clients, state="online", node_role="slave", timeout=0.05):
@@ -1490,6 +1491,7 @@ async def test_tls_replication(
     await proxy.close(proxy_task)
 
 
+@pytest.mark.exclude_epoll
 async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""
     master = df_factory.create(proactor_threads=1, bind="::1", port=1111)
@@ -2664,6 +2666,7 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
     await assert_replica_reconnections(replica, 0)
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize(
     "element_size, elements_number",
     [(16, 30000), (30000, 16)],

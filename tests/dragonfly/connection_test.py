@@ -528,6 +528,7 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
         pass
 
 
+@pytest.mark.exclude_epoll
 async def test_reply_count(async_client: aioredis.Redis):
     """Make sure reply aggregations reduce reply counts for common cases"""
 
