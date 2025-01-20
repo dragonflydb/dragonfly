@@ -98,24 +98,14 @@ TEST_F(StreamFamilyTest, XrangeRangeAutocomplete) {
   Run({"xadd", "mystream", "1609459200001-0", "1", "1"});
   Run({"xadd", "mystream", "1609459200001-1", "2", "2"});
   Run({"xadd", "mystream", "1609459200002-0", "3", "3"});
-  resp = Run({"xrange", "mystream", "1609459200000", "1609459200001"});
-  EXPECT_THAT(resp, ArrLen(3));
-  sub_arr = resp.GetVec();
-  EXPECT_THAT(sub_arr, ElementsAre(ArrLen(2), ArrLen(2), ArrLen(2)));
-  sub0 = sub_arr[0].GetVec();
-  sub1 = sub_arr[1].GetVec();
-  auto sub2 = sub_arr[2].GetVec();
-  EXPECT_THAT(sub0, ElementsAre("1609459200000-0", ArrLen(2)));
-  EXPECT_THAT(sub1, ElementsAre("1609459200001-0", ArrLen(2)));
-  EXPECT_THAT(sub2, ElementsAre("1609459200001-1", ArrLen(2)));
+  auto resp = Run({"xrange", "mystream", "1609459200000", "1609459200001"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre("1609459200000-0", ArrLen(2))),
+                                          RespArray(ElementsAre("1609459200001-0", ArrLen(2))),
+                                          RespArray(ElementsAre("1609459200001-1", ArrLen(2))))));
   resp = Run({"xrange", "mystream", "1609459200000", "(1609459200001"});
-  EXPECT_THAT(resp, ArrLen(2));
-  sub_arr = resp.GetVec();
-  EXPECT_THAT(sub_arr, ElementsAre(ArrLen(2), ArrLen(2)));
-  sub0 = sub_arr[0].GetVec();
-  sub1 = sub_arr[1].GetVec();
-  EXPECT_THAT(sub0, ElementsAre("1609459200000-0", ArrLen(2)));
-  EXPECT_THAT(sub1, ElementsAre("1609459200001-0", ArrLen(2)));
+  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre("1609459200000-0", ArrLen(2))),
+                                          RespArray(ElementsAre("1609459200001-0", ArrLen(2))),
+                                          RespArray(ElementsAre("1609459200001-1", ArrLen(2))))));
 }
 
 TEST_F(StreamFamilyTest, Range) {
