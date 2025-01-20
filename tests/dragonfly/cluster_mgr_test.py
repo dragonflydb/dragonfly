@@ -161,4 +161,4 @@ async def test_cluster_mgr(df_factory):
     for i in range(NODES):
         assert run_cluster_mgr(["--action=detach", f"--target_port={replicas[i].port}"])
     await check_cluster_data(client)
-    await client.close()
+    await client.aclose()

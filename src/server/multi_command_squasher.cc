@@ -77,15 +77,14 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
   atomic_ = mode != Transaction::NON_ATOMIC;
 }
 
-MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(
-    ShardId sid, optional<SlotId> slot_id) {
+MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
     if (IsAtomic()) {
-      sinfo.local_tx = new Transaction{cntx_->transaction, sid, slot_id};
+      sinfo.local_tx = new Transaction{cntx_->transaction, sid, nullopt};
     } else {
       // Non-atomic squashing does not use the transactional framework for fan out, so local
       // transactions have to be fully standalone, check locks and release them immediately.
@@ -121,11 +120,9 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
     return SquashResult::NOT_SQUASHED;
 
   // Check if all commands belong to one shard
-  UniqueSlotChecker slot_checker;
   ShardId last_sid = kInvalidSid;
 
   for (string_view key : keys->Range(args)) {
-    slot_checker.Add(key);
     ShardId sid = Shard(key, shard_set->size());
     if (last_sid == kInvalidSid || last_sid == sid)
       last_sid = sid;
@@ -133,7 +130,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
       return SquashResult::NOT_SQUASHED;  // at least two shards
   }
 
-  auto& sinfo = PrepareShardInfo(last_sid, slot_checker.GetUniqueSlotId());
+  auto& sinfo = PrepareShardInfo(last_sid);
 
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);

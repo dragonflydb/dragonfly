@@ -482,6 +482,7 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE")
 
 
+@pytest.mark.exclude_epoll
 @dfly_args(
     {
         **BASIC_ARGS,
@@ -597,7 +598,7 @@ async def test_big_value_serialization_memory_limit(df_factory, cont_type):
     assert info["used_memory_peak_rss"] < (one_gb * 1.3)
 
     await client.execute_command("FLUSHALL")
-    await client.close()
+    await client.aclose()
 
 
 @dfly_args(

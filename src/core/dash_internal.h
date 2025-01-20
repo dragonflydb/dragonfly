@@ -20,10 +20,10 @@ namespace detail {
 
 template <unsigned NUM_SLOTS> class SlotBitmap {
   static_assert(NUM_SLOTS > 0 && NUM_SLOTS <= 28);
-  static constexpr unsigned kLen = NUM_SLOTS > 14 ? 2 : 1;
+  static constexpr bool SINGLE = NUM_SLOTS <= 14;
+  static constexpr unsigned kLen = SINGLE ? 1 : 2;
   static constexpr unsigned kAllocMask = (1u << NUM_SLOTS) - 1;
   static constexpr unsigned kBitmapLenMask = (1 << 4) - 1;
-  static constexpr bool SINGLE = NUM_SLOTS <= 14;
 
  public:
   // probe - true means the entry is probing, i.e. not owning.
@@ -32,7 +32,8 @@ template <unsigned NUM_SLOTS> class SlotBitmap {
   uint32_t GetProbe(bool probe) const {
     if constexpr (SINGLE)
       return ((val_[0].d >> 4) & kAllocMask) ^ ((!probe) * kAllocMask);
-    return (val_[1].d & kAllocMask) ^ ((!probe) * kAllocMask);
+    else
+      return (val_[1].d & kAllocMask) ^ ((!probe) * kAllocMask);
   }
 
   // GetBusy returns the busy mask.
@@ -502,6 +503,7 @@ template <typename _Key, typename _Value, typename Policy = DefaultSegmentPolicy
 
   // Find item with given key hash and truthy predicate
   template <typename Pred> Iterator FindIt(Hash_t key_hash, Pred&& pred) const;
+  void Prefetch(Hash_t key_hash) const;
 
   // Returns valid iterator if succeeded or invalid if not (it's full).
   // Requires: key should be not present in the segment.
@@ -1186,6 +1188,15 @@ auto Segment<Key, Value, Policy>::FindIt(Hash_t key_hash, Pred&& pred) const -> 
     return Iterator{uint8_t(kBucketNum + stash_res.first), stash_res.second};
   }
   return Iterator{};
+}
+
+template <typename Key, typename Value, typename Policy>
+void Segment<Key, Value, Policy>::Prefetch(Hash_t key_hash) const {
+  uint8_t bidx = BucketIndex(key_hash);
+  const Bucket& target = bucket_[bidx];
+
+  // Prefetch the home bucket that might hold the key with high probability.
+  __builtin_prefetch(&target, 0, 1);
 }
 
 template <typename Key, typename Value, typename Policy>

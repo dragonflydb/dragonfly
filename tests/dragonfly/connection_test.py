@@ -9,7 +9,12 @@ from threading import Thread
 import random
 import ssl
 from redis import asyncio as aioredis
+import redis as base_redis
+import hiredis
+from redis.cache import CacheConfig
+
 from redis.exceptions import ConnectionError as redis_conn_error, ResponseError
+
 import async_timeout
 from dataclasses import dataclass
 from aiohttp import ClientSession
@@ -436,7 +441,7 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
         client = aioredis.Redis(connection_pool=async_pool)
         for i in range(0, 2000):
             await client.publish("channel", f"message-{i}")
-        await client.close()
+        await client.aclose()
 
     async def channel_reader(channel: aioredis.client.PubSub):
         for i in range(0, 150):
@@ -523,6 +528,7 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
         pass
 
 
+@pytest.mark.exclude_epoll
 async def test_reply_count(async_client: aioredis.Redis):
     """Make sure reply aggregations reduce reply counts for common cases"""
 
@@ -774,7 +780,7 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factor
     client = server.client(password="XXX")
     with pytest.raises((ResponseError)):
         await client.dbsize()
-    await client.close()
+    await client.aclose()
 
     client = server.admin_client(password="XXX")
     assert await client.dbsize() == 0
@@ -804,7 +810,7 @@ async def test_tls_reject(
 
     client = server.client(**with_tls_client_args, ssl_cert_reqs=None)
     await client.ping()
-    await client.close()
+    await client.aclose()
 
     client = server.client(**with_tls_client_args)
     with pytest.raises(redis_conn_error):
@@ -1038,3 +1044,10 @@ async def test_lib_name_ver(async_client: aioredis.Redis):
     assert len(list) == 1
     assert list[0]["lib-name"] == "dragonfly"
     assert list[0]["lib-ver"] == "1.2.3.4"
+
+
+async def test_hiredis(df_factory):
+    server = df_factory.create(proactor_threads=1)
+    server.start()
+    client = base_redis.Redis(port=server.port, protocol=3, cache_config=CacheConfig())
+    client.ping()

@@ -43,12 +43,6 @@ namespace dfly::acl {
   return is_authed;
 }
 
-// GCC yields a wrong warning about uninitialized optional use
-#ifdef __GNUC__
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
-
 static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id) {
   const size_t index = id.GetFamily();
   const uint64_t command_mask = id.GetBitIndex();
@@ -129,7 +123,5 @@ static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const Com
 
   return {allowed, AclLog::Reason::PUB_SUB};
 }
-
-#pragma GCC diagnostic pop
 
 }  // namespace dfly::acl

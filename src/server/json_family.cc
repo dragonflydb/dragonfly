@@ -955,8 +955,8 @@ OpResult<long> OpDel(const OpArgs& op_args, string_view key, string_view path,
 
   if (json_path.HoldsJsonPath()) {
     const json::Path& path = json_path.AsJsonPath();
-    long deletions =
-        json::MutatePath(path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
+    long deletions = json::MutatePath(
+        path, [](optional<string_view>, JsonType* val) { return true; }, json_val);
     return deletions;
   }
 
@@ -1487,7 +1487,8 @@ void JsonFamily::Set(CmdArgList args, const CommandContext& cmd_cntx) {
   if (parser.Error() || parser.HasNext())  // also clear the parser error dcheck
     return builder->SendError(kSyntaxErr);
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &path = path, &json_str = json_str](Transaction* t,
+                                                                EngineShard* shard) {
     return OpSet(t->GetOpArgs(shard), key, path, json_path, json_str, is_nx_condition,
                  is_xx_condition);
   };

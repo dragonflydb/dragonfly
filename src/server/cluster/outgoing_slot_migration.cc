@@ -205,7 +205,7 @@ void OutgoingMigration::SyncFb() {
     VLOG(1) << "Connecting to target node";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
-      LOG(WARNING) << "Can't connect to taget node";
+      LOG(WARNING) << "Can't connect to target node";
       cntx_.ReportError(GenericError(ec, "Couldn't connect to source."));
       continue;
     }
@@ -218,7 +218,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      LOG(WARNING) << "Can't connect to taget node";
+      LOG(WARNING) << "Can't connect to target node";
       cntx_.ReportError(GenericError(ec, "Could not send INIT command."));
       continue;
     }

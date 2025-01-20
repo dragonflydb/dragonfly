@@ -28,6 +28,9 @@ inputs:
   s3-bucket:
     required: true
     type: string
+  epoll:
+    required: false
+    type: string
 
 runs:
   using: "composite"
@@ -46,7 +49,15 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        timeout 50m pytest -m "${{inputs.filter}}" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
+        if [[ "${{inputs.epoll}}" == 'true' ]]; then
+          export FILTER="${{inputs.filter}} and not exclude_epoll"
+          # Run only replication tests with epoll
+          timeout 50m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
+        else
+          export FILTER="${{inputs.filter}}"
+          # Run only replication tests with epoll
+          timeout 50m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --log-cli-level=INFO || code=$?
+        fi
 
         # timeout returns 124 if we exceeded the timeout duration
         if [[ $code -eq 124 ]]; then

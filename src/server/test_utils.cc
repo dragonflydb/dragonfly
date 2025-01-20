@@ -34,6 +34,23 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 namespace dfly {
 
+namespace {
+
+// Default stack size for fibers. We decrease it by 16 bytes because some allocators
+// need additional 8-16 bytes for their internal structures, thus over reserving additional
+// memory pages if using round sizes.
+#ifdef NDEBUG
+constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
+#elif defined SANITIZERS
+// Increase stack size for sanitizers builds.
+constexpr size_t kFiberDefaultStackSize = 64_KB - 16;
+#else
+// Increase stack size for debug builds.
+constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
+#endif
+
+}  // namespace
+
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
   os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_used_bytes
      << ", tiered_entries: " << stats.tiered_entries << "\n";
@@ -168,6 +185,12 @@ void BaseFamilyTest::SetUpTestSuite() {
 
   absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
   absl::SetFlag(&FLAGS_dbfilename, "");
+
+  static bool init = true;
+  if (exchange(init, false)) {
+    fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
+  }
+
   init_zmalloc_threadlocal(mi_heap_get_backing());
 
   // TODO: go over all env variables starting with FLAGS_ and make sure they are in the below list.

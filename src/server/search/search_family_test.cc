@@ -93,9 +93,7 @@ template <typename... Args> auto IsUnordArray(Args... args) {
 template <typename Expected, size_t... Is>
 void BuildKvMatchers(std::vector<Matcher<std::pair<std::string, RespExpr>>>& kv_matchers,
                      const Expected& expected, std::index_sequence<Is...>) {
-  std::initializer_list<int>{
-      (kv_matchers.emplace_back(Pair(std::get<Is * 2>(expected), std::get<Is * 2 + 1>(expected))),
-       0)...};
+  (kv_matchers.emplace_back(Pair(std::get<Is * 2>(expected), std::get<Is * 2 + 1>(expected))), ...);
 }
 
 MATCHER_P(IsMapMatcher, expected, "") {

@@ -778,6 +778,7 @@ Service::~Service() {
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
+  facade::Connection::Init(pp_.size());
 
   config_registry.RegisterSetter<MemoryBytesFlag>(
       "maxmemory", [](const MemoryBytesFlag& flag) { max_memory_limit = flag.value; });
@@ -800,12 +801,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
     shard_set->pool()->AwaitBrief(
-        [val](unsigned, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(val); });
+        [val](unsigned tid, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(tid, val); });
   });
 
   config_registry.RegisterSetter<size_t>("pipeline_buffer_limit", [](size_t val) {
     shard_set->pool()->AwaitBrief(
-        [val](unsigned, auto*) { facade::Connection::SetPipelineBufferLimit(val); });
+        [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
   config_registry.RegisterMutable("replica_partial_sync");
@@ -910,6 +911,7 @@ void Service::Shutdown() {
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
+  facade::Connection::Shutdown();
 }
 
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,

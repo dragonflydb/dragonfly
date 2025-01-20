@@ -54,9 +54,11 @@ class SinkReplyBuilder;
 // For pipelined requests, monitor and pubsub messages it uses
 // a separate dispatch queue that is processed on a separate fiber.
 class Connection : public util::Connection {
-  struct QueueBackpressure;
-
  public:
+  static void Init(unsigned io_threads);
+  static void Shutdown();
+  static void ShutdownThreadLocal();
+
   Connection(Protocol protocol, util::HttpListenerBase* http_listener, SSL_CTX* ctx,
              ServiceInterface* service);
   ~Connection();
@@ -195,21 +197,16 @@ class Connection : public util::Connection {
     // Returns client id.Thread-safe.
     uint32_t GetClientId() const;
 
-    // Ensure owner thread's memory budget. If expired, skips and returns false. Thread-safe.
-    bool EnsureMemoryBudget() const;
-
     bool operator<(const WeakRef& other);
     bool operator==(const WeakRef& other) const;
 
    private:
     friend class Connection;
 
-    WeakRef(std::shared_ptr<Connection> ptr, QueueBackpressure* backpressure, unsigned thread,
-            uint32_t client_id);
+    WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id, uint32_t client_id);
 
     std::weak_ptr<Connection> ptr_;
-    QueueBackpressure* backpressure_;
-    unsigned thread_;
+    unsigned thread_id_;
     uint32_t client_id_;
   };
 
@@ -231,10 +228,6 @@ class Connection : public util::Connection {
   // Add InvalidationMessage to dispatch queue.
   virtual void SendInvalidationMessageAsync(InvalidationMessage);
 
-  // Must be called before sending pubsub messages to ensure the threads pipeline queue limit is not
-  // reached. Blocks until free space is available. Controlled with `pipeline_queue_limit` flag.
-  void EnsureAsyncMemoryBudget();
-
   // Register hook that is executen when the connection breaks.
   void RegisterBreakHook(BreakerCb breaker_cb);
 
@@ -248,8 +241,6 @@ class Connection : public util::Connection {
 
   // Borrow weak reference to connection. Can be called from any thread.
   WeakRef Borrow();
-
-  static void ShutdownThreadLocal();
 
   bool IsCurrentlyDispatching() const;
 
@@ -306,10 +297,11 @@ class Connection : public util::Connection {
   bool IsHttp() const;
 
   // Sets max queue length locally in the calling thread.
-  static void SetMaxQueueLenThreadLocal(uint32_t val);
-  static void SetPipelineBufferLimit(size_t val);
+  static void SetMaxQueueLenThreadLocal(unsigned tid, uint32_t val);
+  static void SetPipelineBufferLimit(unsigned tid, size_t val);
   static void GetRequestSizeHistogramThreadLocal(std::string* hist);
   static void TrackRequestSize(bool enable);
+  static void EnsureMemoryBudget(unsigned tid);
 
  protected:
   void OnShutdown() override;
@@ -427,18 +419,11 @@ class Connection : public util::Connection {
   // Used to keep track of borrowed references. Does not really own itself
   std::shared_ptr<Connection> self_;
 
-  // Pointer to corresponding queue backpressure struct.
-  // Needed for access from different threads by EnsureAsyncMemoryBudget().
-  QueueBackpressure* queue_backpressure_ = nullptr;
-
   util::fb2::ProactorBase* migration_request_ = nullptr;
 
   // Pooled pipeline messages per-thread
   // Aggregated while handling pipelines, gradually released while handling regular commands.
   static thread_local std::vector<PipelineMessagePtr> pipeline_req_pool_;
-
-  // Per-thread queue backpressure structs.
-  static thread_local QueueBackpressure tl_queue_backpressure_;
 
   union {
     uint16_t flags_;
