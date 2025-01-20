@@ -26,6 +26,7 @@ class DflyParams:
     path: str
     cwd: str
     gdb: bool
+    direct_output: bool
     buffered_out: bool
     args: Dict[str, Union[str, None]]
     existing_port: int
@@ -153,7 +154,7 @@ class DflyInstance:
 
     async def close_clients(self):
         for client in self.clients:
-            await client.close()
+            await client.aclose() if hasattr(client, "aclose") else await client.close()
 
     def __enter__(self):
         self.start()
@@ -186,7 +187,7 @@ class DflyInstance:
             try:
                 self.get_port_from_psutil()
                 logging.debug(
-                    f"Process started after {time.time() - s:.2f} seconds. port={self.port}"
+                    f"Process {self.proc.pid} started after {time.time() - s:.2f} seconds. port={self.port}"
                 )
                 break
             except RuntimeError:
@@ -202,18 +203,19 @@ class DflyInstance:
         sed_cmd = ["sed", "-u", "-e", sed_format]
         if self.params.buffered_out:
             sed_cmd.remove("-u")
-        self.sed_proc = subprocess.Popen(
-            sed_cmd,
-            stdin=self.proc.stdout,
-            stdout=subprocess.PIPE,
-            bufsize=1,
-            universal_newlines=True,
-        )
-        self.stacktrace = []
-        self.sed_thread = threading.Thread(
-            target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
-        )
-        self.sed_thread.start()
+        if not self.params.direct_output:
+            self.sed_proc = subprocess.Popen(
+                sed_cmd,
+                stdin=self.proc.stdout,
+                stdout=subprocess.PIPE,
+                bufsize=1,
+                universal_newlines=True,
+            )
+            self.stacktrace = []
+            self.sed_thread = threading.Thread(
+                target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
+            )
+            self.sed_thread.start()
 
     def set_proc_to_none(self):
         self.proc = None
@@ -234,7 +236,10 @@ class DflyInstance:
                 # if the return code is negative it means termination by signal
                 # if the return code is positive it means abnormal exit
                 if proc.returncode != 0:
-                    raise Exception("Dragonfly did not terminate gracefully")
+                    raise Exception(
+                        f"Dragonfly did not terminate gracefully, exit code {proc.returncode}, "
+                        f"pid: {proc.pid}"
+                    )
 
         except subprocess.TimeoutExpired:
             # We need to send SIGUSR1 to DF such that it prints the stacktrace
@@ -266,15 +271,18 @@ class DflyInstance:
 
         all_args = self.format_args(self.args)
         real_path = os.path.realpath(self.params.path)
-        logging.debug(f"Starting instance with arguments {' '.join(all_args)} from {real_path}")
 
         run_cmd = [self.params.path, *all_args]
         if self.params.gdb:
             run_cmd = ["gdb", "--ex", "r", "--args"] + run_cmd
 
         self.proc = subprocess.Popen(
-            run_cmd, cwd=self.params.cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            run_cmd,
+            cwd=self.params.cwd,
+            stdout=None if self.params.direct_output else subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
+        logging.debug(f"Starting {real_path} {' '.join(all_args)}, pid {self.proc.pid}")
 
     def _check_status(self):
         if not self.params.existing_port:
@@ -372,16 +380,17 @@ class DflyInstance:
             for metric_family in text_string_to_metric_families(data)
         }
 
-    def is_in_logs(self, pattern):
+    def find_in_logs(self, pattern):
         if self.proc is not None:
             raise RuntimeError("Must close server first")
 
+        results = []
         matcher = re.compile(pattern)
         for path in self.log_files:
             for line in open(path):
                 if matcher.search(line):
-                    return True
-        return False
+                    results.append(line)
+        return results
 
     @property
     def rss(self):
@@ -408,14 +417,20 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1"
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
+
+        # If path is not set, we assume that we are running the latest dragonfly.
+        if not path:
+            args.setdefault("list_experimental_v2")
         args.setdefault("log_dir", self.params.log_dir)
 
-        if version >= 1.21:
-            # Add 1 byte limit for big values
-            args.setdefault("serialization_max_chunk_size", 0)
+        if version >= 1.21 and "serialization_max_chunk_size" not in args:
+            args.setdefault("serialization_max_chunk_size", 300000)
+
+        if version >= 1.26:
+            args.setdefault("fiber_safety_margin=4096")
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
@@ -442,9 +457,19 @@ class DflyInstanceFactory:
 
     async def stop_all(self):
         """Stop all launched instances."""
+        exceptions = []  # To collect exceptions
         for instance in self.instances:
             await instance.close_clients()
-            instance.stop()
+            try:
+                instance.stop()
+            except Exception as e:
+                exceptions.append(e)  # Collect the exception
+        if exceptions:
+            first_exception = exceptions[0]
+            raise Exception(
+                f"One or more errors occurred while stopping instances. "
+                f"First exception: {first_exception}"
+            ) from first_exception
 
     def __repr__(self) -> str:
         return f"Factory({self.args})"

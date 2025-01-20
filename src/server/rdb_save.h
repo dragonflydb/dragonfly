@@ -16,6 +16,7 @@ extern "C" {
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "server/common.h"
+#include "server/detail/compressor.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/table.h"
@@ -67,7 +68,8 @@ enum class SaveMode {
   RDB,                        // Save .rdb file. Expected to read all shards.
 };
 
-enum class CompressionMode { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MULTI_ENTRY_LZ4 };
+enum class CompressionMode : uint8_t { NONE, SINGLE_ENTRY, MULTI_ENTRY_ZSTD, MULTI_ENTRY_LZ4 };
+
 CompressionMode GetDefaultCompressionMode();
 
 class RdbSaver {
@@ -92,7 +94,7 @@ class RdbSaver {
   void StartSnapshotInShard(bool stream_journal, Context* cntx, EngineShard* shard);
 
   // Send only the incremental snapshot since start_lsn.
-  void StartIncrementalSnapshotInShard(Context* cntx, EngineShard* shard, LSN start_lsn);
+  void StartIncrementalSnapshotInShard(LSN start_lsn, Context* cntx, EngineShard* shard);
 
   // Stops full-sync serialization for replication in the shard's thread.
   std::error_code StopFullSyncInShard(EngineShard* shard);
@@ -105,7 +107,7 @@ class RdbSaver {
 
   // Writes the RDB file into sink. Waits for the serialization to finish.
   // Called only for save rdb flow and save df on summary file.
-  std::error_code SaveBody(Context* cntx);
+  std::error_code SaveBody(const Context& cntx);
 
   // Fills freq_map with the histogram of rdb types.
   void FillFreqMap(RdbTypeFreqMap* freq_map);
@@ -122,6 +124,7 @@ class RdbSaver {
   struct SnapshotStats {
     size_t current_keys = 0;
     size_t total_keys = 0;
+    size_t big_value_preemptions = 0;
   };
 
   SnapshotStats GetCurrentSnapshotProgress() const;
@@ -145,8 +148,6 @@ class RdbSaver {
   SaveMode save_mode_;
   CompressionMode compression_mode_;
 };
-
-class CompressorImpl;
 
 class SerializerBase {
  public:
@@ -195,7 +196,7 @@ class SerializerBase {
 
   CompressionMode compression_mode_;
   io::IoBuf mem_buf_;
-  std::unique_ptr<CompressorImpl> compressor_impl_;
+  std::unique_ptr<detail::CompressorImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr double kMinCompressionReductionPrecentage = 0.95;
@@ -224,6 +225,7 @@ class RdbSerializer : public SerializerBase {
   // Must be called in the thread to which `it` belongs.
   // Returns the serialized rdb_type or the error.
   // expire_ms = 0 means no expiry.
+  // This function might preempt if flush_fun_ is used.
   io::Result<uint8_t> SaveEntry(const PrimeKey& pk, const PrimeValue& pv, uint64_t expire_ms,
                                 uint32_t mc_flags, DbIndex dbid);
 
@@ -254,8 +256,8 @@ class RdbSerializer : public SerializerBase {
   std::error_code SaveBinaryDouble(double val);
   std::error_code SaveListPackAsZiplist(uint8_t* lp);
   std::error_code SaveStreamPEL(rax* pel, bool nacks);
-  std::error_code SaveStreamConsumers(streamCG* cg);
-  std::error_code SavePlainNodeAsZiplist(quicklistNode* node);
+  std::error_code SaveStreamConsumers(bool save_active, streamCG* cg);
+  std::error_code SavePlainNodeAsZiplist(const quicklistNode* node);
 
   // Might preempt
   void FlushIfNeeded(FlushState flush_state);

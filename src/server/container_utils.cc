@@ -5,6 +5,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
 #include "core/string_set.h"
@@ -152,24 +153,41 @@ quicklistEntry QLEntry() {
 }
 
 bool IterateList(const PrimeValue& pv, const IterateFunc& func, long start, long end) {
-  quicklist* ql = static_cast<quicklist*>(pv.RObjPtr());
-  long llen = quicklistCount(ql);
-  if (end < 0 || end >= llen)
-    end = llen - 1;
-
-  quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, AL_START_HEAD, start);
-  quicklistEntry entry = QLEntry();
-  long lrange = end - start + 1;
-
   bool success = true;
-  while (success && quicklistNext(qiter, &entry) && lrange-- > 0) {
-    if (entry.value) {
-      success = func(ContainerEntry{reinterpret_cast<char*>(entry.value), entry.sz});
-    } else {
-      success = func(ContainerEntry{entry.longval});
+
+  if (pv.Encoding() == OBJ_ENCODING_QUICKLIST) {
+    quicklist* ql = static_cast<quicklist*>(pv.RObjPtr());
+    long llen = quicklistCount(ql);
+    if (end < 0 || end >= llen)
+      end = llen - 1;
+
+    quicklistIter* qiter = quicklistGetIteratorAtIdx(ql, AL_START_HEAD, start);
+    quicklistEntry entry = QLEntry();
+    long lrange = end - start + 1;
+
+    while (success && quicklistNext(qiter, &entry) && lrange-- > 0) {
+      if (entry.value) {
+        success = func(ContainerEntry{reinterpret_cast<char*>(entry.value), entry.sz});
+      } else {
+        success = func(ContainerEntry{entry.longval});
+      }
     }
+    quicklistReleaseIterator(qiter);
+    return success;
   }
-  quicklistReleaseIterator(qiter);
+  DCHECK_EQ(pv.Encoding(), kEncodingQL2);
+  QList* ql = static_cast<QList*>(pv.RObjPtr());
+
+  ql->Iterate(
+      [&](const QList::Entry& entry) {
+        if (entry.is_int()) {
+          success = func(ContainerEntry{entry.ival()});
+        } else {
+          success = func(ContainerEntry{entry.view().data(), entry.view().size()});
+        }
+        return success;
+      },
+      start, end);
   return success;
 }
 
@@ -250,6 +268,36 @@ bool IterateSortedSet(const detail::RobjWrapper* robj_wrapper, const IterateSort
     });
   }
   return false;
+}
+
+bool IterateMap(const PrimeValue& pv, const IterateKVFunc& func) {
+  bool finished = true;
+
+  if (pv.Encoding() == kEncodingListPack) {
+    uint8_t k_intbuf[LP_INTBUF_SIZE], v_intbuf[LP_INTBUF_SIZE];
+    uint8_t* lp = (uint8_t*)pv.RObjPtr();
+    uint8_t* fptr = lpFirst(lp);
+    while (fptr) {
+      string_view key = LpGetView(fptr, k_intbuf);
+      fptr = lpNext(lp, fptr);
+      string_view val = LpGetView(fptr, v_intbuf);
+      fptr = lpNext(lp, fptr);
+      if (!func(ContainerEntry{key.data(), key.size()}, ContainerEntry{val.data(), val.size()})) {
+        finished = false;
+        break;
+      }
+    }
+  } else {
+    StringMap* sm = static_cast<StringMap*>(pv.RObjPtr());
+    for (const auto& k_v : *sm) {
+      if (!func(ContainerEntry{k_v.first, sdslen(k_v.first)},
+                ContainerEntry{k_v.second, sdslen(k_v.second)})) {
+        finished = false;
+        break;
+      }
+    }
+  }
+  return finished;
 }
 
 StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {

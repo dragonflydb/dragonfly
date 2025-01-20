@@ -18,7 +18,10 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/qlist.h"
+#include "core/sorted_map.h"
 #include "core/string_map.h"
+#include "core/string_set.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -57,9 +60,14 @@ struct PopulateBatch {
 };
 
 struct ObjInfo {
+  unsigned type = 0;
   unsigned encoding;
   unsigned bucket_id = 0;
   unsigned slot_id = 0;
+
+  // for lists - how many nodes do they have.
+  unsigned num_nodes = 0;
+  unsigned num_compressed = 0;
 
   enum LockStatus { NONE, S, X } lock_status = NONE;
 
@@ -116,12 +124,13 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
       args.push_back(GenerateValue(val_size, random_value, gen));
     }
   } else if (type == "JSON") {
-    cid = registry.Find("JSON.SET");
+    cid = registry.Find("JSON.MERGE");
     args.push_back("$");
 
     string json = "{";
     for (size_t i = 0; i < elements; ++i) {
-      absl::StrAppend(&json, "\"", i, "\":\"", GenerateValue(val_size, random_value, gen), "\",");
+      absl::StrAppend(&json, "\"", GenerateValue(val_size / 2, random_value, gen), "\":\"",
+                      GenerateValue(val_size / 2, random_value, gen), "\",");
     }
     json[json.size() - 1] = '}';  // Replace last ',' with '}'
     args.push_back(json);
@@ -149,30 +158,37 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   absl::InlinedVector<string_view, 5> args_view;
   facade::CapturingReplyBuilder crb;
   ConnectionContext local_cntx{cntx, stub_tx.get()};
-
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = absl::StrCat(prefix, ":", batch.index[i]);
+    uint32_t elements_left = elements;
 
-    auto [cid, args] = GeneratePopulateCommand(type, std::move(key), val_size, random_value,
-                                               elements, *sf->service().mutable_registry(), &gen);
-    if (!cid) {
-      LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
-      break;
+    while (elements_left) {
+      // limit rss grow by 32K by limiting the element count in each command.
+      uint32_t max_batch_elements = std::max(32_KB / val_size, 1ULL);
+      uint32_t populate_elements = std::min(max_batch_elements, elements_left);
+      elements_left -= populate_elements;
+      auto [cid, args] =
+          GeneratePopulateCommand(type, key, val_size, random_value, populate_elements,
+                                  *sf->service().mutable_registry(), &gen);
+      if (!cid) {
+        LOG_EVERY_N(WARNING, 10'000) << "Unable to find command, was it renamed?";
+        break;
+      }
+
+      args_view.clear();
+      for (auto& arg : args) {
+        args_view.push_back(arg);
+      }
+      auto args_span = absl::MakeSpan(args_view);
+
+      stub_tx->MultiSwitchCmd(cid);
+      local_cntx.cid = cid;
+      crb.SetReplyMode(ReplyMode::NONE);
+      stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
+
+      sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
     }
-
-    args_view.clear();
-    for (auto& arg : args) {
-      args_view.push_back(arg);
-    }
-    auto args_span = absl::MakeSpan(args_view);
-
-    stub_tx->MultiSwitchCmd(cid);
-    local_cntx.cid = cid;
-    crb.SetReplyMode(ReplyMode::NONE);
-    stub_tx->InitByArgs(cntx->ns, local_cntx.conn_state.db_index, args_span);
-
-    sf->service().InvokeCmd(cid, args_span, &crb, &local_cntx);
   }
 
   local_tx->UnlockMulti();
@@ -207,11 +223,23 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
 
   if (pv.ObjType() == OBJ_LIST) {
     IterateList(pv, per_entry_cb, 0, -1);
+    if (pv.Encoding() == kEncodingQL2) {
+      const QList* ql = static_cast<QList*>(pv.RObjPtr());
+      val_len = ql->MallocUsed(true);
+    }
   } else if (pv.ObjType() == OBJ_ZSET) {
     IterateSortedSet(pv.GetRobjWrapper(),
                      [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
+    if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
+      detail::SortedMap* smap = static_cast<detail::SortedMap*>(pv.RObjPtr());
+      val_len = smap->MallocSize();
+    }
   } else if (pv.ObjType() == OBJ_SET) {
     IterateSet(pv, per_entry_cb);
+    if (pv.Encoding() == kEncodingStrMap2) {
+      StringSet* ss = static_cast<StringSet*>(pv.RObjPtr());
+      val_len = ss->ObjMallocUsed() + ss->SetMallocUsed();
+    }
   } else if (pv.ObjType() == OBJ_HASH) {
     if (pv.Encoding() == kEncodingListPack) {
       uint8_t intbuf[LP_INTBUF_SIZE];
@@ -281,7 +309,7 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
       continue;
     PrimeTable::Cursor cursor;
     do {
-      cursor = db_slice.Traverse(&dbt->prime, cursor, [&](PrimeIterator it) {
+      cursor = dbt->prime.Traverse(cursor, [&](PrimeIterator it) {
         unsigned obj_type = it->second.ObjType();
         auto& hist_ptr = (*obj_hist_map)[obj_type];
         if (!hist_ptr) {
@@ -309,9 +337,24 @@ ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
     const PrimeValue& pv = it->second;
 
     oinfo.found = true;
+    oinfo.type = pv.ObjType();
     oinfo.encoding = pv.Encoding();
     oinfo.bucket_id = it.bucket_id();
     oinfo.slot_id = it.slot_id();
+
+    if (pv.ObjType() == OBJ_LIST && pv.Encoding() == kEncodingQL2) {
+      const QList* qlist = static_cast<const QList*>(pv.RObjPtr());
+      oinfo.num_nodes = qlist->node_count();
+      auto* node = qlist->Head();
+
+      while (node) {
+        if (node->encoding == QUICKLIST_NODE_ENCODING_LZF) {
+          ++oinfo.num_compressed;
+        }
+        node = node->next;
+      }
+    }
+
     if (pv.IsExternal()) {
       oinfo.external_len.emplace(pv.GetExternalSlice().second);
     }
@@ -345,13 +388,31 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
   }
 
   // Only strings are supported right now.
-  if (it->second.ObjType() != OBJ_STRING) {
+  if (it->second.ObjType() != OBJ_STRING && it->second.ObjType() != OBJ_LIST) {
     return OpStatus::WRONG_TYPE;
   }
+  ValueCompressInfo info;
+
+  if (it->second.ObjType() == OBJ_LIST) {
+    if (it->second.Encoding() != kEncodingQL2) {
+      return OpStatus::WRONG_TYPE;
+    }
+
+    const QList* src = static_cast<const QList*>(it->second.RObjPtr());
+    info.raw_size = src->MallocUsed(true);
+    QList qlist(-2, 1);
+    auto copy_cb = [&](QList::Entry entry) {
+      qlist.Push(entry.view(), QList::HEAD);
+      return true;
+    };
+    src->Iterate(copy_cb, 0, -1);
+    info.compressed_size = qlist.MallocUsed(true);
+    return info;
+  }
+
   string scratch;
   string_view value = it->second.GetSlice(&scratch);
 
-  ValueCompressInfo info;
   info.raw_size = value.size();
   info.compressed_size = info.raw_size;
 
@@ -365,9 +426,53 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
   return info;
 };
 
+const char* EncodingName(unsigned obj_type, unsigned encoding) {
+  switch (obj_type) {
+    case OBJ_STRING:
+      return "raw";
+    case OBJ_LIST:
+      switch (encoding) {
+        case kEncodingQL2:
+        case OBJ_ENCODING_QUICKLIST:
+          return "quicklist";
+      }
+      break;
+    case OBJ_SET:
+      ABSL_FALLTHROUGH_INTENDED;
+    case OBJ_ZSET:
+      ABSL_FALLTHROUGH_INTENDED;
+    case OBJ_HASH:
+      switch (encoding) {
+        case kEncodingIntSet:
+          return "intset";
+        case kEncodingStrMap2:
+          return "dense_set";
+        case OBJ_ENCODING_SKIPLIST:  // we kept the old enum for zset
+          return "btree";
+        case OBJ_ENCODING_LISTPACK:
+          ABSL_FALLTHROUGH_INTENDED;
+        case kEncodingListPack:
+          return "listpack";
+      }
+      break;
+    case OBJ_JSON:
+      switch (encoding) {
+        case kEncodingJsonCons:
+          return "jsoncons";
+        case kEncodingJsonFlat:
+          return "jsonflat";
+      }
+      break;
+    case OBJ_STREAM:
+      return "stream";
+  }
+  return "unknown";
+}
+
 }  // namespace
 
-DebugCmd::DebugCmd(ServerFamily* owner, ConnectionContext* cntx) : sf_(*owner), cntx_(cntx) {
+DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx)
+    : sf_(*owner), cf_(*cf), cntx_(cntx) {
 }
 
 void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
@@ -401,7 +506,7 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    to meet value size.",
         "    If RAND is specified then value will be set to random hex string in specified size.",
         "    If SLOTS is specified then create keys only in given slots range.",
-        "    TYPE specifies data type (must be STRING/LIST/SET/HSET/ZSET/JSON), default STRING.",
+        "    TYPE specifies data type (must be STRING/LIST/SET/HASH/ZSET/JSON), default STRING.",
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
         "OBJHIST",
         "    Prints histogram of object sizes.",
@@ -435,6 +540,10 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "REPLICA" && args.size() == 2) {
     return Replica(args, builder);
+  }
+
+  if (subcmd == "MIGRATION" && args.size() == 2) {
+    return Migration(args, builder);
   }
 
   if (subcmd == "WATCHED") {
@@ -550,6 +659,18 @@ void DebugCmd::Replica(CmdArgList args, facade::SinkReplyBuilder* builder) {
   return builder->SendError(UnknownSubCmd("replica", "DEBUG"));
 }
 
+void DebugCmd::Migration(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  args.remove_prefix(1);
+
+  string opt = absl::AsciiStrToUpper(ArgS(args, 0));
+
+  if (opt == "PAUSE" || opt == "RESUME") {
+    cf_.PauseAllIncomingMigrations(opt == "PAUSE");
+    return builder->SendOk();
+  }
+  return builder->SendError(UnknownSubCmd("MIGRATION", "DEBUG"));
+}
+
 optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
                                                                 facade::SinkReplyBuilder* builder) {
   if (args.size() < 2) {
@@ -605,7 +726,7 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         if (!absl::SimpleAtoi(slot_str, &slot_id)) {
           return facade::OpStatus::INVALID_INT;
         }
-        if (slot_id > cluster::kMaxSlotNum) {
+        if (slot_id > kMaxSlotNum) {
           return facade::OpStatus::INVALID_VALUE;
         }
         return slot_id;
@@ -621,8 +742,8 @@ optional<DebugCmd::PopulateOptions> DebugCmd::ParsePopulateArgs(CmdArgList args,
         builder->SendError(end.status());
         return nullopt;
       }
-      options.slot_range = cluster::SlotRange{.start = static_cast<cluster::SlotId>(start.value()),
-                                              .end = static_cast<cluster::SlotId>(end.value())};
+      options.slot_range = cluster::SlotRange{.start = static_cast<SlotId>(start.value()),
+                                              .end = static_cast<SlotId>(end.value())};
 
     } else {
       builder->SendError(kSyntaxErr);
@@ -694,7 +815,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
       // <key_prefix>:<from+total_count+num_of_keys-1> and continue until num_of_keys are added.
 
       // Add keys only in slot range.
-      cluster::SlotId sid = cluster::KeySlot(key);
+      SlotId sid = KeySlot(key);
       if (sid < options.slot_range->start || sid > options.slot_range->end) {
         ++index;
         continue;
@@ -777,7 +898,10 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
   ShardId sid = Shard(key, ess.size());
   VLOG(1) << "DebugCmd::Inspect " << key;
 
-  bool check_compression = (args.size() == 1) && ArgS(args, 0) == "COMPRESS";
+  bool check_compression = false;
+  if (args.size() == 1) {
+    check_compression = absl::AsciiStrToUpper(ArgS(args, 0)) == "COMPRESS";
+  }
   string resp;
 
   if (check_compression) {
@@ -801,7 +925,8 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
       return;
     }
 
-    StrAppend(&resp, "encoding:", strEncoding(res.encoding), " bucket_id:", res.bucket_id);
+    StrAppend(&resp, "encoding:", EncodingName(res.type, res.encoding),
+              " bucket_id:", res.bucket_id);
     StrAppend(&resp, " slot:", res.slot_id, " shard:", sid);
 
     if (res.ttl != INT64_MAX) {
@@ -810,6 +935,16 @@ void DebugCmd::Inspect(string_view key, CmdArgList args, facade::SinkReplyBuilde
 
     if (res.external_len) {
       StrAppend(&resp, " spill_len:", *res.external_len);
+    }
+
+    if (res.num_nodes) {
+      // node count
+      StrAppend(&resp, " nc:", res.num_nodes);
+    }
+
+    if (res.num_compressed) {
+      // compressed nodes
+      StrAppend(&resp, " cn:", res.num_compressed);
     }
 
     if (res.lock_status != ObjInfo::NONE) {
@@ -842,9 +977,9 @@ void DebugCmd::Watched(facade::SinkReplyBuilder* builder) {
   shard_set->RunBlockingInParallel(cb);
   rb->StartArray(4);
   rb->SendBulkString("awaked");
-  rb->SendStringArr(awaked_trans);
+  rb->SendBulkStrArr(awaked_trans);
   rb->SendBulkString("watched");
-  rb->SendStringArr(watched_keys);
+  rb->SendBulkStrArr(watched_keys);
 }
 
 void DebugCmd::TxAnalysis(facade::SinkReplyBuilder* builder) {

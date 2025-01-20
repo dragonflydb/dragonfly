@@ -1,9 +1,46 @@
 local LG_funcs = {}
 
-function LG_funcs.init(dsize, csize)
+function LG_funcs.init(dsize, csize, large_val_count, large_val_sz)
     LG_funcs.dsize = dsize
     LG_funcs.csize = csize
     LG_funcs.esize = math.ceil(dsize / csize)
+    LG_funcs.huge_value_target = large_val_count
+    LG_funcs.huge_value_size = large_val_sz
+end
+
+local huge_entries = 0
+
+
+local function is_huge_entry()
+    if huge_entries >= LG_funcs.huge_value_target then
+        return false
+    else
+        huge_entries = huge_entries + 1
+        return true
+    end
+end
+
+
+local function randstr()
+    local str
+    local is_huge = is_huge_entry()
+    if is_huge then
+        str = dragonfly.randstr(LG_funcs.huge_value_size)
+    else
+        str = dragonfly.randstr(LG_funcs.esize)
+    end
+    return str
+end
+
+local function randstr_sequence()
+    local strs
+    local is_huge = is_huge_entry()
+    if is_huge then
+        strs = dragonfly.randstr(LG_funcs.huge_value_size, LG_funcs.csize)
+    else
+        strs = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize)
+    end
+    return strs
 end
 
 -- strings
@@ -27,12 +64,11 @@ end
 -- lists
 -- store list of random blobs of default container/element sizes
 
-function LG_funcs.add_list(key)
-    local elements = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize)
-    redis.apcall('LPUSH', key, unpack(elements))
+function LG_funcs.add_list(key, keys)
+    redis.apcall('LPUSH', key, unpack(randstr_sequence()))
 end
 
-function LG_funcs.mod_list(key)
+function LG_funcs.mod_list(key, keys)
     -- equally likely pops and pushes, we rely on the list size being large enough
     -- to "highly likely" not get emptied out by consequitve pops
     local action = math.random(1, 4)
@@ -41,9 +77,9 @@ function LG_funcs.mod_list(key)
     elseif action == 2 then
         redis.apcall('LPOP', key)
     elseif action == 3 then
-        redis.apcall('LPUSH', key, dragonfly.randstr(LG_funcs.esize))
+      redis.apcall('LPUSH', key, randstr())
     else
-        redis.apcall('RPUSH', key, dragonfly.randstr(LG_funcs.esize))
+      redis.apcall('RPUSH', key, randstr())
     end
 end
 
@@ -62,17 +98,16 @@ function LG_funcs.add_set(key, keys)
         end
         redis.apcall('SDIFFSTORE', key, keys[i1], keys[i2])
     else
-        local elements = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize)
-        redis.apcall('SADD', key, unpack(elements))
+        redis.apcall('SADD', key, unpack(randstr_sequence()))
     end
 end
 
-function LG_funcs.mod_set(key)
+function LG_funcs.mod_set(key, keys)
      -- equally likely pops and additions
     if math.random() < 0.5 then
         redis.apcall('SPOP', key)
     else
-        redis.apcall('SADD', key, dragonfly.randstr(LG_funcs.esize))
+        redis.apcall('SADD', key, randstr())
     end
 end
 
@@ -81,26 +116,25 @@ end
 -- store  {to_string(i): value for i in [1, csize]},
 -- where `value` is a random string for even indices and a number for odd indices
 
-function LG_funcs.add_hash(key)
-    local blobs  = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize / 2)
+function LG_funcs.add_hash(key, keys)
+    local blobs = randstr_sequence()
+    local limit = LG_funcs.csize
+
     local htable = {}
-    for i = 1,  LG_funcs.csize, 2 do
+    for i = 1, limit do
         htable[i * 2 - 1] = tostring(i)
-        htable[i * 2] = math.random(0, 1000)
+        htable[i * 2] = blobs[i]
     end
-    for i = 2,  LG_funcs.csize, 2 do
-        htable[i * 2 - 1] = tostring(i)
-        htable[i * 2] = blobs[i // 2]
-    end
+
     redis.apcall('HSET', key, unpack(htable))
 end
 
-function LG_funcs.mod_hash(key)
+function LG_funcs.mod_hash(key, keys)
     local idx = math.random(LG_funcs.csize)
     if idx % 2 == 1 then
         redis.apcall('HINCRBY', key, tostring(idx), 1)
     else
-        redis.apcall('HSET', key, tostring(idx), dragonfly.randstr(LG_funcs.esize))
+      redis.apcall('HSET', key, tostring(idx), randstr())
     end
 end
 
@@ -108,19 +142,23 @@ end
 
 function LG_funcs.add_zset(key, keys)
     -- TODO: We don't support ZDIFFSTORE
-    local blobs  = dragonfly.randstr(LG_funcs.esize, LG_funcs.csize)
+    local blobs = randstr_sequence()
     local ztable = {}
-    for i = 1,  LG_funcs.csize do
+
+    local limit = LG_funcs.csize
+
+    for i = 1, limit do
         ztable[i * 2 - 1] = tostring(i)
         ztable[i * 2] = blobs[i]
     end
     redis.apcall('ZADD', key, unpack(ztable))
 end
 
-function LG_funcs.mod_zset(key, dbsize)
+function LG_funcs.mod_zset(key, keys)
     local action = math.random(1, 4)
     if action <= 2 then
-        redis.apcall('ZADD', key, math.random(0, LG_funcs.csize * 2), dragonfly.randstr(LG_funcs.esize))
+        local size = LG_funcs.csize * 2
+        redis.apcall('ZADD', key, math.random(0, size), randstr())
     elseif action == 3 then
         redis.apcall('ZPOPMAX', key)
     else
@@ -152,4 +190,8 @@ function LG_funcs.mod_json(key, dbsize)
     else
         redis.apcall('JSON.NUMINCRBY', key, '$.counters[' .. math.random(LG_funcs.csize ) .. ']', 1)
     end
+end
+
+function LG_funcs.get_huge_entries()
+  return huge_entries
 end

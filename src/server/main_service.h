@@ -62,8 +62,7 @@ class Service : public facade::ServiceInterface {
   void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                   facade::MCReplyBuilder* builder, facade::ConnectionContext* cntx) final;
 
-  facade::ConnectionContext* CreateContext(util::FiberSocketBase* peer,
-                                           facade::Connection* owner) final;
+  facade::ConnectionContext* CreateContext(facade::Connection* owner) final;
 
   const CommandId* FindCmd(std::string_view) const;
 
@@ -79,10 +78,8 @@ class Service : public facade::ServiceInterface {
   // Upon switch, updates cached global state in threadlocal ServerState struct.
   GlobalState SwitchState(GlobalState from, GlobalState to) ABSL_LOCKS_EXCLUDED(mu_);
 
-  void RequestLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
+  bool RequestLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
   void RemoveLoadingState() ABSL_LOCKS_EXCLUDED(mu_);
-
-  GlobalState GetGlobalState() const ABSL_LOCKS_EXCLUDED(mu_);
 
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
   void OnConnectionClose(facade::ConnectionContext* cntx) final;
@@ -115,6 +112,10 @@ class Service : public facade::ServiceInterface {
     return server_family_;
   }
 
+  cluster::ClusterFamily& cluster_family() {
+    return cluster_family_;
+  }
+
   // Utility function used in unit tests
   // Do not use in production, only meant to be used by unit tests
   const acl::AclFamily* TestInit();
@@ -122,39 +123,27 @@ class Service : public facade::ServiceInterface {
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
-  static void Quit(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
-  static void Multi(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
+  static void Quit(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Multi(CmdArgList args, const CommandContext& cmd_cntx);
 
-  static void Watch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
-  static void Unwatch(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                      ConnectionContext* cntx);
+  static void Watch(CmdArgList args, const CommandContext& cmd_cntx);
+  static void Unwatch(CmdArgList args, const CommandContext& cmd_cntx);
 
-  void Discard(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void Eval(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void EvalSha(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void Exec(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Publish(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void Subscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                 ConnectionContext* cntx);
-  void Unsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                   ConnectionContext* cntx);
-  void PSubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                  ConnectionContext* cntx);
-  void PUnsubscribe(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx);
-  void Function(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                ConnectionContext* cntx);
-  void Monitor(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
-  void Pubsub(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder, ConnectionContext* cntx);
-  void Command(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-               ConnectionContext* cntx);
+  void Discard(CmdArgList args, const CommandContext& cmd_cntx);
+  void Eval(CmdArgList args, const CommandContext& cmd_cntx, bool read_only = false);
+  void EvalRo(CmdArgList args, const CommandContext& cmd_cntx);
+  void EvalSha(CmdArgList args, const CommandContext& cmd_cntx, bool read_only = false);
+  void EvalShaRo(CmdArgList args, const CommandContext& cmd_cntx);
+  void Exec(CmdArgList args, const CommandContext& cmd_cntx);
+  void Publish(CmdArgList args, const CommandContext& cmd_cntx);
+  void Subscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void PSubscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void PUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void Function(CmdArgList args, const CommandContext& cmd_cntx);
+  void Monitor(CmdArgList args, const CommandContext& cmd_cntx);
+  void Pubsub(CmdArgList args, const CommandContext& cmd_cntx);
+  void Command(CmdArgList args, const CommandContext& cmd_cntx);
 
   void PubsubChannels(std::string_view pattern, SinkReplyBuilder* builder);
   void PubsubPatterns(SinkReplyBuilder* builder);
@@ -170,9 +159,9 @@ class Service : public facade::ServiceInterface {
                                                        const ConnectionContext& dfly_cntx);
 
   void EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpreter* interpreter,
-                    SinkReplyBuilder* builder, ConnectionContext* cntx);
+                    SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
   void CallSHA(CmdArgList args, std::string_view sha, Interpreter* interpreter,
-               SinkReplyBuilder* builder, ConnectionContext* cntx);
+               SinkReplyBuilder* builder, ConnectionContext* cntx, bool read_only);
 
   // Return optional payload - first received error that occured when executing commands.
   std::optional<facade::CapturingReplyBuilder::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,

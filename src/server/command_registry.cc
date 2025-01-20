@@ -85,7 +85,8 @@ bool CommandId::IsTransactional() const {
   if (first_key_ > 0 || (opt_mask_ & CO::GLOBAL_TRANS) || (opt_mask_ & CO::NO_KEY_TRANSACTIONAL))
     return true;
 
-  if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EXEC")
+  if (name_ == "EVAL" || name_ == "EVALSHA" || name_ == "EVAL_RO" || name_ == "EVALSHA_RO" ||
+      name_ == "EXEC")
     return true;
 
   return false;
@@ -95,10 +96,9 @@ bool CommandId::IsMultiTransactional() const {
   return CO::IsTransKind(name()) || CO::IsEvalKind(name());
 }
 
-uint64_t CommandId::Invoke(CmdArgList args, Transaction* tx, facade::SinkReplyBuilder* builder,
-                           ConnectionContext* cntx) const {
+uint64_t CommandId::Invoke(CmdArgList args, const CommandContext& cmd_cntx) const {
   int64_t before = absl::GetCurrentTimeNanos();
-  handler_(args, tx, builder, cntx);
+  handler_(args, cmd_cntx);
   int64_t after = absl::GetCurrentTimeNanos();
 
   ServerState* ss = ServerState::tlocal();  // Might have migrated thread, read after invocation
@@ -130,13 +130,6 @@ optional<facade::ErrorReply> CommandId::Validate(CmdArgList tail_args) const {
   if (validator_)
     return validator_(tail_args);
   return nullopt;
-}
-
-CommandId&& CommandId::SetHandler(Handler2 f) && {
-  handler_ = [f = std::move(f)](CmdArgList args, Transaction* tx, facade::SinkReplyBuilder* builder,
-                                facade::ConnectionContext*) { f(args, tx, builder); };
-
-  return std::move(*this);
 }
 
 CommandRegistry::CommandRegistry() {
@@ -290,6 +283,8 @@ const char* OptName(CO::CommandOpt fl) {
       return "no-key-tx-span-all";
     case IDEMPOTENT:
       return "idempotent";
+    case SLOW:
+      return "slow";
   }
   return "unknown";
 }

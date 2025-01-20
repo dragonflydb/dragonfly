@@ -430,23 +430,6 @@ def test_pubsub_help_redis71(r: redis.Redis):
     ]
 
 
-@pytest.mark.max_server("6.2.7")
-def test_pubsub_help_redis6(r: redis.Redis):
-    assert testtools.raw_command(r, "PUBSUB HELP") == [
-        b"PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
-        b"CHANNELS [<pattern>]",
-        b"    Return the currently active channels matching a <pattern> (default: '*')"
-        b".",
-        b"NUMPAT",
-        b"    Return number of subscriptions to patterns.",
-        b"NUMSUB [<channel> ...]",
-        b"    Return the number of subscribers for the specified channels, excluding",
-        b"    pattern subscriptions(default: no channels).",
-        b"HELP",
-        b"    Prints this help.",
-    ]
-
-
 def test_pubsub_numsub(r: redis.Redis):
     a = uuid.uuid4().hex
     b = uuid.uuid4().hex
@@ -481,7 +464,7 @@ def test_published_message_to_shard_channel(r: redis.Redis):
 
 
 @pytest.mark.min_server("7")
-@testtools.run_test_if_redispy_ver("gte", "5.0.0rc2")
+@testtools.run_test_if_redispy_ver("gte", "5.0.0")
 @pytest.mark.unsupported_server_types("dragonfly")
 def test_subscribe_property_with_shard_channels_cluster(r: redis.Redis):
     p = r.pubsub()

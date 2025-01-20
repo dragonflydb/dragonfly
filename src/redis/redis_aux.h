@@ -28,9 +28,6 @@ extern Server server;
 
 void InitRedisTables();
 
-const char *strEncoding(int encoding);
-
-
 /* The actual Redis Object */
 #define OBJ_STRING 0U    /* String object. */
 #define OBJ_LIST 1U      /* List object. */

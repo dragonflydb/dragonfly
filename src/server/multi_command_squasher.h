@@ -22,10 +22,14 @@ namespace dfly {
 // contains a non-atomic multi transaction to execute squashed commands.
 class MultiCommandSquasher {
  public:
-  static void Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
-                      ConnectionContext* cntx, Service* service, bool verify_commands = false,
-                      bool error_abort = false) {
-    MultiCommandSquasher{cmds, cntx, service, verify_commands, error_abort}.Run(rb);
+  static size_t Execute(absl::Span<StoredCmd> cmds, facade::RedisReplyBuilder* rb,
+                        ConnectionContext* cntx, Service* service, bool verify_commands = false,
+                        bool error_abort = false) {
+    return MultiCommandSquasher{cmds, cntx, service, verify_commands, error_abort}.Run(rb);
+  }
+
+  static size_t GetRepliesMemSize() {
+    return current_reply_size_.load(std::memory_order_relaxed);
   }
 
  private:
@@ -48,7 +52,7 @@ class MultiCommandSquasher {
                        bool verify_commands, bool error_abort);
 
   // Lazy initialize shard info.
-  ShardExecInfo& PrepareShardInfo(ShardId sid, std::optional<cluster::SlotId> slot_id);
+  ShardExecInfo& PrepareShardInfo(ShardId sid);
 
   // Retrun squash flags
   SquashResult TrySquash(StoredCmd* cmd);
@@ -57,13 +61,14 @@ class MultiCommandSquasher {
   bool ExecuteStandalone(facade::RedisReplyBuilder* rb, StoredCmd* cmd);
 
   // Callback that runs on shards during squashed hop.
-  facade::OpStatus SquashedHopCb(Transaction* parent_tx, EngineShard* es);
+  facade::OpStatus SquashedHopCb(Transaction* parent_tx, EngineShard* es,
+                                 facade::RespVersion resp_v);
 
   // Execute all currently squashed commands. Return false if aborting on error.
   bool ExecuteSquashed(facade::RedisReplyBuilder* rb);
 
-  // Run all commands until completion.
-  void Run(facade::RedisReplyBuilder* rb);
+  // Run all commands until completion. Returns number of squashed commands.
+  size_t Run(facade::RedisReplyBuilder* rb);
 
   bool IsAtomic() const;
 
@@ -85,6 +90,9 @@ class MultiCommandSquasher {
   size_t num_shards_ = 0;
 
   std::vector<MutableSlice> tmp_keylist_;
+
+  // we increase size in one thread and decrease in another
+  static atomic_uint64_t current_reply_size_;
 };
 
 }  // namespace dfly

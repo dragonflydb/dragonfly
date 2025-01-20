@@ -10,12 +10,10 @@
 #include <string_view>
 #include <vector>
 
+#include "facade/facade_types.h"
+#include "server/cluster_support.h"
+
 namespace dfly::cluster {
-
-using SlotId = uint16_t;
-
-constexpr SlotId kMaxSlotNum = 0x3FFF;
-constexpr SlotId kInvalidSlotId = kMaxSlotNum + 1;
 
 struct SlotRange {
   static constexpr SlotId kMaxSlotId = 0x3FFF;
@@ -167,15 +165,7 @@ enum class MigrationState : uint8_t {
   C_FINISHED,
 };
 
-SlotId KeySlot(std::string_view key);
-
 // return error message if slot doesn't belong to this node
-std::optional<std::string> SlotOwnershipErrorStr(SlotId slot_id);
-
-void InitializeCluster();
-bool IsClusterEnabled();
-bool IsClusterEmulated();
-bool IsClusterEnabledOrEmulated();
-bool IsClusterShardedByTag();
+facade::ErrorReply SlotOwnershipError(SlotId slot_id);
 
 }  // namespace dfly::cluster

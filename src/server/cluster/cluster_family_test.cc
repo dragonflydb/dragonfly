@@ -619,6 +619,18 @@ TEST_F(ClusterFamilyTest, ClusterFirstConfigCallDropsEntriesNotOwnedByNode) {
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 }
 
+TEST_F(ClusterFamilyTest, SnapshotBiggerThanMaxMemory) {
+  InitWithDbFilename();
+  ConfigSingleNodeCluster(GetMyId());
+
+  Run({"debug", "populate", "50000"});
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+
+  max_memory_limit = 10000;
+  auto save_info = service_->server_family().GetLastSaveInfo();
+  EXPECT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
+}
+
 TEST_F(ClusterFamilyTest, Keyslot) {
   // Example from Redis' command reference: https://redis.io/commands/cluster-keyslot/
   EXPECT_THAT(Run({"cluster", "keyslot", "somekey"}), IntArg(11'058));

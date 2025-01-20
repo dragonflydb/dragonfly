@@ -41,6 +41,7 @@ namespace {
 
 using namespace std;
 using namespace facade;
+using namespace util;
 
 using CI = CommandId;
 
@@ -54,7 +55,7 @@ struct StringValue {
   }
   StringValue(std::string s) : v_{std::move(s)} {
   }
-  StringValue(util::fb2::Future<std::string> f) : v_{std::move(f)} {
+  StringValue(fb2::Future<std::string> f) : v_{std::move(f)} {
   }
 
   // Get and consume value. If backed by a future, blocks until resolved.
@@ -68,11 +69,11 @@ struct StringValue {
                           EngineShard* es);
 
   bool IsFuturized() const {
-    return std::holds_alternative<util::fb2::Future<std::string>>(v_);
+    return std::holds_alternative<fb2::Future<std::string>>(v_);
   }
 
  private:
-  std::variant<std::monostate, std::string, util::fb2::Future<std::string>> v_;
+  std::variant<std::monostate, std::string, fb2::Future<std::string>> v_;
 };
 
 // Helper for performing SET operations with various options
@@ -148,12 +149,12 @@ size_t SetRange(std::string* value, size_t start, std::string_view range) {
   return value->size();
 }
 
-template <typename T> using TResult = std::variant<T, util::fb2::Future<T>>;
+template <typename T> using TResult = std::variant<T, fb2::Future<T>>;
 
 template <typename T> T GetResult(TResult<T> v) {
   Overloaded ov{
       [](T&& t) { return t; },
-      [](util::fb2::Future<T>&& future) { return future.Get(); },
+      [](fb2::Future<T>&& future) { return future.Get(); },
   };
   return std::visit(ov, std::move(v));
 }
@@ -170,7 +171,7 @@ OpResult<TResult<size_t>> OpStrLen(const OpArgs& op_args, string_view key) {
   // already pending.
   // TODO: Optimize to return co.Size() if no modify operations are present
   if (const auto& co = it_res.value()->second; co.IsExternal()) {
-    util::fb2::Future<size_t> fut;
+    fb2::Future<size_t> fut;
     op_args.shard->tiered_storage()->Read(
         op_args.db_cntx.db_index, key, co,
         [fut](const std::string& s) mutable { fut.Resolve(s.size()); });
@@ -250,7 +251,7 @@ OpResult<StringValue> OpGetRange(const OpArgs& op_args, string_view key, int32_t
   RETURN_ON_BAD_STATUS(it_res);
 
   if (const CompactObj& co = it_res.value()->second; co.IsExternal()) {
-    util::fb2::Future<std::string> fut;
+    fb2::Future<std::string> fut;
     op_args.shard->tiered_storage()->Read(
         op_args.db_cntx.db_index, key, co,
         [read, fut](const std::string& s) mutable { fut.Resolve(string{read(s)}); });
@@ -398,17 +399,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
     if (stored * 2 == args.Size()) {
       RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
       DCHECK_EQ(result, OpStatus::OK);
-      return result;
+    } else if (stored > 0) {
+      vector<string_view> store_args(args.begin(), args.end());
+      store_args.resize(stored * 2);
+      RecordJournal(op_args, "MSET", store_args, op_args.tx->GetUniqueShardCnt());
     }
-
-    // Even without changes, we have to send a dummy command like PING for the
-    // replica to ack
-    string_view cmd = stored == 0 ? "PING" : "MSET";
-    vector<string_view> store_args(args.begin(), args.end());
-    store_args.resize(stored * 2);
-    RecordJournal(op_args, cmd, store_args, op_args.tx->GetUniqueShardCnt());
   }
-
   return result;
 }
 
@@ -518,40 +514,81 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
   return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_ms, reset_after_ms};
 }
 
+struct GetResp {
+  string key;  // TODO: to use backing storage to optimize this as well.
+  string_view value;
+  uint64_t mc_ver = 0;  // 0 means we do not output it (i.e has not been requested).
+  uint32_t mc_flag = 0;
+};
+
+struct MGetResponse {
+  explicit MGetResponse(size_t size = 0) : resp_arr(size) {
+  }
+
+  std::unique_ptr<char[]> storage;
+  absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
+};
+
 // fetch_mask values
 constexpr uint8_t FETCH_MCFLAG = 0x1;
 constexpr uint8_t FETCH_MCVER = 0x2;
-SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_t fetch_mask,
-                                      const Transaction* t, EngineShard* shard) {
+MGetResponse OpMGet(fb2::BlockingCounter wait_bc, uint8_t fetch_mask, const Transaction* t,
+                    EngineShard* shard) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
   auto& db_slice = t->GetDbSlice(shard->shard_id());
 
-  SinkReplyBuilder::MGetResponse response(keys.Size());
-  absl::InlinedVector<DbSlice::ConstIterator, 32> iters(keys.Size());
+  MGetResponse response(keys.Size());
+  struct Item {
+    DbSlice::ConstIterator it;
+    int source_index = -1;  // in case of duplicate keys, points to the first occurrence.
+  };
+
+  absl::InlinedVector<Item, 32> items(keys.Size());
+
+  // We can not make it thread-local because we may preempt during the Find loop due to
+  // serialization with the bumpup calls.
+
+  // TODO: consider separating BumpUps from finds because it becomes too complicated
+  // to reason about.
+  absl::flat_hash_map<string_view, unsigned> key_index;
 
   // First, fetch all iterators and count total size ahead
   size_t total_size = 0;
   unsigned index = 0;
+  key_index.reserve(keys.Size());
+
   for (string_view key : keys) {
+    auto [it, inserted] = key_index.try_emplace(key, index);
+    if (!inserted) {  // duplicate -> point to the first occurrence.
+      items[index++].source_index = it->second;
+      continue;
+    }
+
     auto it_res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
-    if (auto& dest = iters[index++]; it_res) {
-      dest = *it_res;
+    auto& dest = items[index++];
+    if (it_res) {
+      dest.it = *it_res;
       total_size += (*it_res)->second.Size();
     }
   }
 
+  VLOG_IF(1, total_size > 10000000) << "OpMGet: allocating " << total_size << " bytes";
+
   // Allocate enough for all values
-  response.storage_list = SinkReplyBuilder::AllocMGetStorage(total_size);
-  char* next = response.storage_list->data;
+  response.storage = make_unique<char[]>(total_size);
+  char* next = response.storage.get();
   bool fetch_mcflag = fetch_mask & FETCH_MCFLAG;
   bool fetch_mcver = fetch_mask & FETCH_MCVER;
-  for (size_t i = 0; i < iters.size(); ++i) {
-    auto it = iters[i];
-    if (it.is_done())
+  for (size_t i = 0; i < items.size(); ++i) {
+    auto it = items[i].it;
+    if (it.is_done()) {
+      if (items[i].source_index >= 0) {
+        response.resp_arr[i] = response.resp_arr[items[i].source_index];
+      }
       continue;
-
+    }
     auto& resp = response.resp_arr[i].emplace();
 
     // Copy to buffer or trigger tiered read that will eventually write to
@@ -581,6 +618,7 @@ SinkReplyBuilder::MGetResponse OpMGet(util::fb2::BlockingCounter wait_bc, uint8_
       }
     }
   }
+  key_index.clear();
 
   return response;
 }
@@ -650,7 +688,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
   string_view value = ArgS(args, 1);
   VLOG(2) << "ExtendGeneric(" << key << ", " << value << ")";
 
-  if (builder->type() == SinkReplyBuilder::REDIS) {
+  if (builder->GetProtocol() == Protocol::REDIS) {
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
@@ -662,7 +700,7 @@ void ExtendGeneric(CmdArgList args, bool prepend, Transaction* tx, SinkReplyBuil
     rb->SendLong(GetResult(std::move(res.value())));
   } else {
     // Memcached skips if key is missing
-    DCHECK(builder->type() == SinkReplyBuilder::MC);
+    DCHECK(builder->GetProtocol() == Protocol::MEMCACHE);
 
     auto cb = [&](Transaction* t, EngineShard* shard) {
       return ExtendOrSkip(t->GetOpArgs(shard), key, value, prepend);
@@ -723,7 +761,7 @@ void SetExGeneric(bool seconds, CmdArgList args, const CommandId* cid, Transacti
 }
 
 void IncrByGeneric(string_view key, int64_t val, Transaction* tx, SinkReplyBuilder* builder) {
-  bool skip_on_missing = builder->type() == SinkReplyBuilder::MC;
+  bool skip_on_missing = (builder->GetProtocol() == Protocol::MEMCACHE);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
@@ -767,7 +805,7 @@ string StringValue::Get() && {
   auto prev = exchange(v_, monostate{});
   if (holds_alternative<string>(prev))
     return std::move(std::get<string>(prev));
-  return std::get<util::fb2::Future<std::string>>(prev).Get();
+  return std::get<fb2::Future<std::string>>(prev).Get();
 }
 
 bool StringValue::IsEmpty() const {
@@ -931,14 +969,14 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-void StringFamily::Set(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                       ConnectionContext* cntx) {
+void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
   facade::CmdArgParser parser{args};
 
   auto [key, value] = parser.Next<string_view, string_view>();
 
   SetCmd::SetParams sparams;
-  sparams.memcache_flags = cntx->conn_state.memcache_flag;
+  sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
+  auto* builder = cmnd_cntx.rb;
 
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
@@ -974,7 +1012,7 @@ void StringFamily::Set(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
 
       // Remove existed key if the key is expired already
       if (rel_ms < 0) {
-        tx->ScheduleSingleHop([key](const Transaction* tx, EngineShard* es) {
+        cmnd_cntx.tx->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
           ShardArgs args = tx->GetShardArgs(es->shard_id());
           GenericFamily::OpDel(tx->GetOpArgs(es), args);
           return OpStatus::OK;
@@ -1007,15 +1045,15 @@ void StringFamily::Set(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
   StringValue prev;
   if (sparams.flags & SetCmd::SET_GET)
     sparams.prev_val = &prev;
-  bool manual_journal = cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  OpStatus result = SetGeneric(sparams, key, value, manual_journal, tx);
+  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  OpStatus result = SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx);
 
   if (result == OpStatus::WRONG_TYPE) {
     return builder->SendError(kWrongTypeErr);
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    return GetReplies{builder}.Send(std::move(prev));
+    return GetReplies{cmnd_cntx.rb}.Send(std::move(prev));
   }
 
   if (result == OpStatus::OK) {
@@ -1031,18 +1069,15 @@ void StringFamily::Set(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
   builder->SendSetSkipped();
 }
 
-void StringFamily::SetEx(CmdArgList args, Transaction* tx, SinkReplyBuilder* rb,
-                         ConnectionContext* cntx) {
-  SetExGeneric(true, std::move(args), cntx->cid, tx, rb);
+void StringFamily::SetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
+  SetExGeneric(true, std::move(args), cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::PSetEx(CmdArgList args, Transaction* tx, SinkReplyBuilder* rb,
-                          ConnectionContext* cntx) {
-  SetExGeneric(false, std::move(args), cntx->cid, tx, rb);
+void StringFamily::PSetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
+  SetExGeneric(false, std::move(args), cmnd_cntx.conn_cntx->cid, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::SetNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                         ConnectionContext* cntx) {
+void StringFamily::SetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
   // This is the same as calling the "Set" function, only in this case we are
   // change the value only if the key does not exist. Otherwise the function
   // will not modify it. in which case it would return 0
@@ -1053,10 +1088,10 @@ void StringFamily::SetNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
 
   SetCmd::SetParams sparams;
   sparams.flags |= SetCmd::SET_IF_NOTEXIST;
-  sparams.memcache_flags = cntx->conn_state.memcache_flag;
-  bool manual_journal = cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  const auto results{SetGeneric(sparams, key, value, manual_journal, tx)};
-
+  sparams.memcache_flags = cmnd_cntx.conn_cntx->conn_state.memcache_flag;
+  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  const auto results{SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx)};
+  auto* builder = cmnd_cntx.rb;
   if (results == OpStatus::OK) {
     return builder->SendLong(1);  // this means that we successfully set the value
   }
@@ -1068,7 +1103,7 @@ void StringFamily::SetNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
   return builder->SendLong(0);  // value do exists, we need to report that we didn't change it
 }
 
-void StringFamily::Get(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::Get(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
@@ -1077,11 +1112,10 @@ void StringFamily::Get(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
     return StringValue::Read(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{builder}.Send(tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetDel(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                          ConnectionContext* cntx) {
+void StringFamily::GetDel(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* tx, EngineShard* es) -> OpResult<StringValue> {
     auto& db_slice = tx->GetDbSlice(es->shard_id());
     auto it_res = db_slice.FindMutable(tx->GetDbContext(), key, OBJ_STRING);
@@ -1094,41 +1128,41 @@ void StringFamily::GetDel(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
     return value;
   };
 
-  GetReplies{builder}.Send(tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                          ConnectionContext* cntx) {
+void StringFamily::GetSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view value = ArgS(args, 1);
 
   StringValue prev;
   SetCmd::SetParams sparams;
   sparams.prev_val = &prev;
-  bool manual_journal = cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
-  if (OpStatus status = SetGeneric(sparams, key, value, manual_journal, cntx->transaction);
+  bool manual_journal = cmnd_cntx.conn_cntx->cid->opt_mask() & CO::NO_AUTOJOURNAL;
+  if (OpStatus status = SetGeneric(sparams, key, value, manual_journal, cmnd_cntx.tx);
       status != OpStatus::OK) {
+    auto* builder = cmnd_cntx.rb;
     return builder->SendError(status);
   }
 
-  GetReplies{builder}.Send(std::move(prev));
+  GetReplies{cmnd_cntx.rb}.Send(std::move(prev));
 }
 
-void StringFamily::Append(CmdArgList args, Transaction* tx, SinkReplyBuilder* rb) {
-  ExtendGeneric(args, false, tx, rb);
+void StringFamily::Append(CmdArgList args, const CommandContext& cmnd_cntx) {
+  ExtendGeneric(args, false, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::Prepend(CmdArgList args, Transaction* tx, SinkReplyBuilder* rb) {
-  ExtendGeneric(args, true, tx, rb);
+void StringFamily::Prepend(CmdArgList args, const CommandContext& cmnd_cntx) {
+  ExtendGeneric(args, true, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::GetEx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                         ConnectionContext* cntx) {
+void StringFamily::GetEx(CmdArgList args, const CommandContext& cmnd_cntx) {
   CmdArgParser parser{args};
   string_view key = parser.Next();
 
   DbSlice::ExpireParams exp_params;
   bool defined = false;
+  auto* builder = cmnd_cntx.rb;
   while (parser.HasNext()) {
     if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
                                           "PXAT", ExpT::PXAT);
@@ -1187,107 +1221,103 @@ void StringFamily::GetEx(CmdArgList args, Transaction* tx, SinkReplyBuilder* bui
     return value;
   };
 
-  GetReplies{builder}.Send(tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::Incr(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::Incr(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, 1, tx, builder);
+  return IncrByGeneric(key, 1, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::IncrBy(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::IncrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return builder->SendError(kInvalidIntErr);
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
-  return IncrByGeneric(key, val, tx, builder);
+  return IncrByGeneric(key, val, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::IncrByFloat(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::IncrByFloat(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   double val;
 
   if (!absl::SimpleAtod(sval, &val)) {
-    return builder->SendError(kInvalidFloatErr);
+    return cmnd_cntx.rb->SendError(kInvalidFloatErr);
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrFloat(t->GetOpArgs(shard), key, val);
   };
 
-  OpResult<double> result = tx->ScheduleSingleHopT(std::move(cb));
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  OpResult<double> result = cmnd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmnd_cntx.rb);
 
   DVLOG(2) << "IncrByGeneric " << key << "/" << result.value();
   if (!result) {
-    return builder->SendError(result.status());
+    return rb->SendError(result.status());
   }
 
   rb->SendDouble(result.value());
 }
 
-void StringFamily::Decr(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::Decr(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
-  return IncrByGeneric(key, -1, tx, builder);
+  return IncrByGeneric(key, -1, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::DecrBy(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::DecrBy(CmdArgList args, const CommandContext& cmnd_cntx) {
   string_view key = ArgS(args, 0);
   string_view sval = ArgS(args, 1);
   int64_t val;
 
   if (!absl::SimpleAtoi(sval, &val)) {
-    return builder->SendError(kInvalidIntErr);
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
   if (val == INT64_MIN) {
-    return builder->SendError(kIncrOverflow);
+    return cmnd_cntx.rb->SendError(kIncrOverflow);
   }
 
-  return IncrByGeneric(key, -val, tx, builder);
+  return IncrByGeneric(key, -val, cmnd_cntx.tx, cmnd_cntx.rb);
 }
 
-void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx) {
+void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
   DCHECK_GE(args.size(), 1U);
-  std::vector<SinkReplyBuilder::MGetResponse> mget_resp(shard_set->size());
 
   uint8_t fetch_mask = 0;
-  if (builder->type() == SinkReplyBuilder::MC) {
+  auto* builder = cmnd_cntx.rb;
+  if (builder->GetProtocol() == Protocol::MEMCACHE) {
     fetch_mask |= FETCH_MCFLAG;
-    if (cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
+    if (cmnd_cntx.conn_cntx->conn_state.memcache_flag & ConnectionState::FETCH_CAS_VER)
       fetch_mask |= FETCH_MCVER;
   }
 
   // Count of pending tiered reads
-  util::fb2::BlockingCounter tiering_bc{0};
+  fb2::BlockingCounter tiering_bc{0};
+  std::vector<MGetResponse> mget_resp(shard_set->size());
   auto cb = [&](Transaction* t, EngineShard* shard) {
     mget_resp[shard->shard_id()] = OpMGet(tiering_bc, fetch_mask, t, shard);
     return OpStatus::OK;
   };
 
-  OpStatus result = tx->ScheduleSingleHop(std::move(cb));
+  OpStatus result = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb));
   CHECK_EQ(OpStatus::OK, result);
 
   // wait for all tiered reads to finish
   tiering_bc->Wait();
 
-  // reorder the responses back according to the order of their corresponding
-  // keys.
-  SinkReplyBuilder::MGetResponse res(args.size());
+  // reorder shard results back according to argument order
+  absl::FixedArray<optional<GetResp>, 8> res(args.size());
 
   for (ShardId sid = 0; sid < mget_resp.size(); ++sid) {
-    if (!tx->IsActive(sid))
+    if (!cmnd_cntx.tx->IsActive(sid))
       continue;
 
-    SinkReplyBuilder::MGetResponse& src = mget_resp[sid];
-    src.storage_list->next = res.storage_list;
-    res.storage_list = src.storage_list;
-    src.storage_list = nullptr;
-    ShardArgs shard_args = tx->GetShardArgs(sid);
+    auto& src = mget_resp[sid];
+    ShardArgs shard_args = cmnd_cntx.tx->GetShardArgs(sid);
     unsigned src_indx = 0;
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
       if (!src.resp_arr[src_indx])
@@ -1295,24 +1325,62 @@ void StringFamily::MGet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
 
       uint32_t indx = it.index();
 
-      res.resp_arr[indx] = std::move(src.resp_arr[src_indx]);
-      if (builder->type() == SinkReplyBuilder::MC) {
-        res.resp_arr[indx]->key = *it;
+      res[indx] = std::move(src.resp_arr[src_indx]);
+      if (builder->GetProtocol() == Protocol::MEMCACHE) {
+        res[indx]->key = *it;
       }
     }
   }
 
-  return builder->SendMGetResponse(std::move(res));
+  // The code below is safe in the context of squashing (uses CapturingReplyBuilder).
+  // Specifically:
+  // 1. For Memcache:
+  //    builder != CapturingReplyBuilder here because this is only used in squashing
+  //    and there are only two cases:
+  //    * Squashing the pipeline something that is turned off when using MEMCACHE.
+  //    * Squashing a multi/exec block. There exist no such command in MEMCACHE.
+  //    Therefore this path is safe, and the DCHECK in the if statement below shall
+  //    never trigger.
+  // 2. For Redis:
+  //    * Call to StartArray() is safe because it calls RedisReplyBuilder::StartCollection which
+  //      calls CapturingReplyBuilder::StartCollection
+  //    * Calls to SendBulkString() and SendNull() find and if builder is CapturingReplyBuilder
+  //      then the right member gets called.
+  //
+  // Finally, the ReplyScope will trigger a Flush() on scope's end. What that means is,
+  // for CapturingReplyBuilder the internal vec is empty and therefore we should skip the call
+  // to Send because sink_ is nullptr and there is no payload to Send since it was captured.
+  SinkReplyBuilder::ReplyScope scope(builder);
+  if (builder->GetProtocol() == Protocol::MEMCACHE) {
+    auto* rb = static_cast<MCReplyBuilder*>(builder);
+    DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
+    for (const auto& entry : res) {
+      if (entry) {
+        rb->SendValue(entry->key, entry->value, entry->mc_ver, entry->mc_flag);
+      } else {
+        rb->SendMiss();
+      }
+    }
+    rb->SendGetEnd();
+  } else {
+    auto* rb = static_cast<RedisReplyBuilder*>(builder);
+    rb->StartArray(res.size());
+    for (const auto& entry : res) {
+      if (entry)
+        rb->SendBulkString(entry->value);
+      else
+        rb->SendNull();
+    }
+  }
 }
 
-void StringFamily::MSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                        ConnectionContext* cntx) {
+void StringFamily::MSet(CmdArgList args, const CommandContext& cmnd_cntx) {
   if (VLOG_IS_ON(2)) {
     string str;
     for (size_t i = 1; i < args.size(); ++i) {
       absl::StrAppend(&str, " ", ArgS(args, i));
     }
-    LOG(INFO) << "MSET/" << tx->GetUniqueShardCnt() << str;
+    LOG(INFO) << "MSET/" << cmnd_cntx.tx->GetUniqueShardCnt() << str;
   }
 
   AggregateStatus result;
@@ -1323,18 +1391,17 @@ void StringFamily::MSet(CmdArgList args, Transaction* tx, SinkReplyBuilder* buil
     return OpStatus::OK;
   };
 
-  if (auto status = tx->ScheduleSingleHop(std::move(cb)); status != OpStatus::OK)
+  if (auto status = cmnd_cntx.tx->ScheduleSingleHop(std::move(cb)); status != OpStatus::OK)
     result = status;
 
   if (*result == OpStatus::OK) {
-    builder->SendOk();
+    cmnd_cntx.rb->SendOk();
   } else {
-    builder->SendError(*result);
+    cmnd_cntx.rb->SendError(*result);
   }
 }
 
-void StringFamily::MSetNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
-                          ConnectionContext* cntx) {
+void StringFamily::MSetNx(CmdArgList args, const CommandContext& cmnd_cntx) {
   atomic_bool exists{false};
 
   auto cb = [&](Transaction* t, EngineShard* es) {
@@ -1353,7 +1420,7 @@ void StringFamily::MSetNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
     return OpStatus::OK;
   };
 
-  tx->Execute(std::move(cb), false);
+  cmnd_cntx.tx->Execute(std::move(cb), false);
   const bool to_skip = exists.load(memory_order_relaxed);
 
   AggregateStatus result;
@@ -1366,36 +1433,37 @@ void StringFamily::MSetNx(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
       result = status;
     return OpStatus::OK;
   };
-  tx->Execute(std::move(epilog_cb), true);
+  cmnd_cntx.tx->Execute(std::move(epilog_cb), true);
 
-  builder->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
+  cmnd_cntx.rb->SendLong(to_skip || (*result != OpStatus::OK) ? 0 : 1);
 }
 
-void StringFamily::StrLen(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::StrLen(CmdArgList args, const CommandContext& cmnd_cntx) {
   auto cb = [key = ArgS(args, 0)](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{builder}.Send(tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::GetRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, end] = parser.Next<string_view, int32_t, int32_t>();
 
   if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
+    return cmnd_cntx.rb->SendError(err->MakeReply());
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{builder}.Send(tx->ScheduleSingleHopT(cb));
+  GetReplies{cmnd_cntx.rb}.Send(cmnd_cntx.tx->ScheduleSingleHopT(cb));
 }
 
-void StringFamily::SetRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
   CmdArgParser parser(args);
   auto [key, start, value] = parser.Next<string_view, int32_t, string_view>();
+  auto* builder = cmnd_cntx.rb;
 
   if (auto err = parser.Error(); err) {
     return builder->SendError(err->MakeReply());
@@ -1409,10 +1477,10 @@ void StringFamily::SetRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
     return builder->SendError("string exceeds maximum allowed size");
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  auto res = tx->ScheduleSingleHopT(cb);
+  auto res = cmnd_cntx.tx->ScheduleSingleHopT(cb);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (res.ok())
@@ -1434,28 +1502,28 @@ void StringFamily::SetRange(CmdArgList args, Transaction* tx, SinkReplyBuilder* 
  *  5. The number of seconds until the limit will reset to its maximum capacity.
  * Equivalent to X-RateLimit-Reset.
  */
-void StringFamily::ClThrottle(CmdArgList args, Transaction* tx, SinkReplyBuilder* rb) {
+void StringFamily::ClThrottle(CmdArgList args, const CommandContext& cmnd_cntx) {
   const string_view key = ArgS(args, 0);
 
   // Allow max burst in number of tokens
   uint64_t max_burst;
   const string_view max_burst_str = ArgS(args, 1);
   if (!absl::SimpleAtoi(max_burst_str, &max_burst)) {
-    return rb->SendError(kInvalidIntErr);
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
 
   // Emit count of tokens per period
   uint64_t count;
   const string_view count_str = ArgS(args, 2);
   if (!absl::SimpleAtoi(count_str, &count)) {
-    return rb->SendError(kInvalidIntErr);
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
 
   // Period of emitting count of tokens
   uint64_t period;
   const string_view period_str = ArgS(args, 3);
   if (!absl::SimpleAtoi(period_str, &period)) {
-    return rb->SendError(kInvalidIntErr);
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
 
   // Apply quantity of tokens now
@@ -1464,33 +1532,33 @@ void StringFamily::ClThrottle(CmdArgList args, Transaction* tx, SinkReplyBuilder
     const string_view quantity_str = ArgS(args, 4);
 
     if (!absl::SimpleAtoi(quantity_str, &quantity)) {
-      return rb->SendError(kInvalidIntErr);
+      return cmnd_cntx.rb->SendError(kInvalidIntErr);
     }
   }
 
   if (max_burst > INT64_MAX - 1) {
-    return rb->SendError(kInvalidIntErr);
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
   const int64_t limit = max_burst + 1;
 
   if (period > UINT64_MAX / 1000 || count == 0 || period * 1000 / count > INT64_MAX) {
-    return rb->SendError(kInvalidIntErr);
+    return cmnd_cntx.rb->SendError(kInvalidIntErr);
   }
   const int64_t emission_interval_ms = period * 1000 / count;
 
   if (emission_interval_ms == 0) {
-    return rb->SendError("zero rates are not supported");
+    return cmnd_cntx.rb->SendError("zero rates are not supported");
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<array<int64_t, 5>> {
     return OpThrottle(t->GetOpArgs(shard), key, limit, emission_interval_ms, quantity);
   };
 
-  Transaction* trans = tx;
+  Transaction* trans = cmnd_cntx.tx;
   OpResult<array<int64_t, 5>> result = trans->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(rb);
+    RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmnd_cntx.rb);
     redis_builder->StartArray(result->size());
     auto& array = result.value();
 
@@ -1512,17 +1580,17 @@ void StringFamily::ClThrottle(CmdArgList args, Transaction* tx, SinkReplyBuilder
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
-        rb->SendError(kWrongTypeErr);
+        cmnd_cntx.rb->SendError(kWrongTypeErr);
         break;
       case OpStatus::INVALID_INT:
       case OpStatus::INVALID_VALUE:
-        rb->SendError(kInvalidIntErr);
+        cmnd_cntx.rb->SendError(kInvalidIntErr);
         break;
       case OpStatus::OUT_OF_MEMORY:
-        rb->SendError(kOutOfMemory);
+        cmnd_cntx.rb->SendError(kOutOfMemory);
         break;
       default:
-        rb->SendError(result.status());
+        cmnd_cntx.rb->SendError(result.status());
         break;
     }
   }

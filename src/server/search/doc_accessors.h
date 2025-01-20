@@ -12,6 +12,7 @@
 
 #include "core/json/json_object.h"
 #include "core/search/search.h"
+#include "core/search/vector_utils.h"
 #include "server/common.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
@@ -29,7 +30,7 @@ struct BaseAccessor : public search::DocumentAccessor {
 
   // Serialize selected fields
   virtual SearchDocData Serialize(const search::Schema& schema,
-                                  absl::Span<const SearchField<std::string_view>> fields) const;
+                                  absl::Span<const SearchField> fields) const;
 
   /*
   Serialize the whole type, the default implementation is to serialize all fields.
@@ -37,6 +38,11 @@ struct BaseAccessor : public search::DocumentAccessor {
   indexed field
   */
   virtual SearchDocData SerializeDocument(const search::Schema& schema) const;
+
+  // Default implementation uses GetStrings
+  virtual std::optional<VectorInfo> GetVector(std::string_view active_field) const override;
+  virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
+  virtual std::optional<StringList> GetTags(std::string_view active_field) const override;
 };
 
 // Accessor for hashes stored with listpack
@@ -46,8 +52,7 @@ struct ListPackAccessor : public BaseAccessor {
   explicit ListPackAccessor(LpPtr ptr) : lp_{ptr} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  std::optional<StringList> GetStrings(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
@@ -60,8 +65,7 @@ struct StringMapAccessor : public BaseAccessor {
   explicit StringMapAccessor(StringMap* hset) : hset_{hset} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  std::optional<StringList> GetStrings(std::string_view field) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
 
  private:
@@ -75,18 +79,23 @@ struct JsonAccessor : public BaseAccessor {
   explicit JsonAccessor(const JsonType* json) : json_{*json} {
   }
 
-  StringList GetStrings(std::string_view field) const override;
-  VectorInfo GetVector(std::string_view field) const override;
+  std::optional<StringList> GetStrings(std::string_view field) const override;
+  std::optional<VectorInfo> GetVector(std::string_view field) const override;
+  std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
+  std::optional<StringList> GetTags(std::string_view active_field) const override;
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
   SearchDocData Serialize(const search::Schema& schema,
-                          absl::Span<const SearchField<std::string_view>> fields) const override;
+                          absl::Span<const SearchField> fields) const override;
   SearchDocData Serialize(const search::Schema& schema) const override;
   SearchDocData SerializeDocument(const search::Schema& schema) const override;
 
   static void RemoveFieldFromCache(std::string_view field);
 
  private:
+  /* If accept_boolean_values is true, then json boolean values are converted to strings */
+  std::optional<StringList> GetStrings(std::string_view field, bool accept_boolean_values) const;
+
   /// Parses `field` into a JSON path. Caches the results internally.
   JsonPathContainer* GetPath(std::string_view field) const;
 

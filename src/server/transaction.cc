@@ -176,15 +176,15 @@ void Transaction::Shutdown() {
 Transaction::Transaction(const CommandId* cid) : cid_{cid} {
   InitTxTime();
   string_view cmd_name(cid_->name());
-  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVALSHA") {
+  if (cmd_name == "EXEC" || cmd_name == "EVAL" || cmd_name == "EVAL_RO" || cmd_name == "EVALSHA" ||
+      cmd_name == "EVALSHA_RO") {
     multi_.reset(new MultiData);
     multi_->mode = NOT_DETERMINED;
     multi_->role = DEFAULT;
   }
 }
 
-Transaction::Transaction(const Transaction* parent, ShardId shard_id,
-                         std::optional<cluster::SlotId> slot_id)
+Transaction::Transaction(const Transaction* parent, ShardId shard_id, std::optional<SlotId> slot_id)
     : multi_{make_unique<MultiData>()},
       txid_{parent->txid()},
       unique_shard_cnt_{1},
@@ -325,6 +325,7 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
   // Stub transactions always operate only on single shard.
   bool is_stub = multi_ && multi_->role == SQUASHED_STUB;
 
+  unique_slot_checker_.Reset();
   if ((key_index.NumArgs() == 1 && !IsAtomicMulti()) || is_stub) {
     DCHECK(!IsActiveMulti() || multi_->mode == NON_ATOMIC);
 
@@ -399,10 +400,12 @@ OpStatus Transaction::InitByArgs(Namespace* ns, DbIndex index, CmdArgList args) 
   }
 
   if ((cid_->opt_mask() & CO::NO_KEY_TRANSACTIONAL) > 0) {
-    if ((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)
+    if (((cid_->opt_mask() & CO::NO_KEY_TX_SPAN_ALL) > 0)) {
       EnableAllShards();
-    else
+    } else {
       EnableShard(0);
+    }
+
     return OpStatus::OK;
   }
 
@@ -664,7 +667,6 @@ void Transaction::RunCallback(EngineShard* shard) {
   DCHECK_EQ(shard, EngineShard::tlocal());
 
   RunnableResult result;
-  auto& db_slice = GetDbSlice(shard->shard_id());
   try {
     result = (*cb_ptr_)(this, shard);
 
@@ -688,6 +690,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
+  auto& db_slice = GetDbSlice(shard->shard_id());
   db_slice.OnCbFinish();
 
   // Handle result flags to alter behaviour.
@@ -976,7 +979,7 @@ string Transaction::DEBUG_PrintFailState(ShardId sid) const {
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
-  shard_data_.resize(1);
+  shard_data_.resize(IsActiveMulti() ? shard_set->size() : 1);
   shard_data_.front().local_mask |= ACTIVE;
 }
 
@@ -1014,7 +1017,7 @@ ShardId Transaction::GetUniqueShard() const {
   return unique_shard_id_;
 }
 
-optional<cluster::SlotId> Transaction::GetUniqueSlotId() const {
+optional<SlotId> Transaction::GetUniqueSlotId() const {
   return unique_slot_checker_.GetUniqueSlotId();
 }
 
@@ -1453,19 +1456,11 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
     return;
 
   if (result.status != OpStatus::OK) {
-    // We log NOOP even for NO_AUTOJOURNAL commands because the non-success status could have been
-    // due to OOM in a single shard, while other shards succeeded
-    journal->RecordEntry(txid_, journal::Op::NOOP, db_index_, unique_shard_cnt_,
-                         unique_slot_checker_.GetUniqueSlotId(), journal::Entry::Payload{}, true);
-    return;
+    return;  // Do not log to journal if command execution failed.
   }
 
   // If autojournaling was disabled and not re-enabled the callback is writing to journal.
-  // We do not allow preemption in callbacks and therefor the call to RecordJournal from
-  // from callbacks does not allow await.
-  // To make sure we flush the changes to sync we call TriggerJournalWriteToSink here.
   if ((cid_->opt_mask() & CO::NO_AUTOJOURNAL) && !re_enabled_auto_journal_) {
-    TriggerJournalWriteToSink();
     return;
   }
 
@@ -1479,15 +1474,15 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
   }
   // Record to journal autojournal commands, here we allow await which anables writing to sync
   // the journal change.
-  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_, true);
+  LogJournalOnShard(shard, std::move(entry_payload), unique_shard_cnt_);
 }
 
 void Transaction::LogJournalOnShard(EngineShard* shard, journal::Entry::Payload&& payload,
-                                    uint32_t shard_cnt, bool allow_await) const {
+                                    uint32_t shard_cnt) const {
   auto journal = shard->journal();
   CHECK(journal);
   journal->RecordEntry(txid_, journal::Op::COMMAND, db_index_, shard_cnt,
-                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload), allow_await);
+                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload));
 }
 
 void Transaction::ReviveAutoJournal() {
@@ -1560,9 +1555,6 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, CmdArgList args) {
         string_view arg = ArgS(args, i);
         if (absl::EqualsIgnoreCase(arg, "STREAMS")) {
           size_t left = args.size() - i - 1;
-          if (left < 2 || left % 2 != 0)
-            return OpStatus::SYNTAX_ERR;
-
           return KeyIndex(i + 1, i + 1 + (left / 2));
         }
       }

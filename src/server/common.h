@@ -14,10 +14,10 @@
 #include <string_view>
 #include <vector>
 
-#include "base/logging.h"
 #include "core/compact_object.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
+#include "helio/io/proc_reader.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
 
@@ -32,6 +32,7 @@ constexpr int64_t kMaxExpireDeadlineMs = kMaxExpireDeadlineSec * 1000;
 using LSN = uint64_t;
 using TxId = uint64_t;
 using TxClock = uint64_t;
+using SlotId = std::uint16_t;
 
 using facade::ArgS;
 using facade::CmdArgList;
@@ -47,6 +48,9 @@ using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 class CommandId;
 class Transaction;
 class EngineShard;
+struct ConnectionState;
+class Interpreter;
+class Namespaces;
 
 struct LockTagOptions {
   bool enabled = false;
@@ -130,14 +134,23 @@ extern std::atomic_uint64_t rss_mem_peak;
 
 extern size_t max_memory_limit;
 
+size_t FetchRssMemory(io::StatusData sdata);
+
+extern Namespaces* namespaces;
+
 // version 5.11 maps to 511 etc.
 // set upon server start.
 extern unsigned kernel_version;
 
 const char* GlobalStateName(GlobalState gs);
 
-template <typename RandGen> std::string GetRandomHex(RandGen& gen, size_t len) {
+template <typename RandGen>
+std::string GetRandomHex(RandGen& gen, size_t len, size_t len_deviation = 0) {
   static_assert(std::is_same<uint64_t, decltype(gen())>::value);
+  if (len_deviation) {
+    len += (gen() % len_deviation);
+  }
+
   std::string res(len, '\0');
   size_t indx = 0;
 
@@ -353,6 +366,46 @@ template <typename Mutex> class ABSL_SCOPED_LOCKABLE SharedLock {
   bool is_locked_;
 };
 
-extern size_t serialization_max_chunk_size;
+// Ensures availability of an interpreter for EVAL-like commands and it's automatic release.
+// If it's part of MULTI, the preborrowed interpreter is returned, otherwise a new is acquired.
+struct BorrowedInterpreter {
+  BorrowedInterpreter(Transaction* tx, ConnectionState* state);
+
+  ~BorrowedInterpreter();
+
+  // Give up ownership of the interpreter, it must be returned manually.
+  Interpreter* Release() && {
+    assert(owned_);
+    owned_ = false;
+    return interpreter_;
+  }
+
+  operator Interpreter*() {
+    return interpreter_;
+  }
+
+ private:
+  Interpreter* interpreter_ = nullptr;
+  bool owned_ = false;
+};
+
+class LocalBlockingCounter {
+ public:
+  void lock() {
+    ++mutating_;
+  }
+
+  void unlock();
+
+  void Wait();
+
+  bool IsBlocked() const {
+    return mutating_ > 0;
+  }
+
+ private:
+  util::fb2::CondVarAny cond_var_;
+  size_t mutating_ = 0;
+};
 
 }  // namespace dfly

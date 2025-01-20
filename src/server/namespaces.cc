@@ -1,3 +1,7 @@
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "server/namespaces.h"
 
 #include "base/flags.h"
@@ -45,19 +49,12 @@ BlockingController* Namespace::GetBlockingController(ShardId sid) {
   return shard_blocking_controller_[sid].get();
 }
 
-Namespaces namespaces;
-
-Namespaces::~Namespaces() {
-  Clear();
-}
-
-void Namespaces::Init() {
-  DCHECK(default_namespace_ == nullptr);
+Namespaces::Namespaces() {
   default_namespace_ = &GetOrInsert("");
 }
 
-bool Namespaces::IsInitialized() const {
-  return default_namespace_ != nullptr;
+Namespaces::~Namespaces() {
+  Clear();
 }
 
 void Namespaces::Clear() {

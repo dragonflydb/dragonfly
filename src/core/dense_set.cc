@@ -168,14 +168,14 @@ auto DenseSet::PopPtrFront(DenseSet::ChainVectorIterator it) -> DensePtr {
   return front;
 }
 
-uint32_t DenseSet::ClearInternal(uint32_t start, uint32_t count) {
+uint32_t DenseSet::ClearStep(uint32_t start, uint32_t count) {
   constexpr unsigned kArrLen = 32;
   ClearItem arr[kArrLen];
   unsigned len = 0;
 
   size_t end = min<size_t>(entries_.size(), start + count);
   for (size_t i = start; i < end; ++i) {
-    DensePtr ptr = entries_[i];
+    DensePtr& ptr = entries_[i];
     if (ptr.IsEmpty())
       continue;
 
@@ -190,6 +190,7 @@ uint32_t DenseSet::ClearInternal(uint32_t start, uint32_t count) {
       dest.ptr = ptr;
       dest.obj = nullptr;
     }
+    ptr.Reset();
     if (len == kArrLen) {
       ClearBatch(kArrLen, arr);
       len = 0;
@@ -838,24 +839,6 @@ void DenseSet::CollectExpired() {
 size_t DenseSet::SizeSlow() {
   CollectExpired();
   return size_;
-}
-
-size_t DenseSet::IteratorBase::TraverseApply(DensePtr* ptr, std::function<void(DensePtr*)> fun) {
-  size_t links_traversed = 0;
-  while (ptr->IsLink()) {
-    DenseLinkKey* link = ptr->AsLink();
-    fun(link);
-    ptr = &link->next;
-    ++links_traversed;
-  }
-
-  // The last ptr in the link always returns ptr->IsLink() = false
-  DCHECK(!ptr->IsEmpty());
-  DCHECK(ptr->IsObject());
-  fun(ptr);
-  ++links_traversed;
-
-  return links_traversed;
 }
 
 }  // namespace dfly

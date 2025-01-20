@@ -14,7 +14,7 @@ namespace dfly {
 __thread unsigned TaskQueue::blocked_submitters_ = 0;
 
 TaskQueue::TaskQueue(unsigned queue_size, unsigned start_size, unsigned pool_max_size)
-    : queue_(queue_size), consumer_fibers_(start_size), pool_max_size_(pool_max_size) {
+    : queue_(queue_size), consumer_fibers_(start_size) {
   CHECK_GT(start_size, 0u);
   CHECK_LE(start_size, pool_max_size);
 }

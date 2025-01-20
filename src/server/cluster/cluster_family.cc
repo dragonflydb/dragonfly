@@ -35,6 +35,7 @@ ABSL_FLAG(std::string, cluster_node_id, "",
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(uint16_t, announce_port);
+ABSL_DECLARE_FLAG(bool, managed_service_info);
 
 namespace dfly {
 namespace acl {
@@ -62,6 +63,27 @@ constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 
 thread_local shared_ptr<ClusterConfig> tl_cluster_config;
+
+ClusterShardInfos GetConfigForStats(ConnectionContext* cntx) {
+  CHECK(!IsClusterEmulated());
+  CHECK(tl_cluster_config != nullptr);
+
+  auto config = tl_cluster_config->GetConfig();
+  if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
+    return config;
+  }
+
+  // We can't mutate `config` so we copy it over
+  std::vector<ClusterShardInfo> infos;
+  infos.reserve(config.size());
+
+  for (auto& node : config) {
+    infos.push_back(node);
+    infos.rbegin()->replicas.clear();
+  }
+
+  return ClusterShardInfos{std::move(infos)};
+}
 
 }  // namespace
 
@@ -102,6 +124,17 @@ void ClusterFamily::Shutdown() {
   });
 }
 
+std::optional<ClusterShardInfos> ClusterFamily::GetShardInfos(ConnectionContext* cntx) const {
+  if (IsClusterEmulated()) {
+    return {GetEmulatedShardInfo(cntx)};
+  }
+
+  if (tl_cluster_config != nullptr) {
+    return GetConfigForStats(cntx);
+  }
+  return nullopt;
+}
+
 ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
   ClusterShardInfo info{.slot_ranges = SlotRanges({{.start = 0, .end = kMaxSlotNum}}),
                         .master = {},
@@ -122,10 +155,12 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
 
     info.master = {.id = id_, .ip = preferred_endpoint, .port = preferred_port};
 
-    for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
-      info.replicas.push_back({.id = replica.id,
-                               .ip = replica.address,
-                               .port = static_cast<uint16_t>(replica.listening_port)});
+    if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
+      for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
+        info.replicas.push_back({.id = replica.id,
+                                 .ip = replica.address,
+                                 .port = static_cast<uint16_t>(replica.listening_port)});
+      }
     }
   } else {
     // TODO: We currently don't save the master's ID in the replica
@@ -203,13 +238,11 @@ void ClusterShardsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builde
 }  // namespace
 
 void ClusterFamily::ClusterShards(SinkReplyBuilder* builder, ConnectionContext* cntx) {
-  if (IsClusterEmulated()) {
-    return ClusterShardsImpl({GetEmulatedShardInfo(cntx)}, builder);
-  } else if (tl_cluster_config != nullptr) {
-    return ClusterShardsImpl(tl_cluster_config->GetConfig(), builder);
-  } else {
-    return builder->SendError(kClusterNotConfigured);
+  auto shard_infos = GetShardInfos(cntx);
+  if (shard_infos) {
+    return ClusterShardsImpl(*shard_infos, builder);
   }
+  return builder->SendError(kClusterNotConfigured);
 }
 
 namespace {
@@ -248,13 +281,11 @@ void ClusterSlotsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builder
 }  // namespace
 
 void ClusterFamily::ClusterSlots(SinkReplyBuilder* builder, ConnectionContext* cntx) {
-  if (IsClusterEmulated()) {
-    return ClusterSlotsImpl({GetEmulatedShardInfo(cntx)}, builder);
-  } else if (tl_cluster_config != nullptr) {
-    return ClusterSlotsImpl(tl_cluster_config->GetConfig(), builder);
-  } else {
-    return builder->SendError(kClusterNotConfigured);
+  auto shard_infos = GetShardInfos(cntx);
+  if (shard_infos) {
+    return ClusterSlotsImpl(*shard_infos, builder);
   }
+  return builder->SendError(kClusterNotConfigured);
 }
 
 namespace {
@@ -304,13 +335,11 @@ void ClusterNodesImpl(const ClusterShardInfos& config, string_view my_id,
 }  // namespace
 
 void ClusterFamily::ClusterNodes(SinkReplyBuilder* builder, ConnectionContext* cntx) {
-  if (IsClusterEmulated()) {
-    return ClusterNodesImpl({GetEmulatedShardInfo(cntx)}, id_, builder);
-  } else if (tl_cluster_config != nullptr) {
-    return ClusterNodesImpl(tl_cluster_config->GetConfig(), id_, builder);
-  } else {
-    return builder->SendError(kClusterNotConfigured);
+  auto shard_infos = GetShardInfos(cntx);
+  if (shard_infos) {
+    return ClusterNodesImpl(*shard_infos, id_, builder);
   }
+  return builder->SendError(kClusterNotConfigured);
 }
 
 namespace {
@@ -368,13 +397,8 @@ void ClusterInfoImpl(const ClusterShardInfos& config, SinkReplyBuilder* builder)
 }  // namespace
 
 void ClusterFamily::ClusterInfo(SinkReplyBuilder* builder, ConnectionContext* cntx) {
-  if (IsClusterEmulated()) {
-    return ClusterInfoImpl({GetEmulatedShardInfo(cntx)}, builder);
-  } else if (tl_cluster_config != nullptr) {
-    return ClusterInfoImpl(tl_cluster_config->GetConfig(), builder);
-  } else {
-    return ClusterInfoImpl({}, builder);
-  }
+  auto shard_infos = GetShardInfos(cntx);
+  return ClusterInfoImpl(shard_infos.value_or(ClusterShardInfos{}), builder);
 }
 
 void ClusterFamily::KeySlot(CmdArgList args, SinkReplyBuilder* builder) {
@@ -382,15 +406,16 @@ void ClusterFamily::KeySlot(CmdArgList args, SinkReplyBuilder* builder) {
     return builder->SendError(WrongNumArgsError("CLUSTER KEYSLOT"));
   }
 
-  SlotId id = cluster::KeySlot(ArgS(args, 1));
+  SlotId id = dfly::KeySlot(ArgS(args, 1));
   return builder->SendLong(id);
 }
 
-void ClusterFamily::Cluster(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx) {
+void ClusterFamily::Cluster(CmdArgList args, const CommandContext& cmd_cntx) {
   // In emulated cluster mode, all slots are mapped to the same host, and number of cluster
   // instances is thus 1.
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
+  auto* builder = cmd_cntx.rb;
   if (!IsClusterEnabledOrEmulated()) {
     return builder->SendError(kClusterDisabled);
   }
@@ -408,34 +433,35 @@ void ClusterFamily::Cluster(CmdArgList args, SinkReplyBuilder* builder, Connecti
   } else if (sub_cmd == "MYID") {
     return ClusterMyId(builder);
   } else if (sub_cmd == "SHARDS") {
-    return ClusterShards(builder, cntx);
+    return ClusterShards(builder, cmd_cntx.conn_cntx);
   } else if (sub_cmd == "SLOTS") {
-    return ClusterSlots(builder, cntx);
+    return ClusterSlots(builder, cmd_cntx.conn_cntx);
   } else if (sub_cmd == "NODES") {
-    return ClusterNodes(builder, cntx);
+    return ClusterNodes(builder, cmd_cntx.conn_cntx);
   } else if (sub_cmd == "INFO") {
-    return ClusterInfo(builder, cntx);
+    return ClusterInfo(builder, cmd_cntx.conn_cntx);
   } else {
     return builder->SendError(facade::UnknownSubCmd(sub_cmd, "CLUSTER"), facade::kSyntaxErrType);
   }
 }
 
-void ClusterFamily::ReadOnly(CmdArgList args, SinkReplyBuilder* builder) {
+void ClusterFamily::ReadOnly(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!IsClusterEmulated()) {
-    return builder->SendError(kClusterDisabled);
+    return cmd_cntx.rb->SendError(kClusterDisabled);
   }
-  builder->SendOk();
+  cmd_cntx.rb->SendOk();
 }
 
-void ClusterFamily::ReadWrite(CmdArgList args, SinkReplyBuilder* builder) {
+void ClusterFamily::ReadWrite(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!IsClusterEmulated()) {
-    return builder->SendError(kClusterDisabled);
+    return cmd_cntx.rb->SendError(kClusterDisabled);
   }
-  builder->SendOk();
+  cmd_cntx.rb->SendOk();
 }
 
-void ClusterFamily::DflyCluster(CmdArgList args, SinkReplyBuilder* builder,
-                                ConnectionContext* cntx) {
+void ClusterFamily::DflyCluster(CmdArgList args, const CommandContext& cmd_cntx) {
+  auto* builder = cmd_cntx.rb;
+  auto* cntx = cmd_cntx.conn_cntx;
   if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
     return builder->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
   }
@@ -477,7 +503,7 @@ void DeleteSlots(const SlotRanges& slots_ranges) {
     if (shard == nullptr)
       return;
 
-    namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
@@ -517,7 +543,7 @@ void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
     // TODO: Break slot migration upon FLUSHSLOTS
     journal->RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0,
                          /* shard_cnt= */ shard_set->size(), nullopt,
-                         Payload("DFLYCLUSTER", args_view), false);
+                         Payload("DFLYCLUSTER", args_view));
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
@@ -633,7 +659,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgList args, SinkReplyBuilder* bu
 
     util::fb2::LockGuard lk(mu);
     for (auto& [slot, data] : slots_stats) {
-      data += namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
+      data += namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
     }
   };
 
@@ -749,15 +775,15 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgList args, SinkReplyBuilder* b
   }
 }
 
-void ClusterFamily::DflyMigrate(CmdArgList args, SinkReplyBuilder* builder,
-                                ConnectionContext* cntx) {
+void ClusterFamily::DflyMigrate(CmdArgList args, const CommandContext& cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
 
   args.remove_prefix(1);
+  auto* builder = cmd_cntx.rb;
   if (sub_cmd == "INIT") {
     InitMigration(args, builder);
   } else if (sub_cmd == "FLOW") {
-    DflyMigrateFlow(args, builder, cntx);
+    DflyMigrateFlow(args, builder, cmd_cntx.conn_cntx);
   } else if (sub_cmd == "ACK") {
     DflyMigrateAck(args, builder);
   } else {
@@ -986,7 +1012,7 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
                    [source_id = source_id](const auto& m) { return m.node_info.id == source_id; });
   if (m_it == in_migrations.end()) {
     LOG(WARNING) << "migration isn't in config";
-    return builder->SendLong(OutgoingMigration::kInvalidAttempt);
+    return builder->SendError(OutgoingMigration::kUnknownMigration);
   }
 
   auto migration = GetIncomingMigration(source_id);
@@ -1002,21 +1028,18 @@ void ClusterFamily::DflyMigrateAck(CmdArgList args, SinkReplyBuilder* builder) {
   return builder->SendLong(attempt);
 }
 
-using EngineFunc = void (ClusterFamily::*)(CmdArgList args, SinkReplyBuilder* builder,
-                                           ConnectionContext* cntx);
-
-using EngineFunc2 = void (ClusterFamily::*)(CmdArgList args, SinkReplyBuilder* builder);
-
-inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
-  return [=](CmdArgList args, Transaction*, SinkReplyBuilder* builder, ConnectionContext* cntx) {
-    return (se->*f)(args, builder, cntx);
-  };
+void ClusterFamily::PauseAllIncomingMigrations(bool pause) {
+  util::fb2::LockGuard lk(migration_mu_);
+  LOG_IF(ERROR, incoming_migrations_jobs_.empty()) << "No incoming migrations!";
+  for (auto& im : incoming_migrations_jobs_) {
+    im->Pause(pause);
+  }
 }
 
-inline CommandId::Handler2 HandlerFunc(ClusterFamily* se, EngineFunc2 f) {
-  return [=](CmdArgList args, Transaction*, SinkReplyBuilder* builder) {
-    return (se->*f)(args, builder);
-  };
+using EngineFunc = void (ClusterFamily::*)(CmdArgList args, const CommandContext& cmd_cntx);
+
+inline CommandId::Handler3 HandlerFunc(ClusterFamily* se, EngineFunc f) {
+  return [=](CmdArgList args, const CommandContext& cmd_cntx) { return (se->*f)(args, cmd_cntx); };
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ClusterFamily::x))

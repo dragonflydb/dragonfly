@@ -3,8 +3,16 @@ import redis
 
 cuckoofilters_tests = pytest.importorskip("probables")
 
+topk_tests = pytest.importorskip("probables")
 
-@pytest.mark.unsupported_server_types("dragonfly")
+pytestmark = []
+pytestmark.extend(
+    [
+        pytest.mark.unsupported_server_types("dragonfly"),
+    ]
+)
+
+
 def test_cf_add_and_insert(r: redis.Redis):
     assert r.cf().create("cuckoo", 1000)
     assert r.cf().add("cuckoo", "filter")
@@ -24,7 +32,16 @@ def test_cf_add_and_insert(r: redis.Redis):
     assert info.get("filterNum") == 1
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
+def test_create_cf(r: redis.Redis):
+    assert r.cf().create("cuckoo", 1000)
+    assert r.cf().create("cuckoo_e", 1000, expansion=1)
+    assert r.cf().create("cuckoo_bs", 1000, bucket_size=4)
+    assert r.cf().create("cuckoo_mi", 1000, max_iterations=10)
+    assert r.cms().initbydim("cmsDim", 100, 5)
+    assert r.cms().initbyprob("cmsProb", 0.01, 0.01)
+    assert r.topk().reserve("topk", 5, 100, 5, 0.9)
+
+
 def test_cf_exists_and_del(r: redis.Redis):
     assert r.cf().create("cuckoo", 1000)
     assert r.cf().add("cuckoo", "filter")

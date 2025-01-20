@@ -4,6 +4,8 @@
 
 #include "core/search/base.h"
 
+#include <absl/strings/numbers.h>
+
 namespace dfly::search {
 
 std::string_view QueryParams::operator[](std::string_view name) const {
@@ -35,6 +37,13 @@ bool WrappedStrPtr::operator>=(const WrappedStrPtr& other) const {
 
 WrappedStrPtr::operator std::string_view() const {
   return std::string_view{ptr.get(), std::strlen(ptr.get())};
+}
+
+std::optional<double> ParseNumericField(std::string_view value) {
+  double value_as_double;
+  if (absl::SimpleAtod(value, &value_as_double))
+    return value_as_double;
+  return std::nullopt;
 }
 
 }  // namespace dfly::search

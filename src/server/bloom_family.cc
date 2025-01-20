@@ -91,7 +91,7 @@ OpResult<ExistsResult> OpExists(const OpArgs& op_args, string_view key, CmdArgLi
 
 }  // namespace
 
-void BloomFamily::Reserve(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void BloomFamily::Reserve(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser(args);
   string_view key = parser.Next();
   SbfParams params;
@@ -99,23 +99,23 @@ void BloomFamily::Reserve(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
   tie(params.error, params.init_capacity) = parser.Next<double, uint32_t>();
 
   if (parser.Error())
-    return builder->SendError(kSyntaxErr);
+    return cmd_cntx.rb->SendError(kSyntaxErr);
 
   if (!params.ok())
-    return builder->SendError("error rate is out of range", kSyntaxErrType);
+    return cmd_cntx.rb->SendError("error rate is out of range", kSyntaxErrType);
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpReserve(params, t->GetOpArgs(shard), key);
   };
 
-  OpStatus res = tx->ScheduleSingleHop(std::move(cb));
+  OpStatus res = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
   if (res == OpStatus::KEY_EXISTS) {
-    return builder->SendError("item exists");
+    return cmd_cntx.rb->SendError("item exists");
   }
-  return builder->SendError(res);
+  return cmd_cntx.rb->SendError(res);
 }
 
-void BloomFamily::Add(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void BloomFamily::Add(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -123,30 +123,30 @@ void BloomFamily::Add(CmdArgList args, Transaction* tx, SinkReplyBuilder* builde
     return OpAdd(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   OpStatus status = res.status();
   if (res) {
     if (res->front())
-      return builder->SendLong(*res->front());
+      return cmd_cntx.rb->SendLong(*res->front());
     else
       status = res->front().status();
   }
 
-  return builder->SendError(status);
+  return cmd_cntx.rb->SendError(status);
 }
 
-void BloomFamily::Exists(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void BloomFamily::Exists(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = tx->ScheduleSingleHopT(std::move(cb));
-  return builder->SendLong(res ? res->front() : 0);
+  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  return cmd_cntx.rb->SendLong(res ? res->front() : 0);
 }
 
-void BloomFamily::MAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void BloomFamily::MAdd(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -154,23 +154,24 @@ void BloomFamily::MAdd(CmdArgList args, Transaction* tx, SinkReplyBuilder* build
     return OpAdd(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = tx->ScheduleSingleHopT(std::move(cb));
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
   if (!res) {
-    return builder->SendError(res.status());
+    return rb->SendError(res.status());
   }
   const AddResult& add_res = *res;
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(builder);
+
   rb->StartArray(add_res.size());
   for (const OpResult<bool>& val : add_res) {
     if (val) {
-      builder->SendLong(*val);
+      rb->SendLong(*val);
     } else {
-      builder->SendError(val.status());
+      rb->SendError(val.status());
     }
   }
 }
 
-void BloomFamily::MExists(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder) {
+void BloomFamily::MExists(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view key = ArgS(args, 0);
   args.remove_prefix(1);
 
@@ -178,9 +179,9 @@ void BloomFamily::MExists(CmdArgList args, Transaction* tx, SinkReplyBuilder* bu
     return OpExists(t->GetOpArgs(shard), key, args);
   };
 
-  OpResult res = tx->ScheduleSingleHopT(std::move(cb));
+  OpResult res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
 
-  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(builder);
+  RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->StartArray(args.size());
   for (size_t i = 0; i < args.size(); ++i) {
     rb->SendLong(res ? res->at(i) : 0);

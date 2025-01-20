@@ -66,6 +66,8 @@ helm upgrade --install dragonfly oci://ghcr.io/dragonflydb/dragonfly/helm/dragon
 | replicaCount | int | `1` | Number of replicas to deploy |
 | resources.limits | object | `{}` | The resource limits for the containers |
 | resources.requests | object | `{}` | The requested resources for the containers |
+| env | list | `[]` | Extra environment variables |
+| envFrom | list | `[]` | Extra environment variables from K8s objects |
 | securityContext | object | `{}` | Set securityContext for containers |
 | service.annotations | object | `{}` | Extra annotations for the service |
 | service.lablels | object | `{}` | Extra labels for the service |

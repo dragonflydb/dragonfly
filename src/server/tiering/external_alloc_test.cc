@@ -146,4 +146,12 @@ TEST_F(ExternalAllocatorTest, EmptyFull) {
     EXPECT_GT(ext_alloc_.Malloc(kAllocSize), 0u);
 }
 
+TEST_F(ExternalAllocatorTest, AllocLarge) {
+  ext_alloc_.AddStorage(0, kSegSize);
+
+  off_t offs = ext_alloc_.Malloc(2_MB - 1);
+  EXPECT_EQ(offs, 0);
+  ext_alloc_.Free(offs, 2_MB - 1);
+}
+
 }  // namespace dfly::tiering

@@ -16,7 +16,7 @@ On Debian/Ubuntu:
 
 ```bash
 sudo apt install ninja-build libunwind-dev libboost-fiber-dev libssl-dev \
-     autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev
+     autoconf-archive libtool cmake g++ libzstd-dev bison libxml2-dev zlib1g-dev
 ```
 
 On Fedora:
@@ -32,6 +32,12 @@ On openSUSE:
 sudo zypper install automake boost-devel gcc-c++ git cmake libtool ninja libzstd-devel  \
      openssl-devel libunwind-devel autoconf-archive patch bison libxml2-devel \
      libboost_context-devel libboost_system-devel
+```
+
+On FreeBSD:
+
+```bash
+pkg install -y git bash cmake ninja libunwind boost-libs autoconf automake libtool gmake bison
 ```
 
 ## Step 2 - clone the project

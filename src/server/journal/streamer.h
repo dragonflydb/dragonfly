@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include <deque>
+
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/journal/journal.h"
+#include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
 #include "server/rdb_save.h"
 
@@ -30,7 +33,7 @@ class JournalStreamer {
   // and manual cleanup.
   virtual void Cancel();
 
-  size_t GetTotalBufferCapacities() const;
+  size_t UsedBytes() const;
 
  protected:
   // TODO: we copy the string on each write because JournalItem may be passed to multiple
@@ -38,7 +41,7 @@ class JournalStreamer {
   // or wrap JournalItem::data in shared_ptr, we can avoid the cost of copying strings.
   // Also, for small strings it's more peformant to copy to the intermediate buffer than
   // to issue an io operation.
-  void Write(std::string_view str);
+  void Write(std::string str);
 
   // Blocks the if the consumer if not keeping up.
   void ThrottleIfNeeded();
@@ -53,6 +56,7 @@ class JournalStreamer {
   Context* cntx_;
 
  private:
+  void AsyncWrite();
   void OnCompletion(std::error_code ec, size_t len);
 
   bool IsStopped() const {
@@ -62,9 +66,10 @@ class JournalStreamer {
   bool IsStalled() const;
 
   journal::Journal* journal_;
-  std::vector<uint8_t> pending_buf_;
-  size_t in_flight_bytes_ = 0, total_sent_ = 0;
 
+  PendingBuf pending_buf_;
+
+  size_t in_flight_bytes_ = 0, total_sent_ = 0;
   time_t last_lsn_time_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
@@ -94,11 +99,23 @@ class RestoreStreamer : public JournalStreamer {
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
-  bool ShouldWrite(cluster::SlotId slot_id) const;
+  bool ShouldWrite(SlotId slot_id) const;
 
-  // Returns whether anything was written
-  void WriteBucket(PrimeTable::bucket_iterator it);
-  void WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv, uint64_t expire_ms);
+  // Returns true if any entry was actually written
+  bool WriteBucket(PrimeTable::bucket_iterator it);
+
+  void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
+                  uint64_t expire_ms);
+
+  struct Stats {
+    size_t buckets_skipped = 0;
+    size_t buckets_written = 0;
+    size_t buckets_loop = 0;
+    size_t buckets_on_db_update = 0;
+    size_t keys_written = 0;
+    size_t keys_skipped = 0;
+    size_t commands = 0;
+  };
 
   DbSlice* db_slice_;
   DbTableArray db_array_;
@@ -106,6 +123,8 @@ class RestoreStreamer : public JournalStreamer {
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
+  ThreadLocalMutex big_value_mu_;
+  Stats stats_;
 };
 
 }  // namespace dfly

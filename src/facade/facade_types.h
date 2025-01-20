@@ -105,7 +105,6 @@ struct ConnectionStats {
   uint64_t conn_received_cnt = 0;
 
   uint32_t num_conns = 0;
-  uint32_t num_replicas = 0;
   uint32_t num_blocked_clients = 0;
   uint64_t num_migrations = 0;
 
@@ -185,9 +184,14 @@ extern __thread FacadeStats* tl_facade_stats;
 
 void ResetStats();
 
+// Constants for socket bufring.
+constexpr uint16_t kRecvSockGid = 0;
+constexpr size_t kRecvBufSize = 128;
+
 }  // namespace facade
 
 namespace std {
 ostream& operator<<(ostream& os, facade::CmdArgList args);
+ostream& operator<<(ostream& os, facade::Protocol protocol);
 
 }  // namespace std

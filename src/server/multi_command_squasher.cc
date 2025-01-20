@@ -7,8 +7,8 @@
 #include <absl/container/inlined_vector.h>
 
 #include "base/logging.h"
+#include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
-#include "server/cluster/cluster_utility.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -30,7 +30,39 @@ void CheckConnStateClean(const ConnectionState& state) {
   DCHECK(!state.subscribe_info);
 }
 
+size_t Size(const facade::CapturingReplyBuilder::Payload& payload) {
+  size_t payload_size = sizeof(facade::CapturingReplyBuilder::Payload);
+  return visit(
+      Overloaded{
+          [&](monostate) { return payload_size; },
+          [&](long) { return payload_size; },
+          [&](double) { return payload_size; },
+          [&](OpStatus) { return payload_size; },
+          [&](CapturingReplyBuilder::Null) { return payload_size; },
+          // ignore SSO because it's insignificant
+          [&](const CapturingReplyBuilder::SimpleString& data) {
+            return payload_size + data.size();
+          },
+          [&](const CapturingReplyBuilder::BulkString& data) { return payload_size + data.size(); },
+          [&](const CapturingReplyBuilder::Error& data) {
+            return payload_size + data.first.size() + data.second.size();
+          },
+          [&](const unique_ptr<CapturingReplyBuilder::CollectionPayload>& data) {
+            if (!data || (data->len == 0 && data->type == RedisReplyBuilder::ARRAY)) {
+              return payload_size;
+            }
+            for (const auto& pl : data->arr) {
+              payload_size += Size(pl);
+            }
+            return payload_size;
+          },
+      },
+      payload);
+}
+
 }  // namespace
+
+atomic_uint64_t MultiCommandSquasher::current_reply_size_ = 0;
 
 MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, ConnectionContext* cntx,
                                            Service* service, bool verify_commands, bool error_abort)
@@ -45,15 +77,14 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
   atomic_ = mode != Transaction::NON_ATOMIC;
 }
 
-MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(
-    ShardId sid, optional<cluster::SlotId> slot_id) {
+MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
     if (IsAtomic()) {
-      sinfo.local_tx = new Transaction{cntx_->transaction, sid, slot_id};
+      sinfo.local_tx = new Transaction{cntx_->transaction, sid, nullopt};
     } else {
       // Non-atomic squashing does not use the transactional framework for fan out, so local
       // transactions have to be fully standalone, check locks and release them immediately.
@@ -79,6 +110,8 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
 
   cmd->Fill(&tmp_keylist_);
   auto args = absl::MakeSpan(tmp_keylist_);
+  if (args.empty())
+    return SquashResult::NOT_SQUASHED;
 
   auto keys = DetermineKeys(cmd->Cid(), args);
   if (!keys.ok())
@@ -87,11 +120,9 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
     return SquashResult::NOT_SQUASHED;
 
   // Check if all commands belong to one shard
-  cluster::UniqueSlotChecker slot_checker;
   ShardId last_sid = kInvalidSid;
 
   for (string_view key : keys->Range(args)) {
-    slot_checker.Add(key);
     ShardId sid = Shard(key, shard_set->size());
     if (last_sid == kInvalidSid || last_sid == sid)
       last_sid = sid;
@@ -99,7 +130,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
       return SquashResult::NOT_SQUASHED;  // at least two shards
   }
 
-  auto& sinfo = PrepareShardInfo(last_sid, slot_checker.GetUniqueSlotId());
+  auto& sinfo = PrepareShardInfo(last_sid);
 
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
@@ -121,7 +152,7 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   if (verify_commands_) {
     if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
       rb->SendError(std::move(*err));
-      std::ignore = rb->ConsumeLastError();
+      rb->ConsumeLastError();
       return !error_abort_;
     }
   }
@@ -137,12 +168,13 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   return true;
 }
 
-OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
+OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es,
+                                             RespVersion resp_v) {
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.cmds.empty());
 
   auto* local_tx = sinfo.local_tx.get();
-  facade::CapturingReplyBuilder crb;
+  facade::CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
   ConnectionContext local_cntx{cntx_, local_tx};
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
@@ -159,6 +191,8 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
       if (auto err = service_->VerifyCommandState(cmd->Cid(), args, *cntx_); err) {
         crb.SendError(std::move(*err));
         sinfo.replies.emplace_back(crb.Take());
+        current_reply_size_.fetch_add(Size(sinfo.replies.back()), std::memory_order_relaxed);
+
         continue;
       }
     }
@@ -171,6 +205,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard
     service_->InvokeCmd(cmd->Cid(), args, &crb, &local_cntx);
 
     sinfo.replies.emplace_back(crb.Take());
+    current_reply_size_.fetch_add(Size(sinfo.replies.back()), std::memory_order_relaxed);
 
     // Assert commands made no persistent state changes to stub context state
     const auto& local_state = local_cntx.conn_state;
@@ -206,14 +241,15 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     cntx_->cid = base_cid_;
     auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
-    tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
+    tx->ScheduleSingleHop(
+        [this, rb](auto* tx, auto* es) { return SquashedHopCb(tx, es, rb->GetRespVersion()); });
   } else {
 #if 1
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    auto cb = [this, tx, bc]() mutable {
-      this->SquashedHopCb(tx, EngineShard::tlocal());
+    auto cb = [this, tx, bc, rb]() mutable {
+      this->SquashedHopCb(tx, EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
 
@@ -223,8 +259,9 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     }
     bc->Wait();
 #else
-    shard_set->RunBlockingInParallel([this, tx](auto* es) { SquashedHopCb(tx, es); },
-                                     [this](auto sid) { return !sharded_[sid].cmds.empty(); });
+    shard_set->RunBlockingInParallel(
+        [this, tx, rb](auto* es) { SquashedHopCb(tx, es, rb->GetRespVersion()); },
+        [this](auto sid) { return !sharded_[sid].cmds.empty(); });
 #endif
   }
 
@@ -237,6 +274,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
     aborted |= error_abort_ && CapturingReplyBuilder::TryExtractError(replies.back());
 
+    current_reply_size_.fetch_sub(Size(replies.back()), std::memory_order_relaxed);
     CapturingReplyBuilder::Apply(std::move(replies.back()), rb);
     replies.pop_back();
 
@@ -254,7 +292,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   return !aborted;
 }
 
-void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
+size_t MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
   DVLOG(1) << "Trying to squash " << cmds_.size() << " commands for transaction "
            << cntx_->transaction->DebugId();
 
@@ -291,6 +329,7 @@ void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
 
   VLOG(1) << "Squashed " << num_squashed_ << " of " << cmds_.size()
           << " commands, max fanout: " << num_shards_ << ", atomic: " << atomic_;
+  return num_squashed_;
 }
 
 bool MultiCommandSquasher::IsAtomic() const {

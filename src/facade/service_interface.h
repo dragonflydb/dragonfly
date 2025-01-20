@@ -36,7 +36,7 @@ class ServiceInterface {
   virtual void DispatchMC(const MemcacheParser::Command& cmd, std::string_view value,
                           MCReplyBuilder* builder, ConnectionContext* cntx) = 0;
 
-  virtual ConnectionContext* CreateContext(util::FiberSocketBase* peer, Connection* owner) = 0;
+  virtual ConnectionContext* CreateContext(Connection* owner) = 0;
 
   virtual void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
   }

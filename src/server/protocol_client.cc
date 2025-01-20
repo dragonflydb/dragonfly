@@ -384,7 +384,7 @@ bool ProtocolClient::CheckRespFirstTypes(initializer_list<RespExpr::Type> types)
 }
 
 error_code ProtocolClient::SendCommand(string_view command) {
-  string formatted_command = RedisReplyBuilder2Base::SerializeCommand(command);
+  string formatted_command = RedisReplyBuilderBase::SerializeCommand(command);
   auto ec = sock_->Write(io::Buffer(formatted_command));
   if (!ec)
     TouchIoTime();

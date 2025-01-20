@@ -19,7 +19,7 @@ class Connection;
 
 class ConnectionContext {
  public:
-  ConnectionContext(::io::Sink* stream, Connection* owner);
+  explicit ConnectionContext(Connection* owner);
 
   virtual ~ConnectionContext() {
   }
@@ -30,14 +30,6 @@ class ConnectionContext {
 
   const Connection* conn() const {
     return owner_;
-  }
-
-  Protocol protocol() const {
-    return protocol_;
-  }
-
-  SinkReplyBuilder* reply_builder_old() {
-    return rbuilder_.get();
   }
 
   virtual size_t UsedMemory() const;
@@ -71,8 +63,6 @@ class ConnectionContext {
 
  private:
   Connection* owner_;
-  Protocol protocol_ = Protocol::REDIS;
-  std::unique_ptr<SinkReplyBuilder> rbuilder_;
 };
 
 }  // namespace facade

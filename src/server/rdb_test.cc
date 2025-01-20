@@ -36,6 +36,8 @@ ABSL_DECLARE_FLAG(dfly::CompressionMode, compression_mode);
 
 namespace dfly {
 
+static const auto kMatchNil = ArgType(RespExpr::NIL);
+
 class RdbTest : public BaseFamilyTest {
  protected:
   void SetUp();
@@ -54,6 +56,7 @@ class RdbTest : public BaseFamilyTest {
 
 void RdbTest::SetUp() {
   InitWithDbFilename();
+  CHECK_EQ(zmalloc_used_memory_tl, 0);
   max_memory_limit = 40000000;
 }
 
@@ -94,7 +97,7 @@ TEST_F(RdbTest, Crc) {
 
 TEST_F(RdbTest, LoadEmpty) {
   auto ec = LoadRdb("empty.rdb");
-  CHECK(!ec);
+  ASSERT_FALSE(ec) << ec;
 }
 
 TEST_F(RdbTest, LoadSmall6) {
@@ -136,13 +139,20 @@ TEST_F(RdbTest, Stream) {
 
   auto resp = Run({"type", "key:10"});
   EXPECT_EQ(resp, "stream");
+
   resp = Run({"xinfo", "groups", "key:0"});
   EXPECT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0],
+              RespElementsAre("name", "g1", "consumers", 0, "pending", 0, "last-delivered-id",
+                              "1655444851524-3", "entries-read", 128, "lag", 0));
+  EXPECT_THAT(resp.GetVec()[1],
+              RespElementsAre("name", "g2", "consumers", 1, "pending", 0, "last-delivered-id",
+                              "1655444851523-1", "entries-read", kMatchNil, "lag", kMatchNil));
 
   resp = Run({"xinfo", "groups", "key:1"});  // test dereferences array of size 1
-  EXPECT_THAT(resp, RespArray(ElementsAre("name", "g2", "consumers", IntArg(0), "pending",
-                                          IntArg(0), "last-delivered-id", "1655444851523-1",
-                                          "entries-read", IntArg(0), "lag", IntArg(0))));
+  EXPECT_THAT(resp, RespElementsAre("name", "g2", "consumers", IntArg(0), "pending", IntArg(0),
+                                    "last-delivered-id", "1655444851523-1", "entries-read",
+                                    kMatchNil, "lag", kMatchNil));
 
   resp = Run({"xinfo", "groups", "key:2"});
   EXPECT_THAT(resp, ArrLen(0));
@@ -162,6 +172,10 @@ TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
     SetFlag(&FLAGS_compression_mode, mode);
     RespExpr resp = Run({"save", "df"});
     ASSERT_EQ(resp, "OK");
+
+    if (mode == CompressionMode::MULTI_ENTRY_ZSTD || mode == CompressionMode::MULTI_ENTRY_LZ4) {
+      EXPECT_GE(GetMetrics().coordinator_stats.compressed_blobs, 1);
+    }
 
     auto save_info = service_->server_family().GetLastSaveInfo();
     resp = Run({"dfly", "load", save_info.file_name});
@@ -444,6 +458,8 @@ TEST_F(RdbTest, JsonTest) {
 class HllRdbTest : public RdbTest, public testing::WithParamInterface<string> {};
 
 TEST_P(HllRdbTest, Hll) {
+  LOG(INFO) << " max memory: " << max_memory_limit
+            << " used_mem_current: " << used_mem_current.load();
   auto ec = LoadRdb("hll.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
@@ -629,14 +645,30 @@ TEST_F(RdbTest, LoadHugeList) {
 // Tests loading a huge stream, where the stream is loaded in multiple partial
 // reads.
 TEST_F(RdbTest, LoadHugeStream) {
+  TEST_current_time_ms = 1000;
+
   // Add a huge stream (test:0) with 2000 entries, and 4 1k elements per entry
   // (note must be more than 512*4kb elements to test partial reads).
-  for (int i = 0; i != 2000; i++) {
+  // We add 2000 entries to the stream to ensure that the stream, because populate strream
+  // adds only a single entry at a time, with multiple elements in it.
+  for (unsigned i = 0; i < 2000; i++) {
     Run({"debug", "populate", "1", "test", "2000", "rand", "type", "stream", "elements", "4"});
   }
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
+  Run({"XGROUP", "CREATE", "test:0", "grp1", "0"});
+  Run({"XGROUP", "CREATE", "test:0", "grp2", "0"});
+  Run({"XREADGROUP", "GROUP", "grp1", "Alice", "COUNT", "1", "STREAMS", "test:0", ">"});
+  Run({"XREADGROUP", "GROUP", "grp2", "Alice", "COUNT", "1", "STREAMS", "test:0", ">"});
 
-  RespExpr resp = Run({"save", "df"});
+  auto resp = Run({"xinfo", "stream", "test:0"});
+
+  EXPECT_THAT(
+      resp, RespElementsAre("length", 2000, "radix-tree-keys", 2000, "radix-tree-nodes", 2010,
+                            "last-generated-id", "1000-1999", "max-deleted-entry-id", "0-0",
+                            "entries-added", 2000, "recorded-first-entry-id", "1000-0", "groups", 2,
+                            "first-entry", ArrLen(2), "last-entry", ArrLen(2)));
+
+  resp = Run({"save", "df"});
   ASSERT_EQ(resp, "OK");
 
   auto save_info = service_->server_family().GetLastSaveInfo();
@@ -644,6 +676,50 @@ TEST_F(RdbTest, LoadHugeStream) {
   ASSERT_EQ(resp, "OK");
 
   ASSERT_EQ(2000, CheckedInt({"xlen", "test:0"}));
+  resp = Run({"xinfo", "stream", "test:0"});
+  EXPECT_THAT(
+      resp, RespElementsAre("length", 2000, "radix-tree-keys", 2000, "radix-tree-nodes", 2010,
+                            "last-generated-id", "1000-1999", "max-deleted-entry-id", "0-0",
+                            "entries-added", 2000, "recorded-first-entry-id", "1000-0", "groups", 2,
+                            "first-entry", ArrLen(2), "last-entry", ArrLen(2)));
+  resp = Run({"xinfo", "groups", "test:0"});
+  EXPECT_THAT(resp, RespElementsAre(RespElementsAre("name", "grp1", "consumers", 1, "pending", 1,
+                                                    "last-delivered-id", "1000-0", "entries-read",
+                                                    1, "lag", 1999),
+                                    _));
+}
+
+TEST_F(RdbTest, LoadStream2) {
+  auto ec = LoadRdb("RDB_TYPE_STREAM_LISTPACKS_2.rdb");
+  ASSERT_FALSE(ec) << ec.message();
+  auto res = Run({"XINFO", "STREAM", "mystream"});
+  ASSERT_THAT(res.GetVec(),
+              ElementsAre("length", 2, "radix-tree-keys", 1, "radix-tree-nodes", 2,
+                          "last-generated-id", "1732613360686-0", "max-deleted-entry-id", "0-0",
+                          "entries-added", 2, "recorded-first-entry-id", "1732613352350-0",
+                          "groups", 1, "first-entry", RespElementsAre("1732613352350-0", _),
+                          "last-entry", RespElementsAre("1732613360686-0", _)));
+}
+
+TEST_F(RdbTest, LoadStream3) {
+  auto ec = LoadRdb("RDB_TYPE_STREAM_LISTPACKS_3.rdb");
+  ASSERT_FALSE(ec) << ec.message();
+  auto res = Run({"XINFO", "STREAM", "mystream"});
+  ASSERT_THAT(
+      res.GetVec(),
+      ElementsAre("length", 2, "radix-tree-keys", 1, "radix-tree-nodes", 2, "last-generated-id",
+                  "1732614679549-0", "max-deleted-entry-id", "0-0", "entries-added", 2,
+                  "recorded-first-entry-id", "1732614676541-0", "groups", 1, "first-entry",
+                  ArgType(RespExpr::ARRAY), "last-entry", ArgType(RespExpr::ARRAY)));
+}
+
+TEST_F(RdbTest, SnapshotTooBig) {
+  // Run({"debug", "populate", "10000", "foo", "1000"});
+  //  usleep(5000);  // let the stats to sync
+  max_memory_limit = 100000;
+  used_mem_current = 1000000;
+  auto resp = Run({"debug", "reload"});
+  ASSERT_THAT(resp, ErrArg("Out of memory"));
 }
 
 }  // namespace dfly

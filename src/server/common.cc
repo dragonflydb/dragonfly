@@ -18,6 +18,8 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
+#include "core/interpreter.h"
+#include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -117,7 +119,11 @@ atomic_uint64_t rss_mem_peak(0);
 
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
-size_t serialization_max_chunk_size = 0;
+Namespaces* namespaces = nullptr;
+
+size_t FetchRssMemory(io::StatusData sdata) {
+  return sdata.vm_rss + sdata.hugetlb_pages;
+}
 
 const char* GlobalStateName(GlobalState s) {
   switch (s) {
@@ -431,7 +437,7 @@ ThreadLocalMutex::~ThreadLocalMutex() {
 }
 
 void ThreadLocalMutex::lock() {
-  if (serialization_max_chunk_size != 0) {
+  if (ServerState::tlocal()->serialization_max_chunk_size != 0) {
     DCHECK_EQ(EngineShard::tlocal(), shard_);
     util::fb2::NoOpLock noop_lk_;
     if (locked_fiber_ != nullptr) {
@@ -445,12 +451,50 @@ void ThreadLocalMutex::lock() {
 }
 
 void ThreadLocalMutex::unlock() {
-  if (serialization_max_chunk_size != 0) {
+  if (ServerState::tlocal()->serialization_max_chunk_size != 0) {
     DCHECK_EQ(EngineShard::tlocal(), shard_);
     flag_ = false;
     cond_var_.notify_one();
     locked_fiber_ = nullptr;
   }
+}
+
+BorrowedInterpreter::BorrowedInterpreter(Transaction* tx, ConnectionState* state) {
+  // Ensure squashing ignores EVAL. We can't run on a stub context, because it doesn't have our
+  // preborrowed interpreter (which can't be shared on multiple threads).
+  CHECK(!state->squashing_info);
+
+  if (auto borrowed = state->exec_info.preborrowed_interpreter; borrowed) {
+    // Ensure a preborrowed interpreter is only set for an already running MULTI transaction.
+    CHECK_EQ(state->exec_info.state, ConnectionState::ExecInfo::EXEC_RUNNING);
+
+    interpreter_ = borrowed;
+  } else {
+    // A scheduled transaction occupies a place in the transaction queue and holds locks,
+    // preventing other transactions from progressing. Blocking below can deadlock!
+    CHECK(!tx->IsScheduled());
+
+    interpreter_ = ServerState::tlocal()->BorrowInterpreter();
+    owned_ = true;
+  }
+}
+
+BorrowedInterpreter::~BorrowedInterpreter() {
+  if (owned_)
+    ServerState::tlocal()->ReturnInterpreter(interpreter_);
+}
+
+void LocalBlockingCounter::unlock() {
+  DCHECK(mutating_ > 0);
+  --mutating_;
+  if (mutating_ == 0) {
+    cond_var_.notify_all();
+  }
+}
+
+void LocalBlockingCounter::Wait() {
+  util::fb2::NoOpLock noop_lk_;
+  cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
 }
 
 }  // namespace dfly

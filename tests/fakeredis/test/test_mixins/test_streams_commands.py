@@ -300,20 +300,6 @@ def test_xgroup_destroy(r: redis.Redis):
     assert r.xgroup_destroy(stream, group) == 1
 
 
-@pytest.mark.max_server("6.3")
-def test_xgroup_create_redis6(r: redis.Redis):
-    stream, group = "stream", "group"
-    message_id = r.xadd(stream, {"foo": "bar"})
-    r.xgroup_create(stream, group, message_id)
-    r.xadd(stream, {"foo": "bar"})
-    res = r.xinfo_groups(stream)
-    assert len(res) == 1
-    assert res[0]["name"] == group.encode()
-    assert res[0]["consumers"] == 0
-    assert res[0]["pending"] == 0
-    assert res[0]["last-delivered-id"] == message_id
-
-
 @pytest.mark.min_server("7")
 def test_xgroup_create_redis7(r: redis.Redis):
     stream, group = "stream", "group"
@@ -654,40 +640,6 @@ def test_xpending_range_negative(r: redis.Redis):
         r.xpending_range(stream, group, min=None, max=None, count=None, idle=0)
     with pytest.raises(redis.DataError):
         r.xpending_range(stream, group, min=None, max=None, count=None, consumername=0)
-
-
-@pytest.mark.max_server("6.3")
-@testtools.run_test_if_redispy_ver("gte", "4.4")
-def test_xautoclaim_redis6(r: redis.Redis):
-    stream, group, consumer1, consumer2 = "stream", "group", "consumer1", "consumer2"
-
-    message_id1 = r.xadd(stream, {"john": "wick"})
-    message_id2 = r.xadd(stream, {"johny": "deff"})
-    message = get_stream_message(r, stream, message_id1)
-    r.xgroup_create(stream, group, 0)
-
-    # trying to claim a message that isn't already pending doesn't
-    # do anything
-    assert r.xautoclaim(stream, group, consumer2, min_idle_time=0) == [b"0-0", []]
-
-    # read the group as consumer1 to initially claim the messages
-    r.xreadgroup(group, consumer1, streams={stream: ">"})
-
-    # claim one message as consumer2
-    response = r.xautoclaim(stream, group, consumer2, min_idle_time=0, count=1)
-    assert response[1] == [message]
-
-    # reclaim the messages as consumer1, but use the justid argument
-    # which only returns message ids
-    assert r.xautoclaim(
-        stream, group, consumer1, min_idle_time=0, start_id=0, justid=True
-    ) == [
-        message_id1,
-        message_id2,
-    ]
-    assert r.xautoclaim(
-        stream, group, consumer1, min_idle_time=0, start_id=message_id2, justid=True
-    ) == [message_id2]
 
 
 @pytest.mark.min_server("7")

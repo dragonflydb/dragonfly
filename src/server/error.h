@@ -79,4 +79,6 @@ enum errc {
 
 }  // namespace rdb
 
+std::error_code RdbError(rdb::errc ev);
+
 }  // namespace dfly

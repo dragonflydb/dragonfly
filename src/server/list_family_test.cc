@@ -33,7 +33,7 @@ class ListFamilyTest : public BaseFamilyTest {
   static unsigned NumWatched() {
     atomic_uint32_t sum{0};
 
-    auto ns = &namespaces.GetDefaultNamespace();
+    auto ns = &namespaces->GetDefaultNamespace();
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       auto* bc = ns->GetBlockingController(es->shard_id());
       if (bc)
@@ -45,7 +45,7 @@ class ListFamilyTest : public BaseFamilyTest {
 
   static bool HasAwakened() {
     atomic_uint32_t sum{0};
-    auto ns = &namespaces.GetDefaultNamespace();
+    auto ns = &namespaces->GetDefaultNamespace();
     shard_set->RunBriefInParallel([&](EngineShard* es) {
       auto* bc = ns->GetBlockingController(es->shard_id());
       if (bc)
@@ -377,6 +377,11 @@ TEST_F(ListFamilyTest, LRem) {
 
   ASSERT_THAT(Run({"lrem", kKey2, "1", "12345678"}), IntArg(1));
   ASSERT_THAT(Run({"lrem", kKey2, "1", val}), IntArg(1));
+
+  ASSERT_THAT(Run({"lpush", kKey3, "bar", "bar", "foo"}), IntArg(3));
+  ASSERT_THAT(Run({"lrem", kKey3, "-2", "bar"}), IntArg(2));
+  resp = Run({"lrange", kKey3, "0", "-1"});
+  ASSERT_EQ(resp, "foo");
 }
 
 TEST_F(ListFamilyTest, DumpRestorePlain) {
@@ -533,6 +538,7 @@ TEST_F(ListFamilyTest, LMove) {
 
   resp = Run({"lmove", kKey1, kKey2, "LEFT", "RIGHT"});
   ASSERT_THAT(resp, "1");
+  ASSERT_THAT(Run({"llen", kKey1}), IntArg(4));
 
   resp = Run({"lmove", kKey1, kKey2, "LEFT", "LEFT"});
   ASSERT_THAT(resp, "2");

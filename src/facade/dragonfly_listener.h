@@ -50,6 +50,10 @@ class Listener : public util::ListenerInterface {
   bool IsPrivilegedInterface() const;
   bool IsMainInterface() const;
 
+  Protocol protocol() const {
+    return protocol_;
+  }
+
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;
   ProactorBase* PickConnectionProactor(util::FiberSocketBase* sock) final;

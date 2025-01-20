@@ -49,11 +49,9 @@ class Namespace {
 // mutual dependencies.
 class Namespaces {
  public:
-  Namespaces() = default;
+  Namespaces();
   ~Namespaces();
 
-  void Init();
-  bool IsInitialized() const;
   void Clear() ABSL_LOCKS_EXCLUDED(mu_);  // Thread unsafe, use in tear-down or tests
 
   Namespace& GetDefaultNamespace() const;  // No locks
@@ -64,7 +62,5 @@ class Namespaces {
   absl::node_hash_map<std::string, Namespace> namespaces_ ABSL_GUARDED_BY(mu_);
   Namespace* default_namespace_ = nullptr;
 };
-
-extern Namespaces namespaces;
 
 }  // namespace dfly

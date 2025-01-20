@@ -164,23 +164,25 @@ pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio) {
 }  // namespace
 
 bool ScoreMap::iterator::ReallocIfNeeded(float ratio, std::function<void(sds, sds)> cb) {
-  bool reallocated = false;
-  auto body = [ratio, &cb, &reallocated](auto* ptr) {
-    auto* obj = ptr->GetObject();
-    auto [new_obj, duplicate] = DuplicateEntryIfFragmented(obj, ratio);
-    if (duplicate) {
-      if (cb) {
-        cb((sds)obj, (sds)new_obj);
-      }
-      sdsfree((sds)obj);
-      ptr->SetObject(new_obj);
+  auto* ptr = curr_entry_;
+
+  if (ptr->IsLink()) {
+    ptr = ptr->AsLink();
+  }
+
+  DCHECK(!ptr->IsEmpty());
+  DCHECK(ptr->IsObject());
+
+  auto* obj = ptr->GetObject();
+  auto [new_obj, realloced] = DuplicateEntryIfFragmented(obj, ratio);
+  if (realloced) {
+    if (cb) {
+      cb((sds)obj, (sds)new_obj);
     }
-    reallocated |= duplicate;
-  };
-
-  TraverseApply(curr_entry_, body);
-
-  return reallocated;
+    sdsfree((sds)obj);
+    ptr->SetObject(new_obj);
+  }
+  return realloced;
 }
 
 }  // namespace dfly

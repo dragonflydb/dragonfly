@@ -34,6 +34,23 @@ ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to 
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 namespace dfly {
 
+namespace {
+
+// Default stack size for fibers. We decrease it by 16 bytes because some allocators
+// need additional 8-16 bytes for their internal structures, thus over reserving additional
+// memory pages if using round sizes.
+#ifdef NDEBUG
+constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
+#elif defined SANITIZERS
+// Increase stack size for sanitizers builds.
+constexpr size_t kFiberDefaultStackSize = 64_KB - 16;
+#else
+// Increase stack size for debug builds.
+constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
+#endif
+
+}  // namespace
+
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
   os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_used_bytes
      << ", tiered_entries: " << stats.tiered_entries << "\n";
@@ -57,9 +74,9 @@ static vector<string> SplitLines(const std::string& src) {
   return res;
 }
 
-TestConnection::TestConnection(Protocol protocol, io::StringSink* sink)
-    : facade::Connection(protocol, nullptr, nullptr, nullptr), sink_(sink) {
-  cc_.reset(new dfly::ConnectionContext(sink_, this, {}));
+TestConnection::TestConnection(Protocol protocol)
+    : facade::Connection(protocol, nullptr, nullptr, nullptr) {
+  cc_.reset(new dfly::ConnectionContext(this, {}));
   cc_->skip_acl_validation = true;
   SetSocket(ProactorBase::me()->CreateSocket());
   OnConnectionStart();
@@ -82,7 +99,7 @@ void TransactionSuspension::Start() {
 
   transaction_ = new dfly::Transaction{&cid};
 
-  auto st = transaction_->InitByArgs(&namespaces.GetDefaultNamespace(), 0, {});
+  auto st = transaction_->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
   CHECK_EQ(st, OpStatus::OK);
 
   transaction_->Execute([](Transaction* t, EngineShard* shard) { return OpStatus::OK; }, false);
@@ -109,7 +126,7 @@ class BaseFamilyTest::TestConnWrapper {
 
   ConnectionContext* cmd_cntx() {
     auto cntx = static_cast<ConnectionContext*>(dummy_conn_->cntx());
-    cntx->ns = &namespaces.GetDefaultNamespace();
+    cntx->ns = &namespaces->GetDefaultNamespace();
     return cntx;
   }
 
@@ -125,6 +142,10 @@ class BaseFamilyTest::TestConnWrapper {
     return dummy_conn_.get();
   }
 
+  SinkReplyBuilder* builder() {
+    return builder_.get();
+  }
+
  private:
   ::io::StringSink sink_;  // holds the response blob
 
@@ -133,10 +154,19 @@ class BaseFamilyTest::TestConnWrapper {
   std::vector<std::unique_ptr<std::string>> tmp_str_vec_;
 
   std::unique_ptr<RedisParser> parser_;
+  std::unique_ptr<SinkReplyBuilder> builder_;
 };
 
 BaseFamilyTest::TestConnWrapper::TestConnWrapper(Protocol proto)
-    : dummy_conn_(new TestConnection(proto, &sink_)) {
+    : dummy_conn_(new TestConnection(proto)) {
+  switch (proto) {
+    case Protocol::REDIS:
+      builder_.reset(new RedisReplyBuilder{&sink_});
+      break;
+    case Protocol::MEMCACHE:
+      builder_.reset(new MCReplyBuilder{&sink_});
+      break;
+  }
 }
 
 BaseFamilyTest::TestConnWrapper::~TestConnWrapper() {
@@ -155,6 +185,12 @@ void BaseFamilyTest::SetUpTestSuite() {
 
   absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
   absl::SetFlag(&FLAGS_dbfilename, "");
+
+  static bool init = true;
+  if (exchange(init, false)) {
+    fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
+  }
+
   init_zmalloc_threadlocal(mi_heap_get_backing());
 
   // TODO: go over all env variables starting with FLAGS_ and make sure they are in the below list.
@@ -213,7 +249,7 @@ void BaseFamilyTest::ResetService() {
   used_mem_current = 0;
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
-  auto default_ns = &namespaces.GetDefaultNamespace();
+  auto default_ns = &namespaces->GetDefaultNamespace();
   auto cb = [&](EngineShard* s) {
     default_ns->GetDbSlice(s->shard_id()).UpdateExpireBase(TEST_current_time_ms - 1000, 0);
   };
@@ -230,6 +266,7 @@ void BaseFamilyTest::ResetService() {
       absl::SetFlag(&FLAGS_alsologtostderr, true);
       fb2::Mutex m;
       shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+        ThisFiber::SetName("Watchdog");
         std::unique_lock lk(m);
         LOG(ERROR) << "Proactor " << index << ":\n";
         fb2::detail::FiberInterface::PrintAllFiberStackTraces();
@@ -250,7 +287,7 @@ void BaseFamilyTest::ResetService() {
           }
 
           LOG(ERROR) << "TxLocks for shard " << es->shard_id();
-          for (const auto& k_v : namespaces.GetDefaultNamespace()
+          for (const auto& k_v : namespaces->GetDefaultNamespace()
                                      .GetDbSlice(es->shard_id())
                                      .GetDBTable(0)
                                      ->trans_locks) {
@@ -305,7 +342,7 @@ void BaseFamilyTest::CleanupSnapshots() {
 
 unsigned BaseFamilyTest::NumLocked() {
   atomic_uint count = 0;
-  auto default_ns = &namespaces.GetDefaultNamespace();
+  auto default_ns = &namespaces->GetDefaultNamespace();
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     for (const auto& db : default_ns->GetDbSlice(shard->shard_id()).databases()) {
       if (db == nullptr) {
@@ -346,7 +383,10 @@ bool BaseFamilyTest::WaitUntilCondition(std::function<bool()> condition_cb,
 
 RespExpr BaseFamilyTest::Run(ArgSlice list) {
   if (!ProactorBase::IsProactorThread()) {
-    return pp_->at(0)->Await([&] { return this->Run(list); });
+    return pp_->at(0)->Await([&] {
+      ThisFiber::SetName("Test::Run");
+      return this->Run(list);
+    });
   }
 
   return Run(GetId(), list);
@@ -386,16 +426,17 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   CmdArgVec args = conn_wrapper->Args(slice);
 
   auto* context = conn_wrapper->cmd_cntx();
-  context->ns = &namespaces.GetDefaultNamespace();
+  context->ns = &namespaces->GetDefaultNamespace();
 
   DCHECK(context->transaction == nullptr) << id;
 
-  service_->DispatchCommand(CmdArgList{args}, context->reply_builder_old(), context);
+  service_->DispatchCommand(CmdArgList{args}, conn_wrapper->builder(), context);
 
   DCHECK(context->transaction == nullptr);
 
   auto cmd = absl::AsciiStrToUpper(slice.front());
-  if (cmd == "EVAL" || cmd == "EVALSHA" || cmd == "EXEC") {
+  if (cmd == "EVAL" || cmd == "EVALSHA" || cmd == "EVAL_RO" || cmd == "EVALSHA_RO" ||
+      cmd == "EXEC") {
     shard_set->AwaitRunningOnShardQueue([](auto*) {});  // Wait for async UnlockMulti.
   }
 
@@ -433,8 +474,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, string_view va
 
   DCHECK(context->transaction == nullptr);
 
-  service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(context->reply_builder_old()),
-                       context);
+  service_->DispatchMC(cmd, value, static_cast<MCReplyBuilder*>(conn->builder()), context);
 
   DCHECK(context->transaction == nullptr);
 
@@ -446,17 +486,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, std::string_view key) -> MCResp
     return pp_->at(0)->Await([&] { return this->RunMC(cmd_type, key); });
   }
 
-  MP::Command cmd;
-  cmd.type = cmd_type;
-  cmd.key = key;
-  TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
-
-  auto* context = conn->cmd_cntx();
-
-  service_->DispatchMC(cmd, string_view{},
-                       static_cast<MCReplyBuilder*>(context->reply_builder_old()), context);
-
-  return conn->SplitLines();
+  return RunMC(cmd_type, key, string_view{}, 0, chrono::seconds{});
 }
 
 auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::string_view> list)
@@ -479,9 +509,7 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   TestConnWrapper* conn = AddFindConn(Protocol::MEMCACHE, GetId());
 
   auto* context = conn->cmd_cntx();
-
-  service_->DispatchMC(cmd, string_view{},
-                       static_cast<MCReplyBuilder*>(context->reply_builder_old()), context);
+  service_->DispatchMC(cmd, string_view{}, static_cast<MCReplyBuilder*>(conn->builder()), context);
 
   return conn->SplitLines();
 }
@@ -566,7 +594,7 @@ BaseFamilyTest::TestConnWrapper::GetInvalidationMessage(size_t index) const {
 }
 
 bool BaseFamilyTest::IsLocked(DbIndex db_index, std::string_view key) const {
-  return service_->IsLocked(&namespaces.GetDefaultNamespace(), db_index, key);
+  return service_->IsLocked(&namespaces->GetDefaultNamespace(), db_index, key);
 }
 
 string BaseFamilyTest::GetId() const {
@@ -654,7 +682,7 @@ vector<LockFp> BaseFamilyTest::GetLastFps() {
 
     lock_guard lk(mu);
     for (auto fp :
-         namespaces.GetDefaultNamespace().GetDbSlice(shard->shard_id()).TEST_GetLastLockedFps()) {
+         namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).TEST_GetLastLockedFps()) {
       result.push_back(fp);
     }
   };
