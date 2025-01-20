@@ -257,15 +257,16 @@ bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamI
   return true;
 }
 
-bool ParseRangeId(string_view id, RangeId* dest) {
+enum class RangeBoundary { kStart, kEnd };
+bool ParseRangeId(string_view id, RangeBoundary type, RangeId* dest) {
   if (id.empty())
     return false;
   if (id[0] == '(') {
     dest->exclude = true;
     id.remove_prefix(1);
   }
-
-  return ParseID(id, dest->exclude, 0, &dest->parsed_id);
+  uint64 missing_seq = type == RangeBoundary::kStart ? 0 : -1;
+  return ParseID(id, dest->exclude, missing_seq, &dest->parsed_id);
 }
 
 /* This is a wrapper function for lpGet() to directly get an integer value
@@ -2206,7 +2207,8 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
                    CmdArgList args, bool is_rev, Transaction* tx, SinkReplyBuilder* builder) {
   RangeOpts range_opts;
   RangeId rs, re;
-  if (!ParseRangeId(start, &rs) || !ParseRangeId(end, &re)) {
+  if (!ParseRangeId(start, RangeBoundary::kStart, &rs) ||
+      !ParseRangeId(end, RangeBoundary::kEnd, &re)) {
     return builder->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
@@ -2504,7 +2506,8 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
   string_view start = ArgS(args, id_indx);
   id_indx++;
   string_view end = ArgS(args, id_indx);
-  if (!ParseRangeId(start, &rs) || !ParseRangeId(end, &re)) {
+  if (!ParseRangeId(start, RangeBoundary::kStart, &rs) ||
+      !ParseRangeId(end, RangeBoundary::kEnd, &re)) {
     builder->SendError(kInvalidStreamId, kSyntaxErrType);
     return false;
   }
@@ -3227,7 +3230,7 @@ void StreamFamily::XAutoClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view start = ArgS(args, 4);
   RangeId rs;
 
-  if (!ParseRangeId(start, &rs)) {
+  if (!ParseRangeId(start, RangeBoundary::kStart, &rs)) {
     return rb->SendError(kSyntaxErr);
   }
 
