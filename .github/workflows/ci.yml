@@ -49,7 +49,6 @@ jobs:
           - container: "alpine-dev:latest"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
-<<<<<<< HEAD
             cxx_flags: ""
             sanitizers: "NoSanitizers"
           - container: "ubuntu-dev:24"
@@ -58,8 +57,6 @@ jobs:
             # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
             cxx_flags: "-Wno-error=unused-command-line-argument"
             sanitizers: "Sanitizers"
-=======
->>>>>>> main
 
     runs-on: ubuntu-latest
     env:
