@@ -119,7 +119,7 @@ struct CmdArgParser {
 
   // Check if the next value is equal to a specific tag. If equal, its consumed.
   template <class... Args> bool Check(std::string_view tag, Args*... args) {
-    if (cur_i_ + sizeof...(Args) >= args_.size())
+    if (cur_i_ + sizeof...(Args) >= args_.size() || error_)
       return false;
 
     std::string_view arg = SafeSV(cur_i_);

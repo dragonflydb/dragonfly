@@ -341,26 +341,26 @@ std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* par
   return sort_params;
 }
 
-optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
+optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser* parser,
                                                        SinkReplyBuilder* builder) {
   AggregateParams params;
-  tie(params.index, params.query) = parser.Next<string_view, string_view>();
+  tie(params.index, params.query) = parser->Next<string_view, string_view>();
 
   // Parse LOAD count field [field ...]
   // LOAD options are at the beginning of the query, so we need to parse them first
-  while (parser.HasNext() && parser.Check("LOAD")) {
-    ParseLoadFields(&parser, &params.load_fields);
+  while (parser->HasNext() && parser->Check("LOAD")) {
+    ParseLoadFields(parser, &params.load_fields);
   }
 
-  while (parser.HasNext()) {
+  while (parser->HasNext()) {
     // GROUPBY nargs property [property ...]
-    if (parser.Check("GROUPBY")) {
-      size_t num_fields = parser.Next<size_t>();
+    if (parser->Check("GROUPBY")) {
+      size_t num_fields = parser->Next<size_t>();
 
       std::vector<std::string> fields;
       fields.reserve(num_fields);
-      while (parser.HasNext() && num_fields > 0) {
-        auto parsed_field = ParseFieldWithAtSign(&parser);
+      while (parser->HasNext() && num_fields > 0) {
+        auto parsed_field = ParseFieldWithAtSign(parser);
 
         /*
         TODO: Throw an error if the field has no '@' sign at the beginning
@@ -375,27 +375,27 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
       }
 
       vector<aggregate::Reducer> reducers;
-      while (parser.Check("REDUCE")) {
+      while (parser->Check("REDUCE")) {
         using RF = aggregate::ReducerFunc;
         auto func_name =
-            parser.TryMapNext("COUNT", RF::COUNT, "COUNT_DISTINCT", RF::COUNT_DISTINCT, "SUM",
-                              RF::SUM, "AVG", RF::AVG, "MAX", RF::MAX, "MIN", RF::MIN);
+            parser->TryMapNext("COUNT", RF::COUNT, "COUNT_DISTINCT", RF::COUNT_DISTINCT, "SUM",
+                               RF::SUM, "AVG", RF::AVG, "MAX", RF::MAX, "MIN", RF::MIN);
 
         if (!func_name) {
-          builder->SendError(absl::StrCat("reducer function ", parser.Next(), " not found"));
+          builder->SendError(absl::StrCat("reducer function ", parser->Next(), " not found"));
           return nullopt;
         }
 
         auto func = aggregate::FindReducerFunc(*func_name);
-        auto nargs = parser.Next<size_t>();
+        auto nargs = parser->Next<size_t>();
 
         string source_field;
         if (nargs > 0) {
-          source_field = ParseField(&parser);
+          source_field = ParseField(parser);
         }
 
-        parser.ExpectTag("AS");
-        string result_field = parser.Next<string>();
+        parser->ExpectTag("AS");
+        string result_field = parser->Next<string>();
 
         reducers.push_back(
             aggregate::Reducer{std::move(source_field), std::move(result_field), std::move(func)});
@@ -406,8 +406,8 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     }
 
     // SORTBY nargs
-    if (parser.Check("SORTBY")) {
-      auto sort_params = ParseAggregatorSortParams(&parser);
+    if (parser->Check("SORTBY")) {
+      auto sort_params = ParseAggregatorSortParams(parser);
       if (!sort_params) {
         builder->SendError("bad arguments for SORTBY: specified invalid number of strings");
         return nullopt;
@@ -418,29 +418,24 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     }
 
     // LIMIT
-    if (parser.Check("LIMIT")) {
-      auto [offset, num] = parser.Next<size_t, size_t>();
+    if (parser->Check("LIMIT")) {
+      auto [offset, num] = parser->Next<size_t, size_t>();
       params.steps.push_back(aggregate::MakeLimitStep(offset, num));
       continue;
     }
 
     // PARAMS
-    if (parser.Check("PARAMS")) {
-      params.params = ParseQueryParams(&parser);
+    if (parser->Check("PARAMS")) {
+      params.params = ParseQueryParams(parser);
       continue;
     }
 
-    if (parser.Check("LOAD")) {
+    if (parser->Check("LOAD")) {
       builder->SendError("LOAD cannot be applied after projectors or reducers");
       return nullopt;
     }
 
-    builder->SendError(absl::StrCat("Unknown clause: ", parser.Peek()));
-    return nullopt;
-  }
-
-  if (auto err = parser.Error(); err) {
-    builder->SendError(err->MakeReply());
+    builder->SendError(absl::StrCat("Unknown clause: ", parser->Peek()));
     return nullopt;
   }
 
@@ -994,10 +989,17 @@ void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) {
+  CmdArgParser parser{args};
   auto* builder = cmd_cntx.rb;
-  const auto params = ParseAggregatorParamsOrReply(args, builder);
+
+  const auto params = ParseAggregatorParamsOrReply(&parser, builder);
   if (!params)
     return;
+
+  if (auto err = parser.Error(); err) {
+    builder->SendError(err->MakeReply());
+    return;
+  }
 
   search::SearchAlgorithm search_algo;
   if (!search_algo.Init(params->query, &params->params, nullptr))
