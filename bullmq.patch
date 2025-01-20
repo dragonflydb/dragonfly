@@ -1,5 +1,5 @@
 diff --git a/src/classes/worker.ts b/src/classes/worker.ts
-index b79ddf464..41835e812 100644
+index b79ddf464..891e22176 100644
 --- a/src/classes/worker.ts
 +++ b/src/classes/worker.ts
 @@ -702,7 +702,11 @@ will never work with more accuracy than 1ms. */
@@ -8,12 +8,71 @@ index b79ddf464..41835e812 100644
            // function only.
 +          const gettime = () => '[' + new Date().toJSON() + ']';
 +          const id = Math.random().toString(16).slice(2);
-+          console.log(`${gettime()} Pre bzpopmin ${id}`);
++          console.log(`${gettime()} Pre bzpopmin ${id} timeout ${blockTimeout} until ${blockUntil}`);
            const result = await bclient.bzpopmin(this.keys.marker, blockTimeout);
 +          console.log(`${gettime()} Post bzpopmin ${id}`);
 
            if (result) {
              const [_key, member, score] = result;
+@@ -1003,7 +1007,10 @@ will never work with more accuracy than 1ms. */
+    * @returns Promise that resolves when the worker has been closed.
+    */
+   async close(force = false): Promise<void> {
++    const gettime = () => '[' + new Date().toJSON() + ']';
++    console.log(`${gettime()} Closing worker`);
+     if (this.closing) {
++      console.log(`${gettime()} Already closing`);
+       return this.closing;
+     }
+
+@@ -1012,6 +1019,7 @@ will never work with more accuracy than 1ms. */
+       'close',
+       this.name,
+       async span => {
++        console.log(`${gettime()} Setting attributes`);
+         span?.setAttributes({
+           [TelemetryAttributes.WorkerId]: this.id,
+           [TelemetryAttributes.WorkerName]: this.opts.name,
+@@ -1019,10 +1027,14 @@ will never work with more accuracy than 1ms. */
+         });
+
+         this.closing = (async () => {
++          console.log(`${gettime()} Running closing cb`);
+           this.emit('closing', 'closing queue');
++          console.log(`${gettime()} Post emit`);
+           this.abortDelayController?.abort();
++          console.log(`${gettime()} Post abort`);
+
+           this.resume();
++          console.log(`${gettime()} Post resume`);
+
+           // Define the async cleanup functions
+           const asyncCleanups = [
+@@ -1037,17 +1049,24 @@ will never work with more accuracy than 1ms. */
+           // Run cleanup functions sequentially and make sure all are run despite any errors
+           for (const cleanup of asyncCleanups) {
+             try {
++              console.log(`${gettime()} Pre cleanup`);
+               await cleanup();
++              console.log(`${gettime()} Post cleanup`);
+             } catch (err) {
++              console.log(`${gettime()} Cleanup error: ${err}`);
+               this.emit('error', <Error>err);
+             }
+           }
+
++          console.log(`${gettime()} Clearing timeout`);
+           clearTimeout(this.extendLocksTimer);
++          console.log(`${gettime()} Check stopper`);
+           this.stalledCheckStopper?.();
+
+           this.closed = true;
++          console.log(`${gettime()} Emitting closed`);
+           this.emit('closed');
++          console.log(`${gettime()} Done`);
+         })();
+
+         return await this.closing;
 diff --git a/tests/test_bulk.ts b/tests/test_bulk.ts
 index cdaa97ea7..ab20c5b7c 100644
 --- a/tests/test_bulk.ts
