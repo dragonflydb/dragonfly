@@ -74,7 +74,7 @@ index b79ddf464..891e22176 100644
 
          return await this.closing;
 diff --git a/tests/test_bulk.ts b/tests/test_bulk.ts
-index cdaa97ea7..ab20c5b7c 100644
+index cdaa97ea7..8652c09f0 100644
 --- a/tests/test_bulk.ts
 +++ b/tests/test_bulk.ts
 @@ -123,18 +123,23 @@ describe('bulk jobs', () => {
@@ -107,10 +107,12 @@ index cdaa97ea7..ab20c5b7c 100644
 
 +    console.log(`${gettime()} pre completed`);
      await completed;
+-    await worker.close();
+-    await worker2.close();
 +    console.log(`${gettime()} pre close 1`);
-     await worker.close();
++    await worker.close(true);
 +    console.log(`${gettime()} pre close 2`);
-     await worker2.close();
++    await worker2.close(true);
 +    console.log(`${gettime()} pre close queue events`);
      await queueEvents.close();
 +    console.log(`${gettime()} done`);
