@@ -30,7 +30,8 @@ enum class OpStatus : uint16_t {
   CANCELLED,
   AT_LEAST_ONE_KEY,
   MEMBER_NOTFOUND,
-  INVALID_JSON_PATH
+  INVALID_JSON_PATH,
+  INVALID_JSON,
 };
 
 class OpResultBase {

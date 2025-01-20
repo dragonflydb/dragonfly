@@ -343,7 +343,7 @@ OpResult<DbSlice::AddOrFindResult> SetJson(const OpArgs& op_args, string_view ke
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::INVALID_VALUE;
+    return OpStatus::INVALID_JSON;
   }
 
   if (JsonEnconding() == kEncodingJsonFlat) {
@@ -1345,7 +1345,7 @@ OpResult<bool> OpSet(const OpArgs& op_args, string_view key, string_view path,
   optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::INVALID_VALUE;
+    return OpStatus::INVALID_JSON;
   }
   const JsonType& new_json = parsed_json.value();
 
@@ -1444,7 +1444,7 @@ OpStatus OpMerge(const OpArgs& op_args, string_view key, string_view path,
   std::optional<JsonType> parsed_json = ShardJsonFromString(json_str);
   if (!parsed_json) {
     VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
-    return OpStatus::SYNTAX_ERR;
+    return OpStatus::INVALID_JSON;
   }
 
   auto cb = [&](std::optional<std::string_view> cur_path, JsonType* val) -> MutateCallbackResult<> {
