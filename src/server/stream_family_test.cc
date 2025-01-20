@@ -99,13 +99,13 @@ TEST_F(StreamFamilyTest, XrangeRangeAutocomplete) {
   Run({"xadd", "mystream", "1609459200001-1", "2", "2"});
   Run({"xadd", "mystream", "1609459200002-0", "3", "3"});
   auto resp = Run({"xrange", "mystream", "1609459200000", "1609459200001"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre("1609459200000-0", ArrLen(2))),
-                                          RespArray(ElementsAre("1609459200001-0", ArrLen(2))),
-                                          RespArray(ElementsAre("1609459200001-1", ArrLen(2))))));
+  EXPECT_THAT(resp, RespElementsAre(RespElementsAre("1609459200000-0", RespElementsAre("0", "0")),
+                                    RespElementsAre("1609459200001-0", RespElementsAre("1", "1")),
+                                    RespElementsAre("1609459200001-1", RespElementsAre("2", "2"))));
   resp = Run({"xrange", "mystream", "1609459200000", "(1609459200001"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre("1609459200000-0", ArrLen(2))),
-                                          RespArray(ElementsAre("1609459200001-0", ArrLen(2))),
-                                          RespArray(ElementsAre("1609459200001-1", ArrLen(2))))));
+  EXPECT_THAT(resp, RespElementsAre(RespElementsAre("1609459200000-0", RespElementsAre("0", "0")),
+                                    RespElementsAre("1609459200001-0", RespElementsAre("1", "1")),
+                                    RespElementsAre("1609459200001-1", RespElementsAre("2", "2"))));
 }
 
 TEST_F(StreamFamilyTest, Range) {
