@@ -48,6 +48,10 @@ ABSL_FLAG(string, command, "",
           "__data__ for values, __score__ for doubles");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
+ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant only for memcached.");
+ABSL_FLAG(bool, greet, true,
+          "If true, sends a greeting command on each connection, "
+          "to make sure the connection succeeded");
 
 using namespace std;
 using namespace util;
@@ -113,6 +117,10 @@ class CommandGenerator {
     return might_hit_;
   }
 
+  bool noreply() const {
+    return noreply_;
+  }
+
  private:
   enum TemplateType { KEY, VALUE, SCORE };
 
@@ -128,6 +136,7 @@ class CommandGenerator {
   vector<pair<size_t, TemplateType>> key_indices_;
   string value_;
   bool might_hit_ = false;
+  bool noreply_ = false;
 };
 
 CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
@@ -148,6 +157,7 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
 
 string CommandGenerator::Next() {
   cmd_.clear();
+  noreply_ = false;
   if (command_.empty()) {
     string key = (*keygen_)();
 
@@ -190,8 +200,12 @@ void CommandGenerator::FillSet(string_view key) {
     absl::StrAppend(&cmd_, "set ", key, " ", value_, "\r\n");
   } else {
     DCHECK_EQ(protocol, MC_TEXT);
-    absl::StrAppend(&cmd_, "set ", key, " 0 0 ", value_.size(), "\r\n");
-    absl::StrAppend(&cmd_, value_, "\r\n");
+    absl::StrAppend(&cmd_, "set ", key, " 0 0 ", value_.size());
+    if (GetFlag(FLAGS_noreply)) {
+      absl::StrAppend(&cmd_, " noreply");
+      noreply_ = true;
+    }
+    absl::StrAppend(&cmd_, "\r\n", value_, "\r\n");
   }
 }
 
@@ -384,18 +398,19 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
     CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
   }
 
-  // TCP Connect does not ensure that the connection was indeed accepted by the server.
-  // if server backlog is too short the connection will get stuck in the accept queue.
-  // Therefore, we send a ping command to ensure that every connection got connected.
-  ec = socket_->Write(io::Buffer("ping\r\n"));
-  CHECK(!ec);
+  if (absl::GetFlag(FLAGS_greet)) {
+    // TCP Connect does not ensure that the connection was indeed accepted by the server.
+    // if server backlog is too short the connection will get stuck in the accept queue.
+    // Therefore, we send a ping command to ensure that every connection got connected.
+    ec = socket_->Write(io::Buffer("ping\r\n"));
+    CHECK(!ec);
 
-  uint8_t buf[128];
-  auto res_sz = socket_->Recv(io::MutableBytes(buf));
-  CHECK(res_sz) << res_sz.error().message();
-  string_view resp = io::View(io::Bytes(buf, *res_sz));
-  CHECK(absl::EndsWith(resp, "\r\n")) << resp;
-
+    uint8_t buf[128];
+    auto res_sz = socket_->Recv(io::MutableBytes(buf));
+    CHECK(res_sz) << res_sz.error().message();
+    string_view resp = io::View(io::Bytes(buf, *res_sz));
+    CHECK(absl::EndsWith(resp, "\r\n")) << resp;
+  }
   receive_fb_ = MakeFiber(fb2::Launch::dispatch, [this] { ReceiveFb(); });
 }
 
@@ -446,6 +461,9 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       break;
     }
     CHECK(!ec) << ec.message();
+    if (cmd_gen->noreply()) {
+      PopRequest();
+    }
   }
 
   int64_t finish = absl::GetCurrentTimeNanos();
