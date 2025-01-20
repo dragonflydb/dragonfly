@@ -157,7 +157,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
         await client.execute_command(f"SET x{x} {x}")
     await client.execute_command("EXEC")
 
-    await client.close()
+    await client.aclose()
     client = aioredis.Redis(port=df.port, decode_responses=True)
 
     # NOPERM while executing multi
@@ -170,7 +170,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
 
     with pytest.raises(redis.exceptions.NoPermissionError):
         await client.execute_command(f"SET x{x} {x}")
-    await client.close()
+    await client.aclose()
 
     # NOPERM between multi and exec
     admin_client = aioredis.Redis(port=df.port, decode_responses=True)
@@ -198,8 +198,8 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     logging.debug(f"Result is: {res}")
     assert res[0].args[0] == "kk ACL rules changed between the MULTI and EXEC", res
 
-    await admin_client.close()
-    await client.close()
+    await admin_client.aclose()
+    await client.aclose()
 
     # Testing acl commands
     client = aioredis.Redis(port=df.port, decode_responses=True)
@@ -598,7 +598,7 @@ async def test_default_user_bug(df_server):
     client = df_server.client()
 
     await client.execute_command("ACL SETUSER default -@all")
-    await client.close()
+    await client.aclose()
 
     client = df_server.client()
 
@@ -616,7 +616,7 @@ async def test_auth_resp3_bug(df_factory):
     await client.execute_command("ACL SETUSER kostas +@all ON >tmp")
     res = await client.execute_command("HELLO 3 AUTH kostas tmp")
     assert res["server"] == "redis"
-    assert res["version"] == "7.2.0"
+    assert res["version"] == "7.4.0"
     assert res["proto"] == 3
     assert res["mode"] == "standalone"
     assert res["role"] == "master"
