@@ -229,6 +229,8 @@ bool ServerState::ShouldLogSlowCmd(unsigned latency_usec) const {
 }
 
 void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
+  optional<facade::Connection::WeakRef> last_reference;
+
   while (true) {
     util::fb2::NoOpLock noop;
     if (watcher_cv_.wait_for(noop, 1s, [this] { return gstate_ == GlobalState::SHUTTING_DOWN; })) {
@@ -240,6 +242,11 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       continue;
     }
 
+    facade::Connection* from = nullptr;
+    if (last_reference && !last_reference->IsExpired()) {
+      from = last_reference->Get();
+    }
+
     // We use weak refs, because ShutdownSelf below can potentially block the fiber,
     // and during this time some of the connections might be destroyed. Weak refs allow checking
     // validity of each connection.
@@ -249,15 +256,23 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       facade::Connection* dfly_conn = static_cast<facade::Connection*>(conn);
       using Phase = facade::Connection::Phase;
       auto phase = dfly_conn->phase();
+      bool is_replica = true;
+      if (dfly_conn->cntx()) {
+        is_replica = dfly_conn->cntx()->replica_conn;
+      }
+
       if ((phase == Phase::READ_SOCKET || dfly_conn->IsSending()) &&
-          dfly_conn->idle_time() > timeout) {
+          !is_replica && dfly_conn->idle_time() > timeout) {
         conn_refs.push_back(dfly_conn->Borrow());
       }
     };
 
-    // TODO: to traverse in batches some of the connections to avoid blocking
-    // the thread for too long
-    main->TraverseConnectionsOnThread(cb);
+    util::Connection* next = main->TraverseConnectionsOnThread(cb, 100, from);
+    if (next) {
+      last_reference = static_cast<facade::Connection*>(next)->Borrow();
+    } else {
+      last_reference.reset();
+    }
 
     for (auto& ref : conn_refs) {
       facade::Connection* conn = ref.Get();
