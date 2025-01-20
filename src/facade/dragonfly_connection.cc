@@ -1886,6 +1886,10 @@ void Connection::TrackRequestSize(bool enable) {
   }
 }
 
+void Connection::EnsureMemoryBudget(unsigned tid) {
+  thread_queue_backpressure[tid].EnsureBelowLimit();
+}
+
 Connection::WeakRef::WeakRef(std::shared_ptr<Connection> ptr, unsigned thread_id,
                              uint32_t client_id)
     : ptr_{ptr}, thread_id_{thread_id}, client_id_{client_id} {
@@ -1896,7 +1900,9 @@ unsigned Connection::WeakRef::Thread() const {
 }
 
 Connection* Connection::WeakRef::Get() const {
+  // We should never access the connection object from other threads.
   DCHECK_EQ(ProactorBase::me()->GetPoolIndex(), int(thread_id_));
+
   //  The connection can only be deleted on this thread, so
   //  this pointer is valid until the next suspension.
   //  Note: keeping a shared_ptr doesn't prolong the lifetime because
@@ -1910,15 +1916,6 @@ bool Connection::WeakRef::IsExpired() const {
 
 uint32_t Connection::WeakRef::GetClientId() const {
   return client_id_;
-}
-
-bool Connection::WeakRef::EnsureMemoryBudget() const {
-  // Simple optimization: If a connection was closed, don't check memory budget.
-  if (!ptr_.expired()) {
-    thread_queue_backpressure[thread_id_].EnsureBelowLimit();
-    return true;
-  }
-  return false;
 }
 
 bool Connection::WeakRef::operator<(const WeakRef& other) {
