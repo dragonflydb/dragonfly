@@ -49,8 +49,8 @@ ABSL_FLAG(string, command, "",
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
 ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant only for memcached.");
-ABSL_FLAG(bool, great, true,
-          "If true, sends a greating command on each connection, "
+ABSL_FLAG(bool, greet, true,
+          "If true, sends a greeting command on each connection, "
           "to make sure the connection succeeded");
 
 using namespace std;
@@ -398,7 +398,7 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
     CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
   }
 
-  if (absl::GetFlag(FLAGS_great)) {
+  if (absl::GetFlag(FLAGS_greet)) {
     // TCP Connect does not ensure that the connection was indeed accepted by the server.
     // if server backlog is too short the connection will get stuck in the accept queue.
     // Therefore, we send a ping command to ensure that every connection got connected.
