@@ -104,4 +104,28 @@ TEST_F(RaxTreeTest, Find) {
   EXPECT_TRUE(map.find(string_view{}) == map.end());
 }
 
+/* Run with mimalloc to make sure there is no double free */
+TEST_F(RaxTreeTest, Iterate) {
+  const char* kKeys[] = {
+      "aaaaaaaaaaaaaaaaaaaa",
+      "bbbbbbbbbbbbbbbbbbbbbb"
+      "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  };
+
+  RaxTreeMap<int> map(pmr::get_default_resource());
+  for (const char* key : kKeys) {
+    map.try_emplace(key, 2);
+  }
+
+  for (auto it = map.begin(); it != map.end(); ++it) {
+    EXPECT_EQ((*it).second, 2);
+  }
+
+  for (auto it = map.begin(); it != map.end(); ++it) {
+    EXPECT_EQ((*it).second, 2);
+  }
+}
+
 }  // namespace dfly::search

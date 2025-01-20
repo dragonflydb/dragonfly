@@ -93,9 +93,7 @@ template <typename... Args> auto IsUnordArray(Args... args) {
 template <typename Expected, size_t... Is>
 void BuildKvMatchers(std::vector<Matcher<std::pair<std::string, RespExpr>>>& kv_matchers,
                      const Expected& expected, std::index_sequence<Is...>) {
-  std::initializer_list<int>{
-      (kv_matchers.emplace_back(Pair(std::get<Is * 2>(expected), std::get<Is * 2 + 1>(expected))),
-       0)...};
+  (kv_matchers.emplace_back(Pair(std::get<Is * 2>(expected), std::get<Is * 2 + 1>(expected))), ...);
 }
 
 MATCHER_P(IsMapMatcher, expected, "") {
@@ -332,6 +330,11 @@ TEST_F(SearchFamilyTest, Errors) {
 
   // Wrong field type
   EXPECT_THAT(Run({"ft.search", "i1", "@foo:lol"}), ErrArg("Wrong access type for field: foo"));
+
+  // ft.create index on json schema $.sometag AS sometag TAG SEPARATOR
+  EXPECT_THAT(Run({"ft.create", "i2", "ON", "JSON", "SCHEMA", "$.sometag", "AS", "sometag", "TAG",
+                   "SEPARATOR"}),
+              ErrArg("Tag separator must be a single character. Got ``"));
 }
 
 TEST_F(SearchFamilyTest, NoPrefix) {
@@ -957,15 +960,12 @@ TEST_F(SearchFamilyTest, AggregateGroupBy) {
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("foo_total", "20", "word", "item2"),
                                          IsMap("foo_total", "50", "word", "item1")));
 
-  /*
-  Temporary not supported
-
   resp = Run({"ft.aggregate", "i1", "*", "LOAD", "2", "foo", "text", "GROUPBY", "2", "@word",
-  "@text", "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"}); EXPECT_THAT(resp,
-  IsUnordArrayWithSize(IsMap("foo_total", "20", "word", ArgType(RespExpr::NIL), "text", "\"second
-  key\""), IsMap("foo_total", "40", "word", ArgType(RespExpr::NIL), "text", "\"third key\""),
-  IsMap({"foo_total", "10", "word", ArgType(RespExpr::NIL), "text", "\"first key"})));
-  */
+              "@text", "REDUCE", "SUM", "1", "@foo", "AS", "foo_total"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("foo_total", "40", "word", "item1", "text", "\"third key\""),
+                        IsMap("foo_total", "20", "word", "item2", "text", "\"second key\""),
+                        IsMap("foo_total", "10", "word", "item1", "text", "\"first key\"")));
 }
 
 TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
@@ -1296,9 +1296,15 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
   Run({"JSON.SET", "j1", ".", R"({"data":1,"name":"doc_with_int"})"});
   Run({"JSON.SET", "j2", ".", R"({"data":"1","name":"doc_with_int_as_string"})"});
   Run({"JSON.SET", "j3", ".", R"({"data":"string","name":"doc_with_string"})"});
-  Run({"JSON.SET", "j4", ".", R"({"name":"no_data"})"});
-  Run({"JSON.SET", "j5", ".", R"({"data":[5,4,3],"name":"doc_with_vector"})"});
-  Run({"JSON.SET", "j6", ".", R"({"data":"[5,4,3]","name":"doc_with_vector_as_string"})"});
+  Run({"JSON.SET", "j4", ".",
+       R"({"data":["first", "second", "third"],"name":"doc_with_strings"})"});
+  Run({"JSON.SET", "j5", ".", R"({"name":"no_data"})"});
+  Run({"JSON.SET", "j6", ".", R"({"data":[5,4,3],"name":"doc_with_vector"})"});
+  Run({"JSON.SET", "j7", ".", R"({"data":"[5,4,3]","name":"doc_with_vector_as_string"})"});
+  Run({"JSON.SET", "j8", ".", R"({"data":null,"name":"doc_with_null"})"});
+  Run({"JSON.SET", "j9", ".", R"({"data":[null, null, null],"name":"doc_with_nulls"})"});
+  Run({"JSON.SET", "j10", ".", R"({"data":true,"name":"doc_with_boolean"})"});
+  Run({"JSON.SET", "j11", ".", R"({"data":[true, false, true],"name":"doc_with_booleans"})"});
 
   auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.data", "AS", "data", "NUMERIC"});
   EXPECT_EQ(resp, "OK");
@@ -1326,25 +1332,25 @@ TEST_F(SearchFamilyTest, WrongFieldTypeHardJson) {
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"FT.SEARCH", "i1", "*"});
-  EXPECT_THAT(resp, AreDocIds("j1", "j4", "j5"));
+  EXPECT_THAT(resp, AreDocIds("j1", "j5", "j6", "j8", "j9"));
 
   resp = Run({"FT.SEARCH", "i2", "*"});
-  EXPECT_THAT(resp, AreDocIds("j1", "j4", "j5"));
+  EXPECT_THAT(resp, AreDocIds("j1", "j5", "j6", "j8", "j9"));
 
   resp = Run({"FT.SEARCH", "i3", "*"});
-  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j4", "j5", "j7", "j8", "j9", "j10", "j11"));
 
   resp = Run({"FT.SEARCH", "i4", "*"});
-  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j6", "j4"));
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j4", "j5", "j7", "j8", "j9", "j10", "j11"));
 
   resp = Run({"FT.SEARCH", "i5", "*"});
-  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j3", "j6"));
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j4", "j5", "j7", "j8", "j9"));
 
   resp = Run({"FT.SEARCH", "i6", "*"});
-  EXPECT_THAT(resp, AreDocIds("j4", "j2", "j3", "j6"));
+  EXPECT_THAT(resp, AreDocIds("j2", "j3", "j4", "j5", "j7", "j8", "j9"));
 
   resp = Run({"FT.SEARCH", "i7", "*"});
-  EXPECT_THAT(resp, AreDocIds("j4", "j5"));
+  EXPECT_THAT(resp, AreDocIds("j5", "j6", "j8"));
 }
 
 TEST_F(SearchFamilyTest, WrongFieldTypeHardHash) {
@@ -1415,6 +1421,12 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
   Run({"JSON.SET", "j6", ".", R"({"name":"doc_with_no_field"})"});
   Run({"JSON.SET", "j7", ".",
        R"({"vector_field": [999999999999999999999999999999999999999, -999999999999999999999999999999999999999, 500000000000000000000000000000000000000], "name": "doc_with_out_of_range_values"})"});
+  Run({"JSON.SET", "j8", ".", R"({"vector_field":null, "name": "doc_with_null"})"});
+  Run({"JSON.SET", "j9", ".", R"({"vector_field":[null, null, null], "name": "doc_with_nulls"})"});
+  Run({"JSON.SET", "j10", ".", R"({"vector_field":true, "name": "doc_with_boolean"})"});
+  Run({"JSON.SET", "j11", ".",
+       R"({"vector_field":[true, false, true], "name": "doc_with_booleans"})"});
+  Run({"JSON.SET", "j12", ".", R"({"vector_field":1, "name": "doc_with_int"})"});
 
   auto resp =
       Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.vector_field", "AS", "vector_field",
@@ -1422,7 +1434,393 @@ TEST_F(SearchFamilyTest, WrongVectorFieldType) {
   EXPECT_EQ(resp, "OK");
 
   resp = Run({"FT.SEARCH", "index", "*"});
-  EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4"));
+  EXPECT_THAT(resp, AreDocIds("j6", "j7", "j1", "j4", "j8"));
+}
+
+#ifndef SANITIZERS
+TEST_F(SearchFamilyTest, SearchLoadReturnJson) {
+  Run({"JSON.SET", "j1", ".", R"({"a":"one"})"});
+  Run({"JSON.SET", "j2", ".", R"({"a":"two"})"});
+
+  auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  // Search with RETURN $.a
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "$.a"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$.a", "\"one\""), "j2", IsMap("$.a", "\"two\"")));
+
+  // Search with RETURN a
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "a"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("a", "\"one\""), "j2", IsMap("a", "\"two\"")));
+
+  // Search with RETURN @a
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "@a"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
+
+  // Search with RETURN $.a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "$.a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("vvv", "\"one\""), "j2", IsMap("vvv", "\"two\"")));
+
+  // Search with RETURN a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("vvv", "\"one\""), "j2", IsMap("vvv", "\"two\"")));
+
+  // Search with RETURN @a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "@a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
+
+  // Search with LOAD $.a
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "$.a"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$.a", "\"one\"", "$", R"({"a":"one"})"), "j2",
+                                  IsMap("$.a", "\"two\"", "$", R"({"a":"two"})")));
+
+  // Search with LOAD a
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "a"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("a", "\"one\"", "$", R"({"a":"one"})"), "j2",
+                                  IsMap("a", "\"two\"", "$", R"({"a":"two"})")));
+
+  // Search with LOAD @a
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@a"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("a", "\"one\"", "$", R"({"a":"one"})"), "j2",
+                                  IsMap("a", "\"two\"", "$", R"({"a":"two"})")));
+
+  // Search with LOAD $.a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "$.a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})", "vvv", "\"one\""), "j2",
+                                  IsMap("$", R"({"a":"two"})", "vvv", "\"two\"")));
+
+  // Search with LOAD a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})", "vvv", "\"one\""), "j2",
+                                  IsMap("$", R"({"a":"two"})", "vvv", "\"two\"")));
+
+  // Search with LOAD @a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})", "vvv", "\"one\""), "j2",
+                                  IsMap("$", R"({"a":"two"})", "vvv", "\"two\"")));
+
+  /* Test another name */
+
+  resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.a", "AS", "nnn", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  // Search with RETURN nnn
+  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "nnn"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("nnn", "\"one\""), "j2", IsMap("nnn", "\"two\"")));
+
+  // Search with RETURN @nnn
+  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "@nnn"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
+
+  // Search with RETURN a
+  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "a"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
+
+  // Search with RETURN @a
+  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "@a"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap(), "j2", IsMap()));
+
+  // Search with LOAD nnn
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "nnn"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("nnn", "\"one\"", "$", R"({"a":"one"})"), "j2",
+                                  IsMap("nnn", "\"two\"", "$", R"({"a":"two"})")));
+
+  // Search with LOAD @nnn
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@nnn"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("nnn", "\"one\"", "$", R"({"a":"one"})"), "j2",
+                                  IsMap("nnn", "\"two\"", "$", R"({"a":"two"})")));
+
+  // Search with LOAD a
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "a"});
+  EXPECT_THAT(
+      resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})"), "j2", IsMap("$", R"({"a":"two"})")));
+
+  // Search with LOAD @a
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@a"});
+  EXPECT_THAT(
+      resp, IsMapWithSize("j1", IsMap("$", R"({"a":"one"})"), "j2", IsMap("$", R"({"a":"two"})")));
+}
+#endif
+
+TEST_F(SearchFamilyTest, SearchLoadReturnHash) {
+  Run({"HSET", "h1", "a", "one"});
+  Run({"HSET", "h2", "a", "two"});
+
+  auto resp = Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "a", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  // Search with RETURN $.a
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "$.a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap(), "h1", IsMap()));
+
+  // Search with RETURN a
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+
+  // Search with RETURN @a
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "@a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap(), "h1", IsMap()));
+
+  // Search with RETURN $.a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "$.a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap(), "h1", IsMap()));
+
+  // Search with RETURN a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("vvv", "two"), "h1", IsMap("vvv", "one")));
+
+  // Search with RETURN @a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "RETURN", "1", "@a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap(), "h1", IsMap()));
+
+  // Search with LOAD $.a
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "$.a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+
+  // Search with LOAD a
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+
+  // Search with LOAD @a
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+
+  // Search with LOAD $.a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "$.a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+
+  // Search with LOAD a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("vvv", "two", "a", "two"), "h1",
+                                  IsMap("vvv", "one", "a", "one")));
+
+  // Search with LOAD @a AS vvv
+  resp = Run({"FT.SEARCH", "i1", "*", "LOAD", "1", "@a", "AS", "vvv"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("vvv", "two", "a", "two"), "h1",
+                                  IsMap("vvv", "one", "a", "one")));
+
+  /* Test another name */
+
+  resp = Run({"FT.CREATE", "i2", "ON", "HASH", "SCHEMA", "a", "AS", "nnn", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  // Search with RETURN nnn
+  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "nnn"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("nnn", "two"), "h1", IsMap("nnn", "one")));
+
+  // Search with RETURN @nnn
+  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "@nnn"});
+  EXPECT_THAT(resp, IsMapWithSize("h1", IsMap(), "h2", IsMap()));
+
+  // Search with RETURN a
+  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+
+  // Search with RETURN @a
+  resp = Run({"FT.SEARCH", "i2", "*", "RETURN", "1", "@a"});
+  EXPECT_THAT(resp, IsMapWithSize("h1", IsMap(), "h2", IsMap()));
+
+  // Search with LOAD nnn
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "nnn"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("nnn", "two", "a", "two"), "h1",
+                                  IsMap("nnn", "one", "a", "one")));
+
+  // Search with LOAD @nnn
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@nnn"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("nnn", "two", "a", "two"), "h1",
+                                  IsMap("nnn", "one", "a", "one")));
+
+  // Search with LOAD a
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+
+  // Search with LOAD @a
+  resp = Run({"FT.SEARCH", "i2", "*", "LOAD", "1", "@a"});
+  EXPECT_THAT(resp, IsMapWithSize("h2", IsMap("a", "two"), "h1", IsMap("a", "one")));
+}
+
+// Test that FT.AGGREGATE prints only needed fields
+TEST_F(SearchFamilyTest, AggregateResultFields) {
+  Run({"JSON.SET", "j1", ".", R"({"a":"1","b":"2","c":"3"})"});
+  Run({"JSON.SET", "j2", ".", R"({"a":"4","b":"5","c":"6"})"});
+  Run({"JSON.SET", "j3", ".", R"({"a":"7","b":"8","c":"9"})"});
+
+  auto resp = Run({"FT.CREATE", "i1", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT", "SORTABLE",
+                   "$.b", "AS", "b", "TEXT", "$.c", "AS", "c", "TEXT"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.AGGREGATE", "i1", "*"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap(), IsMap(), IsMap()));
+
+  resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "1"), IsMap("a", "4"), IsMap("a", "7")));
+
+  resp = Run({"FT.AGGREGATE", "i1", "*", "LOAD", "1", "@b", "SORTBY", "1", "a"});
+  EXPECT_THAT(resp,
+              IsUnordArrayWithSize(IsMap("b", "\"2\"", "a", "1"), IsMap("b", "\"5\"", "a", "4"),
+                                   IsMap("b", "\"8\"", "a", "7")));
+
+  resp = Run({"FT.AGGREGATE", "i1", "*", "SORTBY", "1", "a", "GROUPBY", "2", "@b", "@a", "REDUCE",
+              "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("b", "\"8\"", "a", "7", "count", "1"),
+                                         IsMap("b", "\"2\"", "a", "1", "count", "1"),
+                                         IsMap("b", "\"5\"", "a", "4", "count", "1")));
+
+  Run({"JSON.SET", "j4", ".", R"({"id":1, "number":4})"});
+  Run({"JSON.SET", "j5", ".", R"({"id":2})"});
+
+  resp = Run({"FT.CREATE", "i2", "ON", "JSON", "SCHEMA", "$.id", "AS", "id", "NUMERIC", "$.number",
+              "AS", "number", "NUMERIC"});
+  EXPECT_EQ(resp, "OK");
+
+  resp = Run({"FT.AGGREGATE", "i2", "*", "LOAD", "2", "@id", "@number"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("id", "1", "number", "4"), IsMap("id", "2"), IsMap(),
+                                         IsMap(), IsMap()));
+}
+
+TEST_F(SearchFamilyTest, AggregateSortByJson) {
+  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
+  Run({"JSON.SET", "j2", "$", R"({"name": "second", "number": 800, "group": "first"})"});
+  Run({"JSON.SET", "j3", "$", R"({"name": "third", "number": 300, "group": "first"})"});
+  Run({"JSON.SET", "j4", "$", R"({"name": "fourth", "number": 400, "group": "second"})"});
+  Run({"JSON.SET", "j5", "$", R"({"name": "fifth", "number": 900, "group": "second"})"});
+  Run({"JSON.SET", "j6", "$", R"({"name": "sixth", "number": 300, "group": "first"})"});
+  Run({"JSON.SET", "j7", "$", R"({"name": "seventh", "number": 400, "group": "second"})"});
+  Run({"JSON.SET", "j8", "$", R"({"name": "eighth", "group": "first"})"});
+  Run({"JSON.SET", "j9", "$", R"({"name": "ninth", "group": "second"})"});
+
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
+
+  // Test sorting by name (DESC) and number (ASC)
+  auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "4", "@name", "DESC", "@number", "ASC"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("name", "\"third\"", "number", "300"),
+                        IsMap("name", "\"sixth\"", "number", "300"),
+                        IsMap("name", "\"seventh\"", "number", "400"),
+                        IsMap("name", "\"second\"", "number", "800"), IsMap("name", "\"ninth\""),
+                        IsMap("name", "\"fourth\"", "number", "400"),
+                        IsMap("name", "\"first\"", "number", "1200"),
+                        IsMap("name", "\"fifth\"", "number", "900"), IsMap("name", "\"eighth\"")));
+
+  // Test sorting by name (ASC) and number (DESC)
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "4", "@name", "ASC", "@number", "DESC"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("name", "\"eighth\""), IsMap("name", "\"fifth\"", "number", "900"),
+                        IsMap("name", "\"first\"", "number", "1200"),
+                        IsMap("name", "\"fourth\"", "number", "400"), IsMap("name", "\"ninth\""),
+                        IsMap("name", "\"second\"", "number", "800"),
+                        IsMap("name", "\"seventh\"", "number", "400"),
+                        IsMap("name", "\"sixth\"", "number", "300"),
+                        IsMap("name", "\"third\"", "number", "300")));
+
+  // Test sorting by group (ASC), number (DESC), and name
+  resp = Run(
+      {"FT.AGGREGATE", "index", "*", "SORTBY", "5", "@group", "ASC", "@number", "DESC", "@name"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("group", "\"first\"", "number", "1200", "name", "\"first\""),
+                        IsMap("group", "\"first\"", "number", "800", "name", "\"second\""),
+                        IsMap("group", "\"first\"", "number", "300", "name", "\"sixth\""),
+                        IsMap("group", "\"first\"", "number", "300", "name", "\"third\""),
+                        IsMap("group", "\"first\"", "name", "\"eighth\""),
+                        IsMap("group", "\"second\"", "number", "900", "name", "\"fifth\""),
+                        IsMap("group", "\"second\"", "number", "400", "name", "\"fourth\""),
+                        IsMap("group", "\"second\"", "number", "400", "name", "\"seventh\""),
+                        IsMap("group", "\"second\"", "name", "\"ninth\"")));
+
+  // Test sorting by number (ASC), group (DESC), and name
+  resp = Run(
+      {"FT.AGGREGATE", "index", "*", "SORTBY", "5", "@number", "ASC", "@group", "DESC", "@name"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("number", "300", "group", "\"first\"", "name", "\"sixth\""),
+                        IsMap("number", "300", "group", "\"first\"", "name", "\"third\""),
+                        IsMap("number", "400", "group", "\"second\"", "name", "\"fourth\""),
+                        IsMap("number", "400", "group", "\"second\"", "name", "\"seventh\""),
+                        IsMap("number", "800", "group", "\"first\"", "name", "\"second\""),
+                        IsMap("number", "900", "group", "\"second\"", "name", "\"fifth\""),
+                        IsMap("number", "1200", "group", "\"first\"", "name", "\"first\""),
+                        IsMap("group", "\"second\"", "name", "\"ninth\""),
+                        IsMap("group", "\"first\"", "name", "\"eighth\"")));
+
+  // Test sorting with MAX 3
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@number", "MAX", "3"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("number", "300"), IsMap("number", "300"),
+                                         IsMap("number", "400")));
+
+  // Test sorting with MAX 3
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "2", "@number", "DESC", "MAX", "3"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("number", "1200"), IsMap("number", "900"),
+                                         IsMap("number", "800")));
+
+  // Test sorting by number (ASC) with MAX 999
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@number", "MAX", "999"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("number", "300"), IsMap("number", "300"),
+                                         IsMap("number", "400"), IsMap("number", "400"),
+                                         IsMap("number", "800"), IsMap("number", "900"),
+                                         IsMap("number", "1200"), IsMap(), IsMap()));
+
+  // Test sorting by name and number (DESC)
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "3", "@name", "@number", "DESC"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("name", "\"eighth\""), IsMap("name", "\"fifth\"", "number", "900"),
+                        IsMap("name", "\"first\"", "number", "1200"),
+                        IsMap("name", "\"fourth\"", "number", "400"), IsMap("name", "\"ninth\""),
+                        IsMap("name", "\"second\"", "number", "800"),
+                        IsMap("name", "\"seventh\"", "number", "400"),
+                        IsMap("name", "\"sixth\"", "number", "300"),
+                        IsMap("name", "\"third\"", "number", "300")));
+
+  // Test SORTBY with MAX, GROUPBY, and REDUCE COUNT
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "3", "GROUPBY", "1",
+              "@number", "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("number", "900", "count", "1"),
+                                         IsMap("number", ArgType(RespExpr::NIL), "count", "1"),
+                                         IsMap("number", "1200", "count", "1")));
+
+  // Test SORTBY with MAX, GROUPBY (0 fields), and REDUCE COUNT
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "3", "GROUPBY", "0",
+              "REDUCE", "COUNT", "0", "AS", "count"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("count", "3")));
+}
+
+TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
+  Run({"JSON.SET", "j1", "$", R"({"name": "first", "number": 1200, "group": "first"})"});
+  Run({"JSON.SET", "j2", "$", R"({"name": "second", "number": 800, "group": "first"})"});
+  Run({"JSON.SET", "j3", "$", R"({"name": "third", "number": 300, "group": "first"})"});
+  Run({"JSON.SET", "j4", "$", R"({"name": "fourth", "number": 400, "group": "second"})"});
+  Run({"JSON.SET", "j5", "$", R"({"name": "fifth", "number": 900, "group": "second"})"});
+  Run({"JSON.SET", "j6", "$", R"({"name": "sixth", "number": 300, "group": "first"})"});
+  Run({"JSON.SET", "j7", "$", R"({"name": "seventh", "number": 400, "group": "second"})"});
+  Run({"JSON.SET", "j8", "$", R"({"name": "eighth", "group": "first"})"});
+  Run({"JSON.SET", "j9", "$", R"({"name": "ninth", "group": "second"})"});
+
+  Run({"FT.CREATE", "index", "ON", "JSON", "SCHEMA", "$.name", "AS", "name", "TEXT", "$.number",
+       "AS", "number", "NUMERIC", "$.group", "AS", "group", "TAG"});
+
+  // Test SORTBY with invalid argument count
+  auto resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "999", "@name", "@number", "DESC"});
+  EXPECT_THAT(resp, ErrArg("bad arguments for SORTBY: specified invalid number of strings"));
+
+  // Test SORTBY with negative argument count
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "-3", "@name", "@number", "DESC"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Test MAX with invalid value
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "-10"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Test MAX without a value
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
+
+  // Test SORTBY with a non-existing field
+  /* Temporary unsupported
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@nonexistingfield"});
+  EXPECT_THAT(resp, ErrArg("Property `nonexistingfield` not loaded nor in schema")); */
+
+  // Test SORTBY with an invalid value
+  resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }
 
 }  // namespace dfly

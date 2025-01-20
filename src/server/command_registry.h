@@ -52,6 +52,7 @@ enum CommandOpt : uint32_t {
   // The same callback can be run multiple times without corrupting the result. Used for
   // opportunistic optimizations where inconsistencies can only be detected afterwards.
   IDEMPOTENT = 1U << 18,
+  SLOW = 1U << 19  // Unused?
 };
 
 const char* OptName(CommandOpt fl);
@@ -64,13 +65,24 @@ constexpr inline bool IsTransKind(std::string_view name) {
   return (name == "EXEC") || (name == "MULTI") || (name == "DISCARD");
 }
 
-static_assert(IsEvalKind("EVAL") && IsEvalKind("EVALSHA"));
+static_assert(IsEvalKind("EVAL") && IsEvalKind("EVAL_RO") && IsEvalKind("EVALSHA") &&
+              IsEvalKind("EVALSHA_RO"));
 static_assert(!IsEvalKind(""));
 
 };  // namespace CO
 
 // Per thread vector of command stats. Each entry is {cmd_calls, cmd_latency_agg in usec}.
 using CmdCallStats = std::pair<uint64_t, uint64_t>;
+
+struct CommandContext {
+  CommandContext(Transaction* _tx, facade::SinkReplyBuilder* _rb, ConnectionContext* cntx)
+      : tx(_tx), rb(_rb), conn_cntx(cntx) {
+  }
+
+  Transaction* tx;
+  facade::SinkReplyBuilder* rb;
+  ConnectionContext* conn_cntx;
+};
 
 class CommandId : public facade::CommandId {
  public:
@@ -85,21 +97,13 @@ class CommandId : public facade::CommandId {
     command_stats_ = std::make_unique<CmdCallStats[]>(thread_count);
   }
 
-  using Handler =
-      fu2::function_base<true /*owns*/, true /*copyable*/, fu2::capacity_default,
-                         false /* non-throwing*/, false /* strong exceptions guarantees*/,
-                         void(CmdArgList, Transaction*, facade::SinkReplyBuilder*,
-                              ConnectionContext*) const>;
-  using Handler2 =
-      fu2::function_base<true, true, fu2::capacity_default, false, false,
-                         void(CmdArgList, Transaction*, facade::SinkReplyBuilder*) const>;
-
+  using Handler3 = fu2::function_base<true, true, fu2::capacity_default, false, false,
+                                      void(CmdArgList, const CommandContext&) const>;
   using ArgValidator = fu2::function_base<true, true, fu2::capacity_default, false, false,
                                           std::optional<facade::ErrorReply>(CmdArgList) const>;
 
   // Returns the invoke time in usec.
-  uint64_t Invoke(CmdArgList args, Transaction*, facade::SinkReplyBuilder*,
-                  ConnectionContext* cntx) const;
+  uint64_t Invoke(CmdArgList args, const CommandContext& cmd_cntx) const;
 
   // Returns error if validation failed, otherwise nullopt
   std::optional<facade::ErrorReply> Validate(CmdArgList tail_args) const;
@@ -122,12 +126,10 @@ class CommandId : public facade::CommandId {
 
   static const char* OptName(CO::CommandOpt fl);
 
-  CommandId&& SetHandler(Handler f) && {
+  CommandId&& SetHandler(Handler3 f) && {
     handler_ = std::move(f);
     return std::move(*this);
   }
-
-  CommandId&& SetHandler(Handler2 f) &&;
 
   CommandId&& SetValidator(ArgValidator f) && {
     validator_ = std::move(f);
@@ -154,7 +156,7 @@ class CommandId : public facade::CommandId {
  private:
   bool implicit_acl_;
   std::unique_ptr<CmdCallStats[]> command_stats_;
-  Handler handler_;
+  Handler3 handler_;
   ArgValidator validator_;
 };
 

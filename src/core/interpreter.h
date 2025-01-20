@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/container/fixed_array.h>
 #include <absl/types/span.h>
 
 #include <functional>
@@ -139,10 +140,14 @@ class Interpreter {
   static int RedisACallCommand(lua_State* lua);
   static int RedisAPCallCommand(lua_State* lua);
 
+  std::optional<absl::FixedArray<std::string_view, 4>> PrepareArgs();
+  bool CallRedisFunction(bool raise_error, bool async, ObjectExplorer* explorer, SliceSpan args);
+
   lua_State* lua_;
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
   std::string buffer_;
+  char name_buffer_[32];  // backing storage for cmd name
 };
 
 // Manages an internal interpreter pool. This allows multiple connections residing on the same

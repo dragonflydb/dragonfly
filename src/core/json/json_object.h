@@ -4,6 +4,13 @@
 
 #pragma once
 
+#include <version>  // for __cpp_lib_to_chars macro.
+
+// std::from_chars is available in C++17 if __cpp_lib_to_chars is defined.
+#if __cpp_lib_to_chars >= 201611L
+#define JSONCONS_HAS_STD_FROM_CHARS 1
+#endif
+
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <memory>

@@ -7,8 +7,6 @@
 #include <mimalloc.h>
 #include <xxhash.h>
 
-#include <jsoncons/json.hpp>
-#include <jsoncons_ext/jsonpath/jsonpath.hpp>
 #include <random>
 
 #include "base/gtest.h"
@@ -16,6 +14,7 @@
 #include "core/detail/bitpacking.h"
 #include "core/flat_set.h"
 #include "core/mi_memory_resource.h"
+#include "core/string_set.h"
 
 extern "C" {
 #include "redis/intset.h"
@@ -77,29 +76,38 @@ void DeallocateAtRandom(size_t steps, std::vector<void*>* ptrs) {
   }
 }
 
+static void InitThreadStructs() {
+  auto* tlh = mi_heap_get_backing();
+  init_zmalloc_threadlocal(tlh);
+  SmallString::InitThreadLocal(tlh);
+  thread_local MiMemoryResource mi_resource(tlh);
+  CompactObj::InitThreadLocal(&mi_resource);
+};
+
+static void CheckEverythingDeallocated() {
+  mi_heap_collect(mi_heap_get_backing(), true);
+
+  auto cb_visit = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
+                     size_t block_size, void* arg) {
+    LOG(ERROR) << "Unfreed allocations: block_size " << block_size
+               << ", allocated: " << area->used * block_size;
+    return true;
+  };
+
+  mi_heap_visit_blocks(mi_heap_get_backing(), false /* do not visit all blocks*/, cb_visit,
+                       nullptr);
+}
+
 class CompactObjectTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
     InitRedisTables();  // to initialize server struct.
 
-    auto* tlh = mi_heap_get_backing();
-    init_zmalloc_threadlocal(tlh);
-    SmallString::InitThreadLocal(tlh);
-    CompactObj::InitThreadLocal(PMR_NS::get_default_resource());
+    InitThreadStructs();
   }
 
   static void TearDownTestSuite() {
-    mi_heap_collect(mi_heap_get_backing(), true);
-
-    auto cb_visit = [](const mi_heap_t* heap, const mi_heap_area_t* area, void* block,
-                       size_t block_size, void* arg) {
-      LOG(ERROR) << "Unfreed allocations: block_size " << block_size
-                 << ", allocated: " << area->used * block_size;
-      return true;
-    };
-
-    mi_heap_visit_blocks(mi_heap_get_backing(), false /* do not visit all blocks*/, cb_visit,
-                         nullptr);
+    CheckEverythingDeallocated();
   }
 
   CompactObj cobj_;
@@ -573,6 +581,14 @@ TEST_F(CompactObjectTest, DefragHash) {
     if (lps[i] != target_lp)
       lpFree(lps[i]);
   }
+}
+
+TEST_F(CompactObjectTest, DefragSet) {
+  // This is still not implemented
+  StringSet* s = CompactObj::AllocateMR<StringSet>();
+  s->Add("str");
+  cobj_.InitRobj(OBJ_SET, kEncodingStrMap2, s);
+  ASSERT_FALSE(cobj_.DefragIfNeeded(0.8));
 }
 
 TEST_F(CompactObjectTest, RawInterface) {

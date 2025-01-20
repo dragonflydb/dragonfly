@@ -9,6 +9,8 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/cluster/cluster_defs.h"
+#include "server/journal/cmd_serializer.h"
+#include "server/server_state.h"
 #include "util/fibers/synchronization.h"
 
 using namespace facade;
@@ -40,7 +42,9 @@ JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
 }
 
 JournalStreamer::~JournalStreamer() {
-  DCHECK_EQ(in_flight_bytes_, 0u);
+  if (!cntx_->IsCancelled()) {
+    DCHECK_EQ(in_flight_bytes_, 0u);
+  }
   VLOG(1) << "~JournalStreamer";
 }
 
@@ -52,6 +56,7 @@ void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
         if (allow_await) {
           ThrottleIfNeeded();
           // No record to write, just await if data was written so consumer will read the data.
+          // TODO: shouldnt we trigger async write in noop??
           if (item.opcode == Op::NOOP)
             return;
         }
@@ -69,7 +74,7 @@ void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
           io::StringSink sink;
           JournalWriter writer(&sink);
           writer.Write(Entry{journal::Op::LSN, item.lsn});
-          Write(sink.str());
+          Write(std::move(sink).str());
         }
       });
 }
@@ -78,70 +83,61 @@ void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
-  WaitForInflightToComplete();
+  if (!cntx_->IsCancelled()) {
+    WaitForInflightToComplete();
+  }
 }
 
-size_t JournalStreamer::GetTotalBufferCapacities() const {
-  return in_flight_bytes_ + pending_buf_.capacity();
+size_t JournalStreamer::UsedBytes() const {
+  return pending_buf_.Size();
 }
 
-void JournalStreamer::Write(std::string_view str) {
-  DCHECK(!str.empty());
-  DVLOG(2) << "Writing " << str.size() << " bytes";
-
-  size_t total_pending = pending_buf_.size() + str.size();
+void JournalStreamer::AsyncWrite() {
+  DCHECK(!pending_buf_.Empty());
 
   if (in_flight_bytes_ > 0) {
     // We can not flush data while there are in flight requests because AsyncWrite
     // is not atomic. Therefore, we just aggregate.
-    size_t tail = pending_buf_.size();
-    pending_buf_.resize(pending_buf_.size() + str.size());
-    memcpy(pending_buf_.data() + tail, str.data(), str.size());
     return;
   }
 
-  // If we do not have any in flight requests we send the string right a way.
-  // We can not aggregate it since we do not know when the next update will follow.
-  // because of potential SOO with strings, we allocate explicitly on heap.
-  uint8_t* buf(new uint8_t[str.size()]);
+  const auto& cur_buf = pending_buf_.PrepareSendingBuf();
 
-  // TODO: it is possible to remove these redundant copies if we adjust high level
-  // interfaces to pass reference-counted buffers.
-  memcpy(buf, str.data(), str.size());
-  in_flight_bytes_ += total_pending;
-  total_sent_ += total_pending;
+  in_flight_bytes_ = cur_buf.mem_size;
+  total_sent_ += in_flight_bytes_;
 
-  iovec v[2];
-  unsigned next_buf_id = 0;
+  const auto v_size = cur_buf.buf.size();
+  absl::InlinedVector<iovec, 8> v(v_size);
 
-  if (!pending_buf_.empty()) {
-    v[0] = IoVec(pending_buf_);
-    ++next_buf_id;
+  for (size_t i = 0; i < v_size; ++i) {
+    const auto* uptr = reinterpret_cast<const uint8_t*>(cur_buf.buf[i].data());
+    v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
   }
-  v[next_buf_id++] = IoVec(io::Bytes(buf, str.size()));
 
-  dest_->AsyncWrite(
-      v, next_buf_id,
-      [buf0 = std::move(pending_buf_), buf, this, len = total_pending](std::error_code ec) {
-        delete[] buf;
-        OnCompletion(ec, len);
-      });
+  dest_->AsyncWrite(v.data(), v.size(), [this, len = in_flight_bytes_](std::error_code ec) {
+    OnCompletion(std::move(ec), len);
+  });
+}
+
+void JournalStreamer::Write(std::string str) {
+  DCHECK(!str.empty());
+  DVLOG(3) << "Writing " << str.size() << " bytes";
+
+  pending_buf_.Push(std::move(str));
+
+  AsyncWrite();
 }
 
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
-  DCHECK_GE(in_flight_bytes_, len);
+  DCHECK_EQ(in_flight_bytes_, len);
 
-  DVLOG(2) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
-  in_flight_bytes_ -= len;
+  DVLOG(3) << "Completing " << in_flight_bytes_;
+  in_flight_bytes_ = 0;
+  pending_buf_.Pop();
   if (ec && !IsStopped()) {
     cntx_->ReportError(ec);
-  } else if (in_flight_bytes_ == 0 && !pending_buf_.empty() && !IsStopped()) {
-    // If everything was sent but we have a pending buf, flush it.
-    io::Bytes src(pending_buf_);
-    in_flight_bytes_ += src.size();
-    dest_->AsyncWrite(src, [buf = std::move(pending_buf_), this](std::error_code ec) {
-      OnCompletion(ec, buf.size());
-    });
+  } else if (!pending_buf_.Empty() && !IsStopped()) {
+    AsyncWrite();
   }
 
   // notify ThrottleIfNeeded or WaitForInflightToComplete that waits
@@ -166,7 +162,7 @@ void JournalStreamer::ThrottleIfNeeded() {
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
-    cntx_->ReportError(make_error_code(errc::stream_timeout));
+    cntx_->ReportError("JournalStreamer write operation timeout");
   }
 }
 
@@ -181,7 +177,7 @@ void JournalStreamer::WaitForInflightToComplete() {
 }
 
 bool JournalStreamer::IsStalled() const {
-  return in_flight_bytes_ + pending_buf_.size() >= replication_stream_output_limit_cached;
+  return pending_buf_.Size() >= replication_stream_output_limit_cached;
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
@@ -212,11 +208,23 @@ void RestoreStreamer::Run() {
   do {
     if (fiber_cancelled_)
       return;
+    cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
+      if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
+        return;
 
-    cursor = db_slice_->Traverse(pt, cursor, [&](PrimeTable::bucket_iterator it) {
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
-      WriteBucket(it);
+
+      if (fiber_cancelled_)  // Could have been cancelled in above call too
+        return;
+
+      std::lock_guard guard(big_value_mu_);
+
+      // Locking this never preempts. See snapshot.cc for why we need it.
+      auto* blocking_counter = db_slice_->BlockingCounter();
+      std::lock_guard blocking_counter_guard(*blocking_counter);
+
+      stats_.buckets_loop += WriteBucket(it);
     });
 
     if (++last_yield >= 100) {
@@ -224,16 +232,25 @@ void RestoreStreamer::Run() {
       last_yield = 0;
     }
   } while (cursor);
+
+  VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
+          << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
 }
 
 void RestoreStreamer::SendFinalize(long attempt) {
-  VLOG(1) << "RestoreStreamer LSN opcode for : " << db_slice_->shard_id() << " attempt " << attempt;
+  VLOG(1) << "RestoreStreamer LSN of " << my_slots_.ToSlotRanges().ToString() << ", shard "
+          << db_slice_->shard_id() << " attempt " << attempt << " with " << stats_.commands
+          << " commands. Buckets looped " << stats_.buckets_loop << ", buckets on_db_update "
+          << stats_.buckets_on_db_update << ", buckets skipped " << stats_.buckets_skipped
+          << ", buckets written " << stats_.buckets_written << ". Keys skipped "
+          << stats_.keys_skipped << ", keys written " << stats_.keys_written;
+
   journal::Entry entry(journal::Op::LSN, attempt);
 
   io::StringSink sink;
   JournalWriter writer{&sink};
   writer.Write(entry);
-  Write(sink.str());
+  Write(std::move(sink).str());
 
   // TODO: is the intent here to flush everything?
   //
@@ -270,22 +287,26 @@ bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
 }
 
 bool RestoreStreamer::ShouldWrite(std::string_view key) const {
-  return ShouldWrite(cluster::KeySlot(key));
+  return ShouldWrite(KeySlot(key));
 }
 
-bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
+bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+  bool written = false;
+
   if (it.GetVersion() < snapshot_version_) {
-    FiberAtomicGuard fg;
+    stats_.buckets_written++;
+
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
     for (; !it.is_done(); ++it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
       if (ShouldWrite(key)) {
+        stats_.keys_written++;
         uint64_t expire = 0;
         if (pv.HasExpire()) {
           auto eit = db_slice_->databases()[0]->expire.Find(it->first);
@@ -293,61 +314,45 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
         }
 
         WriteEntry(key, it->first, pv, expire);
+        written = true;
+      } else {
+        stats_.keys_skipped++;
       }
     }
+  } else {
+    stats_.buckets_skipped++;
   }
   ThrottleIfNeeded();
+
+  return written;
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    WriteBucket(*bit);
+    stats_.buckets_on_db_update += WriteBucket(*bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
       DCHECK_LT(it.GetVersion(), snapshot_version_);
-      WriteBucket(it);
+      stats_.buckets_on_db_update += WriteBucket(it);
     });
   }
 }
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  absl::InlinedVector<string_view, 5> args;
-  args.push_back(key);
-
-  string expire_str = absl::StrCat(expire_ms);
-  args.push_back(expire_str);
-
-  io::StringSink restore_cmd_sink;
-  {  // to destroy extra copy
-    io::StringSink value_dump_sink;
-    SerializerBase::DumpObject(pv, &value_dump_sink);
-    args.push_back(value_dump_sink.str());
-
-    args.push_back("ABSTTL");  // Means expire string is since epoch
-
-    if (pk.IsSticky()) {
-      args.push_back("STICK");
-    }
-
-    journal::Entry entry(0,                     // txid
-                         journal::Op::COMMAND,  // single command
-                         0,                     // db index
-                         1,                     // shard count
-                         0,                     // slot-id, but it is ignored at this level
-                         journal::Entry::Payload("RESTORE", ArgSlice(args)));
-
-    JournalWriter writer{&restore_cmd_sink};
-    writer.Write(entry);
-  }
-  // TODO: From DumpObject to till Write we tripple copy the PrimeValue. It's very inefficient and
-  // will burn CPU for large values.
-  Write(restore_cmd_sink.str());
+  CmdSerializer serializer(
+      [&](std::string s) {
+        Write(std::move(s));
+        ThrottleIfNeeded();
+      },
+      ServerState::tlocal()->serialization_max_chunk_size);
+  stats_.commands += serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
 }  // namespace dfly

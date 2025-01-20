@@ -1,26 +1,19 @@
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
 
-extern "C" {
-#include "redis/crc16.h"
-}
+#include "cluster_defs.h"
 
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 
-#include "base/flags.h"
-#include "base/logging.h"
-#include "cluster_defs.h"
 #include "facade/error.h"
 #include "slot_set.h"
-#include "src/server/common.h"
 
 // TODO remove when tl_cluster_config will be moved out from it
 #include "server/cluster/cluster_family.h"
 
 using namespace std;
-
-ABSL_FLAG(string, cluster_mode, "",
-          "Cluster mode supported. Possible values are "
-          "'emulated', 'yes' or ''");
 
 namespace dfly::cluster {
 std::string SlotRange::ToString() const {
@@ -67,53 +60,6 @@ bool ClusterShardInfo::operator==(const ClusterShardInfo& r) const {
 ClusterShardInfos::ClusterShardInfos(std::vector<ClusterShardInfo> infos)
     : infos_(std::move(infos)) {
   std::sort(infos_.begin(), infos_.end());
-}
-
-namespace {
-enum class ClusterMode {
-  kUninitialized,
-  kNoCluster,
-  kEmulatedCluster,
-  kRealCluster,
-};
-
-ClusterMode cluster_mode = ClusterMode::kUninitialized;
-}  // namespace
-
-void InitializeCluster() {
-  string cluster_mode_str = absl::GetFlag(FLAGS_cluster_mode);
-
-  if (cluster_mode_str == "emulated") {
-    cluster_mode = ClusterMode::kEmulatedCluster;
-  } else if (cluster_mode_str == "yes") {
-    cluster_mode = ClusterMode::kRealCluster;
-  } else if (cluster_mode_str.empty()) {
-    cluster_mode = ClusterMode::kNoCluster;
-  } else {
-    LOG(ERROR) << "Invalid value for flag --cluster_mode. Exiting...";
-    exit(1);
-  }
-}
-
-bool IsClusterEnabled() {
-  return cluster_mode == ClusterMode::kRealCluster;
-}
-
-bool IsClusterEmulated() {
-  return cluster_mode == ClusterMode::kEmulatedCluster;
-}
-
-SlotId KeySlot(std::string_view key) {
-  string_view tag = LockTagOptions::instance().Tag(key);
-  return crc16(tag.data(), tag.length()) & kMaxSlotNum;
-}
-
-bool IsClusterEnabledOrEmulated() {
-  return IsClusterEnabled() || IsClusterEmulated();
-}
-
-bool IsClusterShardedByTag() {
-  return IsClusterEnabledOrEmulated() || LockTagOptions::instance().enabled;
 }
 
 facade::ErrorReply SlotOwnershipError(SlotId slot_id) {

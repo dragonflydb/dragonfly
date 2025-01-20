@@ -23,7 +23,7 @@
 #endif
 
 #ifdef __linux__
-#include <liburing.h>
+#include "util/fibers/uring_proactor.h"
 #endif
 
 #include <mimalloc.h>
@@ -81,6 +81,9 @@ ABSL_FLAG(bool, version_check, true,
           "If true, Will monitor for new releases on Dragonfly servers once a day.");
 
 ABSL_FLAG(uint16_t, tcp_backlog, 256, "TCP listen(2) backlog parameter.");
+ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
+          "How many socket recv buffers of size 256 to allocate per thread."
+          "Relevant only for modern kernels with io_uring enabled");
 
 using namespace util;
 using namespace facade;
@@ -96,7 +99,12 @@ namespace {
 // Default stack size for fibers. We decrease it by 16 bytes because some allocators
 // need additional 8-16 bytes for their internal structures, thus over reserving additional
 // memory pages if using round sizes.
+#ifdef NDEBUG
 constexpr size_t kFiberDefaultStackSize = 32_KB - 16;
+#else
+// Increase stack size for debug builds.
+constexpr size_t kFiberDefaultStackSize = 40_KB - 16;
+#endif
 
 using util::http::TlsClient;
 
@@ -165,12 +173,12 @@ template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
   return res;
 }
 
-bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
+void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   uint64_t maxmemory = GetMaxMemoryFlag();
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
     LOG(ERROR) << "There are " << pool->size() << " threads, so "
                << HumanReadableNumBytes(pool->size() * 256_MB) << " are required. Exiting...";
-    return false;
+    exit(1);
   }
 
   Service service(pool);
@@ -310,8 +318,6 @@ bool RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   version_monitor.Shutdown();
   service.Shutdown();
-
-  return true;
 }
 
 bool CreatePidFile(const string& path) {
@@ -600,6 +606,35 @@ void SetupAllocationTracker(ProactorPool* pool) {
 #endif
 }
 
+void RegisterBufRings(ProactorPool* pool) {
+#ifdef __linux__
+  auto bufcnt = absl::GetFlag(FLAGS_uring_recv_buffer_cnt);
+  if (bufcnt == 0) {
+    return;
+  }
+
+  if (dfly::kernel_version < 602 || pool->at(0)->GetKind() != ProactorBase::IOURING) {
+    LOG(WARNING) << "uring_recv_buffer_cnt is only supported on kernels >= 6.2 and with "
+                    "io_uring proactor";
+    return;
+  }
+
+  // We need a power of 2 length.
+  bufcnt = absl::bit_ceil(bufcnt);
+  pool->AwaitBrief([&](unsigned, ProactorBase* pb) {
+    auto up = static_cast<fb2::UringProactor*>(pb);
+    int res = up->RegisterBufferRing(facade::kRecvSockGid, bufcnt, facade::kRecvBufSize);
+    if (res != 0) {
+      LOG(ERROR) << "Failed to register buf ring for proactor "
+                 << util::detail::SafeErrorMessage(res);
+      exit(1);
+    }
+  });
+  LOG(INFO) << "Registered a bufring with " << bufcnt << " buffers of size " << facade::kRecvBufSize
+            << " per thread ";
+#endif
+}
+
 }  // namespace
 }  // namespace dfly
 
@@ -764,44 +799,43 @@ Usage: dragonfly [FLAGS]
 
   fb2::SetDefaultStackResource(&fb2::std_malloc_resource, kFiberDefaultStackSize);
 
-  unique_ptr<util::ProactorPool> pool;
+  {
+    unique_ptr<util::ProactorPool> pool;
 
 #ifdef __linux__
-  base::sys::KernelVersion kver;
-  base::sys::GetKernelVersion(&kver);
+    base::sys::KernelVersion kver;
+    base::sys::GetKernelVersion(&kver);
 
-  CHECK_LT(kver.major, 99u);
-  dfly::kernel_version = kver.kernel * 100 + kver.major;
+    CHECK_LT(kver.major, 99u);
+    dfly::kernel_version = kver.kernel * 100 + kver.major;
 
-  bool use_epoll = ShouldUseEpollAPI(kver);
+    bool use_epoll = ShouldUseEpollAPI(kver);
 
-  if (use_epoll) {
-    pool.reset(fb2::Pool::Epoll(max_available_threads));
-  } else {
-    pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
-  }
+    if (use_epoll) {
+      pool.reset(fb2::Pool::Epoll(max_available_threads));
+    } else {
+      pool.reset(fb2::Pool::IOUring(1024, max_available_threads));  // 1024 - iouring queue size.
+    }
 #else
-  pool.reset(fb2::Pool::Epoll(max_available_threads));
+    pool.reset(fb2::Pool::Epoll(max_available_threads));
 #endif
 
-  pool->Run();
+    pool->Run();
 
-  SetupAllocationTracker(pool.get());
+    SetupAllocationTracker(pool.get());
+    RegisterBufRings(pool.get());
 
-  AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
-  acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
+    AcceptServer acceptor(pool.get(), &fb2::std_malloc_resource, true);
+    acceptor.set_back_log(absl::GetFlag(FLAGS_tcp_backlog));
 
-  int res = dfly::RunEngine(pool.get(), &acceptor) ? 0 : -1;
+    dfly::RunEngine(pool.get(), &acceptor);
 
-  pool->Stop();
+    pool->Stop();
 
-  if (!pidfile_path.empty()) {
-    unlink(pidfile_path.c_str());
+    if (!pidfile_path.empty()) {
+      unlink(pidfile_path.c_str());
+    }
   }
 
-  // Returns memory to OS.
-  // This is a workaround for a bug in mi_malloc that may cause a crash on exit.
-  mi_collect(true);
-
-  return res;
+  return 0;
 }

@@ -119,8 +119,11 @@ atomic_uint64_t rss_mem_peak(0);
 
 unsigned kernel_version = 0;
 size_t max_memory_limit = 0;
-size_t serialization_max_chunk_size = 0;
 Namespaces* namespaces = nullptr;
+
+size_t FetchRssMemory(io::StatusData sdata) {
+  return sdata.vm_rss + sdata.hugetlb_pages;
+}
 
 const char* GlobalStateName(GlobalState s) {
   switch (s) {
@@ -434,7 +437,7 @@ ThreadLocalMutex::~ThreadLocalMutex() {
 }
 
 void ThreadLocalMutex::lock() {
-  if (serialization_max_chunk_size != 0) {
+  if (ServerState::tlocal()->serialization_max_chunk_size != 0) {
     DCHECK_EQ(EngineShard::tlocal(), shard_);
     util::fb2::NoOpLock noop_lk_;
     if (locked_fiber_ != nullptr) {
@@ -448,7 +451,7 @@ void ThreadLocalMutex::lock() {
 }
 
 void ThreadLocalMutex::unlock() {
-  if (serialization_max_chunk_size != 0) {
+  if (ServerState::tlocal()->serialization_max_chunk_size != 0) {
     DCHECK_EQ(EngineShard::tlocal(), shard_);
     flag_ = false;
     cond_var_.notify_one();
@@ -479,6 +482,19 @@ BorrowedInterpreter::BorrowedInterpreter(Transaction* tx, ConnectionState* state
 BorrowedInterpreter::~BorrowedInterpreter() {
   if (owned_)
     ServerState::tlocal()->ReturnInterpreter(interpreter_);
+}
+
+void LocalBlockingCounter::unlock() {
+  DCHECK(mutating_ > 0);
+  --mutating_;
+  if (mutating_ == 0) {
+    cond_var_.notify_all();
+  }
+}
+
+void LocalBlockingCounter::Wait() {
+  util::fb2::NoOpLock noop_lk_;
+  cond_var_.wait(noop_lk_, [this]() { return mutating_ == 0; });
 }
 
 }  // namespace dfly

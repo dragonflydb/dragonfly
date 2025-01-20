@@ -112,7 +112,7 @@ async def test_cluster_mgr(df_factory):
     # Add replicas
     replica_clients = [replica.client() for replica in replicas]
     for i in range(NODES):
-        await replica_clients[i].execute_command(f"replicaof localhost {masters[i].port}")
+        await replica_clients[i].execute_command(f"replicaof 127.0.0.1 {masters[i].port}")
         assert run_cluster_mgr(
             [
                 f"--action=attach",
@@ -132,7 +132,7 @@ async def test_cluster_mgr(df_factory):
 
     # Revert take over
     c_master0 = masters[0].client()
-    await c_master0.execute_command(f"replicaof localhost {replicas[0].port}")
+    await c_master0.execute_command(f"replicaof 127.0.0.1 {replicas[0].port}")
     assert run_cluster_mgr(
         [
             f"--action=attach",
@@ -143,7 +143,7 @@ async def test_cluster_mgr(df_factory):
     )
     assert run_cluster_mgr(["--action=takeover", f"--target_port={masters[0].port}"])
     await c_master0.execute_command(f"replicaof no one")
-    await replica_clients[0].execute_command(f"replicaof localhost {masters[0].port}")
+    await replica_clients[0].execute_command(f"replicaof 127.0.0.1 {masters[0].port}")
     assert run_cluster_mgr(
         [
             f"--action=attach",
@@ -161,4 +161,4 @@ async def test_cluster_mgr(df_factory):
     for i in range(NODES):
         assert run_cluster_mgr(["--action=detach", f"--target_port={replicas[i].port}"])
     await check_cluster_data(client)
-    await client.close()
+    await client.aclose()

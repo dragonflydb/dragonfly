@@ -27,8 +27,8 @@ endif()
 
 
 add_library(dfly_transaction db_slice.cc blocking_controller.cc
-            command_registry.cc  cluster/cluster_utility.cc
-            journal/tx_executor.cc namespaces.cc
+            command_registry.cc  cluster_support.cc
+            journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
             server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
@@ -45,20 +45,22 @@ endif()
 
 add_library(dragonfly_lib bloom_family.cc
             config_registry.cc conn_context.cc debugcmd.cc dflycmd.cc engine_shard.cc
-            engine_shard_set.cc family_utils.cc
+            engine_shard_set.cc error.cc family_utils.cc
             generic_family.cc hset_family.cc http_api.cc json_family.cc
             list_family.cc main_service.cc memory_cmd.cc rdb_load.cc rdb_save.cc replica.cc
             protocol_client.cc
             snapshot.cc script_mgr.cc server_family.cc
+            detail/compressor.cc
+            detail/decompress.cc
             detail/save_stages_controller.cc
             detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
-            zset_family.cc version.cc bitops_family.cc container_utils.cc
+            zset_family.cc geo_family.cc version.cc bitops_family.cc container_utils.cc
             top_keys.cc multi_command_squasher.cc hll_family.cc
             ${DF_SEARCH_SRCS}
             ${DF_LINUX_SRCS}
             cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
-            cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc
+            cluster/outgoing_slot_migration.cc cluster/cluster_defs.cc cluster/cluster_utility.cc
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
             acl/validator.cc)
 
@@ -96,6 +98,9 @@ endif()
 add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
+if (WITH_ASAN OR WITH_USAN)
+  target_compile_definitions(dfly_test_lib PRIVATE SANITIZERS)
+endif()
 
 cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
 cxx_test(multi_test dfly_test_lib LABELS DFLY)
@@ -109,8 +114,10 @@ cxx_test(string_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
-         testdata/redis_json.rdb LABELS DFLY)
+         testdata/redis_json.rdb testdata/RDB_TYPE_STREAM_LISTPACKS_2.rdb
+         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb LABELS DFLY)
 cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
+cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
@@ -137,5 +144,5 @@ add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
                  redis_parser_test stream_family_test string_family_test
-                 bitops_family_test set_family_test zset_family_test hll_family_test
-                 cluster_config_test cluster_family_test acl_family_test)
+                 bitops_family_test set_family_test zset_family_test geo_family_test
+                 hll_family_test cluster_config_test cluster_family_test acl_family_test)

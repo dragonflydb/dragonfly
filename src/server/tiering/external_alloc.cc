@@ -367,6 +367,12 @@ int64_t ExternalAllocator::Malloc(size_t sz) {
 }
 
 void ExternalAllocator::Free(size_t offset, size_t sz) {
+  if (sz > kMediumObjMaxSize) {
+    size_t align_sz = alignup(sz, 4_KB);
+    extent_tree_.Add(offset, align_sz);
+    return;
+  }
+
   size_t idx = offset / 256_MB;
   size_t delta = offset % 256_MB;
   CHECK_LT(idx, segments_.size());

@@ -104,6 +104,7 @@ struct ConnectionState {
     size_t UsedMemory() const;
 
     absl::flat_hash_set<LockTag> lock_tags;  // declared tags
+    bool read_only = false;
 
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds

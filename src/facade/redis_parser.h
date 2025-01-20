@@ -22,8 +22,6 @@ namespace facade {
  */
 class RedisParser {
  public:
-  constexpr static long kMaxBulkLen = 256 * (1ul << 20);  // 256MB.
-
   enum Result : uint8_t {
     OK,
     INPUT_PENDING,
@@ -47,8 +45,6 @@ class RedisParser {
    * part of str because parser caches the intermediate state internally according to 'consumed'
    * result.
    *
-   * Note: A parser does not always guarantee progress, i.e. if a small buffer was passed it may
-   * returns INPUT_PENDING with consumed == 0.
    *
    */
 
@@ -74,7 +70,8 @@ class RedisParser {
  private:
   using ResultConsumed = std::pair<Result, uint32_t>;
 
-  void InitStart(char prefix_b, RespVec* res);
+  // Returns true if this is a RESP message, false if INLINE.
+  bool InitStart(char prefix_b, RespVec* res);
   void StashState(RespVec* res);
 
   // Skips the first character (*).
@@ -91,14 +88,18 @@ class RedisParser {
     INLINE_S,
     ARRAY_LEN_S,
     MAP_LEN_S,
-    PARSE_ARG_S,  // Parse [$:+-]string\r\n
+    PARSE_ARG_TYPE,  // Parse [$:+-]
+    PARSE_ARG_S,     // Parse string\r\n
     BULK_STR_S,
+    SLASH_N_S,
     CMD_COMPLETE_S,
   };
 
   State state_ = CMD_COMPLETE_S;
   bool is_broken_token_ = false;  // true, if a token (inline or bulk) is broken during the parsing.
   bool server_mode_ = true;
+  uint8_t small_len_ = 0;
+  char arg_c_ = 0;
 
   uint32_t bulk_len_ = 0;
   uint32_t last_stashed_level_ = 0, last_stashed_index_ = 0;
@@ -114,6 +115,7 @@ class RedisParser {
 
   using Blob = std::vector<uint8_t>;
   std::vector<Blob> buf_stash_;
+  std::array<char, 32> small_buf_;
 };
 
 }  // namespace facade

@@ -26,8 +26,8 @@ ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(std::vector<std::string>, rename_command);
-ABSL_DECLARE_FLAG(double, oom_deny_ratio);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
+ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 
 namespace dfly {
 
@@ -305,7 +305,7 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
 
   EXPECT_THAT(
       resp.GetVec(),
-      ElementsAre("server", "redis", "version", "6.2.11", "dragonfly_version",
+      ElementsAre("server", "redis", "version", "7.4.0", "dragonfly_version",
                   ArgType(RespExpr::STRING), "proto", IntArg(2), "id", ArgType(RespExpr::INT64),
                   "mode", testing::AnyOf("standalone", "cluster"), "role", "master"));
 
@@ -313,7 +313,7 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
   ASSERT_THAT(resp, ArrLen(14));
   EXPECT_THAT(
       resp.GetVec(),
-      ElementsAre("server", "redis", "version", "6.2.11", "dragonfly_version",
+      ElementsAre("server", "redis", "version", "7.4.0", "dragonfly_version",
                   ArgType(RespExpr::STRING), "proto", IntArg(3), "id", ArgType(RespExpr::INT64),
                   "mode", testing::AnyOf("standalone", "cluster"), "role", "master"));
 
@@ -456,19 +456,22 @@ TEST_F(DflyEngineTest, OOM) {
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
-  max_memory_limit = 300000;
+  max_memory_limit = 300000 * 4;
 
+  // The threshold is set to 0.3 to trigger eviction earlier and prevent OOM.
   absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
-  ResetService();
+  absl::SetFlag(&FLAGS_eviction_memory_budget_threshold, 0.3);
 
   shard_set->TEST_EnableCacheMode();
 
+  /* The value should be large enough to avoid being inlined. Heartbeat evicts only objects for
+   * which HasAllocated() returns true. */
+  std::string value(1000, '.');
+
   ssize_t i = 0;
   RespExpr resp;
-  for (; i < 10000; ++i) {
-    resp = Run({"setex", StrCat("key", i), "30", "bar"});
-    // we evict some items because 5000 is too much when max_memory_limit is 300000.
+  for (; i < 1000; ++i) {
+    resp = Run({"setex", StrCat("key", i), "30", value});
     ASSERT_EQ(resp, "OK");
   }
 
@@ -489,10 +492,7 @@ TEST_F(DflyEngineTest, Bug207) {
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {
-  max_memory_limit = 300000;
-  absl::FlagSaver fs;
-  absl::SetFlag(&FLAGS_oom_deny_ratio, 4);
-  ResetService();
+  max_memory_limit = 600000;  // 0.6mb
   shard_set->TEST_EnableCacheMode();
 
   string tmp_val(100, '.');
@@ -774,13 +774,59 @@ TEST_F(DflyEngineTest, MemoryUsage) {
   }
 
   for (unsigned i = 0; i < 1000; ++i) {
-    Run({"rpush", "l2", StrCat(string('a', 200), i)});
+    Run({"rpush", "l2", StrCat(string(200, 'a'), i)});
   }
   auto resp = Run({"memory", "usage", "l1"});
   EXPECT_GT(*resp.GetInt(), 8000);
 
   resp = Run({"memory", "usage", "l2"});
   EXPECT_GT(*resp.GetInt(), 100000);
+}
+
+TEST_F(DflyEngineTest, DebugObject) {
+  Run({"set", "key", "value"});
+  Run({"lpush", "l1", "a", "b"});
+  Run({"sadd", "s1", "1", "2", "3"});
+  Run({"sadd", "s2", "a", "b", "c"});
+  Run({"zadd", "z1", "1", "a", "2", "b", "3", "c"});
+  Run({"hset", "h1", "a", "1", "b", "2", "c", "3"});
+  auto resp = Run({"debug", "object", "key"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:raw"));
+  resp = Run({"debug", "object", "l1"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:quicklist"));
+  resp = Run({"debug", "object", "s1"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:intset"));
+  resp = Run({"debug", "object", "s2"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:dense_set"));
+  resp = Run({"debug", "object", "z1"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("encoding:listpack"));
+}
+
+TEST_F(DflyEngineTest, StreamMemInfo) {
+  for (int i = 1; i < 2; ++i) {
+    Run({"XADD", "test", std::to_string(i), "var", "val" + std::to_string(i)});
+  }
+
+  int64_t stream_mem_first = GetMetrics().db_stats[0].memory_usage_by_type[OBJ_STREAM];
+  EXPECT_GT(stream_mem_first, 0);
+
+  auto dump = Run({"dump", "test"});
+  Run({"del", "test"});
+  Run({"restore", "test", "0", facade::ToSV(dump.GetBuf())});
+
+  int64_t stream_mem_second = GetMetrics().db_stats[0].memory_usage_by_type[OBJ_STREAM];
+
+  // stream_mem_first != stream_mem_second due to a preallocation in XADD command (see
+  // STREAM_LISTPACK_MAX_PRE_ALLOCATE)
+  EXPECT_GT(stream_mem_second, 0);
+}
+
+TEST_F(DflyEngineTest, ReplicaofRejectOnLoad) {
+  service_->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+
+  RespExpr res = Run({"REPLICAOF", "localhost", "3779"});
+
+  ASSERT_THAT(res, ErrArg("LOADING Dragonfly is loading the dataset in memory"));
 }
 
 // TODO: to test transactions with a single shard since then all transactions become local.

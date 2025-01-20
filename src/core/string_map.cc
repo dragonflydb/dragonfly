@@ -298,17 +298,19 @@ detail::SdsPair StringMap::iterator::BreakToPair(void* obj) {
 }
 
 bool StringMap::iterator::ReallocIfNeeded(float ratio) {
-  bool reallocated = false;
-  auto body = [this, ratio, &reallocated](auto* ptr) {
-    auto* obj = ptr->GetObject();
-    auto [new_obj, realloc] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio);
-    ptr->SetObject(new_obj);
-    reallocated |= realloc;
-  };
+  auto* ptr = curr_entry_;
+  if (ptr->IsLink()) {
+    ptr = ptr->AsLink();
+  }
 
-  TraverseApply(curr_entry_, body);
+  DCHECK(!ptr->IsEmpty());
+  DCHECK(ptr->IsObject());
 
-  return reallocated;
+  auto* obj = ptr->GetObject();
+  auto [new_obj, realloced] = static_cast<StringMap*>(owner_)->ReallocIfNeeded(obj, ratio);
+  ptr->SetObject(new_obj);
+
+  return realloced;
 }
 
 }  // namespace dfly

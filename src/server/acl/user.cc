@@ -90,7 +90,12 @@ void User::Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
 void User::SetPasswordHash(std::string_view password, bool is_hashed) {
   nopass_ = false;
   if (is_hashed) {
-    password_hashes_.insert(absl::HexStringToBytes(password));
+    std::string binary;
+    if (absl::HexStringToBytes(password, &binary)) {
+      password_hashes_.insert(binary);
+    } else {
+      LOG(ERROR) << "Invalid password hash: " << password;
+    }
     return;
   }
   password_hashes_.insert(StringSHA256(password));
