@@ -6,6 +6,7 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
@@ -13,6 +14,7 @@
 using namespace testing;
 using namespace std;
 using namespace util;
+using namespace facade;
 
 namespace dfly {
 
@@ -628,10 +630,10 @@ TEST_F(SearchFamilyTest, TestReturn) {
 
   // Check no fields are returned
   resp = Run({"ft.search", "i1", "@justA:0", "return", "0"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "k0")));
+  EXPECT_THAT(resp, IsArray(IntArg(1), "k0"));
 
   resp = Run({"ft.search", "i1", "@justA:0", "nocontent"});
-  EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(1), "k0")));
+  EXPECT_THAT(resp, IsArray(IntArg(1), "k0"));
 
   // Check only one field is returned (and with original identifier)
   resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "longA"});
@@ -856,7 +858,7 @@ TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   EXPECT_THAT(resp, ErrArg("no `SEARCH` or `AGGREGATE` provided"));
 
   resp = Run({"ft.profile", "i1", "search", "not_query", "(a | b) c d"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
 
   resp = Run({"ft.profile", "non_existent_key", "search", "query", "(a | b) c d"});
   EXPECT_THAT(resp, ErrArg("non_existent_key: no such index"));
@@ -1803,15 +1805,15 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
 
   // Test SORTBY with negative argument count
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "-3", "@name", "@number", "DESC"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 
   // Test MAX with invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX", "-10"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 
   // Test MAX without a value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "1", "@name", "MAX"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
 
   // Test SORTBY with a non-existing field
   /* Temporary unsupported
@@ -1820,7 +1822,66 @@ TEST_F(SearchFamilyTest, AggregateSortByParsingErrors) {
 
   // Test SORTBY with an invalid value
   resp = Run({"FT.AGGREGATE", "index", "*", "SORTBY", "notvalue", "@name"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+}
+
+TEST_F(SearchFamilyTest, InvalidSearchOptions) {
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
+  Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
+       "AS", "field2", "TEXT"});
+
+  /* Test with an empty query and LOAD. TODO: Add separate test for query syntax
+  auto resp = Run({"FT.SEARCH", "idx", "", "LOAD", "1", "@field1"});
+  EXPECT_THAT(resp, IsMapWithSize()); */
+
+  // Test with LIMIT missing arguments
+  auto resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "0"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test with LIMIT exceeding the maximum allowed value
+  resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "0", "100000000000000000000"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with LIMIT and negative arguments
+  resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "-1", "10"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with LIMIT and invalid argument types
+  resp = Run({"FT.SEARCH", "idx", "*", "LIMIT", "start", "count"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with invalid LOAD arguments
+  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with duplicate fields in LOAD
+  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "4", "@field1", "@field1", "@field2", "@field2"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("field1", "\"first\"", "field2", "\"second\"", "$",
+                                              R"({"field1":"first","field2":"second"})")));
+
+  // Test with LOAD exceeding maximum allowed count
+  resp = Run({"FT.SEARCH", "idx", "*", "LOAD", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with invalid RETURN syntax (missing count)
+  resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with RETURN having duplicate fields
+  resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "4", "field1", "field1", "field2", "field2"});
+  EXPECT_THAT(resp, IsMapWithSize("j1", IsMap("field1", "\"first\"", "field2", "\"second\"")));
+
+  // Test with RETURN exceeding maximum allowed count
+  resp = Run({"FT.SEARCH", "idx", "*", "RETURN", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test with NOCONTENT and LOAD
+  resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "LOAD", "2", "@field1", "@field2"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "j1"));
+
+  // Test with NOCONTENT and RETURN
+  resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "RETURN", "2", "@field1", "@field2"});
+  EXPECT_THAT(resp, IsArray(IntArg(1), "j1"));
 }
 
 }  // namespace dfly
