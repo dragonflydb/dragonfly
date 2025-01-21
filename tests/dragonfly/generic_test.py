@@ -146,6 +146,7 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
     assert info["evicted_keys"] > 0, "Weak testcase: policy based eviction was not triggered."
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.asyncio
 async def test_denyoom_commands(df_factory):
     df_server = df_factory.create(proactor_threads=1, maxmemory="256mb", oom_deny_commands="get")

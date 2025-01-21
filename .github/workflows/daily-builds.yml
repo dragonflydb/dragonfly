@@ -116,3 +116,16 @@ jobs:
         run: |
             cd $GITHUB_WORKSPACE/build
             ctest -V -L DFLY
+
+      - name: Send notifications on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Daily builds failed.\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'
