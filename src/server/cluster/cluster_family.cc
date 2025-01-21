@@ -896,11 +896,12 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
   if (auto err = parser.Error(); err)
     return builder->SendError(err->MakeReply());
 
+  SlotRanges slot_ranges(std::move(slots));
+
   const auto& incoming_migrations = cluster_config()->GetIncomingMigrations();
   bool found = any_of(incoming_migrations.begin(), incoming_migrations.end(),
-                      [source_id = source_id](const MigrationInfo& info) {
-                        // TODO: also compare slot ranges (in an order-agnostic way)
-                        return info.node_info.id == source_id;
+                      [&source_id, &slot_ranges](const MigrationInfo& info) {
+                        return info.node_info.id == source_id && info.slot_ranges == slot_ranges;
                       });
   if (!found) {
     VLOG(1) << "Unrecognized incoming migration from " << source_id;
@@ -914,7 +915,7 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
   LOG_IF(WARNING, was_removed) << "Reinit issued for migration from:" << source_id;
 
   incoming_migrations_jobs_.emplace_back(make_shared<IncomingSlotMigration>(
-      string(source_id), &server_family_->service(), SlotRanges(std::move(slots)), flows_num));
+      string(source_id), &server_family_->service(), std::move(slot_ranges), flows_num));
 
   return builder->SendOk();
 }
@@ -966,16 +967,17 @@ void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
   bool is_migration_valid = false;
   if (is_incoming) {
     for (const auto& mj : incoming_migrations_jobs_) {
-      if (mj->GetSourceID() == node_id) {
-        // TODO add compare for slots
+      if (mj->GetSourceID() == node_id && slots == mj->GetSlots()) {
         is_migration_valid = true;
+        break;
       }
     }
   } else {
     for (const auto& mj : outgoing_migration_jobs_) {
-      if (mj->GetMigrationInfo().node_info.id == node_id) {
-        // TODO add compare for slots
+      if (mj->GetMigrationInfo().node_info.id == node_id &&
+          mj->GetMigrationInfo().slot_ranges == slots) {
         is_migration_valid = true;
+        break;
       }
     }
   }
