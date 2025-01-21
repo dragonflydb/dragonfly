@@ -779,7 +779,7 @@ int main(int argc, char* argv[]) {
 
   uint32_t thread_key_step = 0;
   const uint32_t qps = GetFlag(FLAGS_qps);
-  const int64_t interval = qps ? 1000'000'000LL / qps : 0;
+  const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
   uint64_t num_reqs = GetFlag(FLAGS_n);
   uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
   uint64_t total_requests = num_reqs * total_conn_num;
