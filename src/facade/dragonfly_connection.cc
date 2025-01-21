@@ -610,6 +610,10 @@ Connection::~Connection() {
   UpdateLibNameVerMap(lib_name_, lib_ver_, -1);
 }
 
+bool Connection::IsSending() const {
+  return reply_builder_ && reply_builder_->IsSendActive();
+}
+
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
 void Connection::OnShutdown() {
   VLOG(1) << "Connection::OnShutdown";
@@ -1638,9 +1642,6 @@ bool Connection::Migrate(util::fb2::ProactorBase* dest) {
 
 Connection::WeakRef Connection::Borrow() {
   DCHECK(self_);
-  // If the connection is unaware of subscriptions, it could migrate threads, making this call
-  // unsafe. All external mechanisms that borrow references should register subscriptions.
-  DCHECK_GT(cc_->subscriptions, 0);
 
   return WeakRef(self_, socket_->proactor()->GetPoolIndex(), id_);
 }
