@@ -2715,7 +2715,7 @@ async def test_big_containers(df_factory, element_size, elements_number):
     logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
     assert replica_peak_memory < 1.1 * replica_used_memory
 
-    # Check replica data consisten
+    # Check replica data consistent
     replica_data = await StaticSeeder.capture(c_replica)
     master_data = await StaticSeeder.capture(c_master)
     assert master_data == replica_data
