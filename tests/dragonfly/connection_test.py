@@ -1059,6 +1059,15 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
     await another_client.ping()
     clients = await async_client.client_list()
     assert len(clients) == 2
+
     await asyncio.sleep(2)
-    clients = await async_client.client_list()
-    assert len(clients) == 1
+    
+    @assert_eventually
+    async def wait_for_conn_drop():
+        clients = await async_client.client_list()
+        logging.info("clients: %s", clients)
+        assert len(clients) <= 1
+
+    await wait_for_conn_drop()
+    info = await async_client.info("clients")
+    assert int(info["timeout_disconnects"]) >= 1

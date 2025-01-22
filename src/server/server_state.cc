@@ -34,7 +34,7 @@ ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 19 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 20 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -61,7 +61,7 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(compressed_blobs);
 
   ADD(oom_error_cmd_cnt);
-
+  ADD(conn_timeout_events);
   if (this->tx_width_freq_arr.size() > 0) {
     DCHECK_EQ(this->tx_width_freq_arr.size(), other.tx_width_freq_arr.size());
     this->tx_width_freq_arr += other.tx_width_freq_arr;
@@ -279,6 +279,7 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       if (conn) {
         VLOG(1) << "Closing connection due to timeout: " << conn->GetClientInfo();
         conn->ShutdownSelf();
+        stats.conn_timeout_events++;
       }
     }
   }
