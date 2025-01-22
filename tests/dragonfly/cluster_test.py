@@ -2685,3 +2685,80 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
+
+
+"""
+Test cluster node distributing its slots into 2 other nodes.
+In this test we start migrating to the second node only after the first one finished to
+reproduce the bug found in issue #4455
+"""
+
+
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # 1. Create cluster of 3 nodes with all slots allocated to first node.
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
+        )
+        for i in range(3)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    nodes[2].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("DEBUG POPULATE first node")
+    key_num = 100000
+    await StaticSeeder(key_target=key_num, data_size=100).run(nodes[0].client)
+    dbsize_node0 = await nodes[0].client.dbsize()
+    assert dbsize_node0 > (key_num * 0.95)
+
+    # 2. Start migrating part of the slots from first node to second
+    logging.debug("Start first migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16300)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # 3. Wait for migratin finish
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=50)
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", timeout=50)
+
+    nodes[0].migrations = []
+    nodes[0].slots = [(16301, 16383)]
+    nodes[1].slots = [(0, 16300)]
+    nodes[2].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # 4. Start migrating remaind slots from first node to third node
+    logging.debug("Start second migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[2].instance.admin_port, [(16301, 16383)], nodes[2].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # 5. Wait for migratin finish
+    await wait_for_status(nodes[0].admin_client, nodes[2].id, "FINISHED", timeout=10)
+    await wait_for_status(nodes[2].admin_client, nodes[0].id, "FINISHED", timeout=10)
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16300)]
+    nodes[2].slots = [(16301, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # 6. Check all data was migrated
+    # Using dbsize to check all the data was migrated to the other nodes.
+    # Note: we can not use the seeder capture as we migrate the data to 2 different nodes.
+    # TODO: improve the migration conrrectness by running the seeder capture on slot range (requiers changes in capture script).
+    dbsize_node1 = await nodes[1].client.dbsize()
+    dbsize_node2 = await nodes[2].client.dbsize()
+    assert dbsize_node1 + dbsize_node2 == dbsize_node0
+    assert dbsize_node2 > 0 and dbsize_node1 > 0
