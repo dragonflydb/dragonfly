@@ -291,11 +291,10 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   it.SetVersion(snapshot_version_);
   unsigned result = 0;
 
-  while (!it.is_done()) {
+  for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     ++result;
     // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second);
-    ++it;
   }
   serialize_bucket_running_ = false;
   return result;
