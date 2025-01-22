@@ -409,6 +409,13 @@ class DashTable<_Key, _Value, Policy>::Iterator {
     return *this;
   }
 
+  Iterator& AdvanceIfNotOccupied() {
+    if (!IsOccupied()) {
+      this->operator++();
+    }
+    return *this;
+  }
+
   IteratorPairType operator->() const {
     auto* seg = owner_->segment_[seg_id_];
     return {seg->Key(bucket_id_, slot_id_), seg->Value(bucket_id_, slot_id_)};

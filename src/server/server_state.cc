@@ -15,11 +15,18 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
+#include "facade/dragonfly_connection.h"
 #include "server/journal/journal.h"
+#include "util/listener_interface.h"
 
 ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
+ABSL_FLAG(uint32_t, timeout, 0,
+          "Close the connection after it is idle for N seconds (0 to disable)");
 
 namespace dfly {
+
+using namespace std;
+using namespace std::chrono_literals;
 
 __thread ServerState* ServerState::state_ = nullptr;
 
@@ -27,7 +34,7 @@ ServerState::Stats::Stats(unsigned num_shards) : tx_width_freq_arr(num_shards) {
 }
 
 ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
-  static_assert(sizeof(Stats) == 19 * 8, "Stats size mismatch");
+  static_assert(sizeof(Stats) == 20 * 8, "Stats size mismatch");
 
 #define ADD(x) this->x += (other.x)
 
@@ -54,7 +61,7 @@ ServerState::Stats& ServerState::Stats::Add(const ServerState::Stats& other) {
   ADD(compressed_blobs);
 
   ADD(oom_error_cmd_cnt);
-
+  ADD(conn_timeout_events);
   if (this->tx_width_freq_arr.size() > 0) {
     DCHECK_EQ(this->tx_width_freq_arr.size(), other.tx_width_freq_arr.size());
     this->tx_width_freq_arr += other.tx_width_freq_arr;
@@ -102,19 +109,31 @@ ServerState::ServerState() : interpreter_mgr_{absl::GetFlag(FLAGS_interpreter_pe
 }
 
 ServerState::~ServerState() {
+  watcher_fiber_.JoinIfNeeded();
 }
 
-void ServerState::Init(uint32_t thread_index, uint32_t num_shards, acl::UserRegistry* registry) {
+void ServerState::Init(uint32_t thread_index, uint32_t num_shards,
+                       util::ListenerInterface* main_listener, acl::UserRegistry* registry) {
   state_ = new ServerState();
   state_->gstate_ = GlobalState::ACTIVE;
   state_->thread_index_ = thread_index;
   state_->user_registry = registry;
   state_->stats = Stats(num_shards);
+  if (main_listener) {
+    state_->watcher_fiber_ = util::fb2::Fiber(
+        util::fb2::Launch::post, "ConnectionsWatcher",
+        [state = state_, main_listener] { state->ConnectionsWatcherFb(main_listener); });
+  }
 }
 
 void ServerState::Destroy() {
   delete state_;
   state_ = nullptr;
+}
+
+void ServerState::EnterLameDuck() {
+  gstate_ = GlobalState::SHUTTING_DOWN;
+  watcher_cv_.notify_all();
 }
 
 ServerState::MemoryUsageStats ServerState::GetMemoryUsage(uint64_t now_ns) {
@@ -208,4 +227,62 @@ ServerState* ServerState::SafeTLocal() {
 bool ServerState::ShouldLogSlowCmd(unsigned latency_usec) const {
   return slow_log_shard_.IsEnabled() && latency_usec >= log_slower_than_usec;
 }
+
+void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
+  optional<facade::Connection::WeakRef> last_reference;
+
+  while (true) {
+    util::fb2::NoOpLock noop;
+    if (watcher_cv_.wait_for(noop, 1s, [this] { return gstate_ == GlobalState::SHUTTING_DOWN; })) {
+      break;
+    }
+
+    uint32_t timeout = absl::GetFlag(FLAGS_timeout);
+    if (timeout == 0) {
+      continue;
+    }
+
+    facade::Connection* from = nullptr;
+    if (last_reference && !last_reference->IsExpired()) {
+      from = last_reference->Get();
+    }
+
+    // We use weak refs, because ShutdownSelf below can potentially block the fiber,
+    // and during this time some of the connections might be destroyed. Weak refs allow checking
+    // validity of each connection.
+    vector<facade::Connection::WeakRef> conn_refs;
+
+    auto cb = [&](unsigned thread_index, util::Connection* conn) {
+      facade::Connection* dfly_conn = static_cast<facade::Connection*>(conn);
+      using Phase = facade::Connection::Phase;
+      auto phase = dfly_conn->phase();
+      bool is_replica = true;
+      if (dfly_conn->cntx()) {
+        is_replica = dfly_conn->cntx()->replica_conn;
+      }
+
+      if ((phase == Phase::READ_SOCKET || dfly_conn->IsSending()) &&
+          !is_replica && dfly_conn->idle_time() > timeout) {
+        conn_refs.push_back(dfly_conn->Borrow());
+      }
+    };
+
+    util::Connection* next = main->TraverseConnectionsOnThread(cb, 100, from);
+    if (next) {
+      last_reference = static_cast<facade::Connection*>(next)->Borrow();
+    } else {
+      last_reference.reset();
+    }
+
+    for (auto& ref : conn_refs) {
+      facade::Connection* conn = ref.Get();
+      if (conn) {
+        VLOG(1) << "Closing connection due to timeout: " << conn->GetClientInfo();
+        conn->ShutdownSelf();
+        stats.conn_timeout_events++;
+      }
+    }
+  }
+}
+
 }  // end of namespace dfly

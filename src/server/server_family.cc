@@ -2290,6 +2290,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries);
 
     append("send_delay_ms", GetDelayMs(m.oldest_pending_send_ts));
+    append("timeout_disconnects", m.coordinator_stats.conn_timeout_events);
   }
 
   if (should_enter("MEMORY")) {
