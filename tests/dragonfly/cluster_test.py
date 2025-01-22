@@ -2694,6 +2694,7 @@ reproduce the bug found in issue #4455
 """
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_seeder_factory):
