@@ -44,10 +44,19 @@ jobs:
         build-type: [Debug, Release]
         compiler: [{ cxx: g++, c: gcc }]
         cxx_flags: ["-Werror"]
+        sanitizers: ["NoSanitizers"]
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
+            cxx_flags: ""
+            sanitizers: "NoSanitizers"
+          - container: "ubuntu-dev:24"
+            build-type: Debug
+            compiler: { cxx: clang++, c: clang }
+            # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
+            cxx_flags: "-Wno-error=unused-command-line-argument"
+            sanitizers: "Sanitizers"
 
     runs-on: ubuntu-latest
     env:
@@ -71,6 +80,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+
       - name: Prepare Environment
         run: |
           uname -a
@@ -88,6 +98,7 @@ jobs:
           df -h
           touch /mnt/foo
           ls -la /mnt/foo
+
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.7
 
@@ -98,10 +109,35 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
+      - name: Install clang
+        if: matrix.sanitizers == 'Sanitizers'
+        run: |
+          # TODO remove this once the weekly is done
+          apt -y update
+          apt -y upgrade
+          apt install -y clang
+          which clang
+
       - name: Configure CMake
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
         run: |
+          echo "ulimit is"
+          ulimit -s
+          echo "-----------------------------"
+          echo "disk space is:"
+          df -h
+          echo "-----------------------------"
+
+          export ASAN="OFF"
+          export USAN="OFF"
+
+          if [ '${{matrix.sanitizers}}' = 'Sanitizers' ]; then
+            echo "ASAN/USAN"
+            export ASAN="ON"
+            export USAN="ON"
+          fi
+
           # -no-pie to disable address randomization so we could symbolize stacktraces
           cmake -B ${GITHUB_WORKSPACE}/build \
             -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
@@ -110,7 +146,10 @@ jobs:
             -DCMAKE_CXX_COMPILER="${{matrix.compiler.cxx}}" \
             -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache \
             -DCMAKE_CXX_FLAGS="${{matrix.cxx_flags}} -no-pie" -DWITH_AWS:BOOL=OFF \
+            -DWITH_ASAN="${ASAN}" \
+            -DWITH_USAN="${USAN}" \
             -L
+
           cd ${GITHUB_WORKSPACE}/build && pwd
           du -hcs _deps/
 
