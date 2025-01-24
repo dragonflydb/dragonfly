@@ -149,22 +149,6 @@ jobs:
           load: true
 
       - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
-        name: Build release image for arm64
-        uses: docker/build-push-action@v6
-        with:
-            context: .
-            platforms: linux/arm64
-            build-args: |
-              QEMU_CPU=max,pauth-impdef=on
-            push: false
-            tags: |
-              ${{ steps.metadata.outputs.tags }}
-            labels: ${{ steps.metadata.outputs.labels }}
-            file: ${{ matrix.dockerfile }}-${{ inputs.build_type }}
-            cache-from: type=gha
-            cache-to: type=gha,mode=max
-
-      - if: ${{ hashFiles(format('{0}-{1}', matrix.dockerfile, inputs.build_type)) }}
         name: Test Docker run
         run: |
           # docker run with port-forwarding
@@ -193,7 +177,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           build-args: |
             QEMU_CPU=max,pauth-impdef=on

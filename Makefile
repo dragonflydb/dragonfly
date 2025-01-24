@@ -34,6 +34,8 @@ configure:
 
 build:
 	cd $(RELEASE_DIR); \
+	ninja mimalloc_project; \
+	cat third_party/src/mimalloc_project-stamp/mimalloc_project-build-*.log; \
 	ninja dragonfly && ldd dragonfly
 
 package:
