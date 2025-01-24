@@ -954,11 +954,12 @@ auto DashTable<_Key, _Value, Policy>::GetRandomCursor(absl::BitGen* bitgen) -> C
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
-  if (curs.bucket_id() >= Policy::kBucketNum)  // sanity.
-    return 0;
-
   uint32_t sid = curs.segment_id(global_depth_);
   uint8_t bid = curs.bucket_id();
+
+  // Test validity of the cursor.
+  if (bid >= Policy::kBucketNum || sid >= segment_.size())
+    return 0;
 
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
