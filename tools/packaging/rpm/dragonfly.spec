@@ -35,6 +35,8 @@ mv ./dragonfly-%{_arch} ./dragonfly
 %install
 mkdir -p %{buildroot}/usr/local/bin
 mkdir -p %{buildroot}/etc/dragonfly
+mkdir -p %{buildroot}/var/log/dragonfly
+mkdir -p %{buildroot}/var/lib/dragonfly
 
 install -m 755 ./dragonfly %{buildroot}/usr/local/bin/
 mkdir -p %{buildroot}/usr/lib/systemd/system
