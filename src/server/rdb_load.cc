@@ -2787,6 +2787,10 @@ void RdbLoader::PerformPostLoad(Service* service) {
   shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
     es->search_indices()->RebuildAllIndices(
         OpArgs{es, nullptr, DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}});
+
+    // This clears fetched_items_, which may be set when loading an RDB file. We need to clear it
+    // to remove leftovers, see issue #4497
+    namespaces->GetDefaultNamespace().GetCurrentDbSlice().OnCbFinish();
   });
 }
 
