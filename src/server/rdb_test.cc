@@ -722,4 +722,16 @@ TEST_F(RdbTest, SnapshotTooBig) {
   ASSERT_THAT(resp, ErrArg("Out of memory"));
 }
 
+TEST_F(RdbTest, HugeKeyIssue4497) {
+  SetTestFlag("cache_mode", "true");
+  ResetService();
+
+  EXPECT_EQ(Run({"flushall"}), "OK");
+  EXPECT_EQ(Run({"debug", "populate", "1", "k", "1000", "rand", "type", "set", "elements", "5000"}),
+            "OK");
+  EXPECT_EQ(Run({"save", "rdb", "hugekey.rdb"}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", "hugekey.rdb"}), "OK");
+  EXPECT_EQ(Run({"flushall"}), "OK");
+}
+
 }  // namespace dfly
