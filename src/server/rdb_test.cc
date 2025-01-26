@@ -55,9 +55,9 @@ class RdbTest : public BaseFamilyTest {
 };
 
 void RdbTest::SetUp() {
+  max_memory_limit = 40000000;
   InitWithDbFilename();
   CHECK_EQ(zmalloc_used_memory_tl, 0);
-  max_memory_limit = 40000000;
 }
 
 inline const uint8_t* to_byte(const void* s) {
