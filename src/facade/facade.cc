@@ -97,6 +97,7 @@ const char kLoadingErr[] = "-LOADING Dragonfly is loading the dataset in memory"
 const char kUndeclaredKeyErr[] = "script tried accessing undeclared key";
 const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong";
 const char kInvalidJsonPathErr[] = "invalid JSON path";
+const char kJsonParseError[] = "failed to parse JSON";
 
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";

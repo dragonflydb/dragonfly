@@ -778,6 +778,7 @@ Service::~Service() {
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
+  facade::Connection::Init(pp_.size());
 
   config_registry.RegisterSetter<MemoryBytesFlag>(
       "maxmemory", [](const MemoryBytesFlag& flag) { max_memory_limit = flag.value; });
@@ -800,12 +801,12 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
     shard_set->pool()->AwaitBrief(
-        [val](unsigned, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(val); });
+        [val](unsigned tid, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(tid, val); });
   });
 
   config_registry.RegisterSetter<size_t>("pipeline_buffer_limit", [](size_t val) {
     shard_set->pool()->AwaitBrief(
-        [val](unsigned, auto*) { facade::Connection::SetPipelineBufferLimit(val); });
+        [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
   config_registry.RegisterMutable("replica_partial_sync");
@@ -813,6 +814,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
+  config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("managed_service_info");
 
   config_registry.RegisterMutable(
@@ -848,19 +850,23 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_num = pp_.size();
   }
 
+  // We assume that listeners.front() is the main_listener
+  // see dfly_main RunEngine. In unit tests, listeners are empty.
+  facade::Listener* main_listener = listeners.empty() ? nullptr : listeners.front();
+
   ChannelStore* cs = new ChannelStore{};
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
   pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
-    ServerState::Init(index, shard_num, &user_registry_);
+    ServerState::Init(index, shard_num, main_listener, &user_registry_);
     ServerState::tlocal()->UpdateChannelStore(cs);
   });
 
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
-  if (!tcp_disabled && !listeners.empty()) {
-    acl_family_.Init(listeners.front(), &user_registry_);
+  if (!tcp_disabled && main_listener) {
+    acl_family_.Init(main_listener, &user_registry_);
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.
@@ -906,10 +912,11 @@ void Service::Shutdown() {
   shard_set->Shutdown();
   Transaction::Shutdown();
 
-  pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
+  facade::Connection::Shutdown();
 }
 
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
@@ -1486,7 +1493,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
                          MCReplyBuilder* mc_builder, facade::ConnectionContext* cntx) {
   absl::InlinedVector<MutableSlice, 8> args;
   char cmd_name[16];
-  char ttl[16];
+  char ttl[absl::numbers_internal::kFastToBufferSize];
   char store_opt[32] = {0};
   char ttl_op[] = "EXAT";
 

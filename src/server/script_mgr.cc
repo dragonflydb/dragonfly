@@ -43,6 +43,7 @@ ABSL_FLAG(
     std::vector<std::string>({
         "351130589c64523cb98978dc32c64173a31244f3",  // Sidekiq, see #2442
         "6ae15ef4678593dc61f991c9953722d67d822776",  // Sidekiq, see #2442
+        "34b1048274c8e50a0cc587a3ed9c383a82bb78c5"   // Sidekiq
     }),
     "Comma-separated list of Lua script SHAs which are allowed to access undeclared keys. SHAs are "
     "only looked at when loading the script, and new values do not affect already-loaded script.");

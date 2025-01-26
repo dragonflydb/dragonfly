@@ -305,7 +305,7 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
 
   EXPECT_THAT(
       resp.GetVec(),
-      ElementsAre("server", "redis", "version", "7.2.0", "dragonfly_version",
+      ElementsAre("server", "redis", "version", "7.4.0", "dragonfly_version",
                   ArgType(RespExpr::STRING), "proto", IntArg(2), "id", ArgType(RespExpr::INT64),
                   "mode", testing::AnyOf("standalone", "cluster"), "role", "master"));
 
@@ -313,7 +313,7 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
   ASSERT_THAT(resp, ArrLen(14));
   EXPECT_THAT(
       resp.GetVec(),
-      ElementsAre("server", "redis", "version", "7.2.0", "dragonfly_version",
+      ElementsAre("server", "redis", "version", "7.4.0", "dragonfly_version",
                   ArgType(RespExpr::STRING), "proto", IntArg(3), "id", ArgType(RespExpr::INT64),
                   "mode", testing::AnyOf("standalone", "cluster"), "role", "master"));
 
@@ -774,7 +774,7 @@ TEST_F(DflyEngineTest, MemoryUsage) {
   }
 
   for (unsigned i = 0; i < 1000; ++i) {
-    Run({"rpush", "l2", StrCat(string('a', 200), i)});
+    Run({"rpush", "l2", StrCat(string(200, 'a'), i)});
   }
   auto resp = Run({"memory", "usage", "l1"});
   EXPECT_GT(*resp.GetInt(), 8000);

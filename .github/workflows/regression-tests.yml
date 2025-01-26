@@ -11,8 +11,13 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
+        proactor: [Uring, Epoll]
         build-type: [Debug, Release]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        exclude:
+          - proactor: Epoll
+            build-type: Debug
+
     runs-on: ${{ matrix.runner }}
 
     container:
@@ -31,6 +36,7 @@ jobs:
           cat /proc/cpuinfo
           ulimit -a
           env
+
       - name: Configure & Build
         run: |
           # -no-pie to disable address randomization so we could symbolize stacktraces
@@ -52,6 +58,9 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_S3_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.AWS_S3_ACCESS_SECRET }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
+          # Chain ternary oprator of the form (which can be nested)
+          # (expression == condition && <true expression> || <false expression>)
+          epoll: ${{ matrix.proactor == 'Epoll' && 'true' || '' }}
 
       - name: Upload logs on failure
         if: failure()

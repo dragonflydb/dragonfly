@@ -36,6 +36,8 @@ std::string_view StatusToMsg(OpStatus status) {
       return kKeyNotFoundErr;
     case OpStatus::INVALID_JSON_PATH:
       return kInvalidJsonPathErr;
+    case OpStatus::INVALID_JSON:
+      return kJsonParseError;
     default:
       LOG(ERROR) << "Unsupported status " << status;
       return "Internal error";

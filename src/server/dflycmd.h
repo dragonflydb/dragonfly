@@ -111,14 +111,6 @@ class DflyCmd {
           flows{flow_count} {
     }
 
-    [[nodiscard]] auto GetExclusiveLock() ABSL_EXCLUSIVE_LOCK_FUNCTION() {
-      return util::fb2::LockGuard{shared_mu};
-    }
-
-    [[nodiscard]] auto GetSharedLock() ABSL_EXCLUSIVE_LOCK_FUNCTION() {
-      return dfly::SharedLock{shared_mu};
-    }
-
     // Transition into cancelled state, run cleanup.
     void Cancel();
 

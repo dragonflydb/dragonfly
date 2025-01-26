@@ -131,14 +131,21 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
   // Make sure none of the threads publish buffer limits is reached. We don't reserve memory ahead
   // and don't prevent the buffer from possibly filling, but the approach is good enough for
   // limiting fast producers. Most importantly, we can use DispatchBrief below as we block here
-  optional<uint32_t> last_thread;
+  int32_t last_thread = -1;
   for (auto& sub : subscribers) {
-    DCHECK_LE(last_thread.value_or(0), sub.Thread());
-    if (last_thread && *last_thread == sub.Thread())  // skip same thread
+    int sub_thread = sub.Thread();
+    DCHECK_LE(last_thread, sub_thread);
+    if (last_thread == sub_thread)  // skip same thread
       continue;
 
-    if (sub.EnsureMemoryBudget())  // Invalid pointers are skipped
-      last_thread = sub.Thread();
+    if (sub.IsExpired())
+      continue;
+
+    // Make sure the connection thread has enough memory budget to accept the message.
+    // This is a heuristic and not entirely hermetic since the connection memory might
+    // get filled again.
+    facade::Connection::EnsureMemoryBudget(sub.Thread());
+    last_thread = sub_thread;
   }
 
   auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));

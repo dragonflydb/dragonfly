@@ -581,7 +581,7 @@ void BitCount(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!parser.Finalize()) {
     return builder->SendError(parser.Error()->MakeReply());
   }
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
@@ -1225,7 +1225,7 @@ void SetBit(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(err->MakeReply());
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &offset = offset, &value = value](Transaction* t, EngineShard* shard) {
     return BitNewValue(t->GetOpArgs(shard), key, offset, value != 0);
   };
 

@@ -35,7 +35,7 @@ template <> string ConCat(const CmdArgList& list) {
 struct EntryPayloadVisitor {
   void operator()(const Entry::Payload& p) {
     out->append(p.cmd).append(" ");
-    *out += visit([this](const auto& args) { return ConCat(args); }, p.args);
+    *out += visit([](const auto& args) { return ConCat(args); }, p.args);
   }
 
   string* out;
