@@ -427,6 +427,8 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
   stats_.num_clients++;
   int64_t time_limit_ns =
       time_limit_ > 0 ? int64_t(time_limit_) * 1'000'000'000 + start_ns_ : INT64_MAX;
+  int native_handle = socket_->native_handle();
+
   for (unsigned i = 0; i < num_reqs_; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
@@ -463,14 +465,18 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
     req.might_hit = cmd_gen->might_hit();
 
     reqs_.push(req);
-
-    error_code ec = socket_->Write(io::Buffer(cmd));
+    int err = send(native_handle, cmd.data(), cmd.size(), 0);
+    if (err < 0) {
+      VLOG(1) << "Connection closed " << errno;
+      break;
+    }
+    /*error_code ec = socket_->Write(io::Buffer(cmd));
     if (ec && FiberSocketBase::IsConnClosed(ec)) {
       // TODO: report failure
       VLOG(1) << "Connection closed";
       break;
     }
-    CHECK(!ec) << ec.message();
+    CHECK(!ec) << ec.message();*/
     if (cmd_gen->noreply()) {
       PopRequest();
     }
