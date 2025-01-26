@@ -65,6 +65,7 @@ CapturingReplyBuilder::Payload CapturingReplyBuilder::Take() {
   CHECK(stack_.empty());
   Payload pl = std::move(current_);
   current_ = monostate{};
+  ConsumeLastError();
   return pl;
 }
 

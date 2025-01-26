@@ -425,6 +425,7 @@ class DflySeeder:
         stop_on_failure=True,
         cluster_mode=False,
         mirror_to_fake_redis=False,
+        pipeline=True,
     ):
         if cluster_mode:
             max_multikey = 1
@@ -439,6 +440,7 @@ class DflySeeder:
         self.stop_flag = False
         self.stop_on_failure = stop_on_failure
         self.fake_redis = None
+        self.use_pipeline = pipeline
 
         self.log_file = log_file
         if self.log_file is not None:
@@ -447,6 +449,7 @@ class DflySeeder:
         if mirror_to_fake_redis:
             logging.debug("Creating FakeRedis instance")
             self.fake_redis = fakeredis.FakeAsyncRedis()
+            self.use_pipeline = False
 
     async def run(self, target_ops=None, target_deviation=None):
         """
@@ -604,18 +607,19 @@ class DflySeeder:
                 break
 
             try:
-                if self.fake_redis is None:
+                if self.use_pipeline:
                     pipe = client.pipeline(transaction=tx_data[1])
                     for cmd in tx_data[0]:
                         pipe.execute_command(*cmd)
                     await pipe.execute()
                 else:
-                    # To mirror consistently to Fake Redis we must only send to it successful
-                    # commands. We can't use pipes because they might succeed partially.
                     for cmd in tx_data[0]:
                         dfly_resp = await client.execute_command(*cmd)
-                        fake_resp = await self.fake_redis.execute_command(*cmd)
-                        assert dfly_resp == fake_resp
+                        # To mirror consistently to Fake Redis we must only send to it successful
+                        # commands. We can't use pipes because they might succeed partially.
+                        if self.fake_redis is not None:
+                            fake_resp = await self.fake_redis.execute_command(*cmd)
+                            assert dfly_resp == fake_resp
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
                     await self._close_client(client)
