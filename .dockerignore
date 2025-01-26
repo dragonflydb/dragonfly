@@ -1,3 +1,4 @@
 _deps/*
 build-*
 tools/packaging/*
+.github/*
