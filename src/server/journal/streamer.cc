@@ -297,7 +297,7 @@ bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
 bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
   bool written = false;
 
-  if (it.GetVersion() < snapshot_version_) {
+  if (!it.is_done() && it.GetVersion() < snapshot_version_) {
     stats_.buckets_written++;
 
     it.SetVersion(snapshot_version_);

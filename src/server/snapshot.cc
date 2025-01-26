@@ -390,7 +390,7 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
   const PrimeTable::bucket_iterator* bit = req.update();
 
   if (bit) {
-    if (bit->GetVersion() < snapshot_version_) {
+    if (!bit->is_done() && bit->GetVersion() < snapshot_version_) {
       stats_.side_saved += SerializeBucket(db_index, *bit);
     }
   } else {
