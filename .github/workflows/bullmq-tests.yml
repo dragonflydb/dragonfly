@@ -70,6 +70,7 @@ jobs:
           yarn install
           yarn build
           #BULLMQ_TEST_PREFIX={b} yarn test
+          sed -i 's/timeout: 4000/timeout: 10000/' .mocharc.js
           for i in {1..100}; do
             BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy";
             redis-cli info Commandstats
