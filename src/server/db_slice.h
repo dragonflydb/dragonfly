@@ -477,7 +477,6 @@ class DbSlice {
   }
 
   void SetLoadInProgress(bool in_progress) {
-    DCHECK_NE(load_in_progress_, in_progress);
     load_in_progress_ = in_progress;
   }
 
