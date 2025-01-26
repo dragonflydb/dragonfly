@@ -275,6 +275,7 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
       cache_mode_(cache_mode),
       owner_(owner),
       client_tracking_map_(owner->memory_resource()) {
+  load_in_progress_ = false;
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;

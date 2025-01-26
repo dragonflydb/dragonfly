@@ -585,8 +585,8 @@ class DbSlice {
   mutable LocalBlockingCounter block_counter_;
 
   ShardId shard_id_;
-  uint8_t cache_mode_ : 1 = false;
-  uint8_t load_in_progress_ : 1 = false;
+  uint8_t cache_mode_ : 1;
+  uint8_t load_in_progress_ : 1;
 
   EngineShard* owner_;
 
