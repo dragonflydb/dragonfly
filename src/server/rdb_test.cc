@@ -55,9 +55,10 @@ class RdbTest : public BaseFamilyTest {
 };
 
 void RdbTest::SetUp() {
+  // Setting max_memory_limit must be before calling  InitWithDbFilename
+  max_memory_limit = 40000000;
   InitWithDbFilename();
   CHECK_EQ(zmalloc_used_memory_tl, 0);
-  max_memory_limit = 40000000;
 }
 
 inline const uint8_t* to_byte(const void* s) {
@@ -458,8 +459,8 @@ TEST_F(RdbTest, JsonTest) {
 class HllRdbTest : public RdbTest, public testing::WithParamInterface<string> {};
 
 TEST_P(HllRdbTest, Hll) {
-  LOG(ERROR) << " max memory: " << max_memory_limit
-             << " used_mem_current: " << used_mem_current.load();
+  LOG(INFO) << " max memory: " << max_memory_limit
+            << " used_mem_current: " << used_mem_current.load();
   auto ec = LoadRdb("hll.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
