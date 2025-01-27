@@ -872,4 +872,9 @@ TEST_F(GenericFamilyTest, RestoreOOM) {
   EXPECT_THAT(resp, ErrArg("Out of memory"));
 }
 
+TEST_F(GenericFamilyTest, Bug4466) {
+  auto resp = Run({"SCAN","9223372036854775808"});  // an invalid cursor should not crash us.
+  EXPECT_THAT(resp, RespElementsAre("0", RespElementsAre()));
+}
+
 }  // namespace dfly

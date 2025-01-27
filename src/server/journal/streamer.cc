@@ -231,7 +231,7 @@ void RestoreStreamer::Run() {
       ThisFiber::Yield();
       last_yield = 0;
     }
-  } while (cursor);
+  } while (cursor && !fiber_cancelled_);
 
   VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
           << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
@@ -302,7 +302,7 @@ bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
 
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
-    for (; !it.is_done(); ++it) {
+    for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
       if (ShouldWrite(key)) {

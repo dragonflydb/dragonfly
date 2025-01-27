@@ -814,6 +814,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("migration_finalization_timeout_ms");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
+  config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("managed_service_info");
 
   config_registry.RegisterMutable(
@@ -849,19 +850,23 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_num = pp_.size();
   }
 
+  // We assume that listeners.front() is the main_listener
+  // see dfly_main RunEngine. In unit tests, listeners are empty.
+  facade::Listener* main_listener = listeners.empty() ? nullptr : listeners.front();
+
   ChannelStore* cs = new ChannelStore{};
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
   pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
-    ServerState::Init(index, shard_num, &user_registry_);
+    ServerState::Init(index, shard_num, main_listener, &user_registry_);
     ServerState::tlocal()->UpdateChannelStore(cs);
   });
 
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
-  if (!tcp_disabled && !listeners.empty()) {
-    acl_family_.Init(listeners.front(), &user_registry_);
+  if (!tcp_disabled && main_listener) {
+    acl_family_.Init(main_listener, &user_registry_);
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.
@@ -907,7 +912,7 @@ void Service::Shutdown() {
   shard_set->Shutdown();
   Transaction::Shutdown();
 
-  pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);

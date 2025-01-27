@@ -1051,3 +1051,23 @@ async def test_hiredis(df_factory):
     server.start()
     client = base_redis.Redis(port=server.port, protocol=3, cache_config=CacheConfig())
     client.ping()
+
+
+@dfly_args({"timeout": 1})
+async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
+    another_client = df_server.client()
+    await another_client.ping()
+    clients = await async_client.client_list()
+    assert len(clients) == 2
+
+    await asyncio.sleep(2)
+    
+    @assert_eventually
+    async def wait_for_conn_drop():
+        clients = await async_client.client_list()
+        logging.info("clients: %s", clients)
+        assert len(clients) <= 1
+
+    await wait_for_conn_drop()
+    info = await async_client.info("clients")
+    assert int(info["timeout_disconnects"]) >= 1

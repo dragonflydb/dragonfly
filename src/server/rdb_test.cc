@@ -458,8 +458,8 @@ TEST_F(RdbTest, JsonTest) {
 class HllRdbTest : public RdbTest, public testing::WithParamInterface<string> {};
 
 TEST_P(HllRdbTest, Hll) {
-  LOG(INFO) << " max memory: " << max_memory_limit
-            << " used_mem_current: " << used_mem_current.load();
+  LOG(ERROR) << " max memory: " << max_memory_limit
+             << " used_mem_current: " << used_mem_current.load();
   auto ec = LoadRdb("hll.rdb");
 
   ASSERT_FALSE(ec) << ec.message();
@@ -720,6 +720,18 @@ TEST_F(RdbTest, SnapshotTooBig) {
   used_mem_current = 1000000;
   auto resp = Run({"debug", "reload"});
   ASSERT_THAT(resp, ErrArg("Out of memory"));
+}
+
+TEST_F(RdbTest, HugeKeyIssue4497) {
+  SetTestFlag("cache_mode", "true");
+  ResetService();
+
+  EXPECT_EQ(Run({"flushall"}), "OK");
+  EXPECT_EQ(Run({"debug", "populate", "1", "k", "1000", "rand", "type", "set", "elements", "5000"}),
+            "OK");
+  EXPECT_EQ(Run({"save", "rdb", "hugekey.rdb"}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", "hugekey.rdb"}), "OK");
+  EXPECT_EQ(Run({"flushall"}), "OK");
 }
 
 }  // namespace dfly

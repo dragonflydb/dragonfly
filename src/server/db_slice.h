@@ -229,7 +229,7 @@ class DbSlice {
     int32_t expire_options = 0;  // ExpireFlags
   };
 
-  DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
+  DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
 
   // Activates `db_ind` database if it does not exist (see ActivateDb below).
@@ -468,7 +468,16 @@ class DbSlice {
   }
 
   void TEST_EnableCacheMode() {
-    caching_mode_ = 1;
+    cache_mode_ = 1;
+  }
+
+  bool IsCacheMode() const {
+    // During loading time we never bump elements.
+    return cache_mode_ && !load_in_progress_;
+  }
+
+  void SetLoadInProgress(bool in_progress) {
+    load_in_progress_ = in_progress;
   }
 
   // Test hook to inspect last locked keys.
@@ -575,7 +584,8 @@ class DbSlice {
   mutable LocalBlockingCounter block_counter_;
 
   ShardId shard_id_;
-  uint8_t caching_mode_ : 1;
+  uint8_t cache_mode_ : 1;
+  uint8_t load_in_progress_ : 1;
 
   EngineShard* owner_;
 

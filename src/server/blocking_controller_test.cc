@@ -29,8 +29,9 @@ class BlockingControllerTest : public Test {
   }
   void SetUp() override;
   void TearDown() override;
+
   static void SetUpTestSuite() {
-    ServerState::Init(kNumThreads, kNumThreads, nullptr);
+    ServerState::Init(kNumThreads, kNumThreads, nullptr, nullptr);
     facade::tl_facade_stats = new facade::FacadeStats;
   }
 
@@ -45,7 +46,7 @@ void BlockingControllerTest::SetUp() {
   pp_.reset(fb2::Pool::Epoll(kNumThreads));
   pp_->Run();
   pp_->AwaitBrief([](unsigned index, ProactorBase* p) {
-    ServerState::Init(index, kNumThreads, nullptr);
+    ServerState::Init(index, kNumThreads, nullptr, nullptr);
     if (facade::tl_facade_stats == nullptr) {
       facade::tl_facade_stats = new facade::FacadeStats;
     }
