@@ -2335,10 +2335,11 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
       if (sitem.group) {
         range_opts.consumer =
             FindOrAddConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs());
-      }
+        sitem.consumer = range_opts.consumer;
+        if (!sitem.consumer) {
+          return OpStatus::OUT_OF_MEMORY;
+        }
 
-      range_opts.noack = opts->noack;
-      if (sitem.consumer) {
         if (sitem.consumer->pel->numnodes == 0) {
           LOG(DFATAL) << "Internal error when accessing consumer data, seen_time "
                       << sitem.consumer->seen_time;
@@ -2346,6 +2347,9 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
           return OpStatus::OK;
         }
       }
+
+      range_opts.noack = opts->noack;
+
       result = OpRange(t->GetOpArgs(shard), *wake_key, range_opts);
       key = *wake_key;
     }
