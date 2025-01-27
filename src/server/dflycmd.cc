@@ -78,7 +78,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
   // We don't want any writes to the journal after we send the `PING`,
   // and expirations could ruin that.
   namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(false);
-  shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {}, true);
+  shard->journal()->RecordEntry(0, journal::Op::PING, 0, 0, nullopt, {});
 
   const FlowInfo* flow = &replica->flows[shard->shard_id()];
   while (flow->last_acked_lsn < shard->journal()->GetLsn()) {
@@ -102,7 +102,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
 }  // namespace
 
 void DflyCmd::ReplicaInfo::Cancel() {
-  auto lk = GetExclusiveLock();
+  util::fb2::LockGuard lk{shared_mu};
   if (replica_state == SyncState::CANCELLED) {
     return;
   }
@@ -258,7 +258,7 @@ void DflyCmd::Flow(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
 
   string eof_token;
   {
-    auto lk = replica_ptr->GetExclusiveLock();
+    util::fb2::LockGuard lk{replica_ptr->shared_mu};
 
     if (replica_ptr->replica_state != SyncState::PREPARATION)
       return rb->SendError(kInvalidState);
@@ -321,7 +321,7 @@ void DflyCmd::Sync(CmdArgList args, Transaction* tx, RedisReplyBuilder* rb) {
   if (!sync_id)
     return;
 
-  auto lk = replica_ptr->GetExclusiveLock();
+  util::fb2::LockGuard lk{replica_ptr->shared_mu};
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::PREPARATION, rb))
     return;
 
@@ -359,7 +359,7 @@ void DflyCmd::StartStable(CmdArgList args, Transaction* tx, RedisReplyBuilder* r
   if (!sync_id)
     return;
 
-  auto lk = replica_ptr->GetExclusiveLock();
+  util::fb2::LockGuard lk{replica_ptr->shared_mu};
   if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::FULL_SYNC, rb))
     return;
 
@@ -415,7 +415,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
     return;
 
   {
-    auto lk = replica_ptr->GetSharedLock();
+    dfly::SharedLock lk{replica_ptr->shared_mu};
     if (!CheckReplicaStateOrReply(*replica_ptr, SyncState::STABLE_SYNC, rb))
       return;
 
@@ -434,7 +434,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
   facade::DispatchTracker tracker{sf_->GetNonPriviligedListeners(), cntx->conn()};
-  shard_set->pool()->AwaitBrief([&](unsigned index, auto* pb) {
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto* pb) {
     sf_->CancelBlockingOnThread();
     tracker.TrackOnThread();
   });
@@ -464,7 +464,7 @@ void DflyCmd::TakeOver(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext
 
   atomic_bool catchup_success = true;
   if (*status == OpStatus::OK) {
-    auto lk = replica_ptr->GetSharedLock();
+    dfly::SharedLock lk{replica_ptr->shared_mu};
     auto cb = [replica_ptr = std::move(replica_ptr), end_time,
                &catchup_success](EngineShard* shard) {
       if (!WaitReplicaFlowToCatchup(end_time, replica_ptr.get(), shard)) {
@@ -586,7 +586,7 @@ OpStatus DflyCmd::StartFullSyncInThread(FlowInfo* flow, Context* cntx, EngineSha
   }
 
   if (flow->start_partial_sync_at.has_value())
-    saver->StartIncrementalSnapshotInShard(cntx, shard, *flow->start_partial_sync_at);
+    saver->StartIncrementalSnapshotInShard(*flow->start_partial_sync_at, cntx, shard);
   else
     saver->StartSnapshotInShard(true, cntx, shard);
 
@@ -702,7 +702,7 @@ void DflyCmd::BreakStalledFlowsInShard() {
   vector<uint32_t> deleted;
 
   for (auto [sync_id, replica_ptr] : replica_infos_) {
-    auto replica_lock = replica_ptr->GetSharedLock();
+    dfly::SharedLock replica_lock{replica_ptr->shared_mu};
 
     if (!replica_ptr->flows[sid].saver)
       continue;
@@ -771,7 +771,7 @@ void DflyCmd::GetReplicationMemoryStats(ReplicationMemoryStats* stats) const {
     util::fb2::LockGuard lk{mu_};  // prevent state changes
     auto cb = [&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
       for (const auto& [_, info] : replica_infos_) {
-        auto repl_lk = info->GetSharedLock();
+        dfly::SharedLock repl_lk{info->shared_mu};
 
         // flows should not be empty.
         DCHECK(!info->flows.empty());

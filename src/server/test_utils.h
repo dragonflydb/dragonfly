@@ -25,7 +25,7 @@ void TEST_InvalidateLockTagOptions();
 
 class TestConnection : public facade::Connection {
  public:
-  TestConnection(Protocol protocol, io::StringSink* sink);
+  explicit TestConnection(Protocol protocol);
   std::string RemoteEndpointStr() const override;
 
   void SendPubMessageAsync(PubMessage pmsg) final;
@@ -44,7 +44,6 @@ class TestConnection : public facade::Connection {
   std::vector<InvalidationMessage> invalidate_messages;
 
  private:
-  io::StringSink* sink_;
   bool is_privileged_ = false;
 };
 

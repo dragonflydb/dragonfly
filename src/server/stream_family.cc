@@ -27,6 +27,18 @@ namespace dfly {
 using namespace facade;
 using namespace std;
 
+StreamMemTracker::StreamMemTracker() {
+  start_size_ = zmalloc_used_memory_tl;
+}
+
+void StreamMemTracker::UpdateStreamSize(PrimeValue& pv) const {
+  const size_t current = zmalloc_used_memory_tl;
+  int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
+  pv.AddStreamSize(diff);
+  // Under any flow we must not end up with this special value.
+  DCHECK(pv.MallocUsed() != 0);
+}
+
 namespace {
 
 struct Record {
@@ -245,15 +257,16 @@ bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamI
   return true;
 }
 
-bool ParseRangeId(string_view id, RangeId* dest) {
+enum class RangeBoundary { kStart, kEnd };
+bool ParseRangeId(string_view id, RangeBoundary type, RangeId* dest) {
   if (id.empty())
     return false;
   if (id[0] == '(') {
     dest->exclude = true;
     id.remove_prefix(1);
   }
-
-  return ParseID(id, dest->exclude, 0, &dest->parsed_id);
+  uint64 missing_seq = type == RangeBoundary::kStart ? 0 : -1;
+  return ParseID(id, dest->exclude, missing_seq, &dest->parsed_id);
 }
 
 /* This is a wrapper function for lpGet() to directly get an integer value
@@ -611,24 +624,6 @@ int StreamTrim(const AddTrimOpts& opts, stream* s) {
 
   return 0;
 }
-
-class StreamMemTracker {
- public:
-  StreamMemTracker() {
-    start_size_ = zmalloc_used_memory_tl;
-  }
-
-  void UpdateStreamSize(PrimeValue& pv) const {
-    const size_t current = zmalloc_used_memory_tl;
-    int64_t diff = static_cast<int64_t>(current) - static_cast<int64_t>(start_size_);
-    pv.AddStreamSize(diff);
-    // Under any flow we must not end up with this special value.
-    DCHECK(pv.MallocUsed() != 0);
-  }
-
- private:
-  size_t start_size_{0};
-};
 
 OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
@@ -1813,7 +1808,7 @@ void DestroyGroup(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilde
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("DESTROY", "XGROUP"));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname](Transaction* t, EngineShard* shard) {
     return OpDestroyGroup(t->GetOpArgs(shard), key, gname);
   };
 
@@ -1839,7 +1834,8 @@ void CreateConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuil
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("CREATECONSUMER", "XGROUP"));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
+                                                                  EngineShard* shard) {
     return OpCreateConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
   OpResult<uint32_t> result = tx->ScheduleSingleHopT(cb);
@@ -1867,7 +1863,8 @@ void DelConsumer(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder
   if (parser->HasNext())
     return builder->SendError(UnknownSubCmd("DELCONSUMER", "XGROUP"));
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname, &consumer = consumer](Transaction* t,
+                                                                  EngineShard* shard) {
     return OpDelConsumer(t->GetOpArgs(shard), key, gname, consumer);
   };
 
@@ -1900,7 +1897,7 @@ void SetId(facade::CmdArgParser* parser, Transaction* tx, SinkReplyBuilder* buil
   if (auto err = parser->Error(); err)
     return builder->SendError(err->MakeReply());
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &gname = gname, &id = id](Transaction* t, EngineShard* shard) {
     return OpSetId(t->GetOpArgs(shard), key, gname, id);
   };
 
@@ -2210,7 +2207,8 @@ void XRangeGeneric(std::string_view key, std::string_view start, std::string_vie
                    CmdArgList args, bool is_rev, Transaction* tx, SinkReplyBuilder* builder) {
   RangeOpts range_opts;
   RangeId rs, re;
-  if (!ParseRangeId(start, &rs) || !ParseRangeId(end, &re)) {
+  if (!ParseRangeId(start, RangeBoundary::kStart, &rs) ||
+      !ParseRangeId(end, RangeBoundary::kEnd, &re)) {
     return builder->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
@@ -2508,7 +2506,8 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
   string_view start = ArgS(args, id_indx);
   id_indx++;
   string_view end = ArgS(args, id_indx);
-  if (!ParseRangeId(start, &rs) || !ParseRangeId(end, &re)) {
+  if (!ParseRangeId(start, RangeBoundary::kStart, &rs) ||
+      !ParseRangeId(end, RangeBoundary::kEnd, &re)) {
     builder->SendError(kInvalidStreamId, kSyntaxErrType);
     return false;
   }
@@ -3231,7 +3230,7 @@ void StreamFamily::XAutoClaim(CmdArgList args, const CommandContext& cmd_cntx) {
   string_view start = ArgS(args, 4);
   RangeId rs;
 
-  if (!ParseRangeId(start, &rs)) {
+  if (!ParseRangeId(start, RangeBoundary::kStart, &rs)) {
     return rb->SendError(kSyntaxErr);
   }
 

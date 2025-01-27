@@ -41,7 +41,7 @@ async def post_to_redis(sem, db_name, index):
                 log.info(f"after pipe.execute {key_index}")
         finally:
             # log.info(f"before close {index}")
-            await redis_client.close()
+            await redis_client.aclose()
             # log.info(f"after close {index} {len(results)}")
 
 

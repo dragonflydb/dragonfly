@@ -30,6 +30,7 @@ ABSL_FLAG(uint16_t, p, 6379, "Server port");
 ABSL_FLAG(uint32_t, c, 20, "Number of connections per thread");
 ABSL_FLAG(uint32_t, qps, 20, "QPS schedule at which the generator sends requests to the server");
 ABSL_FLAG(uint32_t, n, 1000, "Number of requests to send per connection");
+ABSL_FLAG(uint32_t, test_time, 0, "Testing time in seconds");
 ABSL_FLAG(uint32_t, d, 16, "Value size in bytes ");
 ABSL_FLAG(string, h, "localhost", "server hostname/ip");
 ABSL_FLAG(uint64_t, key_minimum, 0, "Min value for keys used");
@@ -43,9 +44,15 @@ ABSL_FLAG(uint64_t, key_stddev, 0,
           " a default value of (max-min)/6");
 ABSL_FLAG(uint32_t, pipeline, 1, "maximum number of pending requests per connection");
 ABSL_FLAG(string, ratio, "1:10", "Set:Get ratio");
-ABSL_FLAG(string, command, "", "custom command with __key__ placeholder for keys");
+ABSL_FLAG(string, command, "",
+          "custom command with __key__ placeholder for keys, "
+          "__data__ for values, __score__ for doubles");
 ABSL_FLAG(string, P, "", "protocol can be empty (for RESP) or memcache_text");
 ABSL_FLAG(bool, tcp_nodelay, false, "If true, set nodelay option on tcp socket");
+ABSL_FLAG(bool, noreply, false, "If true, does not wait for replies. Relevant only for memcached.");
+ABSL_FLAG(bool, greet, true,
+          "If true, sends a greeting command on each connection, "
+          "to make sure the connection succeeded");
 
 using namespace std;
 using namespace util;
@@ -56,8 +63,6 @@ using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
 using absl::StrCat;
 
-constexpr string_view kKeyPlaceholder = "__key__"sv;
-
 thread_local base::Xoroshiro128p bit_gen;
 
 #if __INTELLISENSE__
@@ -66,6 +71,28 @@ thread_local base::Xoroshiro128p bit_gen;
 
 enum Protocol { RESP, MC_TEXT } protocol;
 enum DistType { UNIFORM, NORMAL, ZIPFIAN, SEQUENTIAL } dist_type{UNIFORM};
+
+string_view kTmplPatterns[] = {"__key__"sv, "__data__"sv, "__score__"sv};
+
+static string GetRandomHex(size_t len) {
+  std::string res(len, '\0');
+  size_t indx = 0;
+
+  for (; indx < len; indx += 16) {  // 2 chars per byte
+    absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), res.data() + indx);
+  }
+
+  if (indx < len) {
+    char buf[24];
+    absl::numbers_internal::FastHexToBufferZeroPad16(bit_gen(), buf);
+
+    for (unsigned j = 0; indx < len; indx++, j++) {
+      res[indx] = buf[j];
+    }
+  }
+
+  return res;
+}
 
 class KeyGenerator {
  public:
@@ -91,17 +118,26 @@ class CommandGenerator {
     return might_hit_;
   }
 
+  bool noreply() const {
+    return noreply_;
+  }
+
  private:
+  enum TemplateType { KEY, VALUE, SCORE };
+
   void FillSet(string_view key);
   void FillGet(string_view key);
+  void AddTemplateIndices(string_view pattern, TemplateType t);
 
   KeyGenerator* keygen_;
   uint32_t ratio_set_ = 0, ratio_get_ = 0;
   string command_;
   string cmd_;
-  std::vector<size_t> key_indices_;
+
+  vector<pair<size_t, TemplateType>> key_indices_;
   string value_;
   bool might_hit_ = false;
+  bool noreply_ = false;
 };
 
 CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
@@ -113,32 +149,47 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
     CHECK(absl::SimpleAtoi(ratio_str.first, &ratio_set_));
     CHECK(absl::SimpleAtoi(ratio_str.second, &ratio_get_));
   } else {
-    for (size_t pos = 0; (pos = command_.find(kKeyPlaceholder, pos)) != string::npos;
-         pos += kKeyPlaceholder.size()) {
-      key_indices_.push_back(pos);
-    }
+    AddTemplateIndices(kTmplPatterns[KEY], KEY);
+    AddTemplateIndices(kTmplPatterns[VALUE], VALUE);
+    AddTemplateIndices(kTmplPatterns[SCORE], SCORE);
+    sort(key_indices_.begin(), key_indices_.end());
   }
 }
 
 string CommandGenerator::Next() {
   cmd_.clear();
-  string key;
+  noreply_ = false;
   if (command_.empty()) {
-    key = (*keygen_)();
+    string key = (*keygen_)();
 
     if (absl::Uniform(bit_gen, 0U, ratio_get_ + ratio_set_) < ratio_set_) {
       FillSet(key);
       might_hit_ = false;
     } else {
       FillGet(key);
+
       might_hit_ = true;
     }
   } else {
     size_t last_pos = 0;
-    for (size_t pos : key_indices_) {
-      key = (*keygen_)();
-      absl::StrAppend(&cmd_, command_.substr(last_pos, pos - last_pos), key);
-      last_pos = pos + kKeyPlaceholder.size();
+    const size_t kPatLen[] = {kTmplPatterns[KEY].size(), kTmplPatterns[VALUE].size(),
+                              kTmplPatterns[SCORE].size()};
+    string str;
+    for (auto [pos, type] : key_indices_) {
+      switch (type) {
+        case KEY:
+          str = (*keygen_)();
+          break;
+        case VALUE:
+          str = GetRandomHex(value_.size());
+          break;
+        case SCORE: {
+          uniform_real_distribution<double> uniform(0, 1);
+          str = absl::StrCat(uniform(bit_gen));
+        }
+      }
+      absl::StrAppend(&cmd_, command_.substr(last_pos, pos - last_pos), str);
+      last_pos = pos + kPatLen[type];
     }
     absl::StrAppend(&cmd_, command_.substr(last_pos), "\r\n");
   }
@@ -150,13 +201,23 @@ void CommandGenerator::FillSet(string_view key) {
     absl::StrAppend(&cmd_, "set ", key, " ", value_, "\r\n");
   } else {
     DCHECK_EQ(protocol, MC_TEXT);
-    absl::StrAppend(&cmd_, "set ", key, " 0 0 ", value_.size(), "\r\n");
-    absl::StrAppend(&cmd_, value_, "\r\n");
+    absl::StrAppend(&cmd_, "set ", key, " 0 0 ", value_.size());
+    if (GetFlag(FLAGS_noreply)) {
+      absl::StrAppend(&cmd_, " noreply");
+      noreply_ = true;
+    }
+    absl::StrAppend(&cmd_, "\r\n", value_, "\r\n");
   }
 }
 
 void CommandGenerator::FillGet(string_view key) {
   absl::StrAppend(&cmd_, "get ", key, "\r\n");
+}
+
+void CommandGenerator::AddTemplateIndices(string_view pattern, TemplateType t) {
+  for (size_t pos = 0; (pos = command_.find(pattern, pos)) != string::npos; pos += pattern.size()) {
+    key_indices_.emplace_back(pos, t);
+  }
 }
 
 struct ClientStats {
@@ -182,19 +243,23 @@ struct ClientStats {
 // Per connection driver.
 class Driver {
  public:
-  explicit Driver(uint32_t num_reqs, ClientStats* stats, ProactorBase* p)
-      : num_reqs_(num_reqs), stats_(*stats) {
+  explicit Driver(uint32_t num_reqs, uint32_t time_limit, ClientStats* stats, ProactorBase* p)
+      : num_reqs_(num_reqs), time_limit_(time_limit), stats_(*stats) {
     socket_.reset(p->CreateSocket());
+    if (time_limit_ > 0)
+      num_reqs_ = UINT32_MAX;
   }
 
   Driver(const Driver&) = delete;
-  Driver(Driver&&) = default;
-  Driver& operator=(Driver&&) = default;
+  Driver(Driver&&) = delete;
+  Driver& operator=(Driver&&) = delete;
 
   void Connect(unsigned index, const tcp::endpoint& ep);
   void Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen);
 
   float done() const {
+    if (time_limit_ > 0)
+      return double(absl::GetCurrentTimeNanos() - start_ns_) / (time_limit_ * 1e9);
     return double(received_) / num_reqs_;
   }
 
@@ -213,7 +278,8 @@ class Driver {
     bool might_hit;
   };
 
-  uint32_t num_reqs_, received_ = 0;
+  uint32_t num_reqs_, time_limit_, received_ = 0;
+  int64_t start_ns_ = 0;
 
   ClientStats& stats_;
   unique_ptr<FiberSocketBase> socket_;
@@ -231,7 +297,7 @@ class TLocalClient {
   explicit TLocalClient(ProactorBase* p) : p_(p) {
     drivers_.resize(GetFlag(FLAGS_c));
     for (auto& driver : drivers_) {
-      driver.reset(new Driver{GetFlag(FLAGS_n), &stats, p_});
+      driver.reset(new Driver{GetFlag(FLAGS_n), GetFlag(FLAGS_test_time), &stats, p_});
     }
   }
 
@@ -338,32 +404,37 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
     CHECK_EQ(0, setsockopt(socket_->native_handle(), IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes)));
   }
 
-  // TCP Connect does not ensure that the connection was indeed accepted by the server.
-  // if server backlog is too short the connection will get stuck in the accept queue.
-  // Therefore, we send a ping command to ensure that every connection got connected.
-  ec = socket_->Write(io::Buffer("ping\r\n"));
-  CHECK(!ec);
+  if (absl::GetFlag(FLAGS_greet)) {
+    // TCP Connect does not ensure that the connection was indeed accepted by the server.
+    // if server backlog is too short the connection will get stuck in the accept queue.
+    // Therefore, we send a ping command to ensure that every connection got connected.
+    ec = socket_->Write(io::Buffer("ping\r\n"));
+    CHECK(!ec);
 
-  uint8_t buf[128];
-  auto res_sz = socket_->Recv(io::MutableBytes(buf));
-  CHECK(res_sz) << res_sz.error().message();
-  string_view resp = io::View(io::Bytes(buf, *res_sz));
-  CHECK(absl::EndsWith(resp, "\r\n")) << resp;
-
+    uint8_t buf[128];
+    auto res_sz = socket_->Recv(io::MutableBytes(buf));
+    CHECK(res_sz) << res_sz.error().message();
+    string_view resp = io::View(io::Bytes(buf, *res_sz));
+    CHECK(absl::EndsWith(resp, "\r\n")) << resp;
+  }
   receive_fb_ = MakeFiber(fb2::Launch::dispatch, [this] { ReceiveFb(); });
 }
 
 void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
-  const int64_t start = absl::GetCurrentTimeNanos();
+  start_ns_ = absl::GetCurrentTimeNanos();
   unsigned pipeline = GetFlag(FLAGS_pipeline);
 
   stats_.num_clients++;
-
+  int64_t time_limit_ns =
+      time_limit_ > 0 ? int64_t(time_limit_) * 1'000'000'000 + start_ns_ : INT64_MAX;
   for (unsigned i = 0; i < num_reqs_; ++i) {
     int64_t now = absl::GetCurrentTimeNanos();
 
+    if (now > time_limit_ns) {
+      break;
+    }
     if (cycle_ns) {
-      int64_t target_ts = start + i * (*cycle_ns);
+      int64_t target_ts = start_ns_ + i * (*cycle_ns);
       int64_t sleep_ns = target_ts - now;
       if (reqs_.size() > 10 && sleep_ns <= 0) {
         sleep_ns = 10'000;
@@ -400,11 +471,14 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       break;
     }
     CHECK(!ec) << ec.message();
+    if (cmd_gen->noreply()) {
+      PopRequest();
+    }
   }
 
   int64_t finish = absl::GetCurrentTimeNanos();
   VLOG(1) << "Done queuing " << num_reqs_ << " requests, which took "
-          << StrFormat("%.1fs", double(finish - start) / 1000000000)
+          << StrFormat("%.1fs", double(finish - start_ns_) / 1000'000'000)
           << ". Waiting for server processing";
 
   // TODO: to change to a condvar or something.
@@ -412,7 +486,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
     ThisFiber::SleepFor(1ms);
   }
 
-  socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
+  std::ignore = socket_->Shutdown(SHUT_RDWR);  // breaks the receive fiber.
   receive_fb_.Join();
   std::ignore = socket_->Close();
   stats_.num_clients--;
@@ -487,7 +561,7 @@ void Driver::ParseRESP() {
       PopRequest();
     }
     io_buf_.ConsumeInput(consumed);
-  } while (result == RedisParser::OK);
+  } while (result == RedisParser::OK && io_buf_.InputLen() > 0);
 }
 
 void Driver::ParseMC() {
@@ -598,6 +672,7 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
   uint64_t num_last_resp_cnt = 0;
 
   uint64_t resp_goal = GetFlag(FLAGS_c) * pp->size() * GetFlag(FLAGS_n);
+  uint32_t time_limit = GetFlag(FLAGS_test_time);
 
   while (*finish_signal == false) {
     // we sleep with resolution of 1s but print with lower frequency to be more responsive
@@ -628,7 +703,8 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
     uint64_t total_ms = (now - start_time) / 1'000'000;
     uint64_t period_ms = (now - last_print) / 1'000'000;
     uint64_t period_resp_cnt = stats.num_responses - num_last_resp_cnt;
-    double done_perc = double(stats.num_responses) * 100 / resp_goal;
+    double done_perc = time_limit > 0 ? double(total_ms) / (10 * time_limit)
+                                      : double(stats.num_responses) * 100 / resp_goal;
     double hitrate = stats.hit_opportunities > 0
                          ? 100 * double(stats.hit_count) / double(stats.hit_opportunities)
                          : 0;
@@ -703,10 +779,11 @@ int main(int argc, char* argv[]) {
 
   uint32_t thread_key_step = 0;
   const uint32_t qps = GetFlag(FLAGS_qps);
-  const int64_t interval = qps ? 1000000000LL / qps : 0;
+  const int64_t interval = qps ? 1'000'000'000LL / qps : 0;
   uint64_t num_reqs = GetFlag(FLAGS_n);
   uint64_t total_conn_num = GetFlag(FLAGS_c) * pp->size();
   uint64_t total_requests = num_reqs * total_conn_num;
+  uint32_t time_limit = GetFlag(FLAGS_test_time);
 
   if (dist_type == SEQUENTIAL) {
     thread_key_step = std::max(1UL, (key_maximum - key_minimum + 1) / pp->size());
@@ -717,9 +794,10 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
-               << " requests per each connection, or " << total_requests << " requests overall";
-
+  if (!time_limit) {
+    CONSOLE_INFO << "Running " << pp->size() << " threads, sending " << num_reqs
+                 << " requests per each connection, or " << total_requests << " requests overall";
+  }
   if (interval) {
     CONSOLE_INFO << "At a rate of " << GetFlag(FLAGS_qps)
                  << " rps per connection, i.e. request every " << interval / 1000 << "us";
@@ -762,7 +840,8 @@ int main(int argc, char* argv[]) {
 
   CONSOLE_INFO << "\nTotal time: " << duration
                << ". Overall number of requests: " << summary.num_responses
-               << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan");
+               << ", QPS: " << (dur_sec ? StrCat(summary.num_responses / dur_sec) : "nan")
+               << ", P99 lat: " << summary.hist.Percentile(99) << "us";
 
   if (summary.num_errors) {
     CONSOLE_INFO << "Got " << summary.num_errors << " error responses!";

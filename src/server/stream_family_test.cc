@@ -93,6 +93,21 @@ TEST_F(StreamFamilyTest, AddExtended) {
   EXPECT_THAT(Run({"xlen", "key4"}), IntArg(601));
 }
 
+TEST_F(StreamFamilyTest, XrangeRangeAutocomplete) {
+  Run({"xadd", "mystream", "1609459200000-0", "0", "0"});
+  Run({"xadd", "mystream", "1609459200001-0", "1", "1"});
+  Run({"xadd", "mystream", "1609459200001-1", "2", "2"});
+  Run({"xadd", "mystream", "1609459200002-0", "3", "3"});
+  auto resp = Run({"xrange", "mystream", "1609459200000", "1609459200001"});
+  EXPECT_THAT(resp, RespElementsAre(RespElementsAre("1609459200000-0", RespElementsAre("0", "0")),
+                                    RespElementsAre("1609459200001-0", RespElementsAre("1", "1")),
+                                    RespElementsAre("1609459200001-1", RespElementsAre("2", "2"))));
+  resp = Run({"xrange", "mystream", "1609459200000", "(1609459200001"});
+  EXPECT_THAT(resp, RespElementsAre(RespElementsAre("1609459200000-0", RespElementsAre("0", "0")),
+                                    RespElementsAre("1609459200001-0", RespElementsAre("1", "1")),
+                                    RespElementsAre("1609459200001-1", RespElementsAre("2", "2"))));
+}
+
 TEST_F(StreamFamilyTest, Range) {
   Run({"xadd", "key", "1-*", "f1", "v1"});
   Run({"xadd", "key", "1-*", "f2", "v2"});

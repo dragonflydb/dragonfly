@@ -1,3 +1,7 @@
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "server/cluster/cluster_utility.h"
 
 #include "server/cluster/cluster_defs.h"
@@ -7,37 +11,6 @@
 using namespace std;
 
 namespace dfly::cluster {
-
-void UniqueSlotChecker::Add(std::string_view key) {
-  if (!IsClusterEnabled()) {
-    return;
-  }
-
-  Add(KeySlot(key));
-}
-
-void UniqueSlotChecker::Add(SlotId slot_id) {
-  if (!IsClusterEnabled()) {
-    return;
-  }
-
-  if (!slot_id_.has_value()) {
-    slot_id_ = slot_id;
-    return;
-  }
-
-  if (*slot_id_ != slot_id) {
-    slot_id_ = kInvalidSlotId;
-  }
-}
-
-optional<SlotId> UniqueSlotChecker::GetUniqueSlotId() const {
-  if (slot_id_.has_value() && *slot_id_ == kInvalidSlotId) {
-    return nullopt;
-  }
-
-  return slot_id_;
-}
 
 uint64_t GetKeyCount(const SlotRanges& slots) {
   std::atomic_uint64_t keys = 0;

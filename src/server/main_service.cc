@@ -39,10 +39,10 @@ extern "C" {
 #include "server/bloom_family.h"
 #include "server/channel_store.h"
 #include "server/cluster/cluster_family.h"
-#include "server/cluster/cluster_utility.h"
 #include "server/conn_context.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/geo_family.h"
 #include "server/hll_family.h"
 #include "server/hset_family.h"
 #include "server/http_api.h"
@@ -76,13 +76,13 @@ ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
-ABSL_FLAG(uint32_t, multi_exec_mode, 2,
-          "Set multi exec atomicity mode: 1 for global, 2 for locking ahead, 3 for non atomic");
+ABSL_RETIRED_FLAG(uint32_t, multi_exec_mode, 2, "DEPRECATED. Sets multi exec atomicity mode");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
           "Whether multi exec will squash single shard commands to optimize performance");
 
-ABSL_FLAG(bool, track_exec_frequencies, true, "Whether to track exec frequencies for multi exec");
+ABSL_RETIRED_FLAG(bool, track_exec_frequencies, true,
+                  "DEPRECATED. Whether to track exec frequencies for multi exec");
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 4096, "Max buffer for squashed commands per script");
@@ -572,15 +572,13 @@ void ClusterHtmlPage(const http::QueryArgs& args, HttpContext* send,
 
   auto print_kb = [&](string_view k, bool v) { print_kv(k, v ? "True" : "False"); };
 
-  print_kv("Mode", cluster::IsClusterEmulated()  ? "Emulated"
-                   : cluster::IsClusterEnabled() ? "Enabled"
-                                                 : "Disabled");
+  print_kv("Mode", IsClusterEmulated() ? "Emulated" : IsClusterEnabled() ? "Enabled" : "Disabled");
 
-  if (cluster::IsClusterEnabledOrEmulated()) {
+  if (IsClusterEnabledOrEmulated()) {
     print_kb("Lock on hashtags", LockTagOptions::instance().enabled);
   }
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     if (cluster::ClusterFamily::cluster_config() == nullptr) {
       resp.body() += "<h2>Not yet configured.</h2>\n";
     } else {
@@ -651,8 +649,7 @@ Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
                                       const ScriptMgr& script_mgr) {
   // Check if script most LIKELY has global eval transactions
   bool contains_global = false;
-  Transaction::MultiMode multi_mode =
-      static_cast<Transaction::MultiMode>(absl::GetFlag(FLAGS_multi_exec_mode));
+  Transaction::MultiMode multi_mode = Transaction::LOCK_AHEAD;
 
   if (state == ExecScriptUse::SCRIPT_RUN) {
     contains_global = script_mgr.AreGlobalByDefault();
@@ -715,7 +712,7 @@ string FailedCommandToString(std::string_view command, facade::CmdArgList args,
   absl::StrAppend(&result, " ", command);
 
   for (auto arg : args) {
-    absl::StrAppend(&result, " ", facade::ToSV(arg));
+    absl::StrAppend(&result, " ", absl::CHexEscape(arg));
   }
 
   absl::StrAppend(&result, " failed with reason: ", reason);
@@ -781,6 +778,7 @@ Service::~Service() {
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
+  facade::Connection::Init(pp_.size());
 
   config_registry.RegisterSetter<MemoryBytesFlag>(
       "maxmemory", [](const MemoryBytesFlag& flag) { max_memory_limit = flag.value; });
@@ -803,18 +801,20 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 
   config_registry.RegisterSetter<uint32_t>("pipeline_queue_limit", [](uint32_t val) {
     shard_set->pool()->AwaitBrief(
-        [val](unsigned, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(val); });
+        [val](unsigned tid, auto*) { facade::Connection::SetMaxQueueLenThreadLocal(tid, val); });
   });
 
   config_registry.RegisterSetter<size_t>("pipeline_buffer_limit", [](size_t val) {
     shard_set->pool()->AwaitBrief(
-        [val](unsigned, auto*) { facade::Connection::SetPipelineBufferLimit(val); });
+        [val](unsigned tid, auto*) { facade::Connection::SetPipelineBufferLimit(tid, val); });
   });
 
   config_registry.RegisterMutable("replica_partial_sync");
   config_registry.RegisterMutable("replication_timeout");
+  config_registry.RegisterMutable("migration_finalization_timeout_ms");
   config_registry.RegisterMutable("table_growth_margin");
   config_registry.RegisterMutable("tcp_keepalive");
+  config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("managed_service_info");
 
   config_registry.RegisterMutable(
@@ -850,19 +850,23 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     shard_num = pp_.size();
   }
 
+  // We assume that listeners.front() is the main_listener
+  // see dfly_main RunEngine. In unit tests, listeners are empty.
+  facade::Listener* main_listener = listeners.empty() ? nullptr : listeners.front();
+
   ChannelStore* cs = new ChannelStore{};
   // Must initialize before the shard_set because EngineShard::Init references ServerState.
   pp_.AwaitBrief([&](uint32_t index, ProactorBase* pb) {
     tl_facade_stats = new FacadeStats;
-    ServerState::Init(index, shard_num, &user_registry_);
+    ServerState::Init(index, shard_num, main_listener, &user_registry_);
     ServerState::tlocal()->UpdateChannelStore(cs);
   });
 
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
-  if (!tcp_disabled && !listeners.empty()) {
-    acl_family_.Init(listeners.front(), &user_registry_);
+  if (!tcp_disabled && main_listener) {
+    acl_family_.Init(main_listener, &user_registry_);
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.
@@ -884,7 +888,11 @@ void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
   // We mark that we are shutting down. After this incoming requests will be
-  // rejected
+  // rejected.
+  mu_.lock();
+  global_state_ = GlobalState::SHUTTING_DOWN;
+  mu_.unlock();
+
   pp_.AwaitFiberOnAll([](ProactorBase* pb) {
     ServerState::tlocal()->EnterLameDuck();
     facade::Connection::ShutdownThreadLocal();
@@ -904,10 +912,11 @@ void Service::Shutdown() {
   shard_set->Shutdown();
   Transaction::Shutdown();
 
-  pp_.Await([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
+  pp_.AwaitFiberOnAll([](ProactorBase* pb) { ServerState::tlocal()->Destroy(); });
 
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
+  facade::Connection::Shutdown();
 }
 
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
@@ -927,11 +936,11 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   const auto& key_index = *key_index_res;
-  optional<cluster::SlotId> keys_slot;
+  optional<SlotId> keys_slot;
   bool cross_slot = false;
   // Iterate keys and check to which slot they belong.
   for (string_view key : key_index.Range(args)) {
-    if (cluster::SlotId slot = cluster::KeySlot(key); keys_slot && slot != *keys_slot) {
+    if (SlotId slot = KeySlot(key); keys_slot && slot != *keys_slot) {
       cross_slot = true;  // keys belong to different slots
       break;
     } else {
@@ -1099,7 +1108,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId* cid, CmdA
       return ErrorReply{absl::StrCat("'", cmd_name, "' inside MULTI is not allowed")};
   }
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;
   }
@@ -1484,11 +1493,18 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
                          MCReplyBuilder* mc_builder, facade::ConnectionContext* cntx) {
   absl::InlinedVector<MutableSlice, 8> args;
   char cmd_name[16];
-  char ttl[16];
+  char ttl[absl::numbers_internal::kFastToBufferSize];
   char store_opt[32] = {0};
   char ttl_op[] = "EXAT";
 
   mc_builder->SetNoreply(cmd.no_reply);
+  mc_builder->SetMeta(cmd.meta);
+  if (cmd.meta) {
+    mc_builder->SetBase64(cmd.base64);
+    mc_builder->SetReturnMCFlag(cmd.return_flags);
+    mc_builder->SetReturnValue(cmd.return_value);
+    mc_builder->SetReturnVersion(cmd.return_version);
+  }
 
   switch (cmd.type) {
     case MemcacheParser::REPLACE:
@@ -1532,7 +1548,7 @@ void Service::DispatchMC(const MemcacheParser::Command& cmd, std::string_view va
       server_family_.StatsMC(cmd.key, mc_builder);
       return;
     case MemcacheParser::VERSION:
-      mc_builder->SendSimpleString("VERSION 1.5.0 DF");
+      mc_builder->SendSimpleString("VERSION 1.6.0 DF");
       return;
     default:
       mc_builder->SendClientError("bad command line format");
@@ -1923,7 +1939,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
 
   optional<ShardId> sid;
 
-  cluster::UniqueSlotChecker slot_checker;
+  UniqueSlotChecker slot_checker;
   for (size_t i = 0; i < eval_args.keys.size(); ++i) {
     string_view key = ArgS(eval_args.keys, i);
     slot_checker.Add(key);
@@ -2199,10 +2215,8 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->StartArray(exec_info.body.size());
 
   if (!exec_info.body.empty()) {
-    if (GetFlag(FLAGS_track_exec_frequencies)) {
-      string descr = CreateExecDescriptor(exec_info.body, cmd_cntx.tx->GetUniqueShardCnt());
-      ServerState::tlocal()->exec_freq_count[descr]++;
-    }
+    string descr = CreateExecDescriptor(exec_info.body, cmd_cntx.tx->GetUniqueShardCnt());
+    ServerState::tlocal()->exec_freq_count[descr]++;
 
     if (absl::GetFlag(FLAGS_multi_exec_squash) && state != ExecScriptUse::SCRIPT_RUN &&
         !cntx->conn_state.tracking_info_.IsTrackingOn()) {
@@ -2245,7 +2259,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("PUBLISH is not supported in cluster mode yet");
   }
   string_view channel = ArgS(args, 0);
@@ -2256,7 +2270,7 @@ void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
   }
   cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args),
@@ -2265,7 +2279,7 @@ void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
 
 void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
   }
 
@@ -2279,7 +2293,7 @@ void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
 void Service::PSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return rb->SendError("PSUBSCRIBE is not supported in cluster mode yet");
   }
   cmd_cntx.conn_cntx->ChangePSubscription(true, true, args, rb);
@@ -2288,7 +2302,7 @@ void Service::PSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
 void Service::PUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return rb->SendError("PUNSUBSCRIBE is not supported in cluster mode yet");
   }
   if (args.size() == 0) {
@@ -2343,7 +2357,7 @@ void Service::Monitor(CmdArgList args, const CommandContext& cmd_cntx) {
 void Service::Pubsub(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
-  if (cluster::IsClusterEnabled()) {
+  if (IsClusterEnabled()) {
     return rb->SendError("PUBSUB is not supported in cluster mode yet");
   }
   if (args.size() < 1) {
@@ -2498,38 +2512,26 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   return to;
 }
 
-void Service::RequestLoadingState() {
-  bool switch_state = false;
-  {
+bool Service::RequestLoadingState() {
+  if (SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) == GlobalState::LOADING) {
     util::fb2::LockGuard lk(mu_);
-    ++loading_state_counter_;
-    if (global_state_ != GlobalState::LOADING) {
-      DCHECK_EQ(global_state_, GlobalState::ACTIVE);
-      switch_state = true;
-    }
+    loading_state_counter_++;
+    return true;
   }
-  if (switch_state) {
-    SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
-  }
+  return false;
 }
 
 void Service::RemoveLoadingState() {
   bool switch_state = false;
   {
     util::fb2::LockGuard lk(mu_);
-    DCHECK_EQ(global_state_, GlobalState::LOADING);
-    DCHECK_GT(loading_state_counter_, 0u);
+    CHECK_GT(loading_state_counter_, 0u);
     --loading_state_counter_;
     switch_state = loading_state_counter_ == 0;
   }
   if (switch_state) {
     SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
   }
-}
-
-GlobalState Service::GetGlobalState() const {
-  util::fb2::LockGuard lk(mu_);
-  return global_state_;
 }
 
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
@@ -2667,6 +2669,7 @@ void Service::RegisterCommands() {
   SetFamily::Register(&registry_);
   HSetFamily::Register(&registry_);
   ZSetFamily::Register(&registry_);
+  GeoFamily::Register(&registry_);
   JsonFamily::Register(&registry_);
   BitOpsFamily::Register(&registry_);
   HllFamily::Register(&registry_);

@@ -10,7 +10,6 @@
 #include "base/logging.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
-#include "server/cluster/cluster_defs.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
@@ -63,8 +62,8 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t size, DbTable* 
 
   stats.AddTypeMemoryUsage(type, size);
 
-  if (cluster::IsClusterEnabled()) {
-    db->slots_stats[cluster::KeySlot(key)].memory_bytes += size;
+  if (IsClusterEnabled()) {
+    db->slots_stats[KeySlot(key)].memory_bytes += size;
   }
 }
 
@@ -129,11 +128,20 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
   // we estimate how much memory we will take with the current capacity
   // even though we may currently use less memory.
   // see https://github.com/dragonflydb/dragonfly/issues/256#issuecomment-1227095503
-  size_t table_free_items = (tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity;
-  size_t obj_bytes_estimation =
-      db_slice_->bytes_per_object() * table_free_items * GetFlag(FLAGS_table_growth_margin);
+  size_t table_free_items = ((tbl.capacity() - tbl.size()) + PrimeTable::kSegCapacity) *
+                            GetFlag(FLAGS_table_growth_margin);
+
+  size_t obj_bytes_estimation = db_slice_->bytes_per_object() * table_free_items;
   bool res = mem_available > int64_t(PrimeTable::kSegBytes + obj_bytes_estimation);
-  VLOG(2) << "available: " << table_free_items << ", res: " << res;
+  if (res) {
+    VLOG(1) << "free_items: " << table_free_items
+            << ", obj_bytes: " << db_slice_->bytes_per_object() << " "
+            << " mem_available: " << mem_available;
+  } else {
+    LOG_EVERY_T(INFO, 1) << "Can't grow, free_items " << table_free_items
+                         << ", obj_bytes: " << db_slice_->bytes_per_object() << " "
+                         << " mem_available: " << mem_available;
+  }
 
   return res;
 }
@@ -144,6 +152,8 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
   if (db_slice_->WillBlockOnJournalWrite()) {
     return res;
   }
+  // Disable flush journal changes to prevent preemtion in GarbageCollect.
+  journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
   // bool should_print = (eb.key_hash % 128) == 0;
 
@@ -172,6 +182,8 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotspotBuckets& e
 unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeTable* me) {
   if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
     return 0;
+  // Disable flush journal changes to prevent preemtion in evict.
+  journal::JournalFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.by_type.stash_buckets);
 
@@ -195,7 +207,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
 
     // log the evicted keys to journal.
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
-      RecordExpiry(cntx_.db_index, key, false);
+      RecordExpiry(cntx_.db_index, key);
     }
     db_slice_->PerformDeletion(DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)), table);
 
@@ -258,11 +270,12 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 #undef ADD
 
-DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
+DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
     : shard_id_(index),
-      caching_mode_(caching_mode),
+      cache_mode_(cache_mode),
       owner_(owner),
       client_tracking_map_(owner->memory_resource()) {
+  load_in_progress_ = false;
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
@@ -308,7 +321,7 @@ auto DbSlice::GetStats() const -> Stats {
   return s;
 }
 
-SlotStats DbSlice::GetSlotStats(cluster::SlotId sid) const {
+SlotStats DbSlice::GetSlotStats(SlotId sid) const {
   CHECK(db_arr_[0]);
   return db_arr_[0]->slots_stats[sid];
 }
@@ -453,13 +466,13 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   }
 
   if (res.it->second.HasExpire()) {  // check expiry state
-    res = ExpireIfNeeded(cntx, res.it, true);
+    res = ExpireIfNeeded(cntx, res.it);
     if (!IsValid(res.it)) {
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
-  if (caching_mode_ && IsValid(res.it)) {
+  if (IsCacheMode() && IsValid(res.it)) {
     if (!change_cb_.empty()) {
       FetchedItemsRestorer fetched_restorer(&fetched_items_);
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
@@ -468,6 +481,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       db.prime.CVCUponBump(change_cb_.back().first, res.it, bump_cb);
     }
 
+    block_counter_.Wait();  // We must not change the bucket's internal order during serialization
     auto bump_it = db.prime.BumpUp(res.it, PrimeBumpPolicy{&fetched_items_});
     if (bump_it != res.it) {  // the item was bumped
       res.it = bump_it;
@@ -482,8 +496,8 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
       break;
     case UpdateStatsMode::kReadStats:
       events_.hits++;
-      if (cluster::IsClusterEnabled()) {
-        db.slots_stats[cluster::KeySlot(key)].total_reads++;
+      if (IsClusterEnabled()) {
+        db.slots_stats[KeySlot(key)].total_reads++;
       }
       if (res.it->second.IsExternal()) {
         if (res.it->second.IsCool())
@@ -587,14 +601,14 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
       !owner_->IsReplica() && !(ServerState::tlocal()->gstate() == GlobalState::LOADING);
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
-  if (apply_memory_limit && !caching_mode_ && memory_budget_ + memory_offset < 0) {
+  if (apply_memory_limit && !IsCacheMode() && memory_budget_ + memory_offset < 0) {
     LOG_EVERY_T(WARNING, 1) << "AddOrFind: over limit, budget: " << memory_budget_
                             << " reclaimed: " << reclaimed << " offset: " << memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  PrimeEvictionPolicy evp{cntx,          (bool(caching_mode_) && !owner_->IsReplica()),
+  PrimeEvictionPolicy evp{cntx,          (IsCacheMode() && !owner_->IsReplica()),
                           memory_offset, ssize_t(soft_budget_limit_),
                           this,          apply_memory_limit};
 
@@ -646,8 +660,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   events_.stash_unloaded = db.prime.stash_unloaded();
   events_.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
-  if (cluster::IsClusterEnabled()) {
-    cluster::SlotId sid = cluster::KeySlot(key);
+  if (IsClusterEnabled()) {
+    SlotId sid = KeySlot(key);
     db.slots_stats[sid].key_count += 1;
   }
 
@@ -668,10 +682,8 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-bool DbSlice::Del(Context cntx, Iterator it) {
-  if (!IsValid(it)) {
-    return false;
-  }
+void DbSlice::Del(Context cntx, Iterator it) {
+  CHECK(IsValid(it));
 
   auto& db = db_arr_[cntx.db_index];
   auto obj_type = it->second.ObjType();
@@ -682,8 +694,6 @@ bool DbSlice::Del(Context cntx, Iterator it) {
     doc_del_cb_(key, cntx, it->second);
   }
   PerformDeletion(it, db.get());
-
-  return true;
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
@@ -695,7 +705,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
   std::string tmp;
   auto del_entry_cb = [&](PrimeTable::iterator it) {
     std::string_view key = it->first.GetSlice(&tmp);
-    cluster::SlotId sid = cluster::KeySlot(key);
+    SlotId sid = KeySlot(key);
     if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
       PerformDeletion(Iterator::FromPrime(it), db_arr_[0].get());
     }
@@ -916,7 +926,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   if (rel_msec <= 0) {  // implicit - don't persist
-    CHECK(Del(cntx, prime_it));
+    Del(cntx, prime_it);
     return -1;
   } else if (IsValid(expire_it) && !params.persist) {
     auto current = ExpireTime(expire_it);
@@ -1072,20 +1082,19 @@ void DbSlice::PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size
 
   ++events_.update;
 
-  if (cluster::IsClusterEnabled()) {
-    db.slots_stats[cluster::KeySlot(key)].total_writes += 1;
+  if (IsClusterEnabled()) {
+    db.slots_stats[KeySlot(key)].total_writes += 1;
   }
 
   SendInvalidationTrackingMessage(key);
 }
 
 DbSlice::ItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, Iterator it) const {
-  auto res = ExpireIfNeeded(cntx, it.GetInnerIt(), false);
+  auto res = ExpireIfNeeded(cntx, it.GetInnerIt());
   return {.it = Iterator::FromPrime(res.it), .exp_it = ExpIterator::FromPrime(res.exp_it)};
 }
 
-DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
-                                               bool preempts) const {
+DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it) const {
   if (!it->second.HasExpire()) {
     LOG(ERROR) << "Invalid call to ExpireIfNeeded";
     return {it, ExpireIterator{}};
@@ -1115,7 +1124,7 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
 
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
-    RecordExpiry(cntx.db_index, key, preempts);
+    RecordExpiry(cntx.db_index, key);
   }
 
   if (expired_keys_events_recording_)
@@ -1139,6 +1148,8 @@ void DbSlice::ExpireAllIfNeeded() {
   // We hold no locks to any of the keys so we should Wait() here such that
   // we don't preempt in ExpireIfNeeded
   block_counter_.Wait();
+  // Disable flush journal changes to prevent preemtion in traverse.
+  journal::JournalFlushGuard journal_flush_guard(owner_->journal());
 
   for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
     if (!db_arr_[db_index])
@@ -1151,7 +1162,7 @@ void DbSlice::ExpireAllIfNeeded() {
         LOG(ERROR) << "Expire entry " << exp_it->first.ToString() << " not found in prime table";
         return;
       }
-      ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it, false);
+      ExpireIfNeeded(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
     };
 
     ExpireTable::Cursor cursor;
@@ -1215,7 +1226,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
       auto prime_it = db.prime.Find(it->first);
       CHECK(!prime_it.is_done());
       result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
-      ExpireIfNeeded(cntx, prime_it, false);
+      ExpireIfNeeded(cntx, prime_it);
       ++result.deleted;
     } else {
       result.survivor_ttl_sum += ttl;
@@ -1262,7 +1273,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
       return {0, evicted_bytes};
   }
 
-  if ((!caching_mode_) || !expire_allowed_)
+  if ((!IsCacheMode()) || !expire_allowed_)
     return {0, 0};
 
   auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);
@@ -1283,7 +1294,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
     // fiber preemption could happen in this phase.
     for (string_view key : keys_to_journal) {
       if (auto journal = owner_->journal(); journal)
-        RecordExpiry(db_ind, key, false);
+        RecordExpiry(db_ind, key);
 
       if (expired_keys_events_recording_)
         db_table->expired_keys_events_.emplace_back(key);
@@ -1375,7 +1386,7 @@ void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
 
 void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
   for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
-    cluster::SlotId sid = cluster::KeySlot(key);
+    SlotId sid = KeySlot(key);
     if (!slot_ids.Contains(sid)) {
       continue;
     }
@@ -1477,9 +1488,13 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   }
 
   DbTableStats& stats = table->stats;
-  const PrimeValue& pv = del_it->second;
+  PrimeValue& pv = del_it->second;
 
-  if (pv.IsExternal() && shard_owner()->tiered_storage()) {
+  if (pv.HasStashPending()) {
+    string scratch;
+    string_view key = del_it->first.GetSlice(&scratch);
+    shard_owner()->tiered_storage()->CancelStash(table->index, key, &pv);
+  } else if (pv.IsExternal()) {
     shard_owner()->tiered_storage()->Delete(table->index, &del_it->second);
   }
 
@@ -1494,8 +1509,8 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
     --stats.listpack_blob_cnt;
   }
 
-  if (cluster::IsClusterEnabled()) {
-    cluster::SlotId sid = cluster::KeySlot(del_it.key());
+  if (IsClusterEnabled()) {
+    SlotId sid = KeySlot(del_it.key());
     table->slots_stats[sid].key_count -= 1;
   }
 

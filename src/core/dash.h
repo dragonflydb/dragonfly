@@ -149,6 +149,9 @@ class DashTable : public detail::DashTableBase {
   template <typename U> const_iterator Find(U&& key) const;
   template <typename U> iterator Find(U&& key);
 
+  // Prefetches the memory where the key would resize into the cache.
+  template <typename U> void Prefetch(U&& key) const;
+
   // Find first entry with given key hash that evaulates to true on pred.
   // Pred accepts either (const key&) or (const key&, const value&)
   template <typename Pred> iterator FindFirst(uint64_t key_hash, Pred&& pred);
@@ -403,6 +406,13 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   Iterator& operator+=(int delta) {
     slot_id_ += delta;
     Seek2Occupied();
+    return *this;
+  }
+
+  Iterator& AdvanceIfNotOccupied() {
+    if (!IsOccupied()) {
+      this->operator++();
+    }
     return *this;
   }
 
@@ -700,6 +710,14 @@ auto DashTable<_Key, _Value, Policy>::Find(U&& key) -> iterator {
 }
 
 template <typename _Key, typename _Value, typename Policy>
+template <typename U>
+void DashTable<_Key, _Value, Policy>::Prefetch(U&& key) const {
+  uint64_t key_hash = DoHash(key);
+  uint32_t seg_id = SegmentId(key_hash);
+  segment_[seg_id]->Prefetch(key_hash);
+}
+
+template <typename _Key, typename _Value, typename Policy>
 template <typename Pred>
 auto DashTable<_Key, _Value, Policy>::FindFirst(uint64_t key_hash, Pred&& pred) -> iterator {
   uint32_t seg_id = SegmentId(key_hash);
@@ -936,11 +954,12 @@ auto DashTable<_Key, _Value, Policy>::GetRandomCursor(absl::BitGen* bitgen) -> C
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
 auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
-  if (curs.bucket_id() >= Policy::kBucketNum)  // sanity.
-    return 0;
-
   uint32_t sid = curs.segment_id(global_depth_);
   uint8_t bid = curs.bucket_id();
+
+  // Test validity of the cursor.
+  if (bid >= Policy::kBucketNum || sid >= segment_.size())
+    return 0;
 
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 

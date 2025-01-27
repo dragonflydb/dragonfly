@@ -9,7 +9,12 @@ from threading import Thread
 import random
 import ssl
 from redis import asyncio as aioredis
+import redis as base_redis
+import hiredis
+from redis.cache import CacheConfig
+
 from redis.exceptions import ConnectionError as redis_conn_error, ResponseError
+
 import async_timeout
 from dataclasses import dataclass
 from aiohttp import ClientSession
@@ -436,7 +441,7 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
         client = aioredis.Redis(connection_pool=async_pool)
         for i in range(0, 2000):
             await client.publish("channel", f"message-{i}")
-        await client.close()
+        await client.aclose()
 
     async def channel_reader(channel: aioredis.client.PubSub):
         for i in range(0, 150):
@@ -523,6 +528,7 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
         pass
 
 
+@pytest.mark.exclude_epoll
 async def test_reply_count(async_client: aioredis.Redis):
     """Make sure reply aggregations reduce reply counts for common cases"""
 
@@ -604,6 +610,34 @@ async def test_subscribe_in_pipeline(async_client: aioredis.Redis):
     res = await pipe.execute()
 
     assert res == ["one", ["subscribe", "ch1", 1], "two", ["subscribe", "ch2", 2], "three"]
+
+
+async def test_send_delay_metric(df_server: DflyInstance):
+    client = df_server.client()
+    await client.client_setname("client1")
+    blob = "A" * 1000
+    for j in range(10):
+        await client.set(f"key-{j}", blob)
+
+    await client.config_set("pipeline_queue_limit", 100)
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    for j in range(1000000):
+        writer.write(f"GET key-{j % 10}\n".encode())
+
+    @assert_eventually
+    async def wait_for_large_delay():
+        info = await client.info("clients")
+        assert int(info["send_delay_ms"]) > 100
+
+    await wait_for_large_delay()
+
+
+async def test_match_http(df_server: DflyInstance):
+    client = df_server.client()
+    reader, writer = await asyncio.open_connection("localhost", df_server.port)
+    for i in range(2000):
+        writer.write(f"foo bar ".encode())
+        await writer.drain()
 
 
 """
@@ -746,7 +780,7 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factor
     client = server.client(password="XXX")
     with pytest.raises((ResponseError)):
         await client.dbsize()
-    await client.close()
+    await client.aclose()
 
     client = server.admin_client(password="XXX")
     assert await client.dbsize() == 0
@@ -776,7 +810,7 @@ async def test_tls_reject(
 
     client = server.client(**with_tls_client_args, ssl_cert_reqs=None)
     await client.ping()
-    await client.close()
+    await client.aclose()
 
     client = server.client(**with_tls_client_args)
     with pytest.raises(redis_conn_error):
@@ -1010,3 +1044,30 @@ async def test_lib_name_ver(async_client: aioredis.Redis):
     assert len(list) == 1
     assert list[0]["lib-name"] == "dragonfly"
     assert list[0]["lib-ver"] == "1.2.3.4"
+
+
+async def test_hiredis(df_factory):
+    server = df_factory.create(proactor_threads=1)
+    server.start()
+    client = base_redis.Redis(port=server.port, protocol=3, cache_config=CacheConfig())
+    client.ping()
+
+
+@dfly_args({"timeout": 1})
+async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
+    another_client = df_server.client()
+    await another_client.ping()
+    clients = await async_client.client_list()
+    assert len(clients) == 2
+
+    await asyncio.sleep(2)
+    
+    @assert_eventually
+    async def wait_for_conn_drop():
+        clients = await async_client.client_list()
+        logging.info("clients: %s", clients)
+        assert len(clients) <= 1
+
+    await wait_for_conn_drop()
+    info = await async_client.info("clients")
+    assert int(info["timeout_disconnects"]) >= 1

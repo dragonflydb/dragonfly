@@ -118,6 +118,7 @@ class StaticSeeder(SeederBase):
 
         args = ["DEBUG", "POPULATE", key_target, prefix, math.ceil(dsize)]
         args += ["RAND", "TYPE", dtype, "ELEMENTS", csize]
+        logging.debug(args)
         return await client.execute_command(*args)
 
 
@@ -138,10 +139,8 @@ class Seeder(SeederBase):
         data_size=100,
         collection_size=None,
         types: typing.Optional[typing.List[str]] = None,
-        huge_value_percentage=1,
-        huge_value_size=1024,
-        # 1 huge entries per container/key as default
-        huge_value_csize=1,
+        huge_value_target=5,
+        huge_value_size=100000,
     ):
         SeederBase.__init__(self, types)
         self.key_target = key_target
@@ -151,9 +150,8 @@ class Seeder(SeederBase):
         else:
             self.collection_size = collection_size
 
-        self.huge_value_percentage = huge_value_percentage
+        self.huge_value_target = huge_value_target
         self.huge_value_size = huge_value_size
-        self.huge_value_csize = huge_value_csize
 
         self.units = [
             Seeder.Unit(
@@ -175,20 +173,21 @@ class Seeder(SeederBase):
             target_deviation if target_deviation is not None else -1,
             self.data_size,
             self.collection_size,
-            self.huge_value_percentage,
+            self.huge_value_target / len(self.units),
             self.huge_value_size,
-            self.huge_value_csize,
         ]
 
         sha = await client.script_load(Seeder._load_script("generate"))
-        await asyncio.gather(
-            *(self._run_unit(client, sha, unit, using_stopkey, args) for unit in self.units)
-        )
+        for unit in self.units:
+            # Must be serial, otherwise cluster clients throws an exception
+            await self._run_unit(client, sha, unit, using_stopkey, args)
 
     async def stop(self, client: aioredis.Redis):
         """Request seeder seeder if it's running without a target, future returned from start() must still be awaited"""
 
-        await asyncio.gather(*(client.set(unit.stop_key, "X") for unit in self.units))
+        for unit in self.units:
+            # Must be serial, otherwise cluster clients throws an exception
+            await client.set(unit.stop_key, "X")
 
     def change_key_target(self, target: int):
         """Change key target, applied only on succeeding runs"""
@@ -211,11 +210,10 @@ class Seeder(SeederBase):
         result = await client.evalsha(sha, 0, *args)
         result = result.split()
         unit.counter = int(result[0])
-        huge_keys = int(result[1])
-        huge_entries = int(result[2])
+        huge_entries = int(result[1])
 
         msg = f"running unit {unit.prefix}/{unit.type} took {time.time() - s}, target {args[4+0]}"
-        if huge_keys > 0:
-            msg = f"{msg}. Total huge keys added {huge_keys} with {args[11]} elements each. Total extra modified huge entries {huge_entries}."
+        if huge_entries > 0:
+            msg = f"{msg}. Total huge entries {huge_entries} added."
 
         logging.debug(msg)

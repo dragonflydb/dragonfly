@@ -32,6 +32,7 @@ constexpr int64_t kMaxExpireDeadlineMs = kMaxExpireDeadlineSec * 1000;
 using LSN = uint64_t;
 using TxId = uint64_t;
 using TxClock = uint64_t;
+using SlotId = std::uint16_t;
 
 using facade::ArgS;
 using facade::CmdArgList;

@@ -6,8 +6,6 @@
 
 #include <absl/strings/str_replace.h>
 
-#include <jsoncons/json.hpp>
-
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
@@ -2998,6 +2996,54 @@ TEST_F(JsonFamilyTest, MergeLegacy) {
   EXPECT_EQ(resp, "OK");
   resp = Run({"JSON.GET", "j3"});
   EXPECT_EQ(resp, R"({"y":{"doubled":true},"z":{"answers":["xxx","yyy"],"doubled":false}})");
+}
+
+TEST_F(JsonFamilyTest, GetString) {
+  string json = R"(
+  { "a": "b",
+    "c": {
+      "d": "e",
+      "f": "g"
+    }
+  }
+  )";
+
+  auto resp = Run({"SET", "json", json});
+  EXPECT_THAT(resp, "OK");
+  resp = Run({"JSON.GET", "json", "$.c"});
+  EXPECT_EQ(resp, R"([{"d":"e","f":"g"}])");
+  Run({"SET", "not_json", "not_json"});
+  resp = Run({"JSON.GET", "not_json", "$.c"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+}
+
+TEST_F(JsonFamilyTest, MaxNestingJsonDepth) {
+  auto generate_nested_json = [](int depth) -> std::string {
+    std::string json = "{";
+    for (int i = 0; i < depth - 1; ++i) {
+      json += R"("key": {)";
+    }
+    json += R"("key": "value")";  // Innermost value
+    for (int i = 0; i < depth - 1; ++i) {
+      json += "}";
+    }
+    json += "}";
+    return json;
+  };
+
+  // Generate JSON with maximum allowed depth (256)
+  /* std::string valid_json = generate_nested_json(255);
+
+  // Test with valid JSON at depth 256
+  auto resp = Run({"JSON.SET", "valid_json",  ".", valid_json});
+  EXPECT_THAT(resp, "OK"); */
+
+  // Generate JSON exceeding maximum depth (257)
+  std::string invalid_json = generate_nested_json(257);
+
+  // Test with invalid JSON at depth 257
+  auto resp = Run({"JSON.SET", "invalid_json", ".", invalid_json});
+  EXPECT_THAT(resp, ErrArg("failed to parse JSON"));
 }
 
 }  // namespace dfly

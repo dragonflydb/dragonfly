@@ -399,17 +399,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
     if (stored * 2 == args.Size()) {
       RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
       DCHECK_EQ(result, OpStatus::OK);
-      return result;
+    } else if (stored > 0) {
+      vector<string_view> store_args(args.begin(), args.end());
+      store_args.resize(stored * 2);
+      RecordJournal(op_args, "MSET", store_args, op_args.tx->GetUniqueShardCnt());
     }
-
-    // Even without changes, we have to send a dummy command like PING for the
-    // replica to ack
-    string_view cmd = stored == 0 ? "PING" : "MSET";
-    vector<string_view> store_args(args.begin(), args.end());
-    store_args.resize(stored * 2);
-    RecordJournal(op_args, cmd, store_args, op_args.tx->GetUniqueShardCnt());
   }
-
   return result;
 }
 
@@ -1360,11 +1355,13 @@ void StringFamily::MGet(CmdArgList args, const CommandContext& cmnd_cntx) {
     auto* rb = static_cast<MCReplyBuilder*>(builder);
     DCHECK(dynamic_cast<CapturingReplyBuilder*>(builder) == nullptr);
     for (const auto& entry : res) {
-      if (!entry)
-        continue;
-      rb->SendValue(entry->key, entry->value, entry->mc_ver, entry->mc_flag);
+      if (entry) {
+        rb->SendValue(entry->key, entry->value, entry->mc_ver, entry->mc_flag);
+      } else {
+        rb->SendMiss();
+      }
     }
-    rb->SendSimpleString("END");
+    rb->SendGetEnd();
   } else {
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->StartArray(res.size());
@@ -1456,7 +1453,7 @@ void StringFamily::GetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
     return cmnd_cntx.rb->SendError(err->MakeReply());
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &end = end](Transaction* t, EngineShard* shard) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
@@ -1480,7 +1477,7 @@ void StringFamily::SetRange(CmdArgList args, const CommandContext& cmnd_cntx) {
     return builder->SendError("string exceeds maximum allowed size");
   }
 
-  auto cb = [&](Transaction* t, EngineShard* shard) {
+  auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
   auto res = cmnd_cntx.tx->ScheduleSingleHopT(cb);

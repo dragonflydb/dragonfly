@@ -386,13 +386,26 @@ int DragonflyRandstrCommand(lua_State* state) {
   lua_remove(state, 1);
 
   std::string buf(dsize, ' ');
+
   auto push_str = [dsize, state, &buf]() {
     static const char alphanum[] =
         "0123456789"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "abcdefghijklmnopqrstuvwxyz";
-    for (int i = 0; i < dsize; ++i)
-      buf[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+
+    static const char pattern[] = "DRAGONFLY";
+    constexpr int pattern_len = sizeof(pattern) - 1;
+    constexpr int pattern_interval = 53;
+    for (int i = 0; i < dsize; ++i) {
+      if (i % pattern_interval == 0 && i + pattern_len <= dsize) {
+        // Insert the repeating pattern for better compression of random string.
+        buf.replace(i, pattern_len, pattern, pattern_len);
+        i += pattern_len - 1;  // Adjust index to skip the pattern
+      } else {
+        // Fill the rest with semi-random characters for variation
+        buf[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+      }
+    }
     lua_pushlstring(state, buf.c_str(), buf.length());
   };
 
@@ -910,7 +923,7 @@ std::optional<absl::FixedArray<std::string_view, 4>> Interpreter::PrepareArgs() 
     switch (lua_type(lua_, idx)) {
       case LUA_TNUMBER:
         if (lua_isinteger(lua_, idx)) {
-          blob_len += absl::AlphaNum{lua_tointeger(lua_, idx)}.size();
+          blob_len += absl::AlphaNum(lua_tointeger(lua_, idx)).size();
         } else {
           int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
           CHECK_GT(fmt_len, 0);

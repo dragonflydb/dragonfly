@@ -55,7 +55,8 @@ struct OpManagerTest : PoolTestBase, OpManager {
 
   void NotifyStashed(EntryId id, const io::Result<DiskSegment>& segment) override {
     ASSERT_TRUE(segment);
-    stashed_[id] = *segment;
+    auto [it, inserted] = stashed_.emplace(id, *segment);
+    ASSERT_TRUE(inserted);
   }
 
   bool NotifyFetched(EntryId id, std::string_view value, DiskSegment segment,

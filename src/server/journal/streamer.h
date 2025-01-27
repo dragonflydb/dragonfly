@@ -99,12 +99,23 @@ class RestoreStreamer : public JournalStreamer {
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
   bool ShouldWrite(std::string_view key) const;
-  bool ShouldWrite(cluster::SlotId slot_id) const;
+  bool ShouldWrite(SlotId slot_id) const;
 
-  // Returns whether anything was written
-  void WriteBucket(PrimeTable::bucket_iterator it);
+  // Returns true if any entry was actually written
+  bool WriteBucket(PrimeTable::bucket_iterator it);
+
   void WriteEntry(std::string_view key, const PrimeValue& pk, const PrimeValue& pv,
                   uint64_t expire_ms);
+
+  struct Stats {
+    size_t buckets_skipped = 0;
+    size_t buckets_written = 0;
+    size_t buckets_loop = 0;
+    size_t buckets_on_db_update = 0;
+    size_t keys_written = 0;
+    size_t keys_skipped = 0;
+    size_t commands = 0;
+  };
 
   DbSlice* db_slice_;
   DbTableArray db_array_;
@@ -112,6 +123,8 @@ class RestoreStreamer : public JournalStreamer {
   cluster::SlotSet my_slots_;
   bool fiber_cancelled_ = false;
   bool snapshot_finished_ = false;
+  ThreadLocalMutex big_value_mu_;
+  Stats stats_;
 };
 
 }  // namespace dfly

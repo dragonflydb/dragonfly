@@ -282,6 +282,27 @@ TEST_F(QListTest, CompressionPlain) {
   EXPECT_EQ(500, i);
 }
 
+TEST_F(QListTest, LargeValues) {
+  string val(100000, 'a');
+  ql_.Push(val, QList::HEAD);
+  ql_.Push(val, QList::HEAD);
+  ql_.Pop(QList::HEAD);
+  auto items = ToItems();
+  EXPECT_THAT(items, ElementsAre(val));
+}
+
+TEST_F(QListTest, RemoveListpack) {
+  ql_.Push("ABC", QList::TAIL);
+  ql_.Push("DEF", QList::TAIL);
+  auto it = ql_.GetIterator(QList::TAIL);
+  ASSERT_TRUE(it.Next());  // must call Next to initialize the iterator.
+  ql_.Erase(it);
+  it = ql_.GetIterator(QList::TAIL);
+  ASSERT_TRUE(it.Next());
+  it = ql_.Erase(it);
+  ASSERT_FALSE(it.Next());
+}
+
 using FillCompress = tuple<int, unsigned>;
 
 class PrintToFillCompress {

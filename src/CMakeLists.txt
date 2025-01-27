@@ -45,7 +45,7 @@ function(gen_bison name)
  set_source_files_properties(${name}.cc ${name}_base.h PROPERTIES GENERATED TRUE)
 endfunction()
 
-if (APPLE)
+if (APPLE OR ${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
   set(SED_REPL sed "-i" '')
 else()
   set(SED_REPL sed "-i")
@@ -63,8 +63,9 @@ add_third_party(
 
 add_third_party(
   reflex
-  URL https://github.com/Genivia/RE-flex/archive/refs/tags/v3.5.1.tar.gz
-  CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-avx --prefix=${THIRD_PARTY_LIB_DIR}/reflex
+  URL https://github.com/Genivia/RE-flex/archive/refs/tags/v5.1.0.tar.gz
+  PATCH_COMMAND autoreconf -fi
+  CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-avx2 --prefix=${THIRD_PARTY_LIB_DIR}/reflex
           CXX=${CMAKE_CXX_COMPILER} CC=${CMAKE_C_COMPILER}
 )
 
@@ -73,17 +74,15 @@ set(REFLEX "${THIRD_PARTY_LIB_DIR}/reflex/bin/reflex")
 add_third_party(
   jsoncons
   GIT_REPOSITORY https://github.com/dragonflydb/jsoncons
-  # URL https://github.com/danielaparker/jsoncons/archive/refs/tags/v0.171.1.tar.gz
-  GIT_TAG Dragonfly
+  GIT_TAG Dragonfly.178
   GIT_SHALLOW 1
-  # PATCH_COMMAND patch -p1 -i "${CMAKE_SOURCE_DIR}/patches/jsoncons-v0.171.0.patch"
   CMAKE_PASS_FLAGS "-DJSONCONS_BUILD_TESTS=OFF -DJSONCONS_HAS_POLYMORPHIC_ALLOCATOR=ON"
   LIB "none"
 )
 
 add_third_party(
   lz4
-  URL https://github.com/lz4/lz4/archive/refs/tags/v1.9.4.tar.gz
+  URL https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz
 
   BUILD_IN_SOURCE 1
   CONFIGURE_COMMAND echo skip

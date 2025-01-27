@@ -107,6 +107,10 @@ struct Metrics {
   uint32_t blocked_tasks = 0;
   size_t worker_fiber_stack_size = 0;
 
+  // monotonic timestamp (ProactorBase::GetMonotonicTimeNs) of the connection stuck on send
+  // for longest time.
+  uint64_t oldest_pending_send_ts = uint64_t(-1);
+
   InterpreterManager::Stats lua_stats;
 
   // command call frequencies (count, aggregated latency in usec).

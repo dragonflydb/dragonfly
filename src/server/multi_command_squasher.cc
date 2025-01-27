@@ -9,7 +9,6 @@
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
-#include "server/cluster/cluster_utility.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -78,15 +77,14 @@ MultiCommandSquasher::MultiCommandSquasher(absl::Span<StoredCmd> cmds, Connectio
   atomic_ = mode != Transaction::NON_ATOMIC;
 }
 
-MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(
-    ShardId sid, optional<cluster::SlotId> slot_id) {
+MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
   if (sharded_.empty())
     sharded_.resize(shard_set->size());
 
   auto& sinfo = sharded_[sid];
   if (!sinfo.local_tx) {
     if (IsAtomic()) {
-      sinfo.local_tx = new Transaction{cntx_->transaction, sid, slot_id};
+      sinfo.local_tx = new Transaction{cntx_->transaction, sid, nullopt};
     } else {
       // Non-atomic squashing does not use the transactional framework for fan out, so local
       // transactions have to be fully standalone, check locks and release them immediately.
@@ -122,11 +120,9 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
     return SquashResult::NOT_SQUASHED;
 
   // Check if all commands belong to one shard
-  cluster::UniqueSlotChecker slot_checker;
   ShardId last_sid = kInvalidSid;
 
   for (string_view key : keys->Range(args)) {
-    slot_checker.Add(key);
     ShardId sid = Shard(key, shard_set->size());
     if (last_sid == kInvalidSid || last_sid == sid)
       last_sid = sid;
@@ -134,7 +130,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(StoredCmd* cm
       return SquashResult::NOT_SQUASHED;  // at least two shards
   }
 
-  auto& sinfo = PrepareShardInfo(last_sid, slot_checker.GetUniqueSlotId());
+  auto& sinfo = PrepareShardInfo(last_sid);
 
   sinfo.cmds.push_back(cmd);
   order_.push_back(last_sid);
@@ -172,12 +168,13 @@ bool MultiCommandSquasher::ExecuteStandalone(facade::RedisReplyBuilder* rb, Stor
   return true;
 }
 
-OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es) {
+OpStatus MultiCommandSquasher::SquashedHopCb(Transaction* parent_tx, EngineShard* es,
+                                             RespVersion resp_v) {
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.cmds.empty());
 
   auto* local_tx = sinfo.local_tx.get();
-  facade::CapturingReplyBuilder crb;
+  facade::CapturingReplyBuilder crb(ReplyMode::FULL, resp_v);
   ConnectionContext local_cntx{cntx_, local_tx};
   if (cntx_->conn()) {
     local_cntx.skip_acl_validation = cntx_->conn()->IsPrivileged();
@@ -244,14 +241,15 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     cntx_->cid = base_cid_;
     auto cb = [this](ShardId sid) { return !sharded_[sid].cmds.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
-    tx->ScheduleSingleHop([this](auto* tx, auto* es) { return SquashedHopCb(tx, es); });
+    tx->ScheduleSingleHop(
+        [this, rb](auto* tx, auto* es) { return SquashedHopCb(tx, es, rb->GetRespVersion()); });
   } else {
 #if 1
     fb2::BlockingCounter bc(num_shards);
     DVLOG(1) << "Squashing " << num_shards << " " << tx->DebugId();
 
-    auto cb = [this, tx, bc]() mutable {
-      this->SquashedHopCb(tx, EngineShard::tlocal());
+    auto cb = [this, tx, bc, rb]() mutable {
+      this->SquashedHopCb(tx, EngineShard::tlocal(), rb->GetRespVersion());
       bc->Dec();
     };
 
@@ -261,8 +259,9 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     }
     bc->Wait();
 #else
-    shard_set->RunBlockingInParallel([this, tx](auto* es) { SquashedHopCb(tx, es); },
-                                     [this](auto sid) { return !sharded_[sid].cmds.empty(); });
+    shard_set->RunBlockingInParallel(
+        [this, tx, rb](auto* es) { SquashedHopCb(tx, es, rb->GetRespVersion()); },
+        [this](auto sid) { return !sharded_[sid].cmds.empty(); });
 #endif
   }
 

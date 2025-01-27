@@ -26,13 +26,18 @@ class CommandAggregator {
   }
 
   enum class CommitMode { kAuto, kNoCommit };
-  void AddArg(string arg, CommitMode commit_mode = CommitMode::kAuto) {
+
+  // Returns whether CommitPending() was called
+  bool AddArg(string arg, CommitMode commit_mode = CommitMode::kAuto) {
     agg_bytes_ += arg.size();
     members_.push_back(std::move(arg));
 
     if (commit_mode != CommitMode::kNoCommit && agg_bytes_ >= max_aggragation_bytes_) {
       CommitPending();
+      return true;
     }
+
+    return false;
   }
 
  private:
@@ -65,26 +70,27 @@ CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer
     : cb_(std::move(cb)), max_serialization_buffer_size_(max_serialization_buffer_size) {
 }
 
-void CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
-                                   uint64_t expire_ms) {
+size_t CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
+                                     uint64_t expire_ms) {
   // We send RESTORE commands for small objects, or objects we don't support breaking.
   bool use_restore_serialization = true;
+  size_t commands = 1;
   if (max_serialization_buffer_size_ > 0 && pv.MallocUsed() > max_serialization_buffer_size_) {
     switch (pv.ObjType()) {
       case OBJ_SET:
-        SerializeSet(key, pv);
+        commands = SerializeSet(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_ZSET:
-        SerializeZSet(key, pv);
+        commands = SerializeZSet(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_HASH:
-        SerializeHash(key, pv);
+        commands = SerializeHash(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_LIST:
-        SerializeList(key, pv);
+        commands = SerializeList(key, pv);
         use_restore_serialization = false;
         break;
       case OBJ_STRING:
@@ -105,6 +111,7 @@ void CmdSerializer::SerializeEntry(string_view key, const PrimeValue& pk, const 
     SerializeStickIfNeeded(key, pk);
     SerializeExpireIfNeeded(key, expire_ms);
   }
+  return commands;
 }
 
 void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_view> args) {
@@ -139,54 +146,62 @@ void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms)
   SerializeCommand("PEXIRE", {key, absl::StrCat(expire_ms)});
 }
 
-void CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
       max_serialization_buffer_size_);
 
+  size_t commands = 0;
   container_utils::IterateSet(pv, [&](container_utils::ContainerEntry ce) {
-    aggregator.AddArg(ce.ToString());
+    commands += aggregator.AddArg(ce.ToString());
     return true;
   });
+  return commands;
 }
 
-void CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("ZADD", args); },
       max_serialization_buffer_size_);
 
+  size_t commands = 0;
   container_utils::IterateSortedSet(
       pv.GetRobjWrapper(),
       [&](container_utils::ContainerEntry ce, double score) {
         aggregator.AddArg(absl::StrCat(score), CommandAggregator::CommitMode::kNoCommit);
-        aggregator.AddArg(ce.ToString());
+        commands += aggregator.AddArg(ce.ToString());
         return true;
       },
       /*start=*/0, /*end=*/-1, /*reverse=*/false, /*use_score=*/true);
+  return commands;
 }
 
-void CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
       max_serialization_buffer_size_);
 
+  size_t commands = 0;
   container_utils::IterateMap(
       pv, [&](container_utils::ContainerEntry k, container_utils::ContainerEntry v) {
         aggregator.AddArg(k.ToString(), CommandAggregator::CommitMode::kNoCommit);
-        aggregator.AddArg(v.ToString());
+        commands += aggregator.AddArg(v.ToString());
         return true;
       });
+  return commands;
 }
 
-void CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
   CommandAggregator aggregator(
       key, [&](absl::Span<const string_view> args) { SerializeCommand("RPUSH", args); },
       max_serialization_buffer_size_);
 
+  size_t commands = 0;
   container_utils::IterateList(pv, [&](container_utils::ContainerEntry ce) {
-    aggregator.AddArg(ce.ToString());
+    commands += aggregator.AddArg(ce.ToString());
     return true;
   });
+  return commands;
 }
 
 void CmdSerializer::SerializeRestore(string_view key, const PrimeValue& pk, const PrimeValue& pv,

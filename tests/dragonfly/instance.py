@@ -380,16 +380,17 @@ class DflyInstance:
             for metric_family in text_string_to_metric_families(data)
         }
 
-    def is_in_logs(self, pattern):
+    def find_in_logs(self, pattern):
         if self.proc is not None:
             raise RuntimeError("Must close server first")
 
+        results = []
         matcher = re.compile(pattern)
         for path in self.log_files:
             for line in open(path):
                 if matcher.search(line):
-                    return True
-        return False
+                    results.append(line)
+        return results
 
     @property
     def rss(self):
@@ -416,7 +417,7 @@ class DflyInstanceFactory:
         args.setdefault("noversion_check", None)
         # MacOs does not set it automatically, so we need to set it manually
         args.setdefault("maxmemory", "8G")
-        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1"
+        vmod = "dragonfly_connection=1,accept_server=1,listener_interface=1,main_service=1,rdb_save=1,replica=1,cluster_family=1,proactor_pool=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
 
@@ -426,8 +427,10 @@ class DflyInstanceFactory:
         args.setdefault("log_dir", self.params.log_dir)
 
         if version >= 1.21 and "serialization_max_chunk_size" not in args:
-            # Add 1 byte limit for big values
-            args.setdefault("serialization_max_chunk_size", 1)
+            args.setdefault("serialization_max_chunk_size", 300000)
+
+        if version >= 1.26:
+            args.setdefault("fiber_safety_margin=4096")
 
         for k, v in args.items():
             args[k] = v.format(**self.params.env) if isinstance(v, str) else v
@@ -454,9 +457,19 @@ class DflyInstanceFactory:
 
     async def stop_all(self):
         """Stop all launched instances."""
+        exceptions = []  # To collect exceptions
         for instance in self.instances:
             await instance.close_clients()
-            instance.stop()
+            try:
+                instance.stop()
+            except Exception as e:
+                exceptions.append(e)  # Collect the exception
+        if exceptions:
+            first_exception = exceptions[0]
+            raise Exception(
+                f"One or more errors occurred while stopping instances. "
+                f"First exception: {first_exception}"
+            ) from first_exception
 
     def __repr__(self) -> str:
         return f"Factory({self.args})"

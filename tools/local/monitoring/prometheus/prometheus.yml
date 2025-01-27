@@ -33,10 +33,7 @@ scrape_configs:
       - targets: ['host.docker.internal:6379']
 
   - job_name: 'prometheus'
-
-    # Override the global default and scrape targets from this job every 5 seconds.
     scrape_interval: 1s
-
     static_configs:
          - targets: ['localhost:9090']
 
@@ -52,3 +49,8 @@ scrape_configs:
     scrape_interval: 1s
     static_configs:
       - targets: ['memcached-exporter:9150']
+
+  - job_name: 'redis-exporter'
+    scrape_interval: 1s
+    static_configs:
+      - targets: ['redis-exporter:9121']

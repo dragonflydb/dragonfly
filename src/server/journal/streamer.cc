@@ -56,6 +56,7 @@ void JournalStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
         if (allow_await) {
           ThrottleIfNeeded();
           // No record to write, just await if data was written so consumer will read the data.
+          // TODO: shouldnt we trigger async write in noop??
           if (item.opcode == Op::NOOP)
             return;
         }
@@ -103,7 +104,7 @@ void JournalStreamer::AsyncWrite() {
   const auto& cur_buf = pending_buf_.PrepareSendingBuf();
 
   in_flight_bytes_ = cur_buf.mem_size;
-  total_sent_ += cur_buf.mem_size;
+  total_sent_ += in_flight_bytes_;
 
   const auto v_size = cur_buf.buf.size();
   absl::InlinedVector<iovec, 8> v(v_size);
@@ -113,14 +114,14 @@ void JournalStreamer::AsyncWrite() {
     v[i] = IoVec(io::Bytes(uptr, cur_buf.buf[i].size()));
   }
 
-  dest_->AsyncWrite(v.data(), v.size(), [this, len = cur_buf.mem_size](std::error_code ec) {
+  dest_->AsyncWrite(v.data(), v.size(), [this, len = in_flight_bytes_](std::error_code ec) {
     OnCompletion(std::move(ec), len);
   });
 }
 
 void JournalStreamer::Write(std::string str) {
   DCHECK(!str.empty());
-  DVLOG(2) << "Writing " << str.size() << " bytes";
+  DVLOG(3) << "Writing " << str.size() << " bytes";
 
   pending_buf_.Push(std::move(str));
 
@@ -128,13 +129,11 @@ void JournalStreamer::Write(std::string str) {
 }
 
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
-  DCHECK_GE(in_flight_bytes_, len);
+  DCHECK_EQ(in_flight_bytes_, len);
 
-  DVLOG(3) << "Completing from " << in_flight_bytes_ << " to " << in_flight_bytes_ - len;
-  in_flight_bytes_ -= len;
-  if (in_flight_bytes_ == 0) {
-    pending_buf_.Pop();
-  }
+  DVLOG(3) << "Completing " << in_flight_bytes_;
+  in_flight_bytes_ = 0;
+  pending_buf_.Pop();
   if (ec && !IsStopped()) {
     cntx_->ReportError(ec);
   } else if (!pending_buf_.Empty() && !IsStopped()) {
@@ -219,18 +218,33 @@ void RestoreStreamer::Run() {
       if (fiber_cancelled_)  // Could have been cancelled in above call too
         return;
 
-      WriteBucket(it);
+      std::lock_guard guard(big_value_mu_);
+
+      // Locking this never preempts. See snapshot.cc for why we need it.
+      auto* blocking_counter = db_slice_->BlockingCounter();
+      std::lock_guard blocking_counter_guard(*blocking_counter);
+
+      stats_.buckets_loop += WriteBucket(it);
     });
 
     if (++last_yield >= 100) {
       ThisFiber::Yield();
       last_yield = 0;
     }
-  } while (cursor);
+  } while (cursor && !fiber_cancelled_);
+
+  VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
+          << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
 }
 
 void RestoreStreamer::SendFinalize(long attempt) {
-  VLOG(1) << "RestoreStreamer LSN opcode for : " << db_slice_->shard_id() << " attempt " << attempt;
+  VLOG(1) << "RestoreStreamer LSN of " << my_slots_.ToSlotRanges().ToString() << ", shard "
+          << db_slice_->shard_id() << " attempt " << attempt << " with " << stats_.commands
+          << " commands. Buckets looped " << stats_.buckets_loop << ", buckets on_db_update "
+          << stats_.buckets_on_db_update << ", buckets skipped " << stats_.buckets_skipped
+          << ", buckets written " << stats_.buckets_written << ". Keys skipped "
+          << stats_.keys_skipped << ", keys written " << stats_.keys_written;
+
   journal::Entry entry(journal::Op::LSN, attempt);
 
   io::StringSink sink;
@@ -273,22 +287,26 @@ bool RestoreStreamer::ShouldWrite(const journal::JournalItem& item) const {
 }
 
 bool RestoreStreamer::ShouldWrite(std::string_view key) const {
-  return ShouldWrite(cluster::KeySlot(key));
+  return ShouldWrite(KeySlot(key));
 }
 
-bool RestoreStreamer::ShouldWrite(cluster::SlotId slot_id) const {
+bool RestoreStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+bool RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
+  bool written = false;
+
   if (it.GetVersion() < snapshot_version_) {
-    FiberAtomicGuard fg;
+    stats_.buckets_written++;
+
     it.SetVersion(snapshot_version_);
     string key_buffer;  // we can reuse it
-    for (; !it.is_done(); ++it) {
+    for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
       const auto& pv = it->second;
       string_view key = it->first.GetSlice(&key_buffer);
       if (ShouldWrite(key)) {
+        stats_.keys_written++;
         uint64_t expire = 0;
         if (pv.HasExpire()) {
           auto eit = db_slice_->databases()[0]->expire.Find(it->first);
@@ -296,33 +314,45 @@ void RestoreStreamer::WriteBucket(PrimeTable::bucket_iterator it) {
         }
 
         WriteEntry(key, it->first, pv, expire);
+        written = true;
+      } else {
+        stats_.keys_skipped++;
       }
     }
+  } else {
+    stats_.buckets_skipped++;
   }
   ThrottleIfNeeded();
+
+  return written;
 }
 
 void RestoreStreamer::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) {
+  std::lock_guard guard(big_value_mu_);
   DCHECK_EQ(db_index, 0) << "Restore migration only allowed in cluster mode in db0";
 
   PrimeTable* table = db_slice_->GetTables(0).first;
 
   if (const PrimeTable::bucket_iterator* bit = req.update()) {
-    WriteBucket(*bit);
+    stats_.buckets_on_db_update += WriteBucket(*bit);
   } else {
     string_view key = get<string_view>(req.change);
     table->CVCUponInsert(snapshot_version_, key, [this](PrimeTable::bucket_iterator it) {
       DCHECK_LT(it.GetVersion(), snapshot_version_);
-      WriteBucket(it);
+      stats_.buckets_on_db_update += WriteBucket(it);
     });
   }
 }
 
 void RestoreStreamer::WriteEntry(string_view key, const PrimeValue& pk, const PrimeValue& pv,
                                  uint64_t expire_ms) {
-  CmdSerializer serializer([&](std::string s) { Write(std::move(s)); },
-                           ServerState::tlocal()->serialization_max_chunk_size);
-  serializer.SerializeEntry(key, pk, pv, expire_ms);
+  CmdSerializer serializer(
+      [&](std::string s) {
+        Write(std::move(s));
+        ThrottleIfNeeded();
+      },
+      ServerState::tlocal()->serialization_max_chunk_size);
+  stats_.commands += serializer.SerializeEntry(key, pk, pv, expire_ms);
 }
 
 }  // namespace dfly

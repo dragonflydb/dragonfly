@@ -401,8 +401,11 @@ DispatchTracker::DispatchTracker(absl::Span<facade::Listener* const> listeners,
 }
 
 void DispatchTracker::TrackOnThread() {
-  for (auto* listener : listeners_)
-    listener->TraverseConnectionsOnThread(absl::bind_front(&DispatchTracker::Handle, this));
+  for (auto* listener : listeners_) {
+    listener->TraverseConnectionsOnThread(
+        [this](unsigned thread_index, util::Connection* conn) { Handle(thread_index, conn); },
+        UINT32_MAX, nullptr);
+  }
 }
 
 bool DispatchTracker::Wait(absl::Duration duration) {

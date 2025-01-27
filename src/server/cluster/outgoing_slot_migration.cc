@@ -20,7 +20,10 @@
 #include "server/server_family.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_FLAG(int, slot_migration_connection_timeout_ms, 5000, "Timeout for network operations");
+ABSL_FLAG(int, slot_migration_connection_timeout_ms, 2000,
+          "Connection creating timeout for migration operations");
+ABSL_FLAG(int, migration_finalization_timeout_ms, 30000,
+          "Timeout for migration finalization operation");
 
 using namespace std;
 using namespace facade;
@@ -202,7 +205,7 @@ void OutgoingMigration::SyncFb() {
     VLOG(1) << "Connecting to target node";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
-      LOG(WARNING) << "Can't connect to taget node";
+      LOG(WARNING) << "Can't connect to target node";
       cntx_.ReportError(GenericError(ec, "Couldn't connect to source."));
       continue;
     }
@@ -215,7 +218,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      LOG(WARNING) << "Can't connect to taget node";
+      LOG(WARNING) << "Can't connect to target node";
       cntx_.ReportError(GenericError(ec, "Could not send INIT command."));
       continue;
     }
@@ -258,7 +261,7 @@ void OutgoingMigration::SyncFb() {
       continue;
     }
 
-    OnAllShards([this](auto& migration) { migration->RunSync(); });
+    OnAllShards([](auto& migration) { migration->RunSync(); });
 
     if (cntx_.GetError()) {
       continue;
@@ -333,7 +336,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
 
   const absl::Time start = absl::Now();
   const absl::Duration timeout =
-      absl::Milliseconds(absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms));
+      absl::Milliseconds(absl::GetFlag(FLAGS_migration_finalization_timeout_ms));
   while (true) {
     const absl::Time now = absl::Now();
     const absl::Duration passed = now - start;

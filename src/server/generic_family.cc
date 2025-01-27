@@ -20,7 +20,6 @@ extern "C" {
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
-#include "server/cluster/cluster_defs.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
@@ -54,6 +53,7 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
     return std::nullopt;
   }
 
+  // The footer looks like this: version (2 bytes) | crc64 (8 bytes)
   const std::uint8_t* footer =
       reinterpret_cast<const std::uint8_t*>(msg.data()) + (msg.size() - DUMP_FOOTER_SIZE);
   const RdbVersion version = (*(footer + 1) << 8 | (*footer));
@@ -64,9 +64,10 @@ std::optional<RdbVersion> GetRdbVersion(std::string_view msg) {
     return std::nullopt;
   }
 
-  uint64_t expected_cs =
+  // Compute expected crc64 based on the actual data upto the expected crc64 field.
+  uint64_t actual_cs =
       crc64(0, reinterpret_cast<const uint8_t*>(msg.data()), msg.size() - sizeof(uint64_t));
-  uint64_t actual_cs = absl::little_endian::Load64(footer + sizeof(version));
+  uint64_t expected_cs = absl::little_endian::Load64(footer + 2);  // skip the version
 
   if (actual_cs != expected_cs) {
     LOG(WARNING) << "CRC check failed for restore command, expecting: " << expected_cs << " got "
@@ -120,12 +121,16 @@ class RestoreArgs {
       : expiration_(expiration), abs_time_(abs_time), replace_(replace) {
   }
 
-  constexpr bool Replace() const {
+  bool Replace() const {
     return replace_;
   }
 
-  constexpr bool Sticky() const {
+  bool Sticky() const {
     return sticky_;
+  }
+
+  void SetSticky(bool sticky) {
+    sticky_ = sticky;
   }
 
   uint64_t ExpirationTime() const {
@@ -133,11 +138,11 @@ class RestoreArgs {
     return expiration_;
   }
 
-  [[nodiscard]] constexpr bool Expired() const {
+  bool Expired() const {
     return expiration_ < 0;
   }
 
-  [[nodiscard]] constexpr bool HasExpiration() const {
+  bool HasExpiration() const {
     return expiration_ != NO_EXPIRATION;
   }
 
@@ -152,9 +157,9 @@ class RdbRestoreValue : protected RdbLoaderBase {
     rdb_version_ = rdb_version;
   }
 
-  std::optional<DbSlice::ItAndUpdater> Add(std::string_view payload, std::string_view key,
-                                           DbSlice& db_slice, const DbContext& cntx,
-                                           const RestoreArgs& args, EngineShard* shard);
+  OpResult<DbSlice::AddOrFindResult> Add(string_view key, string_view payload,
+                                         const DbContext& cntx, const RestoreArgs& args,
+                                         DbSlice* db_slice);
 
  private:
   std::optional<OpaqueObj> Parse(io::Source* source);
@@ -185,18 +190,17 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* sourc
   return std::optional<OpaqueObj>(std::move(obj));
 }
 
-std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
-                                                          std::string_view key, DbSlice& db_slice,
-                                                          const DbContext& cntx,
-                                                          const RestoreArgs& args,
-                                                          EngineShard* shard) {
+OpResult<DbSlice::AddOrFindResult> RdbRestoreValue::Add(string_view key, string_view data,
+                                                        const DbContext& cntx,
+                                                        const RestoreArgs& args,
+                                                        DbSlice* db_slice) {
   InMemSource data_src(data);
   PrimeValue pv;
   bool first_parse = true;
   do {
     auto opaque_res = Parse(&data_src);
     if (!opaque_res) {
-      return std::nullopt;
+      return OpStatus::INVALID_VALUE;
     }
 
     LoadConfig config;
@@ -212,16 +216,16 @@ std::optional<DbSlice::ItAndUpdater> RdbRestoreValue::Add(std::string_view data,
     if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
       // we failed - report and exit
       LOG(WARNING) << "error while trying to read data: " << ec;
-      return std::nullopt;
+      return OpStatus::INVALID_VALUE;
     }
   } while (pending_read_.remaining > 0);
 
-  if (auto res = db_slice.AddNew(cntx, key, std::move(pv), args.ExpirationTime()); res) {
+  auto res = db_slice->AddOrUpdate(cntx, key, std::move(pv), args.ExpirationTime());
+  if (res) {
     res->it->first.SetSticky(args.Sticky());
-    shard->search_indices()->AddDoc(key, cntx, res->it->second);
-    return std::move(res.value());
+    db_slice->shard_owner()->search_indices()->AddDoc(key, cntx, res->it->second);
   }
-  return std::nullopt;
+  return res;
 }
 
 [[nodiscard]] bool RestoreArgs::UpdateExpiration(int64_t now_msec) {
@@ -432,7 +436,7 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
   DVLOG(1) << "Rename: removing the key '" << src_key_;
 
   res.post_updater.Run();
-  CHECK(db_slice.Del(t->GetDbContext(), it));
+  db_slice.Del(t->GetDbContext(), it);
   if (shard->journal()) {
     RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_}, 2);
   }
@@ -454,7 +458,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
   if (dest_found_) {
     DVLOG(1) << "Rename: deleting the destiny key '" << dest_key_;
     dest_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx, dest_res.it));
+    db_slice.Del(op_args.db_cntx, dest_res.it);
   }
 
   if (restore_args.Expired()) {
@@ -467,18 +471,20 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     return OpStatus::OK;
   }
 
+  restore_args.SetSticky(serialized_value_.sticky);
+
   RdbRestoreValue loader(serialized_value_.version.value());
-  auto restored_dest_it = loader.Add(serialized_value_.value, dest_key_, db_slice, op_args.db_cntx,
-                                     restore_args, shard);
+  auto add_res =
+      loader.Add(dest_key_, serialized_value_.value, op_args.db_cntx, restore_args, &db_slice);
 
-  if (restored_dest_it) {
-    auto& dest_it = restored_dest_it->it;
-    dest_it->first.SetSticky(serialized_value_.sticky);
+  if (!add_res)
+    return add_res.status();
 
-    auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
-    if (bc) {
-      bc->AwakeWatched(t->GetDbIndex(), dest_key_);
-    }
+  LOG_IF(DFATAL, !add_res->is_new)
+      << "Unexpected override for key " << dest_key_ << " " << dest_found_;
+  auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+  if (bc) {
+    bc->AwakeWatched(t->GetDbIndex(), dest_key_);
   }
 
   if (shard->journal()) {
@@ -527,27 +533,28 @@ OpResult<std::string> OpDump(const OpArgs& op_args, string_view key) {
   return OpStatus::KEY_NOTFOUND;
 }
 
-OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
-                         RestoreArgs restore_args, RdbVersion rdb_version) {
+OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view payload,
+                   RestoreArgs restore_args, RdbVersion rdb_version) {
   if (!restore_args.UpdateExpiration(op_args.db_cntx.time_now_ms)) {
     return OpStatus::OUT_OF_RANGE;
   }
 
   auto& db_slice = op_args.GetDbSlice();
+  bool found_prev = false;
+
   // The redis impl (see cluster.c function restoreCommand), remove the old key if
   // the replace option is set, so lets do the same here
   {
     auto res = db_slice.FindMutable(op_args.db_cntx, key);
-    if (restore_args.Replace()) {
-      if (IsValid(res.it)) {
+    if (IsValid(res.it)) {
+      found_prev = true;
+      if (restore_args.Replace()) {
         VLOG(1) << "restore command is running with replace, found old key '" << key
                 << "' and removing it";
         res.post_updater.Run();
-        CHECK(db_slice.Del(op_args.db_cntx, res.it));
-      }
-    } else {
-      // we are not allowed to replace it, so make sure it doesn't exist
-      if (IsValid(res.it)) {
+        db_slice.Del(op_args.db_cntx, res.it);
+      } else {
+        // we are not allowed to replace it.
         return OpStatus::KEY_EXISTS;
       }
     }
@@ -555,12 +562,17 @@ OpResult<bool> OnRestore(const OpArgs& op_args, std::string_view key, std::strin
 
   if (restore_args.Expired()) {
     VLOG(1) << "the new key '" << key << "' already expired, will not save the value";
-    return true;
+    return OpStatus::OK;
   }
 
   RdbRestoreValue loader(rdb_version);
-  auto res = loader.Add(payload, key, db_slice, op_args.db_cntx, restore_args, op_args.shard);
-  return res.has_value();
+  auto add_res = loader.Add(key, payload, op_args.db_cntx, restore_args, &db_slice);
+  LOG_IF(DFATAL, add_res && !add_res->is_new)
+      << "Unexpected override for key " << key << ", found previous " << found_prev
+      << " override: " << restore_args.Replace()
+      << ", type: " << ObjTypeToString(add_res->it->second.ObjType());
+
+  return add_res.status();
 }
 
 bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, string* scratch,
@@ -601,7 +613,8 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // we enter the callback in a timing when journaling will not cause preemptions. Otherwise,
   // the bucket might change as we Traverse and yield.
   db_slice.BlockingCounter()->Wait();
-
+  // Disable flush journal changes to prevent preemtion in traverse.
+  journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
   util::FiberAtomicGuard guard;
   unsigned cnt = 0;
 
@@ -615,6 +628,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
     cur = prime_table->Traverse(
         cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
   } while (cur && cnt < scan_opts.limit);
+
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
   *cursor = cur.value();
 }
@@ -797,7 +811,7 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   // Restore expire flag after std::move.
   from_res.it->second.SetExpire(IsValid(from_res.exp_it));
 
-  CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
+  db_slice.Del(op_args.db_cntx, from_res.it);
   auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
   RETURN_ON_BAD_STATUS(op_result);
   auto& add_res = *op_result;
@@ -853,13 +867,13 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     to_res.post_updater.Run();
 
     from_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
+    db_slice.Del(op_args.db_cntx, from_res.it);
   } else {
     // Here we first delete from_it because AddNew below could invalidate from_it.
     // On the other hand, AddNew does not rely on the iterators - this is why we keep
     // the value in `from_obj`.
     from_res.post_updater.Run();
-    CHECK(db_slice.Del(op_args.db_cntx, from_res.it));
+    db_slice.Del(op_args.db_cntx, from_res.it);
     auto op_result = db_slice.AddNew(op_args.db_cntx, to_key, std::move(from_obj), exp_ts);
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);
@@ -980,35 +994,14 @@ std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, SinkRepl
   return flags;
 }
 
-}  // namespace
-
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
-  DVLOG(1) << "Del: " << keys.Front();
-  auto& db_slice = op_args.GetDbSlice();
-
-  uint32_t res = 0;
-
-  for (string_view key : keys) {
-    auto fres = db_slice.FindMutable(op_args.db_cntx, key);
-    if (!IsValid(fres.it))
-      continue;
-    fres.post_updater.Run();
-    res += int(db_slice.Del(op_args.db_cntx, fres.it));
-  }
-
-  return res;
-}
-
-void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
-  VLOG(1) << "Del " << ArgS(args, 0);
-
+void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
   atomic_uint32_t result{0};
   auto* builder = cmd_cntx.rb;
   bool is_mc = (builder->GetProtocol() == Protocol::MEMCACHE);
 
   auto cb = [&result](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
-    auto res = OpDel(t->GetOpArgs(shard), args);
+    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
     return OpStatus::OK;
@@ -1027,11 +1020,41 @@ void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
     if (del_cnt == 0) {
       mc_builder->SendNotFound();
     } else {
-      mc_builder->SendSimpleString("DELETED");
+      mc_builder->SendDeleted();
     }
   } else {
     builder->SendLong(del_cnt);
   }
+}
+
+}  // namespace
+
+OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
+  DVLOG(1) << "Del: " << keys.Front();
+  auto& db_slice = op_args.GetDbSlice();
+
+  uint32_t res = 0;
+
+  for (string_view key : keys) {
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
+    if (!IsValid(it))
+      continue;
+
+    db_slice.Del(op_args.db_cntx, it);
+    ++res;
+  }
+
+  return res;
+}
+
+void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
+  VLOG(1) << "Del " << ArgS(args, 0);
+
+  DeleteGeneric(args, cmd_cntx);
+}
+
+void GenericFamily::Unlink(CmdArgList args, const CommandContext& cmd_cntx) {
+  DeleteGeneric(args, cmd_cntx);
 }
 
 void GenericFamily::Ping(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -1476,22 +1499,21 @@ void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OnRestore(t->GetOpArgs(shard), key, serialized_value, restore_args.value(),
+    return OpRestore(t->GetOpArgs(shard), key, serialized_value, restore_args.value(),
                      rdb_version.value());
   };
 
-  OpResult<bool> result = cmd_cntx.tx->ScheduleSingleHopT(std::move(cb));
+  OpStatus result = cmd_cntx.tx->ScheduleSingleHop(std::move(cb));
 
-  if (result) {
-    if (result.value()) {
+  switch (result) {
+    case OpStatus::OK:
       return builder->SendOk();
-    } else {
+    case OpStatus::KEY_EXISTS:
+      return builder->SendError("BUSYKEY Target key name already exists.");
+    case OpStatus::INVALID_VALUE:
       return builder->SendError("Bad data format");
-    }
-  } else if (result.status() == OpStatus::KEY_EXISTS) {
-    return builder->SendError("BUSYKEY: key name already exists.");
-  } else {
-    return builder->SendError(result.status());
+    default:
+      return builder->SendError(result);
   }
 }
 
@@ -1626,7 +1648,7 @@ void GenericFamily::Select(CmdArgList args, const CommandContext& cmd_cntx) {
   if (!absl::SimpleAtoi(key, &index)) {
     return builder->SendError(kInvalidDbIndErr);
   }
-  if (cluster::IsClusterEnabled() && index != 0) {
+  if (IsClusterEnabled() && index != 0) {
     return builder->SendError("SELECT is not allowed in cluster mode");
   }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
@@ -1871,7 +1893,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::WRITE, -2, 1, -1, acl::kUnlink}.HFUNC(Del)
+      << CI{"UNLINK", CO::WRITE, -2, 1, -1, acl::kUnlink}.HFUNC(Unlink)
       << CI{"STICK", CO::WRITE, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::READONLY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
       << CI{"MOVE", CO::WRITE | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}.HFUNC(

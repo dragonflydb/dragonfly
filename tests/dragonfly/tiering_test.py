@@ -45,6 +45,7 @@ async def test_basic_memory_usage(async_client: aioredis.Redis):
     )  # the grown table itself takes up lots of space
 
 
+@pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @dfly_args(
     {

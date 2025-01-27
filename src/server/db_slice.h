@@ -229,7 +229,7 @@ class DbSlice {
     int32_t expire_options = 0;  // ExpireFlags
   };
 
-  DbSlice(uint32_t index, bool caching_mode, EngineShard* owner);
+  DbSlice(uint32_t index, bool cache_mode, EngineShard* owner);
   ~DbSlice();
 
   // Activates `db_ind` database if it does not exist (see ActivateDb below).
@@ -239,7 +239,7 @@ class DbSlice {
   Stats GetStats() const;
 
   // Returns slot statistics for db 0.
-  SlotStats GetSlotStats(cluster::SlotId sid) const;
+  SlotStats GetSlotStats(SlotId sid) const;
 
   void UpdateExpireBase(uint64_t now, unsigned generation) {
     expire_base_[generation & 1] = now;
@@ -281,6 +281,10 @@ class DbSlice {
     Iterator it;
     ExpIterator exp_it;
     AutoUpdater post_updater;
+
+    bool IsValid() const {
+      return !it.is_done();
+    }
   };
 
   ItAndUpdater FindMutable(const Context& cntx, std::string_view key);
@@ -342,7 +346,8 @@ class DbSlice {
   // Delete a key referred by its iterator.
   void PerformDeletion(Iterator del_it, DbTable* table);
 
-  bool Del(Context cntx, Iterator it);
+  // Deletes the iterator. The iterator must be valid.
+  void Del(Context cntx, Iterator it);
 
   constexpr static DbIndex kDbAll = 0xFFFF;
 
@@ -463,7 +468,16 @@ class DbSlice {
   }
 
   void TEST_EnableCacheMode() {
-    caching_mode_ = 1;
+    cache_mode_ = 1;
+  }
+
+  bool IsCacheMode() const {
+    // During loading time we never bump elements.
+    return cache_mode_ && !load_in_progress_;
+  }
+
+  void SetLoadInProgress(bool in_progress) {
+    load_in_progress_ = in_progress;
   }
 
   // Test hook to inspect last locked keys.
@@ -548,7 +562,7 @@ class DbSlice {
     ExpireIterator exp_it;
   };
 
-  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it, bool preempts = false) const;
+  PrimeItAndExp ExpireIfNeeded(const Context& cntx, PrimeIterator it) const;
 
   OpResult<AddOrFindResult> AddOrFindInternal(const Context& cntx, std::string_view key);
 
@@ -570,7 +584,8 @@ class DbSlice {
   mutable LocalBlockingCounter block_counter_;
 
   ShardId shard_id_;
-  uint8_t caching_mode_ : 1;
+  uint8_t cache_mode_ : 1;
+  uint8_t load_in_progress_ : 1;
 
   EngineShard* owner_;
 

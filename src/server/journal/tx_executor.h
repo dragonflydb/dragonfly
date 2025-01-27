@@ -47,7 +47,6 @@ struct TransactionData {
 
   TxId txid{0};
   DbIndex dbid{0};
-  uint32_t shard_cnt{0};
   journal::ParsedEntry::CmdData command;
 
   journal::Op opcode = journal::Op::NOOP;

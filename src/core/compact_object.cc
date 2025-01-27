@@ -20,8 +20,6 @@ extern "C" {
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 
-#include <jsoncons/json.hpp>
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/pod_array.h"
@@ -801,8 +799,8 @@ uint64_t CompactObj::HashCode() const {
   }
 
   if (encoded) {
-    GetString(&tl.tmp_str);
-    return XXH3_64bits_withSeed(tl.tmp_str.data(), tl.tmp_str.size(), kHashSeed);
+    string_view sv = GetSlice(&tl.tmp_str);
+    return XXH3_64bits_withSeed(sv.data(), sv.size(), kHashSeed);
   }
 
   switch (taglen_) {
@@ -888,6 +886,9 @@ void CompactObj::SetJson(JsonType&& j) {
   if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
     DCHECK(u_.json_obj.cons.json_ptr != nullptr);  // must be allocated
     u_.json_obj.cons.json_ptr->swap(j);
+    DCHECK(jsoncons::is_trivial_storage(u_.json_obj.cons.json_ptr->storage_kind()) ||
+           u_.json_obj.cons.json_ptr->get_allocator().resource() == tl.local_mr);
+
     // We do not set bytes_used as this is needed. Consider the two following cases:
     // 1. old json contains 50 bytes. The delta for new one is 50, so the total bytes
     // the new json occupies is 100.
@@ -899,6 +900,10 @@ void CompactObj::SetJson(JsonType&& j) {
 
   SetMeta(JSON_TAG);
   u_.json_obj.cons.json_ptr = AllocateMR<JsonType>(std::move(j));
+
+  // With trivial storage json_ptr->get_allocator() throws an exception.
+  DCHECK(jsoncons::is_trivial_storage(u_.json_obj.cons.json_ptr->storage_kind()) ||
+         u_.json_obj.cons.json_ptr->get_allocator().resource() == tl.local_mr);
   u_.json_obj.cons.bytes_used = 0;
 }
 

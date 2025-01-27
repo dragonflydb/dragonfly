@@ -230,7 +230,7 @@ using strings::HumanReadableNumBytes;
 
 namespace {
 
-const auto kRedisVersion = "6.2.11";
+const auto kRedisVersion = "7.4.0";
 
 using EngineFunc = void (ServerFamily::*)(CmdArgList args, const CommandContext&);
 
@@ -583,7 +583,7 @@ std::string_view GetOSString() {
 }
 
 string_view GetRedisMode() {
-  return cluster::IsClusterEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
+  return IsClusterEnabledOrEmulated() ? "cluster"sv : "standalone"sv;
 }
 
 struct ReplicaOfArgs {
@@ -622,7 +622,7 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
       return nullopt;
     }
     if (parser.HasNext()) {
-      auto [slot_start, slot_end] = parser.Next<cluster::SlotId, cluster::SlotId>();
+      auto [slot_start, slot_end] = parser.Next<SlotId, SlotId>();
       replicaof_args.slot_range = cluster::SlotRange{slot_start, slot_end};
       if (auto err = parser.Error(); err || !replicaof_args.slot_range->IsValid()) {
         builder->SendError("Invalid slot range");
@@ -636,6 +636,15 @@ optional<ReplicaOfArgs> ReplicaOfArgs::FromCmdArgs(CmdArgList args, SinkReplyBui
     return nullopt;
   }
   return replicaof_args;
+}
+
+uint64_t GetDelayMs(uint64_t ts) {
+  uint64_t now_ns = fb2::ProactorBase::GetMonotonicTimeNs();
+  uint64_t delay_ns = 0;
+  if (ts < now_ns - 1000000) {  // if more than 1ms has passed between ts and now_ns
+    delay_ns = (now_ns - ts) / 1000000;
+  }
+  return delay_ns;
 }
 
 }  // namespace
@@ -727,7 +736,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{std::move(listeners), conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
-  shard_set->pool()->AwaitBrief([&tracker, pause_state](unsigned, util::ProactorBase*) {
+  shard_set->pool()->AwaitFiberOnAll([&tracker, pause_state](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
     // it's impossible to deadlock on waiting for a command that will be paused.
     tracker.TrackOnThread();
@@ -1159,10 +1168,12 @@ void ServerFamily::SnapshotScheduling() {
     return;
   }
 
-  const auto loading_check_interval = std::chrono::seconds(10);
-  while (service_.GetGlobalState() == GlobalState::LOADING) {
-    schedule_done_.WaitFor(loading_check_interval);
-  }
+  ServerState* ss = ServerState::tlocal();
+  do {
+    if (schedule_done_.WaitFor(100ms)) {
+      return;
+    }
+  } while (ss->gstate() == GlobalState::LOADING);
 
   while (true) {
     const std::chrono::time_point now = std::chrono::system_clock::now();
@@ -1294,6 +1305,10 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
                             MetricType::GAUGE, &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_length", "", conn_stats.dispatch_queue_entries,
                             MetricType::GAUGE, &resp->body());
+  AppendMetricWithoutLabels("send_delay_seconds", "",
+                            double(GetDelayMs(m.oldest_pending_send_ts)) / 1000.0,
+                            MetricType::GAUGE, &resp->body());
+
   AppendMetricWithoutLabels("pipeline_throttle_total", "", conn_stats.pipeline_throttle_count,
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_cmd_cache_bytes", "", conn_stats.pipeline_cmd_cache_bytes,
@@ -1528,6 +1543,7 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
 
   auto cb = [this](const util::http::QueryArgs& args, util::HttpContext* send) {
     StringResponse resp = util::http::MakeStringResponse(boost::beast::http::status::ok);
+    util::http::SetMime(util::http::kTextMime, &resp);
     uint64_t uptime = time(NULL) - start_time_;
     PrintPrometheusMetrics(uptime, this->GetMetrics(&namespaces->GetDefaultNamespace()),
                            this->dfly_cmd_.get(), &resp);
@@ -1643,9 +1659,10 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSaveCheckAndStart(bool new_version, string_view basename,
                                                Transaction* trans, bool ignore_state) {
-  auto state = service_.GetGlobalState();
+  auto state = ServerState::tlocal()->gstate();
+
   // In some cases we want to create a snapshot even if server is not active, f.e in takeover
-  if (!ignore_state && (state != GlobalState::ACTIVE)) {
+  if (!ignore_state && (state != GlobalState::ACTIVE && state != GlobalState::SHUTTING_DOWN)) {
     return GenericError{make_error_code(errc::operation_in_progress),
                         StrCat(GlobalStateName(state), " - can not save database")};
   }
@@ -1756,8 +1773,9 @@ void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> stat
     }
   };
 
-  for (auto* listener : listeners_)
-    listener->TraverseConnectionsOnThread(cb);
+  for (auto* listener : listeners_) {
+    listener->TraverseConnectionsOnThread(cb, UINT32_MAX, nullptr);
+  }
 }
 
 string GetPassword() {
@@ -2145,6 +2163,17 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
       result.connections_lib_name_ver_map[k] += v;
     }
 
+    auto& send_list = facade::SinkReplyBuilder::pending_list;
+    if (!send_list.empty()) {
+      DCHECK(std::is_sorted(send_list.begin(), send_list.end(),
+                            [](const auto& left, const auto& right) {
+                              return left.timestamp_ns < right.timestamp_ns;
+                            }));
+
+      auto& oldest_member = send_list.front();
+      result.oldest_pending_send_ts =
+          min<uint64_t>(result.oldest_pending_send_ts, oldest_member.timestamp_ns);
+    }
     service_.mutable_registry()->MergeCallStats(index, cmd_stat_cb);
   };  // cb
 
@@ -2217,6 +2246,11 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     absl::StrAppend(&info, a1, ":", a2, "\r\n");
   };
 
+  ServerState* ss = ServerState::tlocal();
+
+  bool show_managed_info =
+      !absl::GetFlag(FLAGS_managed_service_info) || cmd_cntx.conn_cntx->conn()->IsPrivileged();
+
   if (should_enter("SERVER")) {
     auto kind = ProactorBase::me()->GetKind();
     const char* multiplex_api = (kind == ProactorBase::IOURING) ? "iouring" : "epoll";
@@ -2225,7 +2259,8 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("dragonfly_version", GetVersion());
     append("redis_mode", GetRedisMode());
     append("arch_bits", 64);
-    if (!absl::GetFlag(FLAGS_managed_service_info)) {
+
+    if (show_managed_info) {
       append("os", GetOSString());
       append("thread_count", service_.proactor_pool().size());
     }
@@ -2253,6 +2288,9 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
     append("pipeline_queue_length", m.facade_stats.conn_stats.dispatch_queue_entries);
+
+    append("send_delay_ms", GetDelayMs(m.oldest_pending_send_ts));
+    append("timeout_disconnects", m.coordinator_stats.conn_timeout_events);
   }
 
   if (should_enter("MEMORY")) {
@@ -2347,6 +2385,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("rdb_save_usec", m.coordinator_stats.rdb_save_usec);
     append("rdb_save_count", m.coordinator_stats.rdb_save_count);
     append("big_value_preemptions", m.coordinator_stats.big_value_preemptions);
+    append("compressed_blobs", m.coordinator_stats.compressed_blobs);
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
@@ -2439,7 +2478,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("last_saved_file", save_info.file_name);
     append("last_success_save_duration_sec", save_info.success_duration_sec);
 
-    size_t is_loading = service_.GetGlobalState() == GlobalState::LOADING;
+    unsigned is_loading = (ss->gstate() == GlobalState::LOADING);
     append("loading", is_loading);
     append("saving", is_saving);
     append("current_save_duration_sec", curent_durration_sec);
@@ -2493,7 +2532,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
       append("role", "master");
       append("connected_slaves", replicas_info.size());
 
-      if (!absl::GetFlag(FLAGS_managed_service_info)) {
+      if (show_managed_info) {
         for (size_t i = 0; i < replicas_info.size(); i++) {
           auto& r = replicas_info[i];
           // e.g. slave0:ip=172.19.0.3,port=6379,state=full_sync
@@ -2603,7 +2642,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 #endif
 
   if (should_enter("CLUSTER")) {
-    append("cluster_enabled", cluster::IsClusterEnabledOrEmulated());
+    append("cluster_enabled", IsClusterEnabledOrEmulated());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);
@@ -2668,10 +2707,10 @@ void ServerFamily::Hello(CmdArgList args, const CommandContext& cmd_cntx) {
   int proto_version = 2;
   if (is_resp3) {
     proto_version = 3;
-    rb->SetResp3(true);
+    rb->SetRespVersion(RespVersion::kResp3);
   } else {
     // Issuing hello 2 again is valid and should switch back to RESP2
-    rb->SetResp3(false);
+    rb->SetRespVersion(RespVersion::kResp2);
   }
 
   SinkReplyBuilder::ReplyAggregator agg(rb);
@@ -2724,7 +2763,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
     util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
 
     // We should not execute replica of command while loading from snapshot.
-    if (ServerState::tlocal()->is_master && service_.GetGlobalState() == GlobalState::LOADING) {
+    ServerState* ss = ServerState::tlocal();
+    if (ss->is_master && ss->gstate() == GlobalState::LOADING) {
       builder->SendError(kLoadingErr);
       return;
     }
@@ -2738,7 +2778,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
 
     // If NO ONE was supplied, just stop the current replica (if it exists)
     if (replicaof_args->IsReplicaOfNoOne()) {
-      if (!ServerState::tlocal()->is_master) {
+      if (!ss->is_master) {
         CHECK(replica_);
 
         SetMasterFlagOnAllThreads(true);  // Flip flag before clearing replica
@@ -2748,8 +2788,8 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
         StopAllClusterReplicas();
       }
 
-      CHECK_EQ(service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::ACTIVE)
-          << "Server is set to replica no one, yet state is not active!";
+      // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
 
       return builder->SendOk();
     }
@@ -3058,9 +3098,6 @@ void ServerFamily::ShutdownCmd(CmdArgList args, const CommandContext& cmd_cntx) 
       return;
     }
   }
-
-  service_.proactor_pool().AwaitFiberOnAll(
-      [](ProactorBase* pb) { ServerState::tlocal()->EnterLameDuck(); });
 
   CHECK_NOTNULL(acceptor_)->Stop();
   cmd_cntx.rb->SendOk();

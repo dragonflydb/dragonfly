@@ -23,6 +23,10 @@ namespace facade {
 class Connection;
 }
 
+namespace util {
+class ListenerInterface;
+}
+
 namespace dfly {
 
 namespace journal {
@@ -123,9 +127,11 @@ class ServerState {  // public struct - to allow initialization.
     uint64_t rdb_save_count = 0;
 
     uint64_t big_value_preemptions = 0;
+    uint64_t compressed_blobs = 0;
 
     // Number of times we rejected command dispatch due to OOM condition.
     uint64_t oom_error_cmd_cnt = 0;
+    uint32_t conn_timeout_events = 0;
 
     std::valarray<uint64_t> tx_width_freq_arr;
   };
@@ -149,12 +155,11 @@ class ServerState {  // public struct - to allow initialization.
   ServerState();
   ~ServerState();
 
-  static void Init(uint32_t thread_index, uint32_t num_shards, acl::UserRegistry* registry);
+  static void Init(uint32_t thread_index, uint32_t num_shards,
+                   util::ListenerInterface* main_listener, acl::UserRegistry* registry);
   static void Destroy();
 
-  void EnterLameDuck() {
-    state_->gstate_ = GlobalState::SHUTTING_DOWN;
-  }
+  void EnterLameDuck();
 
   void TxCountInc() {
     ++live_transactions_;
@@ -301,6 +306,9 @@ class ServerState {  // public struct - to allow initialization.
   size_t serialization_max_chunk_size;
 
  private:
+  // A fiber constantly watching connections on the main listener.
+  void ConnectionsWatcherFb(util::ListenerInterface* main);
+
   int64_t live_transactions_ = 0;
   SlowLogShard slow_log_shard_;
   mi_heap_t* data_heap_;
@@ -319,6 +327,10 @@ class ServerState {  // public struct - to allow initialization.
   // notified when the break is over.
   int client_pauses_[2] = {};
   util::fb2::EventCount client_pause_ec_;
+
+  // Monitors connections. Currently responsible for closing timed out connections.
+  util::fb2::Fiber watcher_fiber_;
+  util::fb2::CondVarAny watcher_cv_;
 
   using Counter = util::SlidingCounter<7>;
   Counter qps_;

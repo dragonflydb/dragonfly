@@ -1,8 +1,11 @@
+// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
 #include "cluster_config.h"
 
 #include <absl/container/flat_hash_set.h>
 
-#include <jsoncons/json.hpp>
 #include <optional>
 #include <string_view>
 
@@ -40,7 +43,7 @@ bool HasValidNodeIds(const ClusterShardInfos& new_config) {
 
 bool IsConfigValid(const ClusterShardInfos& new_config) {
   // Make sure that all slots are set exactly once.
-  array<bool, cluster::kMaxSlotNum + 1> slots_found = {};
+  vector<bool> slots_found(kMaxSlotNum + 1);
 
   if (!HasValidNodeIds(new_config)) {
     return false;
@@ -310,7 +313,7 @@ std::shared_ptr<ClusterConfig> ClusterConfig::CloneWithoutMigrations() const {
 }
 
 bool ClusterConfig::IsMySlot(SlotId id) const {
-  if (id > cluster::kMaxSlotNum) {
+  if (id > kMaxSlotNum) {
     DCHECK(false) << "Requesting a non-existing slot id " << id;
     return false;
   }
@@ -323,7 +326,7 @@ bool ClusterConfig::IsMySlot(std::string_view key) const {
 }
 
 ClusterNodeInfo ClusterConfig::GetMasterNodeForSlot(SlotId id) const {
-  CHECK_LE(id, cluster::kMaxSlotNum) << "Requesting a non-existing slot id " << id;
+  CHECK_LE(id, kMaxSlotNum) << "Requesting a non-existing slot id " << id;
 
   for (const auto& shard : config_) {
     if (shard.slot_ranges.Contains(id)) {

@@ -391,7 +391,7 @@ bool TieredStorage::TryStash(DbIndex dbid, string_view key, PrimeValue* value) {
     return false;
 
   // This invariant should always hold because ShouldStash tests for IoPending flag.
-  DCHECK(!bins_->IsPending(dbid, key));
+  CHECK(!bins_->IsPending(dbid, key));
 
   // TODO: When we are low on memory we should introduce a back-pressure, to avoid OOMs
   // with a lot of underutilized disk space.
