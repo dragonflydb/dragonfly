@@ -717,6 +717,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     PrimeTable* table = GetTables(db_index).first;
 
     auto iterate_bucket = [&](DbIndex db_index, PrimeTable::bucket_iterator it) {
+      it.AdvanceIfNotOccupied();
       while (!it.is_done()) {
         del_entry_cb(it);
         ++it;
@@ -724,7 +725,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     };
 
     if (const PrimeTable::bucket_iterator* bit = req.update()) {
-      if (bit->GetVersion() < next_version) {
+      if (!bit->is_done() && bit->GetVersion() < next_version) {
         iterate_bucket(db_index, *bit);
       }
     } else {
