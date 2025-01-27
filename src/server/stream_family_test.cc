@@ -400,6 +400,25 @@ TEST_F(StreamFamilyTest, XReadGroupBlock) {
   EXPECT_THAT(resp0, ErrArg("consumer group this client was blocked on no longer exists"));
 }
 
+TEST_F(StreamFamilyTest, XReadGroupBlockDelconsumer) {
+  Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
+
+  RespExpr resp0;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp0 = Run({"XREADGROUP", "GROUP", "group", "alice", "BLOCK", "0", "streams", "foo", ">"});
+  });
+  ThisFiber::SleepFor(50us);
+
+  // Del consumer while it's blocked
+  RespExpr resp_del_consumer = Run({"XGROUP", "DELCONSUMER", "foo", "group", "alice"});
+
+  pp_->at(1)->Await([&] { return Run("xadd", {"XADD", "foo", "1-0", "k1", "v1"}); });
+  fb0.Join();
+
+  EXPECT_THAT(resp0.GetVec(), ElementsAre("foo", ArrLen(1)));
+  EXPECT_THAT(resp_del_consumer, IntArg(0));
+}
+
 TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   // Invalid COUNT value.
   auto resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
