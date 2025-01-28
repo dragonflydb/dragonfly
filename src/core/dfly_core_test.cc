@@ -6,7 +6,13 @@
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
 
+extern "C" {
+#include "redis/util.h"
+}
+
 namespace dfly {
+
+using namespace std;
 
 class TxQueueTest : public ::testing::Test {
  protected:
@@ -63,6 +69,44 @@ TEST_F(IntentLockTest, Basic) {
   ASSERT_FALSE(lk_.Check(IntentLock::EXCLUSIVE));
   lk_.Release(IntentLock::SHARED);
   ASSERT_TRUE(lk_.Check(IntentLock::EXCLUSIVE));
+}
+
+class StringMatchTest : public ::testing::Test {
+ protected:
+  // wrapper around stringmatchlen with stringview arguments
+  int MatchLen(string_view pattern, string_view str, bool nocase) {
+    return stringmatchlen(pattern.data(), pattern.size(), str.data(), str.size(), nocase);
+  }
+};
+
+TEST_F(StringMatchTest, Basic) {
+  // ExactMatch
+  EXPECT_EQ(MatchLen("hello", "hello", 0), 1);
+  EXPECT_EQ(MatchLen("hello", "world", 0), 0);
+
+  // Wildcards
+  EXPECT_EQ(MatchLen("*", "hello", 0), 1);
+  EXPECT_EQ(MatchLen("h*", "hello", 0), 1);
+  EXPECT_EQ(MatchLen("h*o", "hello", 0), 1);
+  EXPECT_EQ(MatchLen("hel*o*", "hello*", 0), 1);
+
+  // Single character wildcard
+  EXPECT_EQ(MatchLen("h[aeiou]llo", "hello", 0), 1);
+  EXPECT_EQ(MatchLen("h[aeiou]llo", "hallo", 0), 1);
+  EXPECT_EQ(MatchLen("h[^aeiou]llo", "hallo", 0), 0);
+  EXPECT_EQ(MatchLen("h[a-z]llo", "hello", 0), 1);
+
+  EXPECT_EQ(MatchLen("h[A-Z]llo", "Hello", 1), 1);
+
+  EXPECT_EQ(MatchLen("h\\*llo", "h*llo", 0), 1);
+  EXPECT_EQ(MatchLen("h\\\\llo", "h\\llo", 0), 1);
+
+  // ?
+  EXPECT_EQ(MatchLen("h?llo", "hello", 0), 1);
+  EXPECT_EQ(MatchLen("h??llo", "ha llo", 0), 1);
+  EXPECT_EQ(MatchLen("h??llo", "hallo", 0), 0);
+  EXPECT_EQ(MatchLen("h\\?llo", "hallo", 0), 0);
+  EXPECT_EQ(MatchLen("h\\?llo", "h?llo", 0), 1);
 }
 
 }  // namespace dfly

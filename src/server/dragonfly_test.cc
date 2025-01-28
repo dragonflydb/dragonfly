@@ -13,6 +13,7 @@ extern "C" {
 #include <absl/strings/strip.h>
 #include <fast_float/fast_float.h>
 #include <gmock/gmock.h>
+#include <reflex/matcher.h>
 
 #include "base/flags.h"
 #include "base/gtest.h"
@@ -891,5 +892,37 @@ static void BM_MatchFindSubstr(benchmark::State& state) {
 }
 BENCHMARK(BM_MatchFindSubstr)->Arg(1000)->Arg(10000);
 
+static void BM_MatchReflexFind(benchmark::State& state) {
+  absl::InsecureBitGen eng;
+  string random_val = GetRandomHex(eng, state.range(0));
+  reflex::Matcher matcher("foobar");
+  matcher.input("xxxxxxfoobaryyyyyyyy");
+  CHECK_GT(matcher.find(), 0u);
+  matcher.input("xxxxxxfoobayyyyyyyy");
+  CHECK_EQ(0u, matcher.find());
+
+  while (state.KeepRunning()) {
+    matcher.input(random_val);
+    DoNotOptimize(matcher.find());
+  }
+}
+BENCHMARK(BM_MatchReflexFind)->Arg(1000)->Arg(10000);
+
+static void BM_MatchReflexMatch(benchmark::State& state) {
+  absl::InsecureBitGen eng;
+  string random_val = GetRandomHex(eng, state.range(0));
+  reflex::Matcher matcher(".*foobar.*");
+  matcher.input("xxxxxxfoobaryyyyyyyy");
+  CHECK_GT(matcher.matches(), 0u);
+  matcher.input("xxxxxxfoobayyyyyyyy");
+  CHECK_EQ(0u, matcher.matches());
+
+  matcher.input(random_val);
+  while (state.KeepRunning()) {
+    matcher.input(random_val);
+    DoNotOptimize(matcher.matches());
+  }
+}
+BENCHMARK(BM_MatchReflexMatch)->Arg(1000)->Arg(10000);
 
 }  // namespace dfly
