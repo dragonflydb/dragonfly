@@ -218,16 +218,6 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   return 1;
 }
 
-// Deprecated and should be removed.
-class FetchedItemsRestorer {
- public:
-  template <typename U> explicit FetchedItemsRestorer(U&& u) {
-  }
-
-  ~FetchedItemsRestorer() {
-  }
-};
-
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -269,6 +259,24 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 }
 
 #undef ADD
+
+class DbSlice::PrimeBumpPolicy {
+ public:
+  PrimeBumpPolicy(absl::flat_hash_set<uint64_t, FpHasher>* items) : fetched_items_(items) {
+  }
+
+  // returns true if we can change the object location in dash table.
+  bool CanBump(const CompactObj& obj) const {
+    if (obj.IsSticky()) {
+      return false;
+    }
+    auto hc = obj.HashCode();
+    return fetched_items_->insert(hc).second;
+  }
+
+ private:
+  mutable absl::flat_hash_set<uint64_t, FpHasher>* fetched_items_;
+};
 
 DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
     : shard_id_(index),
@@ -474,7 +482,6 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
 
   if (IsCacheMode() && IsValid(res.it)) {
     if (!change_cb_.empty()) {
-      FetchedItemsRestorer fetched_restorer(&fetched_items_);
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
@@ -566,8 +573,6 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   }
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
-
-  FetchedItemsRestorer fetched_restorer(&fetched_items_);
 
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
@@ -1059,7 +1064,6 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 }
 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
-  FetchedItemsRestorer fetched_restorer(&fetched_items_);
   CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
@@ -1178,8 +1182,7 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 }
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
-  FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
+  unique_lock<LocalBlockingCounter> lk(block_counter_);
 
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.

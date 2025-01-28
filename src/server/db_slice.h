@@ -657,23 +657,7 @@ class DbSlice {
                       absl::container_internal::hash_default_eq<std::string>, AllocatorType>
       client_tracking_map_;
 
-  class PrimeBumpPolicy {
-   public:
-    PrimeBumpPolicy(absl::flat_hash_set<uint64_t, FpHasher>* items) : fetched_items_(items) {
-    }
-
-    // returns true if we can change the object location in dash table.
-    bool CanBump(const CompactObj& obj) const {
-      if (obj.IsSticky()) {
-        return false;
-      }
-      auto hc = obj.HashCode();
-      return fetched_items_->insert(hc).second;
-    }
-
-   private:
-    mutable absl::flat_hash_set<uint64_t, FpHasher>* fetched_items_;
-  };
+  class PrimeBumpPolicy;
 };
 
 inline bool IsValid(const DbSlice::Iterator& it) {
