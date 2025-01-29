@@ -12,7 +12,6 @@
 
 extern "C" {
 #include "redis/crc64.h"
-#include "redis/util.h"
 }
 
 #include "base/flags.h"
@@ -1180,7 +1179,7 @@ void GenericFamily::Keys(CmdArgList args, const CommandContext& cmd_cntx) {
 
   ScanOpts scan_opts;
   if (pattern != "*") {
-    scan_opts.pattern = pattern;
+    scan_opts.matcher.emplace(pattern, true);
   }
 
   scan_opts.limit = 512;

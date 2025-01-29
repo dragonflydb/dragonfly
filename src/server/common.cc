@@ -12,7 +12,6 @@
 
 extern "C" {
 #include "redis/rdb.h"
-#include "redis/util.h"
 }
 
 #include "base/flags.h"
@@ -298,7 +297,7 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
     } else if (opt == "MATCH") {
       string_view pattern = ArgS(args, i + 1);
       if (pattern != "*")
-        scan_opts.pattern = pattern;
+        scan_opts.matcher.emplace(pattern, true);
     } else if (opt == "TYPE") {
       auto obj_type = ObjTypeFromString(ArgS(args, i + 1));
       if (!obj_type) {
@@ -317,9 +316,7 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
 }
 
 bool ScanOpts::Matches(std::string_view val_name) const {
-  if (!pattern)
-    return true;
-  return stringmatchlen(pattern->data(), pattern->size(), val_name.data(), val_name.size(), 0) == 1;
+  return !matcher || matcher->Matches(val_name);
 }
 
 GenericError::operator std::error_code() const {
