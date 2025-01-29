@@ -260,6 +260,9 @@ class ServerState {  // public struct - to allow initialization.
     channel_store_ = replacement;
   }
 
+  void UnsubscribeSlotsAndUpdateChannelStore(std::vector<std::string_view> channels,
+                                             ChannelStore* replacement);
+
   bool ShouldLogSlowCmd(unsigned latency_usec) const;
 
   Stats stats;
