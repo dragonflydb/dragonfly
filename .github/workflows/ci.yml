@@ -171,7 +171,7 @@ jobs:
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
-          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
           FLAGS_fiber_safety_margin=4096 FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY
 
           echo "Running tests with --force_epoll"

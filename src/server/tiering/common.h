@@ -42,6 +42,10 @@ struct DiskSegment {
   }
 
   size_t offset = 0, length = 0;
+
+  friend std::ostream& operator<<(std::ostream& os, const DiskSegment& ds) {
+    return os << "[" << ds.offset << ", " << ds.length << "]";
+  }
 };
 
 };  // namespace dfly::tiering
