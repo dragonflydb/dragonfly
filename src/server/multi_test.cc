@@ -20,6 +20,7 @@ ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
 ABSL_DECLARE_FLAG(std::string, default_lua_flags);
+ABSL_DECLARE_FLAG(std::vector<std::string>, lua_force_atomicity_shas);
 
 namespace dfly {
 
@@ -27,6 +28,7 @@ using namespace std;
 using namespace util;
 using absl::StrCat;
 using ::io::Result;
+using testing::_;
 using testing::ElementsAre;
 using testing::HasSubstr;
 
@@ -1146,6 +1148,29 @@ TEST_F(MultiTest, EvalShaRo) {
 
   resp = Run({"evalsha_ro", write_sha, "1", "foo"});
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
+}
+
+TEST_F(MultiTest, ForceAtomicityFlag) {
+  absl::FlagSaver fs;
+
+  const string kHash = "bb855c2ecfa3114d222cb11e0682af6360e9712f";
+  const string_view kScript = R"(
+    --!df flags=disable-atomicity
+    redis.call('get', 'x');
+    return "OK";
+  )";
+
+  // EVAL the script works due to disable-atomicity flag
+  EXPECT_EQ(Run({"eval", kScript, "0"}), "OK");
+
+  EXPECT_THAT(Run({"script", "list"}), RespElementsAre(kHash, kScript));
+
+  // Flush scripts to force re-evaluating of flags
+  EXPECT_EQ(Run({"script", "flush"}), "OK");
+
+  // Now it doesn't work, because we force atomicity
+  absl::SetFlag(&FLAGS_lua_force_atomicity_shas, {kHash});
+  EXPECT_THAT(Run({"eval", kScript, "0"}), ErrArg("undeclared"));
 }
 
 }  // namespace dfly
