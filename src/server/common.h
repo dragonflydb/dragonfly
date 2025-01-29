@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/compact_object.h"
+#include "core/glob_matcher.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "helio/io/proc_reader.h"
@@ -303,7 +304,7 @@ class Context : protected Cancellation {
 };
 
 struct ScanOpts {
-  std::optional<std::string_view> pattern;
+  std::optional<GlobMatcher> matcher;
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;

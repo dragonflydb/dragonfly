@@ -875,7 +875,7 @@ static void BM_MatchPattern(benchmark::State& state) {
   absl::InsecureBitGen eng;
   string random_val = GetRandomHex(eng, state.range(0));
   ScanOpts scan_opts;
-  scan_opts.pattern = "*foobar*";
+  scan_opts.matcher.emplace("*foobar*", true);
   while (state.KeepRunning()) {
     DoNotOptimize(scan_opts.Matches(random_val));
   }

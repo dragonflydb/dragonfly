@@ -3,12 +3,9 @@
 //
 
 #include "base/gtest.h"
+#include "core/glob_matcher.h"
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
-
-extern "C" {
-#include "redis/util.h"
-}
 
 namespace dfly {
 
@@ -75,7 +72,8 @@ class StringMatchTest : public ::testing::Test {
  protected:
   // wrapper around stringmatchlen with stringview arguments
   int MatchLen(string_view pattern, string_view str, bool nocase) {
-    return stringmatchlen(pattern.data(), pattern.size(), str.data(), str.size(), nocase);
+    GlobMatcher matcher(pattern, !nocase);
+    return matcher.Matches(str);
   }
 };
 

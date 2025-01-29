@@ -4,15 +4,10 @@
 // See LICENSE for licensing terms.
 //
 
-#include <shared_mutex>
-
-extern "C" {
-#include "redis/util.h"
-}
-
 #include <absl/container/fixed_array.h>
 
 #include "base/logging.h"
+#include "core/glob_matcher.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 
@@ -20,10 +15,6 @@ namespace dfly {
 using namespace std;
 
 namespace {
-
-bool Matches(string_view pattern, string_view channel) {
-  return stringmatchlen(pattern.data(), pattern.size(), channel.data(), channel.size(), 0) == 1;
-}
 
 // Build functor for sending messages to connection
 auto BuildSender(string_view channel, facade::ArgRange messages) {
@@ -171,7 +162,8 @@ vector<ChannelStore::Subscriber> ChannelStore::FetchSubscribers(string_view chan
     Fill(*it->second, string{}, &res);
 
   for (const auto& [pat, subs] : *patterns_) {
-    if (Matches(pat, channel))
+    GlobMatcher matcher{pat, true};
+    if (matcher.Matches(channel))
       Fill(*subs, pat, &res);
   }
 
@@ -192,8 +184,9 @@ void ChannelStore::Fill(const SubscribeMap& src, const string& pattern, vector<S
 
 std::vector<string> ChannelStore::ListChannels(const string_view pattern) const {
   vector<string> res;
+  GlobMatcher matcher{pattern, true};
   for (const auto& [channel, _] : *channels_) {
-    if (pattern.empty() || Matches(pattern, channel))
+    if (pattern.empty() || matcher.Matches(channel))
       res.push_back(channel);
   }
   return res;
