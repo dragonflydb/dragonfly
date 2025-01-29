@@ -97,7 +97,12 @@ class CommandId {
 
   // PSUBSCRIBE/PUNSUBSCRIBE variant
   bool IsPSub() const {
-    return is_p_sub_;
+    return is_p_pub_sub_;
+  }
+
+  // SSUBSCRIBE/SUNSUBSCRIBE variant
+  bool IsShardedPSub() const {
+    return is_sharded_pub_sub_;
   }
 
  protected:
@@ -118,7 +123,8 @@ class CommandId {
   bool restricted_ = false;
 
   bool is_pub_sub_ = false;
-  bool is_p_sub_ = false;
+  bool is_sharded_pub_sub_ = false;
+  bool is_p_pub_sub_ = false;
 };
 
 }  // namespace facade
