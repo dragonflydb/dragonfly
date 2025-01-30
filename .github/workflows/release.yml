@@ -24,60 +24,25 @@ jobs:
           draft: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  build-qemu:
-    runs-on: ubuntu-latest
-    name: Build aarch64 on ubuntu20.04
+  build-arm:
+    runs-on: ubuntu-24.04-arm
+    name: Build arm64 on ubuntu-24.04-arm
     needs: create-release
+    container:
+      image: ghcr.io/romange/ubuntu-dev:20
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: true
-    - uses: uraimo/run-on-arch-action@v2
-      name: Run commands
-      id: runcmd
-      with:
-        arch: aarch64
-        distro: ubuntu20.04
-        githubToken: ${{ github.token }}
-        # Create an artifacts directory
-        setup: |
-          mkdir -p "${PWD}/artifacts"
-
-        # Mount the artifacts directory as /artifacts in the container
-        dockerRunArgs: |
-          --volume "${{ github.workspace }}:/src"
-
-        # The shell to run commands with in the container
-        shell: /bin/bash
-        install: |
-          export DEBIAN_FRONTEND=noninteractive
-          apt update && apt install -q -y autoconf-archive cmake curl git libssl-dev \
-              libunwind-dev ninja-build libtool gcc-9 g++-9 libboost-context-dev \
-              zip libzstd-dev debhelper moreutils bison zlib1g-dev
-          update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 40  \
-                              --slave /usr/bin/g++ g++ /usr/bin/g++-9
-        run: |
+    - name: Build artifacts
+      run: |
             # Work around https://github.com/actions/checkout/issues/766
-            git config --global --add safe.directory /src
-            cd /src
+            git config --global --add safe.directory "$GITHUB_WORKSPACE"
             git describe --always --tags ${{ github.sha }}
-
-            if [ -d ${{ env.RELEASE_DIR }} ]; then
-              chown -R root ${{ env.RELEASE_DIR }}
-              ls -l ./${{ env.RELEASE_DIR }}
-              for i in `ls -d ./${{ env.RELEASE_DIR }}/_deps/*-src`; do
-                git config --global --add safe.directory $(realpath $i)
-              done
-            fi
             ./tools/release.sh
             ./tools/packaging/generate_debian_package.sh ${{ env.RELEASE_DIR }}/dragonfly-aarch64
             mv dragonfly_*.deb ${{ env.RELEASE_DIR }}/
-    - name: Show the artifact
-      # Items placed in /src/${{ env.RELEASE_DIR }} in the container will be in
-      # ${PWD}/${{ env.RELEASE_DIR }} on the host.
-      run: |
-        echo finished
-        ls -al
     - name: Upload
       uses: actions/upload-artifact@v4
       with:
@@ -150,7 +115,7 @@ jobs:
         path: results-artifacts/*
   publish_release:
     runs-on: ubuntu-latest
-    needs: [build-native, build-qemu]
+    needs: [build-native, build-arm]
     steps:
       - uses: actions/download-artifact@v4
         name: Download files
