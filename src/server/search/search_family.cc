@@ -306,7 +306,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
 }
 
 std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
-  using SordOrder = aggregate::SortParams::SortOrder;
+  using SortOrder = aggregate::SortParams::SortOrder;
 
   size_t strings_num = parser->Next<size_t>();
 
@@ -318,9 +318,9 @@ std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* par
     std::string_view parsed_field = ParseFieldWithAtSign(parser);
     strings_num--;
 
-    SordOrder sord_order = SordOrder::ASC;
+    SortOrder sord_order = SortOrder::ASC;
     if (strings_num > 0) {
-      auto order = parser->TryMapNext("ASC", SordOrder::ASC, "DESC", SordOrder::DESC);
+      auto order = parser->TryMapNext("ASC", SortOrder::ASC, "DESC", SortOrder::DESC);
       if (order) {
         sord_order = order.value();
         strings_num--;
