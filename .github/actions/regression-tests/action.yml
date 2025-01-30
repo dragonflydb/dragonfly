@@ -49,7 +49,7 @@ runs:
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
         export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
 
-        if [[ "${{inputs.epoll}}" == 'true' ]]; then
+        if [[ "${{inputs.epoll}}" == 'epoll' ]]; then
           export FILTER="${{inputs.filter}} and not exclude_epoll"
           # Run only replication tests with epoll
           timeout 50m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes --json-report --json-report-file=report.json dragonfly --df force_epoll=true --log-cli-level=INFO || code=$?
@@ -98,7 +98,7 @@ runs:
         fi
 
         job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-        message="Regression tests failed.\\n The commit is: ${{github.sha}}.\\n $failed_tests \\n Job Link: ${job_link}\\n"
+        message="Regression ${{inputs.epoll}} tests failed.\\n The commit is: ${{github.sha}}.\\n $failed_tests \\n Job Link: ${job_link}\\n"
 
         curl -s \
           -X POST \
