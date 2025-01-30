@@ -1491,6 +1491,35 @@ async def test_tls_replication(
     await proxy.close(proxy_task)
 
 
+@dfly_args({"proactor_threads": 2})
+async def test_tls_replication_without_ca(
+    df_factory,
+    df_seeder_factory,
+    with_tls_server_args,
+    with_ca_tls_client_args,
+):
+    # 1. Spin up dragonfly tls enabled, debug populate
+    master = df_factory.create(tls_replication="true", **with_tls_server_args, requirepass="hi")
+    master.start()
+    # Somehow redis-py forces to verify the certificate and it fails
+    # TODO investigate why and remove with_ca_tls_clients_args
+    c_master = master.client(password="hi", **with_ca_tls_client_args)
+    await c_master.execute_command("DEBUG POPULATE 100")
+
+    # 2. Spin up a replica and initiate a REPLICAOF
+    replica = df_factory.create(
+        tls_replication="true", **with_tls_server_args, masterauth="hi", requirepass="hi"
+    )
+    replica.start()
+
+    c_replica = replica.client(password="hi", **with_ca_tls_client_args)
+
+    res = await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+    assert "OK" == res
+    await check_all_replicas_finished([c_replica], c_master)
+    assert 100 == await c_replica.execute_command("dbsize")
+
+
 @pytest.mark.exclude_epoll
 async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""

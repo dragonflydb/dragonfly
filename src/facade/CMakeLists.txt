@@ -3,7 +3,7 @@ cxx_link(dfly_parser_lib base strings_lib)
 
 add_library(dfly_facade conn_context.cc dragonfly_listener.cc dragonfly_connection.cc facade.cc
             memcache_parser.cc reply_builder.cc op_status.cc service_interface.cc
-            reply_capture.cc cmd_arg_parser.cc tls_error.cc)
+            reply_capture.cc cmd_arg_parser.cc tls_helpers.cc)
 
 if (DF_USE_SSL)
   set(TLS_LIB tls_lib)
