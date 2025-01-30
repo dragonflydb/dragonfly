@@ -1901,9 +1901,8 @@ TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
   EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 
   // Test REDUCE with no REDUCE function
-  /* resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE"});
-  EXPECT_THAT(resp, ErrArg("Bad arguments for REDUCE: SUCCESS"));
- */
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE"});
+  EXPECT_THAT(resp, ErrArg("reducer function  not found"));
 
   /* // Test REDUCE with COUNT function
   resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE", "COUNT", "0"});
