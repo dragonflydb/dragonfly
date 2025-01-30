@@ -165,4 +165,44 @@ sds StringSet::MakeSetSds(string_view src, uint32_t ttl_sec) const {
   return sdsnewlen(src.data(), src.size());
 }
 
+// Does not release obj. Callers must deallocate with sdsfree explicitly
+pair<sds, bool> StringSet::DuplicateEntryIfFragmented(void* obj, float ratio) {
+  sds key = (sds)obj;
+
+  if (!zmalloc_page_is_underutilized(key, ratio))
+    return {key, false};
+
+  size_t key_len = sdslen(key);
+  bool has_ttl = MayHaveTtl(key);
+
+  if (has_ttl) {
+    sds res = AllocSdsWithSpace(key_len, sizeof(uint32_t));
+    std::memcpy(res, key, key_len + sizeof(uint32_t));
+    return {res, true};
+  }
+
+  return {sdsnewlen(key, key_len), true};
+}
+
+bool StringSet::iterator::ReallocIfNeeded(float ratio) {
+  auto* ptr = curr_entry_;
+  if (ptr->IsLink()) {
+    ptr = ptr->AsLink();
+  }
+
+  DCHECK(!ptr->IsEmpty());
+  DCHECK(ptr->IsObject());
+
+  auto* obj = ptr->GetObject();
+  auto [new_obj, realloced] =
+      static_cast<StringSet*>(owner_)->DuplicateEntryIfFragmented(obj, ratio);
+
+  if (realloced) {
+    ptr->SetObject(new_obj);
+    sdsfree((sds)obj);
+  }
+
+  return realloced;
+}
+
 }  // namespace dfly

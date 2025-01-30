@@ -2034,6 +2034,9 @@ error_code RdbLoader::Load(io::Source* src) {
 
   auto cleanup = absl::Cleanup([&] { FinishLoad(start, &keys_loaded); });
 
+  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+    namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetLoadInProgress(true);
+  });
   while (!stop_early_.load(memory_order_relaxed)) {
     if (pause_) {
       ThisFiber::SleepFor(100ms);
@@ -2223,7 +2226,10 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
+    shard_set->Add(i, [bc]() mutable {
+      namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetLoadInProgress(false);
+      bc->Dec();
+    });
   }
   bc->Wait();  // wait for sentinels to report.
 

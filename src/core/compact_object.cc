@@ -276,6 +276,15 @@ pair<void*, bool> DefragSortedMap(detail::SortedMap* sm, float ratio) {
   return {sm, reallocated};
 }
 
+pair<void*, bool> DefragStrSet(StringSet* ss, float ratio) {
+  bool realloced = false;
+
+  for (auto it = ss->begin(); it != ss->end(); ++it)
+    realloced |= it.ReallocIfNeeded(ratio);
+
+  return {ss, realloced};
+}
+
 // Iterates over allocations of internal hash data structures and re-allocates
 // them if their pages are underutilized.
 // Returns pointer to new object ptr and whether any re-allocations happened.
@@ -304,8 +313,7 @@ pair<void*, bool> DefragSet(unsigned encoding, void* ptr, float ratio) {
     }
 
     case kEncodingStrMap2: {
-      // Still not implemented
-      return {ptr, false};
+      return DefragStrSet((StringSet*)ptr, ratio);
     }
 
     default:

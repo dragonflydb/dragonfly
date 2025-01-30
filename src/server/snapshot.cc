@@ -291,11 +291,10 @@ unsigned SliceSnapshot::SerializeBucket(DbIndex db_index, PrimeTable::bucket_ite
   it.SetVersion(snapshot_version_);
   unsigned result = 0;
 
-  while (!it.is_done()) {
+  for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     ++result;
     // might preempt due to big value serialization.
     SerializeEntry(db_index, it->first, it->second);
-    ++it;
   }
   serialize_bucket_running_ = false;
   return result;
@@ -391,7 +390,7 @@ void SliceSnapshot::OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req) 
   const PrimeTable::bucket_iterator* bit = req.update();
 
   if (bit) {
-    if (bit->GetVersion() < snapshot_version_) {
+    if (!bit->is_done() && bit->GetVersion() < snapshot_version_) {
       stats_.side_saved += SerializeBucket(db_index, *bit);
     }
   } else {

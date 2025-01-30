@@ -1,4 +1,4 @@
-name: Regression Tests
+name: Epoll Regression Tests
 
 on:
   schedule:
@@ -11,8 +11,8 @@ jobs:
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:20"]
-        proactor: [Uring]
-        build-type: [Debug, Release]
+        proactor: [Epoll]
+        build-type: [Debug]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
 
     runs-on: ${{ matrix.runner }}

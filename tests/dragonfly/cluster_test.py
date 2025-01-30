@@ -2685,3 +2685,179 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     assert (await StaticSeeder.capture(nodes[1].client)) == start_capture
+
+
+"""
+Test cluster node distributing its slots into 2 other nodes.
+In this test we start migrating to the second node only after the first one finished to
+reproduce the bug found in issue #4455
+"""
+
+
+@pytest.mark.exclude_epoll
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # 1. Create cluster of 3 nodes with all slots allocated to first node.
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
+        )
+        for i in range(3)
+    ]
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    nodes[2].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("DEBUG POPULATE first node")
+    key_num = 100000
+    await StaticSeeder(key_target=key_num, data_size=100).run(nodes[0].client)
+    dbsize_node0 = await nodes[0].client.dbsize()
+    assert dbsize_node0 > (key_num * 0.95)
+
+    # 2. Start migrating part of the slots from first node to second
+    logging.debug("Start first migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16300)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # 3. Wait for migratin finish
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=50)
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", timeout=50)
+
+    nodes[0].migrations = []
+    nodes[0].slots = [(16301, 16383)]
+    nodes[1].slots = [(0, 16300)]
+    nodes[2].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # 4. Start migrating remaind slots from first node to third node
+    logging.debug("Start second migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[2].instance.admin_port, [(16301, 16383)], nodes[2].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # 5. Wait for migratin finish
+    await wait_for_status(nodes[0].admin_client, nodes[2].id, "FINISHED", timeout=10)
+    await wait_for_status(nodes[2].admin_client, nodes[0].id, "FINISHED", timeout=10)
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16300)]
+    nodes[2].slots = [(16301, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # 6. Check all data was migrated
+    # Using dbsize to check all the data was migrated to the other nodes.
+    # Note: we can not use the seeder capture as we migrate the data to 2 different nodes.
+    # TODO: improve the migration conrrectness by running the seeder capture on slot range (requiers changes in capture script).
+    dbsize_node1 = await nodes[1].client.dbsize()
+    dbsize_node2 = await nodes[2].client.dbsize()
+    assert dbsize_node1 + dbsize_node2 == dbsize_node0
+    assert dbsize_node2 > 0 and dbsize_node1 > 0
+
+
+"""
+Test cluster node distributing its slots into 3 other nodes.
+In this test we randomize the slot ranges that are migrated to each node
+For each migration we start migration, wait for it to finish and once it is finished we send migration finalization config
+"""
+
+
+@pytest.mark.slow
+@pytest.mark.exclude_epoll
+@pytest.mark.asyncio
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seeder_factory):
+    # 1. Create cluster of 3 nodes with all slots allocated to first node.
+    instances = [
+        df_factory.create(
+            port=next(next_port),
+            admin_port=next(next_port),
+            vmodule="outgoing_slot_migration=2,cluster_family=2,incoming_slot_migration=2,streamer=2",
+        )
+        for i in range(4)
+    ]
+    df_factory.start_all(instances)
+
+    def create_random_ranges():
+        # Generate 2 random breakpoints within the range
+        breakpoints = sorted(random.sample(range(1, 16382), 2))
+        ranges = [
+            (0, breakpoints[0] - 1),
+            (breakpoints[0], breakpoints[1] - 1),
+            (breakpoints[1], 16383),
+        ]
+        return ranges
+
+    # Create 3 random ranges from 0 to 16383
+    random_ranges = create_random_ranges()
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = random_ranges
+    nodes[1].slots = []
+    nodes[2].slots = []
+    nodes[3].slots = []
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    key_num = 100000
+    logging.debug(f"DEBUG POPULATE first node with number of keys: {key_num}")
+    await StaticSeeder(key_target=key_num, data_size=100).run(nodes[0].client)
+    dbsize_node0 = await nodes[0].client.dbsize()
+    assert dbsize_node0 > (key_num * 0.95)
+
+    logging.debug("start seeding")
+    # Running seeder with pipeline mode when finalizing migrations leads to errors
+    # TODO: I believe that changing the seeder to generate pipeline command only on specific slot will fix the problem
+    seeder = df_seeder_factory.create(
+        keys=50_000, port=instances[0].port, cluster_mode=True, pipeline=False
+    )
+    await seeder.run(target_deviation=0.1)
+    seed = asyncio.create_task(seeder.run())
+
+    migration_info = [
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [random_ranges[0]], nodes[1].id),
+        MigrationInfo("127.0.0.1", nodes[2].instance.admin_port, [random_ranges[1]], nodes[2].id),
+        MigrationInfo("127.0.0.1", nodes[3].instance.admin_port, [random_ranges[2]], nodes[3].id),
+    ]
+
+    nodes_lock = asyncio.Lock()
+
+    async def do_migration(index):
+        await asyncio.sleep(random.randint(1, 10) / 5)
+        async with nodes_lock:
+            logging.debug(f"Start migration from node {index}")
+            nodes[0].migrations.append(migration_info[index - 1])
+            await push_config(
+                json.dumps(generate_config(nodes)), [node.admin_client for node in nodes]
+            )
+
+        logging.debug(f"wait migration from node {index}")
+        await wait_for_status(nodes[0].admin_client, nodes[index].id, "FINISHED", timeout=50)
+        await wait_for_status(nodes[index].admin_client, nodes[0].id, "FINISHED", timeout=50)
+        logging.debug(f"finished migration from node {index}")
+        await asyncio.sleep(random.randint(1, 5) / 5)
+        async with nodes_lock:
+            logging.debug(f"Finalize migration from node {index}")
+            nodes[index].slots = migration_info[index - 1].slots
+            nodes[0].slots.remove(migration_info[index - 1].slots[0])
+            nodes[0].migrations.remove(migration_info[index - 1])
+            await push_config(
+                json.dumps(generate_config(nodes)), [node.admin_client for node in nodes]
+            )
+
+    all_migrations = [asyncio.create_task(do_migration(i)) for i in range(1, 4)]
+    for migration in all_migrations:
+        await migration
+
+    logging.debug("stop seeding")
+    seeder.stop()
+    await seed

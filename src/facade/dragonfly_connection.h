@@ -303,6 +303,16 @@ class Connection : public util::Connection {
   static void TrackRequestSize(bool enable);
   static void EnsureMemoryBudget(unsigned tid);
 
+  unsigned idle_time() const {
+    return time(nullptr) - last_interaction_;
+  }
+
+  Phase phase() const {
+    return phase_;
+  }
+
+  bool IsSending() const;
+
  protected:
   void OnShutdown() override;
   void OnPreMigrateThread() override;

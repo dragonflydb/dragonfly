@@ -218,16 +218,6 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   return 1;
 }
 
-// Deprecated and should be removed.
-class FetchedItemsRestorer {
- public:
-  template <typename U> explicit FetchedItemsRestorer(U&& u) {
-  }
-
-  ~FetchedItemsRestorer() {
-  }
-};
-
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -270,11 +260,30 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
 
 #undef ADD
 
-DbSlice::DbSlice(uint32_t index, bool caching_mode, EngineShard* owner)
+class DbSlice::PrimeBumpPolicy {
+ public:
+  PrimeBumpPolicy(absl::flat_hash_set<uint64_t, FpHasher>* items) : fetched_items_(items) {
+  }
+
+  // returns true if we can change the object location in dash table.
+  bool CanBump(const CompactObj& obj) const {
+    if (obj.IsSticky()) {
+      return false;
+    }
+    auto hc = obj.HashCode();
+    return fetched_items_->insert(hc).second;
+  }
+
+ private:
+  mutable absl::flat_hash_set<uint64_t, FpHasher>* fetched_items_;
+};
+
+DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
     : shard_id_(index),
-      caching_mode_(caching_mode),
+      cache_mode_(cache_mode),
       owner_(owner),
       client_tracking_map_(owner->memory_resource()) {
+  load_in_progress_ = false;
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
@@ -471,9 +480,8 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     }
   }
 
-  if (caching_mode_ && IsValid(res.it)) {
+  if (IsCacheMode() && IsValid(res.it)) {
     if (!change_cb_.empty()) {
-      FetchedItemsRestorer fetched_restorer(&fetched_items_);
       auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
         CallChangeCallbacks(cntx.db_index, key, bit);
       };
@@ -566,8 +574,6 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   auto status = res.status();
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
-  FetchedItemsRestorer fetched_restorer(&fetched_items_);
-
   // It's a new entry.
   CallChangeCallbacks(cntx.db_index, key, {key});
 
@@ -600,14 +606,14 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
       !owner_->IsReplica() && !(ServerState::tlocal()->gstate() == GlobalState::LOADING);
 
   // If we are over limit in non-cache scenario, just be conservative and throw.
-  if (apply_memory_limit && !caching_mode_ && memory_budget_ + memory_offset < 0) {
+  if (apply_memory_limit && !IsCacheMode() && memory_budget_ + memory_offset < 0) {
     LOG_EVERY_T(WARNING, 1) << "AddOrFind: over limit, budget: " << memory_budget_
                             << " reclaimed: " << reclaimed << " offset: " << memory_offset;
     events_.insertion_rejections++;
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  PrimeEvictionPolicy evp{cntx,          (bool(caching_mode_) && !owner_->IsReplica()),
+  PrimeEvictionPolicy evp{cntx,          (IsCacheMode() && !owner_->IsReplica()),
                           memory_offset, ssize_t(soft_budget_limit_),
                           this,          apply_memory_limit};
 
@@ -716,6 +722,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     PrimeTable* table = GetTables(db_index).first;
 
     auto iterate_bucket = [&](DbIndex db_index, PrimeTable::bucket_iterator it) {
+      it.AdvanceIfNotOccupied();
       while (!it.is_done()) {
         del_entry_cb(it);
         ++it;
@@ -723,7 +730,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids) {
     };
 
     if (const PrimeTable::bucket_iterator* bit = req.update()) {
-      if (bit->GetVersion() < next_version) {
+      if (!bit->is_done() && bit->GetVersion() < next_version) {
         iterate_bucket(db_index, *bit);
       }
     } else {
@@ -1057,7 +1064,6 @@ bool DbSlice::CheckLock(IntentLock::Mode mode, DbIndex dbid, uint64_t fp) const 
 }
 
 void DbSlice::PreUpdate(DbIndex db_ind, Iterator it, std::string_view key) {
-  FetchedItemsRestorer fetched_restorer(&fetched_items_);
   CallChangeCallbacks(db_ind, key, ChangeReq{it.GetInnerIt()});
   it.GetInnerIt().SetVersion(NextVersion());
 }
@@ -1176,8 +1182,7 @@ uint64_t DbSlice::RegisterOnChange(ChangeCallback cb) {
 }
 
 void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound) {
-  FetchedItemsRestorer fetched_restorer(&fetched_items_);
-  std::unique_lock<LocalBlockingCounter> lk(block_counter_);
+  unique_lock<LocalBlockingCounter> lk(block_counter_);
 
   uint64_t bucket_version = it.GetVersion();
   // change_cb_ is ordered by version.
@@ -1272,7 +1277,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStep(DbIndex db_ind, size_t s
       return {0, evicted_bytes};
   }
 
-  if ((!caching_mode_) || !expire_allowed_)
+  if ((!IsCacheMode()) || !expire_allowed_)
     return {0, 0};
 
   auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);

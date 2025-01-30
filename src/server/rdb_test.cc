@@ -55,9 +55,10 @@ class RdbTest : public BaseFamilyTest {
 };
 
 void RdbTest::SetUp() {
+  // Setting max_memory_limit must be before calling  InitWithDbFilename
+  max_memory_limit = 40000000;
   InitWithDbFilename();
   CHECK_EQ(zmalloc_used_memory_tl, 0);
-  max_memory_limit = 40000000;
 }
 
 inline const uint8_t* to_byte(const void* s) {
@@ -720,6 +721,18 @@ TEST_F(RdbTest, SnapshotTooBig) {
   used_mem_current = 1000000;
   auto resp = Run({"debug", "reload"});
   ASSERT_THAT(resp, ErrArg("Out of memory"));
+}
+
+TEST_F(RdbTest, HugeKeyIssue4497) {
+  SetTestFlag("cache_mode", "true");
+  ResetService();
+
+  EXPECT_EQ(Run({"flushall"}), "OK");
+  EXPECT_EQ(Run({"debug", "populate", "1", "k", "1000", "rand", "type", "set", "elements", "5000"}),
+            "OK");
+  EXPECT_EQ(Run({"save", "rdb", "hugekey.rdb"}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", "hugekey.rdb"}), "OK");
+  EXPECT_EQ(Run({"flushall"}), "OK");
 }
 
 }  // namespace dfly
