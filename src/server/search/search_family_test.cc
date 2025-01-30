@@ -852,7 +852,6 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
 
 TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   Run({"ft.create", "i1", "schema", "name", "text"});
-  ;
 
   auto resp = Run({"ft.profile", "i1", "not_search", "query", "(a | b) c d"});
   EXPECT_THAT(resp, ErrArg("no `SEARCH` or `AGGREGATE` provided"));
