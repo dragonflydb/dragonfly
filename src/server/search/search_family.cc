@@ -221,7 +221,7 @@ void ParseLoadFields(CmdArgParser* parser, std::optional<SearchFieldsList>* load
     load_fields->emplace();
   }
 
-  while (num_fields--) {
+  while (parser->HasNext() && num_fields--) {
     string_view str = parser->Next();
 
     if (absl::StartsWith(str, "@"sv)) {
@@ -274,7 +274,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
        * AS a */
       size_t num_fields = parser->Next<size_t>();
       params.return_fields.emplace();
-      while (params.return_fields->size() < num_fields) {
+      while (parser->HasNext() && params.return_fields->size() < num_fields) {
         StringOrView name = StringOrView::FromString(parser->Next<std::string>());
 
         if (parser->Check("AS")) {
@@ -285,8 +285,7 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
         }
       }
     } else if (parser->Check("NOCONTENT")) {  // NOCONTENT
-      params.load_fields.emplace();
-      params.return_fields.emplace();
+      params.no_content = true;
     } else if (parser->Check("PARAMS")) {  // [PARAMS num(ignored) name(ignored) knn_vector]
       params.query_params = ParseQueryParams(parser);
     } else if (parser->Check("SORTBY")) {
@@ -360,7 +359,7 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
 
       std::vector<std::string> fields;
       fields.reserve(num_fields);
-      while (num_fields > 0 && parser.HasNext()) {
+      while (parser.HasNext() && num_fields > 0) {
         auto parsed_field = ParseFieldWithAtSign(&parser);
 
         /*
