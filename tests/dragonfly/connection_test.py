@@ -1091,40 +1091,34 @@ async def test_pipeline_cache_size(df_factory):
     assert info["pipeline_cache_bytes"] == 0
     assert info["dispatch_queue_bytes"] == 0
 
-    async def push_pipeline(bad_actor_client):
+    async def push_pipeline(bad_actor_client, size=1):
         # Fill cache.
         p = bad_actor_client.pipeline(transaction=True)
-        for i in range(1):
+        for i in range(size):
             p.lpush(str(i), "V")
         await p.execute()
 
-    await push_pipeline(bad_actor_client)
+    await push_pipeline(bad_actor_client, 32)
     info = await good_client.info()
 
     old_pipeline_cache_bytes = info["pipeline_cache_bytes"]
     assert old_pipeline_cache_bytes > 0
     assert info["dispatch_queue_bytes"] == 0
 
-    # Whoops, total pipeline_cache_bytes haven't changed. If a workload aggregates a bunch
-    # pipeline_cache_bytes because it recycled too many messages, they won't gradually be released
-    # if one command (one connection out of `n` connections) dispatches async. Only 1 command out of
-    # n connections must be dispatched async and the pipeline won't gradually be relesed.
     for i in range(30):
         await push_pipeline(bad_actor_client)
         await good_client.execute_command(f"set foo{i} bar")
 
     info = await good_client.info()
 
-    # Pipeline cache bytes remained constant :(
-    assert old_pipeline_cache_bytes == info["pipeline_cache_bytes"]
+    # Gradually release pipeline
+    assert old_pipeline_cache_bytes > info["pipeline_cache_bytes"]
     assert info["dispatch_queue_bytes"] == 0
 
     # Now drain it
-    for i in range(30):
-        await good_client.execute_command(f"set foo{i} bar")
+    async with async_timeout.timeout(5):
+        while info["pipeline_cache_bytes"] != 0:
+            await good_client.execute_command(f"set foo{i} bar")
+            info = await good_client.info()
 
-    info = await good_client.info()
-
-    # Drained
-    assert info["pipeline_cache_bytes"] == 0
     assert info["dispatch_queue_bytes"] == 0

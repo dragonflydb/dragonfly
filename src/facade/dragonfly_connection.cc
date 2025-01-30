@@ -9,6 +9,7 @@
 #include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
+#include <chrono>
 #include <numeric>
 #include <variant>
 
@@ -92,7 +93,6 @@ using absl::GetFlag;
 using nonstd::make_unexpected;
 
 namespace facade {
-
 
 namespace {
 
@@ -266,8 +266,6 @@ void LogTraffic(uint32_t id, bool has_more, absl::Span<RespExpr> resp,
 
 constexpr size_t kMinReadSize = 256;
 
-thread_local uint32_t free_req_release_weight = 0;
-
 const char* kPhaseName[Connection::NUM_PHASES] = {"SETUP", "READ", "PROCESS", "SHUTTING_DOWN",
                                                   "PRECLOSE"};
 
@@ -315,6 +313,36 @@ QueueBackpressure& GetQueueBackpressure() {
 }  // namespace
 
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
+
+class PipelineCacheSizePaceMaker {
+ public:
+  bool WatermarkReached(size_t pipeline_sz) {
+    const auto now = Clock::now();
+    const auto elapsed = now - last_check_;
+
+    const size_t max = Limits::max();
+    if (elapsed < std::chrono::milliseconds(10)) {
+      min_ = std::min(min_, pipeline_sz);
+      return false;
+    }
+
+    const bool watermark_reached = (min_ > 0) && (min_ != max);
+    min_ = max;
+    last_check_ = Clock::now();
+
+    return watermark_reached;
+  }
+
+ private:
+  using Tp = std::chrono::time_point<std::chrono::system_clock>;
+  using Clock = std::chrono::system_clock;
+  using Limits = std::numeric_limits<size_t>;
+
+  Tp last_check_ = Clock::now();
+  size_t min_ = Limits::max();
+};
+
+thread_local PipelineCacheSizePaceMaker tl_pipe_pace_maker;
 
 void Connection::PipelineMessage::SetArgs(const RespVec& args) {
   auto* next = storage.data();
@@ -1589,14 +1617,7 @@ void Connection::ShrinkPipelinePool() {
   if (pipeline_req_pool_.empty())
     return;
 
-  // The request pool is shared by all the connections in the thread so we do not want
-  // to release it aggressively just because some connection is running in
-  // non-pipelined mode. So by using free_req_release_weight we wait at least N times,
-  // where N is the number of connections in the thread.
-  ++free_req_release_weight;
-
-  if (free_req_release_weight > stats_->num_conns) {
-    free_req_release_weight = 0;
+  if (tl_pipe_pace_maker.WatermarkReached(pipeline_req_pool_.size())) {
     stats_->pipeline_cmd_cache_bytes -= pipeline_req_pool_.back()->StorageCapacity();
     pipeline_req_pool_.pop_back();
   }
@@ -1606,7 +1627,6 @@ Connection::PipelineMessagePtr Connection::GetFromPipelinePool() {
   if (pipeline_req_pool_.empty())
     return nullptr;
 
-  free_req_release_weight = 0;  // Reset the release weight.
   auto ptr = std::move(pipeline_req_pool_.back());
   stats_->pipeline_cmd_cache_bytes -= ptr->StorageCapacity();
   pipeline_req_pool_.pop_back();
