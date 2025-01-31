@@ -304,7 +304,7 @@ class Context : protected Cancellation {
 };
 
 struct ScanOpts {
-  std::optional<GlobMatcher> matcher;
+  std::unique_ptr<GlobMatcher> matcher;
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;

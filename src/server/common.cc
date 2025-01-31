@@ -297,7 +297,7 @@ OpResult<ScanOpts> ScanOpts::TryFrom(CmdArgList args) {
     } else if (opt == "MATCH") {
       string_view pattern = ArgS(args, i + 1);
       if (pattern != "*")
-        scan_opts.matcher.emplace(pattern, true);
+        scan_opts.matcher.reset(new GlobMatcher{pattern, true});
     } else if (opt == "TYPE") {
       auto obj_type = ObjTypeFromString(ArgS(args, i + 1));
       if (!obj_type) {
