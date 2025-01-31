@@ -8,6 +8,9 @@
 namespace dfly {
 
 class GlobMatcher {
+  GlobMatcher(const GlobMatcher&) = delete;
+  GlobMatcher& operator=(const GlobMatcher&) = delete;
+
  public:
   explicit GlobMatcher(std::string_view pattern, bool case_sensitive);
 

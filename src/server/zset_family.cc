@@ -2602,7 +2602,7 @@ void ZSetFamily::ZScan(CmdArgList args, const CommandContext& cmd_cntx) {
     DVLOG(1) << "Scan invalid args - return " << ops << " to the user";
     return rb->SendError(ops.status());
   }
-  ScanOpts scan_op = ops.value();
+  const ScanOpts& scan_op = ops.value();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);

@@ -1179,7 +1179,7 @@ void GenericFamily::Keys(CmdArgList args, const CommandContext& cmd_cntx) {
 
   ScanOpts scan_opts;
   if (pattern != "*") {
-    scan_opts.matcher.emplace(pattern, true);
+    scan_opts.matcher.reset(new GlobMatcher{pattern, true});
   }
 
   scan_opts.limit = 512;
@@ -1745,7 +1745,7 @@ void GenericFamily::Scan(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError(ops.status());
   }
 
-  ScanOpts scan_op = ops.value();
+  const ScanOpts& scan_op = ops.value();
 
   StringVec keys;
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx.conn_cntx);
