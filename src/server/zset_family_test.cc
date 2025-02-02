@@ -976,7 +976,8 @@ TEST_F(ZSetFamilyTest, BlockingIsReleased) {
     unblocking_commands.push_back({"ZINCRBY", key, "2", "x"});
     unblocking_commands.push_back({"ZINTERSTORE", key, "2", "A", "B"});
     unblocking_commands.push_back({"ZUNIONSTORE", key, "2", "C", "D"});
-    // unblocking_commands.push_back({"ZDIFFSTORE", key, "2", "A", "B"}); // unimplemented
+    // TBD: ZDIFFSTORE must be fixed
+    // unblocking_commands.push_back({"ZDIFFSTORE", key, "2", "A", "B"});
 
     for (auto& cmd : unblocking_commands) {
       RespExpr resp0;
@@ -999,12 +1000,10 @@ TEST_F(ZSetFamilyTest, BlockingIsReleased) {
 TEST_F(ZSetFamilyTest, BlockingWithIncorrectType) {
   RespExpr resp0;
   RespExpr resp1;
-  auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
-    resp0 = Run({"BLPOP", "list1", "0"});
-  });
-  auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
-    resp1 = Run({"BZPOPMIN", "list1", "0"});
-  });
+  auto fb0 =
+      pp_->at(0)->LaunchFiber(Launch::dispatch, [&] { resp0 = Run({"BLPOP", "list1", "0"}); });
+  auto fb1 =
+      pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp1 = Run({"BZPOPMIN", "list1", "0"}); });
 
   ThisFiber::SleepFor(50us);
   pp_->at(2)->Await([&] { return Run({"ZADD", "list1", "1", "a"}); });
@@ -1083,6 +1082,43 @@ TEST_F(ZSetFamilyTest, ZDiff) {
 
   resp = Run({"zdiff", "2", "z1", "z2", "WITHSCORES"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("two", "2", "three", "3", "four", "4"));
+}
+
+TEST_F(ZSetFamilyTest, ZDiffStore) {
+  RespExpr resp;
+
+  EXPECT_EQ(4, CheckedInt({"zadd", "z1", "1", "one", "2", "two", "3", "three", "4", "four"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z2", "1", "one", "5", "five"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z3", "2", "two", "3", "three"}));
+  EXPECT_EQ(1, CheckedInt({"zadd", "z4", "4", "four"}));
+
+  resp = Run({"zdiffstore", "out", "1", "z1"});
+  resp = Run({"zrange", "out", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two", "three", "four"));
+
+  resp = Run({"zdiffstore", "out", "2", "z1", "z1"});
+  resp = Run({"zrange", "out", "0", "-1"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"zdiffstore", "out", "z1", "doesnt_exist"});
+  resp = Run({"zrange", "out", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two", "three", "four"));
+
+  resp = Run({"zdiffstore", "out", "2", "z1", "z2"});
+  resp = Run({"zrange", "out", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("two", "three", "four"));
+
+  resp = Run({"zdiffstore", "out", "2", "z1", "z3"});
+  resp = Run({"zrange", "out", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "four"));
+
+  resp = Run({"zdiffstore", "out", "4", "z1", "z2", "z3", "z4"});
+  resp = Run({"zrange", "out", "0", "-1"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"zdiffstore", "out", "2", "doesnt_exist", "key1"});
+  resp = Run({"zrange", "out", "0", "-1"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
 }
 
 TEST_F(ZSetFamilyTest, Count) {

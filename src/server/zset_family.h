@@ -57,7 +57,7 @@ class ZSetFamily {
     std::variant<IndexInterval, ScoreInterval, LexInterval, TopNScored> interval;
     RangeParams params;
     ZRangeSpec() = default;
-    ZRangeSpec(const ScoreInterval& si, const RangeParams& rp) : interval(si), params(rp){};
+    ZRangeSpec(const ScoreInterval& si, const RangeParams& rp) : interval(si), params(rp) {};
   };
 
   struct ZParams {
@@ -106,6 +106,7 @@ class ZSetFamily {
   static void ZCard(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZCount(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZDiff(CmdArgList args, const CommandContext& cmd_cntx);
+  static void ZDiffStore(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZIncrBy(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZInterStore(CmdArgList args, const CommandContext& cmd_cntx);
   static void ZInter(CmdArgList args, const CommandContext& cmd_cntx);

@@ -1155,7 +1155,6 @@ def test_zrandemember(r: redis.Redis):
     assert len(r.zrandmember("a", -10)) == 10
 
 
-@pytest.mark.unsupported_server_types("dragonfly")
 def test_zdiffstore(r: redis.Redis):
     r.zadd("a", {"a1": 1, "a2": 2, "a3": 3})
     r.zadd("b", {"a1": 1, "a2": 2})
