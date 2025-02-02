@@ -21,8 +21,6 @@ extern "C" {
 
 using namespace std;
 
-ABSL_RETIRED_FLAG(bool, use_zset_tree, true, "If true use b+tree for zset implementation");
-
 namespace dfly {
 namespace detail {
 
