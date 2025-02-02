@@ -365,7 +365,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   } else {
     DCHECK_EQ(pv.Encoding(), kEncodingQL2);
     QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
-    node = ql->Head();
+    node = (const quicklistNode*)ql->Head();  // We rely on common ABI for Q2 and Q1 nodes.
     len = ql->node_count();
   }
   RETURN_ON_ERR(SaveLen(len));

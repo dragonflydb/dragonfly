@@ -28,7 +28,7 @@ static int _ql_verify_compress(const QList& ql) {
   int errors = 0;
   unsigned compress_param = ql.compress_param();
   if (compress_param > 0) {
-    const quicklistNode* node = ql.Head();
+    const auto* node = ql.Head();
     unsigned int low_raw = compress_param;
     unsigned int high_raw = ql.node_count() - compress_param;
 
