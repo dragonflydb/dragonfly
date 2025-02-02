@@ -12,6 +12,8 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/mi_memory_resource.h"
+#include "io/file.h"
+#include "io/line_reader.h"
 
 extern "C" {
 #include "redis/listpack.h"
@@ -24,7 +26,7 @@ using namespace std;
 using namespace testing;
 using absl::StrCat;
 
-static int _ql_verify_compress(const QList& ql) {
+static int ql_verify_compress(const QList& ql) {
   int errors = 0;
   unsigned compress_param = ql.compress_param();
   if (compress_param > 0) {
@@ -115,8 +117,14 @@ static int ql_verify(const QList& ql, uint32_t nc, uint32_t count, uint32_t head
     errors++;
   }
 
-  errors += _ql_verify_compress(ql);
+  errors += ql_verify_compress(ql);
   return errors;
+}
+
+static void SetupMalloc() {
+  // configure redis lib zmalloc which requires mimalloc heap to work.
+  auto* tlh = mi_heap_get_backing();
+  init_zmalloc_threadlocal(tlh);
 }
 
 class QListTest : public ::testing::Test {
@@ -125,9 +133,7 @@ class QListTest : public ::testing::Test {
   }
 
   static void SetUpTestSuite() {
-    // configure redis lib zmalloc which requires mimalloc heap to work.
-    auto* tlh = mi_heap_get_backing();
-    init_zmalloc_threadlocal(tlh);
+    SetupMalloc();
   }
 
   static void TearDownTestSuite() {
@@ -847,5 +853,54 @@ TEST_P(OptionsTest, IndexFrom500) {
   it = ql_.GetIterator(500);
   ASSERT_FALSE(it.Next());
 }
+
+static void BM_QListCompress(benchmark::State& state) {
+  SetupMalloc();
+
+  string path = base::ProgramRunfile("testdata/list.txt.zst");
+  io::Result<io::Source*> src = io::OpenUncompressed(path);
+  CHECK(src) << src.error();
+  io::LineReader lr(*src, TAKE_OWNERSHIP);
+  string_view line;
+  vector<string> lines;
+  while (lr.Next(&line)) {
+    lines.push_back(string(line));
+  }
+
+  while (state.KeepRunning()) {
+    QList ql(-2, state.range(0));  // uses differrent compression modes, see below.
+    for (const string& l : lines) {
+      ql.Push(l, QList::TAIL);
+    }
+    DVLOG(1) << ql.node_count() << ", " << ql.MallocUsed(true);
+  }
+}
+BENCHMARK(BM_QListCompress)
+    ->Arg(0)   // no compression
+    ->Arg(1)   // compress all nodes but edges.
+    ->Arg(4);  // compress all nodes but 4 nodes from edges.
+
+static void BM_QListUncompress(benchmark::State& state) {
+  SetupMalloc();
+
+  string path = base::ProgramRunfile("testdata/list.txt.zst");
+  io::Result<io::Source*> src = io::OpenUncompressed(path);
+  CHECK(src) << src.error();
+  io::LineReader lr(*src, TAKE_OWNERSHIP);
+  string_view line;
+  QList ql(-2, state.range(0));
+
+  while (lr.Next(&line)) {
+    ql.Push(line, QList::TAIL);
+  }
+
+  LOG(INFO) << "MallocUsed " << ql.compress_param() << ": " << ql.MallocUsed(true) << ", "
+            << ql.MallocUsed(false);
+
+  while (state.KeepRunning()) {
+    ql.Iterate([](const QList::Entry& e) { return true; }, 0, -1);
+  }
+}
+BENCHMARK(BM_QListUncompress)->Arg(0)->Arg(1)->Arg(4);
 
 }  // namespace dfly
