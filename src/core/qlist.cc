@@ -206,9 +206,12 @@ bool CompressNode(QList::Node* node) {
   if (((lzf->sz = lzf_compress(node->entry, node->sz, lzf->compressed, node->sz, sdata)) == 0) ||
       lzf->sz + MIN_COMPRESS_IMPROVE >= node->sz) {
     /* lzf_compress aborts/rejects compression if value not compressible. */
+    DVLOG(2) << "Uncompressable " << node->sz << " vs " << lzf->sz;
     zfree(lzf);
+
     return false;
   }
+  DVLOG(2) << "Compressed " << node->sz << " to " << lzf->sz;
 
   lzf = (quicklistLZF*)zrealloc(lzf, sizeof(*lzf) + lzf->sz);
   zfree(node->entry);
@@ -352,7 +355,7 @@ void QList::Clear() {
 }
 
 void QList::Push(string_view value, Where where) {
-  DVLOG(2) << "Push " << absl::CHexEscape(value) << " " << (where == HEAD ? "HEAD" : "TAIL");
+  DVLOG(3) << "Push " << absl::CHexEscape(value) << " " << (where == HEAD ? "HEAD" : "TAIL");
 
   /* The head and tail should never be compressed (we don't attempt to decompress them) */
   if (head_) {
