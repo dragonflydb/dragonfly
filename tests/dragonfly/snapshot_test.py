@@ -154,8 +154,7 @@ async def test_dbfilenames(
     {
         **BASIC_ARGS,
         "proactor_threads": 4,
-        "dbfilename": "test-redis-load-rdb",
-        "list_rdb_encode_v2": "false",  # Needed for compatibility with Redis 6
+        "dbfilename": "test-redis-load-rdb",        
     }
 )
 async def test_redis_load_snapshot(
@@ -176,7 +175,7 @@ async def test_redis_load_snapshot(
     await async_client.connection_pool.disconnect()
     df_server.stop()
 
-    redis_local_server.start(dir=tmp_dir, dbfilename="test-redis-load-rdb.rdb")
+    redis_local_server.start(dir=tmp_dir, redis7=True, dbfilename="test-redis-load-rdb.rdb")
     await asyncio.sleep(1)
     c_master = aioredis.Redis(port=redis_local_server.port)
     await c_master.ping()

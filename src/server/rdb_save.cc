@@ -49,12 +49,12 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 
-// TODO: to retire both flags in v1.27 (Jan 2025)
-ABSL_FLAG(bool, list_rdb_encode_v2, true,
+ABSL_RETIRED_FLAG(bool, list_rdb_encode_v2, true,
           "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
           "enconding of list uses ziplist encoding compatible with redis 6");
 
-ABSL_FLAG(bool, stream_rdb_encode_v2, false,
+// TODO: to retire this flag in v1.31
+ABSL_FLAG(bool, stream_rdb_encode_v2, true,
           "V2 uses format, compatible with redis 7.2 and Dragonfly v1.26+, while v1 format "
           "is compatible with redis 6");
 
@@ -173,8 +173,7 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       return RDB_TYPE_STRING;
     case OBJ_LIST:
       if (compact_enc == OBJ_ENCODING_QUICKLIST || compact_enc == kEncodingQL2) {
-        return absl::GetFlag(FLAGS_list_rdb_encode_v2) ? RDB_TYPE_LIST_QUICKLIST_2
-                                                       : RDB_TYPE_LIST_QUICKLIST;
+        return RDB_TYPE_LIST_QUICKLIST_2;
       }
       break;
     case OBJ_SET:
@@ -375,49 +374,19 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
 
-    if (absl::GetFlag(FLAGS_list_rdb_encode_v2)) {
-      // Use listpack encoding
-      SaveLen(node->container);
-      if (quicklistNodeIsCompressed(node)) {
-        void* data;
-        size_t compress_len = quicklistGetLzf(node, &data);
+    // Use listpack encoding
+    SaveLen(node->container);
+    if (quicklistNodeIsCompressed(node)) {
+      void* data;
+      size_t compress_len = quicklistGetLzf(node, &data);
 
-        RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
-      } else {
-        RETURN_ON_ERR(SaveString(node->entry, node->sz));
-        FlushState flush_state = FlushState::kFlushMidEntry;
-        if (node->next == nullptr)
-          flush_state = FlushState::kFlushEndEntry;
-        FlushIfNeeded(flush_state);
-      }
+      RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
-      // Use ziplist encoding
-      if (QL_NODE_IS_PLAIN(node)) {
-        RETURN_ON_ERR(SavePlainNodeAsZiplist(node));
-      } else {
-        // listpack node
-        uint8_t* lp = node->entry;
-        uint8_t* decompressed = NULL;
-
-        if (quicklistNodeIsCompressed(node)) {
-          void* data;
-          size_t compress_len = quicklistGetLzf(node, &data);
-          decompressed = (uint8_t*)zmalloc(node->sz);
-
-          if (lzf_decompress(data, compress_len, decompressed, node->sz) == 0) {
-            /* Someone requested decompress, but we can't decompress.  Not good. */
-            zfree(decompressed);
-            return make_error_code(errc::illegal_byte_sequence);
-          }
-          lp = decompressed;
-        }
-
-        auto cleanup = absl::MakeCleanup([=] {
-          if (decompressed)
-            zfree(decompressed);
-        });
-        RETURN_ON_ERR(SaveListPackAsZiplist(lp));
-      }
+      RETURN_ON_ERR(SaveString(node->entry, node->sz));
+      FlushState flush_state = FlushState::kFlushMidEntry;
+      if (node->next == nullptr)
+        flush_state = FlushState::kFlushEndEntry;
+      FlushIfNeeded(flush_state);
     }
     node = node->next;
   }
