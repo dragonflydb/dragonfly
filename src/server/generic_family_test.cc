@@ -24,8 +24,6 @@ using namespace util;
 using namespace boost;
 using absl::StrCat;
 
-ABSL_DECLARE_FLAG(bool, list_rdb_encode_v2);
-
 namespace dfly {
 
 class GenericFamilyTest : public BaseFamilyTest {};
@@ -565,17 +563,16 @@ TEST_F(GenericFamilyTest, Persist) {
 }
 
 TEST_F(GenericFamilyTest, Dump) {
-  ASSERT_THAT(RDB_SER_VERSION, 9);
-  absl::SetFlag(&FLAGS_list_rdb_encode_v2, false);
+  ASSERT_EQ(RDB_SER_VERSION, 9);
   uint8_t EXPECTED_STRING_DUMP[13] = {0x00, 0xc0, 0x13, 0x09, 0x00, 0x23, 0x13,
                                       0x6f, 0x4d, 0x68, 0xf6, 0x35, 0x6e};
   uint8_t EXPECTED_HASH_DUMP[] = {0x0d, 0x12, 0x12, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00,
                                   0x02, 0x00, 0x00, 0xfe, 0x13, 0x03, 0xc0, 0xd2, 0x04, 0xff,
                                   0x09, 0x00, 0xb1, 0x0b, 0xae, 0x6c, 0x23, 0x5d, 0x17, 0xaa};
 
-  uint8_t EXPECTED_LIST_DUMP[] = {0x0e, 0x01, 0x0e, 0x0e, 0x00, 0x00, 0x00, 0x0a, 0x00,
-                                  0x00, 0x00, 0x01, 0x00, 0x00, 0xfe, 0x14, 0xff, 0x09,
-                                  0x00, 0xba, 0x1e, 0xa9, 0x6b, 0xba, 0xfe, 0x2d, 0x3f};
+  uint8_t EXPECTED_LIST_DUMP[] = {0x12, 0x01, 0x02, '\t', '\t', 0x00, 0x00, 0x00,
+                                  0x01, 0x00, 0x14, 0x01, 0xff, '\t', 0x00, 0xfb,
+                                  0xbd, 0x36, 0xf8, 0xb4, 't',  '%',  ';'};
 
   // Check string dump
   auto resp = Run({"set", "z", "19"});
@@ -588,7 +585,7 @@ TEST_F(GenericFamilyTest, Dump) {
   EXPECT_EQ(1, CheckedInt({"rpush", "l", "20"}));
   resp = Run({"dump", "l"});
   dump = resp.GetBuf();
-  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP));
+  CHECK_EQ(ToSV(dump), ToSV(EXPECTED_LIST_DUMP)) << absl::CHexEscape(resp.GetString());
 
   // Check for hash dump
   EXPECT_EQ(1, CheckedInt({"hset", "z2", "19", "1234"}));
@@ -873,7 +870,7 @@ TEST_F(GenericFamilyTest, RestoreOOM) {
 }
 
 TEST_F(GenericFamilyTest, Bug4466) {
-  auto resp = Run({"SCAN","9223372036854775808"});  // an invalid cursor should not crash us.
+  auto resp = Run({"SCAN", "9223372036854775808"});  // an invalid cursor should not crash us.
   EXPECT_THAT(resp, RespElementsAre("0", RespElementsAre()));
 }
 

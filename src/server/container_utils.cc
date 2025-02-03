@@ -22,8 +22,6 @@ extern "C" {
 #include "redis/zset.h"
 }
 
-ABSL_FLAG(bool, singlehop_blocking, true, "Use single hop optimization for blocking commands");
-
 namespace dfly::container_utils {
 using namespace std;
 namespace {
@@ -336,7 +334,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   // If we don't find anything, we abort concluding and keep scheduled.
   // Slow path: schedule, find results from shards, execute action if found.
   OpResult<ShardFFResult> result;
-  if (trans->GetUniqueShardCnt() == 1 && absl::GetFlag(FLAGS_singlehop_blocking)) {
+  if (trans->GetUniqueShardCnt() == 1) {
     auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
     if (res.ok()) {
       if (info)
