@@ -3,8 +3,6 @@
 //
 #pragma once
 
-#include <reflex/matcher.h>
-
 #include <string>
 #include <string_view>
 
@@ -16,6 +14,7 @@ class GlobMatcher {
 
  public:
   explicit GlobMatcher(std::string_view pattern, bool case_sensitive);
+  ~GlobMatcher();
 
   bool Matches(std::string_view str) const;
 
@@ -23,7 +22,7 @@ class GlobMatcher {
   static std::string Glob2Regex(std::string_view glob);
 
  private:
-  mutable reflex::Matcher matcher_;
+  void* matcher_ = nullptr;
 
   bool case_sensitive_;
   bool starts_with_star_ = false;

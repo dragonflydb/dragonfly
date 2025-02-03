@@ -125,6 +125,15 @@ add_third_party(
                     -DFLATBUFFERS_BUILD_FLATC=OFF"
 )
 
+add_third_party(
+  pcre2
+  URL https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.44/pcre2-10.44.tar.bz2
+
+  CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=${THIRD_PARTY_LIB_DIR}/pcre2 
+                    --enable-shared=no --disable-unicode --enable-jit
+  LIB libpcre2-8.a
+)
+
 add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES

@@ -4,6 +4,9 @@
 
 #include "core/glob_matcher.h"
 
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
+
 #include "base/logging.h"
 
 namespace dfly {
@@ -75,42 +78,41 @@ GlobMatcher::GlobMatcher(string_view pattern, bool case_sensitive)
   }
 
   empty_pattern_ = pattern.empty();
-  string regex("(?s");  // dotall mode
+  // string regex;
+#if 1
+  string regex("(?");  // dotall mode
   if (!case_sensitive) {
     regex.push_back('i');
   }
   regex.push_back(')');
+#endif
   regex.append(Glob2Regex(pattern));
-  matcher_.pattern(regex);
+  int errnum;
+  PCRE2_SIZE erroffset;
+  pcre2_code_8* re =
+      pcre2_compile_8((PCRE2_SPTR)regex.c_str(), regex.size(), 0, &errnum, &erroffset, nullptr);
+  if (re) {
+    CHECK_EQ(0, pcre2_jit_compile_8(re, PCRE2_JIT_COMPLETE));
+  } else {
+    LOG(WARNING) << "Failed to compile regex: " << regex;
+  }
+  matcher_ = re;
+}
+
+GlobMatcher::~GlobMatcher() {
+  pcre2_code_free((pcre2_code_8*)matcher_);
 }
 
 bool GlobMatcher::Matches(std::string_view str) const {
-  DCHECK(!matcher_.pattern().empty());
-
-  matcher_.input(reflex::Input(str.data(), str.size()));
-
-  bool use_find = starts_with_star_ || ends_with_star_;
-  if (!use_find) {
-    return matcher_.matches() > 0;
-  }
-
-  if (empty_pattern_) {
-    return !str.empty();
-  }
-
-  bool found = matcher_.find() > 0;
-  if (!found) {
+  if (!matcher_)
     return false;
-  }
 
-  if (!ends_with_star_ && matcher_.last() != str.size()) {
-    return false;
-  }
-  if (!starts_with_star_ && matcher_.first() != 0) {
-    return false;
-  }
-
-  return true;
+  pcre2_code_8* re = (pcre2_code_8*)matcher_;
+  pcre2_match_data* match_data = pcre2_match_data_create_from_pattern_8(re, NULL);
+  int rc = pcre2_jit_match_8(re, (PCRE2_SPTR)str.data(), str.size(), 0,
+                             PCRE2_ANCHORED | PCRE2_ENDANCHORED, match_data, NULL);
+  pcre2_match_data_free(match_data);
+  return rc > 0;
 }
 
 }  // namespace dfly

@@ -6,10 +6,8 @@
 #include <absl/strings/numbers.h>
 #include <fast_float/fast_float.h>
 
-#ifdef USE_PCRE2
 #define PCRE2_CODE_UNIT_WIDTH 8
 #include <pcre2.h>
-#endif
 
 #include <reflex/matcher.h>
 #include <re2/re2.h>
@@ -241,6 +239,7 @@ TEST_F(StringMatchTest, Glob2Regex) {
   EXPECT_EQ(GlobMatcher::Glob2Regex("[^abc]"), "[^abc]");
   EXPECT_EQ(GlobMatcher::Glob2Regex("h\\[^|"), "h\\[\\^\\|");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[$?^]a"), "[$?^]a");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("abc[e-c]?"), "abc[e-c].");
 }
 
 TEST_F(StringMatchTest, Basic) {
@@ -270,6 +269,7 @@ TEST_F(StringMatchTest, Basic) {
   EXPECT_EQ(MatchLen("h[a-z]llo", "hello", 0), 1);
   EXPECT_EQ(MatchLen("h[A-Z]llo", "HeLLO", 1), 1);
   EXPECT_EQ(MatchLen("[[]", "[", 0), 1);
+  EXPECT_EQ(MatchLen("abc[e-c]?", "abcde", 0), 1);
 
   // ?
   EXPECT_EQ(MatchLen("h?llo", "hello", 0), 1);
@@ -284,6 +284,11 @@ TEST_F(StringMatchTest, Special) {
   EXPECT_EQ(MatchLen("h\\[^|", "h[^|", 0), 1);
   EXPECT_EQ(MatchLen("[^", "[^", 0), 0);
   EXPECT_EQ(MatchLen("[$?^]a", "?a", 0), 1);
+
+  reflex::Matcher matcher("abc[c-e].");
+  matcher.input("abcde");
+  // EXPECT_TRUE(matcher.find() > 0);   // fails
+  EXPECT_TRUE(matcher.matches() > 0);   // fails
 }
 
 using benchmark::DoNotOptimize;
@@ -380,20 +385,6 @@ static void BM_MatchRedisGlob(benchmark::State& state) {
 }
 BENCHMARK(BM_MatchRedisGlob)->Arg(1000)->Arg(10000);
 
-#ifdef USE_RE2
-static void BM_MatchRe2(benchmark::State& state) {
-  string random_val = GetRandomHex(state.range(0));
-  re2::RE2 re(".*foobar.*", re2::RE2::Latin1);
-  CHECK(re.ok());
-
-  while (state.KeepRunning()) {
-    DoNotOptimize(re2::RE2::FullMatch(random_val, re));
-  }
-}
-BENCHMARK(BM_MatchRe2)->Arg(1000)->Arg(10000);
-#endif
-
-#ifdef USE_PCRE2
 static void BM_MatchPcre2Jit(benchmark::State& state) {
   string random_val = GetRandomHex(state.range(0));
   int errnum;
@@ -417,6 +408,18 @@ static void BM_MatchPcre2Jit(benchmark::State& state) {
   pcre2_code_free(re);
 }
 BENCHMARK(BM_MatchPcre2Jit)->Arg(1000)->Arg(10000);
+
+#ifdef USE_RE2
+static void BM_MatchRe2(benchmark::State& state) {
+  string random_val = GetRandomHex(state.range(0));
+  re2::RE2 re(".*foobar.*", re2::RE2::Latin1);
+  CHECK(re.ok());
+
+  while (state.KeepRunning()) {
+    DoNotOptimize(re2::RE2::FullMatch(random_val, re));
+  }
+}
+BENCHMARK(BM_MatchRe2)->Arg(1000)->Arg(10000);
 #endif
 
 }  // namespace dfly
