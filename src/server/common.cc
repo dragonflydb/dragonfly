@@ -349,10 +349,6 @@ GenericError ExecutionState::GetError() const {
   return err_;
 }
 
-const Cancellation* ExecutionState::GetCancellation() const {
-  return this;
-}
-
 void ExecutionState::ReportCancelError() {
   ReportError(std::make_error_code(errc::operation_canceled), "Context cancelled");
 }
@@ -363,7 +359,7 @@ void ExecutionState::Reset(ErrHandler handler) {
   unique_lock lk{err_mu_};
   err_ = {};
   err_handler_ = std::move(handler);
-  Cancellation::flag_.store(false, std::memory_order_relaxed);
+  state_.store(State::RUN, std::memory_order_relaxed);
   fb.swap(err_handler_fb_);
   lk.unlock();
   fb.JoinIfNeeded();
@@ -402,7 +398,7 @@ GenericError ExecutionState::ReportErrorInternal(GenericError&& err) {
   // We can move err_handler_ because it should run at most once.
   if (err_handler_)
     err_handler_fb_ = fb2::Fiber("report_internal_error", std::move(err_handler_), err_);
-  Cancellation::Cancel();
+  state_.store(State::ERROR, std::memory_order_relaxed);
   return err_;
 }
 

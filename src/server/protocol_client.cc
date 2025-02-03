@@ -158,7 +158,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     // The context closes sock_. So if the context error handler has already
     // run we must not create a new socket. sock_mu_ syncs between the two
     // functions.
-    if (!cntx->IsCancelled()) {
+    if (cntx->IsRunning()) {
       if (sock_) {
         LOG_IF(WARNING, sock_->Close()) << "Error closing socket";
         sock_.reset(nullptr);
