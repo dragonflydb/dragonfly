@@ -882,12 +882,11 @@ struct BlankPolicy : public BasicDashPolicy {
 // into a new segment, not every item finds a place.
 TEST_F(DashTest, SplitBug) {
   DashTable<uint64_t, uint64_t, BlankPolicy> table;
+  string path = base::ProgramRunfile("testdata/ids.txt.zst");
+  io::Result<io::Source*> src = io::OpenUncompressed(path);
+  ASSERT_TRUE(src) << src.error();
 
-  io::ReadonlyFileOrError fl_err =
-      io::OpenRead(base::ProgramRunfile("testdata/ids.txt"), io::ReadonlyFile::Options{});
-  CHECK(fl_err);
-  io::FileSource fs(std::move(*fl_err));
-  io::LineReader lr(&fs, DO_NOT_TAKE_OWNERSHIP);
+  io::LineReader lr(*src, TAKE_OWNERSHIP);
   string_view line;
   uint64_t val;
   while (lr.Next(&line)) {
