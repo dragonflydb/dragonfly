@@ -1568,7 +1568,7 @@ async def test_cluster_fuzzymigration(
     seeder = df_seeder_factory.create(
         keys=keys, port=nodes[0].instance.port, cluster_mode=True, mirror_to_fake_redis=True
     )
-    await seeder.run(target_deviation=0.1)
+    seed_task = asyncio.create_task(seeder.run())
 
     # Counter that pushes values to a list
     async def list_counter(key, client: aioredis.RedisCluster):
@@ -1585,10 +1585,6 @@ async def test_cluster_fuzzymigration(
         asyncio.create_task(list_counter(key, conn))
         for key, conn in zip(counter_keys, counter_connections)
     ]
-
-    # Generate capture, capture ignores counter keys
-    capture = await seeder.capture()
-    fake_capture = await seeder.capture_fake_redis()
 
     # Generate migration plan
     for node_idx, node in enumerate(nodes):
@@ -1673,8 +1669,11 @@ async def test_cluster_fuzzymigration(
         for i, j in zip(counter_list, counter_list[1:]):
             assert int(i) == int(j) + 1, f"Found inconsistent list in {key}: {counter_list}"
 
-    # Compare captures
-    assert await seeder.compare(capture, nodes[0].instance.port)
+    # Compare to fake redis, capture ignores counter keys
+    seeder.stop()
+    await seed_task
+    fake_capture = await seeder.capture_fake_redis()
+
     assert await seeder.compare(fake_capture, nodes[0].instance.port)
 
     await asyncio.gather(*[c.aclose() for c in counter_connections])
@@ -1765,8 +1764,7 @@ async def test_cluster_replication_migration(
     seeder = df_seeder_factory.create(
         keys=2000, port=m1_node.instance.port, cluster_mode=True, mirror_to_fake_redis=True
     )
-    await seeder.run(target_deviation=0.1)
-    fake_capture = await seeder.capture_fake_redis()
+    seed = asyncio.create_task(seeder.run())
 
     logging.debug("start replication")
     await r1_node.admin_client.execute_command(f"replicaof localhost {m1_node.instance.port}")
@@ -1774,9 +1772,6 @@ async def test_cluster_replication_migration(
 
     await wait_available_async(r1_node.admin_client)
     await wait_available_async(r2_node.admin_client)
-
-    r1_capture = await seeder.capture(r1_node.instance.port)
-    r2_capture = await seeder.capture(r2_node.instance.port)
 
     logging.debug("start migration")
     m1_node.migrations = [
@@ -1806,8 +1801,9 @@ async def test_cluster_replication_migration(
     await asyncio.sleep(2)
 
     # ensure captures got exchanged
-    assert await seeder.compare(r2_capture, r1_node.instance.port)
-    assert await seeder.compare(r1_capture, r2_node.instance.port)
+    seeder.stop()
+    await seed
+    fake_capture = await seeder.capture_fake_redis()
     assert await seeder.compare(fake_capture, r1_node.instance.port)
 
 
@@ -1845,7 +1841,7 @@ async def test_start_replication_during_migration(
     seeder = df_seeder_factory.create(
         keys=10000, port=nodes[0].instance.port, cluster_mode=True, mirror_to_fake_redis=True
     )
-    await seeder.run(target_deviation=0.1)
+    seed = asyncio.create_task(seeder.run())
 
     logging.debug("start migration")
     m1_node.migrations = [
@@ -1874,10 +1870,9 @@ async def test_start_replication_during_migration(
 
     await check_all_replicas_finished([r1_node.client], m1_node.client)
 
-    m1_capture = await seeder.capture(m1_node.instance.port)
+    seeder.stop()
+    await seed
     fake_capture = await seeder.capture_fake_redis()
-
-    assert await seeder.compare(m1_capture, r1_node.instance.port)
     assert await seeder.compare(fake_capture, r1_node.instance.port)
 
 
@@ -1911,10 +1906,7 @@ async def test_snapshoting_during_migration(
     seeder = df_seeder_factory.create(
         keys=10000, port=nodes[0].instance.port, cluster_mode=True, mirror_to_fake_redis=True
     )
-    await seeder.run(target_deviation=0.1)
-
-    capture_before_migration = await seeder.capture(nodes[0].instance.port)
-    fake_capture_before_migration = await seeder.capture_fake_redis()
+    seed = asyncio.create_task(seeder.run())
 
     nodes[0].migrations = [
         MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
@@ -1947,13 +1939,15 @@ async def test_snapshoting_during_migration(
     logging.debug("finish migration")
     nodes[0].migrations = []
     nodes[0].slots = []
-    nodes[0].migrations = []
-    nodes[0].slots = [(0, 16383)]
+    nodes[1].migrations = []
+    nodes[1].slots = [(0, 16383)]
 
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    assert await seeder.compare(capture_before_migration, nodes[1].instance.port)
-    assert await seeder.compare(fake_capture_before_migration, nodes[1].instance.port)
+    seeder.stop()
+    await seed
+    fake_capture = await seeder.capture_fake_redis()
+    assert await seeder.compare(fake_capture, nodes[1].instance.port)
 
     await nodes[1].client.execute_command(
         "DFLY",
@@ -1961,8 +1955,10 @@ async def test_snapshoting_during_migration(
         "snap_during_migration-summary.dfs",
     )
 
-    assert await seeder.compare(capture_before_migration, nodes[1].instance.port)
-    assert await seeder.compare(fake_capture_before_migration, nodes[1].instance.port)
+    # TBD: We can't compare the post-loaded data with anything because it is saved while we seed
+    # the cluster. If we want to keep this comparison check we should revert the changes in this
+    # test.
+    # TODO: reach a decision, then remove this comment.
 
 
 @pytest.mark.exclude_epoll
@@ -2842,7 +2838,11 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
     # Running seeder with pipeline mode when finalizing migrations leads to errors
     # TODO: I believe that changing the seeder to generate pipeline command only on specific slot will fix the problem
     seeder = df_seeder_factory.create(
-        keys=50_000, port=instances[0].port, cluster_mode=True, pipeline=False
+        keys=50_000,
+        port=instances[0].port,
+        cluster_mode=True,
+        pipeline=False,
+        mirror_to_fake_redis=True,
     )
     await seeder.run(target_deviation=0.1)
     seed = asyncio.create_task(seeder.run())
@@ -2885,3 +2885,5 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
     logging.debug("stop seeding")
     seeder.stop()
     await seed
+    capture = await seeder.capture_fake_redis()
+    assert await seeder.compare(capture, nodes[1].instance.port)
