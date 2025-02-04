@@ -43,130 +43,9 @@
 #include "util.h"
 
 
-/* Glob-style pattern matching. */
-int stringmatchlen(const char *pattern, int patternLen,
-        const char *string, int stringLen, int nocase)
-{
-    while(patternLen && stringLen) {
-        switch(pattern[0]) {
-        case '*':
-            while (patternLen && pattern[1] == '*') {
-                pattern++;
-                patternLen--;
-            }
-            if (patternLen == 1)
-                return 1; /* match */
-            while(stringLen) {
-                if (stringmatchlen(pattern+1, patternLen-1,
-                            string, stringLen, nocase))
-                    return 1; /* match */
-                string++;
-                stringLen--;
-            }
-            return 0; /* no match */
-            break;
-        case '?':
-            string++;
-            stringLen--;
-            break;
-        case '[':
-        {
-            int not, match;
-
-            pattern++;
-            patternLen--;
-            not = pattern[0] == '^';
-            if (not) {
-                pattern++;
-                patternLen--;
-            }
-            match = 0;
-            while(1) {
-                if (pattern[0] == '\\' && patternLen >= 2) {
-                    pattern++;
-                    patternLen--;
-                    if (pattern[0] == string[0])
-                        match = 1;
-                } else if (pattern[0] == ']') {
-                    break;
-                } else if (patternLen == 0) {
-                    pattern--;
-                    patternLen++;
-                    break;
-                } else if (patternLen >= 3 && pattern[1] == '-') {
-                    int start = pattern[0];
-                    int end = pattern[2];
-                    int c = string[0];
-                    if (start > end) {
-                        int t = start;
-                        start = end;
-                        end = t;
-                    }
-                    if (nocase) {
-                        start = tolower(start);
-                        end = tolower(end);
-                        c = tolower(c);
-                    }
-                    pattern += 2;
-                    patternLen -= 2;
-                    if (c >= start && c <= end)
-                        match = 1;
-                } else {
-                    if (!nocase) {
-                        if (pattern[0] == string[0])
-                            match = 1;
-                    } else {
-                        if (tolower((int)pattern[0]) == tolower((int)string[0]))
-                            match = 1;
-                    }
-                }
-                pattern++;
-                patternLen--;
-            }
-            if (not)
-                match = !match;
-            if (!match)
-                return 0; /* no match */
-            string++;
-            stringLen--;
-            break;
-        }
-        case '\\':
-            if (patternLen >= 2) {
-                pattern++;
-                patternLen--;
-            }
-            /* fall through */
-        default:
-            if (!nocase) {
-                if (pattern[0] != string[0])
-                    return 0; /* no match */
-            } else {
-                if (tolower((int)pattern[0]) != tolower((int)string[0]))
-                    return 0; /* no match */
-            }
-            string++;
-            stringLen--;
-            break;
-        }
-        pattern++;
-        patternLen--;
-        if (stringLen == 0) {
-            while(*pattern == '*') {
-                pattern++;
-                patternLen--;
-            }
-            break;
-        }
-    }
-    if (patternLen == 0 && stringLen == 0)
-        return 1;
-    return 0;
-}
-
 /* Return the number of digits of 'v' when converted to string in radix 10.
  * See ll2string() for more information. */
-uint32_t digits10(uint64_t v) {
+static uint32_t digits10(uint64_t v) {
     if (v < 10) return 1;
     if (v < 100) return 2;
     if (v < 1000) return 3;
@@ -184,18 +63,6 @@ uint32_t digits10(uint64_t v) {
         return 11 + (v >= 100000000000UL);
     }
     return 12 + digits10(v / 1000000000000UL);
-}
-
-/* Like digits10() but for signed values. */
-uint32_t sdigits10(int64_t v) {
-    if (v < 0) {
-        /* Abs value of LLONG_MIN requires special handling. */
-        uint64_t uv = (v != LLONG_MIN) ?
-                      (uint64_t)-v : ((uint64_t) LLONG_MAX)+1;
-        return digits10(uv)+1; /* +1 for the minus. */
-    } else {
-        return digits10(v);
-    }
 }
 
 /* Convert a long long into a string. Returns the number of

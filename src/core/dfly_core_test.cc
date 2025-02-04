@@ -5,9 +5,20 @@
 #include <absl/strings/charconv.h>
 #include <absl/strings/numbers.h>
 #include <fast_float/fast_float.h>
+
+#ifdef USE_PCRE2
+#define PCRE2_CODE_UNIT_WIDTH 8
+#include <pcre2.h>
+#endif
+
+#ifdef USE_RE2
+#include <re2/re2.h>
+#endif
+
 #include <reflex/matcher.h>
 
 #include <random>
+#include <regex>
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -39,6 +50,124 @@ static string GetRandomHex(size_t len) {
   }
 
   return res;
+}
+
+/* Glob-style pattern matching taken from Redis. */
+static int stringmatchlen(const char* pattern, int patternLen, const char* string, int stringLen,
+                          int nocase) {
+  while (patternLen && stringLen) {
+    switch (pattern[0]) {
+      case '*':
+        while (patternLen && pattern[1] == '*') {
+          pattern++;
+          patternLen--;
+        }
+        if (patternLen == 1)
+          return 1; /* match */
+        while (stringLen) {
+          if (stringmatchlen(pattern + 1, patternLen - 1, string, stringLen, nocase))
+            return 1; /* match */
+          string++;
+          stringLen--;
+        }
+        return 0; /* no match */
+        break;
+      case '?':
+        string++;
+        stringLen--;
+        break;
+      case '[': {
+        int neg, match;
+
+        pattern++;
+        patternLen--;
+        neg = pattern[0] == '^';
+        if (neg) {
+          pattern++;
+          patternLen--;
+        }
+        match = 0;
+        while (1) {
+          if (pattern[0] == '\\' && patternLen >= 2) {
+            pattern++;
+            patternLen--;
+            if (pattern[0] == string[0])
+              match = 1;
+          } else if (pattern[0] == ']') {
+            break;
+          } else if (patternLen == 0) {
+            pattern--;
+            patternLen++;
+            break;
+          } else if (patternLen >= 3 && pattern[1] == '-') {
+            int start = pattern[0];
+            int end = pattern[2];
+            int c = string[0];
+            if (start > end) {
+              int t = start;
+              start = end;
+              end = t;
+            }
+            if (nocase) {
+              start = tolower(start);
+              end = tolower(end);
+              c = tolower(c);
+            }
+            pattern += 2;
+            patternLen -= 2;
+            if (c >= start && c <= end)
+              match = 1;
+          } else {
+            if (!nocase) {
+              if (pattern[0] == string[0])
+                match = 1;
+            } else {
+              if (tolower((int)pattern[0]) == tolower((int)string[0]))
+                match = 1;
+            }
+          }
+          pattern++;
+          patternLen--;
+        }
+        if (neg)
+          match = !match;
+        if (!match)
+          return 0; /* no match */
+        string++;
+        stringLen--;
+        break;
+      }
+      case '\\':
+        if (patternLen >= 2) {
+          pattern++;
+          patternLen--;
+        }
+        /* fall through */
+      default:
+        if (!nocase) {
+          if (pattern[0] != string[0])
+            return 0; /* no match */
+        } else {
+          if (tolower((int)pattern[0]) != tolower((int)string[0]))
+            return 0; /* no match */
+        }
+        string++;
+        stringLen--;
+        break;
+    }
+    pattern++;
+    patternLen--;
+    if (stringLen == 0) {
+      while (*pattern == '*') {
+        pattern++;
+        patternLen--;
+      }
+      break;
+    }
+  }
+  if (patternLen == 0 && stringLen == 0)
+    return 1;
+  return 0;
 }
 
 class TxQueueTest : public ::testing::Test {
@@ -107,6 +236,19 @@ class StringMatchTest : public ::testing::Test {
   }
 };
 
+TEST_F(StringMatchTest, Glob2Regex) {
+  EXPECT_EQ(GlobMatcher::Glob2Regex(""), "");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("*"), ".*");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("\\?"), "\\?");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("[abc]"), "[abc]");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("[^abc]"), "[^abc]");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("h\\[^|"), "h\\[\\^\\|");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("[$?^]a"), "[$?^]a");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("[^]a"), ".a");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("[]a"), "[]a");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("\\d"), "d");
+}
+
 TEST_F(StringMatchTest, Basic) {
   EXPECT_EQ(MatchLen("", "", 0), 1);
 
@@ -114,6 +256,7 @@ TEST_F(StringMatchTest, Basic) {
   EXPECT_EQ(MatchLen("*", "", 1), 0);
   EXPECT_EQ(MatchLen("\\\\", "\\", 0), 1);
   EXPECT_EQ(MatchLen("h\\\\llo", "h\\llo", 0), 1);
+  EXPECT_EQ(MatchLen("a\\bc", "ABC", 1), 1);
 
   // ExactMatch
   EXPECT_EQ(MatchLen("hello", "hello", 0), 1);
@@ -134,6 +277,7 @@ TEST_F(StringMatchTest, Basic) {
   EXPECT_EQ(MatchLen("h[a-z]llo", "hello", 0), 1);
   EXPECT_EQ(MatchLen("h[A-Z]llo", "HeLLO", 1), 1);
   EXPECT_EQ(MatchLen("[[]", "[", 0), 1);
+  EXPECT_EQ(MatchLen("[^]a", "xa", 0), 1);
 
   // ?
   EXPECT_EQ(MatchLen("h?llo", "hello", 0), 1);
@@ -141,8 +285,10 @@ TEST_F(StringMatchTest, Basic) {
   EXPECT_EQ(MatchLen("h??llo", "hallo", 0), 0);
   EXPECT_EQ(MatchLen("h\\?llo", "hallo", 0), 0);
   EXPECT_EQ(MatchLen("h\\?llo", "h?llo", 0), 1);
+  EXPECT_EQ(MatchLen("abc?", "abc\n", 0), 1);
+}
 
-  // special regex chars
+TEST_F(StringMatchTest, Special) {
   EXPECT_EQ(MatchLen("h\\[^|", "h[^|", 0), 1);
   EXPECT_EQ(MatchLen("[^", "[^", 0), 0);
   EXPECT_EQ(MatchLen("[$?^]a", "?a", 0), 1);
@@ -221,5 +367,64 @@ static void BM_MatchReflexFindStar(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_MatchReflexFindStar)->Arg(1000)->Arg(10000);
+
+static void BM_MatchStd(benchmark::State& state) {
+  string random_val = GetRandomHex(state.range(0));
+  std::regex regex(".*foobar");
+  std::match_results<std::string::const_iterator> results;
+  while (state.KeepRunning()) {
+    std::regex_match(random_val, results, regex);
+  }
+}
+BENCHMARK(BM_MatchStd)->Arg(1000)->Arg(10000);
+
+static void BM_MatchRedisGlob(benchmark::State& state) {
+  string random_val = GetRandomHex(state.range(0));
+  const char* pattern = "*foobar*";
+  while (state.KeepRunning()) {
+    DoNotOptimize(
+        stringmatchlen(pattern, strlen(pattern), random_val.c_str(), random_val.size(), 0));
+  }
+}
+BENCHMARK(BM_MatchRedisGlob)->Arg(1000)->Arg(10000);
+
+#ifdef USE_RE2
+static void BM_MatchRe2(benchmark::State& state) {
+  string random_val = GetRandomHex(state.range(0));
+  re2::RE2 re(".*foobar.*", re2::RE2::Latin1);
+  CHECK(re.ok());
+
+  while (state.KeepRunning()) {
+    DoNotOptimize(re2::RE2::FullMatch(random_val, re));
+  }
+}
+BENCHMARK(BM_MatchRe2)->Arg(1000)->Arg(10000);
+#endif
+
+#ifdef USE_PCRE2
+static void BM_MatchPcre2Jit(benchmark::State& state) {
+  string random_val = GetRandomHex(state.range(0));
+  int errnum;
+  PCRE2_SIZE erroffset;
+  pcre2_code* re = pcre2_compile((PCRE2_SPTR) ".*foobar", PCRE2_ZERO_TERMINATED, 0, &errnum,
+                                 &erroffset, nullptr);
+  CHECK(re);
+  CHECK_EQ(0, pcre2_jit_compile(re, PCRE2_JIT_COMPLETE));
+  pcre2_match_data* match_data = pcre2_match_data_create_from_pattern(re, NULL);
+  const char sample[] = "aaaaaaaaaaaaafoobar";
+  int rc = pcre2_jit_match(re, (PCRE2_SPTR)sample, strlen(sample), 0,
+                           PCRE2_ANCHORED | PCRE2_ENDANCHORED, match_data, NULL);
+  CHECK_EQ(1, rc);
+
+  while (state.KeepRunning()) {
+    rc = pcre2_jit_match(re, (PCRE2_SPTR)random_val.c_str(), random_val.size(), 0,
+                         PCRE2_ANCHORED | PCRE2_ENDANCHORED, match_data, NULL);
+    CHECK_EQ(PCRE2_ERROR_NOMATCH, rc);
+  }
+  pcre2_match_data_free(match_data);
+  pcre2_code_free(re);
+}
+BENCHMARK(BM_MatchPcre2Jit)->Arg(1000)->Arg(10000);
+#endif
 
 }  // namespace dfly
