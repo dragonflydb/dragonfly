@@ -478,13 +478,11 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id) {
 }
 
 /* Trims a stream by length. Returns the number of deleted items. */
-int64_t streamTrimByLength(stream *s, long long maxlen, int approx, streamID *last_id) {
-    long long limit = approx ? 100 * server.stream_node_max_entries : 0;
-    return streamTrimByLengthLimited(s, maxlen, approx, limit, last_id);
-}
-
-/* Trims a stream by length. Returns the number of deleted items. */
-int64_t streamTrimByLengthLimited(stream *s, long long maxlen, int approx, long long limit, streamID *last_id) {
+int64_t streamTrimByLength(stream *s, long long maxlen, int approx, streamID *last_id, long long limit) {
+    if (limit == NO_TRIM_LIMIT) {
+        limit = approx ? 100 * server.stream_node_max_entries : 0;
+    }
+    
     streamAddTrimArgs args = {
         .trim_strategy = TRIM_STRATEGY_MAXLEN,
         .approx_trim = approx,
@@ -495,13 +493,11 @@ int64_t streamTrimByLengthLimited(stream *s, long long maxlen, int approx, long 
 }
 
 /* Trims a stream by minimum ID. Returns the number of deleted items. */
-int64_t streamTrimByID(stream *s, streamID minid, int approx, streamID *last_id) {
-    long long limit = approx ? 100 * server.stream_node_max_entries : 0;
-    return streamTrimByIDLimited(s, minid, approx, limit, last_id);
-}
-
-/* Trims a stream by minimum ID. Returns the number of deleted items. */
-int64_t streamTrimByIDLimited(stream *s, streamID minid, int approx, long long limit, streamID *last_id) {
+int64_t streamTrimByID(stream *s, streamID minid, int approx, streamID *last_id, long long limit) {
+    if (limit == NO_TRIM_LIMIT) {
+        limit = approx ? 100 * server.stream_node_max_entries : 0;
+    }
+    
     streamAddTrimArgs args = {
         .trim_strategy = TRIM_STRATEGY_MINID,
         .approx_trim = approx,

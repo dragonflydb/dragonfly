@@ -75,12 +75,6 @@ struct RangeId {
 };
 
 struct TrimOpts {
-  static constexpr int32_t kNoLimit = -1;
-
-  bool HasLimit() const {
-    return limit != kNoLimit;
-  }
-
   bool IsMaxLen() const {
     return std::holds_alternative<uint32_t>(length_or_id);
   }
@@ -95,7 +89,7 @@ struct TrimOpts {
 
   // First is MaxLen, second is MinId.
   std::variant<uint32_t, ParsedStreamId> length_or_id;
-  int32_t limit = kNoLimit;
+  int32_t limit = NO_TRIM_LIMIT;
   bool approx = false;
 };
 
@@ -630,20 +624,11 @@ std::pair<int64_t, streamID> TrimStream(const TrimOpts& opts, stream* s) {
   streamID last_id = {0, 0};
 
   auto trim = [&]() {
-    bool limit = opts.HasLimit();
     if (opts.IsMaxLen()) {
-      if (!limit) {
-        return streamTrimByLength(s, opts.AsMaxLen(), opts.approx, &last_id);
-      } else {
-        return streamTrimByLengthLimited(s, opts.AsMaxLen(), opts.approx, opts.limit, &last_id);
-      }
+      return streamTrimByLength(s, opts.AsMaxLen(), opts.approx, &last_id, opts.limit);
     } else {
       const auto& min_id = opts.AsMinId().val;
-      if (!limit) {
-        return streamTrimByID(s, min_id, opts.approx, &last_id);
-      } else {
-        return streamTrimByIDLimited(s, min_id, opts.approx, opts.limit, &last_id);
-      }
+      return streamTrimByID(s, min_id, opts.approx, &last_id, opts.limit);
     }
   };
 
