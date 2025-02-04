@@ -533,6 +533,8 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
   }
 
   if (parser.HasError()) {
+    // consume error
+    parser.Error();
     return rb->SendError(kSyntaxErr);
   }
 
