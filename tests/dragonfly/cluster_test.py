@@ -1871,7 +1871,7 @@ async def test_start_replication_during_migration(
 
 
 @pytest.mark.parametrize("migration_first", [False, True])
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "dbfilename": "snap_during_migration"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_snapshoting_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, migration_first: bool
 ):
@@ -1883,8 +1883,14 @@ async def test_snapshoting_during_migration(
 
     The result should be the same: snapshot contains all the data that existed before migration
     """
+    dbfilename = f"snap_{tmp_file_name()}"
     instances = [
-        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+        df_factory.create(
+            dbfilename=dbfilename if i == 0 else "",
+            port=next(next_port),
+            admin_port=next(next_port),
+        )
+        for i in range(2)
     ]
     df_factory.start_all(instances)
 
@@ -1943,7 +1949,7 @@ async def test_snapshoting_during_migration(
     await nodes[1].client.execute_command(
         "DFLY",
         "LOAD",
-        "snap_during_migration-summary.dfs",
+        f"{dbfilename}-summary.dfs",
     )
 
     assert await seeder.compare(capture_before_migration, nodes[1].instance.port)
