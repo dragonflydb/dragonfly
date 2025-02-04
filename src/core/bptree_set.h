@@ -489,8 +489,14 @@ template <typename T, typename Policy>
 detail::BPTreePath<T> BPTree<T, Policy>::GEQ(KeyT item) const {
   BPTreePath path;
 
-  if (!Locate(item, &path) && path.Last().second >= path.Last().first->NumItems())
-    path.Clear();
+  bool res = Locate(item, &path);
+
+  // if we did not find the item and the path does not lead to any key in the node,
+  // adjust the path to point to the next key in the tree.
+  // In case we are past all items in the tree, Next() will collapse to the empty path.
+  if (!res && path.Last().second >= path.Last().first->NumItems()) {
+    path.Next();
+  }
 
   return path;
 }

@@ -88,10 +88,14 @@ class BPTreeSetTest : public ::testing::Test {
   static void SetUpTestSuite() {
   }
 
-  void FillTree(unsigned factor = 1) {
-    for (unsigned i = 0; i < kNumElems; ++i) {
+  void FillTree(unsigned start, unsigned factor) {
+    for (unsigned i = start; i < kNumElems; ++i) {
       bptree_.Insert(i * factor);
     }
+  }
+
+  void FillTree(unsigned factor = 1) {
+    FillTree(0, factor);
   }
 
   bool Validate();
@@ -275,6 +279,25 @@ TEST_F(BPTreeSetTest, Ranges) {
 
   path = bptree_.LEQ(1);
   EXPECT_TRUE(path.Empty());
+}
+
+TEST_F(BPTreeSetTest, HalfRanges) {
+  FillTree(1, 3);  // 3, 6, 9 ...
+  auto path = bptree_.FromRank(bptree_.Size() - 1);
+  uint64_t val = path.Terminal();
+  for (unsigned i = 0; i <= val; ++i) {
+    path = bptree_.GEQ(i);
+    ASSERT_FALSE(path.Empty()) << i;
+  }
+  path = bptree_.GEQ(val + 1);
+  ASSERT_TRUE(path.Empty());
+
+  for (unsigned i = 3; i <= val + 10; ++i) {
+    path = bptree_.LEQ(i);
+    ASSERT_FALSE(path.Empty()) << i;
+  }
+  path = bptree_.LEQ(2);
+  ASSERT_TRUE(path.Empty());
 }
 
 TEST_F(BPTreeSetTest, MemoryUsage) {
