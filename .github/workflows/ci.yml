@@ -109,15 +109,6 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '')
 
-      - name: Install clang
-        if: matrix.sanitizers == 'Sanitizers'
-        run: |
-          # TODO remove this once the weekly is done
-          apt -y update
-          apt -y upgrade
-          apt install -y clang
-          which clang
-
       - name: Configure CMake
         # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
         # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
