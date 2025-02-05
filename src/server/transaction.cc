@@ -559,7 +559,8 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   if (sid) {
     absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
                     ",is_armed=", DEBUG_IsArmedInShard(*sid),
-                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos);
+                    ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos,
+                    ",fail_state_print=", DEBUG_PrintFailState(*sid));
   }
   absl::StrAppend(&res, "}");
   return res;
