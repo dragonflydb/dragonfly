@@ -542,6 +542,21 @@ error_code Replica::InitiateDflySync() {
     // Lock to prevent the error handler from running instantly
     // while the flows are in a mixed state.
     lock_guard lk{flows_op_mu_};
+    absl::Cleanup clean = [this]() {
+      shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+        namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetLoadInProgress(false);
+      });
+    };
+
+    // See issue #4554
+    // We really need two dispatches here because StartSyncFlow executes on different shards.
+    // If the sync fiber on one of the threads, starts, loads the snapshots and starts flushing
+    // the loaded data to the shards asynchronously via LoadItemsBuffer() while the other thread
+    // did not even spawned the Sync flow fiber, it will start Bumping items because
+    // SetLoadInProgress will still be false.
+    shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
+      namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetLoadInProgress(true);
+    });
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
 
     size_t num_full_flows =
