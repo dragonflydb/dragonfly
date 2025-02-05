@@ -143,7 +143,7 @@ typename BaseStringIndex<C>::Container* BaseStringIndex<C>::GetOrCreate(string_v
 
 template <typename C>
 bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view field) {
-  auto strings_list = doc.GetStrings(field);
+  auto strings_list = GetStrings(doc, field);
   if (!strings_list) {
     return false;
   }
@@ -159,7 +159,7 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
 
 template <typename C>
 void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  auto strings_list = doc.GetStrings(field).value();
+  auto strings_list = GetStrings(doc, field).value();
 
   absl::flat_hash_set<std::string> tokens;
   for (string_view str : strings_list)
@@ -188,8 +188,18 @@ template <typename C> vector<string> BaseStringIndex<C>::GetTerms() const {
 template struct BaseStringIndex<CompressedSortedSet>;
 template struct BaseStringIndex<SortedVector>;
 
+std::optional<DocumentAccessor::StringList> TextIndex::GetStrings(const DocumentAccessor& doc,
+                                                                  std::string_view field) const {
+  return doc.GetStrings(field);
+}
+
 absl::flat_hash_set<std::string> TextIndex::Tokenize(std::string_view value) const {
   return TokenizeWords(value, *stopwords_);
+}
+
+std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentAccessor& doc,
+                                                                 std::string_view field) const {
+  return doc.GetTags(field);
 }
 
 absl::flat_hash_set<std::string> TagIndex::Tokenize(std::string_view value) const {

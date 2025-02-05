@@ -80,6 +80,9 @@ struct DocumentAccessor {
 
   /* Return nullopt if the specified field is not a list of doubles */
   virtual std::optional<NumsList> GetNumbers(std::string_view active_field) const = 0;
+
+  /* Same as GetStrings, but also supports boolean values */
+  virtual std::optional<StringList> GetTags(std::string_view active_field) const = 0;
 };
 
 // Base class for type-specific indices.
