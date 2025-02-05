@@ -99,6 +99,18 @@ struct AddOpts {
   bool no_mkstream = false;
 };
 
+/* Used to journal the XADD command.
+   The actual stream ID assigned after adding may differ from the one specified in the command.
+   So, for the replica, we need to specify the exact ID that was actually added. */
+struct AddArgsJournaler {
+  void SetStreamId(std::string_view stream_id) {
+    add_args[stream_id_index] = stream_id;
+  }
+
+  CmdArgVec add_args;
+  size_t stream_id_index;
+};
+
 struct NACKInfo {
   streamID pel_id;
   string consumer_name;
@@ -641,7 +653,7 @@ bool JournalAsMinId(const TrimOpts& opts) {
 }
 
 OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& opts,
-                         bool journal_as_minid, CmdArgList args) {
+                         CmdArgList args, AddArgsJournaler journaler) {
   DCHECK(!args.empty() && args.size() % 2 == 0);
 
   auto& db_slice = op_args.GetDbSlice();
@@ -692,21 +704,30 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 
   mem_tracker.UpdateStreamSize(it->second);
 
-  if (op_args.shard->journal() && journal_as_minid) {
-    // We need to set exact MinId in the journal.
-    std::string last_id = StreamsIdToString(trim_result.second);
-    std::vector<std::string_view> journal_args = {key, "MINID"sv, "="sv, last_id};
-    journal_args.reserve(args.size());
+  if (op_args.shard->journal()) {
+    std::string result_id_as_string = StreamsIdToString(result_id);
 
-    if (opts.no_mkstream) {
-      journal_args.push_back("NOMKSTREAM"sv);
+    if (opts.trim_opts && JournalAsMinId(opts.trim_opts.value())) {
+      // We need to set exact MinId in the journal.
+      std::string last_id = StreamsIdToString(trim_result.second);
+      CmdArgVec journal_args = {key, "MINID"sv, "="sv, last_id};
+      journal_args.reserve(args.size() + 4);
+
+      if (opts.no_mkstream) {
+        journal_args.push_back("NOMKSTREAM"sv);
+      }
+
+      journal_args.push_back(result_id_as_string);
+
+      for (size_t i = 0; i < args.size(); i++) {
+        journal_args.push_back(args[i]);
+      }
+
+      RecordJournal(op_args, "XADD"sv, journal_args);
+    } else {
+      journaler.SetStreamId(result_id_as_string);
+      RecordJournal(op_args, "XADD"sv, journaler.add_args);
     }
-
-    for (size_t i = 0; i < args.size(); i++) {
-      journal_args.push_back(args[i]);
-    }
-
-    RecordJournal(op_args, "XADD"sv, journal_args);
   }
 
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
@@ -2611,22 +2632,20 @@ void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
     return;
   }
 
+  // Save the index of the stream ID in the arguments list.
+  // We need this during journaling
+  // It is (parser.GetCurrentIndex() - 1) because the stream id is the last parsed argument in the
+  // ParseAddOpts
+  const size_t stream_id_index_in_args = parser.GetCurrentIndex() - 1;
+  AddArgsJournaler journaler{{args.begin(), args.end()}, stream_id_index_in_args};
+
   CmdArgList fields = parser.Tail();
   if (fields.empty() || fields.size() % 2 != 0) {
     return rb->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }
 
-  auto& add_opts = parsed_add_opts.value();
-
-  // We can auto-journal if we are not trimming approximately or by maxlen
-  const bool enable_auto_journaling =
-      !(add_opts.trim_opts && JournalAsMinId(add_opts.trim_opts.value()));
-  if (enable_auto_journaling) {
-    cmd_cntx.tx->ReviveAutoJournal();
-  }
-
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), key, add_opts, !enable_auto_journaling, fields);
+    return OpAdd(t->GetOpArgs(shard), key, parsed_add_opts.value(), fields, journaler);
   };
 
   OpResult<streamID> add_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
