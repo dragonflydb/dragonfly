@@ -339,25 +339,25 @@ std::string GenericError::Format() const {
     return absl::StrCat(ec_.message(), ": ", details_);
 }
 
-Context::~Context() {
+ExecutionState::~ExecutionState() {
   DCHECK(!err_handler_fb_.IsJoinable());
   err_handler_fb_.JoinIfNeeded();
 }
 
-GenericError Context::GetError() const {
+GenericError ExecutionState::GetError() const {
   std::lock_guard lk(err_mu_);
   return err_;
 }
 
-const Cancellation* Context::GetCancellation() const {
+const Cancellation* ExecutionState::GetCancellation() const {
   return this;
 }
 
-void Context::Cancel() {
+void ExecutionState::ReportCancelError() {
   ReportError(std::make_error_code(errc::operation_canceled), "Context cancelled");
 }
 
-void Context::Reset(ErrHandler handler) {
+void ExecutionState::Reset(ErrHandler handler) {
   fb2::Fiber fb;
 
   unique_lock lk{err_mu_};
@@ -369,7 +369,7 @@ void Context::Reset(ErrHandler handler) {
   fb.JoinIfNeeded();
 }
 
-GenericError Context::SwitchErrorHandler(ErrHandler handler) {
+GenericError ExecutionState::SwitchErrorHandler(ErrHandler handler) {
   std::lock_guard lk{err_mu_};
   if (!err_) {
     // No need to check for the error handler - it can't be running
@@ -379,7 +379,7 @@ GenericError Context::SwitchErrorHandler(ErrHandler handler) {
   return err_;
 }
 
-void Context::JoinErrorHandler() {
+void ExecutionState::JoinErrorHandler() {
   fb2::Fiber fb;
   unique_lock lk{err_mu_};
   fb.swap(err_handler_fb_);
@@ -387,7 +387,7 @@ void Context::JoinErrorHandler() {
   fb.JoinIfNeeded();
 }
 
-GenericError Context::ReportErrorInternal(GenericError&& err) {
+GenericError ExecutionState::ReportErrorInternal(GenericError&& err) {
   lock_guard lk{err_mu_};
   if (err_)
     return err_;

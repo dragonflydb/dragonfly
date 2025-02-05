@@ -59,7 +59,7 @@ struct TransactionData {
 struct TransactionReader {
   TransactionReader(std::optional<uint64_t> lsn = std::nullopt) : lsn_(lsn) {
   }
-  std::optional<TransactionData> NextTxData(JournalReader* reader, Context* cntx);
+  std::optional<TransactionData> NextTxData(JournalReader* reader, ExecutionState* cntx);
 
  private:
   std::optional<uint64_t> lsn_ = 0;

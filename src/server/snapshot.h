@@ -54,13 +54,13 @@ class SliceSnapshot {
     virtual ~SnapshotDataConsumerInterface() = default;
 
     // Receives a chunk of snapshot data for processing
-    virtual void ConsumeData(std::string data, Context* cntx) = 0;
+    virtual void ConsumeData(std::string data, ExecutionState* cntx) = 0;
     // Finalizes the snapshot writing
     virtual void Finalize() = 0;
   };
 
   SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                SnapshotDataConsumerInterface* consumer, Context* cntx);
+                SnapshotDataConsumerInterface* consumer, ExecutionState* cntx);
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
@@ -178,7 +178,7 @@ class SliceSnapshot {
   ThreadLocalMutex big_value_mu_;
 
   SnapshotDataConsumerInterface* consumer_;
-  Context* cntx_;
+  ExecutionState* cntx_;
 };
 
 }  // namespace dfly

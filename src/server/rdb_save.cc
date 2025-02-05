@@ -49,9 +49,10 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 
-ABSL_RETIRED_FLAG(bool, list_rdb_encode_v2, true,
-          "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
-          "enconding of list uses ziplist encoding compatible with redis 6");
+ABSL_RETIRED_FLAG(
+    bool, list_rdb_encode_v2, true,
+    "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
+    "enconding of list uses ziplist encoding compatible with redis 6");
 
 // TODO: to retire this flag in v1.31
 ABSL_FLAG(bool, stream_rdb_encode_v2, true,
@@ -1048,14 +1049,14 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
 
   ~Impl();
 
-  void StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard);
-  void StartIncrementalSnapshotting(LSN start_lsn, Context* cntx, EngineShard* shard);
+  void StartSnapshotting(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
+  void StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx, EngineShard* shard);
 
   void StopSnapshotting(EngineShard* shard);
   void WaitForSnapshottingFinish(EngineShard* shard);
 
   // Pushes snapshot data. Called from SliceSnapshot
-  void ConsumeData(std::string data, Context* cntx) override;
+  void ConsumeData(std::string data, ExecutionState* cntx) override;
   // Finalizes the snapshot writing. Called from SliceSnapshot
   void Finalize() override;
 
@@ -1226,7 +1227,8 @@ error_code RdbSaver::Impl::WriteRecord(io::Bytes src) {
   return ec;
 }
 
-void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard) {
+void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx,
+                                       EngineShard* shard) {
   auto& s = GetSnapshot(shard);
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
@@ -1238,7 +1240,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, Engin
   s->Start(stream_journal, allow_flush);
 }
 
-void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, Context* cntx,
+void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx,
                                                   EngineShard* shard) {
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
@@ -1255,7 +1257,7 @@ void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
   snapshot->WaitSnapshotting();
 }
 
-void RdbSaver::Impl::ConsumeData(std::string data, Context* cntx) {
+void RdbSaver::Impl::ConsumeData(std::string data, ExecutionState* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
@@ -1429,11 +1431,12 @@ RdbSaver::~RdbSaver() {
   tlocal->DecommitMemory(ServerState::kAllMemory);
 }
 
-void RdbSaver::StartSnapshotInShard(bool stream_journal, Context* cntx, EngineShard* shard) {
+void RdbSaver::StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard) {
   impl_->StartSnapshotting(stream_journal, cntx, shard);
 }
 
-void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, Context* cntx, EngineShard* shard) {
+void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, ExecutionState* cntx,
+                                               EngineShard* shard) {
   impl_->StartIncrementalSnapshotting(start_lsn, cntx, shard);
 }
 
@@ -1460,7 +1463,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody(const Context& cntx) {
+error_code RdbSaver::SaveBody(const ExecutionState& cntx) {
   RETURN_ON_ERR(impl_->FlushSerializer());
 
   if (save_mode_ == SaveMode::RDB) {

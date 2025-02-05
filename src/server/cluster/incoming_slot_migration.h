@@ -67,7 +67,7 @@ class IncomingSlotMigration {
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
   SlotRanges slots_;
   std::atomic<MigrationState> state_ = MigrationState::C_CONNECTING;
-  Context cntx_;
+  ExecutionState cntx_;
   mutable util::fb2::Mutex error_mu_;
   dfly::GenericError last_error_ ABSL_GUARDED_BY(error_mu_);
 

@@ -42,7 +42,7 @@ class ClusterShardMigration {
     pause_ = pause;
   }
 
-  void Start(Context* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
+  void Start(ExecutionState* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
     {
       util::fb2::LockGuard lk(mu_);
       if (is_finished_) {
@@ -125,7 +125,7 @@ class ClusterShardMigration {
   }
 
  private:
-  void ExecuteTx(TransactionData&& tx_data, Context* cntx) {
+  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
     if (cntx->IsCancelled()) {
       return;
     }
@@ -205,7 +205,7 @@ bool IncomingSlotMigration::Join(long attempt) {
 void IncomingSlotMigration::Stop() {
   string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
-  cntx_.Cancel();
+  cntx_.ReportCancelError();
 
   for (auto& flow : shard_flows_) {
     if (auto err = flow->Cancel(); err) {
