@@ -1955,10 +1955,8 @@ async def test_snapshoting_during_migration(
         "snap_during_migration-summary.dfs",
     )
 
-    # TBD: We can't compare the post-loaded data with anything because it is saved while we seed
-    # the cluster. If we want to keep this comparison check we should revert the changes in this
-    # test.
-    # TODO: reach a decision, then remove this comment.
+    # TODO: We can't compare the post-loaded data as is, because it might have changed by now.
+    # We can try to use FakeRedis with the StaticSeeder comparison here.
 
 
 @pytest.mark.exclude_epoll
