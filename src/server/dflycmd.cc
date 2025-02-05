@@ -528,11 +528,7 @@ void DflyCmd::Load(CmdArgList args, RedisReplyBuilder* rb, ConnectionContext* cn
     existing_keys = ServerFamily::LoadExistingKeys::kOverride;
   }
 
-  if (parser.HasNext()) {
-    parser.Error();
-  }
-
-  if (parser.HasError()) {
+  if (parser.Error() || parser.HasNext()) {
     return rb->SendError(kSyntaxErr);
   }
 
