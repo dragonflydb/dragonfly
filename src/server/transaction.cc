@@ -58,7 +58,7 @@ void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
                       ", poll_executions:", shard->stats().poll_execution_total);
       const Transaction* cont_tx = shard->GetContTx();
       if (cont_tx) {
-        absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(), " ",
+        absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(shard->shard_id()), " ",
                         cont_tx->DEBUG_IsArmedInShard(shard->shard_id()) ? " armed" : "");
       }
       absl::StrAppend(&msg, "\nTxQueue head debug info ", info.head.debug_id_info);
@@ -558,6 +558,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   absl::StrAppend(&res, " {id=", trans_id(this));
   if (sid) {
     absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
+                    ",is_armed=", DEBUG_IsArmedInShard(*sid),
                     ",txqpos[]=", shard_data_[SidToId(*sid)].pq_pos);
   }
   absl::StrAppend(&res, "}");
