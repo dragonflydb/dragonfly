@@ -2715,7 +2715,7 @@ async def test_big_containers(df_factory, element_size, elements_number):
     logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
     assert replica_peak_memory < 1.1 * replica_used_memory
 
-    # Check replica data consisten
+    # Check replica data consistent
     replica_data = await StaticSeeder.capture(c_replica)
     master_data = await StaticSeeder.capture(c_master)
     assert master_data == replica_data
@@ -2734,3 +2734,39 @@ async def test_master_too_big(df_factory):
     # We should never sync due to used memory too high during full sync
     with pytest.raises(TimeoutError):
         await wait_available_async(c_replica, timeout=10)
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_stream_approximate_trimming(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    # Step 1: Populate master with 100 streams, each containing 200 entries
+    num_streams = 100
+    entries_per_stream = 200
+
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        for j in range(entries_per_stream):
+            await c_master.execute_command("XADD", stream_name, "*", f"field{j}", f"value{j}")
+
+    # Step 2: Trim each stream to a random size between 70 and 200
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        trim_size = random.randint(70, entries_per_stream)
+        await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "~", trim_size)
+
+    # Wait for replica sync
+    await asyncio.sleep(1)
+
+    # Check replica data consistent
+    master_data = await StaticSeeder.capture(c_master)
+    replica_data = await StaticSeeder.capture(c_replica)
+    assert master_data == replica_data

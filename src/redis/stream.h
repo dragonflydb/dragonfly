@@ -125,6 +125,9 @@ typedef struct {
 /* Prototypes of exported APIs. */
 // struct client;
 
+// Use this to in streamTrimByLength and streamTrimByID
+#define NO_TRIM_LIMIT (-1)
+
 /* Flags for streamCreateConsumer */
 #define SCC_DEFAULT       0
 #define SCC_NO_NOTIFY     (1<<0) /* Do not notify key space if consumer created */
@@ -163,9 +166,12 @@ int streamAppendItem(stream *s, robj **argv, int64_t numfields, streamID *added_
 int streamDeleteItem(stream *s, streamID *id);
 void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_id);
 long long streamEstimateDistanceFromFirstEverEntry(stream *s, streamID *id);
-int64_t streamTrim(stream *s, streamAddTrimArgs *args);
-int64_t streamTrimByLength(stream *s, long long maxlen, int approx);
-int64_t streamTrimByID(stream *s, streamID minid, int approx);
+int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id);
+
+// If you don't want to specify a limit, use NO_TRIM_LIMIT
+int64_t streamTrimByLength(stream *s, long long maxlen, int approx, streamID *last_id, long long limit);
+int64_t streamTrimByID(stream *s, streamID minid, int approx, streamID *last_id, long long limit);
+
 void streamFreeCG(streamCG *cg);
 void streamDelConsumer(streamCG *cg, streamConsumer *consumer);
 void streamLastValidID(stream *s, streamID *maxid);

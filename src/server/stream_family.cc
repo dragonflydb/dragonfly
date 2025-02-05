@@ -48,6 +48,14 @@ struct Record {
 
 using RecordVec = vector<Record>;
 
+using nonstd::make_unexpected;
+
+template <typename T> using ParseResult = io::Result<T, ErrorReply>;
+
+nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) {
+  return make_unexpected(ErrorReply{message, kSyntaxErrType});
+}
+
 struct ParsedStreamId {
   streamID val;
 
@@ -66,23 +74,41 @@ struct RangeId {
   bool exclude = false;
 };
 
-enum class TrimStrategy {
-  kNone = TRIM_STRATEGY_NONE,
-  kMaxLen = TRIM_STRATEGY_MAXLEN,
-  kMinId = TRIM_STRATEGY_MINID,
+struct TrimOpts {
+  bool IsMaxLen() const {
+    return std::holds_alternative<uint32_t>(length_or_id);
+  }
+
+  uint32_t AsMaxLen() const {
+    return std::get<uint32_t>(length_or_id);
+  }
+
+  const ParsedStreamId& AsMinId() const {
+    return std::get<ParsedStreamId>(length_or_id);
+  }
+
+  // First is MaxLen, second is MinId.
+  std::variant<uint32_t, ParsedStreamId> length_or_id;
+  int32_t limit = NO_TRIM_LIMIT;
+  bool approx = false;
 };
 
-struct AddTrimOpts {
-  string_view key;
-  ParsedStreamId minid;
-  uint32_t max_len = kuint32max;
-  uint32_t limit = 0;
-  TrimStrategy trim_strategy = TrimStrategy::kNone;
-  bool trim_approx = false;
-
-  // XADD only.
+struct AddOpts {
+  std::optional<TrimOpts> trim_opts;
   ParsedStreamId parsed_id;
   bool no_mkstream = false;
+};
+
+/* Used to journal the XADD command.
+   The actual stream ID assigned after adding may differ from the one specified in the command.
+   So, for the replica, we need to specify the exact ID that was actually added. */
+struct AddArgsJournaler {
+  void SetStreamId(std::string_view stream_id) {
+    add_args[stream_id_index] = stream_id;
+  }
+
+  CmdArgVec add_args;
+  size_t stream_id_index;
 };
 
 struct NACKInfo {
@@ -166,6 +192,8 @@ struct ReadOpts {
   bool noack = false;
 };
 
+const char kTrimOptionConflictErr[] =
+    "MAXLEN and MINID options at the same time are not compatible";
 const char kInvalidStreamId[] = "Invalid stream ID specified as stream command argument";
 const char kXGroupKeyNotFound[] =
     "The XGROUP subcommand requires the key to exist. "
@@ -599,45 +627,44 @@ streamNACK* StreamCreateNACK(streamConsumer* consumer, uint64_t now_ms) {
   return nack;
 }
 
-int StreamTrim(const AddTrimOpts& opts, stream* s) {
-  if (!opts.limit) {
-    if (opts.trim_strategy == TrimStrategy::kMaxLen) {
-      /* Notify xtrim event if needed. */
-      return streamTrimByLength(s, opts.max_len, opts.trim_approx);
-      // TODO: when replicating, we should propagate it as exact limit in case of trimming.
-    } else if (opts.trim_strategy == TrimStrategy::kMinId) {
-      return streamTrimByID(s, opts.minid.val, opts.trim_approx);
-    }
-  } else {
-    streamAddTrimArgs trim_args = {};
-    trim_args.trim_strategy = static_cast<int>(opts.trim_strategy);
-    trim_args.approx_trim = opts.trim_approx;
-    trim_args.limit = opts.limit;
-
-    if (opts.trim_strategy == TrimStrategy::kMaxLen) {
-      trim_args.maxlen = opts.max_len;
-    } else if (opts.trim_strategy == TrimStrategy::kMinId) {
-      trim_args.minid = opts.minid.val;
-    }
-    return streamTrim(s, &trim_args);
-  }
-
-  return 0;
+std::string StreamsIdToString(streamID id) {
+  return absl::StrCat(id.ms, "-", id.seq);
 }
 
-OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgList args) {
-  DCHECK(!args.empty() && args.size() % 2 == 0);
-  auto& db_slice = op_args.GetDbSlice();
-  DbSlice::AddOrFindResult add_res;
+/* The first value represents the number of deleted items, and the second is the last trimmed ID. */
+std::pair<int64_t, streamID> TrimStream(const TrimOpts& opts, stream* s) {
+  streamID last_id = {0, 0};
 
-  if (opts.no_mkstream) {
-    auto res_it = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_STREAM);
-    if (!res_it) {
-      return res_it.status();
+  auto trim = [&]() {
+    if (opts.IsMaxLen()) {
+      return streamTrimByLength(s, opts.AsMaxLen(), opts.approx, &last_id, opts.limit);
+    } else {
+      const auto& min_id = opts.AsMinId().val;
+      return streamTrimByID(s, min_id, opts.approx, &last_id, opts.limit);
     }
+  };
+
+  const int64_t deleted_items_number = trim();
+  return {deleted_items_number, last_id};
+}
+
+bool JournalAsMinId(const TrimOpts& opts) {
+  return opts.approx || opts.IsMaxLen();
+}
+
+OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& opts,
+                         CmdArgList args, AddArgsJournaler journaler) {
+  DCHECK(!args.empty() && args.size() % 2 == 0);
+
+  auto& db_slice = op_args.GetDbSlice();
+
+  DbSlice::AddOrFindResult add_res;
+  if (opts.no_mkstream) {
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
+    RETURN_ON_BAD_STATUS(res_it);
     add_res = std::move(*res_it);
   } else {
-    auto op_res = db_slice.AddOrFind(op_args.db_cntx, opts.key);
+    auto op_res = db_slice.AddOrFind(op_args.db_cntx, key);
     RETURN_ON_BAD_STATUS(op_res);
     add_res = std::move(*op_res);
   }
@@ -670,13 +697,42 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, const AddTrimOpts& opts, CmdArgL
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  StreamTrim(opts, stream_inst);
+  std::pair<int64_t, streamID> trim_result{};
+  if (opts.trim_opts) {
+    trim_result = TrimStream(opts.trim_opts.value(), stream_inst);
+  }
 
   mem_tracker.UpdateStreamSize(it->second);
 
+  if (op_args.shard->journal()) {
+    std::string result_id_as_string = StreamsIdToString(result_id);
+
+    if (opts.trim_opts && JournalAsMinId(opts.trim_opts.value())) {
+      // We need to set exact MinId in the journal.
+      std::string last_id = StreamsIdToString(trim_result.second);
+      CmdArgVec journal_args = {key, "MINID"sv, "="sv, last_id};
+      journal_args.reserve(args.size() + 4);
+
+      if (opts.no_mkstream) {
+        journal_args.push_back("NOMKSTREAM"sv);
+      }
+
+      journal_args.push_back(result_id_as_string);
+
+      for (size_t i = 0; i < args.size(); i++) {
+        journal_args.push_back(args[i]);
+      }
+
+      RecordJournal(op_args, "XADD"sv, journal_args);
+    } else {
+      journaler.SetStreamId(result_id_as_string);
+      RecordJournal(op_args, "XADD"sv, journaler.add_args);
+    }
+  }
+
   auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (blocking_controller) {
-    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, opts.key);
+    blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
   }
 
   return result_id;
@@ -1934,9 +1990,10 @@ void XGroupHelp(CmdArgList args, const CommandContext& cmd_cntx) {
   return rb->SendSimpleStrArr(help_arr);
 }
 
-OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
+OpResult<int64_t> OpTrim(const OpArgs& op_args, std::string_view key, const TrimOpts& opts,
+                         bool journal_as_minid) {
   auto& db_slice = op_args.GetDbSlice();
-  auto res_it = db_slice.FindMutable(op_args.db_cntx, opts.key, OBJ_STREAM);
+  auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STREAM);
   if (!res_it) {
     if (res_it.status() == OpStatus::KEY_NOTFOUND) {
       return 0;
@@ -1949,77 +2006,93 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, const AddTrimOpts& opts) {
   CompactObj& cobj = res_it->it->second;
   stream* s = (stream*)cobj.RObjPtr();
 
-  auto res = StreamTrim(opts, s);
+  auto res = TrimStream(opts, s);
 
   mem_tracker.UpdateStreamSize(cobj);
+
+  if (op_args.shard->journal() && journal_as_minid) {
+    std::string last_id = StreamsIdToString(res.second);
+    RecordJournal(op_args, "XTRIM"sv, ArgSlice{key, "MINID"sv, "="sv, last_id});
+  }
+
+  return res.first;
+}
+
+ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {
+  TrimOpts opts;
+  opts.approx = parser->Check("~");
+  if (!opts.approx) {
+    parser->Check("=");
+  }
+
+  if (max_len) {
+    opts.length_or_id = parser->Next<uint32_t>();
+  } else {
+    ParsedStreamId parsed_id;
+    if (!ParseID(parser->Next(), false, 0, &parsed_id)) {
+      return CreateSyntaxError(kSyntaxErr);
+    }
+
+    opts.length_or_id = parsed_id;  // trivial copy
+  }
+
+  if (parser->Check("LIMIT")) {
+    if (!opts.approx) {
+      return CreateSyntaxError(kSyntaxErr);
+    }
+
+    opts.limit = parser->Next<uint32_t>();
+  }
+
+  return opts;
+}
+
+ParseResult<TrimOpts> ParseTrimOpts(CmdArgParser* parser) {
+  bool max_len = parser->Check("MAXLEN");
+  if (!max_len) {
+    parser->ExpectTag("MINID");
+  }
+
+  auto res = ParseTrimOpts(max_len, parser);
+
+  if (parser->Check("MAXLEN") || parser->Check("MINID")) {
+    return CreateSyntaxError(kTrimOptionConflictErr);
+  }
+
   return res;
 }
 
-optional<pair<AddTrimOpts, unsigned>> ParseAddOrTrimArgsOrReply(CmdArgList args, bool is_xadd,
-                                                                SinkReplyBuilder* builder) {
-  AddTrimOpts opts;
-  opts.key = ArgS(args, 0);
-
-  unsigned id_indx = 1;
-  for (; id_indx < args.size(); ++id_indx) {
-    string arg = absl::AsciiStrToUpper(ArgS(args, id_indx));
-    size_t remaining_args = args.size() - id_indx - 1;
-
-    if (is_xadd && arg == "NOMKSTREAM") {
+ParseResult<AddOpts> ParseAddOpts(CmdArgParser* parser) {
+  AddOpts opts;
+  while (parser->HasNext()) {
+    if (parser->Check("NOMKSTREAM")) {
       opts.no_mkstream = true;
-    } else if ((arg == "MAXLEN" || arg == "MINID") && remaining_args >= 1) {
-      if (opts.trim_strategy != TrimStrategy::kNone) {
-        builder->SendError("MAXLEN and MINID options at the same time are not compatible",
-                           kSyntaxErr);
-        return std::nullopt;
+      continue;
+    }
+
+    bool max_len = parser->Check("MAXLEN");
+    if (max_len || parser->Check("MINID")) {
+      if (opts.trim_opts) {
+        return CreateSyntaxError(kTrimOptionConflictErr);
       }
 
-      if (arg == "MAXLEN") {
-        opts.trim_strategy = TrimStrategy::kMaxLen;
-      } else {
-        opts.trim_strategy = TrimStrategy::kMinId;
+      auto trim_opts = ParseTrimOpts(max_len, parser);
+      if (!trim_opts) {
+        return make_unexpected(trim_opts.error());
       }
 
-      id_indx++;
-      arg = ArgS(args, id_indx);
-      if (remaining_args >= 2 && arg == "~") {
-        opts.trim_approx = true;
-        id_indx++;
-        arg = ArgS(args, id_indx);
-      } else if (remaining_args >= 2 && arg == "=") {
-        opts.trim_approx = false;
-        id_indx++;
-        arg = ArgS(args, id_indx);
-      }
-
-      if (opts.trim_strategy == TrimStrategy::kMaxLen && !absl::SimpleAtoi(arg, &opts.max_len)) {
-        builder->SendError(kInvalidIntErr);
-        return std::nullopt;
-      }
-      if (opts.trim_strategy == TrimStrategy::kMinId && !ParseID(arg, false, 0, &opts.minid)) {
-        builder->SendError(kSyntaxErr);
-        return std::nullopt;
-      }
-    } else if (arg == "LIMIT" && remaining_args >= 1 && opts.trim_strategy != TrimStrategy::kNone) {
-      if (!opts.trim_approx) {
-        builder->SendError(kSyntaxErr);
-        return std::nullopt;
-      }
-      ++id_indx;
-      if (!absl::SimpleAtoi(ArgS(args, id_indx), &opts.limit)) {
-        builder->SendError(kSyntaxErr);
-        return std::nullopt;
-      }
-    } else if (is_xadd) {
-      // There are still remaining field args.
-      break;
+      opts.trim_opts = trim_opts.value();  // trivial copy
     } else {
-      builder->SendError(kSyntaxErr);
-      return std::nullopt;
+      // It is StreamId
+      std::string_view id = parser->Next();
+      if (!ParseID(id, true, 0, &opts.parsed_id)) {
+        return CreateSyntaxError(kInvalidStreamId);
+      }
+      break;
     }
   }
 
-  return make_pair(opts, id_indx);
+  return opts;
 }
 
 struct StreamReplies {
@@ -2547,46 +2620,47 @@ bool ParseXpendingOptions(CmdArgList& args, PendingOpts& opts, SinkReplyBuilder*
 }  // namespace
 
 void StreamFamily::XAdd(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto parse_resp = ParseAddOrTrimArgsOrReply(args, true, cmd_cntx.rb);
-  if (!parse_resp) {
+  CmdArgParser parser{args};
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  string_view key = parser.Next();
+
+  auto parsed_add_opts = ParseAddOpts(&parser);
+
+  if (auto err = parser.Error(); err || !parsed_add_opts) {
+    rb->SendError(!parsed_add_opts ? parsed_add_opts.error() : err->MakeReply());
     return;
   }
 
-  auto add_opts = parse_resp->first;
-  auto id_indx = parse_resp->second;
+  // Save the index of the stream ID in the arguments list.
+  // We need this during journaling
+  // It is (parser.GetCurrentIndex() - 1) because the stream id is the last parsed argument in the
+  // ParseAddOpts
+  const size_t stream_id_index_in_args = parser.GetCurrentIndex() - 1;
+  AddArgsJournaler journaler{{args.begin(), args.end()}, stream_id_index_in_args};
 
-  args.remove_prefix(id_indx);
-  if (args.size() < 2 || args.size() % 2 == 0) {
-    return cmd_cntx.rb->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
+  CmdArgList fields = parser.Tail();
+  if (fields.empty() || fields.size() % 2 != 0) {
+    return rb->SendError(WrongNumArgsError("XADD"), kSyntaxErrType);
   }
 
-  string_view id = ArgS(args, 0);
-
-  if (!ParseID(id, true, 0, &add_opts.parsed_id)) {
-    return cmd_cntx.rb->SendError(kInvalidStreamId, kSyntaxErrType);
-  }
-
-  args.remove_prefix(1);
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpAdd(t->GetOpArgs(shard), add_opts, args);
+    return OpAdd(t->GetOpArgs(shard), key, parsed_add_opts.value(), fields, journaler);
   };
 
   OpResult<streamID> add_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
 
   if (add_result) {
-    return rb->SendBulkString(StreamIdRepr(*add_result));
+    rb->SendBulkString(StreamIdRepr(*add_result));
+  } else {
+    if (add_result == OpStatus::KEY_NOTFOUND) {
+      rb->SendNull();
+    } else if (add_result == OpStatus::STREAM_ID_SMALL) {
+      rb->SendError(LeqTopIdError("XADD"));
+    } else {
+      rb->SendError(add_result.status());
+    }
   }
-
-  if (add_result == OpStatus::KEY_NOTFOUND) {
-    return rb->SendNull();
-  }
-
-  if (add_result.status() == OpStatus::STREAM_ID_SMALL) {
-    return cmd_cntx.rb->SendError(LeqTopIdError("XADD"));
-  }
-
-  return cmd_cntx.rb->SendError(add_result.status());
 }
 
 absl::InlinedVector<streamID, 8> GetXclaimIds(CmdArgList& args) {
@@ -3173,22 +3247,35 @@ void StreamFamily::XSetId(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void StreamFamily::XTrim(CmdArgList args, const CommandContext& cmd_cntx) {
-  auto parse_resp = ParseAddOrTrimArgsOrReply(args, true, cmd_cntx.rb);
-  if (!parse_resp) {
+  CmdArgParser parser{args};
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
+
+  std::string_view key = parser.Next();
+
+  auto parsed_trim_opts = ParseTrimOpts(&parser);
+  if (!parsed_trim_opts || !parser.Finalize()) {
+    rb->SendError(!parsed_trim_opts ? parsed_trim_opts.error() : parser.Error()->MakeReply());
     return;
   }
 
-  auto trim_opts = parse_resp->first;
+  auto& trim_opts = parsed_trim_opts.value();
+
+  // We can auto-journal if we are not trimming approximately or by maxlen
+  const bool enable_auto_journaling = !JournalAsMinId(trim_opts);
+  if (enable_auto_journaling) {
+    cmd_cntx.tx->ReviveAutoJournal();
+  }
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpTrim(t->GetOpArgs(shard), trim_opts);
+    return OpTrim(t->GetOpArgs(shard), key, trim_opts, !enable_auto_journaling);
   };
 
   OpResult<int64_t> trim_result = cmd_cntx.tx->ScheduleSingleHopT(cb);
   if (trim_result) {
-    return cmd_cntx.rb->SendLong(*trim_result);
+    rb->SendLong(*trim_result);
+  } else {
+    rb->SendError(trim_result.status());
   }
-  return cmd_cntx.rb->SendError(trim_result.status());
 }
 
 void StreamFamily::XAck(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -3315,7 +3402,9 @@ void StreamFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
   constexpr auto kReadFlags = CO::READONLY | CO::BLOCKING | CO::VARIADIC_KEYS;
-  *registry << CI{"XADD", CO::WRITE | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::kXAdd}.HFUNC(XAdd)
+  *registry << CI{"XADD",    CO::WRITE | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -5, 1, 1,
+                  acl::kXAdd}
+                   .HFUNC(XAdd)
             << CI{"XCLAIM", CO::WRITE | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
             << CI{"XDEL", CO::WRITE | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)
             << CI{"XGROUP", CO::WRITE | CO::DENYOOM, -3, 2, 2, acl::kXGroup}.HFUNC(XGroup)
@@ -3327,7 +3416,8 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XREAD", kReadFlags, -3, 3, 3, acl::kXRead}.HFUNC(XRead)
             << CI{"XREADGROUP", kReadFlags, -6, 6, 6, acl::kXReadGroup}.HFUNC(XReadGroup)
             << CI{"XSETID", CO::WRITE, 3, 1, 1, acl::kXSetId}.HFUNC(XSetId)
-            << CI{"XTRIM", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXTrim}.HFUNC(XTrim)
+            << CI{"XTRIM", CO::WRITE | CO::FAST | CO::NO_AUTOJOURNAL, -4, 1, 1, acl::kXTrim}.HFUNC(
+                   XTrim)
             << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 2, 0, 0, acl::kXGroupHelp}.SetHandler(
                    XGroupHelp)
             << CI{"XACK", CO::WRITE | CO::FAST, -4, 1, 1, acl::kXAck}.HFUNC(XAck)
