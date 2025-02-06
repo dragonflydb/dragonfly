@@ -1100,11 +1100,6 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
     return immediate(expand_result.error());
   }
 
-  // See issue #4554
-  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetLoadInProgress(true);
-  });
-
   auto new_state = service_.SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
   if (new_state != GlobalState::LOADING) {
     LOG(WARNING) << new_state << " in progress, ignored";
@@ -1160,11 +1155,6 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(string_view load_pat
 
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     future.Resolve(*(aggregated_result->first_error));
-    // See issue #4554
-    // Once we are done we need to clean the state
-    shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-      namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetLoadInProgress(false);
-    });
   };
   pool.GetNextProactor()->Dispatch(std::move(load_join_func));
 
