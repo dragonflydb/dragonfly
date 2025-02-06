@@ -72,7 +72,7 @@ class RdbSnapshot {
   unique_ptr<RdbSaver> saver_;
   RdbTypeFreqMap freq_map_;
 
-  Context cntx_{};
+  ExecutionState cntx_{};
 };
 
 struct SaveStagesController : public SaveStagesInputs {

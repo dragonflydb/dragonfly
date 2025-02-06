@@ -188,7 +188,7 @@ error_code ProtocolClient::ResolveHostDns() {
 }
 
 error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_timeout_ms,
-                                          Context* cntx) {
+                                          ExecutionState* cntx) {
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
   {

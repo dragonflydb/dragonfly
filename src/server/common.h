@@ -246,25 +246,27 @@ class GenericError {
 // Thread safe utility to store the first non null generic error.
 using AggregateGenericError = AggregateValue<GenericError>;
 
-// Context is a utility for managing error reporting and cancellation for complex tasks.
+// ExecutionState is a utility for managing error reporting and cancellation for complex tasks.
 //
 // When submitting an error with `Error`, only the first is stored (as in aggregate values).
-// Then a special error handler is run, if present, and the context is cancelled. The error handler
-// is run in a separate handler to free up the caller.
+// Then a special error handler is run, if present, and the ExecutionState is cancelled. The error
+// handler is run in a separate handler to free up the caller.
 //
 // Manual cancellation with `Cancel` is simulated by reporting an `errc::operation_canceled` error.
 // This allows running the error handler and representing this scenario as an error.
-class Context : protected Cancellation {
+class ExecutionState : protected Cancellation {
  public:
   using ErrHandler = std::function<void(const GenericError&)>;
 
-  Context() = default;
-  Context(ErrHandler err_handler) : Cancellation{}, err_{}, err_handler_{std::move(err_handler)} {
+  ExecutionState() = default;
+  ExecutionState(ErrHandler err_handler)
+      : Cancellation{}, err_{}, err_handler_{std::move(err_handler)} {
   }
 
-  ~Context();
+  ~ExecutionState();
 
-  void Cancel();  // Cancels the context by submitting an `errc::operation_canceled` error.
+  void
+  ReportCancelError();  // Cancels the context by submitting an `errc::operation_canceled` error.
   using Cancellation::IsCancelled;
   const Cancellation* GetCancellation() const;
 

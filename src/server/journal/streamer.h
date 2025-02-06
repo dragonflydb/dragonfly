@@ -19,7 +19,7 @@ namespace dfly {
 // journal listener and writes them to a destination sink in a separate fiber.
 class JournalStreamer {
  public:
-  JournalStreamer(journal::Journal* journal, Context* cntx);
+  JournalStreamer(journal::Journal* journal, ExecutionState* cntx);
   virtual ~JournalStreamer();
 
   // Self referential.
@@ -53,7 +53,7 @@ class JournalStreamer {
   void WaitForInflightToComplete();
 
   util::FiberSocketBase* dest_ = nullptr;
-  Context* cntx_;
+  ExecutionState* cntx_;
 
  private:
   void AsyncWrite();
@@ -79,7 +79,8 @@ class JournalStreamer {
 // Only handles relevant slots, while ignoring all others.
 class RestoreStreamer : public JournalStreamer {
  public:
-  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal, Context* cntx);
+  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
+                  ExecutionState* cntx);
   ~RestoreStreamer() override;
 
   void Start(util::FiberSocketBase* dest, bool send_lsn = false) override;
