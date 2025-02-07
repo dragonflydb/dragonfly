@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 
 var fHost = flag.String("host", "127.0.0.1:6379", "Redis host")
 var fClientBuffer = flag.Int("buffer", 100, "How many records to buffer per client")
+var fPace = flag.Bool("pace", true, "whether to pace the traffic according to the original timings.false - to pace as fast as possible")
+var fSkip = flag.Uint("skip", 0, "skip N records")
 
 func RenderTable(area *pterm.AreaPrinter, files []string, workers []FileWorker) {
 	tableData := pterm.TableData{{"file", "parsed", "processed", "delayed", "clients"}}
@@ -163,7 +166,28 @@ func Analyze(files []string) {
 }
 
 func main() {
+	flag.Usage = func() {
+		binaryName := os.Args[0]
+
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] <command> <files...>\n", binaryName)
+		fmt.Fprintln(os.Stderr, "\nOptions:")
+		flag.PrintDefaults()
+		fmt.Fprintln(os.Stderr, "\nCommands:")
+		fmt.Fprintln(os.Stderr, "  run  - replays the traffic")
+		fmt.Fprintln(os.Stderr, "  print - prints the command")
+		fmt.Fprintln(os.Stderr, "  analyze - analyzes the traffic")
+
+		fmt.Fprintln(os.Stderr, "\nExamples:")
+		fmt.Fprintf(os.Stderr, "   %s -host 192.168.1.10:6379 -buffer 50 run *.bin\n", binaryName)
+		fmt.Fprintf(os.Stderr, "  %s print *.bin\n", binaryName)
+	}
+
 	flag.Parse()
+	if flag.NArg() < 2 {
+		flag.Usage()
+		os.Exit(1)
+	}
+
 	cmd := flag.Arg(0)
 	files := flag.Args()[1:]
 
