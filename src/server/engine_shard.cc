@@ -872,7 +872,7 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   {
     auto value = queue->At(cur);
     Transaction* trx = std::get<Transaction*>(value);
-    info.head.debug_id_info = trx->DebugId();
+    info.head.debug_id_info = trx->DebugId(sid);
   }
 
   do {
