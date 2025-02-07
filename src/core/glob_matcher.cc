@@ -31,6 +31,9 @@ string GlobMatcher::Glob2Regex(string_view glob) {
         in_group = 0;
       }
       regex.push_back(c);
+      if (c == '\\') {
+        regex.push_back(c);  // escape it.
+      }
       continue;
     }
 

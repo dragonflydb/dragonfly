@@ -230,7 +230,7 @@ TEST_F(IntentLockTest, Basic) {
 class StringMatchTest : public ::testing::Test {
  protected:
   // wrapper around stringmatchlen with stringview arguments
-  int MatchLen(string_view pattern, string_view str, bool nocase) {
+  bool MatchLen(string_view pattern, string_view str, bool nocase) {
     GlobMatcher matcher(pattern, !nocase);
     return matcher.Matches(str);
   }
@@ -247,6 +247,11 @@ TEST_F(StringMatchTest, Glob2Regex) {
   EXPECT_EQ(GlobMatcher::Glob2Regex("[^]a"), ".a");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[]a"), "[]a");
   EXPECT_EQ(GlobMatcher::Glob2Regex("\\d"), "d");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("[\\d]"), "[\\\\d]");
+
+  reflex::Matcher matcher("abc[\\\\d]e");
+  matcher.input("abcde");
+  ASSERT_TRUE(matcher.find());
 }
 
 TEST_F(StringMatchTest, Basic) {
@@ -289,9 +294,10 @@ TEST_F(StringMatchTest, Basic) {
 }
 
 TEST_F(StringMatchTest, Special) {
-  EXPECT_EQ(MatchLen("h\\[^|", "h[^|", 0), 1);
-  EXPECT_EQ(MatchLen("[^", "[^", 0), 0);
-  EXPECT_EQ(MatchLen("[$?^]a", "?a", 0), 1);
+  EXPECT_TRUE(MatchLen("h\\[^|", "h[^|", 0));
+  EXPECT_FALSE(MatchLen("[^", "[^", 0));
+  EXPECT_TRUE(MatchLen("[$?^]a", "?a", 0));
+  EXPECT_TRUE(MatchLen("abc[\\d]e", "abcde", 0));
 }
 
 using benchmark::DoNotOptimize;
