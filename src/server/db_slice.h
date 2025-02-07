@@ -473,15 +473,15 @@ class DbSlice {
 
   bool IsCacheMode() const {
     // During loading time we never bump elements.
-    return cache_mode_ && (load_in_progress_ == 0);
+    return cache_mode_ && (load_ref_count_ == 0);
   }
 
   void IncrLoadInProgress() {
-    ++load_in_progress_;
+    ++load_ref_count_;
   }
 
   void DecrLoadInProgress() {
-    --load_in_progress_;
+    --load_ref_count_;
   }
 
   // Test hook to inspect last locked keys.
@@ -601,7 +601,7 @@ class DbSlice {
   size_t soft_budget_limit_ = 0;
   size_t table_memory_ = 0;
   uint64_t entries_count_ = 0;
-  size_t load_in_progress_ = 0;
+  unsigned load_ref_count_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 
