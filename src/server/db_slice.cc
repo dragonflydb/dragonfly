@@ -794,7 +794,7 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
   }
 
-  LOG_IF(DFATAL, fetched_items_.empty())
+  LOG_IF(DFATAL, !fetched_items_.empty())
       << "Some operation might bumped up items outside of a transaction";
 
   auto cb = [indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
