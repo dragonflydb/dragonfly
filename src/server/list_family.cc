@@ -1049,6 +1049,7 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
     if (op_res.status() == OpStatus::KEY_NOTFOUND) {
       op_res = OpStatus::TIMED_OUT;
     }
+    tx->Conclude();
     return op_res;
   }
 
