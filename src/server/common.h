@@ -252,8 +252,7 @@ using AggregateGenericError = AggregateValue<GenericError>;
 // Then a special error handler is run, if present, and the ExecutionState is cancelled. The error
 // handler is run in a separate handler to free up the caller.
 //
-// Manual cancellation with `Cancel` is simulated by reporting an `errc::operation_canceled` error.
-// This allows running the error handler and representing this scenario as an error.
+// ReportCancelError() reporting an `errc::operation_canceled` error.
 class ExecutionState : protected Cancellation {
  public:
   using ErrHandler = std::function<void(const GenericError&)>;
@@ -265,8 +264,8 @@ class ExecutionState : protected Cancellation {
 
   ~ExecutionState();
 
-  void
-  ReportCancelError();  // Cancels the context by submitting an `errc::operation_canceled` error.
+  // Cancels the context by submitting an `errc::operation_canceled` error.
+  void ReportCancelError();
   using Cancellation::IsCancelled;
   const Cancellation* GetCancellation() const;
 
