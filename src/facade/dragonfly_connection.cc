@@ -316,18 +316,16 @@ thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_poo
 
 class PipelineCacheSizePaceMaker {
  public:
-  bool WatermarkReached(size_t pipeline_sz) {
+  bool CheckAndUpdateWatermark(size_t pipeline_sz) {
     const auto now = Clock::now();
     const auto elapsed = now - last_check_;
-
-    const size_t max = Limits::max();
+    min_ = std::min(min_, pipeline_sz);
     if (elapsed < std::chrono::milliseconds(10)) {
-      min_ = std::min(min_, pipeline_sz);
       return false;
     }
 
-    const bool watermark_reached = (min_ > 0) && (min_ != max);
-    min_ = max;
+    const bool watermark_reached = (min_ > 0);
+    min_ = Limits::max();
     last_check_ = Clock::now();
 
     return watermark_reached;
@@ -1617,7 +1615,7 @@ void Connection::ShrinkPipelinePool() {
   if (pipeline_req_pool_.empty())
     return;
 
-  if (tl_pipe_pace_maker.WatermarkReached(pipeline_req_pool_.size())) {
+  if (tl_pipe_pace_maker.CheckAndUpdateWatermark(pipeline_req_pool_.size())) {
     stats_->pipeline_cmd_cache_bytes -= pipeline_req_pool_.back()->StorageCapacity();
     pipeline_req_pool_.pop_back();
   }
