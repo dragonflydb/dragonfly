@@ -507,10 +507,13 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
         // blocking_controller does not have to be set with non-blocking transactions.
         auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
         if (blocking_controller) {
+          IndexSlice slice(0, 1);
+          ShardArgs sa{absl::MakeSpan(&src, 1), absl::MakeSpan(&slice, 1)};
+
           // hack, again. since we hacked which queue we are waiting on (see RunPair)
           // we must clean-up src key here manually. See RunPair why we do this.
           // in short- we suspended on "src" on both shards.
-          blocking_controller->FinalizeWatched(ArgSlice({src}), t);
+          blocking_controller->RemovedWatched(sa, t);
         }
       } else {
         DVLOG(1) << "Popping value from list: " << key;
@@ -1027,14 +1030,13 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
     return op_res;
   }
 
-  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice(&pop_key_, 1); };
-
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {
     return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };
+
   // Block
-  auto status = tx->WaitOnWatch(tp, std::move(wcb), key_checker, &(cntx->blocked), &(cntx->paused));
+  auto status = tx->WaitOnWatch(tp, pop_key_, key_checker, &(cntx->blocked), &(cntx->paused));
   if (status != OpStatus::OK)
     return status;
 
@@ -1054,18 +1056,16 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
     return op_res;
   }
 
-  // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
-  // Therefore we follow the regular flow of watching the key but for the destination shard it
-  // will never be triggerred.
-  // This allows us to run Transaction::Execute on watched transactions in both shards.
-  auto wcb = [&](Transaction* t, EngineShard* shard) { return ArgSlice(&this->pop_key_, 1); };
-
   const auto key_checker = [](EngineShard* owner, const DbContext& context, Transaction*,
                               std::string_view key) -> bool {
     return context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST).ok();
   };
 
-  if (auto status = tx->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked, &cntx->paused);
+  // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
+  // Therefore we follow the regular flow of watching the key but for the destination shard it
+  // will never be triggerred.
+  // This allows us to run Transaction::Execute on watched transactions in both shards.
+  if (auto status = tx->WaitOnWatch(tp, pop_key_, key_checker, &cntx->blocked, &cntx->paused);
       status != OpStatus::OK)
     return status;
 

@@ -87,7 +87,7 @@ TEST_F(BlockingControllerTest, Basic) {
         keys, [](auto...) { return true; }, t);
     EXPECT_EQ(1, bc.NumWatched(0));
 
-    bc.FinalizeWatched(keys, t);
+    bc.RemovedWatched(keys, t);
     EXPECT_EQ(0, bc.NumWatched(0));
     return OpStatus::OK;
   });
@@ -98,10 +98,8 @@ TEST_F(BlockingControllerTest, Timeout) {
   bool blocked;
   bool paused;
 
-  auto cb = [&](Transaction* t, EngineShard* shard) { return trans_->GetShardArgs(0); };
-
   facade::OpStatus status = trans_->WaitOnWatch(
-      tp, cb, [](auto...) { return true; }, &blocked, &paused);
+      tp, Transaction::kShardArgs, [](auto...) { return true; }, &blocked, &paused);
 
   EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(

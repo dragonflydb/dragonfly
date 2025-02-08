@@ -132,9 +132,9 @@ class Transaction {
   // Callacks should return `OpStatus` which is implicitly converitble to `RunnableResult`!
   using RunnableType = absl::FunctionRef<RunnableResult(Transaction* t, EngineShard*)>;
 
-  // Provides keys to block on for specific shard.
-  using WaitKeysProvider =
-      std::function<std::variant<ShardArgs, ArgSlice>(Transaction*, EngineShard* shard)>;
+  static constexpr std::nullopt_t kShardArgs{std::nullopt};
+  // Provides an override to watch a specific key or kShardArgs to watch all keys in the shard.
+  using WaitKeys = std::optional<std::string_view>;
 
   // Modes in which a multi transaction can run.
   enum MultiMode {
@@ -207,15 +207,14 @@ class Transaction {
 
   // Called by engine shard to execute a transaction hop.
   // txq_ooo is set to true if the transaction is running out of order
-  // not as the tx queue head.
-  // Returns true if the transaction continues running in the thread
+  // not as the tx queue head. Returns true if the transaction concludes.
   bool RunInShard(EngineShard* shard, bool txq_ooo);
 
   // Registers transaction into watched queue and blocks until a) either notification is received.
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
-  facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeysProvider cb, KeyReadyChecker krc,
+  facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeys keys, KeyReadyChecker krc,
                                bool* block_flag, bool* pause_flag);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
@@ -529,13 +528,12 @@ class Transaction {
   void RunCallback(EngineShard* shard);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.
-  OpStatus WatchInShard(Namespace* ns, std::variant<ShardArgs, ArgSlice> keys, EngineShard* shard,
-                        KeyReadyChecker krc);
+  void WatchInShard(Namespace* ns, ShardArgs keys, EngineShard* shard, KeyReadyChecker krc);
 
   // Expire blocking transaction, unlock keys and unregister it from the blocking controller
-  void ExpireBlocking(WaitKeysProvider wcb);
+  void ExpireBlocking(WaitKeys keys);
 
-  void ExpireShardCb(std::variant<ShardArgs, ArgSlice> keys, EngineShard* shard);
+  void ExpireShardCb(ShardArgs keys, EngineShard* shard);
 
   // Returns true if we need to follow up with PollExecution on this shard.
   bool CancelShardCb(EngineShard* shard);
