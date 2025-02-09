@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/container/flat_hash_set.h>
 #include <absl/random/random.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -9,6 +10,7 @@
 #include <absl/strings/str_split.h>
 
 #include <queue>
+#include <tuple>
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -17,9 +19,11 @@
 #include "base/random.h"
 #include "base/zipf_gen.h"
 #include "facade/redis_parser.h"
+#include "io/io.h"
 #include "io/io_buf.h"
 #include "util/fibers/dns_resolve.h"
 #include "util/fibers/pool.h"
+#include "util/fibers/proactor_base.h"
 #include "util/fibers/uring_socket.h"
 
 // A load-test for DragonflyDB that fixes coordinated omission problem.
@@ -59,6 +63,7 @@ using namespace util;
 using absl::GetFlag;
 using absl::StrFormat;
 using facade::RedisParser;
+using facade::RespExpr;
 using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
 using absl::StrCat;
@@ -93,6 +98,14 @@ static string GetRandomHex(size_t len) {
 
   return res;
 }
+
+struct ShardInfo {
+  uint16_t slot_start = 0;
+  uint16_t slot_end = 0;
+  tcp::endpoint endpoint;
+};
+
+using ClusterSpec = vector<ShardInfo>;
 
 class KeyGenerator {
  public:
@@ -254,7 +267,8 @@ class Driver {
   Driver(Driver&&) = delete;
   Driver& operator=(Driver&&) = delete;
 
-  void Connect(unsigned index, const tcp::endpoint& ep);
+  void Connect(unsigned index, const tcp::endpoint& ep,
+               optional<pair<uint16_t, uint16_t>> slot_range);
   void Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen);
 
   float done() const {
@@ -283,6 +297,7 @@ class Driver {
 
   ClientStats& stats_;
   unique_ptr<FiberSocketBase> socket_;
+  optional<pair<uint16_t, uint16_t>> slot_range_;
   fb2::Fiber receive_fb_;
   queue<Req> reqs_;
   fb2::CondVarAny cnd_;
@@ -303,7 +318,7 @@ class TLocalClient {
 
   TLocalClient(const TLocalClient&) = delete;
 
-  void Connect(tcp::endpoint ep);
+  void Connect(tcp::endpoint ep, const ClusterSpec& cluster);
   void Start(uint32_t key_min, uint32_t key_max, uint64_t cycle_ns);
   void Join();
 
@@ -395,7 +410,8 @@ string KeyGenerator::operator()() {
   return StrCat(prefix_, key_suffix);
 }
 
-void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
+void Driver::Connect(unsigned index, const tcp::endpoint& ep,
+                     optional<pair<uint16_t, uint16_t>> slot_range) {
   VLOG(2) << "Connecting " << index;
   error_code ec = socket_->Connect(ep);
   CHECK(!ec) << "Could not connect to " << ep << " " << ec;
@@ -417,6 +433,7 @@ void Driver::Connect(unsigned index, const tcp::endpoint& ep) {
     string_view resp = io::View(io::Bytes(buf, *res_sz));
     CHECK(absl::EndsWith(resp, "\r\n")) << resp;
   }
+  slot_range_ = slot_range;
   receive_fb_ = MakeFiber(fb2::Launch::dispatch, [this] { ReceiveFb(); });
 }
 
@@ -552,9 +569,9 @@ void Driver::ParseRESP() {
   do {
     result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
     if (result == RedisParser::OK && !parse_args.empty()) {
-      if (parse_args[0].type == facade::RespExpr::ERROR) {
+      if (parse_args[0].type == RespExpr::ERROR) {
         ++stats_.num_errors;
-      } else if (reqs_.front().might_hit && parse_args[0].type != facade::RespExpr::NIL) {
+      } else if (reqs_.front().might_hit && parse_args[0].type != RespExpr::NIL) {
         ++stats_.hit_count;
       }
       parse_args.clear();
@@ -602,14 +619,27 @@ void Driver::ParseMC() {
   }
 }
 
-void TLocalClient::Connect(tcp::endpoint ep) {
+void TLocalClient::Connect(tcp::endpoint ep, const ClusterSpec& cluster) {
   VLOG(2) << "Connecting client...";
+
+  unsigned conn_per_shard = GetFlag(FLAGS_c);
+  if (!cluster.empty()) {
+    drivers_.resize(cluster.size() * conn_per_shard);
+  }
+
   vector<fb2::Fiber> fbs(drivers_.size());
 
   for (size_t i = 0; i < fbs.size(); ++i) {
+    optional<pair<uint16_t, uint16_t>> slot_range;
+    tcp::endpoint shard_ep = ep;
+    if (!cluster.empty()) {
+      size_t shard = i / conn_per_shard;
+      slot_range = {cluster[shard].slot_start, cluster[shard].slot_end};
+      shard_ep = cluster[shard].endpoint;
+    }
     fbs[i] = MakeFiber([&, i] {
       ThisFiber::SetName(StrCat("connect/", i));
-      drivers_[i]->Connect(i, ep);
+      drivers_[i]->Connect(i, shard_ep, slot_range);
     });
   }
 
@@ -724,6 +754,83 @@ void WatchFiber(atomic_bool* finish_signal, ProactorPool* pp) {
   }
 }
 
+ClusterSpec FetchCluster(const tcp::endpoint& ep, ProactorBase* proactor) {
+  unique_ptr<FiberSocketBase> socket(proactor->CreateSocket());
+  error_code ec = socket->Connect(ep);
+  CHECK(!ec) << "Could not connect to " << ep << " " << ec;
+  ec = socket->Write(io::Buffer("cluster nodes\r\n"));
+  CHECK(!ec);
+  facade::RedisParser parser{1024, false};
+  uint8_t buf[1024];
+  RespVec resp_vec;
+  while (true) {
+    io::Result<size_t> res = socket->Recv(buf);
+    CHECK(res) << res.error().message();
+    RespExpr::Buffer bytes(buf, *res);
+    uint32_t consumed = 0;
+    facade::RedisParser::Result result = parser.Parse(bytes, &consumed, &resp_vec);
+    if (result == facade::RedisParser::OK) {
+      break;
+    }
+    CHECK_EQ(result, facade::RedisParser::INPUT_PENDING);
+  }
+  CHECK_EQ(1u, resp_vec.size());
+  std::ignore = socket->Close();
+  if (resp_vec.front().type == RespExpr::ERROR) {
+    LOG(INFO) << "Cluster command failed " << resp_vec.front().GetString();
+    return {};
+  }
+  string cluster_spec = resp_vec.front().GetString();
+  LOG(INFO) << "Cluster spec: " << cluster_spec;
+  vector<string_view> lines = absl::StrSplit(cluster_spec, '\n', absl::SkipEmpty());
+  ClusterSpec res;
+  for (string_view line : lines) {
+    vector<string_view> parts = absl::StrSplit(line, ' ');
+    // <id> <ip:port@cport[,hostname]> <flags> <master> <ping-sent> <pong-recv>
+    // <config-epoch> <link-state> <slot> <slot> ... <slot>
+    if (parts.size() < 9) {
+      LOG(WARNING) << "Skipping line: " << line;
+      continue;
+    }
+    ShardInfo shard;
+    vector<string_view> addr_parts = absl::StrSplit(parts[1], ':');
+    CHECK_EQ(2u, addr_parts.size());
+    auto address = ::boost::asio::ip::make_address(addr_parts[0]);
+
+    uint32_t val;
+    vector<string_view> port_parts = absl::StrSplit(addr_parts[1], '@');
+    CHECK_EQ(2u, port_parts.size());
+    CHECK(absl::SimpleAtoi(port_parts[0], &val));
+    CHECK_LT(val, 65536u);
+
+
+    shard.endpoint = tcp::endpoint(address, val);
+
+    string_view flags = parts[2];
+    absl::flat_hash_set<string_view> flags_set(absl::StrSplit(flags, ','));
+    if (!flags_set.contains("master")) {
+      LOG(INFO) << "Skipping non-master node " << shard.endpoint << " " << flags;
+      continue;
+    }
+
+    vector<string_view> slots = absl::StrSplit(parts[8], '-');
+    if (!absl::SimpleAtoi(slots[0], &val) || val >= 16384) {
+      LOG(ERROR) << "Invalid slot definition " << parts[8];
+      continue;
+    }
+    shard.slot_start = val;
+    if (slots.size() > 1) {
+      CHECK(absl::SimpleAtoi(slots[1], &val));
+      shard.slot_end = val;
+    } else {
+      shard.slot_end = shard.slot_start;
+    }
+    res.push_back(shard);
+  }
+
+  return res;
+}
+
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
@@ -763,14 +870,21 @@ int main(int argc, char* argv[]) {
   auto address = ::boost::asio::ip::make_address(ip_addr);
   tcp::endpoint ep{address, GetFlag(FLAGS_p)};
 
-  LOG(INFO) << "Connecting threads";
+  ClusterSpec shards;
+  if (protocol == RESP) {
+    shards = proactor->Await([&] { return FetchCluster(ep, proactor); });
+  }
+  LOG(INFO) << "Connecting threads to "
+            << (shards.empty() ? string("single node ")
+                               : absl::StrCat(shards.size(), " shard cluster"));
+
   pp->AwaitFiberOnAll([&](unsigned index, auto* p) {
     base::SplitMix64 seed_mix(GetFlag(FLAGS_seed) + index * 0x6a45554a264d72bULL);
     auto seed = seed_mix();
     VLOG(1) << "Seeding bitgen with seed " << seed;
     bit_gen.seed(seed);
     client = make_unique<TLocalClient>(p);
-    client->Connect(ep);
+    client->Connect(ep, shards);
   });
 
   const uint32_t key_minimum = GetFlag(FLAGS_key_minimum);
