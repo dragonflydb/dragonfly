@@ -2339,8 +2339,6 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     return rb->SendNullArray();
   }
 
-  auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
-
   auto tp = (opts->timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts->timeout)
                             : Transaction::time_point::max();
 
@@ -2372,7 +2370,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     return streamCompareID(&last_id, &sitem.group->last_id) > 0;
   };
 
-  if (auto status = tx->WaitOnWatch(tp, std::move(wcb), key_checker, &cntx->blocked, &cntx->paused);
+  if (auto status =
+          tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, &cntx->blocked, &cntx->paused);
       status != OpStatus::OK)
     return rb->SendNullArray();
 

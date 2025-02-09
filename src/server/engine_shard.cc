@@ -602,7 +602,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         << trans->DEBUG_GetLocalMask(sid);
 
     // Commands like BRPOPLPUSH don't conclude immediately
-    if (trans->RunInShard(this, false)) {
+    if (!trans->RunInShard(this, false)) {
       // execution is blocked while HasAwakedTransaction() returns true, so no need to set
       // continuation_trans_. Moreover, setting it for wakened multi-hop transactions may lead to
       // inconcistency, see BLMoveSimultaneously test.
@@ -614,15 +614,11 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     continuation_trans_ = nullptr;
   }
 
-  string dbg_id;
   bool update_stats = false;
 
-  auto run = [this, &dbg_id, &update_stats](Transaction* tx, bool is_ooo) -> bool /* keep */ {
-    dbg_id = VLOG_IS_ON(1) ? tx->DebugId() : "";
-    bool keep = tx->RunInShard(this, is_ooo);
-    DLOG_IF(INFO, !dbg_id.empty()) << dbg_id << ", keep " << keep << ", ooo " << is_ooo;
+  auto run = [this, &update_stats](Transaction* tx, bool is_ooo) -> bool /* concluding */ {
     update_stats = true;
-    return keep;
+    return tx->RunInShard(this, is_ooo);
   };
 
   // Check the currently running transaction, we have to handle it first until it concludes
@@ -632,9 +628,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       trans = nullptr;
 
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
-      if (bool keep = run(continuation_trans_, false); !keep) {
-        // if this holds, we can remove this check altogether.
-        DCHECK(continuation_trans_ == nullptr);
+      if (bool concludes = run(continuation_trans_, false); concludes) {
         continuation_trans_ = nullptr;
       }
     }
@@ -672,24 +666,27 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DCHECK_LT(committed_txid_, txid);  //  strictly increasing when processed via txq
     committed_txid_ = txid;
 
-    if (bool keep = run(head, false); keep)
+    DCHECK(!continuation_trans_);  // while() check above ensures this.
+    if (bool concludes = run(head, false); !concludes) {
       continuation_trans_ = head;
+    }
   }
 
   // If we disarmed, but didn't find ourselves in the loop, run now.
   if (trans && disarmed) {
     DCHECK(trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q));
+    CHECK(trans != continuation_trans_);
 
     bool is_ooo = trans_mask & Transaction::OUT_OF_ORDER;
-    bool keep = run(trans, is_ooo);
-    if (is_ooo && !keep) {
+    bool concludes = run(trans, is_ooo);
+    if (is_ooo && concludes) {
       stats_.tx_ooo_total++;
     }
 
     // If the transaction concluded, it must remove itself from the tx queue.
     // Otherwise it is required to stay there to keep the relative order.
     if (is_ooo && !trans->IsMulti())
-      DCHECK_EQ(keep, trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd);
+      LOG_IF(DFATAL, concludes != (trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd));
   }
   if (update_stats) {
     CacheStats();

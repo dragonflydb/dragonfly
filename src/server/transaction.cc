@@ -576,7 +576,7 @@ void Transaction::PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, D
   StoreKeysInArgs(*key_index);
 }
 
-// Runs in the dbslice thread. Returns true if the transaction continues running in the thread.
+// Runs in the dbslice thread. Returns true if the transaction concluded.
 bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   DCHECK_GT(txid_, 0u);
   CHECK(cb_ptr_) << DebugId();
@@ -591,7 +591,6 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   bool was_suspended = sd.local_mask & SUSPENDED_Q;
   bool awaked_prerun = sd.local_mask & AWAKED_Q;
-
   IntentLock::Mode mode = LockMode();
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
@@ -650,7 +649,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
     if (auto* bcontroller = namespace_->GetBlockingController(shard->shard_id()); bcontroller) {
       if (awaked_prerun || was_suspended) {
-        bcontroller->FinalizeWatched(GetShardArgs(idx), this);
+        bcontroller->RemovedWatched(GetShardArgs(idx), this);
       }
 
       // Wake only if no tx queue head is currently running
@@ -662,7 +661,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   }
 
   FinishHop();  // From this point on we can not access 'this'.
-  return !is_concluding;
+  return is_concluding;
 }
 
 void Transaction::RunCallback(EngineShard* shard) {
@@ -995,14 +994,20 @@ void Transaction::EnableAllShards() {
 
 // runs in coordinator thread.
 // Marks the transaction as expired and removes it from the waiting queue.
-void Transaction::ExpireBlocking(WaitKeysProvider wcb) {
+void Transaction::ExpireBlocking(WaitKeys wkeys) {
   DCHECK(!IsGlobal());
   DVLOG(1) << "ExpireBlocking " << DebugId();
   run_barrier_.Start(unique_shard_cnt_);
 
-  auto expire_cb = [this, &wcb] {
+  auto expire_cb = [this, &wkeys] {
     EngineShard* es = EngineShard::tlocal();
-    ExpireShardCb(wcb(this, es), es);
+    if (wkeys) {
+      IndexSlice is(0, 1);
+      ShardArgs sa(absl::MakeSpan(&wkeys.value(), 1), absl::MakeSpan(&is, 1));
+      ExpireShardCb(sa, es);
+    } else {
+      ExpireShardCb(GetShardArgs(es->shard_id()), es);
+    }
   };
   IterateActiveShards([&expire_cb](PerShardData& sd, auto i) { shard_set->Add(i, expire_cb); });
 
@@ -1250,8 +1255,8 @@ ShardArgs Transaction::GetShardArgs(ShardId sid) const {
                    absl::MakeSpan(args_slices_.data() + sd.slice_start, sd.slice_count)};
 }
 
-OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_provider,
-                                  KeyReadyChecker krc, bool* block_flag, bool* pause_flag) {
+OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReadyChecker krc,
+                                  bool* block_flag, bool* pause_flag) {
   if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
     Conclude();
     return OpStatus::CANCELLED;
@@ -1261,8 +1266,14 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
 
   // Register keys on active shards blocking controllers and mark shard state as suspended.
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    auto keys = wkeys_provider(t, shard);
-    return t->WatchInShard(&t->GetNamespace(), keys, shard, krc);
+    if (wkeys) {  // single string_view.
+      IndexSlice is(0, 1);
+      ShardArgs sa(absl::MakeSpan(&wkeys.value(), 1), absl::MakeSpan(&is, 1));
+      t->WatchInShard(&t->GetNamespace(), sa, shard, krc);
+    } else {
+      t->WatchInShard(&t->GetNamespace(), t->GetShardArgs(shard->shard_id()), shard, krc);
+    }
+    return OpStatus::OK;
   };
   Execute(std::move(cb), true);
 
@@ -1296,13 +1307,13 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeysProvider wkeys_p
 
   // If we don't follow up with an "action" hop, we must clean up manually on all shards.
   if (result != OpStatus::OK)
-    ExpireBlocking(wkeys_provider);
+    ExpireBlocking(std::move(wkeys));
 
   return result;
 }
 
-OpStatus Transaction::WatchInShard(Namespace* ns, BlockingController::Keys keys, EngineShard* shard,
-                                   KeyReadyChecker krc) {
+void Transaction::WatchInShard(Namespace* ns, ShardArgs keys, EngineShard* shard,
+                               KeyReadyChecker krc) {
   auto& sd = shard_data_[SidToId(shard->shard_id())];
 
   CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
@@ -1311,11 +1322,9 @@ OpStatus Transaction::WatchInShard(Namespace* ns, BlockingController::Keys keys,
 
   ns->GetOrAddBlockingController(shard)->AddWatched(keys, std::move(krc), this);
   DVLOG(2) << "WatchInShard " << DebugId();
-
-  return OpStatus::OK;
 }
 
-void Transaction::ExpireShardCb(BlockingController::Keys keys, EngineShard* shard) {
+void Transaction::ExpireShardCb(ShardArgs keys, EngineShard* shard) {
   // Blocking transactions don't release keys when suspending, release them now.
   auto lock_args = GetLockArgs(shard->shard_id());
   GetDbSlice(shard->shard_id()).Release(LockMode(), lock_args);
@@ -1323,7 +1332,7 @@ void Transaction::ExpireShardCb(BlockingController::Keys keys, EngineShard* shar
   auto& sd = shard_data_[SidToId(shard->shard_id())];
   sd.local_mask &= ~KEYLOCK_ACQUIRED;
 
-  namespace_->GetBlockingController(shard->shard_id())->FinalizeWatched(keys, this);
+  namespace_->GetBlockingController(shard->shard_id())->RemovedWatched(keys, this);
   DCHECK(!namespace_->GetBlockingController(shard->shard_id())
               ->awakened_transactions()
               .contains(this));
