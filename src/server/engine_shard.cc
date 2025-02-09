@@ -632,16 +632,10 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       trans = nullptr;
 
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
-      auto bc = continuation_trans_->GetNamespace().GetBlockingController(shard_id_);
       if (bool keep = run(continuation_trans_, false); !keep) {
         // if this holds, we can remove this check altogether.
         DCHECK(continuation_trans_ == nullptr);
         continuation_trans_ = nullptr;
-      }
-      if (bc && bc->HasAwakedTransaction()) {
-        // Break if there are any awakened transactions, as we must give way to them
-        // before continuing to handle regular transactions from the queue.
-        return;
       }
     }
   }
@@ -684,7 +678,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // If we disarmed, but didn't find ourselves in the loop, run now.
   if (trans && disarmed) {
-    DCHECK(trans != head);
     DCHECK(trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q));
 
     bool is_ooo = trans_mask & Transaction::OUT_OF_ORDER;
