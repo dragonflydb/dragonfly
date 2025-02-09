@@ -128,15 +128,76 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 
-ParseResult<search::Schema> ParseSchema(DocIndex::DataType type, CmdArgParser* parser) {
-  search::Schema schema;
+using ParsedSchemaField =
+    ParseResult<std::pair<search::SchemaField::FieldType, search::SchemaField::ParamsVariant>>;
+
+// Tag fields include: [separator char] [casesensitive]
+ParsedSchemaField ParseTag(CmdArgParser* parser) {
+  auto tag_params = ParseTagParams(parser);
+  if (!tag_params) {
+    return make_unexpected(tag_params.error());
+  }
+  return std::make_pair(search::SchemaField::TAG, std::move(tag_params).value());
+}
+
+ParsedSchemaField ParseText(CmdArgParser* parser) {
+  return std::make_pair(search::SchemaField::TEXT, std::monostate{});
+}
+
+ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
+  return std::make_pair(search::SchemaField::NUMERIC, std::monostate{});
+}
+
+// Vector fields include: {algorithm} num_args args...
+ParsedSchemaField ParseVector(CmdArgParser* parser) {
+  auto vector_params = ParseVectorParams(parser);
+
+  if (parser->HasError()) {
+    auto err = *parser->Error();
+    VLOG(1) << "Could not parse vector param " << err.index;
+    return CreateSyntaxError("Parse error of vector parameters"sv);
+  }
+
+  if (vector_params.dim == 0) {
+    return CreateSyntaxError("Knn vector dimension cannot be zero"sv);
+  }
+  return std::make_pair(search::SchemaField::VECTOR, vector_params);
+}
+
+// ON HASH | JSON
+ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
+  index->type = parser->MapNext("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
+  return true;
+}
+
+// PREFIX count prefix [prefix ...]
+ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
+  if (!parser->Check("1")) {
+    return CreateSyntaxError("Multiple prefixes are not supported"sv);
+  }
+  index->prefix = parser->Next<std::string>();
+  return true;
+}
+
+// STOPWORDS count [words...]
+ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
+  index->options.stopwords.clear();
+  for (size_t num = parser->Next<size_t>(); num > 0; num--) {
+    index->options.stopwords.emplace(parser->Next());
+  }
+  return true;
+}
+
+// SCHEMA field [AS alias] type [flags...]
+ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
+  auto& schema = index->schema;
 
   while (parser->HasNext()) {
     string_view field = parser->Next();
     string_view field_alias = field;
 
     // Verify json path is correct
-    if (type == DocIndex::JSON && !IsValidJsonPath(field)) {
+    if (index->type == DocIndex::JSON && !IsValidJsonPath(field)) {
       return CreateSyntaxError(absl::StrCat("Bad json path: "sv, field));
     }
 
@@ -145,61 +206,38 @@ ParseResult<search::Schema> ParseSchema(DocIndex::DataType type, CmdArgParser* p
 
     // Determine type
     using search::SchemaField;
-    auto type = parser->MapNext("TAG"sv, SchemaField::TAG, "TEXT"sv, SchemaField::TEXT, "NUMERIC"sv,
-                                SchemaField::NUMERIC, "VECTOR"sv, SchemaField::VECTOR);
-
-    // Tag fields include: [separator char] [casesensitive]
-    // Vector fields include: {algorithm} num_args args...
-    search::SchemaField::ParamsVariant params(monostate{});
-    if (type == search::SchemaField::TAG) {
-      auto tag_params = ParseTagParams(parser);
-      if (!tag_params) {
-        return make_unexpected(tag_params.error());
-      }
-      params = tag_params.value();
-    } else if (type == search::SchemaField::VECTOR && !parser->HasError()) {
-      auto vector_params = ParseVectorParams(parser);
-
-      if (parser->HasError()) {
-        auto err = *parser->Error();
-        VLOG(1) << "Could not parse vector param " << err.index;
-        return CreateSyntaxError("Parse error of vector parameters"sv);
-      }
-
-      if (vector_params.dim == 0) {
-        return CreateSyntaxError("Knn vector dimension cannot be zero"sv);
-      }
-      params = vector_params;
+    auto parsed_params = parser->MapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv,
+                                         &ParseNumeric, "VECTOR"sv, &ParseVector)(parser);
+    if (!parsed_params) {
+      return make_unexpected(parsed_params.error());
     }
+
+    auto [field_type, params] = std::move(parsed_params).value();
 
     // Flags: check for SORTABLE and NOINDEX
     uint8_t flags = 0;
     while (parser->HasNext()) {
-      if (parser->Check("NOINDEX")) {
-        flags |= search::SchemaField::NOINDEX;
-        continue;
+      auto flag = parser->TryMapNext("NOINDEX", search::SchemaField::NOINDEX, "SORTABLE",
+                                     search::SchemaField::SORTABLE);
+      if (!flag) {
+        break;
       }
 
-      if (parser->Check("SORTABLE")) {
-        flags |= search::SchemaField::SORTABLE;
-        continue;
-      }
-
-      break;
+      flags |= *flag;
     }
 
     // Skip all trailing ignored parameters
     while (kIgnoredOptions.count(parser->Peek()) > 0)
       parser->Skip(2);
 
-    schema.fields[field] = {type, flags, string{field_alias}, params};
+    schema.fields[field] = {field_type, flags, string{field_alias}, params};
   }
 
   // Build field name mapping table
   for (const auto& [field_ident, field_info] : schema.fields)
     schema.field_names[field_info.short_name] = field_ident;
 
-  return schema;
+  return false;
 }
 
 #ifndef __clang__
@@ -210,39 +248,23 @@ ParseResult<DocIndex> ParseCreateParams(CmdArgParser* parser) {
   DocIndex index{};
 
   while (parser->HasNext()) {
-    // ON HASH | JSON
-    if (parser->Check("ON")) {
-      index.type = parser->MapNext("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
+    auto option_parser =
+        parser->TryMapNext("ON"sv, &ParseOnOption, "PREFIX"sv, &ParsePrefix, "STOPWORDS"sv,
+                           &ParseStopwords, "SCHEMA"sv, &ParseSchema);
+
+    if (!option_parser) {
+      // Unsupported parameters are ignored for now
+      parser->Skip(1);
       continue;
     }
 
-    // PREFIX count prefix [prefix ...]
-    if (parser->Check("PREFIX")) {
-      if (!parser->Check("1"))
-        return CreateSyntaxError("Multiple prefixes are not supported"sv);
-      index.prefix = string(parser->Next());
-      continue;
+    auto parse_result = option_parser.value()(parser, &index);
+    if (!parse_result) {
+      return make_unexpected(parse_result.error());
     }
-
-    // STOWORDS count [words...]
-    if (parser->Check("STOPWORDS")) {
-      index.options.stopwords.clear();
-      for (size_t num = parser->Next<size_t>(); num > 0; num--)
-        index.options.stopwords.emplace(parser->Next());
-      continue;
+    if (!parse_result.value()) {
+      break;
     }
-
-    // SCHEMA
-    if (parser->Check("SCHEMA")) {
-      auto schema = ParseSchema(index.type, parser);
-      if (!schema)
-        return make_unexpected(schema.error());
-      index.schema = std::move(*schema);
-      break;  // SCHEMA always comes last
-    }
-
-    // Unsupported parameters are ignored for now
-    parser->Skip(1);
   }
 
   return index;
@@ -661,22 +683,24 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   // Parse additional schema
-  auto new_fields = ParseSchema(index_info->type, &parser);
-  if (SendErrorIfOccurred(new_fields, &parser, builder)) {
+  DocIndex new_index{};
+  new_index.type = index_info->type;
+  auto parse_result = ParseSchema(&parser, &new_index);
+  if (SendErrorIfOccurred(parse_result, &parser, builder)) {
     cmd_cntx.tx->Conclude();
     return;
   }
 
+  auto& new_fields = new_index.schema;
+
   // For logging we copy the whole schema
   // TODO: Use a more efficient way for logging
-  LOG(INFO)
-      << "Adding "
-      << DocIndexInfo{.base_index = DocIndex{.schema = new_fields.value()}}.BuildRestoreCommand();
+  LOG(INFO) << "Adding " << DocIndexInfo{.base_index = new_index}.BuildRestoreCommand();
 
   // Merge schemas
   search::Schema& schema = index_info->schema;
-  schema.fields.insert(new_fields->fields.begin(), new_fields->fields.end());
-  schema.field_names.insert(new_fields->field_names.begin(), new_fields->field_names.end());
+  schema.fields.insert(new_fields.fields.begin(), new_fields.fields.end());
+  schema.field_names.insert(new_fields.field_names.begin(), new_fields.field_names.end());
 
   // Rebuild index
   // TODO: Introduce partial rebuild
