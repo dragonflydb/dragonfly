@@ -64,6 +64,7 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
+using facade::operator""_KB;
 using facade::ErrorReply;
 
 ABSL_FLAG(int32_t, port, 6379,
@@ -110,7 +111,7 @@ ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
           "DENYOOM will fail with OOM error and new connections to non-admin port will be "
           "rejected. Negative value disables this feature.");
 
-ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
+ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
