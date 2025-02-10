@@ -204,8 +204,10 @@ bool IncomingSlotMigration::Join(long attempt) {
 
     auto wait_res = bc_->WaitFor(wait_time);
     if (is_attempt_correct) {
-      state_.store(MigrationState::C_FINISHED);
-      keys_number_ = cluster::GetKeyCount(slots_);
+      if (wait_res) {
+        state_.store(MigrationState::C_FINISHED);
+        keys_number_ = cluster::GetKeyCount(slots_);
+      }
       return wait_res;
     }
   }
