@@ -1978,7 +1978,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareMultiForScheduleSingleHop(cntx->ns, *sid, tx->GetDbIndex(), args);
+    tx->PrepareMultiForScheduleSingleHop(cntx->ns, *sid, cntx->db_index(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
           new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};

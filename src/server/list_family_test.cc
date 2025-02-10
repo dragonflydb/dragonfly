@@ -1337,5 +1337,18 @@ TEST_F(ListFamilyTest, AwakeMulti) {
   f3.Join();
 }
 
+TEST_F(ListFamilyTest, AwakeDb1) {
+  const char* kDbId = "1";
+
+  auto f1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    Run("C", {"SELECT", kDbId});
+    Run("C", {"brpoplpush", "x", "y", "0"});
+    ASSERT_EQ(GetDebugInfo("C").shards_count, 1);
+  });
+  Run({"SELECT", kDbId});
+  Run({"EVAL", "redis.call('LPUSH', KEYS[1], 'val'); return 1;", "1", "x"});
+  f1.Join();
+}
+
 #pragma GCC diagnostic pop
 }  // namespace dfly
