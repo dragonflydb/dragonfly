@@ -480,6 +480,21 @@ TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
   }
 }
 
+TEST_F(ClusterFamilyTest, ClusterEvalCrossslot) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  auto res = Run({"EVAL", "return redis.call('MSET', 'x1', 'x1', 'x2', 'x2', 'x3', 'x3');", "3",
+                  "x1", "x2", "x3"});
+
+  EXPECT_THAT(res, ErrArg("CROSSSLOT"));
+
+  auto sha =
+      Run({"SCRPIT", "LOAD", "return redis.call('MSET', 'x1', 'x1', 'x2', 'x2', 'x3', 'x3');", "3",
+           "x1", "x2", "x3"});
+
+  EXPECT_THAT(Run({"EVALSHA", sha.GetString(), "3", "x1", "x2", "x3"}), ErrArg("CROSSSLOT"));
+}
+
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
   ConfigSingleNodeCluster(GetMyId());
 
