@@ -207,6 +207,9 @@ bool IncomingSlotMigration::Join(long attempt) {
       if (wait_res) {
         state_.store(MigrationState::C_FINISHED);
         keys_number_ = cluster::GetKeyCount(slots_);
+      } else {
+        LOG(WARNING) << "Can't join migration because of data after LSN for " << source_id_;
+        ReportError(GenericError("Can't join migration in time"));
       }
       return wait_res;
     }
