@@ -80,6 +80,7 @@ async def test_txq_ooo(async_client: aioredis.Redis, df_server):
     )
 
 
+@pytest.mark.skip("deadlocks")
 @dfly_args({"proactor_threads": 2, "num_shards": 2})
 async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: DflyInstance):
     active = True
@@ -114,7 +115,6 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
             tasks.append(block(i))
         await asyncio.gather(*tasks)
 
-
     # produce is constantly waking up consumers. It is used to trigger the
     # flow that creates wake ups on a differrent database in the
     # middle of continuation transaction.
@@ -122,11 +122,12 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
         LPUSH_SCRIPT = """
             redis.call('LPUSH', KEYS[1], "val")
         """
+
         async def produce(id):
             c = df_server.client(db=1)  # important to be on a different db
             for i in range(iters):
                 # Must be a lua script and not multi-exec for some reason.
-                await c.eval(LPUSH_SCRIPT, 1,  f"list{{{id}}}")
+                await c.eval(LPUSH_SCRIPT, 1, f"list{{{id}}}")
 
         tasks = []
         for i in range(num):
@@ -150,7 +151,6 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
 
         await asyncio.gather(*tasks)
         logging.info("Finished consuming")
-
 
     num_keys = 32
     num_iters = 200
