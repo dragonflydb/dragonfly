@@ -529,7 +529,7 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
 void SearchReply(const SearchParams& params, std::optional<search::AggregationInfo> agg_info,
                  absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
   size_t total_hits = 0;
-  std::vector<SerializedSearchDoc*> docs;
+  absl::InlinedVector<SerializedSearchDoc*, 5> docs;
   docs.reserve(results.size());
   for (auto& shard_results : results) {
     total_hits += shard_results.total_hits;
@@ -546,9 +546,17 @@ void SearchReply(const SearchParams& params, std::optional<search::AggregationIn
     total_hits = std::min(total_hits, agg_info->limit);
     should_add_score_field = params.ShouldReturnField(agg_info->alias);
 
-    auto comparator = [desc = agg_info->descending](const auto* l, const auto* r) {
-      return desc ? (*l >= *r) : (*l < *r);
-    };
+    auto comparator = [desc = agg_info->descending]()
+        -> std::function<bool(const SerializedSearchDoc*, const SerializedSearchDoc*)> {
+      if (desc) {
+        return [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) -> bool {
+          return *l >= *r;
+        };
+      }
+      return [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) -> bool {
+        return *l < *r;
+      };
+    }();
 
     const size_t prefix_size_to_sort = std::min(params.limit_offset + params.limit_total, size);
     if (prefix_size_to_sort == docs.size()) {
