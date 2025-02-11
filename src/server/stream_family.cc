@@ -75,6 +75,12 @@ struct RangeId {
 };
 
 struct TrimOpts {
+  static constexpr int32_t kNoTrimLimit = -1;
+
+  bool HasLimit() const {
+    return limit != kNoTrimLimit;
+  }
+
   bool IsMaxLen() const {
     return std::holds_alternative<uint32_t>(length_or_id);
   }
@@ -89,7 +95,7 @@ struct TrimOpts {
 
   // First is MaxLen, second is MinId.
   std::variant<uint32_t, ParsedStreamId> length_or_id;
-  int32_t limit = NO_TRIM_LIMIT;
+  int32_t limit = kNoTrimLimit;
   bool approx = false;
 };
 
@@ -631,21 +637,30 @@ std::string StreamsIdToString(streamID id) {
   return absl::StrCat(id.ms, "-", id.seq);
 }
 
-/* The first value represents the number of deleted items, and the second is the last trimmed ID. */
-std::pair<int64_t, streamID> TrimStream(const TrimOpts& opts, stream* s) {
-  streamID last_id = {0, 0};
-
-  auto trim = [&]() {
+/* Return value represents the number of deleted items. */
+int64_t TrimStream(const TrimOpts& opts, stream* s) {
+  if (!opts.HasLimit()) {
     if (opts.IsMaxLen()) {
-      return streamTrimByLength(s, opts.AsMaxLen(), opts.approx, &last_id, opts.limit);
+      return streamTrimByLength(s, opts.AsMaxLen(), opts.approx);
     } else {
       const auto& min_id = opts.AsMinId().val;
-      return streamTrimByID(s, min_id, opts.approx, &last_id, opts.limit);
+      return streamTrimByID(s, min_id, opts.approx);
     }
-  };
+  }
 
-  const int64_t deleted_items_number = trim();
-  return {deleted_items_number, last_id};
+  streamAddTrimArgs trim_args = {};
+  trim_args.approx_trim = opts.approx;
+  trim_args.limit = opts.limit;
+
+  if (opts.IsMaxLen()) {
+    trim_args.trim_strategy = TRIM_STRATEGY_MAXLEN;
+    trim_args.maxlen = opts.AsMaxLen();
+  } else {
+    trim_args.trim_strategy = TRIM_STRATEGY_MINID;
+    trim_args.minid = opts.AsMinId().val;
+  }
+
+  return streamTrim(s, &trim_args);
 }
 
 bool JournalAsMinId(const TrimOpts& opts) {
@@ -697,30 +712,44 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
     return OpStatus::OUT_OF_MEMORY;
   }
 
-  std::pair<int64_t, streamID> trim_result{};
   if (opts.trim_opts) {
-    trim_result = TrimStream(opts.trim_opts.value(), stream_inst);
+    int64_t deleted_items_number = TrimStream(opts.trim_opts.value(), stream_inst);
+    VLOG(2) << "Trimmed " << deleted_items_number << " items from stream " << key
+            << " during the XADD command";
   }
 
   mem_tracker.UpdateStreamSize(it->second);
 
   if (op_args.shard->journal()) {
     std::string result_id_as_string = StreamsIdToString(result_id);
+    const bool stream_is_empty = stream_inst->length == 0;
 
-    if (opts.trim_opts && JournalAsMinId(opts.trim_opts.value())) {
-      // We need to set exact MinId in the journal.
-      std::string last_id = StreamsIdToString(trim_result.second);
-      CmdArgVec journal_args = {key, "MINID"sv, "="sv, last_id};
+    if (opts.trim_opts && (stream_is_empty || JournalAsMinId(opts.trim_opts.value()))) {
+      std::string last_id;
+
+      CmdArgVec journal_args = {key};
       journal_args.reserve(args.size() + 4);
 
-      if (opts.no_mkstream) {
-        journal_args.push_back("NOMKSTREAM"sv);
+      if (stream_is_empty) {
+        // We need remove the whole stream in replica
+        journal_args.emplace_back("MAXLEN"sv);
+        journal_args.emplace_back("0"sv);
+      } else {
+        // We need to set exact MinId in the journal.
+        // For this we are using new first_id from the stream
+        last_id = StreamsIdToString(stream_inst->first_id);
+        journal_args.emplace_back("MINID"sv);
+        journal_args.emplace_back(last_id);
       }
 
-      journal_args.push_back(result_id_as_string);
+      if (opts.no_mkstream) {
+        journal_args.emplace_back("NOMKSTREAM"sv);
+      }
+
+      journal_args.emplace_back(result_id_as_string);
 
       for (size_t i = 0; i < args.size(); i++) {
-        journal_args.push_back(args[i]);
+        journal_args.emplace_back(args[i]);
       }
 
       RecordJournal(op_args, "XADD"sv, journal_args);
@@ -2006,16 +2035,24 @@ OpResult<int64_t> OpTrim(const OpArgs& op_args, std::string_view key, const Trim
   CompactObj& cobj = res_it->it->second;
   stream* s = (stream*)cobj.RObjPtr();
 
-  auto res = TrimStream(opts, s);
+  int64_t deleted_items_number = TrimStream(opts, s);
 
   mem_tracker.UpdateStreamSize(cobj);
 
   if (op_args.shard->journal() && journal_as_minid) {
-    std::string last_id = StreamsIdToString(res.second);
-    RecordJournal(op_args, "XTRIM"sv, ArgSlice{key, "MINID"sv, "="sv, last_id});
+    const bool stream_is_empty = s->length == 0;
+    if (stream_is_empty) {
+      // We need remove the whole stream in replica
+      RecordJournal(op_args, "XTRIM"sv, ArgSlice{key, "MAXLEN"sv, "0"sv});
+    } else {
+      // We need to set exact MinId in the journal.
+      // For this we are using new first_id from the stream
+      std::string last_id = StreamsIdToString(s->first_id);
+      RecordJournal(op_args, "XTRIM"sv, ArgSlice{key, "MINID"sv, last_id});
+    }
   }
 
-  return res.first;
+  return deleted_items_number;
 }
 
 ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {

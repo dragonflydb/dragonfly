@@ -2770,3 +2770,13 @@ async def test_stream_approximate_trimming(df_factory):
     master_data = await StaticSeeder.capture(c_master)
     replica_data = await StaticSeeder.capture(c_replica)
     assert master_data == replica_data
+
+    # Step 3: Trim all streams to 0
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "0")
+
+    # Check replica data consistent
+    master_data = await StaticSeeder.capture(c_master)
+    replica_data = await StaticSeeder.capture(c_replica)
+    assert master_data == replica_data
