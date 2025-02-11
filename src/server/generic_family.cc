@@ -106,9 +106,9 @@ class InMemSource : public ::io::Source {
 
 class RestoreArgs {
  private:
-  static constexpr time_t NO_EXPIRATION = 0;
+  static constexpr int64_t NO_EXPIRATION = 0;
 
-  time_t expiration_ = NO_EXPIRATION;
+  int64_t expiration_ = NO_EXPIRATION;
   bool abs_time_ = false;
   bool replace_ = false;  // if true, over-ride existing key
   bool sticky_ = false;
@@ -116,7 +116,7 @@ class RestoreArgs {
  public:
   RestoreArgs() = default;
 
-  RestoreArgs(time_t expiration, bool abs_time, bool replace)
+  RestoreArgs(int64_t expiration, bool abs_time, bool replace)
       : expiration_(expiration), abs_time_(abs_time), replace_(replace) {
   }
 
@@ -231,7 +231,7 @@ OpResult<DbSlice::AddOrFindResult> RdbRestoreValue::Add(string_view key, string_
   if (HasExpiration()) {
     int64_t ttl = abs_time_ ? expiration_ - now_msec : expiration_;
     if (ttl > kMaxExpireDeadlineMs)
-      return false;
+      ttl = kMaxExpireDeadlineMs;
 
     expiration_ = ttl < 0 ? -1 : ttl + now_msec;
   }
@@ -321,7 +321,7 @@ class Renamer {
   struct SerializedValue {
     std::string value;
     std::optional<RdbVersion> version;
-    time_t expire_ts;
+    int64_t expire_ts;
     bool sticky;
   };
 
