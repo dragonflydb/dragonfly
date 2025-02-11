@@ -688,18 +688,21 @@ SearchResult SearchAlgorithm::Search(const FieldIndices* index, size_t limit) co
   return bs.Search(*query_);
 }
 
-optional<AggregationInfo> SearchAlgorithm::HasAggregation() const {
+optional<AggregationInfo> SearchAlgorithm::GetAggregationInfo() const {
   DCHECK(query_);
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
-    return AggregationInfo{knn->limit, string_view{knn->score_alias}, false};
 
+  // KNN query
+  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
+    return AggregationInfo{string_view{knn->score_alias}, false, knn->limit};
+
+  // SEARCH query with SORTBY option
   if (auto* sort = get_if<AstSortNode>(query_.get()); sort) {
     string_view alias = "";
     if (auto* knn = get_if<AstKnnNode>(&sort->filter->Variant());
         knn && knn->score_alias == sort->field)
       alias = knn->score_alias;
 
-    return AggregationInfo{nullopt, alias, sort->descending};
+    return AggregationInfo{alias, sort->descending};
   }
 
   return nullopt;
