@@ -852,7 +852,6 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
 
 TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   Run({"ft.create", "i1", "schema", "name", "text"});
-  ;
 
   auto resp = Run({"ft.profile", "i1", "not_search", "query", "(a | b) c d"});
   EXPECT_THAT(resp, ErrArg("no `SEARCH` or `AGGREGATE` provided"));
@@ -1882,6 +1881,68 @@ TEST_F(SearchFamilyTest, InvalidSearchOptions) {
   // Test with NOCONTENT and RETURN
   resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "RETURN", "2", "@field1", "@field2"});
   EXPECT_THAT(resp, IsArray(IntArg(1), "j1"));
+}
+
+TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
+  Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
+       "AS", "field2", "TEXT"});
+
+  // Test GROUPBY with no arguments
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test GROUPBY with invalid count
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp =
+      Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test REDUCE with no REDUCE function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE"});
+  EXPECT_THAT(resp, ErrArg("reducer function  not found"));
+
+  /* // Test REDUCE with COUNT function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE", "COUNT", "0"});
+  EXPECT_THAT(resp, IsMapWithSize("__generated_aliascount", "1", "field1", "first")); */
+
+  // Test REDUCE with invalid function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE", "INVALIDFUNC", "0",
+              "AS", "result"});
+  EXPECT_THAT(resp, ErrArg("reducer function INVALIDFUNC not found"));
+
+  // Test SORTBY with no arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test SORTBY with invalid count
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY", "100000000000000000000", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test LIMIT with invalid arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "0"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "-1", "10"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "0", "100000000000000000000"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test LOAD with invalid arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
 }  // namespace dfly

@@ -36,6 +36,31 @@ using namespace facade;
 
 namespace {
 
+using nonstd::make_unexpected;
+
+template <typename T> using ParseResult = io::Result<T, ErrorReply>;
+
+nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string message) {
+  return make_unexpected(ErrorReply{std::move(message), kSyntaxErrType});
+}
+
+nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) {
+  return make_unexpected(ErrorReply{message, kSyntaxErrType});
+}
+
+// Send error from parser or result
+// Returns false if no errors occured
+template <typename T>
+bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
+                         SinkReplyBuilder* builder) {
+  if (auto err = parser->Error(); err || !result) {
+    builder->SendError(!result ? result.error() : err->MakeReply());
+    return true;
+  }
+
+  return false;
+}
+
 static const set<string_view> kIgnoredOptions = {"WEIGHT", "SEPARATOR"};
 
 bool IsValidJsonPath(string_view path) {
@@ -72,18 +97,17 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
-std::optional<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser,
-                                                             SinkReplyBuilder* builder) {
+ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser) {
   search::SchemaField::TagParams params{};
   while (parser->HasNext()) {
     if (parser->Check("SEPARATOR")) {
       std::string_view separator = parser->NextOrDefault();
+
       if (separator.size() != 1) {
-        builder->SendError(
-            absl::StrCat("Tag separator must be a single character. Got `", separator, "`"),
-            kSyntaxErrType);
-        return std::nullopt;
+        return CreateSyntaxError(
+            absl::StrCat("Tag separator must be a single character. Got `"sv, separator, "`"sv));
       }
+
       params.separator = separator.front();
       continue;
     }
@@ -104,95 +128,147 @@ std::optional<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parse
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 
-optional<search::Schema> ParseSchemaOrReply(DocIndex::DataType type, CmdArgParser parser,
-                                            SinkReplyBuilder* builder) {
-  search::Schema schema;
+using ParsedSchemaField =
+    ParseResult<std::pair<search::SchemaField::FieldType, search::SchemaField::ParamsVariant>>;
 
-  while (parser.HasNext()) {
-    string_view field = parser.Next();
+// Tag fields include: [separator char] [casesensitive]
+ParsedSchemaField ParseTag(CmdArgParser* parser) {
+  auto tag_params = ParseTagParams(parser);
+  if (!tag_params) {
+    return make_unexpected(tag_params.error());
+  }
+  return std::make_pair(search::SchemaField::TAG, std::move(tag_params).value());
+}
+
+ParsedSchemaField ParseText(CmdArgParser* parser) {
+  return std::make_pair(search::SchemaField::TEXT, std::monostate{});
+}
+
+ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
+  return std::make_pair(search::SchemaField::NUMERIC, std::monostate{});
+}
+
+// Vector fields include: {algorithm} num_args args...
+ParsedSchemaField ParseVector(CmdArgParser* parser) {
+  auto vector_params = ParseVectorParams(parser);
+
+  if (parser->HasError()) {
+    auto err = *parser->Error();
+    VLOG(1) << "Could not parse vector param " << err.index;
+    return CreateSyntaxError("Parse error of vector parameters"sv);
+  }
+
+  if (vector_params.dim == 0) {
+    return CreateSyntaxError("Knn vector dimension cannot be zero"sv);
+  }
+  return std::make_pair(search::SchemaField::VECTOR, vector_params);
+}
+
+// ON HASH | JSON
+ParseResult<bool> ParseOnOption(CmdArgParser* parser, DocIndex* index) {
+  index->type = parser->MapNext("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
+  return true;
+}
+
+// PREFIX count prefix [prefix ...]
+ParseResult<bool> ParsePrefix(CmdArgParser* parser, DocIndex* index) {
+  if (!parser->Check("1")) {
+    return CreateSyntaxError("Multiple prefixes are not supported"sv);
+  }
+  index->prefix = parser->Next<std::string>();
+  return true;
+}
+
+// STOPWORDS count [words...]
+ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
+  index->options.stopwords.clear();
+  for (size_t num = parser->Next<size_t>(); num > 0; num--) {
+    index->options.stopwords.emplace(parser->Next());
+  }
+  return true;
+}
+
+// SCHEMA field [AS alias] type [flags...]
+ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
+  auto& schema = index->schema;
+
+  while (parser->HasNext()) {
+    string_view field = parser->Next();
     string_view field_alias = field;
 
     // Verify json path is correct
-    if (type == DocIndex::JSON && !IsValidJsonPath(field)) {
-      builder->SendError("Bad json path: " + string{field});
-      return nullopt;
+    if (index->type == DocIndex::JSON && !IsValidJsonPath(field)) {
+      return CreateSyntaxError(absl::StrCat("Bad json path: "sv, field));
     }
 
     // AS [alias]
-    parser.Check("AS", &field_alias);
+    parser->Check("AS", &field_alias);
 
     // Determine type
     using search::SchemaField;
-    auto type = parser.MapNext("TAG", SchemaField::TAG, "TEXT", SchemaField::TEXT, "NUMERIC",
-                               SchemaField::NUMERIC, "VECTOR", SchemaField::VECTOR);
-    if (auto err = parser.Error(); err) {
-      builder->SendError(err->MakeReply());
-      return nullopt;
+    auto parsed_params = parser->MapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv,
+                                         &ParseNumeric, "VECTOR"sv, &ParseVector)(parser);
+    if (!parsed_params) {
+      return make_unexpected(parsed_params.error());
     }
 
-    // Tag fields include: [separator char] [casesensitive]
-    // Vector fields include: {algorithm} num_args args...
-    search::SchemaField::ParamsVariant params(monostate{});
-    if (type == search::SchemaField::TAG) {
-      auto tag_params = ParseTagParams(&parser, builder);
-      if (!tag_params) {
-        return std::nullopt;
-      }
-      params = tag_params.value();
-    } else if (type == search::SchemaField::VECTOR) {
-      auto vector_params = ParseVectorParams(&parser);
-      if (parser.HasError()) {
-        auto err = *parser.Error();
-        VLOG(1) << "Could not parse vector param " << err.index;
-        builder->SendError("Parse error of vector parameters", kSyntaxErrType);
-        return nullopt;
-      }
-
-      if (vector_params.dim == 0) {
-        builder->SendError("Knn vector dimension cannot be zero", kSyntaxErrType);
-        return nullopt;
-      }
-      params = vector_params;
-    }
+    auto [field_type, params] = std::move(parsed_params).value();
 
     // Flags: check for SORTABLE and NOINDEX
     uint8_t flags = 0;
-    while (parser.HasNext()) {
-      if (parser.Check("NOINDEX")) {
-        flags |= search::SchemaField::NOINDEX;
-        continue;
+    while (parser->HasNext()) {
+      auto flag = parser->TryMapNext("NOINDEX", search::SchemaField::NOINDEX, "SORTABLE",
+                                     search::SchemaField::SORTABLE);
+      if (!flag) {
+        break;
       }
 
-      if (parser.Check("SORTABLE")) {
-        flags |= search::SchemaField::SORTABLE;
-        continue;
-      }
-
-      break;
+      flags |= *flag;
     }
 
     // Skip all trailing ignored parameters
-    while (kIgnoredOptions.count(parser.Peek()) > 0)
-      parser.Skip(2);
+    while (kIgnoredOptions.count(parser->Peek()) > 0)
+      parser->Skip(2);
 
-    schema.fields[field] = {type, flags, string{field_alias}, std::move(params)};
+    schema.fields[field] = {field_type, flags, string{field_alias}, params};
   }
 
   // Build field name mapping table
   for (const auto& [field_ident, field_info] : schema.fields)
     schema.field_names[field_info.short_name] = field_ident;
 
-  if (auto err = parser.Error(); err) {
-    builder->SendError(err->MakeReply());
-    return nullopt;
-  }
-
-  return schema;
+  return false;
 }
 
 #ifndef __clang__
 #pragma GCC diagnostic pop
 #endif
+
+ParseResult<DocIndex> ParseCreateParams(CmdArgParser* parser) {
+  DocIndex index{};
+
+  while (parser->HasNext()) {
+    auto option_parser =
+        parser->TryMapNext("ON"sv, &ParseOnOption, "PREFIX"sv, &ParsePrefix, "STOPWORDS"sv,
+                           &ParseStopwords, "SCHEMA"sv, &ParseSchema);
+
+    if (!option_parser) {
+      // Unsupported parameters are ignored for now
+      parser->Skip(1);
+      continue;
+    }
+
+    auto parse_result = option_parser.value()(parser, &index);
+    if (!parse_result) {
+      return make_unexpected(parse_result.error());
+    }
+    if (!parse_result.value()) {
+      break;
+    }
+  }
+
+  return index;
+}
 
 std::string_view ParseField(CmdArgParser* parser) {
   std::string_view field = parser->Next();
@@ -248,7 +324,7 @@ search::QueryParams ParseQueryParams(CmdArgParser* parser) {
   return params;
 }
 
-optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyBuilder* builder) {
+ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
   SearchParams params;
 
   while (parser->HasNext()) {
@@ -258,15 +334,13 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
       params.limit_total = parser->Next<size_t>();
     } else if (parser->Check("LOAD")) {
       if (params.return_fields) {
-        builder->SendError("LOAD cannot be applied after RETURN");
-        return std::nullopt;
+        return CreateSyntaxError("LOAD cannot be applied after RETURN"sv);
       }
 
       ParseLoadFields(parser, &params.load_fields);
     } else if (parser->Check("RETURN")) {
       if (params.load_fields) {
-        builder->SendError("RETURN cannot be applied after LOAD");
-        return std::nullopt;
+        return CreateSyntaxError("RETURN cannot be applied after LOAD"sv);
       }
 
       // RETURN {num} [{ident} AS {name}...]
@@ -297,16 +371,11 @@ optional<SearchParams> ParseSearchParamsOrReply(CmdArgParser* parser, SinkReplyB
     }
   }
 
-  if (auto err = parser->Error(); err) {
-    builder->SendError(err->MakeReply());
-    return nullopt;
-  }
-
   return params;
 }
 
 std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* parser) {
-  using SordOrder = aggregate::SortParams::SortOrder;
+  using SortOrder = aggregate::SortParams::SortOrder;
 
   size_t strings_num = parser->Next<size_t>();
 
@@ -318,9 +387,9 @@ std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* par
     std::string_view parsed_field = ParseFieldWithAtSign(parser);
     strings_num--;
 
-    SordOrder sord_order = SordOrder::ASC;
+    SortOrder sord_order = SortOrder::ASC;
     if (strings_num > 0) {
-      auto order = parser->TryMapNext("ASC", SordOrder::ASC, "DESC", SordOrder::DESC);
+      auto order = parser->TryMapNext("ASC", SortOrder::ASC, "DESC", SortOrder::DESC);
       if (order) {
         sord_order = order.value();
         strings_num--;
@@ -341,26 +410,25 @@ std::optional<aggregate::SortParams> ParseAggregatorSortParams(CmdArgParser* par
   return sort_params;
 }
 
-optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
-                                                       SinkReplyBuilder* builder) {
+ParseResult<AggregateParams> ParseAggregatorParams(CmdArgParser* parser) {
   AggregateParams params;
-  tie(params.index, params.query) = parser.Next<string_view, string_view>();
+  tie(params.index, params.query) = parser->Next<string_view, string_view>();
 
   // Parse LOAD count field [field ...]
   // LOAD options are at the beginning of the query, so we need to parse them first
-  while (parser.HasNext() && parser.Check("LOAD")) {
-    ParseLoadFields(&parser, &params.load_fields);
+  while (parser->HasNext() && parser->Check("LOAD")) {
+    ParseLoadFields(parser, &params.load_fields);
   }
 
-  while (parser.HasNext()) {
+  while (parser->HasNext()) {
     // GROUPBY nargs property [property ...]
-    if (parser.Check("GROUPBY")) {
-      size_t num_fields = parser.Next<size_t>();
+    if (parser->Check("GROUPBY")) {
+      size_t num_fields = parser->Next<size_t>();
 
       std::vector<std::string> fields;
       fields.reserve(num_fields);
-      while (parser.HasNext() && num_fields > 0) {
-        auto parsed_field = ParseFieldWithAtSign(&parser);
+      while (parser->HasNext() && num_fields > 0) {
+        auto parsed_field = ParseFieldWithAtSign(parser);
 
         /*
         TODO: Throw an error if the field has no '@' sign at the beginning
@@ -375,30 +443,29 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
       }
 
       vector<aggregate::Reducer> reducers;
-      while (parser.Check("REDUCE")) {
+      while (parser->Check("REDUCE")) {
         using RF = aggregate::ReducerFunc;
         auto func_name =
-            parser.TryMapNext("COUNT", RF::COUNT, "COUNT_DISTINCT", RF::COUNT_DISTINCT, "SUM",
-                              RF::SUM, "AVG", RF::AVG, "MAX", RF::MAX, "MIN", RF::MIN);
+            parser->TryMapNext("COUNT", RF::COUNT, "COUNT_DISTINCT", RF::COUNT_DISTINCT, "SUM",
+                               RF::SUM, "AVG", RF::AVG, "MAX", RF::MAX, "MIN", RF::MIN);
 
         if (!func_name) {
-          builder->SendError(absl::StrCat("reducer function ", parser.Next(), " not found"));
-          return nullopt;
+          return CreateSyntaxError(absl::StrCat("reducer function ", parser->Next(), " not found"));
         }
 
         auto func = aggregate::FindReducerFunc(*func_name);
-        auto nargs = parser.Next<size_t>();
+        auto nargs = parser->Next<size_t>();
 
         string source_field;
         if (nargs > 0) {
-          source_field = ParseField(&parser);
+          source_field = ParseField(parser);
         }
 
-        parser.ExpectTag("AS");
-        string result_field = parser.Next<string>();
+        parser->ExpectTag("AS");
+        string result_field = parser->Next<string>();
 
         reducers.push_back(
-            aggregate::Reducer{std::move(source_field), std::move(result_field), std::move(func)});
+            aggregate::Reducer{std::move(source_field), std::move(result_field), func});
       }
 
       params.steps.push_back(aggregate::MakeGroupStep(std::move(fields), std::move(reducers)));
@@ -406,11 +473,10 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     }
 
     // SORTBY nargs
-    if (parser.Check("SORTBY")) {
-      auto sort_params = ParseAggregatorSortParams(&parser);
+    if (parser->Check("SORTBY")) {
+      auto sort_params = ParseAggregatorSortParams(parser);
       if (!sort_params) {
-        builder->SendError("bad arguments for SORTBY: specified invalid number of strings");
-        return nullopt;
+        return CreateSyntaxError("bad arguments for SORTBY: specified invalid number of strings"sv);
       }
 
       params.steps.push_back(aggregate::MakeSortStep(std::move(sort_params).value()));
@@ -418,30 +484,23 @@ optional<AggregateParams> ParseAggregatorParamsOrReply(CmdArgParser parser,
     }
 
     // LIMIT
-    if (parser.Check("LIMIT")) {
-      auto [offset, num] = parser.Next<size_t, size_t>();
+    if (parser->Check("LIMIT")) {
+      auto [offset, num] = parser->Next<size_t, size_t>();
       params.steps.push_back(aggregate::MakeLimitStep(offset, num));
       continue;
     }
 
     // PARAMS
-    if (parser.Check("PARAMS")) {
-      params.params = ParseQueryParams(&parser);
+    if (parser->Check("PARAMS")) {
+      params.params = ParseQueryParams(parser);
       continue;
     }
 
-    if (parser.Check("LOAD")) {
-      builder->SendError("LOAD cannot be applied after projectors or reducers");
-      return nullopt;
+    if (parser->Check("LOAD")) {
+      return CreateSyntaxError("LOAD cannot be applied after projectors or reducers"sv);
     }
 
-    builder->SendError(absl::StrCat("Unknown clause: ", parser.Peek()));
-    return nullopt;
-  }
-
-  if (auto err = parser.Error(); err) {
-    builder->SendError(err->MakeReply());
-    return nullopt;
+    return CreateSyntaxError(absl::StrCat("Unknown clause: ", parser->Peek()));
   }
 
   return params;
@@ -561,49 +620,13 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError("Cannot create index on db != 0"sv);
   }
 
-  DocIndex index{};
-
   CmdArgParser parser{args};
   string_view idx_name = parser.Next();
 
-  while (parser.HasNext()) {
-    // ON HASH | JSON
-    if (parser.Check("ON")) {
-      index.type = parser.MapNext("HASH"sv, DocIndex::HASH, "JSON"sv, DocIndex::JSON);
-      continue;
-    }
-
-    // PREFIX count prefix [prefix ...]
-    if (parser.Check("PREFIX")) {
-      if (size_t num = parser.Next<size_t>(); num != 1)
-        return builder->SendError("Multiple prefixes are not supported");
-      index.prefix = string(parser.Next());
-      continue;
-    }
-
-    // STOWORDS count [words...]
-    if (parser.Check("STOPWORDS")) {
-      index.options.stopwords.clear();
-      for (size_t num = parser.Next<size_t>(); num > 0; num--)
-        index.options.stopwords.emplace(parser.Next());
-      continue;
-    }
-
-    // SCHEMA
-    if (parser.Check("SCHEMA")) {
-      auto schema = ParseSchemaOrReply(index.type, parser.Tail(), builder);
-      if (!schema)
-        return;
-      index.schema = std::move(*schema);
-      break;  // SCHEMA always comes last
-    }
-
-    // Unsupported parameters are ignored for now
-    parser.Skip(1);
+  auto parsed_index = ParseCreateParams(&parser);
+  if (SendErrorIfOccurred(parsed_index, &parser, builder)) {
+    return;
   }
-
-  if (auto err = parser.Error(); err)
-    return builder->SendError(err->MakeReply());
 
   // Check if index already exists
   atomic_uint exists_cnt = 0;
@@ -622,7 +645,7 @@ void SearchFamily::FtCreate(CmdArgList args, const CommandContext& cmd_cntx) {
     return builder->SendError("Index already exists");
   }
 
-  auto idx_ptr = make_shared<DocIndex>(std::move(index));
+  auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
   cmd_cntx.tx->Execute(
       [idx_name, idx_ptr](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr);
@@ -660,19 +683,24 @@ void SearchFamily::FtAlter(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 
   // Parse additional schema
-  optional<search::Schema> new_fields = ParseSchemaOrReply(index_info->type, parser, builder);
-  if (!new_fields) {
+  DocIndex new_index{};
+  new_index.type = index_info->type;
+  auto parse_result = ParseSchema(&parser, &new_index);
+  if (SendErrorIfOccurred(parse_result, &parser, builder)) {
     cmd_cntx.tx->Conclude();
     return;
   }
 
-  LOG(INFO) << "Adding "
-            << DocIndexInfo{.base_index = DocIndex{.schema = *new_fields}}.BuildRestoreCommand();
+  auto& new_fields = new_index.schema;
+
+  // For logging we copy the whole schema
+  // TODO: Use a more efficient way for logging
+  LOG(INFO) << "Adding " << DocIndexInfo{.base_index = new_index}.BuildRestoreCommand();
 
   // Merge schemas
   search::Schema& schema = index_info->schema;
-  schema.fields.insert(new_fields->fields.begin(), new_fields->fields.end());
-  schema.field_names.insert(new_fields->field_names.begin(), new_fields->field_names.end());
+  schema.fields.insert(new_fields.fields.begin(), new_fields.fields.end());
+  schema.field_names.insert(new_fields.field_names.begin(), new_fields.field_names.end());
 
   // Rebuild index
   // TODO: Introduce partial rebuild
@@ -789,9 +817,10 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
   CmdArgParser parser{args};
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
+
   auto* builder = cmd_cntx.rb;
-  auto params = ParseSearchParamsOrReply(&parser, builder);
-  if (!params.has_value())
+  auto params = ParseSearchParams(&parser);
+  if (SendErrorIfOccurred(params, &parser, builder))
     return;
 
   search::SearchAlgorithm search_algo;
@@ -840,8 +869,8 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
 
   string_view query_str = parser.Next();
 
-  optional<SearchParams> params = ParseSearchParamsOrReply(&parser, rb);
-  if (!params.has_value())
+  auto params = ParseSearchParams(&parser);
+  if (SendErrorIfOccurred(params, &parser, rb))
     return;
 
   search::SearchAlgorithm search_algo;
@@ -994,9 +1023,11 @@ void SearchFamily::FtTagVals(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void SearchFamily::FtAggregate(CmdArgList args, const CommandContext& cmd_cntx) {
+  CmdArgParser parser{args};
   auto* builder = cmd_cntx.rb;
-  const auto params = ParseAggregatorParamsOrReply(args, builder);
-  if (!params)
+
+  const auto params = ParseAggregatorParams(&parser);
+  if (SendErrorIfOccurred(params, &parser, builder))
     return;
 
   search::SearchAlgorithm search_algo;
