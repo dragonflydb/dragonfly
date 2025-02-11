@@ -177,8 +177,6 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
 
   auto* blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.is_new && blocking_controller) {
-    string tmp;
-    string_view key = it->first.GetSlice(&tmp);
     blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
   }
 

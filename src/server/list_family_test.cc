@@ -700,6 +700,22 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBug2857) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+TEST_F(ListFamilyTest, BRPopLPushSingleShardBug4569) {
+  RespExpr resp;
+  auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp = Run({"brpop", "x", "0"}); });
+  WaitUntilLocked(0, "x");
+
+  ASSERT_TRUE(IsLocked(0, "x"));
+  Run({"lpush", "y", "val"});
+  Run({"rpoplpush", "y", "x"});
+  ASSERT_EQ(1, GetDebugInfo().shards_count);
+  fb0.Join();
+  EXPECT_THAT(resp, ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("x", "val"));
+  ASSERT_EQ(0, NumWatched());
+  ASSERT_FALSE(IsLocked(0, "x"));
+}
+
 TEST_F(ListFamilyTest, BRPopLPushSingleShardBlocking) {
   RespExpr resp;
 
@@ -1306,7 +1322,6 @@ TEST_F(ListFamilyTest, LMPopWrongType) {
   resp = Run({"lmpop", "2", "l1", "foo", "left"});
   EXPECT_THAT(resp, RespArray(ElementsAre("l1", RespArray(ElementsAre("e1")))));
 }
-
 
 // Reproduce a flow that trigerred a wrong DCHECK in the transaction flow.
 TEST_F(ListFamilyTest, AwakeMulti) {
