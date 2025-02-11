@@ -300,7 +300,7 @@ void streamGetEdgeID(stream *s, int first, int skip_tombstones, streamID *edge_i
  * that should be trimmed, there is a chance we will still have entries with
  * IDs < 'id' (or number of elements >= maxlen in case of MAXLEN).
  */
-int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id) {
+int64_t streamTrim(stream *s, streamAddTrimArgs *args) {
     size_t maxlen = args->maxlen;
     streamID *id = &args->minid;
     int approx = args->approx_trim;
@@ -315,8 +315,6 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id) {
     raxSeek(&ri,"^",NULL,0);
 
     int64_t deleted = 0;
-    streamID last_deleted_id = {0, 0}; // Initialize last deleted ID
-    
     while (raxNext(&ri)) {
         if (trim_strategy == TRIM_STRATEGY_MAXLEN && s->length <= maxlen)
             break;
@@ -333,24 +331,16 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id) {
         streamID master_id = {0}; /* For MINID */
         if (trim_strategy == TRIM_STRATEGY_MAXLEN) {
             remove_node = s->length - entries >= maxlen;
-            if (remove_node) {
-                streamDecodeID(ri.key, &master_id);
-                // Write last ID to last_deleted_id
-                lpGetEdgeStreamID(lp, 0, &master_id, &last_deleted_id);
-            }
         } else {
             /* Read the master ID from the radix tree key. */
             streamDecodeID(ri.key, &master_id);
-            
+
             /* Read last ID. */
             streamID last_id = {0, 0};
             lpGetEdgeStreamID(lp, 0, &master_id, &last_id);
 
             /* We can remove the entire node id its last ID < 'id' */
             remove_node = streamCompareID(&last_id, id) < 0;
-            if (remove_node) {
-                last_deleted_id = last_id;
-            }
         }
 
         if (remove_node) {
@@ -365,10 +355,6 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id) {
         /* If we cannot remove a whole element, and approx is true,
          * stop here. */
         if (approx) break;
-
-        if (trim_strategy == TRIM_STRATEGY_MAXLEN) {
-            streamDecodeID(ri.key, &master_id);
-        }
 
         /* Now we have to trim entries from within 'lp' */
         int64_t deleted_from_lp = 0;
@@ -400,7 +386,11 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id) {
             int64_t seq_delta = lpGetInteger(p);
             p = lpNext(lp, p); /* Skip ID seq delta */
 
-            streamID currid = {master_id.ms + ms_delta, master_id.seq + seq_delta};
+            streamID currid = {0}; /* For MINID */
+            if (trim_strategy == TRIM_STRATEGY_MINID) {
+                currid.ms = master_id.ms + ms_delta;
+                currid.seq = master_id.seq + seq_delta;
+            }
 
             int stop;
             if (trim_strategy == TRIM_STRATEGY_MAXLEN) {
@@ -432,7 +422,6 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id) {
                 deleted_from_lp++;
                 s->length--;
                 p = lp + delta;
-                last_deleted_id = currid;
             }
         }
         deleted += deleted_from_lp;
@@ -469,42 +458,29 @@ int64_t streamTrim(stream *s, streamAddTrimArgs *args, streamID *last_id) {
         streamGetEdgeID(s,1,1,&s->first_id);
     }
 
-    /* Set the last deleted ID, if applicable. */
-    if (last_id) {
-        *last_id = last_deleted_id;
-    }
-
     return deleted;
 }
 
 /* Trims a stream by length. Returns the number of deleted items. */
-int64_t streamTrimByLength(stream *s, long long maxlen, int approx, streamID *last_id, long long limit) {
-    if (limit == NO_TRIM_LIMIT) {
-        limit = approx ? 100 * server.stream_node_max_entries : 0;
-    }
-    
+int64_t streamTrimByLength(stream *s, long long maxlen, int approx) {
     streamAddTrimArgs args = {
         .trim_strategy = TRIM_STRATEGY_MAXLEN,
         .approx_trim = approx,
-        .limit = limit,
+        .limit = approx ? 100 * server.stream_node_max_entries : 0,
         .maxlen = maxlen
     };
-    return streamTrim(s, &args, last_id);
+    return streamTrim(s, &args);
 }
 
 /* Trims a stream by minimum ID. Returns the number of deleted items. */
-int64_t streamTrimByID(stream *s, streamID minid, int approx, streamID *last_id, long long limit) {
-    if (limit == NO_TRIM_LIMIT) {
-        limit = approx ? 100 * server.stream_node_max_entries : 0;
-    }
-    
+int64_t streamTrimByID(stream *s, streamID minid, int approx) {
     streamAddTrimArgs args = {
         .trim_strategy = TRIM_STRATEGY_MINID,
         .approx_trim = approx,
-        .limit = limit,
+        .limit = approx ? 100 * server.stream_node_max_entries : 0,
         .minid = minid
     };
-    return streamTrim(s, &args, last_id);
+    return streamTrim(s, &args);
 }
 
 /* Initialize the stream iterator, so that we can call iterating functions
