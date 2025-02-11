@@ -528,6 +528,13 @@ TEST_F(StringFamilyTest, IncrByFloat) {
   EXPECT_EQ(resp, "3.566");
 }
 
+TEST_F(StringFamilyTest, RestoreHighTTL) {
+  Run({"SET", "X", "1"});
+  auto buffer = Run({"DUMP", "X"}).GetBuf();
+  Run({"DEL", "X"});
+  EXPECT_EQ(Run({"RESTORE", "X", "5430186761345", ToSV(buffer)}), "OK");
+}
+
 TEST_F(StringFamilyTest, SetNx) {
   // Make sure that we "screen out" invalid parameters for this command
   // this is important as it uses similar path as the "normal" set
