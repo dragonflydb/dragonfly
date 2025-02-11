@@ -546,17 +546,12 @@ void SearchReply(const SearchParams& params, std::optional<search::AggregationIn
     total_hits = std::min(total_hits, agg_info->limit);
     should_add_score_field = params.ShouldReturnField(agg_info->alias);
 
-    auto comparator = [desc = agg_info->descending]()
-        -> std::function<bool(const SerializedSearchDoc*, const SerializedSearchDoc*)> {
-      if (desc) {
-        return [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) -> bool {
-          return *l >= *r;
-        };
-      }
-      return [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) -> bool {
-        return *l < *r;
-      };
-    }();
+    using Comparator = bool (*)(const SerializedSearchDoc*, const SerializedSearchDoc*);
+    auto comparator =
+        !agg_info->descending
+            ? static_cast<Comparator>([](const SerializedSearchDoc* l,
+                                         const SerializedSearchDoc* r) { return *l < *r; })
+            : [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) { return *r < *l; };
 
     const size_t prefix_size_to_sort = std::min(params.limit_offset + params.limit_total, size);
     if (prefix_size_to_sort == docs.size()) {
