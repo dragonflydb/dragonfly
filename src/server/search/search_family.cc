@@ -526,89 +526,65 @@ void SendSerializedDoc(const SerializedSearchDoc& doc, SinkReplyBuilder* builder
   }
 }
 
-void ReplyWithResults(const SearchParams& params, absl::Span<SearchResult> results,
-                      SinkReplyBuilder* builder) {
-  size_t total_count = 0;
-  for (const auto& shard_docs : results)
-    total_count += shard_docs.total_hits;
-
-  size_t result_count =
-      min(total_count - min(total_count, params.limit_offset), params.limit_total);
-
-  facade::SinkReplyBuilder::ReplyAggregator agg{builder};
-
-  bool ids_only = params.IdsOnly();
-  size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
-
-  auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->StartArray(reply_size);
-  rb->SendLong(total_count);
-
-  size_t sent = 0;
-  size_t to_skip = params.limit_offset;
-  for (const auto& shard_docs : results) {
-    for (const auto& serialized_doc : shard_docs.docs) {
-      // Scoring is not implemented yet, so we just cut them in the order they were retrieved
-      if (to_skip > 0) {
-        to_skip--;
-        continue;
-      }
-
-      if (sent++ >= result_count)
-        return;
-
-      if (ids_only)
-        rb->SendBulkString(serialized_doc.key);
-      else
-        SendSerializedDoc(serialized_doc, builder);
-    }
-  }
-}
-
-void ReplySorted(search::AggregationInfo agg, const SearchParams& params,
+void SearchReply(const SearchParams& params, std::optional<search::AggregationInfo> agg_info,
                  absl::Span<SearchResult> results, SinkReplyBuilder* builder) {
-  size_t total = 0;
-  vector<SerializedSearchDoc*> docs;
+  size_t total_hits = 0;
+  absl::InlinedVector<SerializedSearchDoc*, 5> docs;
+  docs.reserve(results.size());
   for (auto& shard_results : results) {
-    total += shard_results.total_hits;
+    total_hits += shard_results.total_hits;
     for (auto& doc : shard_results.docs) {
       docs.push_back(&doc);
     }
   }
 
-  size_t agg_limit = agg.limit.value_or(total);
-  size_t prefix = min(params.limit_offset + params.limit_total, agg_limit);
+  size_t size = docs.size();
+  bool should_add_score_field = false;
 
-  partial_sort(docs.begin(), docs.begin() + min(docs.size(), prefix), docs.end(),
-               [desc = agg.descending](const auto* l, const auto* r) {
-                 return desc ? (*l >= *r) : (*l < *r);
-               });
+  if (agg_info) {
+    size = std::min(size, agg_info->limit);
+    total_hits = std::min(total_hits, agg_info->limit);
+    should_add_score_field = params.ShouldReturnField(agg_info->alias);
 
-  docs.resize(min(docs.size(), agg_limit));
+    using Comparator = bool (*)(const SerializedSearchDoc*, const SerializedSearchDoc*);
+    auto comparator =
+        !agg_info->descending
+            ? static_cast<Comparator>([](const SerializedSearchDoc* l,
+                                         const SerializedSearchDoc* r) { return *l < *r; })
+            : [](const SerializedSearchDoc* l, const SerializedSearchDoc* r) { return *r < *l; };
 
-  size_t start_idx = min(params.limit_offset, docs.size());
-  size_t result_count = min(docs.size() - start_idx, params.limit_total);
-  bool ids_only = params.IdsOnly();
-  size_t reply_size = ids_only ? (result_count + 1) : (result_count * 2 + 1);
+    const size_t prefix_size_to_sort = std::min(params.limit_offset + params.limit_total, size);
+    if (prefix_size_to_sort == docs.size()) {
+      std::sort(docs.begin(), docs.end(), std::move(comparator));
+    } else {
+      std::partial_sort(docs.begin(), docs.begin() + prefix_size_to_sort, docs.end(),
+                        std::move(comparator));
+    }
+  }
 
-  // Clear score alias if it's excluded from return values
-  if (!params.ShouldReturnField(agg.alias))
-    agg.alias = "";
+  const size_t offset = std::min(params.limit_offset, size);
+  const size_t limit = std::min(size - offset, params.limit_total);
 
-  facade::SinkReplyBuilder::ReplyAggregator agg_reply{builder};
+  const bool reply_with_ids_only = params.IdsOnly();
+  const size_t reply_size = reply_with_ids_only ? (limit + 1) : (limit * 2 + 1);
+
+  facade::SinkReplyBuilder::ReplyAggregator agg{builder};
+
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   rb->StartArray(reply_size);
-  rb->SendLong(min(total, agg_limit));
-  for (auto* doc : absl::MakeSpan(docs).subspan(start_idx, result_count)) {
-    if (ids_only) {
-      rb->SendBulkString(doc->key);
+  rb->SendLong(total_hits);
+
+  const size_t end = offset + limit;
+  for (size_t i = offset; i < end; i++) {
+    if (reply_with_ids_only) {
+      rb->SendBulkString(docs[i]->key);
       continue;
     }
 
-    if (!agg.alias.empty() && holds_alternative<float>(doc->score))
-      doc->values[agg.alias] = absl::StrCat(get<float>(doc->score));
+    if (should_add_score_field && holds_alternative<float>(docs[i]->score))
+      docs[i]->values[agg_info->alias] = absl::StrCat(get<float>(docs[i]->score));
 
-    SendSerializedDoc(*doc, builder);
+    SendSerializedDoc(*docs[i], builder);
   }
 }
 
@@ -848,10 +824,7 @@ void SearchFamily::FtSearch(CmdArgList args, const CommandContext& cmd_cntx) {
       return builder->SendError(*res.error);
   }
 
-  if (auto agg = search_algo.HasAggregation(); agg)
-    ReplySorted(*agg, *params, absl::MakeSpan(docs), builder);
-  else
-    ReplyWithResults(*params, absl::MakeSpan(docs), builder);
+  SearchReply(*params, search_algo.GetAggregationInfo(), absl::MakeSpan(docs), builder);
 }
 
 void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -927,12 +900,7 @@ void SearchFamily::FtProfile(CmdArgList args, const CommandContext& cmd_cntx) {
 
   // Result of the search command
   if (!result_is_empty) {
-    auto agg = search_algo.HasAggregation();
-    if (agg) {
-      ReplySorted(*agg, *params, absl::MakeSpan(search_results), rb);
-    } else {
-      ReplyWithResults(*params, absl::MakeSpan(search_results), rb);
-    }
+    SearchReply(*params, search_algo.GetAggregationInfo(), absl::MakeSpan(search_results), rb);
   } else {
     rb->StartArray(1);
     rb->SendLong(0);

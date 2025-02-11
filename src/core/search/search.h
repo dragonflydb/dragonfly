@@ -136,9 +136,9 @@ struct SearchResult {
 };
 
 struct AggregationInfo {
-  std::optional<size_t> limit;
   std::string_view alias;
   bool descending;
+  size_t limit = std::numeric_limits<size_t>::max();
 };
 
 // SearchAlgorithm allows searching field indices with a query
@@ -154,7 +154,7 @@ class SearchAlgorithm {
                       size_t limit = std::numeric_limits<size_t>::max()) const;
 
   // if enabled, return limit & alias for knn query
-  std::optional<AggregationInfo> HasAggregation() const;
+  std::optional<AggregationInfo> GetAggregationInfo() const;
 
   void EnableProfiling();
 
