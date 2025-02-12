@@ -3,7 +3,7 @@
 //
 #include "server/protocol_client.h"
 
-#include "facade/tls_error.h"
+#include "facade/tls_helpers.h"
 
 extern "C" {
 #include "redis/rdb.h"
@@ -54,46 +54,6 @@ using absl::StrCat;
 
 namespace {
 
-#ifdef DFLY_USE_SSL
-
-static ProtocolClient::SSL_CTX* CreateSslClientCntx() {
-  ProtocolClient::SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
-  const auto& tls_key_file = GetFlag(FLAGS_tls_key_file);
-  unsigned mask = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-
-  // Load client certificate if given.
-  if (!tls_key_file.empty()) {
-    DFLY_SSL_CHECK(1 == SSL_CTX_use_PrivateKey_file(ctx, tls_key_file.c_str(), SSL_FILETYPE_PEM));
-    // We checked that the flag is non empty in ValidateClientTlsFlags.
-    const auto& tls_cert_file = GetFlag(FLAGS_tls_cert_file);
-
-    DFLY_SSL_CHECK(1 == SSL_CTX_use_certificate_chain_file(ctx, tls_cert_file.c_str()));
-  }
-
-  // Load custom certificate validation if given.
-  const auto& tls_ca_cert_file = GetFlag(FLAGS_tls_ca_cert_file);
-  const auto& tls_ca_cert_dir = GetFlag(FLAGS_tls_ca_cert_dir);
-
-  const auto* file = tls_ca_cert_file.empty() ? nullptr : tls_ca_cert_file.data();
-  const auto* dir = tls_ca_cert_dir.empty() ? nullptr : tls_ca_cert_dir.data();
-  if (file || dir) {
-    DFLY_SSL_CHECK(1 == SSL_CTX_load_verify_locations(ctx, file, dir));
-  } else {
-    DFLY_SSL_CHECK(1 == SSL_CTX_set_default_verify_paths(ctx));
-  }
-
-  DFLY_SSL_CHECK(1 == SSL_CTX_set_cipher_list(ctx, "DEFAULT"));
-  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
-
-  SSL_CTX_set_options(ctx, SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS);
-
-  SSL_CTX_set_verify(ctx, mask, NULL);
-
-  DFLY_SSL_CHECK(1 == SSL_CTX_set_dh_auto(ctx, 1));
-  return ctx;
-}
-#endif
-
 error_code Recv(FiberSocketBase* input, base::IoBuf* dest) {
   auto buf = dest->AppendBuffer();
   io::Result<size_t> exp_size = input->Recv(buf);
@@ -136,9 +96,11 @@ void ValidateClientTlsFlags() {
 }
 
 void ProtocolClient::MaybeInitSslCtx() {
+#ifdef DFLY_USE_SSL
   if (absl::GetFlag(FLAGS_tls_replication)) {
-    ssl_ctx_ = CreateSslClientCntx();
+    ssl_ctx_ = CreateSslCntx(facade::TlsContextRole::CLIENT);
   }
+#endif
 }
 
 ProtocolClient::ProtocolClient(string host, uint16_t port) {
