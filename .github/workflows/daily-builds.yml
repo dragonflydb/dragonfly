@@ -102,13 +102,16 @@ jobs:
           cd $GITHUB_WORKSPACE/build
 
           export PATH=/usr/local/opt/bison/bin:$PATH
-          gcc-12 --version
+          which clang
+          clang --version
+          which clang++
+          clang++ --version
 
           bison --version
 
           echo "*************************** START BUILDING **************************************"
-          CC=gcc-12 CXX=g++-12 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-ld_classic"
+          CC=clang CXX=clang++ cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-ld_classic,-Wno-error=unused-command-line-argument"
 
           ninja src/all
 
