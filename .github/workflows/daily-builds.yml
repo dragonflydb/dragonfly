@@ -101,22 +101,17 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/build
 
-          echo "Paths for /usr/bin/clang++"
-          /usr/bin/clang++ -###
-          #          export PATH=/usr/local/opt/bison/bin:$PATH
-          #          which /usr/bin/c++
-          #          /usr/bin/c++ --version
-          #          which /usr/bin/cc
-          #          /usr/bin/cc --version
-          echo "Paths for /usr/bin/c++"
-          /usr/bin/c++ -###
+          # We need -isysroot such that we fetch both include and lib dirs for standard library
+          # On macos-15 /usr/bin/cc or /usr/bin/clang does this automatically. However for macos-13 it seems that this is not the case.
+          # Furthermore, keep in mind that on macos-15, /Applications/Xcode.app/... have been moved to /Library/Developer
+          # so if we upgrade this flow to use a newer version this might fail.
+          export CPPFLAGS="-isysroot $(xcrun --sdk macosx --show-sdk-path)"
+          ls -lah /Library/Developer/CommandLineTools/usr/bin
 
-          echo "Paths for /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++"
-          /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++ -###
+          echo "next ls"
 
-          xcode-select -p
-          # Use proper toolchain
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          ls -lah /Library/Developer/
+
 
           bison --version
 
