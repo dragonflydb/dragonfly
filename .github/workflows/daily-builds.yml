@@ -104,13 +104,13 @@ jobs:
           export PATH=/usr/local/opt/bison/bin:$PATH
           which /usr/bin/c++
           /usr/bin/c++ --version
-          which /usr/bin/c
-          /usr/bin/c --version
+          which /usr/bin/cc
+          /usr/bin/cc --version
 
           bison --version
 
           echo "*************************** START BUILDING **************************************"
-          CC=/usr/bin/c CXX=/usr/bin/c++ cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
+          CC=/usr/bin/cc CXX=/usr/bin/c++ cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-ld_classic,-Wno-error=unused-command-line-argument"
 
           ninja src/all
