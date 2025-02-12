@@ -107,6 +107,10 @@ jobs:
           which /usr/bin/cc
           /usr/bin/cc --version
 
+          xcode-select -p
+          # Use proper toolchain
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
           bison --version
 
           echo "*************************** START BUILDING **************************************"
