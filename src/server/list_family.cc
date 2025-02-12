@@ -250,6 +250,10 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
                           GetFlag(FLAGS_list_compress_depth));
       dest_res.it->second.InitRobj(OBJ_LIST, OBJ_ENCODING_QUICKLIST, dest_ql);
     }
+    auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
+    if (blocking_controller) {
+      blocking_controller->AwakeWatched(op_args.db_cntx.db_index, dest);
+    }
   } else {
     if (dest_res.it->second.ObjType() != OBJ_LIST)
       return OpStatus::WRONG_TYPE;
@@ -380,9 +384,6 @@ OpResult<uint32_t> OpPush(const OpArgs& op_args, std::string_view key, ListDir d
   if (res.is_new) {
     auto blocking_controller = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
     if (blocking_controller) {
-      string tmp;
-      string_view key = res.it->first.GetSlice(&tmp);
-
       blocking_controller->AwakeWatched(op_args.db_cntx.db_index, key);
     }
   }
@@ -1010,14 +1011,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
         std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
         RecordJournal(op_args, "LMOVE", arr, 1);
       }
-      auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
-      if (blocking_controller) {
-        string tmp;
-
-        blocking_controller->AwakeWatched(op_args.db_cntx.db_index, push_key_);
-      }
     }
-
     return OpStatus::OK;
   };
   tx->Execute(cb_move, false);
