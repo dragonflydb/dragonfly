@@ -365,6 +365,10 @@ class Transaction {
     return shard_data_[SidToId(sid)].local_mask;
   }
 
+  uint32_t DEBUG_GetWakePos(ShardId sid) const {
+    return shard_data_[SidToId(sid)].wake_key_pos;
+  }
+
   void SetTrackingCallback(std::function<void(Transaction* trans)> f) {
     tracking_cb_ = std::move(f);
   }

@@ -196,8 +196,17 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
                                    ListDir src_dir, ListDir dest_dir) {
   auto& db_slice = op_args.GetDbSlice();
   auto src_res = db_slice.FindMutable(op_args.db_cntx, src, OBJ_LIST);
-  if (!src_res)
+  if (!src_res) {
+    const Transaction* tx = op_args.tx;
+    ShardId sid = op_args.shard->shard_id();
+    uint16_t mask = tx->DEBUG_GetLocalMask(sid);
+    if (mask & Transaction::AWAKED_Q) {
+      LOG(WARNING) << "Transaction " << tx->DebugId(sid) << " awoken by key " << src
+                   << " but the key is missing " << src_res.status() << " wake pos "
+                   << tx->DEBUG_GetWakePos(sid);
+    }
     return src_res.status();
+  }
 
   auto src_it = src_res->it;
   quicklist* src_ql = nullptr;
@@ -1018,6 +1027,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
 
   if (is_multi || op_res.status() != OpStatus::KEY_NOTFOUND) {
     if (op_res.status() == OpStatus::KEY_NOTFOUND) {
+      DCHECK(is_multi);
       op_res = OpStatus::TIMED_OUT;
     }
     tx->Conclude();
@@ -1035,6 +1045,10 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
     return status;
 
   tx->Execute(cb_move, true);
+  if (!op_res.ok()) {
+    LOG(ERROR) << "BPopPusher::RunSingle failed with status " << op_res.status();
+    return OpStatus::TIMED_OUT;
+  }
   return op_res;
 }
 

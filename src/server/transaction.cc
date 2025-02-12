@@ -1437,6 +1437,19 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid, string_view 
   sd.wake_key_pos = it.index();
 
   blocking_barrier_.Close();
+
+  // TODO: remove this once #4599 is fixed.
+  auto& db_slice = namespace_->GetDbSlice(sid);
+  auto it_res = db_slice.FindReadOnly(GetDbContext(), key);
+  if (IsValid(it_res.it)) {
+    if (IsValid(it_res.exp_it)) {
+      VLOG(1) << "NotifySuspended: key " << key << ", expire time "
+              << db_slice.ExpireTime(it_res.exp_it);
+    }
+  } else {
+    LOG(INFO) << "NotifySuspended: key " << key << " not found";
+  }
+
   return true;
 }
 
