@@ -23,6 +23,8 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     add_compile_options(-Werror=thread-safety)
 endif()
 
+message(FATAL_ERROR "${CMAKE_CXX_COMPILER}")
+
 # We can not use here CHECK_CXX_COMPILER_FLAG because systems that do not support sanitizers
 # fail during linking time.
 set(CMAKE_REQUIRED_FLAGS "-fsanitize=address")
