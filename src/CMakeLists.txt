@@ -66,7 +66,6 @@ add_third_party(
   URL https://github.com/Genivia/RE-flex/archive/refs/tags/v5.2.2.tar.gz
   PATCH_COMMAND autoreconf -fi
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-avx2 --prefix=${THIRD_PARTY_LIB_DIR}/reflex
-          CXX=${CMAKE_CXX_COMPILER} CC=${CMAKE_C_COMPILER}
 )
 
 set(REFLEX "${THIRD_PARTY_LIB_DIR}/reflex/bin/reflex")
