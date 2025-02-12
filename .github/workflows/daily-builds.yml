@@ -106,17 +106,18 @@ jobs:
           # Furthermore, keep in mind that on macos-15, /Applications/Xcode.app/... have been moved to /Library/Developer
           # so if we upgrade this flow to use a newer version this might fail.
           export CPPFLAGS="-isysroot $(xcrun --sdk macosx --show-sdk-path)"
-          ls -lah /Library/Developer/CommandLineTools/usr/bin
+          export CCFLAGS="-isysroot $(xcrun --sdk macosx --show-sdk-path)"
+          #ls -lah /Library/Developer/CommandLineTools/usr/bin/clang
 
-          echo "next ls"
+          #echo "next ls"
 
-          ls -lah /Library/Developer/
+          #ls -lah /Library/Developer/
 
 
           bison --version
 
           echo "*************************** START BUILDING **************************************"
-          CC=/usr/bin/cc CXX=/usr/bin/c++ cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
+          CC=/Library/Developer/CommandLineTools/usr/bin/clang CXX=/Library/Developer/CommandLineTools/usr/bin/clang++ cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-ld_classic,-Wno-error=unused-command-line-argument"
 
           ninja src/all
