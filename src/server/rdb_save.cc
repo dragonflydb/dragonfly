@@ -524,9 +524,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
     RETURN_ON_ERR(SaveString(lp, lp_bytes));
 
-    const FlushState flush_state =
-        (i + 1 < rax_size) ? FlushState::kFlushMidEntry : FlushState::kFlushEndEntry;
-    FlushIfNeeded(flush_state);
+    FlushIfNeeded(FlushState::kFlushMidEntry);
   }
 
   std::move(stop_listpacks_rax).Invoke();
@@ -594,6 +592,8 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
       RETURN_ON_ERR(SaveStreamConsumers(rdb_type >= RDB_TYPE_STREAM_LISTPACKS_3, cg));
     }
   }
+
+  FlushIfNeeded(FlushState::kFlushEndEntry);
 
   return error_code{};
 }
