@@ -118,7 +118,7 @@ jobs:
 
           echo "*************************** START BUILDING **************************************"
           CC=/Library/Developer/CommandLineTools/usr/bin/clang CXX=/Library/Developer/CommandLineTools/usr/bin/clang++ cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-ld_classic,-Wno-error=unused-command-line-argument"
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-Wno-error=unused-command-line-argument"
 
           ninja src/all
 
