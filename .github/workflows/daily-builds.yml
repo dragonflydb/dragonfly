@@ -100,6 +100,7 @@ jobs:
       - name: Configure & Build
         run: |
           cd $GITHUB_WORKSPACE/build
+          export PATH=/usr/local/opt/bison/bin:$PATH
 
           # We need -isysroot such that we fetch both include and lib dirs for standard library
           # On macos-15 /usr/bin/cc or /usr/bin/clang does this automatically. However for macos-13 it seems that this is not the case.
@@ -117,7 +118,7 @@ jobs:
           bison --version
 
           echo "*************************** START BUILDING **************************************"
-          CC=/Library/Developer/CommandLineTools/usr/bin/clang CXX=/Library/Developer/CommandLineTools/usr/bin/clang++ cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
+          CC=/usr/bin/cc CXX=/usr/bin/c++ cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl"
 
           ninja src/all
