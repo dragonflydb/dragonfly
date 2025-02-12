@@ -101,11 +101,18 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/build
 
-          export PATH=/usr/local/opt/bison/bin:$PATH
-          which /usr/bin/c++
-          /usr/bin/c++ --version
-          which /usr/bin/cc
-          /usr/bin/cc --version
+          echo "Paths for /usr/bin/clang++"
+          /usr/bin/clang++ -###
+          #          export PATH=/usr/local/opt/bison/bin:$PATH
+          #          which /usr/bin/c++
+          #          /usr/bin/c++ --version
+          #          which /usr/bin/cc
+          #          /usr/bin/cc --version
+          echo "Paths for /usr/bin/c++"
+          /usr/bin/c++ -###
+
+          echo "Paths for /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++"
+          /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/c++ -###
 
           xcode-select -p
           # Use proper toolchain
