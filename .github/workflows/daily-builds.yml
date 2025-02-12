@@ -110,7 +110,7 @@ jobs:
           CC=gcc-12 CXX=g++-12 cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja -DWITH_UNWIND=OFF \
             -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-ld_classic"
 
-          ninja src/all
+          ninja -v src/all
 
       - name: Test
         run: |
