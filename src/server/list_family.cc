@@ -1011,12 +1011,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
         std::array<string_view, 4> arr = {pop_key_, push_key_, DirToSv(popdir_), DirToSv(pushdir_)};
         RecordJournal(op_args, "LMOVE", arr, 1);
       }
-      auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
-      if (blocking_controller) {
-        blocking_controller->AwakeWatched(op_args.db_cntx.db_index, push_key_);
-      }
     }
-
     return OpStatus::OK;
   };
   tx->Execute(cb_move, false);
