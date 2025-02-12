@@ -22,6 +22,10 @@ class UniqueSlotChecker {
 
   std::optional<SlotId> GetUniqueSlotId() const;
 
+  bool IsCrossSlot() const {
+    return slot_id_ == kCrossSlot;
+  }
+
   void Reset() {
     slot_id_ = kNoSlotId;
   }
@@ -29,8 +33,8 @@ class UniqueSlotChecker {
  private:
   // kNoSlotId - if slot wasn't set at all
   static constexpr SlotId kNoSlotId = kMaxSlotNum + 1;
-  // kInvalidSlotId - if several different slots were set
-  static constexpr SlotId kInvalidSlotId = kNoSlotId + 1;
+  // kCrossSlot - if several different slots were set
+  static constexpr SlotId kCrossSlot = kNoSlotId + 1;
 
   SlotId slot_id_ = kNoSlotId;
 };
