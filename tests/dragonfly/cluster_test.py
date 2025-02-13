@@ -1898,13 +1898,12 @@ async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory)
 
     seeder = ExpirySeeder(timeout=4)
     seeder_task = asyncio.create_task(seeder.run(nodes[0].client))
-    await asyncio.sleep(1)
+    await seeder.wait_until_n_inserts(1000)
 
     logging.debug("Start migration")
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
     )
-    seeder.stop()
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
