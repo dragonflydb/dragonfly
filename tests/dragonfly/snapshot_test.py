@@ -402,7 +402,6 @@ class TestDflySnapshotOnShutdown:
         assert memory_counters == {"object_used_memory": 0}
 
     @pytest.mark.asyncio
-    @pytest.mark.slow
     async def test_snapshot(self, df_server, async_client):
         """Checks that:
         1. After reloading the snapshot file the data is the same
