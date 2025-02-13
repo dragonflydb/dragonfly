@@ -764,9 +764,11 @@ class ExpirySeeder:
     async def run(self, client):
         while not self.stop_flag:
             try:
+                pipeline = client.pipeline(transaction=False)
                 for i in range(0, self.batch_size):
-                    await client.execute_command(f"SET tmp{self.i} bar{self.i} EX {self.timeout}")
+                    pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX {self.timeout}")
                     self.i = self.i + 1
+                await pipeline.execute()
             except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
                 if self.stop_on_failure:
                     return
