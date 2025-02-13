@@ -427,7 +427,7 @@ class TestDflySnapshotOnShutdown:
         memory_after = await self._get_info_memory_fields(async_client)
         for counter, value in memory_before.items():
             # Counters should be non zero.
-            assert memory_after[counter] >= 0
+            assert memory_after[counter] > 0
 
         await self._delete_all_keys(async_client)
         memory_empty = await self._get_info_memory_fields(async_client)
