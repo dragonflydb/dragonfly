@@ -897,6 +897,9 @@ void Service::Shutdown() {
   pp_.AwaitFiberOnAll([](ProactorBase* pb) {
     ServerState::tlocal()->EnterLameDuck();
     facade::Connection::ShutdownThreadLocal();
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      GenericFamily::ShutdownShardData();
+    }
   });
 
   config_registry.Reset();
