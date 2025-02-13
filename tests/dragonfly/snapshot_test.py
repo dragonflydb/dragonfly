@@ -405,7 +405,7 @@ class TestDflySnapshotOnShutdown:
     async def test_snapshot(self, df_server, async_client):
         """Checks that:
         1. After reloading the snapshot file the data is the same
-        2. Memory counters after loading from snapshot is similar to before creating a snapshot
+        2. Memory counters after loading should be non zero
         3. Memory counters after deleting all keys loaded by snapshot - this validates the memory
            counting when loading from snapshot."""
 
