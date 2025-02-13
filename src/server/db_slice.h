@@ -526,6 +526,10 @@ class DbSlice {
     return &block_counter_;
   }
 
+  bool IsFetchedItemsEmpty() const {
+    return fetched_items_.empty();
+  }
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
