@@ -937,21 +937,17 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   const auto& key_index = *key_index_res;
-  optional<SlotId> keys_slot;
-  bool cross_slot = false;
-  // Iterate keys and check to which slot they belong.
+
+  UniqueSlotChecker slot_checker;
   for (string_view key : key_index.Range(args)) {
-    if (SlotId slot = KeySlot(key); keys_slot && slot != *keys_slot) {
-      cross_slot = true;  // keys belong to different slots
-      break;
-    } else {
-      keys_slot = slot;
-    }
+    slot_checker.Add(key);
   }
 
-  if (cross_slot) {
-    return ErrorReply{"-CROSSSLOT Keys in request don't hash to the same slot"};
+  if (slot_checker.IsCrossSlot()) {
+    return ErrorReply{kCrossSlotError};
   }
+
+  optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
 
   if (keys_slot.has_value()) {
     if (auto error = cluster::SlotOwnershipError(*keys_slot);
@@ -1866,28 +1862,27 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
     return Transaction::NON_ATOMIC;
 }
 
-// Start multi transaction for eval. Returns true if transaction was scheduled.
+// Starts multi transaction. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
-bool StartMultiEval(DbIndex dbid, CmdArgList keys, Transaction::MultiMode script_mode,
-                    ConnectionContext* cntx) {
+bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgList keys) {
   Transaction* tx = cntx->transaction;
   Namespace* ns = cntx->ns;
+  const DbIndex dbid = cntx->db_index();
 
-  if (keys.empty() && script_mode == Transaction::LOCK_AHEAD)
-    return false;
-
-  switch (script_mode) {
+  switch (tx_mode) {
     case Transaction::GLOBAL:
       tx->StartMultiGlobal(ns, dbid);
       return true;
     case Transaction::LOCK_AHEAD:
+      if (keys.empty())
+        return false;
       tx->StartMultiLockedAhead(ns, dbid, keys);
       return true;
     case Transaction::NON_ATOMIC:
       tx->StartMultiNonAtomic();
       return true;
     default:
-      CHECK(false) << "Invalid mode";
+      LOG(FATAL) << "Invalid mode";
   };
 
   return false;
@@ -2009,7 +2004,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
         return builder->SendError(err);
       }
     } else {
-      scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, script_mode, cntx);
+      scheduled = StartMulti(cntx, script_mode, eval_args.keys);
     }
 
     ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
@@ -2132,27 +2127,6 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
   return out;
 }
 
-// Return true if transaction was scheduled, false if scheduling was not required.
-void StartMultiExec(ConnectionContext* cntx, ConnectionState::ExecInfo* exec_info,
-                    Transaction::MultiMode multi_mode) {
-  auto* tx = cntx->transaction;
-  auto dbid = cntx->db_index();
-  switch (multi_mode) {
-    case Transaction::GLOBAL:
-      tx->StartMultiGlobal(cntx->ns, dbid);
-      break;
-    case Transaction::LOCK_AHEAD: {
-      auto vec = CollectAllKeys(exec_info);
-      tx->StartMultiLockedAhead(cntx->ns, dbid, absl::MakeSpan(vec));
-    } break;
-    case Transaction::NON_ATOMIC:
-      tx->StartMultiNonAtomic();
-      break;
-    case Transaction::NOT_DETERMINED:
-      LOG(FATAL) << "should not reach";
-  };
-}
-
 void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   auto& exec_info = cmd_cntx.conn_cntx->conn_state.exec_info;
@@ -2180,6 +2154,18 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
 
+  auto keys = CollectAllKeys(&exec_info);
+  if (IsClusterEnabled()) {
+    UniqueSlotChecker slot_checker;
+    for (const auto& s : keys) {
+      slot_checker.Add(s);
+    }
+
+    if (slot_checker.IsCrossSlot()) {
+      return rb->SendError(kCrossSlotError);
+    }
+  }
+
   // The transaction can contain script load script execution, determine their presence ahead to
   // customize logic below.
   ExecScriptUse state = DetermineScriptPresense(exec_info.body);
@@ -2196,8 +2182,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
   bool scheduled = false;
   if (multi_mode != Transaction::NOT_DETERMINED) {
-    StartMultiExec(cntx, &exec_info, multi_mode);
-    scheduled = true;
+    scheduled = StartMulti(cntx, multi_mode, keys);
   }
 
   // EXEC should not run if any of the watched keys expired.

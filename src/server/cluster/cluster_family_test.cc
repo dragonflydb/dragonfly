@@ -495,6 +495,17 @@ TEST_F(ClusterFamilyTest, ClusterEvalCrossslot) {
   EXPECT_THAT(Run({"EVALSHA", sha.GetString(), "3", "x1", "x2", "x3"}), ErrArg("CROSSSLOT"));
 }
 
+TEST_F(ClusterFamilyTest, ClusterMultiExec) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  Run({"MULTI"});
+  Run({"SET", "X1", "X1"});
+  Run({"SET", "X2", "X2"});
+  Run({"SET", "X3", "X3"});
+
+  EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
+}
+
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
   ConfigSingleNodeCluster(GetMyId());
 
