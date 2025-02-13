@@ -2513,7 +2513,7 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
     auto* es = EngineShard::tlocal();
     if (es && to == GlobalState::ACTIVE) {
       DbSlice& db = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
-      DCHECK(db.IsFetchedItemsEmpty());
+      DCHECK(db.IsLoadInProgressZeroInCacheMode());
     }
   });
   return to;

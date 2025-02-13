@@ -484,6 +484,13 @@ class DbSlice {
     --load_ref_count_;
   }
 
+  bool IsLoadInProgressZeroInCacheMode() const {
+    if (!cache_mode_) {
+      return true;
+    }
+    return IsCacheMode();
+  }
+
   // Test hook to inspect last locked keys.
   const auto& TEST_GetLastLockedFps() const {
     return uniq_fps_;
@@ -524,10 +531,6 @@ class DbSlice {
 
   LocalBlockingCounter* BlockingCounter() {
     return &block_counter_;
-  }
-
-  bool IsFetchedItemsEmpty() const {
-    return fetched_items_.empty();
   }
 
  private:
