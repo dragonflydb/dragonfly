@@ -1865,9 +1865,9 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 // Starts multi transaction. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
 bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgList keys) {
-  auto* tx = cntx->transaction;
-  auto* ns = cntx->ns;
-  const auto dbid = cntx->db_index();
+  Transaction* tx = cntx->transaction;
+  Namespace* ns = cntx->ns;
+  const DbIndex dbid = cntx->db_index();
 
   switch (tx_mode) {
     case Transaction::GLOBAL:
@@ -2154,6 +2154,18 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
 
+  auto keys = CollectAllKeys(&exec_info);
+  if (IsClusterEnabled()) {
+    UniqueSlotChecker slot_checker;
+    for (const auto& s : keys) {
+      slot_checker.Add(s);
+    }
+
+    if (slot_checker.IsCrossSlot()) {
+      return rb->SendError(kCrossSlotError);
+    }
+  }
+
   // The transaction can contain script load script execution, determine their presence ahead to
   // customize logic below.
   ExecScriptUse state = DetermineScriptPresense(exec_info.body);
@@ -2162,16 +2174,6 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   if (state != ExecScriptUse::NONE) {
     exec_info.preborrowed_interpreter =
         BorrowedInterpreter(cmd_cntx.tx, &cntx->conn_state).Release();
-  }
-
-  auto keys = CollectAllKeys(&exec_info);
-  UniqueSlotChecker slot_checker;
-  for (const auto& s : keys) {
-    slot_checker.Add(s);
-  }
-
-  if (slot_checker.IsCrossSlot()) {
-    return rb->SendError(kCrossSlotError);
   }
 
   // Determine according multi mode, not only only flag, but based on presence of global commands
