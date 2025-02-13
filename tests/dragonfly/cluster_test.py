@@ -1876,6 +1876,56 @@ async def test_start_replication_during_migration(
     assert await seeder.compare(fake_capture, r1_node.instance.port)
 
 
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory):
+    # Check data migration from one node to another with expiration
+    instances = [
+        df_factory.create(port=next(next_port), admin_port=next(next_port)) for i in range(2)
+    ]
+
+    df_factory.start_all(instances)
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    logging.debug("Start seeder")
+    await nodes[0].client.execute_command("debug", "populate", "100000", "foo", "100", "RAND")
+
+    capture_before = await StaticSeeder.capture(nodes[0].client)
+
+    seeder = ExpirySeeder(timeout=4)
+    seeder_task = asyncio.create_task(seeder.run(nodes[0].client))
+    await seeder.wait_until_n_inserts(1000)
+
+    logging.debug("Start migration")
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
+
+    logging.debug("Stop seeders")
+    seeder.stop()
+    await seeder_task
+
+    logging.debug("finish migration")
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
+
+    # wait to expire all keys
+    await asyncio.sleep(5)
+
+    assert await StaticSeeder.capture(nodes[1].client) == capture_before
+
+    stats = await nodes[1].client.info("STATS")
+    assert stats["expired_keys"] > 0
+
+
 @pytest.mark.parametrize("migration_first", [False, True])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_snapshoting_during_migration(
