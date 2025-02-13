@@ -209,7 +209,7 @@ class Transaction {
 
   // Called by engine shard to execute a transaction hop.
   // Returns true if the transaction concludes.
-  bool RunInShard(EngineShard* shard);
+  bool RunInShard(EngineShard* shard, bool allow_q_removal);
 
   // Registers transaction into watched queue and blocks until a) either notification is received.
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.

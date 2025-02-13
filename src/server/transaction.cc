@@ -577,7 +577,7 @@ void Transaction::PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, D
 }
 
 // Runs in the dbslice thread. Returns true if the transaction concluded.
-bool Transaction::RunInShard(EngineShard* shard) {
+bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
   DCHECK_GT(txid_, 0u);
   CHECK(cb_ptr_) << DebugId();
 
@@ -596,7 +596,6 @@ bool Transaction::RunInShard(EngineShard* shard) {
   bool awaked_prerun = sd.local_mask & AWAKED_Q;
   DCHECK(was_suspended || !awaked_prerun);
 
-  bool is_ooo = sd.local_mask & OUT_OF_ORDER;
   IntentLock::Mode mode = LockMode();
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
@@ -611,10 +610,10 @@ bool Transaction::RunInShard(EngineShard* shard) {
 
   bool is_concluding = coordinator_state_ & COORD_CONCLUDING;
 
-  // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
+  // If we're allowed, we remove ourselves upon first invocation from the queue,
   // and successive hops are run by continuation_trans_ in engine shard.
-  // Otherwise we can remove ourselves only when we're concluding (so no more hops will follow).
-  if ((is_concluding || !is_ooo) && sd.pq_pos != TxQueue::kEnd) {
+  // Otherwise we can remove ourselves only when we're concluding (so no more hops follow).
+  if (sd.pq_pos != TxQueue::kEnd && (is_concluding || allow_q_removal)) {
     VLOG(2) << "Remove from txq " << this->DebugId();
     shard->txq()->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
@@ -623,7 +622,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // If it's a final hop we should release the locks.
   if (is_concluding) {
-    bool became_suspended = sd.local_mask & WAS_SUSPENDED;
+    bool became_suspended = !was_suspended && (sd.local_mask & WAS_SUSPENDED);
     KeyLockArgs largs;
 
     if (IsGlobal()) {
@@ -637,7 +636,7 @@ bool Transaction::RunInShard(EngineShard* shard) {
       // If a transaction has been suspended, we keep the lock so that future transaction
       // touching those keys will be ordered via TxQueue. It's necessary because we preserve
       // the atomicity of awaked transactions by halting the TxQueue.
-      if (was_suspended || !became_suspended) {
+      if (!became_suspended) {
         GetDbSlice(shard->shard_id()).Release(mode, largs);
         sd.local_mask &= ~KEYLOCK_ACQUIRED;
       }

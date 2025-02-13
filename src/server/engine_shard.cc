@@ -602,7 +602,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         << trans->DEBUG_GetLocalMask(sid);
 
     // Commands like BRPOPLPUSH don't conclude immediately
-    if (!trans->RunInShard(this)) {
+    if (!trans->RunInShard(this, true)) {
       // execution is blocked while HasAwakedTransaction() returns true, so no need to set
       // continuation_trans_. Moreover, setting it for wakened multi-hop transactions may lead to
       // inconcistency, see BLMoveSimultaneously test.
@@ -615,9 +615,9 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   bool update_stats = false;
 
-  auto run = [this, &update_stats](Transaction* tx) -> bool /* concluding */ {
+  auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
     update_stats = true;
-    return tx->RunInShard(this);
+    return tx->RunInShard(this, allow_removal);
   };
 
   // Check the currently running transaction, we have to handle it first until it concludes
@@ -627,7 +627,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       trans = nullptr;
 
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
-      if (bool concludes = run(continuation_trans_); concludes) {
+      if (bool concludes = run(continuation_trans_, true); concludes) {
         continuation_trans_ = nullptr;
       }
     }
@@ -666,7 +666,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     committed_txid_ = txid;
 
     DCHECK(!continuation_trans_);  // while() check above ensures this.
-    if (bool concludes = run(head); !concludes) {
+    if (bool concludes = run(head, true); !concludes) {
+      DCHECK_EQ(head->DEBUG_GetTxqPosInShard(sid), TxQueue::kEnd) << head->DebugId(sid);
       continuation_trans_ = head;
     }
   }
@@ -679,15 +680,19 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     CHECK(trans != continuation_trans_);
 
     bool is_ooo = trans_mask & Transaction::OUT_OF_ORDER;
-    bool concludes = run(trans);
+
+    // For OOO transactions that are still in the queue, we can not remove them unless
+    // they conclude.
+    bool concludes = run(trans, !is_ooo);
     if (is_ooo && concludes) {
       stats_.tx_ooo_total++;
     }
 
     // If the transaction concluded, it must remove itself from the tx queue.
     // Otherwise it is required to stay there to keep the relative order.
-    if (is_ooo && !trans->IsMulti())
-      LOG_IF(DFATAL, concludes != (trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd));
+    if (!concludes && is_ooo) {
+      LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
+    }
   }
   if (update_stats) {
     CacheStats();
