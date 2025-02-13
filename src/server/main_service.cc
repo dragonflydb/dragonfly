@@ -2509,7 +2509,14 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   VLOG(1) << "Switching state from " << from << " to " << to;
   global_state_ = to;
 
-  pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
+  pp_.Await([&](ProactorBase*) {
+    ServerState::tlocal()->set_gstate(to);
+    auto* es = EngineShard::tlocal();
+    if (es && to == GlobalState::ACTIVE) {
+      DbSlice& db = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+      DCHECK(db.IsLoadRefCountZero());
+    }
+  });
   return to;
 }
 

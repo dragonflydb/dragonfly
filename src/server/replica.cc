@@ -542,6 +542,7 @@ error_code Replica::InitiateDflySync() {
     // Lock to prevent the error handler from running instantly
     // while the flows are in a mixed state.
     lock_guard lk{flows_op_mu_};
+
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
 
     size_t num_full_flows =
