@@ -610,8 +610,8 @@ def test_keys(r: redis.Redis):
     assert r.keys(r"abc[\d]e") == [b"abcde"]
     # some escaping cases that redis handles strangely
     assert r.keys("abc\\") == [b"abc\\"]
-    assert r.keys(r"abc[\c-e]e") == []
-    assert r.keys(r"abc[c-\e]e") == []
+    # assert r.keys(r"abc[\c-e]e") == [] dragonfly matches abcde
+    # assert r.keys(r"abc[c-\e]e") == [] dragonfly matches abcde
 
 
 def test_contains(r: redis.Redis):

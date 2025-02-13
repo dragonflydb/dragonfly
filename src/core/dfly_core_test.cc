@@ -248,6 +248,7 @@ TEST_F(StringMatchTest, Glob2Regex) {
   EXPECT_EQ(GlobMatcher::Glob2Regex("[]a"), "[]a");
   EXPECT_EQ(GlobMatcher::Glob2Regex("\\d"), "d");
   EXPECT_EQ(GlobMatcher::Glob2Regex("[\\d]"), "[\\\\d]");
+  EXPECT_EQ(GlobMatcher::Glob2Regex("abc\\"), "abc\\\\");
 
   reflex::Matcher matcher("abc[\\\\d]e");
   matcher.input("abcde");
@@ -298,6 +299,7 @@ TEST_F(StringMatchTest, Special) {
   EXPECT_FALSE(MatchLen("[^", "[^", 0));
   EXPECT_TRUE(MatchLen("[$?^]a", "?a", 0));
   EXPECT_TRUE(MatchLen("abc[\\d]e", "abcde", 0));
+  EXPECT_TRUE(MatchLen("foo\\", "foo\\", 0));
 }
 
 using benchmark::DoNotOptimize;

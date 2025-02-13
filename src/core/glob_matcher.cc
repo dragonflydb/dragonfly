@@ -59,11 +59,11 @@ string GlobMatcher::Glob2Regex(string_view glob) {
       case '\\':
         if (i + 1 < glob.size()) {
           ++i;
-          if (absl::ascii_ispunct(glob[i])) {
-            regex.push_back('\\');
-          }
-          regex.push_back(glob[i]);
         }
+        if (absl::ascii_ispunct(glob[i])) {
+          regex.push_back('\\');
+        }
+        regex.push_back(glob[i]);
         break;
       case '[':
         regex.push_back('[');
