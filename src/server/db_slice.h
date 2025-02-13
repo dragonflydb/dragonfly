@@ -484,11 +484,8 @@ class DbSlice {
     --load_ref_count_;
   }
 
-  bool IsLoadInProgressZeroInCacheMode() const {
-    if (!cache_mode_) {
-      return true;
-    }
-    return IsCacheMode();
+  bool IsLoadRefCountZero() const {
+    return load_ref_count_ == 0;
   }
 
   // Test hook to inspect last locked keys.

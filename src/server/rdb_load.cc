@@ -2233,7 +2233,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   bc->Wait();  // wait for sentinels to report.
   // Decrement local one if it exists
   if (EngineShard* es = EngineShard::tlocal(); es) {
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().IncrLoadInProgress();
+    namespaces->GetDefaultNamespace().GetCurrentDbSlice().DecrLoadInProgress();
   }
 
   absl::Duration dur = absl::Now() - start_time;
