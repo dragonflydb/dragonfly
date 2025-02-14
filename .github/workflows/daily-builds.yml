@@ -101,18 +101,14 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/build
 
-          ls /usr/local/
-          #export PATH=/usr/local/opt/bison/bin:$PATH
-          #ls /opt/homebrew/bin/
-
-          bison --version
-          which bison
           export PATH=/opt/homebrew/bin:$PATH
           export PATH=/opt/homebrew/opt/bison/bin/:$PATH
+
+          which bison
+          bison --version
+
           gcc-12 --version
 
-          bison --version
-          which bison
           autoconf --help
           autoreconf --help
 
@@ -121,14 +117,12 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_FLAGS="-Wl,-ld_classic" \
             -DCMAKE_C_COMPILER="gcc-12" -DCMAKE_CXX_COMPILER="g++-12"
 
-          ninja rdb_test
+          ninja src/all
 
       - name: Test
         run: |
             cd $GITHUB_WORKSPACE/build
-            ./rdb_test
-            # error
-            exit 1
+            ctest -V -L DFLY
 
       - name: Upload logs
         if: failure()
