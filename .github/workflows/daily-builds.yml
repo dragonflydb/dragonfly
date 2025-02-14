@@ -93,7 +93,7 @@ jobs:
           rm /usr/local/bin/idle3* || :
           rm /usr/local/bin/pydoc* || :
           rm /usr/local/bin/python3* || :
-          brew update && brew install ninja boost automake zstd bison autoreconf
+          brew update && brew install ninja boost automake zstd bison autoconf
 
           mkdir -p $GITHUB_WORKSPACE/build
 
@@ -102,11 +102,9 @@ jobs:
           cd $GITHUB_WORKSPACE/build
 
           export PATH=/usr/local/opt/bison/bin:$PATH
-          ls /usr/local/opt/autoreconf/bin
-          ls /opt/homebrew/
+          ls /opt/homebrew/opt/
 
-          export PATH=/usr/local/opt/autoreconf/bin:$PATH
-          export PATH=/opte/homebrew/opt/autoreconf/bin:$PATH
+          export PATH=/opt/homebrew/opt/autoconf/bin:$PATH
           gcc-12 --version
 
           bison --version
