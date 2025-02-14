@@ -123,10 +123,3 @@ jobs:
         run: |
             cd $GITHUB_WORKSPACE/build
             ctest -V -L DFLY
-
-      - name: Upload logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: failed logs
-          path: /Users/runner/work/dragonfly/dragonfly/build/third_party/src/*
