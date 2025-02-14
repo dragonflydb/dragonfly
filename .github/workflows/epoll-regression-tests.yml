@@ -57,7 +57,7 @@ jobs:
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           # Chain ternary oprator of the form (which can be nested)
           # (expression == condition && <true expression> || <false expression>)
-          epoll: ${{ matrix.proactor == 'Epoll' && 'true' || '' }}
+          epoll: ${{ matrix.proactor == 'Epoll' && 'epoll' || 'iouring' }}
 
       - name: Upload logs on failure
         if: failure()
