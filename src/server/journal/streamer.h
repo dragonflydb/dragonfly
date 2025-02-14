@@ -47,7 +47,7 @@ class JournalStreamer {
   void ThrottleIfNeeded();
 
   virtual bool ShouldWrite(const journal::JournalItem& item) const {
-    return !IsStopped();
+    return cntx_->IsRunning();
   }
 
   void WaitForInflightToComplete();
@@ -58,10 +58,6 @@ class JournalStreamer {
  private:
   void AsyncWrite();
   void OnCompletion(std::error_code ec, size_t len);
-
-  bool IsStopped() const {
-    return cntx_->IsCancelled();
-  }
 
   bool IsStalled() const;
 
@@ -92,10 +88,6 @@ class RestoreStreamer : public JournalStreamer {
 
   void SendFinalize(long attempt);
 
-  bool IsSnapshotFinished() const {
-    return snapshot_finished_;
-  }
-
  private:
   void OnDbChange(DbIndex db_index, const DbSlice::ChangeReq& req);
   bool ShouldWrite(const journal::JournalItem& item) const override;
@@ -122,8 +114,7 @@ class RestoreStreamer : public JournalStreamer {
   DbTableArray db_array_;
   uint64_t snapshot_version_ = 0;
   cluster::SlotSet my_slots_;
-  bool fiber_cancelled_ = false;
-  bool snapshot_finished_ = false;
+
   ThreadLocalMutex big_value_mu_;
   Stats stats_;
 };

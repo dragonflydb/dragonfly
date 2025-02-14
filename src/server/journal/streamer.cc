@@ -42,7 +42,7 @@ JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx
 }
 
 JournalStreamer::~JournalStreamer() {
-  if (!cntx_->IsCancelled()) {
+  if (!cntx_->IsError()) {
     DCHECK_EQ(in_flight_bytes_, 0u);
   }
   VLOG(1) << "~JournalStreamer";
@@ -83,7 +83,7 @@ void JournalStreamer::Cancel() {
   VLOG(1) << "JournalStreamer::Cancel";
   waker_.notifyAll();
   journal_->UnregisterOnChange(journal_cb_id_);
-  if (!cntx_->IsCancelled()) {
+  if (!cntx_->IsError()) {
     WaitForInflightToComplete();
   }
 }
@@ -134,10 +134,12 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
   DVLOG(3) << "Completing " << in_flight_bytes_;
   in_flight_bytes_ = 0;
   pending_buf_.Pop();
-  if (ec && !IsStopped()) {
-    cntx_->ReportError(ec);
-  } else if (!pending_buf_.Empty() && !IsStopped()) {
-    AsyncWrite();
+  if (cntx_->IsRunning()) {
+    if (ec) {
+      cntx_->ReportError(ec);
+    } else if (!pending_buf_.Empty()) {
+      AsyncWrite();
+    }
   }
 
   // notify ThrottleIfNeeded or WaitForInflightToComplete that waits
@@ -149,7 +151,7 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
 }
 
 void JournalStreamer::ThrottleIfNeeded() {
-  if (IsStopped() || !IsStalled())
+  if (!cntx_->IsRunning() || !IsStalled())
     return;
 
   auto next =
@@ -158,7 +160,7 @@ void JournalStreamer::ThrottleIfNeeded() {
   size_t sent_start = total_sent_;
 
   std::cv_status status =
-      waker_.await_until([this]() { return !IsStalled() || IsStopped(); }, next);
+      waker_.await_until([this]() { return !IsStalled() || !cntx_->IsRunning(); }, next);
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
@@ -188,7 +190,7 @@ RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal
 }
 
 void RestoreStreamer::Start(util::FiberSocketBase* dest, bool send_lsn) {
-  if (fiber_cancelled_)
+  if (!cntx_->IsRunning())
     return;
 
   VLOG(1) << "RestoreStreamer start";
@@ -206,16 +208,16 @@ void RestoreStreamer::Run() {
   PrimeTable* pt = &db_array_[0]->prime;
 
   do {
-    if (fiber_cancelled_)
+    if (!cntx_->IsRunning())
       return;
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
-      if (fiber_cancelled_)  // Could be cancelled any time as Traverse may preempt
+      if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
         return;
 
       db_slice_->FlushChangeToEarlierCallbacks(0 /*db_id always 0 for cluster*/,
                                                DbSlice::Iterator::FromPrime(it), snapshot_version_);
 
-      if (fiber_cancelled_)  // Could have been cancelled in above call too
+      if (!cntx_->IsRunning())  // Could have been cancelled in above call too
         return;
 
       std::lock_guard guard(big_value_mu_);
@@ -231,7 +233,7 @@ void RestoreStreamer::Run() {
       ThisFiber::Yield();
       last_yield = 0;
     }
-  } while (cursor && !fiber_cancelled_);
+  } while (cursor);
 
   VLOG(1) << "RestoreStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
           << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
@@ -252,8 +254,7 @@ void RestoreStreamer::SendFinalize(long attempt) {
   writer.Write(entry);
   Write(std::move(sink).str());
 
-  // TODO: is the intent here to flush everything?
-  //
+  // DFLYMIGRATE ACK command has a timeout so we want to send it only when LSN is ready to be sent
   ThrottleIfNeeded();
 }
 
@@ -263,7 +264,7 @@ RestoreStreamer::~RestoreStreamer() {
 void RestoreStreamer::Cancel() {
   auto sver = snapshot_version_;
   snapshot_version_ = 0;  // to prevent double cancel in another fiber
-  fiber_cancelled_ = true;
+  cntx_->Cancel();
   if (sver != 0) {
     db_slice_->UnregisterOnChange(sver);
     JournalStreamer::Cancel();
