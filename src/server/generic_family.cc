@@ -32,6 +32,7 @@ extern "C" {
 #include "server/search/doc_index.h"
 #include "server/set_family.h"
 #include "server/transaction.h"
+#include "util/fibers/proactor_base.h"
 #include "util/varz.h"
 
 ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
@@ -40,6 +41,7 @@ ABSL_FLAG(uint32_t, keys_output_limit, 8192, "Maximum number of keys output by k
 namespace dfly {
 using namespace std;
 using namespace facade;
+using util::fb2::ProactorBase;
 
 namespace {
 
@@ -993,14 +995,46 @@ std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, SinkRepl
   return flags;
 }
 
-void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
+constexpr uint32_t kClearStepSize = 1024;
+struct ClearNode {
+  DenseSet* ds;
+  uint32_t cursor;
+  ClearNode* next;
+
+  ClearNode(DenseSet* d, uint32_t c, ClearNode* n) : ds(d), cursor(c), next(n) {
+  }
+};
+
+// We add async deletion requests to a linked list and process them asynchronously
+// in each thread.
+__thread ClearNode* clear_head = nullptr;
+
+int32_t ClearQueuedDenseSetEntries() {
+  if (clear_head == nullptr)
+    return -1;  // unregister itself.
+
+  auto* current = clear_head;
+
+  DVLOG(2) << "ClearQueuedDenseSetEntries " << current->cursor;
+  uint32_t next = current->ds->ClearStep(current->cursor, kClearStepSize);
+  if (next == current->ds->BucketCount()) {  // reached the end.
+    CompactObj::DeleteMR<DenseSet>(current->ds);
+    clear_head = current->next;
+    delete current;
+  } else {
+    current->cursor = next;
+  }
+  return ProactorBase::kOnIdleMaxLevel;
+};
+
+void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool async) {
   atomic_uint32_t result{0};
   auto* builder = cmd_cntx.rb;
   bool is_mc = (builder->GetProtocol() == Protocol::MEMCACHE);
 
-  auto cb = [&result](const Transaction* t, EngineShard* shard) {
+  auto cb = [&](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
-    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args);
+    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args, async);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
     return OpStatus::OK;
@@ -1028,7 +1062,17 @@ void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
 
 }  // namespace
 
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
+void GenericFamily::ShutdownShardData() {
+  // we do not bother with deleting the sets during the shutdown.
+  // this works well because we destroy mimalloc heap anyways.
+  while (clear_head) {
+    auto* next = clear_head->next;
+    delete clear_head;
+    clear_head = next;
+  }
+}
+
+OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async) {
   DVLOG(1) << "Del: " << keys.Front();
   auto& db_slice = op_args.GetDbSlice();
 
@@ -1038,6 +1082,31 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
     if (!IsValid(it))
       continue;
+
+    PrimeValue& pv = it->second;
+    if (pv.ObjType() == OBJ_SET && pv.Encoding() == kEncodingStrMap2) {
+      DenseSet* ds = (DenseSet*)pv.RObjPtr();
+      pv.SetRObjPtr(nullptr);
+
+      uint32_t next = ds->ClearStep(0, kClearStepSize);
+      if (next < ds->BucketCount() && async) {
+        ProactorBase* pb = ProactorBase::me();
+        DCHECK(pb);
+
+        bool launch_task = (clear_head == nullptr);
+
+        // register ds
+        clear_head = new ClearNode{ds, next, clear_head};
+        ds = nullptr;
+        if (launch_task) {
+          pb->AddOnIdleTask(&ClearQueuedDenseSetEntries);
+        }
+      }
+
+      if (ds) {
+        CompactObj::DeleteMR<DenseSet>(ds);
+      }
+    }
 
     db_slice.Del(op_args.db_cntx, it);
     ++res;
@@ -1049,11 +1118,11 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
 void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
   VLOG(1) << "Del " << ArgS(args, 0);
 
-  DeleteGeneric(args, cmd_cntx);
+  DeleteGeneric(args, cmd_cntx, false);
 }
 
 void GenericFamily::Unlink(CmdArgList args, const CommandContext& cmd_cntx) {
-  DeleteGeneric(args, cmd_cntx);
+  DeleteGeneric(args, cmd_cntx, true);
 }
 
 void GenericFamily::Ping(CmdArgList args, const CommandContext& cmd_cntx) {
