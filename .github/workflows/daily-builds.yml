@@ -102,9 +102,9 @@ jobs:
           cd $GITHUB_WORKSPACE/build
 
           export PATH=/usr/local/opt/bison/bin:$PATH
-          ls /opt/homebrew/opt/
+          ls /opt/homebrew/bin/
 
-          export PATH=/opt/homebrew/opt/autoconf/bin:$PATH
+          export PATH=/opt/homebrew/bin:$PATH
           gcc-12 --version
 
           bison --version
