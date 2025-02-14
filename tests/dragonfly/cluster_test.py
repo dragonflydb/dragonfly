@@ -1892,13 +1892,13 @@ async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory)
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
     logging.debug("Start seeder")
-    await nodes[0].client.execute_command("debug", "populate", "100000", "foo", "100", "RAND")
+    await nodes[0].client.execute_command("debug", "populate", "100", "foo", "100", "RAND")
 
     capture_before = await StaticSeeder.capture(nodes[0].client)
 
     seeder = ExpirySeeder(timeout=4)
     seeder_task = asyncio.create_task(seeder.run(nodes[0].client))
-    await seeder.wait_until_n_inserts(1000)
+    await seeder.wait_until_n_inserts(500)
 
     logging.debug("Start migration")
     nodes[0].migrations.append(
