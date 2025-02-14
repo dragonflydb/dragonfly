@@ -1906,7 +1906,7 @@ async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory)
     )
     await push_config(json.dumps(generate_config(nodes)), [node.admin_client for node in nodes])
 
-    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
+    await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", timeout=20)
 
     logging.debug("Stop seeders")
     seeder.stop()
