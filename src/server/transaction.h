@@ -159,12 +159,14 @@ class Transaction {
   // State on specific shard.
   enum LocalMask : uint16_t {
     ACTIVE = 1,  // Whether its active on this shard (to schedule or execute hops)
-    OPTIMISTIC_EXECUTION = 1 << 7,  // Whether the shard executed optimistically (during schedule)
+    OPTIMISTIC_EXECUTION = 1 << 1,  // Whether the shard executed optimistically (during schedule)
     // Whether it can run out of order. Undefined if KEYLOCK_ACQUIRED isn't set
     OUT_OF_ORDER = 1 << 2,
     // Whether its key locks are acquired, never set for global commands.
     KEYLOCK_ACQUIRED = 1 << 3,
-    SUSPENDED_Q = 1 << 4,   // Whether it suspended (by WatchInShard())
+
+    // Whether it was suspended (by WatchInShard()). This flag is sticky and stays forever once set.
+    WAS_SUSPENDED = 1 << 4,
     AWAKED_Q = 1 << 5,      // Whether it was awakened (by NotifySuspended())
     UNLOCK_MULTI = 1 << 6,  // Whether this shard executed UnlockMultiShardCb
   };
@@ -206,9 +208,8 @@ class Transaction {
   void Conclude();
 
   // Called by engine shard to execute a transaction hop.
-  // txq_ooo is set to true if the transaction is running out of order
-  // not as the tx queue head. Returns true if the transaction concludes.
-  bool RunInShard(EngineShard* shard, bool txq_ooo);
+  // Returns true if the transaction concludes.
+  bool RunInShard(EngineShard* shard, bool allow_q_removal);
 
   // Registers transaction into watched queue and blocks until a) either notification is received.
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
@@ -219,7 +220,7 @@ class Transaction {
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue.
-  bool NotifySuspended(TxId committed_ts, ShardId sid, std::string_view key);
+  bool NotifySuspended(ShardId sid, std::string_view key);
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
   // Must be called from coordinator thread.
