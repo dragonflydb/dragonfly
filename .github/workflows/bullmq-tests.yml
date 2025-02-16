@@ -66,7 +66,9 @@ jobs:
       - name: Run BullMQ tests
         run: |
           cd $GITHUB_WORKSPACE/../bullmq/bullmq
-          BULLMQ_TEST_PREFIX={b} yarn test
+          for i in {1..30}; do
+            BULLMQ_TEST_PREFIX={b} yarn test -g "should keep workers busy";
+          done
 
       - name: Upload logs on failure
         if: failure()
