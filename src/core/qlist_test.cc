@@ -8,6 +8,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <gmock/gmock.h>
+#include <mimalloc.h>
 
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -125,6 +126,7 @@ static void SetupMalloc() {
   // configure redis lib zmalloc which requires mimalloc heap to work.
   auto* tlh = mi_heap_get_backing();
   init_zmalloc_threadlocal(tlh);
+  mi_option_set(mi_option_purge_delay, -1);  // disable purging of segments (affects benchmarks)
 }
 
 class QListTest : public ::testing::Test {
@@ -309,15 +311,17 @@ TEST_F(QListTest, RemoveListpack) {
   ASSERT_FALSE(it.Next());
 }
 
-using FillCompress = tuple<int, unsigned>;
+using FillCompress = tuple<int, unsigned, QList::COMPR_METHOD>;
 
 class PrintToFillCompress {
  public:
   std::string operator()(const TestParamInfo<FillCompress>& info) const {
     int fill = get<0>(info.param);
     int compress = get<1>(info.param);
+    QList::COMPR_METHOD method = get<2>(info.param);
     string fill_str = fill >= 0 ? absl::StrCat("f", fill) : absl::StrCat("fminus", -fill);
-    return absl::StrCat(fill_str, "compress", compress);
+    string method_str = method == QList::LZF ? "lzf" : "lz4";
+    return absl::StrCat(fill_str, "compr", compress, method_str);
   }
 };
 
@@ -325,12 +329,13 @@ class OptionsTest : public QListTest, public WithParamInterface<FillCompress> {}
 
 INSTANTIATE_TEST_SUITE_P(Matrix, OptionsTest,
                          Combine(Values(-5, -4, -3, -2, -1, 0, 1, 2, 32, 66, 128, 999),
-                                 Values(0, 1, 2, 3, 4, 5, 6, 10)),
+                                 Values(0, 1, 2, 3, 4, 5, 6, 10), Values(QList::LZF, QList::LZ4)),
                          PrintToFillCompress());
 
 TEST_P(OptionsTest, Numbers) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
+  ql_.set_compr_method(method);
   array<int64_t, 5000> nums;
 
   for (unsigned i = 0; i < nums.size(); i++) {
@@ -352,8 +357,9 @@ TEST_P(OptionsTest, Numbers) {
 }
 
 TEST_P(OptionsTest, NumbersIndex) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
+  ql_.set_compr_method(method);
 
   long long nums[5000];
   for (int i = 0; i < 760; i++) {
@@ -371,8 +377,9 @@ TEST_P(OptionsTest, NumbersIndex) {
 }
 
 TEST_P(OptionsTest, DelRangeA) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
+  ql_.set_compr_method(method);
   long long nums[5000];
   for (int i = 0; i < 33; i++) {
     nums[i] = -5157318210846258176 + i;
@@ -395,8 +402,9 @@ TEST_P(OptionsTest, DelRangeA) {
 }
 
 TEST_P(OptionsTest, DelRangeB) {
-  auto [fill, _] = GetParam();
+  auto [fill, _, method] = GetParam();
   ql_ = QList(fill, QUICKLIST_NOCOMPRESS);  // ignore compress parameter
+  ql_.set_compr_method(method);
 
   long long nums[5000];
   for (int i = 0; i < 33; i++) {
@@ -434,8 +442,10 @@ TEST_P(OptionsTest, DelRangeB) {
 }
 
 TEST_P(OptionsTest, DelRangeC) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
+  ql_.set_compr_method(method);
+
   long long nums[5000];
   for (int i = 0; i < 33; i++) {
     nums[i] = -5157318210846258176 + i;
@@ -457,8 +467,10 @@ TEST_P(OptionsTest, DelRangeC) {
 }
 
 TEST_P(OptionsTest, DelRangeD) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
+  ql_.set_compr_method(method);
+
   long long nums[5000];
   for (int i = 0; i < 33; i++) {
     nums[i] = -5157318210846258176 + i;
@@ -473,8 +485,9 @@ TEST_P(OptionsTest, DelRangeD) {
 }
 
 TEST_P(OptionsTest, DelRangeNode) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(-2, compress);
+  ql_.set_compr_method(method);
 
   for (int i = 0; i < 32; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -485,8 +498,9 @@ TEST_P(OptionsTest, DelRangeNode) {
 }
 
 TEST_P(OptionsTest, DelRangeNodeOverflow) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(-2, compress);
+  ql_.set_compr_method(method);
 
   for (int i = 0; i < 32; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -496,7 +510,7 @@ TEST_P(OptionsTest, DelRangeNodeOverflow) {
 }
 
 TEST_P(OptionsTest, DelRangeMiddle100of500) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(32, compress);
 
   for (int i = 0; i < 500; i++)
@@ -508,7 +522,7 @@ TEST_P(OptionsTest, DelRangeMiddle100of500) {
 }
 
 TEST_P(OptionsTest, DelLessFillAcrossNodes) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(32, compress);
 
   for (int i = 0; i < 500; i++)
@@ -519,7 +533,7 @@ TEST_P(OptionsTest, DelLessFillAcrossNodes) {
 }
 
 TEST_P(OptionsTest, DelNegOne) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(32, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
@@ -529,7 +543,7 @@ TEST_P(OptionsTest, DelNegOne) {
 }
 
 TEST_P(OptionsTest, DelNegOneOverflow) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(32, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
@@ -541,7 +555,7 @@ TEST_P(OptionsTest, DelNegOneOverflow) {
 }
 
 TEST_P(OptionsTest, DelNeg100From500) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(32, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
@@ -554,7 +568,7 @@ TEST_P(OptionsTest, DelNeg100From500) {
 }
 
 TEST_P(OptionsTest, DelMin10_5_from50) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(32, compress);
 
   for (int i = 0; i < 50; i++)
@@ -565,7 +579,7 @@ TEST_P(OptionsTest, DelMin10_5_from50) {
 }
 
 TEST_P(OptionsTest, DelElems) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
 
   const char* words[] = {"abc", "foo", "bar", "foobar", "foobared", "zap", "bar", "test", "foo"};
@@ -605,7 +619,7 @@ TEST_P(OptionsTest, DelElems) {
 }
 
 TEST_P(OptionsTest, IterateReverse) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(32, compress);
 
   for (int i = 0; i < 500; i++)
@@ -621,7 +635,7 @@ TEST_P(OptionsTest, IterateReverse) {
 }
 
 TEST_P(OptionsTest, Iterate500) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(32, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -647,7 +661,7 @@ TEST_P(OptionsTest, Iterate500) {
 }
 
 TEST_P(OptionsTest, IterateAfterOne) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(-2, compress);
   ql_.Push("hello", QList::HEAD);
 
@@ -668,7 +682,7 @@ TEST_P(OptionsTest, IterateAfterOne) {
 }
 
 TEST_P(OptionsTest, IterateDelete) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
 
   ql_.Push("abc", QList::TAIL);
@@ -692,7 +706,7 @@ TEST_P(OptionsTest, IterateDelete) {
 }
 
 TEST_P(OptionsTest, InsertBeforeOne) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(-2, compress);
 
   ql_.Push("hello", QList::HEAD);
@@ -712,7 +726,7 @@ TEST_P(OptionsTest, InsertBeforeOne) {
 }
 
 TEST_P(OptionsTest, InsertWithHeadFull) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(4, compress);
 
   for (int i = 0; i < 10; i++)
@@ -728,7 +742,7 @@ TEST_P(OptionsTest, InsertWithHeadFull) {
 }
 
 TEST_P(OptionsTest, InsertWithTailFull) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(4, compress);
   for (int i = 0; i < 10; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -743,7 +757,7 @@ TEST_P(OptionsTest, InsertWithTailFull) {
 }
 
 TEST_P(OptionsTest, InsertOnceWhileIterating) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
 
   ql_.Push("abc", QList::TAIL);
@@ -767,7 +781,7 @@ TEST_P(OptionsTest, InsertOnceWhileIterating) {
 }
 
 TEST_P(OptionsTest, InsertBefore250NewInMiddleOf500Elements) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
   for (int i = 0; i < 500; i++) {
     string val = StrCat("hello", i);
@@ -787,7 +801,7 @@ TEST_P(OptionsTest, InsertBefore250NewInMiddleOf500Elements) {
 }
 
 TEST_P(OptionsTest, InsertAfter250NewInMiddleOf500Elements) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i), QList::HEAD);
@@ -806,7 +820,7 @@ TEST_P(OptionsTest, InsertAfter250NewInMiddleOf500Elements) {
 }
 
 TEST_P(OptionsTest, NextPlain) {
-  auto [_, compress] = GetParam();
+  auto [_, compress, method] = GetParam();
   ql_ = QList(-2, compress);
 
   QList::SetPackedThreshold(3);
@@ -826,7 +840,7 @@ TEST_P(OptionsTest, NextPlain) {
 }
 
 TEST_P(OptionsTest, IndexFrom500) {
-  auto [fill, compress] = GetParam();
+  auto [fill, compress, method] = GetParam();
   ql_ = QList(fill, compress);
   for (int i = 0; i < 500; i++)
     ql_.Push(StrCat("hello", i + 1), QList::TAIL);
@@ -867,18 +881,22 @@ static void BM_QListCompress(benchmark::State& state) {
     lines.push_back(string(line));
   }
 
+  VLOG(1) << "Read " << lines.size() << " lines " << state.range(0);
   while (state.KeepRunning()) {
     QList ql(-2, state.range(0));  // uses differrent compression modes, see below.
+    ql.set_compr_method(state.range(1) == 0 ? QList::LZF : QList::LZ4);
+
     for (const string& l : lines) {
       ql.Push(l, QList::TAIL);
     }
     DVLOG(1) << ql.node_count() << ", " << ql.MallocUsed(true);
   }
+  CHECK_EQ(0, zmalloc_used_memory_tl);
 }
 BENCHMARK(BM_QListCompress)
-    ->Arg(0)   // no compression
-    ->Arg(1)   // compress all nodes but edges.
-    ->Arg(4);  // compress all nodes but 4 nodes from edges.
+    ->ArgsProduct({{1, 4, 0}, {0, 1}});  // x - compression depth, y compression method.
+                                         // x = 0 no compression, 1 - compress all nodes but edges,
+                                         // 4 - compress all but 4 nodes from edges.
 
 static void BM_QListUncompress(benchmark::State& state) {
   SetupMalloc();
@@ -889,18 +907,41 @@ static void BM_QListUncompress(benchmark::State& state) {
   io::LineReader lr(*src, TAKE_OWNERSHIP);
   string_view line;
   QList ql(-2, state.range(0));
+  ql.set_compr_method(state.range(1) == 0 ? QList::LZF : QList::LZ4);
+  QList::stats.compression_attempts = 0;
 
+  CHECK_EQ(QList::stats.compressed_bytes, 0u);
+  CHECK_EQ(QList::stats.raw_compressed_bytes, 0u);
+
+  size_t line_len = 0;
   while (lr.Next(&line)) {
     ql.Push(line, QList::TAIL);
+    line_len += line.size();
+  }
+
+  if (ql.compress_param() > 0) {
+    CHECK_GT(QList::stats.compression_attempts, 0u);
+    CHECK_GT(QList::stats.compressed_bytes, 0u);
+    CHECK_GT(QList::stats.raw_compressed_bytes, QList::stats.compressed_bytes);
   }
 
   LOG(INFO) << "MallocUsed " << ql.compress_param() << ": " << ql.MallocUsed(true) << ", "
             << ql.MallocUsed(false);
+  size_t exp_count = ql.Size();
 
   while (state.KeepRunning()) {
-    ql.Iterate([](const QList::Entry& e) { return true; }, 0, -1);
+    unsigned actual_count = 0, actual_len = 0;
+    ql.Iterate(
+        [&](const QList::Entry& e) {
+          actual_len += e.view().size();
+          ++actual_count;
+          return true;
+        },
+        0, -1);
+    CHECK_EQ(exp_count, actual_count);
+    CHECK_EQ(line_len, actual_len);
   }
 }
-BENCHMARK(BM_QListUncompress)->Arg(0)->Arg(1)->Arg(4);
+BENCHMARK(BM_QListUncompress)->ArgsProduct({{1, 4, 0}, {0, 1}});
 
 }  // namespace dfly

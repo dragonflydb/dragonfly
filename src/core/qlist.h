@@ -19,9 +19,10 @@ namespace dfly {
 class QList {
  public:
   enum Where { TAIL, HEAD };
+  enum COMPR_METHOD { LZF = 0, LZ4 = 1 };
 
-  /* Node is a 32 byte struct describing a listpack for a quicklist.
-   * We use bit fields keep the Node at 32 bytes.
+  /* Node is a 40 byte struct describing a listpack for a quicklist.
+   * We use bit fields keep the Node at 40 bytes.
    * count: 16 bits, max 65536 (max lp bytes is 65k, so max count actually < 32k).
    * encoding: 2 bits, RAW=1, LZF=2.
    * container: 2 bits, PLAIN=1 (a single item as char array), PACKED=2 (listpack with multiple
@@ -43,7 +44,7 @@ class QList {
     unsigned int recompress : 1;         /* was this node previous compressed? */
     unsigned int attempted_compress : 1; /* node can't compress; too small */
     unsigned int dont_compress : 1;      /* prevent compression of entry that will be used later */
-    unsigned int extra : 9;              /* more bits to steal for future usage */
+    unsigned int extra : 25;             /* more bits to steal for future usage */
   } Node;
 
   // Provides wrapper around the references to the listpack entries.
@@ -208,7 +209,29 @@ class QList {
     fill_ = fill;
   }
 
+  void set_compr_method(COMPR_METHOD cm) {
+    compr_method_ = static_cast<unsigned>(cm);
+  }
+
   static void SetPackedThreshold(unsigned threshold);
+
+  struct Stats {
+    uint64_t compression_attempts = 0;
+
+    // compression attempts with compression ratio that was not good enough to keep.
+    // Subset of compression_attempts.
+    uint64_t bad_compression_attempts = 0;
+
+    uint64_t decompression_calls = 0;
+
+    // How many bytes we currently keep compressed.
+    size_t compressed_bytes = 0;
+
+    // how many bytes we compressed from.
+    // Compressed savings are calculated as raw_compressed_bytes - compressed_bytes.
+    size_t raw_compressed_bytes = 0;
+  };
+  static __thread Stats stats;
 
  private:
   bool AllowCompression() const {
@@ -242,7 +265,8 @@ class QList {
   uint32_t count_ = 0;      /* total count of all entries in all listpacks */
   uint32_t len_ = 0;        /* number of quicklistNodes */
   int fill_ : QL_FILL_BITS; /* fill factor for individual nodes */
-  int reserved1_ : 16;
+  int compr_method_ : 2;    // 0 - lzf, 1 - lz4
+  int reserved1_ : 14;
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
