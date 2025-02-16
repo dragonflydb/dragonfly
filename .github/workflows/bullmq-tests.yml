@@ -16,7 +16,7 @@ jobs:
     # TODO: Build Dragonfly instead of using a container, see below
     services:
       dragonflydb:
-        image: ghcr.io/dragonflydb/dragonfly-weekly:latest
+        image: ghcr.io/dragonflydb/dragonfly-dev:ubuntu-8974626
         env:
           DFLY_cluster_mode: emulated
           DFLY_lock_on_hashtags: true
@@ -39,13 +39,13 @@ jobs:
           yarn --version
           mkdir -p $GITHUB_WORKSPACE/build
 
-#      - name: Build Dragonfly
-#        run: |
-#          mkdir $GITHUB_WORKSPACE/build
-#          cd $GITHUB_WORKSPACE/build
-#          cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
-#          ninja dragonfly
-#          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
+      #      - name: Build Dragonfly
+      #        run: |
+      #          mkdir $GITHUB_WORKSPACE/build
+      #          cd $GITHUB_WORKSPACE/build
+      #          cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
+      #          ninja dragonfly
+      #          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
 
       - name: Build BullMQ
         run: |
