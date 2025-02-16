@@ -218,6 +218,38 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   return 1;
 }
 
+constexpr uint32_t kClearStepSize = 1024;
+struct ClearNode {
+  DenseSet* ds;
+  uint32_t cursor;
+  ClearNode* next;
+
+  ClearNode(DenseSet* d, uint32_t c, ClearNode* n) : ds(d), cursor(c), next(n) {
+  }
+};
+
+// We add async deletion requests to a linked list and process them asynchronously
+// in each thread.
+__thread ClearNode* clear_head = nullptr;
+
+int32_t ClearQueuedDenseSetEntries() {
+  if (clear_head == nullptr)
+    return -1;  // unregister itself.
+
+  auto* current = clear_head;
+
+  DVLOG(2) << "ClearQueuedDenseSetEntries " << current->cursor;
+  uint32_t next = current->ds->ClearStep(current->cursor, kClearStepSize);
+  if (next == current->ds->BucketCount()) {  // reached the end.
+    CompactObj::DeleteMR<DenseSet>(current->ds);
+    clear_head = current->next;
+    delete current;
+  } else {
+    current->cursor = next;
+  }
+  return ProactorBase::kOnIdleMaxLevel;
+};
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -304,6 +336,14 @@ DbSlice::~DbSlice() {
     if (!db)
       continue;
     db.reset();
+  }
+
+  // we do not bother with deleting objects scheduled for asynchronous deletion
+  // during the shutdown. this should work well because we destroy mimalloc heap anyways.
+  while (clear_head) {
+    auto* next = clear_head->next;
+    delete clear_head;
+    clear_head = next;
   }
 }
 
@@ -1507,6 +1547,29 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
                       table);                                                // Key
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
+
+  if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&
+      pv.Encoding() == kEncodingStrMap2) {
+    DenseSet* ds = (DenseSet*)pv.RObjPtr();
+    pv.SetRObjPtr(nullptr);
+
+    uint32_t next = ds->ClearStep(0, kClearStepSize);
+    if (next < ds->BucketCount()) {
+      ProactorBase* pb = ProactorBase::me();
+      DCHECK(pb);
+
+      bool launch_task = (clear_head == nullptr);
+
+      // register ds
+      clear_head = new ClearNode{ds, next, clear_head};
+      if (launch_task) {
+        pb->AddOnIdleTask(&ClearQueuedDenseSetEntries);
+      }
+    } else {
+      CompactObj::DeleteMR<DenseSet>(ds);
+    }
+  }  // del_it->first.IsAsyncDelete()
+
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
   } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {

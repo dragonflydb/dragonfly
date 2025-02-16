@@ -138,6 +138,10 @@ class CompactObj {
     // IO_PENDING is set when the tiered storage has issued an i/o request to save the value. It is
     // cleared when the io request finishes or is cancelled.
     IO_PENDING = 0x20,
+    
+    // Applied only on keys that should be deleted asynchronously.
+    // (it can be the same value as IO_PENDING) that is applied only on values.
+    KEY_ASYNC_DELETE = 0x20,
     STICKY = 0x40,
 
     // TOUCHED used to determin which items are hot/cold.
@@ -252,6 +256,14 @@ class CompactObj {
   }
 
   bool DefragIfNeeded(float ratio);
+
+  void SetAsyncDelete() {
+    mask_ |= KEY_ASYNC_DELETE;
+  }
+
+  bool IsAsyncDelete() const {
+    return mask_ & KEY_ASYNC_DELETE;
+  }
 
   bool HasStashPending() const {
     return mask_ & IO_PENDING;
@@ -511,47 +523,6 @@ inline bool CompactObj::operator==(std::string_view sv) const {
   return EqualNonInline(sv);
 }
 
-class CompactObjectView {
- public:
-  CompactObjectView(const CompactObj& src) : obj_(src.AsRef()) {
-  }
-  CompactObjectView(const CompactObjectView& o) : obj_(o.obj_.AsRef()) {
-  }
-  CompactObjectView(CompactObjectView&& o) = default;
-
-  operator CompactObj() const {
-    return obj_.AsRef();
-  }
-
-  const CompactObj* operator->() const {
-    return &obj_;
-  }
-
-  bool operator==(const CompactObjectView& o) const {
-    return obj_ == o.obj_;
-  }
-
-  uint64_t Hash() const {
-    return obj_.HashCode();
-  }
-
-  CompactObjectView& operator=(const CompactObjectView& o) {
-    obj_ = o.obj_.AsRef();
-    return *this;
-  }
-
-  bool defined() const {
-    return obj_.IsRef();
-  }
-
-  void Reset() {
-    obj_.Reset();
-  }
-
- private:
-  CompactObj obj_;
-};
-
 std::string_view ObjTypeToString(CompactObjType type);
 
 std::optional<CompactObjType> ObjTypeFromString(std::string_view sv);
@@ -570,12 +541,3 @@ static_assert(sizeof(TieredColdRecord) == 48);
 };  // namespace detail
 
 }  // namespace dfly
-
-namespace std {
-template <> struct hash<dfly::CompactObjectView> {
-  std::size_t operator()(const dfly::CompactObjectView& obj) const {
-    return obj.Hash();
-  }
-};
-
-}  // namespace std

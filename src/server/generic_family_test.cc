@@ -874,4 +874,18 @@ TEST_F(GenericFamilyTest, Bug4466) {
   EXPECT_THAT(resp, RespElementsAre("0", RespElementsAre()));
 }
 
+TEST_F(GenericFamilyTest, Unlink) {
+  for (unsigned i = 0; i < 1000; ++i) {
+    unsigned start = i * 10;
+    vector<string> cmd = {"SADD", "s1"};
+    for (unsigned j = 0; j < 10; ++j) {
+      cmd.push_back(absl::StrCat("f", start + j));
+    }
+    auto resp = Run(absl::MakeSpan(cmd));
+    ASSERT_THAT(resp, IntArg(10));
+  }
+  auto resp = Run({"unlink", "s1"});
+  EXPECT_THAT(resp, IntArg(1));
+}
+
 }  // namespace dfly
