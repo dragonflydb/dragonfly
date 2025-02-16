@@ -192,6 +192,8 @@ class EngineShard {
   // least 50% of allowed max, providing at least some guarantee of progress.
   bool ShouldThrottleForTiering() const;
 
+  void FinalizeMulti(Transaction* tx);
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;

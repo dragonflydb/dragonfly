@@ -577,7 +577,7 @@ void Transaction::PrepareMultiForScheduleSingleHop(Namespace* ns, ShardId sid, D
 }
 
 // Runs in the dbslice thread. Returns true if the transaction concluded.
-bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
+bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
   DCHECK_GT(txid_, 0u);
   CHECK(cb_ptr_) << DebugId();
 
@@ -589,12 +589,16 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   DCHECK_GT(run_barrier_.DEBUG_Count(), 0u);
   VLOG(2) << "RunInShard: " << DebugId() << " sid:" << shard->shard_id() << " " << sd.local_mask;
 
-  bool was_suspended = sd.local_mask & SUSPENDED_Q;
+  // was_suspended is true meaning that this transaction was suspended and then
+  // it was woken up by another transaction in either this thread or a key in another thread.
+  // if awaked_prerun is true - it means it was woken up by a transaction in this thread,
+  bool was_suspended = sd.local_mask & WAS_SUSPENDED;
   bool awaked_prerun = sd.local_mask & AWAKED_Q;
+  DCHECK(was_suspended || !awaked_prerun);
+
   IntentLock::Mode mode = LockMode();
 
   DCHECK(IsGlobal() || (sd.local_mask & KEYLOCK_ACQUIRED) || (multi_ && multi_->mode == GLOBAL));
-  DCHECK(!txq_ooo || (sd.local_mask & OUT_OF_ORDER));
 
   /*************************************************************************/
 
@@ -606,10 +610,10 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
 
   bool is_concluding = coordinator_state_ & COORD_CONCLUDING;
 
-  // If we're the head of tx queue (txq_ooo is false), we remove ourselves upon first invocation
+  // If we're allowed, we remove ourselves upon first invocation from the queue,
   // and successive hops are run by continuation_trans_ in engine shard.
-  // Otherwise we can remove ourselves only when we're concluding (so no more hops will follow).
-  if ((is_concluding || !txq_ooo) && sd.pq_pos != TxQueue::kEnd) {
+  // Otherwise we can remove ourselves only when we're concluding (so no more hops follow).
+  if (sd.pq_pos != TxQueue::kEnd && (is_concluding || allow_q_removal)) {
     VLOG(2) << "Remove from txq " << this->DebugId();
     shard->txq()->Remove(sd.pq_pos);
     sd.pq_pos = TxQueue::kEnd;
@@ -618,7 +622,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
   // For multi we unlock transaction (i.e. its keys) in UnlockMulti() call.
   // If it's a final hop we should release the locks.
   if (is_concluding) {
-    bool became_suspended = sd.local_mask & SUSPENDED_Q;
+    bool became_suspended = !was_suspended && (sd.local_mask & WAS_SUSPENDED);
     KeyLockArgs largs;
 
     if (IsGlobal()) {
@@ -632,7 +636,7 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
       // If a transaction has been suspended, we keep the lock so that future transaction
       // touching those keys will be ordered via TxQueue. It's necessary because we preserve
       // the atomicity of awaked transactions by halting the TxQueue.
-      if (was_suspended || !became_suspended) {
+      if (!became_suspended) {
         GetDbSlice(shard->shard_id()).Release(mode, largs);
         sd.local_mask &= ~KEYLOCK_ACQUIRED;
       }
@@ -640,6 +644,8 @@ bool Transaction::RunInShard(EngineShard* shard, bool txq_ooo) {
     }
 
     // This is the last hop, so clear cont_trans if its held by the current tx
+    // The position is important because we check below if `shard->GetContTx() == nullptr`
+    // so we must clear it before we notify awaked transactions.
     shard->RemoveContTx(this);
 
     // It has 2 responsibilities.
@@ -1316,8 +1322,8 @@ void Transaction::WatchInShard(Namespace* ns, ShardArgs keys, EngineShard* shard
                                KeyReadyChecker krc) {
   auto& sd = shard_data_[SidToId(shard->shard_id())];
 
-  CHECK_EQ(0, sd.local_mask & SUSPENDED_Q);
-  sd.local_mask |= SUSPENDED_Q;
+  CHECK_EQ(0, sd.local_mask & WAS_SUSPENDED);
+  sd.local_mask |= WAS_SUSPENDED;
   sd.local_mask &= ~OUT_OF_ORDER;
 
   ns->GetOrAddBlockingController(shard)->AddWatched(keys, std::move(krc), this);
@@ -1337,9 +1343,11 @@ void Transaction::ExpireShardCb(ShardArgs keys, EngineShard* shard) {
               ->awakened_transactions()
               .contains(this));
 
-  // Resume processing of transaction queue
-  shard->PollExecution("unwatchcb", nullptr);
+  // Unblock the caller with FinishHop.
   FinishHop();
+
+  // And then poll execution to continue processing the queued transactions.
+  shard->PollExecution("unwatchcb", nullptr);
 }
 
 DbSlice& Transaction::GetDbSlice(ShardId shard_id) const {
@@ -1391,14 +1399,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
     sd.pq_pos = TxQueue::kEnd;
   }
 
-  shard->RemoveContTx(this);
-
-  // Wake only if no tx queue head is currently running
-  auto bc = namespace_->GetBlockingController(shard->shard_id());
-  if (bc && shard->GetContTx() == nullptr)
-    bc->NotifyPending();
-
-  shard->PollExecution("unlockmulti", nullptr);
+  shard->FinalizeMulti(this);
 }
 
 bool Transaction::IsGlobal() const {
@@ -1410,7 +1411,7 @@ bool Transaction::IsGlobal() const {
 // Runs only in the shard thread.
 // Returns true if the transacton has changed its state from suspended to awakened,
 // false, otherwise.
-bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid, string_view key) {
+bool Transaction::NotifySuspended(ShardId sid, string_view key) {
   // Wake a transaction only once on the first notify.
   // We don't care about preserving the strict order with multiple operations running on blocking
   // keys in parallel, because the internal order is not observable from outside either way.
@@ -1419,11 +1420,12 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid, string_view 
 
   auto& sd = shard_data_[SidToId(sid)];
 
-  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << sd.local_mask
-           << " by commited_id " << committed_txid;
+  DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << sd.local_mask;
 
-  // We're the first and only to wake this transaction, expect the shard to be suspended
-  CHECK(sd.local_mask & SUSPENDED_Q);
+  // We're the first and only to wake this transaction, expect the shard to be suspended.
+  CHECK(sd.local_mask & WAS_SUSPENDED);
+
+  // We wake at most once.
   CHECK_EQ(sd.local_mask & AWAKED_Q, 0);
 
   // Find index of awakened key
@@ -1432,7 +1434,6 @@ bool Transaction::NotifySuspended(TxId committed_txid, ShardId sid, string_view 
   CHECK(it != args.cend());
 
   // Change state to awaked and store index of awakened key
-  sd.local_mask &= ~SUSPENDED_Q;
   sd.local_mask |= AWAKED_Q;
   sd.wake_key_pos = it.index();
 

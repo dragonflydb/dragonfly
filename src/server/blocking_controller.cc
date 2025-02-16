@@ -257,8 +257,9 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
     Transaction* head = wi.get();
     // We check may the transaction be notified otherwise move it to the end of the queue
     if (wi.key_ready_checker(owner_, context, head, key)) {
-      DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key;
-      if (head->NotifySuspended(owner_->committed_txid(), sid, key)) {
+      DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
+               << owner_->committed_txid();
+      if (head->NotifySuspended(sid, key)) {
         wq->state = WatchQueue::ACTIVE;
         // We deliberately keep the notified transaction in the queue to know which queue
         // must handled when this transaction finished.
