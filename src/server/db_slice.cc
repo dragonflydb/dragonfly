@@ -218,31 +218,66 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   return 1;
 }
 
-constexpr uint32_t kClearStepSize = 1024;
-struct ClearNode {
-  DenseSet* ds;
-  uint32_t cursor;
-  ClearNode* next;
+class AsyncDeleter {
+ public:
+  static void EnqueDeletion(uint32_t next, DenseSet* ds);
+  static void Shutdown();
 
-  ClearNode(DenseSet* d, uint32_t c, ClearNode* n) : ds(d), cursor(c), next(n) {
-  }
+ private:
+  static constexpr uint32_t kClearStepSize = 1024;
+  struct ClearNode {
+    DenseSet* ds;
+    uint32_t cursor;
+    ClearNode* next;
+
+    ClearNode(DenseSet* d, uint32_t c, ClearNode* n) : ds(d), cursor(c), next(n) {
+    }
+  };
+
+  // Asynchronously deletes entries during the cpu-idle time.
+  static int32_t IdleCb();
+
+  // We add async deletion requests to a linked list and process them asynchronously
+  // in each thread.
+  static __thread ClearNode* head_;
 };
 
-// We add async deletion requests to a linked list and process them asynchronously
-// in each thread.
-__thread ClearNode* clear_head = nullptr;
+__thread AsyncDeleter::ClearNode* AsyncDeleter::head_ = nullptr;
 
-int32_t ClearQueuedDenseSetEntries() {
-  if (clear_head == nullptr)
+void AsyncDeleter::EnqueDeletion(uint32_t next, DenseSet* ds) {
+  bool launch_task = (head_ == nullptr);
+
+  // register ds
+  head_ = new ClearNode{ds, next, head_};
+  ProactorBase* pb = ProactorBase::me();
+  DCHECK(pb);
+  DVLOG(2) << "Adding async deletion task, thread " << pb->GetPoolIndex() << " " << launch_task;
+  if (launch_task) {
+    pb->AddOnIdleTask(&IdleCb);
+  }
+}
+
+void AsyncDeleter::Shutdown() {
+  // we do not bother with deleting objects scheduled for asynchronous deletion
+  // during the shutdown. this should work well because we destroy mimalloc heap anyways.
+  while (head_) {
+    auto* next = head_->next;
+    delete head_;
+    head_ = next;
+  }
+}
+
+int32_t AsyncDeleter::IdleCb() {
+  if (head_ == nullptr)
     return -1;  // unregister itself.
 
-  auto* current = clear_head;
+  auto* current = head_;
 
-  DVLOG(2) << "ClearQueuedDenseSetEntries " << current->cursor;
+  DVLOG(2) << "IdleCb " << current->cursor;
   uint32_t next = current->ds->ClearStep(current->cursor, kClearStepSize);
   if (next == current->ds->BucketCount()) {  // reached the end.
     CompactObj::DeleteMR<DenseSet>(current->ds);
-    clear_head = current->next;
+    head_ = current->next;
     delete current;
   } else {
     current->cursor = next;
@@ -338,13 +373,7 @@ DbSlice::~DbSlice() {
     db.reset();
   }
 
-  // we do not bother with deleting objects scheduled for asynchronous deletion
-  // during the shutdown. this should work well because we destroy mimalloc heap anyways.
-  while (clear_head) {
-    auto* next = clear_head->next;
-    delete clear_head;
-    clear_head = next;
-  }
+  AsyncDeleter::Shutdown();
 }
 
 auto DbSlice::GetStats() const -> Stats {
@@ -1552,19 +1581,11 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
       pv.Encoding() == kEncodingStrMap2) {
     DenseSet* ds = (DenseSet*)pv.RObjPtr();
     pv.SetRObjPtr(nullptr);
+    const size_t kClearStepSize = 512;
 
     uint32_t next = ds->ClearStep(0, kClearStepSize);
     if (next < ds->BucketCount()) {
-      ProactorBase* pb = ProactorBase::me();
-      DCHECK(pb);
-
-      bool launch_task = (clear_head == nullptr);
-
-      // register ds
-      clear_head = new ClearNode{ds, next, clear_head};
-      if (launch_task) {
-        pb->AddOnIdleTask(&ClearQueuedDenseSetEntries);
-      }
+      AsyncDeleter::EnqueDeletion(next, ds);
     } else {
       CompactObj::DeleteMR<DenseSet>(ds);
     }

@@ -883,9 +883,12 @@ TEST_F(GenericFamilyTest, Unlink) {
     }
     auto resp = Run(absl::MakeSpan(cmd));
     ASSERT_THAT(resp, IntArg(10));
+    cmd[1] = "s2";
+    resp = Run(absl::MakeSpan(cmd));
+    ASSERT_THAT(resp, IntArg(10));
   }
-  auto resp = Run({"unlink", "s1"});
-  EXPECT_THAT(resp, IntArg(1));
+  auto resp = Run({"unlink", "s1", "s2"});
+  EXPECT_THAT(resp, IntArg(2));
 }
 
 }  // namespace dfly

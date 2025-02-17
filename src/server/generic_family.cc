@@ -36,6 +36,7 @@ extern "C" {
 
 ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
 ABSL_FLAG(uint32_t, keys_output_limit, 8192, "Maximum number of keys output by keys command");
+ABSL_FLAG(bool, unlink_experimental_async, true, "If true, runs unlink command asynchronously.");
 
 namespace dfly {
 using namespace std;
@@ -1054,7 +1055,8 @@ void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
 }
 
 void GenericFamily::Unlink(CmdArgList args, const CommandContext& cmd_cntx) {
-  DeleteGeneric(args, cmd_cntx, true);
+  bool async = absl::GetFlag(FLAGS_unlink_experimental_async);
+  DeleteGeneric(args, cmd_cntx, async);
 }
 
 void GenericFamily::Ping(CmdArgList args, const CommandContext& cmd_cntx) {
