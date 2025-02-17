@@ -1,0 +1,160 @@
+name: Docker Release-v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      TAG_NAME:
+        description: 'Tag name that the major tag will point to'
+        required: true
+      PRERELEASE:
+        description: 'Whether this is a prerelease'
+        type: boolean
+        required: true
+
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TAG_NAME: ${{ github.event.inputs.TAG_NAME || github.event.release.tag_name }}
+  IS_PRERELEASE: ${{ github.event.release.prerelease || github.event.inputs.PRERELEASE }}
+  IMAGE: ghcr.io/dragonflydb/dragonfly
+
+jobs:
+  build_and_tag:
+    name: Build and Push ${{matrix.flavor}} ${{ matrix.os.arch }} image
+    strategy:
+      matrix:
+        flavor: [ubuntu]
+        os:
+          - image: ubuntu-24.04
+            arch: amd64
+          - image: ubuntu-24.04-arm
+            arch: arm64
+
+    runs-on: ${{ matrix.os.image }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      - name: Set up Docker Build
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch release asset
+        uses: dsaltares/fetch-gh-release-asset@1.1.2
+        with:
+          version: "tags/${{ env.TAG_NAME }}"
+          regex: true
+          file: "dragonfly-.*\\.tar\\.gz"
+          target: 'releases/'
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract artifacts
+        run: |
+          echo "Event prerelease ${{ github.event.release.prerelease }}"
+          echo "Input prerelease ${{ github.event.inputs.PRERELEASE }}"
+          ls -l
+          ls -l releases
+          for f in releases/*.tar.gz; do tar xvfz $f -C releases; done
+          rm releases/*.tar.gz
+
+      - name: Docker meta
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+            prefix=${{ matrix.flavor}}-
+            suffix=-${{ matrix.os.arch }}
+          tags: |
+            type=semver,pattern={{version}},enable=true,value=${{ env.TAG_NAME }}
+            type=semver,pattern={{raw}},enable=true,value=${{ env.TAG_NAME }}
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.vendor=DragonflyDB LTD
+            org.opencontainers.image.title=Dragonfly Production Image
+            org.opencontainers.image.description=The fastest in-memory store
+
+      - name: Build image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          provenance: false  # Prevent pushing a docker manifest
+          tags: |
+            ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          file: tools/packaging/Dockerfile.${{ matrix.flavor }}-prod
+          cache-from: type=gha,scope=prod-${{ matrix.flavor }}
+          cache-to: type=gha,scope=prod-${{ matrix.flavor }},mode=max
+          load: true  # Load the build images into the local docker.
+
+      - name: Test Image
+        uses: ./.github/actions/test-docker
+        timeout-minutes: 1
+        with:
+          image_id: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          name: ${{ matrix.flavor }}-${{ matrix.os.arch }}
+
+      - id: output-sha
+        run: |
+          echo "sha_${{ matrix.os.arch }}=${{ steps.build.outputs.digest }}" >> $GITHUB_OUTPUT
+    outputs:
+      sha_amd: ${{ steps.output-sha.outputs.sha_amd64 }}
+      sha_arm: ${{ steps.output-sha.outputs.sha_arm64 }}
+
+  merge_manifest:
+    needs: [build_and_tag]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        flavor: [ubuntu]
+    steps:
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge and Push
+        run: |
+            sha_amd=${{ env.IMAGE }}@${{ needs.build_and_tag.outputs.sha_amd }}
+            sha_arm=${{ env.IMAGE }}@${{ needs.build_and_tag.outputs.sha_arm }}
+            echo "shas: $sha_amd $sha_arm"
+
+            if [[ "${{ env.IS_PRERELEASE }}" == 'true' ]]; then
+              # Create and push the manifest like dragonfly:alpha-ubuntu
+              tag="${{ env.IMAGE }}:alpha-${{ matrix.flavor }}"
+              docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
+              docker manifest push ${tag}
+            elif [[ "${{matrix.flavor}}" == 'ubuntu' ]]; then
+              tag="${{ env.IMAGE }}:latest"
+              # Create and push the manifest like dragonfly:latest
+              docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
+              docker manifest push ${tag}
+            fi
+
+            # Create and push the manifest like dragonfly:v1.26.4
+            tag=${{ env.IMAGE }}:${{ env.TAG_NAME }}
+            docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
+            docker manifest push ${tag}
