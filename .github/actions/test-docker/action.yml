@@ -1,5 +1,4 @@
 name: Test Docker Image
-description: "Run regression tests"
 
 inputs:
   image_id:
