@@ -10,9 +10,6 @@
 
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 
-namespace facade {
-class SinkReplyBuilder;
-};
 
 namespace dfly {
 
@@ -20,7 +17,6 @@ using facade::CmdArgList;
 using facade::OpResult;
 
 class CommandRegistry;
-class Transaction;
 struct CommandContext;
 
 class GenericFamily {
@@ -29,10 +25,8 @@ class GenericFamily {
 
   // Accessed by Service::Exec and Service::Watch as an utility.
   static OpResult<uint32_t> OpExists(const OpArgs& op_args, const ShardArgs& keys);
-  static OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys);
-
+  static OpResult<uint32_t> OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async);
  private:
-  using SinkReplyBuilder = facade::SinkReplyBuilder;
 
   static void Del(CmdArgList args, const CommandContext& cmd_cntx);
   static void Unlink(CmdArgList args, const CommandContext& cmd_cntx);
