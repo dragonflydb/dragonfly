@@ -47,7 +47,6 @@ OpResult<std::pair<DbSlice::ConstIterator, unsigned>> FindFirstReadOnly(const Db
       return res.status();
   }
 
-  VLOG(2) << "FindFirst not found";
   return OpStatus::KEY_NOTFOUND;
 }
 
@@ -66,8 +65,10 @@ OpResult<string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_ty
     if (ff_res == OpStatus::WRONG_TYPE)
       return OpStatus::WRONG_TYPE;
 
-    if (ff_res == OpStatus::KEY_NOTFOUND)
+    if (ff_res == OpStatus::KEY_NOTFOUND) {
+      DVLOG(2) << "FindFirst not found " << trans->DebugId();
       return {OpStatus::KEY_NOTFOUND, Transaction::RunnableResult::AVOID_CONCLUDING};
+    }
 
     CHECK(ff_res.ok());  // No other errors possible
     ff_res->first->first.GetString(&key);
@@ -326,8 +327,7 @@ string_view LpGetView(uint8_t* lp_it, uint8_t int_buf[]) {
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms,
-                                              bool* block_flag, bool* pause_flag,
-                                              std::string* info) {
+                                              bool* block_flag, bool* pause_flag) {
   string result_key;
 
   // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
@@ -337,12 +337,9 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   if (trans->GetUniqueShardCnt() == 1) {
     auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
     if (res.ok()) {
-      if (info)
-        *info = "FF1S/";
       return res;
-    } else {
-      result = res.status();
     }
+    result = res.status();
   } else {
     result = FindFirstNonEmpty(trans, req_obj_type);
   }
@@ -357,8 +354,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
       return OpStatus::OK;
     };
     trans->Execute(std::move(cb), true);
-    if (info)
-      *info = "FFMS/";
     return result_key;
   }
 
@@ -404,18 +399,6 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return OpStatus::OK;
   };
   trans->Execute(std::move(cb), true);
-  if (info) {
-    *info = "BLOCK/";
-    for (unsigned sid = 0; sid < shard_set->size(); sid++) {
-      if (!trans->IsActive(sid))
-        continue;
-      if (auto wake_key = trans->GetWakeKey(sid); wake_key)
-        *info += absl::StrCat("sid:", sid, ",key:", *wake_key, ",");
-    }
-    *info += "/";
-    *info += trans->DEBUGV18_BlockInfo();
-    *info += "/";
-  }
   return result_key;
 }
 
