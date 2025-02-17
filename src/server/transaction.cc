@@ -927,7 +927,7 @@ void Transaction::DispatchHop() {
   if (CanRunInlined()) {
     DCHECK_EQ(run_cnt, 1u);
     DVLOG(1) << "Short-circuit ExecuteAsync " << DebugId();
-    EngineShard::tlocal()->PollExecution("exec_cb", this);
+    EngineShard::tlocal()->PollExecution("inline_cb", this);
     return;
   }
 

@@ -274,6 +274,11 @@ void BaseFamilyTest::ResetService() {
 
         if (es != nullptr) {
           TxQueue* txq = es->txq();
+          const Transaction* cont_tx = es->GetContTx();
+          if (cont_tx) {
+            LOG(ERROR) << "continuation_tx: " << cont_tx->DebugId(es->shard_id()) << " "
+                       << (cont_tx->DEBUG_IsArmedInShard(es->shard_id()) ? " armed" : "");
+          }
           if (!txq->Empty()) {
             LOG(ERROR) << "TxQueue for shard " << es->shard_id();
 

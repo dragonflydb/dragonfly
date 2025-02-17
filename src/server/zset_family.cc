@@ -1038,7 +1038,6 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   }
   VLOG(1) << "BZPop timeout(" << timeout << ")";
 
-  std::string dinfo;
   optional<std::string> callback_ran_key;
   OpResult<ScoredArray> popped_array;
   auto cb = [is_max, &popped_array, &callback_ran_key](Transaction* t, EngineShard* shard,
@@ -1048,19 +1047,19 @@ void BZPopMinMax(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
   };
 
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      tx, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused, &dinfo);
+      tx, OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
 
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (popped_key) {
     if (!callback_ran_key) {
-      LOG(ERROR) << "BUG: Callback didn't run! " << popped_key.value() << " " << dinfo;
+      LOG(DFATAL) << "BUG: Callback didn't run! " << popped_key.value();
       return rb->SendNullArray();
     }
 
     DVLOG(1) << "BZPop " << tx->DebugId() << " popped from key " << popped_key;  // key.
-    CHECK(popped_array.ok()) << dinfo;
+    CHECK(popped_array.ok());
     CHECK_EQ(popped_array->size(), 1u)
-        << popped_key << " ran " << *callback_ran_key << " info " << dinfo;
+        << popped_key << " ran " << *callback_ran_key;
     rb->StartArray(3);
     rb->SendBulkString(*popped_key);
     rb->SendBulkString(popped_array->front().first);

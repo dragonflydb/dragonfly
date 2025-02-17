@@ -277,7 +277,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) {
-  static_assert(sizeof(Stats) == 64);
+  static_assert(sizeof(Stats) == 72);
 
 #define ADD(x) x += o.x
 
@@ -285,6 +285,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const EngineShard::Stats& o) 
   ADD(defrag_realloc_total);
   ADD(defrag_task_invocation_total);
   ADD(poll_execution_total);
+  ADD(poll_runs_total);
   ADD(tx_ooo_total);
   ADD(tx_optimistic_total);
   ADD(tx_batch_schedule_calls_total);
@@ -581,38 +582,6 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
 
-  // If any of the following flags are present, we are guaranteed to run in this function:
-  // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't
-  // occupy a place in txq and have highest priority
-  // 2. WAS_SUSPENDED -> Suspended transactions are run to clean up and finalize blocking keys
-  // 3. OUT_OF_ORDER -> Transactions without conflicting keys can run earlier than their position in
-  // txq is reached
-  uint16_t flags = Transaction::AWAKED_Q | Transaction::WAS_SUSPENDED | Transaction::OUT_OF_ORDER;
-  auto [trans_mask, disarmed] =
-      trans ? trans->DisarmInShardWhen(sid, flags) : make_pair(uint16_t(0), false);
-
-  if (trans && trans_mask == 0)  // If not armed, it means that this poll task expired
-    return;
-
-  if (trans_mask & Transaction::AWAKED_Q) {
-    CHECK(trans->GetNamespace().GetBlockingController(shard_id_)->HasAwakedTransaction());
-    CHECK(continuation_trans_ == nullptr)
-        << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
-        << "cont_mask: " << continuation_trans_->DEBUG_GetLocalMask(sid) << " vs "
-        << trans->DEBUG_GetLocalMask(sid);
-
-    // Commands like BRPOPLPUSH don't conclude immediately
-    if (!trans->RunInShard(this, true)) {
-      // execution is blocked while HasAwakedTransaction() returns true, so no need to set
-      // continuation_trans_. Moreover, setting it for wakened multi-hop transactions may lead to
-      // inconcistency, see BLMoveSimultaneously test.
-      // continuation_trans_ = trans;
-      return;
-    }
-
-    trans = nullptr;  // Avoid handling the caller below
-  }
-
   bool update_stats = false;
 
   auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
@@ -622,11 +591,10 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // Check the currently running transaction, we have to handle it first until it concludes
   if (continuation_trans_) {
-    bool is_self = continuation_trans_ == trans;
-    if (is_self)
+    if (continuation_trans_ == trans)
       trans = nullptr;
 
-    if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
+    if (continuation_trans_->DisarmInShard(sid)) {
       if (bool concludes = run(continuation_trans_, true); concludes) {
         continuation_trans_ = nullptr;
       }
@@ -641,15 +609,15 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
     // Break if there are any awakened transactions, as we must give way to them
     // before continuing to handle regular transactions from the queue.
-    if (head->GetNamespace().GetBlockingController(shard_id_) &&
-        head->GetNamespace().GetBlockingController(shard_id_)->HasAwakedTransaction())
+    auto* bc = head->GetNamespace().GetBlockingController(shard_id_);
+    if (bc && bc->HasAwakedTransaction())
       break;
 
     VLOG(2) << "Considering head " << head->DebugId()
             << " isarmed: " << head->DEBUG_IsArmedInShard(sid);
 
     // If the transaction isn't armed yet, it will be handled by a successive poll
-    bool should_run = (head == trans && disarmed) || head->DisarmInShard(sid);
+    bool should_run = head->DisarmInShard(sid);
     if (!should_run)
       break;
 
@@ -668,33 +636,66 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DCHECK(!continuation_trans_);  // while() check above ensures this.
     if (bool concludes = run(head, true); !concludes) {
       DCHECK_EQ(head->DEBUG_GetTxqPosInShard(sid), TxQueue::kEnd) << head->DebugId(sid);
+      DVLOG(2) << "SetContTx " << head->DebugId(sid);
       continuation_trans_ = head;
     }
   }
 
-  // If we disarmed, but didn't find ourselves in the loop, run now.
-  if (trans && disarmed) {
-    // if WAS_SUSPENDED is true but not AWAKED_Q, it means the transaction was awaked
-    // in another thread and this one just follows along.
-    DCHECK(trans_mask & (Transaction::OUT_OF_ORDER | Transaction::WAS_SUSPENDED));
-    CHECK(trans != continuation_trans_);
+  // If any of the following flags are present, we are guaranteed to run in this function:
+  // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't
+  // occupy a place in txq and have highest priority
+  // 2. WAS_SUSPENDED -> Suspended transactions are run to clean up and finalize blocking keys
+  // 3. OUT_OF_ORDER -> Transactions without conflicting keys can run earlier than their position in
+  // txq is reached
+  if (trans) {
+    uint16_t flags = Transaction::AWAKED_Q | Transaction::WAS_SUSPENDED | Transaction::OUT_OF_ORDER;
+    auto [trans_mask, disarmed] = trans->DisarmInShardWhen(sid, flags);
 
-    bool is_ooo = trans_mask & Transaction::OUT_OF_ORDER;
+    if (trans_mask & Transaction::AWAKED_Q) {
+      CHECK(trans->GetNamespace().GetBlockingController(shard_id_)->HasAwakedTransaction());
+      CHECK(continuation_trans_ == nullptr)
+          << continuation_trans_->DebugId() << " when polling " << trans->DebugId()
+          << "cont_mask: " << continuation_trans_->DEBUG_GetLocalMask(sid) << " vs "
+          << trans->DEBUG_GetLocalMask(sid);
 
-    // For OOO transactions that are still in the queue, we can not remove them unless
-    // they conclude.
-    bool concludes = run(trans, !is_ooo);
-    if (is_ooo && concludes) {
-      stats_.tx_ooo_total++;
+      // Commands like BRPOPLPUSH don't conclude immediately
+      if (!trans->RunInShard(this, true)) {
+        // execution is blocked while HasAwakedTransaction() returns true, so no need to set
+        // continuation_trans_. Moreover, setting it for wakened multi-hop transactions may lead to
+        // inconcistency, see BLMoveSimultaneously test.
+        // continuation_trans_ = trans;
+        return;
+      }
+      update_stats = true;
+      trans = nullptr;  // Avoid handling the caller below
     }
 
-    // If the transaction concluded, it must remove itself from the tx queue.
-    // Otherwise it is required to stay there to keep the relative order.
-    if (!concludes && is_ooo) {
-      LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
+    // If we disarmed, but didn't find ourselves in the loop, run now.
+    if (trans && disarmed) {
+      // if WAS_SUSPENDED is true but not AWAKED_Q, it means the transaction was awaked
+      // in another thread and this one just follows along.
+      DCHECK(trans_mask & (Transaction::OUT_OF_ORDER | Transaction::WAS_SUSPENDED));
+      CHECK(trans != continuation_trans_);
+
+      bool is_ooo = trans_mask & Transaction::OUT_OF_ORDER;
+
+      // For OOO transactions that are still in the queue, we can not remove them unless
+      // they conclude.
+      bool concludes = run(trans, !is_ooo);
+      if (is_ooo && concludes) {
+        stats_.tx_ooo_total++;
+      }
+
+      // If the transaction concluded, it must remove itself from the tx queue.
+      // Otherwise it is required to stay there to keep the relative order.
+      if (!concludes && is_ooo) {
+        LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
+      }
     }
   }
+
   if (update_stats) {
+    stats_.poll_runs_total++;
     CacheStats();
   }
 }
