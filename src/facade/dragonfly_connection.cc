@@ -314,7 +314,7 @@ QueueBackpressure& GetQueueBackpressure() {
 
 thread_local vector<Connection::PipelineMessagePtr> Connection::pipeline_req_pool_;
 
-class PipelineCacheSizePaceMaker {
+class PipelineCacheSizeTracker {
  public:
   bool CheckAndUpdateWatermark(size_t pipeline_sz) {
     const auto now = Clock::now();
@@ -340,7 +340,7 @@ class PipelineCacheSizePaceMaker {
   size_t min_ = Limits::max();
 };
 
-thread_local PipelineCacheSizePaceMaker tl_pipe_pace_maker;
+thread_local PipelineCacheSizeTracker tl_pipe_cache_sz_tracker;
 
 void Connection::PipelineMessage::SetArgs(const RespVec& args) {
   auto* next = storage.data();
@@ -1615,7 +1615,7 @@ void Connection::ShrinkPipelinePool() {
   if (pipeline_req_pool_.empty())
     return;
 
-  if (tl_pipe_pace_maker.CheckAndUpdateWatermark(pipeline_req_pool_.size())) {
+  if (tl_pipe_cache_sz_tracker.CheckAndUpdateWatermark(pipeline_req_pool_.size())) {
     stats_->pipeline_cmd_cache_bytes -= pipeline_req_pool_.back()->StorageCapacity();
     pipeline_req_pool_.pop_back();
   }
