@@ -1061,7 +1061,7 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
     assert len(clients) == 2
 
     await asyncio.sleep(2)
-    
+
     @assert_eventually
     async def wait_for_conn_drop():
         clients = await async_client.client_list()
@@ -1071,3 +1071,83 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
     await wait_for_conn_drop()
     info = await async_client.info("clients")
     assert int(info["timeout_disconnects"]) >= 1
+
+
+# Test that the cache pipeline does not grow or shrink under constant pipeline load.
+@dfly_args({"proactor_threads": 1, "pipeline_squash": 9})
+async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
+    server = df_factory.create()
+    server.start()
+
+    client = server.client()
+
+    async def push_pipeline(size=1):
+        p = client.pipeline(transaction=True)
+        for i in range(size):
+            p.info()
+        res = await p.execute()
+        return res
+
+    # Dispatch only async command/pipelines and force squashing. pipeline_cache_bytes,
+    # should be zero because:
+    # We always dispatch the items that will be squashed, so when `INFO` gets called
+    # the cache is empty because the pipeline consumed it throughout its execution
+    for i in range(0, 30):
+        # it's actually 11 commands. 8 INFO + 2 from the MULTI/EXEC block that is injected
+        # by the client. Connection fiber yields to dispatch/async fiber when
+        # ++async_streak_len_ >= 10. The minimum to squash is 9 so it will squash the pipeline
+        # and INFO ALL should return zero for all the squashed commands in the pipeline
+        res = await push_pipeline(8)
+        for i in range(1):
+            assert res[i]["pipeline_cache_bytes"] == 0
+
+    # Non zero because we reclaimed/recycled the messages back to the cache
+    info = await client.info()
+    assert info["pipeline_cache_bytes"] > 0
+
+
+# Test that the pipeline cache size shrinks on workloads that storm the datastore with
+# pipeline commands and then "back off" by gradually reducing the pipeline load such that
+# the cache becomes progressively underutilized. At that stage, the pipeline should slowly
+# shrink (because it's underutilized).
+@dfly_args({"proactor_threads": 1})
+async def test_pipeline_cache_size(df_factory):
+    server = df_factory.create(proactor_threads=1)
+    server.start()
+
+    # Start 1 client.
+    good_client = server.client()
+    bad_actor_client = server.client()
+
+    async def push_pipeline(bad_actor_client, size=1):
+        # Fill cache.
+        p = bad_actor_client.pipeline(transaction=True)
+        for i in range(size):
+            p.lpush(str(i), "V")
+        await p.execute()
+
+    # Establish a baseline for the cache size. We dispatch async here.
+    await push_pipeline(bad_actor_client, 32)
+    info = await good_client.info()
+
+    old_pipeline_cache_bytes = info["pipeline_cache_bytes"]
+    assert old_pipeline_cache_bytes > 0
+    assert info["dispatch_queue_bytes"] == 0
+
+    for i in range(30):
+        await push_pipeline(bad_actor_client)
+        await good_client.execute_command(f"set foo{i} bar")
+
+    info = await good_client.info()
+
+    # Gradually release pipeline.
+    assert old_pipeline_cache_bytes > info["pipeline_cache_bytes"]
+    assert info["dispatch_queue_bytes"] == 0
+
+    # Now drain the full cache.
+    async with async_timeout.timeout(5):
+        while info["pipeline_cache_bytes"] != 0:
+            await good_client.execute_command(f"set foo{i} bar")
+            info = await good_client.info()
+
+    assert info["dispatch_queue_bytes"] == 0
