@@ -35,7 +35,7 @@ uint32_t replication_stream_output_limit_cached = 64_KB;
 
 }  // namespace
 
-JournalStreamer::JournalStreamer(journal::Journal* journal, Context* cntx)
+JournalStreamer::JournalStreamer(journal::Journal* journal, ExecutionState* cntx)
     : cntx_(cntx), journal_(journal) {
   // cache the flag to avoid accessing it later.
   replication_stream_output_limit_cached = absl::GetFlag(FLAGS_replication_stream_output_limit);
@@ -181,7 +181,7 @@ bool JournalStreamer::IsStalled() const {
 }
 
 RestoreStreamer::RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, journal::Journal* journal,
-                                 Context* cntx)
+                                 ExecutionState* cntx)
     : JournalStreamer(journal, cntx), db_slice_(slice), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   db_array_ = slice->databases();  // Inc ref to make sure DB isn't deleted while we use it

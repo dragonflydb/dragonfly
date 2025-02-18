@@ -49,10 +49,6 @@ ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
 
-// TODO: Remove this flag on release >= 1.22
-ABSL_FLAG(bool, replica_reconnect_on_master_restart, false,
-          "Deprecated - please use --break_replication_on_master_restart.");
-
 namespace dfly {
 
 using namespace std;
@@ -102,7 +98,7 @@ error_code Replica::Start(facade::SinkReplyBuilder* builder) {
     }
     if (ec) {
       builder->SendError(absl::StrCat(msg, ec.message()));
-      cntx_.Cancel();
+      cntx_.ReportCancelError();
     }
     return ec;
   };
@@ -149,8 +145,8 @@ void Replica::Stop() {
   // Stops the loop in MainReplicationFb.
 
   proactor_->Await([this] {
-    state_mask_.store(0);  // Specifically ~R_ENABLED.
-    cntx_.Cancel();        // Context is fully resposible for cleanup.
+    state_mask_.store(0);       // Specifically ~R_ENABLED.
+    cntx_.ReportCancelError();  // Context is fully resposible for cleanup.
   });
 
   // Make sure the replica fully stopped and did all cleanup,
@@ -339,8 +335,7 @@ std::error_code Replica::HandleCapaDflyResp() {
   // If we're syncing a different replication ID, drop the saved LSNs.
   string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
   if (master_context_.master_repl_id != master_repl_id) {
-    if ((absl::GetFlag(FLAGS_replica_reconnect_on_master_restart) ||
-         absl::GetFlag(FLAGS_break_replication_on_master_restart)) &&
+    if (absl::GetFlag(FLAGS_break_replication_on_master_restart) &&
         !master_context_.master_repl_id.empty()) {
       LOG(ERROR) << "Encountered different master repl id (" << master_repl_id << " vs "
                  << master_context_.master_repl_id << ")";
@@ -547,6 +542,7 @@ error_code Replica::InitiateDflySync() {
     // Lock to prevent the error handler from running instantly
     // while the flows are in a mixed state.
     lock_guard lk{flows_op_mu_};
+
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
 
     size_t num_full_flows =
@@ -737,7 +733,7 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
   return std::error_code{};
 }
 
-io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cntx,
+io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, ExecutionState* cntx,
                                                  std::optional<LSN> lsn) {
   using nonstd::make_unexpected;
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
@@ -786,7 +782,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, Context* cn
   return is_full_sync;
 }
 
-error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
+error_code DflyShardReplica::StartStableSyncFlow(ExecutionState* cntx) {
   DCHECK(!master_context_.master_repl_id.empty() && !master_context_.dfly_session_id.empty());
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
@@ -801,7 +797,8 @@ error_code DflyShardReplica::StartStableSyncFlow(Context* cntx) {
   return std::error_code{};
 }
 
-void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc, Context* cntx) {
+void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
+                                      ExecutionState* cntx) {
   DCHECK(leftover_buf_);
   io::PrefixSource ps{leftover_buf_->InputBuffer(), Sock()};
 
@@ -851,7 +848,7 @@ void DflyShardReplica::FullSyncDflyFb(std::string eof_token, BlockingCounter bc,
   VLOG(1) << "FullSyncDflyFb finished after reading " << rdb_loader_->bytes_read() << " bytes";
 }
 
-void DflyShardReplica::StableSyncDflyReadFb(Context* cntx) {
+void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   DCHECK_EQ(proactor_index_, ProactorBase::me()->GetPoolIndex());
 
   // Check leftover from full sync.
@@ -912,7 +909,7 @@ void Replica::RedisStreamAcksFb() {
   }
 }
 
-void DflyShardReplica::StableSyncDflyAcksFb(Context* cntx) {
+void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
   DCHECK_EQ(proactor_index_, ProactorBase::me()->GetPoolIndex());
 
   constexpr size_t kAckRecordMaxInterval = 1024;
@@ -963,7 +960,7 @@ DflyShardReplica::~DflyShardReplica() {
   JoinFlow();
 }
 
-void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, Context* cntx) {
+void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }

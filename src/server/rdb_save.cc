@@ -49,12 +49,13 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
           "set 2 for multi entry zstd compression on df snapshot and single entry on rdb snapshot,"
           "set 3 for multi entry lz4 compression on df snapshot and single entry on rdb snapshot");
 
-// TODO: to retire both flags in v1.27 (Jan 2025)
-ABSL_FLAG(bool, list_rdb_encode_v2, true,
-          "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
-          "enconding of list uses ziplist encoding compatible with redis 6");
+ABSL_RETIRED_FLAG(
+    bool, list_rdb_encode_v2, true,
+    "V2 rdb encoding of list uses listpack encoding format, compatible with redis 7. V1 rdb "
+    "enconding of list uses ziplist encoding compatible with redis 6");
 
-ABSL_FLAG(bool, stream_rdb_encode_v2, false,
+// TODO: to retire this flag in v1.31
+ABSL_FLAG(bool, stream_rdb_encode_v2, true,
           "V2 uses format, compatible with redis 7.2 and Dragonfly v1.26+, while v1 format "
           "is compatible with redis 6");
 
@@ -173,8 +174,7 @@ uint8_t RdbObjectType(const PrimeValue& pv) {
       return RDB_TYPE_STRING;
     case OBJ_LIST:
       if (compact_enc == OBJ_ENCODING_QUICKLIST || compact_enc == kEncodingQL2) {
-        return absl::GetFlag(FLAGS_list_rdb_encode_v2) ? RDB_TYPE_LIST_QUICKLIST_2
-                                                       : RDB_TYPE_LIST_QUICKLIST;
+        return RDB_TYPE_LIST_QUICKLIST_2;
       }
       break;
     case OBJ_SET:
@@ -366,7 +366,7 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
   } else {
     DCHECK_EQ(pv.Encoding(), kEncodingQL2);
     QList* ql = reinterpret_cast<QList*>(pv.RObjPtr());
-    node = ql->Head();
+    node = (const quicklistNode*)ql->Head();  // We rely on common ABI for Q2 and Q1 nodes.
     len = ql->node_count();
   }
   RETURN_ON_ERR(SaveLen(len));
@@ -375,49 +375,19 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
 
-    if (absl::GetFlag(FLAGS_list_rdb_encode_v2)) {
-      // Use listpack encoding
-      SaveLen(node->container);
-      if (quicklistNodeIsCompressed(node)) {
-        void* data;
-        size_t compress_len = quicklistGetLzf(node, &data);
+    // Use listpack encoding
+    SaveLen(node->container);
+    if (quicklistNodeIsCompressed(node)) {
+      void* data;
+      size_t compress_len = quicklistGetLzf(node, &data);
 
-        RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
-      } else {
-        RETURN_ON_ERR(SaveString(node->entry, node->sz));
-        FlushState flush_state = FlushState::kFlushMidEntry;
-        if (node->next == nullptr)
-          flush_state = FlushState::kFlushEndEntry;
-        FlushIfNeeded(flush_state);
-      }
+      RETURN_ON_ERR(SaveLzfBlob(Bytes{reinterpret_cast<uint8_t*>(data), compress_len}, node->sz));
     } else {
-      // Use ziplist encoding
-      if (QL_NODE_IS_PLAIN(node)) {
-        RETURN_ON_ERR(SavePlainNodeAsZiplist(node));
-      } else {
-        // listpack node
-        uint8_t* lp = node->entry;
-        uint8_t* decompressed = NULL;
-
-        if (quicklistNodeIsCompressed(node)) {
-          void* data;
-          size_t compress_len = quicklistGetLzf(node, &data);
-          decompressed = (uint8_t*)zmalloc(node->sz);
-
-          if (lzf_decompress(data, compress_len, decompressed, node->sz) == 0) {
-            /* Someone requested decompress, but we can't decompress.  Not good. */
-            zfree(decompressed);
-            return make_error_code(errc::illegal_byte_sequence);
-          }
-          lp = decompressed;
-        }
-
-        auto cleanup = absl::MakeCleanup([=] {
-          if (decompressed)
-            zfree(decompressed);
-        });
-        RETURN_ON_ERR(SaveListPackAsZiplist(lp));
-      }
+      RETURN_ON_ERR(SaveString(node->entry, node->sz));
+      FlushState flush_state = FlushState::kFlushMidEntry;
+      if (node->next == nullptr)
+        flush_state = FlushState::kFlushEndEntry;
+      FlushIfNeeded(flush_state);
     }
     node = node->next;
   }
@@ -554,9 +524,7 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveString((uint8_t*)ri.key, ri.key_len));
     RETURN_ON_ERR(SaveString(lp, lp_bytes));
 
-    const FlushState flush_state =
-        (i + 1 < rax_size) ? FlushState::kFlushMidEntry : FlushState::kFlushEndEntry;
-    FlushIfNeeded(flush_state);
+    FlushIfNeeded(FlushState::kFlushMidEntry);
   }
 
   std::move(stop_listpacks_rax).Invoke();
@@ -624,6 +592,8 @@ error_code RdbSerializer::SaveStreamObject(const PrimeValue& pv) {
       RETURN_ON_ERR(SaveStreamConsumers(rdb_type >= RDB_TYPE_STREAM_LISTPACKS_3, cg));
     }
   }
+
+  FlushIfNeeded(FlushState::kFlushEndEntry);
 
   return error_code{};
 }
@@ -1079,14 +1049,14 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
 
   ~Impl();
 
-  void StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard);
-  void StartIncrementalSnapshotting(LSN start_lsn, Context* cntx, EngineShard* shard);
+  void StartSnapshotting(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
+  void StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx, EngineShard* shard);
 
   void StopSnapshotting(EngineShard* shard);
   void WaitForSnapshottingFinish(EngineShard* shard);
 
   // Pushes snapshot data. Called from SliceSnapshot
-  void ConsumeData(std::string data, Context* cntx) override;
+  void ConsumeData(std::string data, ExecutionState* cntx) override;
   // Finalizes the snapshot writing. Called from SliceSnapshot
   void Finalize() override;
 
@@ -1257,7 +1227,8 @@ error_code RdbSaver::Impl::WriteRecord(io::Bytes src) {
   return ec;
 }
 
-void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, EngineShard* shard) {
+void RdbSaver::Impl::StartSnapshotting(bool stream_journal, ExecutionState* cntx,
+                                       EngineShard* shard) {
   auto& s = GetSnapshot(shard);
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
 
@@ -1269,7 +1240,7 @@ void RdbSaver::Impl::StartSnapshotting(bool stream_journal, Context* cntx, Engin
   s->Start(stream_journal, allow_flush);
 }
 
-void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, Context* cntx,
+void RdbSaver::Impl::StartIncrementalSnapshotting(LSN start_lsn, ExecutionState* cntx,
                                                   EngineShard* shard) {
   auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
   auto& s = GetSnapshot(shard);
@@ -1286,7 +1257,7 @@ void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
   snapshot->WaitSnapshotting();
 }
 
-void RdbSaver::Impl::ConsumeData(std::string data, Context* cntx) {
+void RdbSaver::Impl::ConsumeData(std::string data, ExecutionState* cntx) {
   if (cntx->IsCancelled()) {
     return;
   }
@@ -1460,11 +1431,12 @@ RdbSaver::~RdbSaver() {
   tlocal->DecommitMemory(ServerState::kAllMemory);
 }
 
-void RdbSaver::StartSnapshotInShard(bool stream_journal, Context* cntx, EngineShard* shard) {
+void RdbSaver::StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard) {
   impl_->StartSnapshotting(stream_journal, cntx, shard);
 }
 
-void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, Context* cntx, EngineShard* shard) {
+void RdbSaver::StartIncrementalSnapshotInShard(LSN start_lsn, ExecutionState* cntx,
+                                               EngineShard* shard) {
   impl_->StartIncrementalSnapshotting(start_lsn, cntx, shard);
 }
 
@@ -1491,7 +1463,7 @@ error_code RdbSaver::SaveHeader(const GlobalData& glob_state) {
   return error_code{};
 }
 
-error_code RdbSaver::SaveBody(const Context& cntx) {
+error_code RdbSaver::SaveBody(const ExecutionState& cntx) {
   RETURN_ON_ERR(impl_->FlushSerializer());
 
   if (save_mode_ == SaveMode::RDB) {

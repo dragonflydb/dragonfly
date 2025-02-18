@@ -9,7 +9,7 @@
 extern "C" {
 #include "redis/intset.h"
 #include "redis/redis_aux.h"
-#include "redis/util.h"
+#include "redis/util.h"  // for string2ll
 }
 
 #include "base/flags.h"
@@ -1413,7 +1413,7 @@ void SScan(CmdArgList args, const CommandContext& cmd_cntx) {
     return cmd_cntx.rb->SendError(ops.status());
   }
 
-  ScanOpts scan_op = ops.value();
+  const ScanOpts& scan_op = ops.value();
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpScan(t->GetOpArgs(shard), key, &cursor, scan_op);

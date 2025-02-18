@@ -693,7 +693,7 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
 
   // Invalid limit.
   resp = Run({"xtrim", "foo", "maxlen", "~", "2", "limit", "nan"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 }
 TEST_F(StreamFamilyTest, XPending) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});

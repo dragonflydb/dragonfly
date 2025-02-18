@@ -81,3 +81,4 @@ Checks: >
 # modernize-use-nullptr,
 # modernize-use-equals-default,
 # readability-qualified-auto,
+cppcoreguidelines-narrowing-conversions.WarnOnIntegerNarrowingConversion: 'false'

@@ -852,7 +852,6 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
 
 TEST_F(SearchFamilyTest, FtProfileErrorReply) {
   Run({"ft.create", "i1", "schema", "name", "text"});
-  ;
 
   auto resp = Run({"ft.profile", "i1", "not_search", "query", "(a | b) c d"});
   EXPECT_THAT(resp, ErrArg("no `SEARCH` or `AGGREGATE` provided"));
@@ -1882,6 +1881,106 @@ TEST_F(SearchFamilyTest, InvalidSearchOptions) {
   // Test with NOCONTENT and RETURN
   resp = Run({"FT.SEARCH", "idx", "*", "NOCONTENT", "RETURN", "2", "@field1", "@field2"});
   EXPECT_THAT(resp, IsArray(IntArg(1), "j1"));
+}
+
+TEST_F(SearchFamilyTest, KnnSearchOptions) {
+  Run({"JSON.SET", "doc:1", ".", R"({"vector": [0.1, 0.2, 0.3, 0.4]})"});
+  Run({"JSON.SET", "doc:2", ".", R"({"vector": [0.5, 0.6, 0.7, 0.8]})"});
+  Run({"JSON.SET", "doc:3", ".", R"({"vector": [0.9, 0.1, 0.4, 0.3]})"});
+
+  auto resp = Run({"FT.CREATE", "my_index", "ON",  "JSON",   "PREFIX",          "1",     "doc:",
+                   "SCHEMA",    "$.vector", "AS",  "vector", "VECTOR",          "FLAT",  "6",
+                   "TYPE",      "FLOAT32",  "DIM", "4",      "DISTANCE_METRIC", "COSINE"});
+  EXPECT_EQ(resp, "OK");
+
+  std::string query_vector("\x00\x00\x00\x3f\x00\x00\x00\x40\x00\x00\x00\x41\x00\x00\x80\x42", 16);
+
+  // KNN 2
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 2 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2"));
+
+  // KNN 11929939
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // KNN 11929939, LIMIT 4 2
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector, "LIMIT", "4", "2"});
+  EXPECT_THAT(resp, IntArg(3));
+
+  // KNN 11929939, LIMIT 0 10
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 11929939 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+
+  // KNN 1, LIMIT 0 2
+  resp = Run({"FT.SEARCH", "my_index", "*=>[KNN 1 @vector $query_vector]", "PARAMS", "2",
+              "query_vector", query_vector, "LIMIT", "0", "2"});
+  EXPECT_THAT(resp, AreDocIds("doc:1"));
+}
+
+TEST_F(SearchFamilyTest, InvalidAggregateOptions) {
+  Run({"JSON.SET", "j1", ".", R"({"field1":"first","field2":"second"})"});
+  Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.field1", "AS", "field1", "TEXT", "$.field2",
+       "AS", "field2", "TEXT"});
+
+  // Test GROUPBY with no arguments
+  auto resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test GROUPBY with invalid count
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp =
+      Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test REDUCE with no REDUCE function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE"});
+  EXPECT_THAT(resp, ErrArg("reducer function  not found"));
+
+  /* // Test REDUCE with COUNT function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE", "COUNT", "0"});
+  EXPECT_THAT(resp, IsMapWithSize("__generated_aliascount", "1", "field1", "first")); */
+
+  // Test REDUCE with invalid function
+  resp = Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@field1", "REDUCE", "INVALIDFUNC", "0",
+              "AS", "result"});
+  EXPECT_THAT(resp, ErrArg("reducer function INVALIDFUNC not found"));
+
+  // Test SORTBY with no arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  // Test SORTBY with invalid count
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "SORTBY", "100000000000000000000", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test LIMIT with invalid arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "0"});
+  EXPECT_THAT(resp, ErrArg(kSyntaxErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "-1", "10"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LIMIT", "0", "100000000000000000000"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  // Test LOAD with invalid arguments
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "-1", "@field1"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
+
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "100000000000000000000", "@field1", "@field2"});
+  EXPECT_THAT(resp, ErrArg(kInvalidIntErr));
 }
 
 }  // namespace dfly

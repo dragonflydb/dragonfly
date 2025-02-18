@@ -119,7 +119,7 @@ bool BlockingController::DbWatchTable::AddAwakeEvent(string_view key) {
 }
 
 // Removes tx from its watch queues if tx appears there.
-void BlockingController::FinalizeWatched(Keys keys, Transaction* tx) {
+void BlockingController::RemovedWatched(Keys keys, Transaction* tx) {
   DCHECK(tx);
   VLOG(1) << "FinalizeBlocking [" << owner_->shard_id() << "]" << tx->DebugId();
 
@@ -136,7 +136,7 @@ void BlockingController::FinalizeWatched(Keys keys, Transaction* tx) {
 
   // Add keys of processed transaction so we could awake the next one in the queue
   // in case those keys still exist.
-  for (string_view key : base::it::Wrap(facade::kToSV, keys)) {
+  for (string_view key : keys) {
     bool removed_awakened = wt.UnwatchTx(key, tx);
     CHECK(!removed_awakened || removed)
         << tx->DebugId() << " " << key << " " << tx->DEBUG_GetLocalMask(owner_->shard_id());
@@ -207,7 +207,7 @@ void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transa
 
   DbWatchTable& wt = *dbit->second;
 
-  for (auto key : base::it::Wrap(facade::kToSV, watch_keys)) {
+  for (auto key : watch_keys) {
     auto [res, inserted] = wt.queue_map.emplace(key, nullptr);
     if (inserted) {
       res->second.reset(new WatchQueue);
@@ -257,8 +257,9 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
     Transaction* head = wi.get();
     // We check may the transaction be notified otherwise move it to the end of the queue
     if (wi.key_ready_checker(owner_, context, head, key)) {
-      DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key;
-      if (head->NotifySuspended(owner_->committed_txid(), sid, key)) {
+      DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
+               << owner_->committed_txid();
+      if (head->NotifySuspended(sid, key)) {
         wq->state = WatchQueue::ACTIVE;
         // We deliberately keep the notified transaction in the queue to know which queue
         // must handled when this transaction finished.

@@ -473,11 +473,19 @@ class DbSlice {
 
   bool IsCacheMode() const {
     // During loading time we never bump elements.
-    return cache_mode_ && !load_in_progress_;
+    return cache_mode_ && (load_ref_count_ == 0);
   }
 
-  void SetLoadInProgress(bool in_progress) {
-    load_in_progress_ = in_progress;
+  void IncrLoadInProgress() {
+    ++load_ref_count_;
+  }
+
+  void DecrLoadInProgress() {
+    --load_ref_count_;
+  }
+
+  bool IsLoadRefCountZero() const {
+    return load_ref_count_ == 0;
   }
 
   // Test hook to inspect last locked keys.
@@ -585,7 +593,6 @@ class DbSlice {
 
   ShardId shard_id_;
   uint8_t cache_mode_ : 1;
-  uint8_t load_in_progress_ : 1;
 
   EngineShard* owner_;
 
@@ -598,6 +605,7 @@ class DbSlice {
   size_t soft_budget_limit_ = 0;
   size_t table_memory_ = 0;
   uint64_t entries_count_ = 0;
+  unsigned load_ref_count_ = 0;
 
   mutable SliceEvents events_;  // we may change this even for const operations.
 

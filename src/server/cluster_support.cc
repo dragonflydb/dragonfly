@@ -35,7 +35,7 @@ void UniqueSlotChecker::Add(SlotId slot_id) {
   if (slot_id_ == kNoSlotId) {
     slot_id_ = slot_id;
   } else if (slot_id_ != slot_id) {
-    slot_id_ = kInvalidSlotId;
+    slot_id_ = kCrossSlot;
   }
 }
 

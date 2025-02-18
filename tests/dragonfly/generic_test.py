@@ -1,4 +1,3 @@
-import os
 import logging
 import pytest
 import redis
@@ -6,7 +5,7 @@ import asyncio
 from redis import asyncio as aioredis
 
 from . import dfly_multi_test_args, dfly_args
-from .instance import DflyStartException
+from .instance import DflyInstance, DflyStartException
 from .utility import batch_fill_data, gen_test_data, EnvironCntx
 from .seeder import StaticSeeder
 
@@ -79,6 +78,92 @@ async def test_txq_ooo(async_client: aioredis.Redis, df_server):
     await asyncio.gather(
         task1("i1", 2), task1("i2", 3), task2("l1", 2), task2("l1", 2), task2("l1", 5)
     )
+
+
+@dfly_args({"proactor_threads": 2, "num_shards": 2})
+async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: DflyInstance):
+    active = True
+
+    # A task to trigger the flow that eventually looses a transaction
+    # blmove is used to trigger a global deadlock, but we could use any
+    # command - the effect would be - a deadlocking locally that connection
+    async def blmove_task_loose(num):
+        async def run(id):
+            c = df_server.client()
+            await c.lpush(f"key{id}", "val")
+            while active:
+                await c.blmove(f"key{id}", f"key{id}", 0, "LEFT", "LEFT")
+                await asyncio.sleep(0.01)
+
+        tasks = []
+        for i in range(num):
+            tasks.append(run(i))
+
+        await asyncio.gather(*tasks)
+
+    # A task that creates continuation_trans_ by constantly timing out on
+    # an empty set. We could probably use any 2-hop operation like rename.
+    async def task_blocking(num):
+        async def block(id):
+            c = df_server.client()
+            while active:
+                await c.blmove(f"{{{id}}}from", f"{{{id}}}to", 0.1, "LEFT", "LEFT")
+
+        tasks = []
+        for i in range(num):
+            tasks.append(block(i))
+        await asyncio.gather(*tasks)
+
+
+    # produce is constantly waking up consumers. It is used to trigger the
+    # flow that creates wake ups on a differrent database in the
+    # middle of continuation transaction.
+    async def tasks_produce(num, iters):
+        LPUSH_SCRIPT = """
+            redis.call('LPUSH', KEYS[1], "val")
+        """
+        async def produce(id):
+            c = df_server.client(db=1)  # important to be on a different db
+            for i in range(iters):
+                # Must be a lua script and not multi-exec for some reason.
+                await c.eval(LPUSH_SCRIPT, 1,  f"list{{{id}}}")
+
+        tasks = []
+        for i in range(num):
+            task = asyncio.create_task(produce(i))
+            tasks.append(task)
+
+        await asyncio.gather(*tasks)
+        logging.info("Finished producing")
+
+    # works with producer to constantly block and wake up
+    async def tasks_consume(num, iters):
+        async def drain(id, iters):
+            client = df_server.client(db=1)
+            for _ in range(iters):
+                await client.blmove(f"list{{{id}}}", f"sink{{{id}}}", 0, "LEFT", "LEFT")
+
+        tasks = []
+        for i in range(num):
+            task = asyncio.create_task(drain(i, iters))
+            tasks.append(task)
+
+        await asyncio.gather(*tasks)
+        logging.info("Finished consuming")
+
+
+    num_keys = 32
+    num_iters = 200
+    async_task1 = asyncio.create_task(blmove_task_loose(num_keys))
+    async_task2 = asyncio.create_task(task_blocking(num_keys))
+    logging.info("Starting tasks")
+    await asyncio.gather(
+        tasks_consume(num_keys, num_iters),
+        tasks_produce(num_keys, num_iters),
+    )
+    logging.info("Finishing tasks")
+    active = False
+    await asyncio.gather(async_task1, async_task2)
 
 
 async def test_arg_from_environ_overwritten_by_cli(df_factory):

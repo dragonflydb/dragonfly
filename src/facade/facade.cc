@@ -98,6 +98,7 @@ const char kUndeclaredKeyErr[] = "script tried accessing undeclared key";
 const char kInvalidDumpValueErr[] = "DUMP payload version or checksum are wrong";
 const char kInvalidJsonPathErr[] = "invalid JSON path";
 const char kJsonParseError[] = "failed to parse JSON";
+const char kCrossSlotError[] = "-CROSSSLOT Keys in request don't hash to the same slot";
 
 const char kSyntaxErrType[] = "syntax_error";
 const char kScriptErrType[] = "script_error";

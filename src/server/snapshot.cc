@@ -37,7 +37,7 @@ constexpr size_t kMinBlobSize = 32_KB;
 }  // namespace
 
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
-                             SnapshotDataConsumerInterface* consumer, Context* cntx)
+                             SnapshotDataConsumerInterface* consumer, ExecutionState* cntx)
     : db_slice_(slice),
       db_array_(slice->databases()),
       compression_mode_(compression_mode),

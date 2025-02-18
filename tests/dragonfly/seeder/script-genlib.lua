@@ -192,6 +192,34 @@ function LG_funcs.mod_json(key, dbsize)
     end
 end
 
+-- streams
+-- store sequences of timestamped events
+
+function LG_funcs.add_stream(key)
+    local entries = {}
+
+    local limit = LG_funcs.csize
+    local blobs = randstr_sequence()
+
+    for i = 1, limit do
+        table.insert(entries, tostring(i))
+        table.insert(entries, blobs[i])
+    end
+
+    redis.apcall('XADD', key, '*', unpack(entries))
+end
+
+function LG_funcs.mod_stream(key)
+    local action = math.random(1, 3)
+    if action <= 2 then
+        local size = LG_funcs.csize * 2
+        redis.apcall('XADD', key, '*', math.random(0, size), randstr())
+    else
+        local maxlen = math.random(0, 100)
+        redis.apcall('XTRIM', key, 'MAXLEN', '~', maxlen)
+    end
+end
+
 function LG_funcs.get_huge_entries()
   return huge_entries
 end

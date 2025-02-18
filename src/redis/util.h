@@ -44,8 +44,6 @@
 #define C_OK                    0
 #define C_ERR                   -1
 
-int stringmatchlen(const char *p, int plen, const char *s, int slen, int nocase);
-
 
 int ll2string(char *s, size_t len, long long value);
 int string2ll(const char *s, size_t slen, long long *value);
