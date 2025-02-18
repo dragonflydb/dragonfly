@@ -900,7 +900,7 @@ void ClusterFamily::InitMigration(CmdArgList args, SinkReplyBuilder* builder) {
 
   const auto& incoming_migrations = cluster_config()->GetIncomingMigrations();
   bool found = any_of(incoming_migrations.begin(), incoming_migrations.end(),
-                      [&source_id, &slot_ranges](const MigrationInfo& info) {
+                      [source_id = source_id, &slot_ranges](const MigrationInfo& info) {
                         return info.node_info.id == source_id && info.slot_ranges == slot_ranges;
                       });
   if (!found) {

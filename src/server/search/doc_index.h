@@ -148,6 +148,7 @@ struct SearchParams {
     Only one of load_fields and return_fields should be set.
   */
   std::optional<SearchFieldsList> load_fields;
+  bool no_content = false;
 
   std::optional<search::SortOption> sort_option;
   search::QueryParams query_params;
@@ -157,7 +158,7 @@ struct SearchParams {
   }
 
   bool IdsOnly() const {
-    return return_fields && return_fields->empty();
+    return no_content || (return_fields && return_fields->empty());
   }
 
   bool ShouldReturnField(std::string_view alias) const;

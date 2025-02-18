@@ -5,17 +5,19 @@
 #include "server/acl/validator.h"
 
 #include "base/logging.h"
+#include "core/glob_matcher.h"
 #include "facade/dragonfly_connection.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
-// we need this because of stringmatchlen
-extern "C" {
-#include "redis/util.h"
-}
 
 namespace dfly::acl {
+
+inline bool Matches(std::string_view pattern, std::string_view target) {
+  GlobMatcher matcher(pattern, true);
+  return matcher.Matches(target);
+};
 
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
                                                 ArgSlice tail_args) {
@@ -58,16 +60,12 @@ static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const Com
     return {false, AclLog::Reason::COMMAND};
   }
 
-  auto match = [](const auto& pattern, const auto& target) {
-    return stringmatchlen(pattern.data(), pattern.size(), target.data(), target.size(), 0);
-  };
-
   const bool is_read_command = id.IsReadOnly();
   const bool is_write_command = id.IsWriteOnly();
 
   auto iterate_globs = [&](auto target) {
     for (auto& [elem, op] : keys.key_globs) {
-      if (match(elem, target)) {
+      if (Matches(elem, target)) {
         if (is_read_command && (op == KeyOp::READ || op == KeyOp::READ_WRITE)) {
           return true;
         }
@@ -98,16 +96,12 @@ static bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const Com
     return {false, AclLog::Reason::COMMAND};
   }
 
-  auto match = [](std::string_view pattern, std::string_view target) {
-    return stringmatchlen(pattern.data(), pattern.size(), target.data(), target.size(), 0);
-  };
-
   auto iterate_globs = [&](std::string_view target) {
     for (auto& [glob, has_asterisk] : pub_sub.globs) {
       if (literal_match && (glob == target)) {
         return true;
       }
-      if (!literal_match && match(glob, target)) {
+      if (!literal_match && Matches(glob, target)) {
         return true;
       }
     }

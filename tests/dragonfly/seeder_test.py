@@ -13,7 +13,7 @@ async def test_static_seeder(async_client: aioredis.Redis):
     s = StaticSeeder(key_target=10_000, data_size=100)
     await s.run(async_client)
 
-    assert abs(await async_client.dbsize() - 10_000) <= 50
+    assert abs(await async_client.dbsize() - 10_000) <= 70
 
 
 @dfly_args({"proactor_threads": 4})

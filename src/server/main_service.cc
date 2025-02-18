@@ -64,6 +64,7 @@ extern "C" {
 #include "util/varz.h"
 
 using namespace std;
+using facade::operator""_KB;
 using facade::ErrorReply;
 
 ABSL_FLAG(int32_t, port, 6379,
@@ -110,7 +111,7 @@ ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
           "DENYOOM will fail with OOM error and new connections to non-admin port will be "
           "rejected. Negative value disables this feature.");
 
-ABSL_FLAG(size_t, serialization_max_chunk_size, 0,
+ABSL_FLAG(size_t, serialization_max_chunk_size, 64_KB,
           "Maximum size of a value that may be serialized at once during snapshotting or full "
           "sync. Values bigger than this threshold will be serialized using streaming "
           "serialization. 0 - to disable streaming mode");
@@ -951,21 +952,17 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
   }
 
   const auto& key_index = *key_index_res;
-  optional<SlotId> keys_slot;
-  bool cross_slot = false;
-  // Iterate keys and check to which slot they belong.
+
+  UniqueSlotChecker slot_checker;
   for (string_view key : key_index.Range(args)) {
-    if (SlotId slot = KeySlot(key); keys_slot && slot != *keys_slot) {
-      cross_slot = true;  // keys belong to different slots
-      break;
-    } else {
-      keys_slot = slot;
-    }
+    slot_checker.Add(key);
   }
 
-  if (cross_slot) {
-    return ErrorReply{"-CROSSSLOT Keys in request don't hash to the same slot"};
+  if (slot_checker.IsCrossSlot()) {
+    return ErrorReply{kCrossSlotError};
   }
+
+  optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
 
   if (keys_slot.has_value()) {
     if (auto error = cluster::SlotOwnershipError(*keys_slot);
@@ -1880,28 +1877,27 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
     return Transaction::NON_ATOMIC;
 }
 
-// Start multi transaction for eval. Returns true if transaction was scheduled.
+// Starts multi transaction. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
-bool StartMultiEval(DbIndex dbid, CmdArgList keys, Transaction::MultiMode script_mode,
-                    ConnectionContext* cntx) {
+bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgList keys) {
   Transaction* tx = cntx->transaction;
   Namespace* ns = cntx->ns;
+  const DbIndex dbid = cntx->db_index();
 
-  if (keys.empty() && script_mode == Transaction::LOCK_AHEAD)
-    return false;
-
-  switch (script_mode) {
+  switch (tx_mode) {
     case Transaction::GLOBAL:
       tx->StartMultiGlobal(ns, dbid);
       return true;
     case Transaction::LOCK_AHEAD:
+      if (keys.empty())
+        return false;
       tx->StartMultiLockedAhead(ns, dbid, keys);
       return true;
     case Transaction::NON_ATOMIC:
       tx->StartMultiNonAtomic();
       return true;
     default:
-      CHECK(false) << "Invalid mode";
+      LOG(FATAL) << "Invalid mode";
   };
 
   return false;
@@ -1992,7 +1988,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
     });
 
     ++ServerState::tlocal()->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareMultiForScheduleSingleHop(cntx->ns, *sid, tx->GetDbIndex(), args);
+    tx->PrepareMultiForScheduleSingleHop(cntx->ns, *sid, cntx->db_index(), args);
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
           new Transaction{tx, *sid, slot_checker.GetUniqueSlotId()};
@@ -2023,7 +2019,7 @@ void Service::EvalInternal(CmdArgList args, const EvalArgs& eval_args, Interpret
         return builder->SendError(err);
       }
     } else {
-      scheduled = StartMultiEval(cntx->db_index(), eval_args.keys, script_mode, cntx);
+      scheduled = StartMulti(cntx, script_mode, eval_args.keys);
     }
 
     ++ServerState::tlocal()->stats.eval_io_coordination_cnt;
@@ -2146,27 +2142,6 @@ CmdArgVec CollectAllKeys(ConnectionState::ExecInfo* exec_info) {
   return out;
 }
 
-// Return true if transaction was scheduled, false if scheduling was not required.
-void StartMultiExec(ConnectionContext* cntx, ConnectionState::ExecInfo* exec_info,
-                    Transaction::MultiMode multi_mode) {
-  auto* tx = cntx->transaction;
-  auto dbid = cntx->db_index();
-  switch (multi_mode) {
-    case Transaction::GLOBAL:
-      tx->StartMultiGlobal(cntx->ns, dbid);
-      break;
-    case Transaction::LOCK_AHEAD: {
-      auto vec = CollectAllKeys(exec_info);
-      tx->StartMultiLockedAhead(cntx->ns, dbid, absl::MakeSpan(vec));
-    } break;
-    case Transaction::NON_ATOMIC:
-      tx->StartMultiNonAtomic();
-      break;
-    case Transaction::NOT_DETERMINED:
-      LOG(FATAL) << "should not reach";
-  };
-}
-
 void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   auto& exec_info = cmd_cntx.conn_cntx->conn_state.exec_info;
@@ -2194,6 +2169,18 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
   cntx->last_command_debug.exec_body_len = exec_info.body.size();
 
+  auto keys = CollectAllKeys(&exec_info);
+  if (IsClusterEnabled()) {
+    UniqueSlotChecker slot_checker;
+    for (const auto& s : keys) {
+      slot_checker.Add(s);
+    }
+
+    if (slot_checker.IsCrossSlot()) {
+      return rb->SendError(kCrossSlotError);
+    }
+  }
+
   // The transaction can contain script load script execution, determine their presence ahead to
   // customize logic below.
   ExecScriptUse state = DetermineScriptPresense(exec_info.body);
@@ -2210,8 +2197,7 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
 
   bool scheduled = false;
   if (multi_mode != Transaction::NOT_DETERMINED) {
-    StartMultiExec(cntx, &exec_info, multi_mode);
-    scheduled = true;
+    scheduled = StartMulti(cntx, multi_mode, keys);
   }
 
   // EXEC should not run if any of the watched keys expired.
@@ -2550,7 +2536,14 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
   VLOG(1) << "Switching state from " << from << " to " << to;
   global_state_ = to;
 
-  pp_.Await([&](ProactorBase*) { ServerState::tlocal()->set_gstate(to); });
+  pp_.Await([&](ProactorBase*) {
+    ServerState::tlocal()->set_gstate(to);
+    auto* es = EngineShard::tlocal();
+    if (es && to == GlobalState::ACTIVE) {
+      DbSlice& db = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+      DCHECK(db.IsLoadRefCountZero());
+    }
+  });
   return to;
 }
 

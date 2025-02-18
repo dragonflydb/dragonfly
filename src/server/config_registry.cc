@@ -7,11 +7,8 @@
 #include <absl/strings/str_replace.h>
 
 #include "base/logging.h"
+#include "core/glob_matcher.h"
 #include "server/common.h"
-
-extern "C" {
-#include "redis/util.h"
-}
 
 namespace dfly {
 namespace {
@@ -67,11 +64,13 @@ void ConfigRegistry::Reset() {
 
 vector<string> ConfigRegistry::List(string_view glob) const {
   string normalized_glob = NormalizeConfigName(glob);
+  GlobMatcher matcher(normalized_glob, false /* case insensitive*/);
 
   vector<string> res;
   util::fb2::LockGuard lk(mu_);
+
   for (const auto& [name, _] : registry_) {
-    if (stringmatchlen(normalized_glob.data(), normalized_glob.size(), name.data(), name.size(), 1))
+    if (matcher.Matches(name))
       res.push_back(name);
   }
   return res;

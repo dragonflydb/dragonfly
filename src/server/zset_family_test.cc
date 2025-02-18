@@ -967,6 +967,8 @@ TEST_F(ZSetFamilyTest, BlockingIsReleased) {
   Run({"ZADD", "B", "1", "x", "3", "b"});
   Run({"ZADD", "C", "1", "x", "10", "a"});
   Run({"ZADD", "D", "1", "x", "5", "c"});
+  Run({"ZADD", "E", "2", "x", "1", "c"});
+  Run({"ZADD", "F", "1", "c"});
 
   vector<string> blocking_keys{"zset1", "zset2", "zset3"};
   for (const auto& key : blocking_keys) {
@@ -976,7 +978,7 @@ TEST_F(ZSetFamilyTest, BlockingIsReleased) {
     unblocking_commands.push_back({"ZINCRBY", key, "2", "x"});
     unblocking_commands.push_back({"ZINTERSTORE", key, "2", "A", "B"});
     unblocking_commands.push_back({"ZUNIONSTORE", key, "2", "C", "D"});
-    // unblocking_commands.push_back({"ZDIFFSTORE", key, "2", "A", "B"}); // unimplemented
+    unblocking_commands.push_back({"ZDIFFSTORE", key, "2", "E", "F"});
 
     for (auto& cmd : unblocking_commands) {
       RespExpr resp0;
@@ -1046,6 +1048,14 @@ TEST_F(ZSetFamilyTest, ZDiffError) {
 
   resp = Run({"zdiff", "0", "z1", "z2"});
   EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
+
+  EXPECT_EQ(1, CheckedInt({"sadd", "s1", "one"}));
+
+  resp = Run({"zdiff", "2", "z1", "s1"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key holding the wrong kind of value"));
+
+  resp = Run({"zdiff", "2", "s1", "z2"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key holding the wrong kind of value"));
 }
 
 TEST_F(ZSetFamilyTest, ZDiff) {
@@ -1083,6 +1093,67 @@ TEST_F(ZSetFamilyTest, ZDiff) {
 
   resp = Run({"zdiff", "2", "z1", "z2", "WITHSCORES"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("two", "2", "three", "3", "four", "4"));
+}
+
+TEST_F(ZSetFamilyTest, ZDiffStoreError) {
+  RespExpr resp;
+
+  resp = Run({"zdiffstore", "key"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"zdiffstore", "key", "0"});
+  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+
+  resp = Run({"zdiffstore", "key", "-1", "z1"});
+  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  resp = Run({"zdiffstore", "key", "0", "z1"});
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
+
+  resp = Run({"zdiffstore", "key", "0", "z1", "z2"});
+  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
+
+  EXPECT_EQ(1, CheckedInt({"sadd", "s1", "one"}));
+
+  resp = Run({"zdiffstore", "key", "2", "z1", "s1"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key holding the wrong kind of value"));
+
+  resp = Run({"zdiffstore", "key", "2", "s1", "z2"});
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key holding the wrong kind of value"));
+}
+
+TEST_F(ZSetFamilyTest, ZDiffStore) {
+  RespExpr resp;
+
+  EXPECT_EQ(4, CheckedInt({"zadd", "z1", "1", "one", "2", "two", "3", "three", "4", "four"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z2", "1", "one", "5", "five"}));
+  EXPECT_EQ(2, CheckedInt({"zadd", "z3", "2", "two", "3", "three"}));
+  EXPECT_EQ(1, CheckedInt({"zadd", "z4", "4", "four"}));
+
+  resp = Run({"zdiffstore", "key", "1", "z1"});
+  EXPECT_THAT(resp, IntArg(4));
+  resp = Run({"zrange", "key", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "1", "two", "2", "three", "3", "four", "4"));
+
+  resp = Run({"zdiffstore", "key", "2", "z1", "z1"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"zrange", "key", "0", "-1", "withscores"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"zdiffstore", "key", "4", "z1", "z2", "z3", "z4"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"zrange", "key", "0", "-1"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
+
+  resp = Run({"zdiffstore", "key", "2", "z1", "doesnt_exist"});
+  EXPECT_THAT(resp, IntArg(4));
+  resp = Run({"zrange", "key", "0", "-1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two", "three", "four"));
+
+  resp = Run({"zdiffstore", "key", "2", "doesnt_exits", "z1"});
+  EXPECT_THAT(resp, IntArg(0));
+  resp = Run({"zrange", "key", "0", "-1"});
+  EXPECT_THAT(resp.GetVec().empty(), true);
 }
 
 TEST_F(ZSetFamilyTest, Count) {

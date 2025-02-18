@@ -179,21 +179,22 @@ class DflyShardReplica : public ProtocolClient {
 
   // Start replica initialized as dfly flow.
   // Sets is_full_sync when successful.
-  io::Result<bool> StartSyncFlow(util::fb2::BlockingCounter block, Context* cntx,
+  io::Result<bool> StartSyncFlow(util::fb2::BlockingCounter block, ExecutionState* cntx,
                                  std::optional<LSN>);
 
   // Transition into stable state mode as dfly flow.
-  std::error_code StartStableSyncFlow(Context* cntx);
+  std::error_code StartStableSyncFlow(ExecutionState* cntx);
 
   // Single flow full sync fiber spawned by StartFullSyncFlow.
-  void FullSyncDflyFb(std::string eof_token, util::fb2::BlockingCounter block, Context* cntx);
+  void FullSyncDflyFb(std::string eof_token, util::fb2::BlockingCounter block,
+                      ExecutionState* cntx);
 
   // Single flow stable state sync fiber spawned by StartStableSyncFlow.
-  void StableSyncDflyReadFb(Context* cntx);
+  void StableSyncDflyReadFb(ExecutionState* cntx);
 
-  void StableSyncDflyAcksFb(Context* cntx);
+  void StableSyncDflyAcksFb(ExecutionState* cntx);
 
-  void ExecuteTx(TransactionData&& tx_data, Context* cntx);
+  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx);
 
   uint32_t FlowId() const;
 

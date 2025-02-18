@@ -143,12 +143,12 @@ void OutgoingMigration::Finish(GenericError error) {
   auto next_state = MigrationState::C_FINISHED;
   if (error) {
     next_state = MigrationState::C_ERROR;
-    VLOG(1) << "Finish outgoing migration for " << cf_->MyID() << ": "
-            << migration_info_.node_info.id << " with error: " << error.Format();
+    LOG(WARNING) << "Finish outgoing migration for " << cf_->MyID() << ": "
+                 << migration_info_.node_info.id << " with error: " << error.Format();
     cntx_.ReportError(std::move(error));
   } else {
-    VLOG(1) << "Finish outgoing migration for " << cf_->MyID() << ": "
-            << migration_info_.node_info.id;
+    LOG(INFO) << "Finish outgoing migration for " << cf_->MyID() << ": "
+              << migration_info_.node_info.id;
   }
 
   bool should_cancel_flows = false;
@@ -285,14 +285,12 @@ void OutgoingMigration::SyncFb() {
 bool OutgoingMigration::FinalizeMigration(long attempt) {
   // if it's not the 1st attempt and flows are work correctly we try to
   // reconnect and ACK one more time
-  VLOG(1) << "FinalizeMigration for " << cf_->MyID() << " : " << migration_info_.node_info.id
-          << " attempt " << attempt;
+  LOG(INFO) << "Finalize migration for " << cf_->MyID() << " : " << migration_info_.node_info.id
+            << " attempt " << attempt;
   if (attempt > 1) {
     if (cntx_.GetError()) {
       return true;
     }
-    VLOG(1) << "Reconnecting " << cf_->MyID() << " : " << migration_info_.node_info.id
-            << " attempt " << attempt;
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &cntx_); ec) {
       LOG(WARNING) << "Couldn't connect " << cf_->MyID() << " : " << migration_info_.node_info.id
@@ -316,20 +314,19 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   absl::Cleanup cleanup([&is_block_active, &pause_fb_opt]() {
-    is_block_active = false;
-    pause_fb_opt->JoinIfNeeded();
+    if (pause_fb_opt) {
+      is_block_active = false;
+      pause_fb_opt->JoinIfNeeded();
+    }
   });
 
-  VLOG(1) << "FINALIZE flows for " << cf_->MyID() << " : " << migration_info_.node_info.id;
+  LOG(INFO) << "FINALIZE flows for " << cf_->MyID() << " : " << migration_info_.node_info.id;
   OnAllShards([attempt](auto& migration) { migration->Finalize(attempt); });
 
   auto cmd = absl::StrCat("DFLYMIGRATE ACK ", cf_->MyID(), " ", attempt);
   VLOG(1) << "send " << cmd;
 
-  auto err = SendCommand(cmd);
-  LOG_IF(WARNING, err) << err;
-
-  if (err) {
+  if (auto err = SendCommand(cmd); err) {
     LOG(WARNING) << "Error during sending DFLYMIGRATE ACK: " << err.message();
     return false;
   }

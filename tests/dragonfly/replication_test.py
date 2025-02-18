@@ -1491,6 +1491,35 @@ async def test_tls_replication(
     await proxy.close(proxy_task)
 
 
+@dfly_args({"proactor_threads": 2})
+async def test_tls_replication_without_ca(
+    df_factory,
+    df_seeder_factory,
+    with_tls_server_args,
+    with_ca_tls_client_args,
+):
+    # 1. Spin up dragonfly tls enabled, debug populate
+    master = df_factory.create(tls_replication="true", **with_tls_server_args, requirepass="hi")
+    master.start()
+    # Somehow redis-py forces to verify the certificate and it fails
+    # TODO investigate why and remove with_ca_tls_clients_args
+    c_master = master.client(password="hi", **with_ca_tls_client_args)
+    await c_master.execute_command("DEBUG POPULATE 100")
+
+    # 2. Spin up a replica and initiate a REPLICAOF
+    replica = df_factory.create(
+        tls_replication="true", **with_tls_server_args, masterauth="hi", requirepass="hi"
+    )
+    replica.start()
+
+    c_replica = replica.client(password="hi", **with_ca_tls_client_args)
+
+    res = await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+    assert "OK" == res
+    await check_all_replicas_finished([c_replica], c_master)
+    assert 100 == await c_replica.execute_command("dbsize")
+
+
 @pytest.mark.exclude_epoll
 async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     """Test that IPV6 addresses work for replication, ::1 is 127.0.0.1 localhost"""
@@ -2715,7 +2744,7 @@ async def test_big_containers(df_factory, element_size, elements_number):
     logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
     assert replica_peak_memory < 1.1 * replica_used_memory
 
-    # Check replica data consisten
+    # Check replica data consistent
     replica_data = await StaticSeeder.capture(c_replica)
     master_data = await StaticSeeder.capture(c_master)
     assert master_data == replica_data
@@ -2734,3 +2763,49 @@ async def test_master_too_big(df_factory):
     # We should never sync due to used memory too high during full sync
     with pytest.raises(TimeoutError):
         await wait_available_async(c_replica, timeout=10)
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_stream_approximate_trimming(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    # Step 1: Populate master with 100 streams, each containing 200 entries
+    num_streams = 100
+    entries_per_stream = 200
+
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        for j in range(entries_per_stream):
+            await c_master.execute_command("XADD", stream_name, "*", f"field{j}", f"value{j}")
+
+    # Step 2: Trim each stream to a random size between 70 and 200
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        trim_size = random.randint(70, entries_per_stream)
+        await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "~", trim_size)
+
+    # Wait for replica sync
+    await asyncio.sleep(1)
+
+    # Check replica data consistent
+    master_data = await StaticSeeder.capture(c_master)
+    replica_data = await StaticSeeder.capture(c_replica)
+    assert master_data == replica_data
+
+    # Step 3: Trim all streams to 0
+    for i in range(num_streams):
+        stream_name = f"stream{i}"
+        await c_master.execute_command("XTRIM", stream_name, "MAXLEN", "0")
+
+    # Check replica data consistent
+    master_data = await StaticSeeder.capture(c_master)
+    replica_data = await StaticSeeder.capture(c_replica)
+    assert master_data == replica_data

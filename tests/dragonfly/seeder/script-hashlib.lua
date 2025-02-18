@@ -29,3 +29,7 @@ function LH_funcs.json(key, hash)
     -- add values to hash, note JSON.GET returns just a string
     return dragonfly.ihash(hash, false, 'JSON.GET', key)
 end
+
+function LH_funcs.stream(key, hash)
+    return dragonfly.ihash(hash, false, 'XRANGE', key, '-', '+')
+end

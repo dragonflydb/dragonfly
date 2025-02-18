@@ -42,7 +42,7 @@ class ClusterShardMigration {
     pause_ = pause;
   }
 
-  void Start(Context* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
+  void Start(ExecutionState* cntx, util::FiberSocketBase* source) ABSL_LOCKS_EXCLUDED(mu_) {
     {
       util::fb2::LockGuard lk(mu_);
       if (is_finished_) {
@@ -125,7 +125,7 @@ class ClusterShardMigration {
   }
 
  private:
-  void ExecuteTx(TransactionData&& tx_data, Context* cntx) {
+  void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
     if (cntx->IsCancelled()) {
       return;
     }
@@ -192,12 +192,26 @@ bool IncomingSlotMigration::Join(long attempt) {
       return false;
     }
 
-    if ((bc_->WaitFor(absl::ToInt64Milliseconds(timeout - passed) * 1ms)) &&
-        (std::all_of(shard_flows_.begin(), shard_flows_.end(),
-                     [&](const auto& flow) { return flow->GetLastAttempt() == attempt; }))) {
-      state_.store(MigrationState::C_FINISHED);
-      keys_number_ = cluster::GetKeyCount(slots_);
-      return true;
+    // if data was sent after LSN, WaitFor() always returns false so to reduce wait time
+    // we check current state and if WaitFor false but GetLastAttempt() == attempt
+    // the Join is failed and we can return false
+    const auto remaining_time = absl::ToInt64Milliseconds(timeout - passed);
+    const auto wait_time = (remaining_time > 100 ? 100 : remaining_time) * 1ms;
+
+    const auto is_attempt_correct =
+        std::all_of(shard_flows_.begin(), shard_flows_.end(),
+                    [attempt](const auto& flow) { return flow->GetLastAttempt() == attempt; });
+
+    auto wait_res = bc_->WaitFor(wait_time);
+    if (is_attempt_correct) {
+      if (wait_res) {
+        state_.store(MigrationState::C_FINISHED);
+        keys_number_ = cluster::GetKeyCount(slots_);
+      } else {
+        LOG(WARNING) << "Can't join migration because of data after LSN for " << source_id_;
+        ReportError(GenericError("Can't join migration in time"));
+      }
+      return wait_res;
     }
   }
 }
@@ -205,7 +219,7 @@ bool IncomingSlotMigration::Join(long attempt) {
 void IncomingSlotMigration::Stop() {
   string_view log_state = state_.load() == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
-  cntx_.Cancel();
+  cntx_.ReportCancelError();
 
   for (auto& flow : shard_flows_) {
     if (auto err = flow->Cancel(); err) {
