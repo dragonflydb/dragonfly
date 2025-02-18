@@ -920,14 +920,14 @@ void Service::Shutdown() {
   facade::Connection::Shutdown();
 }
 
-OpResult<KeyIndex> DetermineClusterKeys(const CommandId* cid, CmdArgList args) {
+OpResult<KeyIndex> Service::DetermineClusterKeys(const CommandId* cid, CmdArgList args) {
   if (!cid->IsShardedPSub()) {
     return DetermineKeys(cid, args);
   }
 
   // Sharded pub sub
   // Command form: SPUBLISH shardchannel message
-  if (cid->name() == "SPUBLISH") {
+  if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH")) {
     return {KeyIndex(0, 1)};
   }
 
