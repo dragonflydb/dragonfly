@@ -36,6 +36,7 @@ extern "C" {
 
 ABSL_FLAG(uint32_t, dbnum, 16, "Number of databases");
 ABSL_FLAG(uint32_t, keys_output_limit, 8192, "Maximum number of keys output by keys command");
+ABSL_FLAG(bool, unlink_experimental_async, true, "If true, runs unlink command asynchronously.");
 
 namespace dfly {
 using namespace std;
@@ -993,14 +994,14 @@ std::optional<int32_t> ParseExpireOptionsOrReply(const CmdArgList args, SinkRepl
   return flags;
 }
 
-void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
+void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx, bool async) {
   atomic_uint32_t result{0};
   auto* builder = cmd_cntx.rb;
   bool is_mc = (builder->GetProtocol() == Protocol::MEMCACHE);
 
-  auto cb = [&result](const Transaction* t, EngineShard* shard) {
+  auto cb = [&](const Transaction* t, EngineShard* shard) {
     ShardArgs args = t->GetShardArgs(shard->shard_id());
-    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args);
+    auto res = GenericFamily::OpDel(t->GetOpArgs(shard), args, async);
     result.fetch_add(res.value_or(0), memory_order_relaxed);
 
     return OpStatus::OK;
@@ -1028,8 +1029,8 @@ void DeleteGeneric(CmdArgList args, const CommandContext& cmd_cntx) {
 
 }  // namespace
 
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys) {
-  DVLOG(1) << "Del: " << keys.Front();
+OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async) {
+  DVLOG(1) << "Del: " << keys.Front() << " async: " << async;
   auto& db_slice = op_args.GetDbSlice();
 
   uint32_t res = 0;
@@ -1039,6 +1040,9 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
     if (!IsValid(it))
       continue;
 
+    if (async)
+      it->first.SetAsyncDelete();
+
     db_slice.Del(op_args.db_cntx, it);
     ++res;
   }
@@ -1047,13 +1051,12 @@ OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& 
 }
 
 void GenericFamily::Del(CmdArgList args, const CommandContext& cmd_cntx) {
-  VLOG(1) << "Del " << ArgS(args, 0);
-
-  DeleteGeneric(args, cmd_cntx);
+  DeleteGeneric(args, cmd_cntx, false);
 }
 
 void GenericFamily::Unlink(CmdArgList args, const CommandContext& cmd_cntx) {
-  DeleteGeneric(args, cmd_cntx);
+  bool async = absl::GetFlag(FLAGS_unlink_experimental_async);
+  DeleteGeneric(args, cmd_cntx, async);
 }
 
 void GenericFamily::Ping(CmdArgList args, const CommandContext& cmd_cntx) {
