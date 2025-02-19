@@ -557,10 +557,10 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
 }
 
 void RobjWrapper::ReserveString(size_t size, MemoryResource* mr) {
+  CHECK_EQ(inner_obj_, nullptr);
   type_ = OBJ_STRING;
   encoding_ = OBJ_ENCODING_RAW;
   MakeInnerRoom(0, size, mr);
-  sz_ = 0;
 }
 
 void RobjWrapper::AppendString(string_view s, MemoryResource* mr) {
