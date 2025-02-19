@@ -363,13 +363,17 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
       return res;
     }
 
+    if (len > kMaxBulkLen) {
+      LOG_EVERY_T(WARNING, 1) << "Large bulk len: " << len;
+      return {BAD_ARRAYLEN, res.second};
+    }
+
     if (len == -1) {  // Resp2 NIL
       cached_expr_->emplace_back(RespExpr::NIL);
       cached_expr_->back().u = Buffer{};
       HandleFinishArg();
     } else {
       DVLOG(1) << "String(" << len << ")";
-      LOG_IF(WARNING, len > kMaxBulkLen) << "Large bulk len: " << len;
 
       cached_expr_->emplace_back(RespExpr::STRING);
       cached_expr_->back().u = Buffer{};
