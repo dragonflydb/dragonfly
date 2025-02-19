@@ -3,16 +3,19 @@
 //
 #include "facade/redis_parser.h"
 
+#include <absl/flags/flag.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
 #include "core/heap_size.h"
 
+using facade::operator""_MB;
+ABSL_FLAG(int64_t, max_bulk_len, 256_MB, "Bulk length threshold for rejecting large requests");
+
 namespace facade {
 
 using namespace std;
-constexpr static long kMaxBulkLen = 256 * (1ul << 20);  // 256MB.
 
 auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> Result {
   DCHECK(!str.empty());
@@ -363,8 +366,8 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
       return res;
     }
 
-    if (len > kMaxBulkLen) {
-      LOG_EVERY_T(WARNING, 1) << "Large bulk len: " << len;
+    if (len > absl::GetFlag(FLAGS_max_bulk_len)) {
+      LOG_EVERY_T(WARNING, 1) << "Threshold reached with bulk len: " << len;
       return {BAD_ARRAYLEN, res.second};
     }
 
