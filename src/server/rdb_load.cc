@@ -2683,6 +2683,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     // If the key can be discarded, we must still continue to read the
     // object from the RDB so we can read the next key.
     if (ShouldDiscardKey(key, settings)) {
+      pending_read_.reserve = 0;
       continue;
     }
 
