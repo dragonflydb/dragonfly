@@ -626,13 +626,13 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   size_t buckets_iterated = 0;
   const size_t limit = 10000 / (PrimeTable::kBucketNum * PrimeTable::kSlotNum);
   do {
-    cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
-    ++buckets_iterated;
-    if (buckets_iterated == limit) {
+    if (buckets_iterated >= limit) {
       buckets_iterated = 0;
       util::ThisFiber::Yield();
     }
+    cur = prime_table->Traverse(
+        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+    ++buckets_iterated;
   } while (cur && cnt < scan_opts.limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
