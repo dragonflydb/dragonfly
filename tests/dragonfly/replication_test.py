@@ -2696,6 +2696,48 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
 
 @pytest.mark.exclude_epoll
+@dfly_args({"proactor_threads": 1})
+async def test_big_string(df_factory):
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    logging.debug("Fill master with test data")
+    seeder = StaticSeeder(
+        key_target=1,
+        data_size=1024 * 1024 * 200,
+        variance=1,
+        samples=1,
+        types=["STRING"],
+    )
+    await seeder.run(c_master)
+
+    async def get_memory(client, field):
+        info = await client.info("memory")
+        return info[field]
+
+    logging.debug("Start replication and wait for full sync")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    await c_replica.execute_command("memory decommit")
+    await asyncio.sleep(1)
+    replica_peak_memory = await get_memory(c_replica, "used_memory_peak_rss")
+    replica_used_memory = await get_memory(c_replica, "used_memory_rss")
+
+    logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
+    assert replica_peak_memory < 1.1 * replica_used_memory
+
+    # Check replica data consistent
+    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await StaticSeeder.capture(c_master)
+    assert master_data == replica_data
+
+
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize(
     "element_size, elements_number",
     [(16, 30000), (30000, 16)],
