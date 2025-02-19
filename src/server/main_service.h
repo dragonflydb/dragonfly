@@ -136,8 +136,11 @@ class Service : public facade::ServiceInterface {
   void EvalShaRo(CmdArgList args, const CommandContext& cmd_cntx);
   void Exec(CmdArgList args, const CommandContext& cmd_cntx);
   void Publish(CmdArgList args, const CommandContext& cmd_cntx);
+  void SPublish(CmdArgList args, const CommandContext& cmd_cntx);
   void Subscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void SSubscribe(CmdArgList args, const CommandContext& cmd_cntx);
   void Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
+  void SUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
   void PSubscribe(CmdArgList args, const CommandContext& cmd_cntx);
   void PUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx);
   void Function(CmdArgList args, const CommandContext& cmd_cntx);
@@ -168,6 +171,8 @@ class Service : public facade::ServiceInterface {
                                                                            bool force = false);
 
   void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
+
+  OpResult<KeyIndex> FindKeys(const CommandId* cid, CmdArgList args);
 
   void RegisterCommands();
   void Register(CommandRegistry* registry);

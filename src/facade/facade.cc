@@ -138,7 +138,9 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
   if (name_ == "PUBLISH" || name_ == "SUBSCRIBE" || name_ == "UNSUBSCRIBE") {
     is_pub_sub_ = true;
   } else if (name_ == "PSUBSCRIBE" || name_ == "PUNSUBSCRIBE") {
-    is_p_sub_ = true;
+    is_p_pub_sub_ = true;
+  } else if (name_ == "SPUBLISH" || name_ == "SSUBSCRIBE" || name_ == "SUNSUBSCRIBE") {
+    is_sharded_pub_sub_ = true;
   }
 }
 

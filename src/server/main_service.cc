@@ -920,6 +920,20 @@ void Service::Shutdown() {
   facade::Connection::Shutdown();
 }
 
+OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, CmdArgList args) {
+  if (!cid->IsShardedPSub()) {
+    return DetermineKeys(cid, args);
+  }
+
+  // Sharded pub sub
+  // Command form: SPUBLISH shardchannel message
+  if (cid->name() == registry_.RenamedOrOriginal("SPUBLISH")) {
+    return {KeyIndex(0, 1)};
+  }
+
+  return {KeyIndex(0, args.size())};
+}
+
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgList args,
                                                  const ConnectionContext& dfly_cntx) {
   if (dfly_cntx.is_replicating) {
@@ -927,11 +941,12 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
     return nullopt;
   }
 
-  if (cid->first_key_pos() == 0) {
+  if (cid->first_key_pos() == 0 && !cid->IsShardedPSub()) {
     return nullopt;  // No key command.
   }
 
-  OpResult<KeyIndex> key_index_res = DetermineKeys(cid, args);
+  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
+
   if (!key_index_res) {
     return ErrorReply{key_index_res.status()};
   }
@@ -2244,8 +2259,9 @@ void Service::Exec(CmdArgList args, const CommandContext& cmd_cntx) {
   VLOG(2) << "Exec completed";
 }
 
-void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (IsClusterEnabled()) {
+namespace {
+void PublishImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
+  if (reject_cluster && IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("PUBLISH is not supported in cluster mode yet");
   }
   string_view channel = ArgS(args, 0);
@@ -2255,17 +2271,17 @@ void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
   cmd_cntx.rb->SendLong(cs->SendMessages(channel, messages));
 }
 
-void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
-  if (IsClusterEnabled()) {
+void SubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
+  if (reject_cluster && IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("SUBSCRIBE is not supported in cluster mode yet");
   }
   cmd_cntx.conn_cntx->ChangeSubscription(true /*add*/, true /* reply*/, std::move(args),
                                          static_cast<RedisReplyBuilder*>(cmd_cntx.rb));
 }
 
-void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+void UnSubscribeImpl(bool reject_cluster, CmdArgList args, const CommandContext& cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
-  if (IsClusterEnabled()) {
+  if (reject_cluster && IsClusterEnabled()) {
     return cmd_cntx.rb->SendError("UNSUBSCRIBE is not supported in cluster mode yet");
   }
 
@@ -2274,6 +2290,32 @@ void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
   } else {
     cmd_cntx.conn_cntx->ChangeSubscription(false, true, args, rb);
   }
+}
+
+}  // namespace
+
+void Service::Publish(CmdArgList args, const CommandContext& cmd_cntx) {
+  PublishImpl(true, args, cmd_cntx);
+}
+
+void Service::SPublish(CmdArgList args, const CommandContext& cmd_cntx) {
+  PublishImpl(false, args, cmd_cntx);
+}
+
+void Service::Subscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  SubscribeImpl(true, args, cmd_cntx);
+}
+
+void Service::SSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  SubscribeImpl(false, args, cmd_cntx);
+}
+
+void Service::Unsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  UnSubscribeImpl(true, args, cmd_cntx);
+}
+
+void Service::SUnsubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
+  UnSubscribeImpl(false, args, cmd_cntx);
 }
 
 void Service::PSubscribe(CmdArgList args, const CommandContext& cmd_cntx) {
@@ -2641,9 +2683,13 @@ void Service::Register(CommandRegistry* registry) {
              .SetValidator(&EvalValidator)
       << CI{"EXEC", CO::LOADING | CO::NOSCRIPT, 1, 0, 0, acl::kExec}.MFUNC(Exec)
       << CI{"PUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(Publish)
+      << CI{"SPUBLISH", CO::LOADING | CO::FAST, 3, 0, 0, acl::kPublish}.MFUNC(SPublish)
       << CI{"SUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(Subscribe)
+      << CI{"SSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kSubscribe}.MFUNC(SSubscribe)
       << CI{"UNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
              Unsubscribe)
+      << CI{"SUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
+             SUnsubscribe)
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kPSubscribe}.MFUNC(PSubscribe)
       << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kPUnsubsribe}.MFUNC(
              PUnsubscribe)

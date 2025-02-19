@@ -27,7 +27,7 @@ inline bool Matches(std::string_view pattern, std::string_view target) {
 
   std::pair<bool, AclLog::Reason> auth_res;
 
-  if (id.IsPubSub()) {
+  if (id.IsPubSub() || id.IsShardedPSub()) {
     auth_res = IsPubSubCommandAuthorized(false, cntx.acl_commands, cntx.pub_sub, tail_args, id);
   } else if (id.IsPSub()) {
     auth_res = IsPubSubCommandAuthorized(true, cntx.acl_commands, cntx.pub_sub, tail_args, id);
