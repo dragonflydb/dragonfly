@@ -4,6 +4,8 @@
 
 #include "server/generic_family.h"
 
+#include <absl/cleanup/cleanup.h>
+
 #include <boost/operators.hpp>
 #include <optional>
 
@@ -612,9 +614,6 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // we enter the callback in a timing when journaling will not cause preemptions. Otherwise,
   // the bucket might change as we Traverse and yield.
   db_slice.BlockingCounter()->Wait();
-  // Disable flush journal changes to prevent preemtion in traverse.
-  journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
-  util::FiberAtomicGuard guard;
   unsigned cnt = 0;
 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_cntx.db_index << " has "
@@ -630,8 +629,12 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
       buckets_iterated = 0;
       util::ThisFiber::Yield();
     }
-    cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+    {
+      // Disable flush journal changes to prevent preemtion in traverse.
+      journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
+      cur = prime_table->Traverse(
+          cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+    }
     ++buckets_iterated;
   } while (cur && cnt < scan_opts.limit);
 
