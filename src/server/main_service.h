@@ -172,7 +172,7 @@ class Service : public facade::ServiceInterface {
 
   void CallFromScript(ConnectionContext* cntx, Interpreter::CallArgs& args);
 
-  OpResult<KeyIndex> DetermineClusterKeys(const CommandId* cid, CmdArgList args);
+  OpResult<KeyIndex> FindKeys(const CommandId* cid, CmdArgList args);
 
   void RegisterCommands();
   void Register(CommandRegistry* registry);
