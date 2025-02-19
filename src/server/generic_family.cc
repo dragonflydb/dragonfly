@@ -623,18 +623,16 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
   string scratch;
+  size_t buckets_iterated = 0;
+  const size_t limit = 10000 / (PrimeTable::kBucketNum * PrimeTable::kSlotNum);
   do {
     cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); },
-        [](size_t count) -> size_t {
-          // Our limit is 100k keys. Estimate how many buckets that is.
-          const size_t limit = 100000 / (PrimeTable::kBucketNum * PrimeTable::kSlotNum);
-          if (count == limit) {
-            util::ThisFiber::Yield();
-            return 0;
-          }
-          return count;
-        });
+        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+    ++buckets_iterated;
+    if (buckets_iterated == limit) {
+      buckets_iterated = 0;
+      util::ThisFiber::Yield();
+    }
   } while (cur && cnt < scan_opts.limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();

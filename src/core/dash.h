@@ -233,12 +233,7 @@ class DashTable : public detail::DashTableBase {
   // mutations. It guarantees that if key exists (1)at the beginning of traversal, (2) stays in the
   // table during the traversal, then Traverse() will eventually reach it even when the table
   // shrinks or grows. Returns: cursor that is guaranteed to be less than 2^40.
-  // YieldCb is used for early preemption. It should accept a size_t that denotes
-  // the number of buckets so far iterated in Traverse and if a threshold (e.g. the number of
-  // buckets iterated) is reached then it suspends. Upon return it should act as an identity
-  // function if the threshold is not reached or return 0 to denote that there was preemption
-  using YieldCb = std::function<size_t(size_t)>;
-  template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb, YieldCb yield_cb = {});
+  template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb);
 
   // Traverses over physical buckets. It calls cb once for each bucket by passing a bucket iterator.
   // if cursor=0 starts traversing from the beginning, otherwise continues from where
@@ -958,7 +953,7 @@ auto DashTable<_Key, _Value, Policy>::GetRandomCursor(absl::BitGen* bitgen) -> C
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb, YieldCb yield_cb) -> Cursor {
+auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
   uint32_t sid = curs.segment_id(global_depth_);
   uint8_t bid = curs.bucket_id();
 
@@ -969,7 +964,6 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb, YieldCb yie
   auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
 
   bool fetched = false;
-  size_t iterated_buckets = 0;
 
   // We fix bid and go over all segments. Once we reach the end we increase bid and repeat.
   do {
@@ -988,9 +982,6 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb, YieldCb yie
         return 0;  // "End of traversal" cursor.
     }
 
-    ++iterated_buckets;
-    // might preempt
-    iterated_buckets = yield_cb(iterated_buckets);
   } while (!fetched);
 
   return Cursor{global_depth_, sid, bid};
