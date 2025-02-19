@@ -981,7 +981,6 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
       if (bid >= Policy::kBucketNum)
         return 0;  // "End of traversal" cursor.
     }
-
   } while (!fetched);
 
   return Cursor{global_depth_, sid, bid};

@@ -4,8 +4,6 @@
 
 #include "server/generic_family.h"
 
-#include <absl/cleanup/cleanup.h>
-
 #include <boost/operators.hpp>
 #include <optional>
 
