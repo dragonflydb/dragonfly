@@ -945,7 +945,7 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId* cid, CmdArgLis
     return nullopt;  // No key command.
   }
 
-  OpResult<KeyIndex> key_index_res = DetermineClusterKeys(cid, args);
+  OpResult<KeyIndex> key_index_res = FindKeys(cid, args);
 
   if (!key_index_res) {
     return ErrorReply{key_index_res.status()};
