@@ -324,6 +324,9 @@ class ServerFamily {
 
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
+  void ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx);
+  void ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder);
+
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
 
@@ -334,7 +337,7 @@ class ServerFamily {
   bool accepting_connections_ = true;
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable util::fb2::Mutex replicaof_mu_, save_mu_;
+  mutable util::fb2::Mutex replicaof_mu_, save_mu_, client_pause_mu_;
   std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
   std::vector<std::unique_ptr<Replica>> cluster_replicas_
       ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
@@ -357,6 +360,9 @@ class ServerFamily {
   util::fb2::Done schedule_done_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
+
+  std::atomic<bool> client_pause_ = false;
+  util::fb2::Fiber client_pause_fb_;
 
   // protected by save_mu_
   util::fb2::Fiber bg_save_fb_;

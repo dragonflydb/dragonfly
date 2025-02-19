@@ -1151,3 +1151,22 @@ async def test_pipeline_cache_size(df_factory):
             info = await good_client.info()
 
     assert info["dispatch_queue_bytes"] == 0
+
+
+async def test_client_unpause():
+    async_client = aioredis.Redis()
+    await async_client.client_pause(10000)
+
+    async def set_foo():
+        await async_client.execute_command("SET", "foo", "bar")
+
+    p1 = asyncio.create_task(set_foo())
+
+    await asyncio.sleep(0.5)
+    assert not p1.done()
+
+    async with async_timeout.timeout(2):
+        await async_client.client_unpause()
+
+    await asyncio.sleep(0.5)
+    assert p1.done()

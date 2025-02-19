@@ -361,35 +361,6 @@ void ClientList(CmdArgList args, absl::Span<facade::Listener*> listeners, SinkRe
   return rb->SendVerbatimString(result);
 }
 
-void ClientPauseCmd(CmdArgList args, vector<facade::Listener*> listeners, SinkReplyBuilder* builder,
-                    ConnectionContext* cntx) {
-  CmdArgParser parser(args);
-
-  auto timeout = parser.Next<uint64_t>();
-  ClientPause pause_state = ClientPause::ALL;
-  if (parser.HasNext()) {
-    pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
-  }
-  if (auto err = parser.Error(); err) {
-    return builder->SendError(err->MakeReply());
-  }
-
-  const auto timeout_ms = timeout * 1ms;
-  auto is_pause_in_progress = [end_time = chrono::steady_clock::now() + timeout_ms] {
-    return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
-           chrono::steady_clock::now() < end_time;
-  };
-
-  if (auto pause_fb_opt =
-          Pause(listeners, cntx->ns, cntx->conn(), pause_state, std::move(is_pause_in_progress));
-      pause_fb_opt) {
-    pause_fb_opt->Detach();
-    builder->SendOk();
-  } else {
-    builder->SendError("Failed to pause all running clients");
-  }
-}
-
 void ClientTracking(CmdArgList args, SinkReplyBuilder* builder, ConnectionContext* cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   if (!rb->IsResp3())
@@ -1882,6 +1853,56 @@ void ServerFamily::Auth(CmdArgList args, const CommandContext& cmd_cntx) {
   }
 }
 
+void ServerFamily::ClientUnPauseCmd(CmdArgList args, SinkReplyBuilder* builder) {
+  if (!args.empty()) {
+    builder->SendError(facade::kSyntaxErr);
+    return;
+  }
+  std::unique_lock lk(client_pause_mu_);
+  client_pause_.store(false, std::memory_order_relaxed);
+  client_pause_fb_.JoinIfNeeded();
+  builder->SendOk();
+}
+
+void ClientHelp(SinkReplyBuilder* builder) {
+  string_view help_arr[] = {
+      "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+      "CACHING (YES|NO)",
+      "    Enable/disable tracking of the keys for next command in OPTIN/OPTOUT modes.",
+      "GETNAME",
+      "    Return the name of the current connection.",
+      "ID",
+      "    Return the ID of the current connection.",
+      "KILL <ip:port>",
+      "    Kill connection made from <ip:port>.",
+      "KILL <option> <value> [<option> <value> [...]]",
+      "    Kill connections. Options are:",
+      "    * ADDR (<ip:port>|<unixsocket>:0)",
+      "      Kill connections made from the specified address",
+      "    * LADDR (<ip:port>|<unixsocket>:0)",
+      "      Kill connections made to specified local address",
+      "    * ID <client-id>",
+      "      Kill connections by client id.",
+      "LIST",
+      "    Return information about client connections.",
+      "UNPAUSE",
+      "    Stop the current client pause, resuming traffic.",
+      "PAUSE <timeout> [WRITE|ALL]",
+      "    Suspend all, or just write, clients for <timeout> milliseconds.",
+      "SETNAME <name>",
+      "    Assign the name <name> to the current connection.",
+      "SETINFO <option> <value>",
+      "Set client meta attr. Options are:",
+      "    * LIB-NAME: the client lib name.",
+      "    * LIB-VER: the client lib version.",
+      "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
+      "    Control server assisted client side caching.",
+      "HELP",
+      "    Print this help."};
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  return rb->SendSimpleStrArr(help_arr);
+}
+
 void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   string sub_cmd = absl::AsciiStrToUpper(ArgS(args, 0));
   CmdArgList sub_args = args.subspan(1);
@@ -1895,7 +1916,9 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
   } else if (sub_cmd == "LIST") {
     return ClientList(sub_args, absl::MakeSpan(listeners_), builder, cntx);
   } else if (sub_cmd == "PAUSE") {
-    return ClientPauseCmd(sub_args, GetNonPriviligedListeners(), builder, cntx);
+    return ClientPauseCmd(sub_args, builder, cntx);
+  } else if (sub_cmd == "UNPAUSE") {
+    return ClientUnPauseCmd(sub_args, builder);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(sub_args, builder, cntx);
   } else if (sub_cmd == "KILL") {
@@ -1906,6 +1929,8 @@ void ServerFamily::Client(CmdArgList args, const CommandContext& cmd_cntx) {
     return ClientSetInfo(sub_args, builder, cntx);
   } else if (sub_cmd == "ID") {
     return ClientId(sub_args, builder, cntx);
+  } else if (sub_cmd == "HELP") {
+    return ClientHelp(builder);
   }
 
   LOG_FIRST_N(ERROR, 10) << "Subcommand " << sub_cmd << " not supported";
@@ -3173,6 +3198,38 @@ void ServerFamily::Module(CmdArgList args, const CommandContext& cmd_cntx) {
   rb->SendSimpleString("search");
   rb->SendSimpleString("ver");
   rb->SendLong(20'000);  // we target v2
+}
+
+void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
+                                  ConnectionContext* cntx) {
+  CmdArgParser parser(args);
+  auto listeners = GetNonPriviligedListeners();
+
+  auto timeout = parser.Next<uint64_t>();
+  ClientPause pause_state = ClientPause::ALL;
+  if (parser.HasNext()) {
+    pause_state = parser.MapNext("WRITE", ClientPause::WRITE, "ALL", ClientPause::ALL);
+  }
+  if (auto err = parser.Error(); err) {
+    return builder->SendError(err->MakeReply());
+  }
+
+  const auto timeout_ms = timeout * 1ms;
+  auto is_pause_in_progress = [this, end_time = chrono::steady_clock::now() + timeout_ms] {
+    return ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN &&
+           chrono::steady_clock::now() < end_time && client_pause_.load(std::memory_order_relaxed);
+  };
+
+  if (auto pause_fb_opt =
+          Pause(listeners, cntx->ns, cntx->conn(), pause_state, std::move(is_pause_in_progress));
+      pause_fb_opt) {
+    std::unique_lock lk(client_pause_mu_);
+    client_pause_.store(true, std::memory_order_relaxed);
+    client_pause_fb_ = std::move(*pause_fb_opt);
+    builder->SendOk();
+  } else {
+    builder->SendError("Failed to pause all running clients");
+  }
 }
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &ServerFamily::x))
