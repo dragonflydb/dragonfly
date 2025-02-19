@@ -230,7 +230,7 @@ RdbSerializer::~RdbSerializer() {
   VLOG(2) << "compression mode: " << uint32_t(compression_mode_);
   if (compression_stats_) {
     VLOG(2) << "compression not effective: " << compression_stats_->compression_no_effective;
-    VLOG(2) << "string none compression applied: " << compression_stats_->size_skip_count;
+    VLOG(2) << "string compression skipped: " << compression_stats_->size_skip_count;
     VLOG(2) << "compression failed: " << compression_stats_->compression_failed;
     VLOG(2) << "compressed blobs:" << compression_stats_->compressed_blobs;
   }

@@ -1311,6 +1311,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_ZSET_LISTPACK:
     case RDB_TYPE_ZSET_ZIPLIST:
     case RDB_TYPE_STRING:
+    case RDB_TYPE_JSON:
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
@@ -1329,9 +1330,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_STREAM_LISTPACKS_2:
     case RDB_TYPE_STREAM_LISTPACKS_3:
       iores = ReadStreams(rdbtype);
-      break;
-    case RDB_TYPE_JSON:
-      iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_SET_LISTPACK:
       // We need to deal with protocol versions 9 and older because in these

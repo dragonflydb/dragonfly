@@ -2697,7 +2697,13 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
 @pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 1})
-async def test_big_string(df_factory):
+async def test_memory_on_big_string_loading(df_factory):
+    """
+    In this test we want to make sure there is no spike in rss while loading big string value
+    1. insert 1 big value to master
+    2. replicate master
+    3. check rss peak memory on replica node
+    """
     master = df_factory.create()
     replica = df_factory.create()
 
@@ -2705,15 +2711,8 @@ async def test_big_string(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    logging.debug("Fill master with test data")
-    seeder = StaticSeeder(
-        key_target=1,
-        data_size=1024 * 1024 * 200,
-        variance=1,
-        samples=1,
-        types=["STRING"],
-    )
-    await seeder.run(c_master)
+    logging.debug("Populate with one big string")
+    await c_master.execute_command("DEBUG POPULATE 1 key 200000000 RAND")
 
     async def get_memory(client, field):
         info = await client.info("memory")
