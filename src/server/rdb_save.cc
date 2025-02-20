@@ -1061,7 +1061,7 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   void Finalize() override;
 
   // used only for legacy rdb save flows.
-  error_code ConsumeChannel(const Cancellation* cll);
+  error_code ConsumeChannel(const ExecutionState* cll);
 
   void FillFreqMap(RdbTypeFreqMap* dest) const;
 
@@ -1161,7 +1161,7 @@ error_code RdbSaver::Impl::SaveAuxFieldStrStr(string_view key, string_view val) 
   return error_code{};
 }
 
-error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
+error_code RdbSaver::Impl::ConsumeChannel(const ExecutionState* es) {
   error_code io_error;
   string record;
 
@@ -1170,11 +1170,11 @@ error_code RdbSaver::Impl::ConsumeChannel(const Cancellation* cll) {
   // we can not exit on io-error since we spawn fibers that push data.
   // TODO: we may signal them to stop processing and exit asap in case of the error.
   while (channel_->Pop(record)) {
-    if (io_error || cll->IsCancelled())
+    if (io_error || (!es->IsRunning()))
       continue;
 
     do {
-      if (cll->IsCancelled())
+      if (!es->IsRunning())
         continue;
 
       auto start = absl::GetCurrentTimeNanos();
@@ -1258,7 +1258,7 @@ void RdbSaver::Impl::WaitForSnapshottingFinish(EngineShard* shard) {
 }
 
 void RdbSaver::Impl::ConsumeData(std::string data, ExecutionState* cntx) {
-  if (cntx->IsCancelled()) {
+  if (!cntx->IsRunning()) {
     return;
   }
   if (channel_) {  // Rdb write to channel
@@ -1468,7 +1468,7 @@ error_code RdbSaver::SaveBody(const ExecutionState& cntx) {
 
   if (save_mode_ == SaveMode::RDB) {
     VLOG(1) << "SaveBody , snapshots count: " << impl_->Size();
-    error_code io_error = impl_->ConsumeChannel(cntx.GetCancellation());
+    error_code io_error = impl_->ConsumeChannel(&cntx);
     if (io_error) {
       return io_error;
     }

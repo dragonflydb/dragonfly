@@ -158,7 +158,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   }
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
-    if (cntx_->IsCancelled())
+    if (!cntx_->IsRunning())
       return;
 
     if (!db_array_[db_indx])
@@ -169,7 +169,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
     VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_indx;
     do {
-      if (cntx_->IsCancelled()) {
+      if (!cntx_->IsRunning()) {
         return;
       }
 
@@ -213,7 +213,7 @@ void SliceSnapshot::SwitchIncrementalFb(LSN lsn) {
   VLOG(1) << "Starting incremental snapshot from lsn=" << lsn;
 
   // The replica sends the LSN of the next entry is wants to receive.
-  while (!cntx_->IsCancelled() && journal->IsLSNInBuffer(lsn)) {
+  while (cntx_->IsRunning() && journal->IsLSNInBuffer(lsn)) {
     serializer_->WriteJournalEntry(journal->GetEntry(lsn));
     PushSerialized(false);
     lsn++;

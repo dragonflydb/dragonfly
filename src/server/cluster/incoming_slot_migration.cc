@@ -59,7 +59,7 @@ class ClusterShardMigration {
     JournalReader reader{source, 0};
     TransactionReader tx_reader;
 
-    while (!cntx->IsCancelled()) {
+    while (cntx->IsRunning()) {
       if (pause_) {
         ThisFiber::SleepFor(100ms);
         continue;
@@ -126,7 +126,7 @@ class ClusterShardMigration {
 
  private:
   void ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
-    if (cntx->IsCancelled()) {
+    if (!cntx->IsRunning()) {
       return;
     }
     if (!tx_data.IsGlobalCmd()) {
