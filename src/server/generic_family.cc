@@ -575,17 +575,15 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
   return add_res.status();
 }
 
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, string* scratch,
-            StringVec* res) {
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
   auto& db_slice = op_args.GetDbSlice();
 
   DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
   if (prime_it->second.HasExpire()) {
     it = db_slice.ExpireIfNeeded(op_args.db_cntx, it).it;
+    if (!IsValid(it))
+      return false;
   }
-
-  if (!IsValid(it))
-    return false;
 
   bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
 
@@ -596,11 +594,10 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
     return false;
   }
 
-  it->first.GetString(scratch);
-  if (!opts.Matches(*scratch)) {
+  if (!opts.Matches(it.key())) {
     return false;
   }
-  res->push_back(*scratch);
+  res->push_back(string(it.key()));
 
   return true;
 }
@@ -620,7 +617,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
-  string scratch;
+
   size_t buckets_iterated = 0;
   // 10k Traverses
   const size_t limit = 10000;
@@ -633,7 +630,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
       // Disable flush journal changes to prevent preemtion in traverse.
       journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
       cur = prime_table->Traverse(
-          cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+          cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
     }
     ++buckets_iterated;
   } while (cur && cnt < scan_opts.limit);
