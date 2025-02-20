@@ -609,9 +609,10 @@ TEST_F(GenericFamilyTest, Restore) {
                                  0x75, 0x59, 0x6d, 0x10, 0x04, 0x3f, 0x5c};
   auto resp = Run({"set", "exiting-key", "1234"});
   EXPECT_EQ(resp, "OK");
-  // try to restore into existing key - this should fail
+
+  // try to restore into existing key - this should fail. We should get BUSYKEY error
   ASSERT_THAT(Run({"restore", "exiting-key", "0", ToSV(STRING_DUMP_REDIS)}),
-              ArgType(RespExpr::ERROR));
+              ErrArg("BUSYKEY Target key name already exists."));
 
   // Try restore while setting expiration into the past
   // note that value for expiration is just some valid unix time stamp from the pass

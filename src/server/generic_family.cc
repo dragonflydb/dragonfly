@@ -1517,7 +1517,7 @@ void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
     case OpStatus::OK:
       return builder->SendOk();
     case OpStatus::KEY_EXISTS:
-      return builder->SendError("BUSYKEY Target key name already exists.");
+      return builder->SendError("-BUSYKEY Target key name already exists.");
     case OpStatus::INVALID_VALUE:
       return builder->SendError("Bad data format");
     default:
