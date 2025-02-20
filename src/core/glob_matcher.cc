@@ -12,8 +12,8 @@ namespace dfly {
 using namespace std;
 
 /* Glob-style pattern matching taken from Redis. */
-int stringmatchlen(const char* pattern, int patternLen, const char* string, int stringLen,
-                   int nocase) {
+static int stringmatchlen_impl(const char* pattern, int patternLen, const char* string,
+                               int stringLen, int nocase, int* skipLongerMatches) {
   while (patternLen && stringLen) {
     switch (pattern[0]) {
       case '*':
@@ -24,11 +24,26 @@ int stringmatchlen(const char* pattern, int patternLen, const char* string, int 
         if (patternLen == 1)
           return 1; /* match */
         while (stringLen) {
-          if (stringmatchlen(pattern + 1, patternLen - 1, string, stringLen, nocase))
+          if (stringmatchlen_impl(pattern + 1, patternLen - 1, string, stringLen, nocase,
+                                  skipLongerMatches))
             return 1; /* match */
+          if (*skipLongerMatches)
+            return 0; /* no match */
           string++;
           stringLen--;
         }
+
+        /* There was no match for the rest of the pattern starting
+         * from anywhere in the rest of the string. If there were
+         * any '*' earlier in the pattern, we can terminate the
+         * search early without trying to match them to longer
+         * substrings. This is because a longer match for the
+         * earlier part of the pattern would require the rest of the
+         * pattern to match starting later in the string, and we
+         * have just determined that there is no match for the rest
+         * of the pattern starting from anywhere in the current
+         * string. */
+        *skipLongerMatches = 1;
         return 0; /* no match */
         break;
       case '?':
@@ -129,6 +144,12 @@ int stringmatchlen(const char* pattern, int patternLen, const char* string, int 
   return 0;
 }
 
+int stringmatchlen(const char* pattern, int patternLen, const char* string, int stringLen,
+                   int nocase) {
+  int skipLongerMatches = 0;
+  return stringmatchlen_impl(pattern, patternLen, string, stringLen, nocase, &skipLongerMatches);
+}
+
 string GlobMatcher::Glob2Regex(string_view glob) {
   string regex;
   regex.reserve(glob.size());
@@ -198,8 +219,8 @@ string GlobMatcher::Glob2Regex(string_view glob) {
 }
 
 GlobMatcher::GlobMatcher(string_view pattern, bool case_sensitive)
-    : case_sensitive_(case_sensitive) {
-#ifdef FIX_PERFORMANCE_MATCHING
+    : glob_(pattern), case_sensitive_(case_sensitive) {
+#ifdef REFLEX_PERFORMANCE
   if (!pattern.empty()) {
     starts_with_star_ = pattern.front() == '*';
     pattern.remove_prefix(starts_with_star_);
@@ -210,7 +231,6 @@ GlobMatcher::GlobMatcher(string_view pattern, bool case_sensitive)
     }
   }
 
-  empty_pattern_ = pattern.empty();
   string regex("(?s");  // dotall mode
   if (!case_sensitive) {
     regex.push_back('i');
@@ -218,13 +238,33 @@ GlobMatcher::GlobMatcher(string_view pattern, bool case_sensitive)
   regex.push_back(')');
   regex.append(Glob2Regex(pattern));
   matcher_.pattern(regex);
-#else
-  glob_ = pattern;
+#elif USE_PCRE2
+  string regex("(?s");  // dotall mode
+  if (!case_sensitive) {
+    regex.push_back('i');
+  }
+  regex.push_back(')');
+  regex.append(Glob2Regex(pattern));
+
+  int errnum;
+  PCRE2_SIZE erroffset;
+  re_ = pcre2_compile((PCRE2_SPTR)regex.c_str(), regex.size(), 0, &errnum, &erroffset, nullptr);
+  if (re_) {
+    CHECK_EQ(0, pcre2_jit_compile(re_, PCRE2_JIT_COMPLETE));
+    match_data_ = pcre2_match_data_create_from_pattern(re_, NULL);
+  }
 #endif
 }
 
 bool GlobMatcher::Matches(std::string_view str) const {
-#ifdef FIX_PERFORMANCE_MATCHING
+#ifdef REFLEX_PERFORMANCE
+  if (str.size() < 16) {
+    return stringmatchlen(glob_.data(), glob_.size(), str.data(), str.size(), !case_sensitive_);
+  }
+  if (glob_.empty()) {
+    return true;
+  }
+
   DCHECK(!matcher_.pattern().empty());
 
   matcher_.input(reflex::Input(str.data(), str.size()));
@@ -232,10 +272,6 @@ bool GlobMatcher::Matches(std::string_view str) const {
   bool use_find = starts_with_star_ || ends_with_star_;
   if (!use_find) {
     return matcher_.matches() > 0;
-  }
-
-  if (empty_pattern_) {
-    return !str.empty();
   }
 
   bool found = matcher_.find() > 0;
@@ -251,8 +287,30 @@ bool GlobMatcher::Matches(std::string_view str) const {
   }
 
   return true;
+#elif USE_PCRE2
+  if (!re_ || str.size() < 16) {
+    return stringmatchlen(glob_.data(), glob_.size(), str.data(), str.size(), !case_sensitive_);
+  }
+
+  if (glob_.empty()) {
+    return true;
+  }
+
+  int rc = pcre2_jit_match(re_, (PCRE2_SPTR)str.data(), str.size(), 0, 0, match_data_, NULL);
+  return rc > 0;
+
 #else
   return stringmatchlen(glob_.data(), glob_.size(), str.data(), str.size(), !case_sensitive_);
+#endif
+}
+
+GlobMatcher::~GlobMatcher() {
+#ifdef REFLEX_PERFORMANCE
+#elif USE_PCRE2
+  if (re_) {
+    pcre2_code_free(re_);
+    pcre2_match_data_free(match_data_);
+  }
 #endif
 }
 
