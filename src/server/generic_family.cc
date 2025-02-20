@@ -621,7 +621,8 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
   string scratch;
   size_t buckets_iterated = 0;
-  const size_t limit = 10000 / (PrimeTable::kBucketNum * PrimeTable::kSlotNum);
+  // 10k Traverses
+  const size_t limit = 10000;
   do {
     if (buckets_iterated >= limit) {
       buckets_iterated = 0;
