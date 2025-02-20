@@ -273,7 +273,7 @@ void Replica::MainReplicationFb() {
 }
 
 error_code Replica::Greet() {
-  ResetParser(false);
+  ResetParser(RedisParser::Mode::CLIENT);
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommandAndReadResponse("PING"));  // optional.
@@ -605,7 +605,7 @@ error_code Replica::ConsumeRedisStream() {
 
   // we never reply back on the commands.
   facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};
-  ResetParser(true);
+  ResetParser(RedisParser::Mode::SERVER);
 
   // Master waits for this command in order to start sending replication stream.
   RETURN_ON_ERR(SendCommand("REPLCONF ACK 0"));
@@ -753,7 +753,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, ExecutionSt
     absl::StrAppend(&cmd, " ", *lsn);
   }
 
-  ResetParser(/*server_mode=*/false);
+  ResetParser(RedisParser::Mode::CLIENT);
   leftover_buf_.emplace(128);
   RETURN_ON_ERR_T(make_unexpected, SendCommand(cmd));
   auto read_resp = ReadRespReply(&*leftover_buf_);

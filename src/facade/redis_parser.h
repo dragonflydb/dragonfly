@@ -32,9 +32,11 @@ class RedisParser {
     BAD_DOUBLE
   };
   using Buffer = RespExpr::Buffer;
+  enum Mode : uint8_t { SERVER, CLIENT };
 
-  explicit RedisParser(uint32_t max_arr_len = UINT32_MAX, bool server_mode = true)
-      : server_mode_(server_mode), max_arr_len_(max_arr_len) {
+  explicit RedisParser(Mode mode = Mode::SERVER, uint32_t max_arr_len = UINT32_MAX,
+                       uint64_t max_bulk_len = UINT64_MAX)
+      : server_mode_(mode == Mode::SERVER), max_arr_len_(max_arr_len), max_bulk_len_(max_bulk_len) {
   }
 
   /**
@@ -104,6 +106,7 @@ class RedisParser {
   uint32_t bulk_len_ = 0;
   uint32_t last_stashed_level_ = 0, last_stashed_index_ = 0;
   uint32_t max_arr_len_;
+  uint64_t max_bulk_len_;
 
   // Points either to the result passed by the caller or to the stash.
   RespVec* cached_expr_ = nullptr;

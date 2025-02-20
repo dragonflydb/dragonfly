@@ -201,7 +201,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
   */
   auto masterauth = absl::GetFlag(FLAGS_masterauth);
   auto masteruser = absl::GetFlag(FLAGS_masteruser);
-  ResetParser(false);
+  ResetParser(RedisParser::Mode::CLIENT);
   if (!masterauth.empty()) {
     auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
                                   : StrCat("AUTH ", masteruser, " ", masterauth);
@@ -361,9 +361,9 @@ error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
   return response_res.has_value() ? error_code{} : response_res.error();
 }
 
-void ProtocolClient::ResetParser(bool server_mode) {
+void ProtocolClient::ResetParser(RedisParser::Mode mode) {
   // We accept any length for the parser because it has been approved by the master.
-  parser_.reset(new RedisParser(UINT32_MAX, server_mode));
+  parser_.reset(new RedisParser(mode));
 }
 
 uint64_t ProtocolClient::LastIoTime() const {

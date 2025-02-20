@@ -10,9 +10,6 @@
 #include "base/logging.h"
 #include "core/heap_size.h"
 
-using facade::operator""_MB;
-ABSL_FLAG(int64_t, max_bulk_len, 256_MB, "Bulk length threshold for rejecting large requests");
-
 namespace facade {
 
 using namespace std;
@@ -366,7 +363,7 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
       return res;
     }
 
-    if (len > absl::GetFlag(FLAGS_max_bulk_len)) {
+    if (len > 0 && static_cast<uint64_t>(len) > max_bulk_len_) {
       LOG_EVERY_T(WARNING, 1) << "Threshold reached with bulk len: " << len;
       return {BAD_ARRAYLEN, res.second};
     }

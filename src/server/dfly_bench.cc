@@ -287,7 +287,7 @@ class Driver {
   queue<Req> reqs_;
   fb2::CondVarAny cnd_;
 
-  facade::RedisParser parser_{1 << 16, false};
+  facade::RedisParser parser_{RedisParser::Mode::CLIENT, 1 << 16};
   io::IoBuf io_buf_{512};
 };
 
