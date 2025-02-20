@@ -24,7 +24,7 @@ class TaskQueue {
 
   template <typename F> bool Add(F&& f) {
     if (queue_.TryAdd(std::forward<F>(f)))
-      return true;
+      return false;
 
     ++blocked_submitters_;
     auto res = queue_.Add(std::forward<F>(f));

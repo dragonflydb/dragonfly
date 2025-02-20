@@ -4,6 +4,8 @@
 
 #include "core/sorted_map.h"
 
+#include <absl/strings/str_cat.h>
+
 #include <cmath>
 
 extern "C" {
@@ -288,17 +290,15 @@ optional<double> SortedMap::GetScore(sds ele) const {
   return std::nullopt;
 }
 
-// Takes ownership over ele.
-bool SortedMap::Insert(double score, sds ele) {
-  DVLOG(1) << "Inserting " << ele << " with score " << score;
+bool SortedMap::InsertNew(double score, std::string_view member) {
+  DVLOG(2) << "InsertNew " << score << " " << member;
 
-  auto [newk, added] = score_map->AddOrUpdate(string_view{ele, sdslen(ele)}, score);
-  DCHECK(added);
+  auto [newk, added] = score_map->AddOrSkip(member, score);
+  if (!added)
+    return false;
 
   added = score_tree->Insert(newk);
-  DCHECK(added);
-  sdsfree(ele);
-
+  CHECK(added);
   return true;
 }
 
@@ -741,7 +741,6 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   unsigned char* vstr;
   unsigned int vlen;
   long long vlong;
-  sds ele;
 
   void* ptr = res->allocate(sizeof(SortedMap), alignof(SortedMap));
   SortedMap* zs = new (ptr) SortedMap{res};
@@ -755,12 +754,12 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   while (eptr != NULL) {
     double score = zzlGetScore(sptr);
     vstr = lpGetValue(eptr, &vlen, &vlong);
-    if (vstr == NULL)
-      ele = sdsfromlonglong(vlong);
-    else
-      ele = sdsnewlen((char*)vstr, vlen);
+    if (vstr == NULL) {
+      CHECK(zs->InsertNew(score, absl::StrCat(vlong)));
+    } else {
+      CHECK(zs->InsertNew(score, string_view{reinterpret_cast<const char*>(vstr), vlen}));
+    }
 
-    CHECK(zs->Insert(score, ele));
     zzlNext(zl, &eptr, &sptr);
   }
 

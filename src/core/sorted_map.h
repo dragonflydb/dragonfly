@@ -53,7 +53,11 @@ class SortedMap {
 
   bool Reserve(size_t sz);
   int Add(double score, sds ele, int in_flags, int* out_flags, double* newscore);
-  bool Insert(double score, sds member);
+
+  // Inserts a new element. Returns false if the element already exists.
+  // No score update is performed in this case.
+  bool InsertNew(double score, std::string_view member);
+
   bool Delete(sds ele);
 
   // Upper bound size of the set.

@@ -467,15 +467,13 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveLen(zs->Size()));
     std::error_code ec;
 
-    /* We save the skiplist elements from the greatest to the smallest
-     * (that's trivial since the elements are already ordered in the
-     * skiplist): this improves the load process, since the next loaded
-     * element will always be the smaller, so adding to the skiplist
-     * will always immediately stop at the head, making the insertion
-     * O(1) instead of O(log(N)). */
     const size_t total = zs->Size();
     size_t count = 0;
-    zs->Iterate(0, total, true, [&](sds ele, double score) mutable {
+
+    // Iterate over the sorted map and save the key and score.
+    // The order is important (from smallest to biggest) - so that the loader
+    // will load the entries faster.
+    zs->Iterate(0, total, false, [&](sds ele, double score) mutable {
       ec = SaveString(string_view{ele, sdslen(ele)});
       if (ec)
         return false;
