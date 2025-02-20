@@ -1178,10 +1178,6 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
 
   auto expire_it = db->expire.Find(it->first);
 
-  // TODO: Accept Iterator instead of PrimeIterator, as this might save an allocation below.
-  string scratch;
-  string_view key = it->first.GetSlice(&scratch);
-
   if (IsValid(expire_it)) {
     // TODO: to employ multi-generation update of expire-base and the underlying values.
     time_t expire_time = ExpireTime(expire_it);
@@ -1195,6 +1191,9 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
                << ", expire table size: " << db->expire.size()
                << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
   }
+
+  string scratch;
+  string_view key = it->first.GetSlice(&scratch);
 
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
