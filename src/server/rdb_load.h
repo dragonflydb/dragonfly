@@ -310,6 +310,8 @@ class RdbLoader : protected RdbLoaderBase {
 
   void LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib);
 
+  void CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice);
+
   void LoadScriptFromAux(std::string&& value);
 
   // Load index definition from RESP string describing it in FT.CREATE format,
