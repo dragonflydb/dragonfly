@@ -613,9 +613,6 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // we enter the callback in a timing when journaling will not cause preemptions. Otherwise,
   // the bucket might change as we Traverse and yield.
   db_slice.BlockingCounter()->Wait();
-  // Disable flush journal changes to prevent preemtion in traverse.
-  journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
-  util::FiberAtomicGuard guard;
   unsigned cnt = 0;
 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_cntx.db_index << " has "
@@ -624,9 +621,21 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
   string scratch;
+  size_t buckets_iterated = 0;
+  // 10k Traverses
+  const size_t limit = 10000;
   do {
-    cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+    if (buckets_iterated >= limit) {
+      buckets_iterated = 0;
+      util::ThisFiber::Yield();
+    }
+    {
+      // Disable flush journal changes to prevent preemtion in traverse.
+      journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
+      cur = prime_table->Traverse(
+          cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+    }
+    ++buckets_iterated;
   } while (cur && cnt < scan_opts.limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
