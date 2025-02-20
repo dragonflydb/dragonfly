@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/compact_object.h"
+#include "core/glob_matcher.h"
 #include "facade/facade_types.h"
 #include "facade/op_status.h"
 #include "helio/io/proc_reader.h"
@@ -245,25 +246,26 @@ class GenericError {
 // Thread safe utility to store the first non null generic error.
 using AggregateGenericError = AggregateValue<GenericError>;
 
-// Context is a utility for managing error reporting and cancellation for complex tasks.
+// ExecutionState is a utility for managing error reporting and cancellation for complex tasks.
 //
 // When submitting an error with `Error`, only the first is stored (as in aggregate values).
-// Then a special error handler is run, if present, and the context is cancelled. The error handler
-// is run in a separate handler to free up the caller.
+// Then a special error handler is run, if present, and the ExecutionState is cancelled. The error
+// handler is run in a separate handler to free up the caller.
 //
-// Manual cancellation with `Cancel` is simulated by reporting an `errc::operation_canceled` error.
-// This allows running the error handler and representing this scenario as an error.
-class Context : protected Cancellation {
+// ReportCancelError() reporting an `errc::operation_canceled` error.
+class ExecutionState : protected Cancellation {
  public:
   using ErrHandler = std::function<void(const GenericError&)>;
 
-  Context() = default;
-  Context(ErrHandler err_handler) : Cancellation{}, err_{}, err_handler_{std::move(err_handler)} {
+  ExecutionState() = default;
+  ExecutionState(ErrHandler err_handler)
+      : Cancellation{}, err_{}, err_handler_{std::move(err_handler)} {
   }
 
-  ~Context();
+  ~ExecutionState();
 
-  void Cancel();  // Cancels the context by submitting an `errc::operation_canceled` error.
+  // Cancels the context by submitting an `errc::operation_canceled` error.
+  void ReportCancelError();
   using Cancellation::IsCancelled;
   const Cancellation* GetCancellation() const;
 
@@ -303,7 +305,7 @@ class Context : protected Cancellation {
 };
 
 struct ScanOpts {
-  std::optional<std::string_view> pattern;
+  std::unique_ptr<GlobMatcher> matcher;
   size_t limit = 10;
   std::optional<CompactObjType> type_filter;
   unsigned bucket_id = UINT_MAX;

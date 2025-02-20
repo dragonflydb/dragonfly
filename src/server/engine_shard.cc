@@ -584,10 +584,10 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   // If any of the following flags are present, we are guaranteed to run in this function:
   // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't
   // occupy a place in txq and have highest priority
-  // 2. SUSPENDED_Q -> Suspended shards are run to clean up and finalize blocking keys
+  // 2. WAS_SUSPENDED -> Suspended transactions are run to clean up and finalize blocking keys
   // 3. OUT_OF_ORDER -> Transactions without conflicting keys can run earlier than their position in
   // txq is reached
-  uint16_t flags = Transaction::AWAKED_Q | Transaction::SUSPENDED_Q | Transaction::OUT_OF_ORDER;
+  uint16_t flags = Transaction::AWAKED_Q | Transaction::WAS_SUSPENDED | Transaction::OUT_OF_ORDER;
   auto [trans_mask, disarmed] =
       trans ? trans->DisarmInShardWhen(sid, flags) : make_pair(uint16_t(0), false);
 
@@ -602,7 +602,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
         << trans->DEBUG_GetLocalMask(sid);
 
     // Commands like BRPOPLPUSH don't conclude immediately
-    if (trans->RunInShard(this, false)) {
+    if (!trans->RunInShard(this, true)) {
       // execution is blocked while HasAwakedTransaction() returns true, so no need to set
       // continuation_trans_. Moreover, setting it for wakened multi-hop transactions may lead to
       // inconcistency, see BLMoveSimultaneously test.
@@ -611,18 +611,13 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     }
 
     trans = nullptr;  // Avoid handling the caller below
-    continuation_trans_ = nullptr;
   }
 
-  string dbg_id;
   bool update_stats = false;
 
-  auto run = [this, &dbg_id, &update_stats](Transaction* tx, bool is_ooo) -> bool /* keep */ {
-    dbg_id = VLOG_IS_ON(1) ? tx->DebugId() : "";
-    bool keep = tx->RunInShard(this, is_ooo);
-    DLOG_IF(INFO, !dbg_id.empty()) << dbg_id << ", keep " << keep << ", ooo " << is_ooo;
+  auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
     update_stats = true;
-    return keep;
+    return tx->RunInShard(this, allow_removal);
   };
 
   // Check the currently running transaction, we have to handle it first until it concludes
@@ -632,16 +627,8 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
       trans = nullptr;
 
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
-      auto bc = continuation_trans_->GetNamespace().GetBlockingController(shard_id_);
-      if (bool keep = run(continuation_trans_, false); !keep) {
-        // if this holds, we can remove this check altogether.
-        DCHECK(continuation_trans_ == nullptr);
+      if (bool concludes = run(continuation_trans_, true); concludes) {
         continuation_trans_ = nullptr;
-      }
-      if (bc && bc->HasAwakedTransaction()) {
-        // Break if there are any awakened transactions, as we must give way to them
-        // before continuing to handle regular transactions from the queue.
-        return;
       }
     }
   }
@@ -678,25 +665,34 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     DCHECK_LT(committed_txid_, txid);  //  strictly increasing when processed via txq
     committed_txid_ = txid;
 
-    if (bool keep = run(head, false); keep)
+    DCHECK(!continuation_trans_);  // while() check above ensures this.
+    if (bool concludes = run(head, true); !concludes) {
+      DCHECK_EQ(head->DEBUG_GetTxqPosInShard(sid), TxQueue::kEnd) << head->DebugId(sid);
       continuation_trans_ = head;
+    }
   }
 
   // If we disarmed, but didn't find ourselves in the loop, run now.
   if (trans && disarmed) {
-    DCHECK(trans != head);
-    DCHECK(trans_mask & (Transaction::OUT_OF_ORDER | Transaction::SUSPENDED_Q));
+    // if WAS_SUSPENDED is true but not AWAKED_Q, it means the transaction was awaked
+    // in another thread and this one just follows along.
+    DCHECK(trans_mask & (Transaction::OUT_OF_ORDER | Transaction::WAS_SUSPENDED));
+    CHECK(trans != continuation_trans_);
 
     bool is_ooo = trans_mask & Transaction::OUT_OF_ORDER;
-    bool keep = run(trans, is_ooo);
-    if (is_ooo && !keep) {
+
+    // For OOO transactions that are still in the queue, we can not remove them unless
+    // they conclude.
+    bool concludes = run(trans, !is_ooo);
+    if (is_ooo && concludes) {
       stats_.tx_ooo_total++;
     }
 
     // If the transaction concluded, it must remove itself from the tx queue.
     // Otherwise it is required to stay there to keep the relative order.
-    if (is_ooo && !trans->IsMulti())
-      DCHECK_EQ(keep, trans->DEBUG_GetTxqPosInShard(sid) != TxQueue::kEnd);
+    if (!concludes && is_ooo) {
+      LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
+    }
   }
   if (update_stats) {
     CacheStats();
@@ -854,6 +850,19 @@ bool EngineShard::ShouldThrottleForTiering() const {  // see header for formula 
          (UsedMemory() > tiering_redline + tiered_storage_->CoolMemoryUsage());
 }
 
+void EngineShard::FinalizeMulti(Transaction* tx) {
+  if (continuation_trans_ == tx) {
+    continuation_trans_ = nullptr;
+  }
+
+  // Wake only if no tx queue head is currently running
+  auto* bc = tx->GetNamespace().GetBlockingController(shard_id());
+  if (bc && continuation_trans_ == nullptr)
+    bc->NotifyPending();
+
+  PollExecution("unlockmulti", nullptr);
+}
+
 EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   const TxQueue* queue = txq();
 
@@ -872,7 +881,7 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   {
     auto value = queue->At(cur);
     Transaction* trx = std::get<Transaction*>(value);
-    info.head.debug_id_info = trx->DebugId();
+    info.head.debug_id_info = trx->DebugId(sid);
   }
 
   do {

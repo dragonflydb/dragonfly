@@ -12,39 +12,65 @@ jobs:
     name: Build
 
     timeout-minutes: 60
-    container:
-      image: ghcr.io/romange/alpine-dev:latest
-      options: --security-opt seccomp=unconfined
-      credentials:
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GITHUB_TOKEN }}
 
+    # TODO: Build Dragonfly instead of using a container, see below
+    services:
+      dragonflydb:
+        image: ghcr.io/dragonflydb/dragonfly-weekly:latest
+        env:
+          DFLY_cluster_mode: emulated
+          DFLY_lock_on_hashtags: true
+          HEALTHCHECK_PORT: 6379
+        ports:
+          - 6379:6379
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
+
       - name: Install NodeJs
         run: |
-          apk add --no-cache nodejs npm yarn
+          wget -q https://unofficial-builds.nodejs.org/download/release/v22.12.0/node-v22.12.0-linux-x64-glibc-217.tar.xz
+          tar -xf node-v22.12.0-linux-x64-glibc-217.tar.xz
+          sudo cp -r node-v22.12.0-linux-x64-glibc-217/* /usr/local/
+          sudo apt install yarn jq
           node --version
           npm --version
           yarn --version
           mkdir -p $GITHUB_WORKSPACE/build
-      - name: Configure/Build
-        run: |
-          cd $GITHUB_WORKSPACE/build
-          cmake .. -DCMAKE_BUILD_TYPE=Debug -GNinja
-          ninja dragonfly
-          ./dragonfly --alsologtostderr &
 
-      - name: Clone and build BullMQ
+#      - name: Build Dragonfly
+#        run: |
+#          mkdir $GITHUB_WORKSPACE/build
+#          cd $GITHUB_WORKSPACE/build
+#          cmake .. -DCMAKE_BUILD_TYPE=Release -GNinja
+#          ninja dragonfly
+#          ./dragonfly --alsologtostderr --cluster_mode=emulated --lock_on_hashtags --dbfilename= &
+
+      - name: Build BullMQ
         run: |
-          git clone https://github.com/taskforcesh/bullmq.git
+          mkdir -p $GITHUB_WORKSPACE/../bullmq
+          cd $GITHUB_WORKSPACE/../bullmq
+          # TODO: Use BullMQ latest release instead of our fork:
+          # DOWNLOAD_URL=$(curl -s https://api.github.com/repos/taskforcesh/bullmq/releases/latest | jq -r '.tarball_url')
+          # echo "Downloading latest BullMQ release from ${DOWNLOAD_URL}"
+          # wget -O bullmq.tar.gz ${DOWNLOAD_URL}
+          # tar -zxvf bullmq.tar.gz
+          # mv taskforcesh-bullmq-* bullmq
+          git clone https://github.com/dragonflydb/bullmq
           cd bullmq
           pwd
-          yarn install --ignore-engines --frozen-lockfile --non-interactive
+          yarn install
           yarn build
-      - name: Test BullMQ
+
+      - name: Run BullMQ tests
         run: |
-          cd $GITHUB_WORKSPACE/bullmq
-          # yarn test -i -g "should process delayed jobs with several workers respecting delay"
+          cd $GITHUB_WORKSPACE/../bullmq/bullmq
+          BULLMQ_TEST_PREFIX={b} yarn test
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit_logs
+          path: /tmp/dragonfly.*

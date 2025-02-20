@@ -754,18 +754,26 @@ def skip_if_not_in_github():
 
 
 class ExpirySeeder:
-    def __init__(self):
+    def __init__(self, stop_on_failure=True, timeout=3):
         self.stop_flag = False
         self.i = 0
         self.batch_size = 200
+        self.stop_on_failure = stop_on_failure
+        self.timeout = timeout
 
     async def run(self, client):
         while not self.stop_flag:
-            pipeline = client.pipeline(transaction=True)
-            for i in range(0, self.batch_size):
-                pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX 3")
-                self.i = self.i + 1
-            await pipeline.execute()
+            try:
+                pipeline = client.pipeline(transaction=False)
+                for i in range(0, self.batch_size):
+                    pipeline.execute_command(f"SET tmp{self.i} bar{self.i} EX {self.timeout}")
+                    self.i = self.i + 1
+                await pipeline.execute()
+            except (redis.exceptions.ConnectionError, redis.exceptions.ResponseError) as e:
+                if self.stop_on_failure:
+                    return
+                else:
+                    raise SystemExit(e)
 
     async def wait_until_n_inserts(self, count):
         while not self.i > count:

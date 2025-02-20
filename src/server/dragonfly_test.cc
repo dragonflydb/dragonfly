@@ -8,11 +8,10 @@ extern "C" {
 }
 
 #include <absl/strings/ascii.h>
-#include <absl/strings/charconv.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
-#include <fast_float/fast_float.h>
 #include <gmock/gmock.h>
+#include <reflex/matcher.h>
 
 #include "base/flags.h"
 #include "base/gtest.h"
@@ -831,65 +830,8 @@ TEST_F(DflyEngineTest, ReplicaofRejectOnLoad) {
   ASSERT_THAT(res, ErrArg("LOADING Dragonfly is loading the dataset in memory"));
 }
 
-using benchmark::DoNotOptimize;
-
 // TODO: to test transactions with a single shard since then all transactions become local.
 // To consider having a parameter in dragonfly engine controlling number of shards
 // unconditionally from number of cpus. TO TEST BLPOP under multi for single/multi argument case.
-
-// Parse Double benchmarks
-static void BM_ParseFastFloat(benchmark::State& state) {
-  std::vector<std::string> args(100);
-  std::random_device rd;
-
-  for (auto& arg : args) {
-    arg = std::to_string(std::uniform_real_distribution<double>(0, 1e5)(rd));
-  }
-  double res;
-  while (state.KeepRunning()) {
-    for (const auto& arg : args) {
-      fast_float::from_chars(arg.data(), arg.data() + arg.size(), res);
-    }
-  }
-}
-BENCHMARK(BM_ParseFastFloat);
-
-static void BM_ParseDoubleAbsl(benchmark::State& state) {
-  std::vector<std::string> args(100);
-  std::random_device rd;
-  for (auto& arg : args) {
-    arg = std::to_string(std::uniform_real_distribution<double>(0, 1e5)(rd));
-  }
-
-  double res;
-  while (state.KeepRunning()) {
-    for (const auto& arg : args) {
-      absl::from_chars(arg.data(), arg.data() + arg.size(), res);
-    }
-  }
-}
-BENCHMARK(BM_ParseDoubleAbsl);
-
-static void BM_MatchPattern(benchmark::State& state) {
-  absl::InsecureBitGen eng;
-  string random_val = GetRandomHex(eng, state.range(0));
-  ScanOpts scan_opts;
-  scan_opts.pattern = "*foobar*";
-  while (state.KeepRunning()) {
-    DoNotOptimize(scan_opts.Matches(random_val));
-  }
-}
-BENCHMARK(BM_MatchPattern)->Arg(1000)->Arg(10000);
-
-static void BM_MatchFindSubstr(benchmark::State& state) {
-  absl::InsecureBitGen eng;
-  string random_val = GetRandomHex(eng, state.range(0));
-
-  while (state.KeepRunning()) {
-    DoNotOptimize(random_val.find("foobar"));
-  }
-}
-BENCHMARK(BM_MatchFindSubstr)->Arg(1000)->Arg(10000);
-
 
 }  // namespace dfly

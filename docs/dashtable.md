@@ -154,7 +154,7 @@ where Redis finishes its snapshot, reaching almost x3 times more memory usage at
 ### Expiry of items during writes
 
 Efficient Expiry is very important for many scenarios. See, for example,
-[Pelikan paper'21](https://twitter.github.io/pelikan/2021/segcache.html). Twitter team says
+[Pelikan paper'21](https://pelikan.io/2021/segcache.html). Twitter team says
 that their memory footprint could be reduced by as much as by 60% by employing better expiry methodology. The authors of the post above show pros and cons of expiration methods in the table below:
 
 <img src="https://pelikan.io/assets/img/segcache/expiration.svg" width="400">

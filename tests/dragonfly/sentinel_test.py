@@ -81,7 +81,7 @@ class Sentinel:
         logging.info(self.config_file.read_text())
 
         self.proc = subprocess.Popen(
-            ["redis-server", f"{self.config_file.absolute()}", "--sentinel"]
+            ["redis-server-6.2.11", f"{self.config_file.absolute()}", "--sentinel"]
         )
 
     def stop(self):

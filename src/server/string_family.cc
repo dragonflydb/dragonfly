@@ -1014,7 +1014,7 @@ void StringFamily::Set(CmdArgList args, const CommandContext& cmnd_cntx) {
       if (rel_ms < 0) {
         cmnd_cntx.tx->ScheduleSingleHop([](const Transaction* tx, EngineShard* es) {
           ShardArgs args = tx->GetShardArgs(es->shard_id());
-          GenericFamily::OpDel(tx->GetOpArgs(es), args);
+          GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
           return OpStatus::OK;
         });
         return builder->SendStored();

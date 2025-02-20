@@ -218,6 +218,73 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotspotBuckets& eb, PrimeT
   return 1;
 }
 
+class AsyncDeleter {
+ public:
+  static void EnqueDeletion(uint32_t next, DenseSet* ds);
+  static void Shutdown();
+
+ private:
+  static constexpr uint32_t kClearStepSize = 1024;
+  struct ClearNode {
+    DenseSet* ds;
+    uint32_t cursor;
+    ClearNode* next;
+
+    ClearNode(DenseSet* d, uint32_t c, ClearNode* n) : ds(d), cursor(c), next(n) {
+    }
+  };
+
+  // Asynchronously deletes entries during the cpu-idle time.
+  static int32_t IdleCb();
+
+  // We add async deletion requests to a linked list and process them asynchronously
+  // in each thread.
+  static __thread ClearNode* head_;
+};
+
+__thread AsyncDeleter::ClearNode* AsyncDeleter::head_ = nullptr;
+
+void AsyncDeleter::EnqueDeletion(uint32_t next, DenseSet* ds) {
+  bool launch_task = (head_ == nullptr);
+
+  // register ds
+  head_ = new ClearNode{ds, next, head_};
+  ProactorBase* pb = ProactorBase::me();
+  DCHECK(pb);
+  DVLOG(2) << "Adding async deletion task, thread " << pb->GetPoolIndex() << " " << launch_task;
+  if (launch_task) {
+    pb->AddOnIdleTask(&IdleCb);
+  }
+}
+
+void AsyncDeleter::Shutdown() {
+  // we do not bother with deleting objects scheduled for asynchronous deletion
+  // during the shutdown. this should work well because we destroy mimalloc heap anyways.
+  while (head_) {
+    auto* next = head_->next;
+    delete head_;
+    head_ = next;
+  }
+}
+
+int32_t AsyncDeleter::IdleCb() {
+  if (head_ == nullptr)
+    return -1;  // unregister itself.
+
+  auto* current = head_;
+
+  DVLOG(2) << "IdleCb " << current->cursor;
+  uint32_t next = current->ds->ClearStep(current->cursor, kClearStepSize);
+  if (next == current->ds->BucketCount()) {  // reached the end.
+    CompactObj::DeleteMR<DenseSet>(current->ds);
+    head_ = current->next;
+    delete current;
+  } else {
+    current->cursor = next;
+  }
+  return ProactorBase::kOnIdleMaxLevel;
+};
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -283,7 +350,6 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner)
       cache_mode_(cache_mode),
       owner_(owner),
       client_tracking_map_(owner->memory_resource()) {
-  load_in_progress_ = false;
   db_arr_.emplace_back();
   CreateDb(0);
   expire_base_[0] = expire_base_[1] = 0;
@@ -306,6 +372,8 @@ DbSlice::~DbSlice() {
       continue;
     db.reset();
   }
+
+  AsyncDeleter::Shutdown();
 }
 
 auto DbSlice::GetStats() const -> Stats {
@@ -795,7 +863,8 @@ void DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
   }
 
-  CHECK(fetched_items_.empty());
+  LOG_IF(DFATAL, !fetched_items_.empty())
+      << "Some operation might bumped up items outside of a transaction";
 
   auto cb = [indexes, flush_db_arr = std::move(flush_db_arr)]() mutable {
     flush_db_arr.clear();
@@ -1507,6 +1576,21 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
   AccountObjectMemory(del_it.key(), del_it->first.ObjType(), -key_size_used,
                       table);                                                // Key
   AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
+
+  if (del_it->first.IsAsyncDelete() && pv.ObjType() == OBJ_SET &&
+      pv.Encoding() == kEncodingStrMap2) {
+    DenseSet* ds = (DenseSet*)pv.RObjPtr();
+    pv.SetRObjPtr(nullptr);
+    const size_t kClearStepSize = 512;
+
+    uint32_t next = ds->ClearStep(0, kClearStepSize);
+    if (next < ds->BucketCount()) {
+      AsyncDeleter::EnqueDeletion(next, ds);
+    } else {
+      CompactObj::DeleteMR<DenseSet>(ds);
+    }
+  }  // del_it->first.IsAsyncDelete()
+
   if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
     --stats.listpack_blob_cnt;
   } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {

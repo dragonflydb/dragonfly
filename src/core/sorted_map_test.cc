@@ -246,6 +246,26 @@ TEST_F(SortedMapTest, DeleteRange) {
   EXPECT_EQ(96, sm_.DeleteRangeByLex(lex_range));
 }
 
+TEST_F(SortedMapTest, RangeBug) {
+  constexpr size_t kArrLen = 80;
+  for (unsigned i = 0; i < kArrLen; i++) {
+    sds s = sdsempty();
+
+    s = sdscatfmt(s, "score%u", i);
+    sm_.Insert(i, s);
+  }
+
+  for (unsigned i = 0; i < kArrLen; i++) {
+    zrangespec range;
+    range.max = HUGE_VAL;
+    range.min = i;
+    range.minex = 0;
+    range.maxex = 0;
+    auto arr = sm_.GetRange(range, 0, 5, false);
+    ASSERT_GT(arr.size(), 0) << i;
+  }
+}
+
 // not a real test, just to see how much memory is used by zskiplist.
 TEST_F(SortedMapTest, MemoryUsage) {
   zskiplist* zsl = zslCreate();

@@ -2034,9 +2034,11 @@ error_code RdbLoader::Load(io::Source* src) {
 
   auto cleanup = absl::Cleanup([&] { FinishLoad(start, &keys_loaded); });
 
-  shard_set->AwaitRunningOnShardQueue([](EngineShard* es) {
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetLoadInProgress(true);
-  });
+  // Increment local one if it exists
+  if (EngineShard* es = EngineShard::tlocal(); es) {
+    namespaces->GetDefaultNamespace().GetCurrentDbSlice().IncrLoadInProgress();
+  }
+
   while (!stop_early_.load(memory_order_relaxed)) {
     if (pause_) {
       ThisFiber::SleepFor(100ms);
@@ -2226,12 +2228,13 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     FlushShardAsync(i);
 
     // Send sentinel callbacks to ensure that all previous messages have been processed.
-    shard_set->Add(i, [bc]() mutable {
-      namespaces->GetDefaultNamespace().GetCurrentDbSlice().SetLoadInProgress(false);
-      bc->Dec();
-    });
+    shard_set->Add(i, [bc]() mutable { bc->Dec(); });
   }
   bc->Wait();  // wait for sentinels to report.
+  // Decrement local one if it exists
+  if (EngineShard* es = EngineShard::tlocal(); es) {
+    namespaces->GetDefaultNamespace().GetCurrentDbSlice().DecrLoadInProgress();
+  }
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -2515,7 +2518,12 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     return;
 
   auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
+    // Before we start loading, increment LoadInProgress.
+    // This is required because FlushShardAsync dispatches to multiple shards, and those shards
+    // might have not yet have their state (load in progress) incremented.
+    namespaces->GetDefaultNamespace().GetCurrentDbSlice().IncrLoadInProgress();
     this->LoadItemsBuffer(indx, ib);
+    namespaces->GetDefaultNamespace().GetCurrentDbSlice().DecrLoadInProgress();
 
     // Block, if tiered storage is active, but can't keep up
     while (EngineShard::tlocal()->ShouldThrottleForTiering()) {
@@ -2553,6 +2561,8 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   EngineShard* es = EngineShard::tlocal();
   DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
   DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
+
+  DCHECK(!db_slice.IsCacheMode());
 
   auto error_msg = [](const auto* item, auto db_ind) {
     return absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",

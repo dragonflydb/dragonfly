@@ -22,8 +22,6 @@ extern "C" {
 #include "redis/zset.h"
 }
 
-ABSL_FLAG(bool, singlehop_blocking, true, "Use single hop optimization for blocking commands");
-
 namespace dfly::container_utils {
 using namespace std;
 namespace {
@@ -336,7 +334,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
   // If we don't find anything, we abort concluding and keep scheduled.
   // Slow path: schedule, find results from shards, execute action if found.
   OpResult<ShardFFResult> result;
-  if (trans->GetUniqueShardCnt() == 1 && absl::GetFlag(FLAGS_singlehop_blocking)) {
+  if (trans->GetUniqueShardCnt() == 1) {
     auto res = FindFirstNonEmptySingleShard(trans, req_obj_type, func);
     if (res.ok()) {
       if (info)
@@ -386,14 +384,14 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     limit_tp = steady_clock::now() + milliseconds(limit_ms);
   }
 
-  auto wcb = [](Transaction* t, EngineShard* shard) { return t->GetShardArgs(shard->shard_id()); };
   auto* ns = &trans->GetNamespace();
   const auto key_checker = [req_obj_type, ns](EngineShard* owner, const DbContext& context,
                                               Transaction*, std::string_view key) -> bool {
     return ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, req_obj_type).ok();
   };
 
-  auto status = trans->WaitOnWatch(limit_tp, std::move(wcb), key_checker, block_flag, pause_flag);
+  auto status =
+      trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, block_flag, pause_flag);
 
   if (status != OpStatus::OK)
     return status;

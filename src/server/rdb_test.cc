@@ -735,4 +735,19 @@ TEST_F(RdbTest, HugeKeyIssue4497) {
   EXPECT_EQ(Run({"flushall"}), "OK");
 }
 
+TEST_F(RdbTest, HugeKeyIssue4554) {
+  SetTestFlag("cache_mode", "true");
+  // We need to stress one flow/shard such that the others finish early. Lock on hashtags allows
+  // that.
+  SetTestFlag("lock_on_hashtags", "true");
+  ResetService();
+
+  EXPECT_EQ(
+      Run({"debug", "populate", "20", "{tmp}", "20", "rand", "type", "set", "elements", "10000"}),
+      "OK");
+  EXPECT_EQ(Run({"save", "df", "hugekey"}), "OK");
+  EXPECT_EQ(Run({"dfly", "load", "hugekey-summary.dfs"}), "OK");
+  EXPECT_EQ(Run({"flushall"}), "OK");
+}
+
 }  // namespace dfly
