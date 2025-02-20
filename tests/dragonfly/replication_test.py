@@ -2809,3 +2809,23 @@ async def test_stream_approximate_trimming(df_factory):
     master_data = await StaticSeeder.capture(c_master)
     replica_data = await StaticSeeder.capture(c_replica)
     assert master_data == replica_data
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_replicaof_does_not_flush_if_it_fails_to_connect(df_factory):
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2)
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    await c_master.execute_comamnd("SET foo bar")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port()}")
+    await check_all_replicas_finished(c_replica, c_master)
+
+    res = await c_replica.execute_comamnd("dbsize")
+    assert res == 1
+    await c_replica.execute_command(f"REPLICAOF localhost {replica.port()}")
+    res = await c_replica.execute_comamnd("dbsize")
+    assert res == 1
