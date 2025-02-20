@@ -46,6 +46,8 @@ class RobjWrapper {
   void Free(MemoryResource* mr);
 
   void SetString(std::string_view s, MemoryResource* mr);
+  void ReserveString(size_t size, MemoryResource* mr);
+  void AppendString(std::string_view s, MemoryResource* mr);
   // Used when sz_ is used to denote memory usage
   void SetSize(uint64_t size);
   void Init(unsigned type, unsigned encoding, void* inner);
@@ -320,6 +322,9 @@ class CompactObj {
   // For STR object.
   void SetString(std::string_view str);
   void GetString(std::string* res) const;
+
+  void ReserveString(size_t size);
+  void AppendString(std::string_view str);
 
   // Will set this to hold OBJ_JSON, after that it is safe to call GetJson
   // NOTE: in order to avid copy which can be expensive in this case,

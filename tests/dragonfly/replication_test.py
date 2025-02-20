@@ -2696,6 +2696,47 @@ async def test_replication_timeout_on_full_sync_heartbeat_expiry(
 
 
 @pytest.mark.exclude_epoll
+@dfly_args({"proactor_threads": 1})
+async def test_memory_on_big_string_loading(df_factory):
+    """
+    In this test we want to make sure there is no spike in rss while loading big string value
+    1. insert 1 big value to master
+    2. replicate master
+    3. check rss peak memory on replica node
+    """
+    master = df_factory.create()
+    replica = df_factory.create()
+
+    df_factory.start_all([master, replica])
+    c_master = master.client()
+    c_replica = replica.client()
+
+    logging.debug("Populate with one big string")
+    await c_master.execute_command("DEBUG POPULATE 1 key 200000000 RAND")
+
+    async def get_memory(client, field):
+        info = await client.info("memory")
+        return info[field]
+
+    logging.debug("Start replication and wait for full sync")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+
+    await c_replica.execute_command("memory decommit")
+    await asyncio.sleep(1)
+    replica_peak_memory = await get_memory(c_replica, "used_memory_peak_rss")
+    replica_used_memory = await get_memory(c_replica, "used_memory_rss")
+
+    logging.info(f"Replica Used memory {replica_used_memory}, peak memory {replica_peak_memory}")
+    assert replica_peak_memory < 1.1 * replica_used_memory
+
+    # Check replica data consistent
+    replica_data = await StaticSeeder.capture(c_replica)
+    master_data = await StaticSeeder.capture(c_master)
+    assert master_data == replica_data
+
+
+@pytest.mark.exclude_epoll
 @pytest.mark.parametrize(
     "element_size, elements_number",
     [(16, 30000), (30000, 16)],

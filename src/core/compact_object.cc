@@ -556,6 +556,20 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
   }
 }
 
+void RobjWrapper::ReserveString(size_t size, MemoryResource* mr) {
+  CHECK_EQ(inner_obj_, nullptr);
+  type_ = OBJ_STRING;
+  encoding_ = OBJ_ENCODING_RAW;
+  MakeInnerRoom(0, size, mr);
+}
+
+void RobjWrapper::AppendString(string_view s, MemoryResource* mr) {
+  size_t cur_cap = InnerObjMallocUsed();
+  CHECK(cur_cap >= sz_ + s.size()) << cur_cap << " " << sz_ << " " << s.size();
+  memcpy(reinterpret_cast<uint8_t*>(inner_obj_) + sz_, s.data(), s.size());
+  sz_ += s.size();
+}
+
 void RobjWrapper::SetSize(uint64_t size) {
   sz_ = size;
 }
@@ -974,6 +988,16 @@ void CompactObj::SetString(std::string_view str) {
   }
 
   EncodeString(str);
+}
+
+void CompactObj::ReserveString(size_t size) {
+  uint8_t mask = mask_ & ~kEncMask;
+  SetMeta(ROBJ_TAG, mask);
+  u_.r_obj.ReserveString(size, tl.local_mr);
+}
+
+void CompactObj::AppendString(std::string_view str) {
+  u_.r_obj.AppendString(str, tl.local_mr);
 }
 
 string_view CompactObj::GetSlice(string* scratch) const {

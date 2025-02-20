@@ -854,7 +854,14 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   if (rdb_type_ == RDB_TYPE_STRING) {
-    pv_->SetString(blob);
+    if (config_.append) {
+      pv_->AppendString(blob);
+    } else if (config_.reserve) {
+      pv_->ReserveString(config_.reserve);
+      pv_->AppendString(blob);
+    } else {
+      pv_->SetString(blob);
+    }
     return;
   }
 
@@ -1292,12 +1299,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
   io::Result<OpaqueObj> iores;
 
   switch (rdbtype) {
-    case RDB_TYPE_STRING: {
-      dest->rdb_type = RDB_TYPE_STRING;
-
-      /* Read string value */
-      return ReadStringObj(&dest->obj);
-    }
     case RDB_TYPE_SET:
     case RDB_TYPE_SET_WITH_EXPIRY:
       iores = ReadSet(rdbtype);
@@ -1308,6 +1309,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_HASH_ZIPLIST:
     case RDB_TYPE_HASH_LISTPACK:
     case RDB_TYPE_ZSET_LISTPACK:
+    case RDB_TYPE_ZSET_ZIPLIST:
+    case RDB_TYPE_STRING:
+    case RDB_TYPE_JSON:
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
@@ -1318,9 +1322,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_ZSET_2:
       iores = ReadZSet(rdbtype);
       break;
-    case RDB_TYPE_ZSET_ZIPLIST:
-      iores = ReadZSetZL();
-      break;
     case RDB_TYPE_LIST_QUICKLIST:
     case RDB_TYPE_LIST_QUICKLIST_2:
       iores = ReadListQuicklist(rdbtype);
@@ -1330,16 +1331,13 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_STREAM_LISTPACKS_3:
       iores = ReadStreams(rdbtype);
       break;
-    case RDB_TYPE_JSON:
-      iores = ReadJson();
-      break;
     case RDB_TYPE_SET_LISTPACK:
       // We need to deal with protocol versions 9 and older because in these
       // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
       // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
       if (rdb_version_ < 10) {
         // consider it RDB_TYPE_JSON_OLD (20)
-        iores = ReadJson();
+        iores = ReadGeneric(RDB_TYPE_JSON);
       } else {
         iores = ReadGeneric(rdbtype);
       }
@@ -1362,10 +1360,11 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
   return error_code{};
 }
 
-error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest) {
-  bool isencoded;
-  size_t len;
+static const size_t kMaxStringSize = 200_KB;
 
+error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split) {
+  bool isencoded = false;
+  size_t len;
   SET_OR_RETURN(LoadLen(&isencoded), len);
 
   if (isencoded) {
@@ -1393,10 +1392,24 @@ error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest) {
     }
   }
 
+  if (big_string_split && len > kMaxStringSize) {
+    pending_read_.remaining = len - kMaxStringSize;
+    pending_read_.reserve = len;
+    len = kMaxStringSize;
+  }
+
   auto& blob = dest->emplace<base::PODArray<char>>();
   blob.resize(len);
-  error_code ec = FetchBuf(len, blob.data());
-  return ec;
+  return FetchBuf(len, blob.data());
+}
+
+error_code RdbLoaderBase::ReadRemainingString(RdbVariant* dest) {
+  size_t read_len = std::min(pending_read_.remaining, kMaxStringSize);
+  pending_read_.remaining = pending_read_.remaining - read_len;
+
+  auto& blob = dest->emplace<base::PODArray<char>>();
+  blob.resize(read_len);
+  return FetchBuf(read_len, blob.data());
 }
 
 io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
@@ -1494,12 +1507,18 @@ auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
+  bool is_string_type = RDB_TYPE_STRING == rdbtype;
   RdbVariant str_obj;
-  error_code ec = ReadStringObj(&str_obj);
+  error_code ec;
+  if (pending_read_.remaining) {
+    ec = ReadRemainingString(&str_obj);
+  } else {
+    ec = ReadStringObj(&str_obj, is_string_type);
+  }
   if (ec)
     return make_unexpected(ec);
 
-  if (StrLen(str_obj) == 0) {
+  if (!is_string_type && StrLen(str_obj) == 0) {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
@@ -1587,19 +1606,6 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
-}
-
-auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
-  RdbVariant str_obj;
-  error_code ec = ReadStringObj(&str_obj);
-  if (ec)
-    return make_unexpected(ec);
-
-  if (StrLen(str_obj) == 0) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  return OpaqueObj{std::move(str_obj), RDB_TYPE_ZSET_ZIPLIST};
 }
 
 auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
@@ -1873,15 +1879,6 @@ auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
   if (!opcode || *opcode != RDB_MODULE_OPCODE_EOF) {
     return Unexpected(errc::rdb_file_corrupted);
   }
-
-  return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
-}
-
-auto RdbLoaderBase::ReadJson() -> io::Result<OpaqueObj> {
-  RdbVariant dest;
-  error_code ec = ReadStringObj(&dest);
-  if (ec)
-    return make_unexpected(ec);
 
   return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
 }
@@ -2684,6 +2681,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     // If the key can be discarded, we must still continue to read the
     // object from the RDB so we can read the next key.
     if (ShouldDiscardKey(key, settings)) {
+      pending_read_.reserve = 0;
       continue;
     }
 
