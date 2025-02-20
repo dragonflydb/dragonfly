@@ -507,6 +507,10 @@ void DeleteSlots(const SlotRanges& slots_ranges) {
     namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  auto* channel_store = ServerState::tlocal()->channel_store();
+  auto deleted = SlotSet(slots_ranges);
+  channel_store->UnsubscribeAfterClusterSlotMigration(deleted);
 }
 
 void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
@@ -626,9 +630,6 @@ void ClusterFamily::DflyClusterConfig(CmdArgList args, SinkReplyBuilder* builder
       auto deleted_slots = (before.GetRemovedSlots(after)).ToSlotRanges();
       deleted_slots.Merge(outgoing_migrations.slot_ranges);
       DeleteSlots(deleted_slots);
-      auto* channel_store = ServerState::tlocal()->channel_store();
-      auto deleted = SlotSet(deleted_slots);
-      channel_store->UnsubscribeAfterClusterSlotMigration(deleted);
       LOG_IF(INFO, !deleted_slots.Empty())
           << "Flushing newly unowned slots: " << deleted_slots.ToString();
       WriteFlushSlotsToJournal(deleted_slots);

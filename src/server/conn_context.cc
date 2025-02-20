@@ -225,7 +225,9 @@ size_t ConnectionContext::UsedMemory() const {
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {
   auto* sinfo = conn_state.subscribe_info.get();
-  sinfo->channels.erase(channel);
+  DCHECK(sinfo);
+  auto erased = sinfo->channels.erase(channel);
+  DCHECK(erased);
   if (sinfo->IsEmpty()) {
     conn_state.subscribe_info.reset();
     DCHECK_GE(subscriptions, 1u);
