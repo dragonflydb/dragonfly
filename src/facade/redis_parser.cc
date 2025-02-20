@@ -364,7 +364,8 @@ auto RedisParser::ParseArg(Buffer str) -> ResultConsumed {
     }
 
     if (len > 0 && static_cast<uint64_t>(len) > max_bulk_len_) {
-      LOG_EVERY_T(WARNING, 1) << "Threshold reached with bulk len: " << len;
+      LOG_EVERY_T(WARNING, 1) << "Threshold reached with bulk len: " << len
+                              << ", consider increasing max_bulk_len";
       return {BAD_ARRAYLEN, res.second};
     }
 
