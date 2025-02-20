@@ -233,21 +233,27 @@ int SortedMap::ScoreSdsPolicy::KeyCompareTo::operator()(ScoreSds a, ScoreSds b) 
   return sdscmp(sdsa, sdsb);
 }
 
-int SortedMap::Add(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
+int SortedMap::AddElem(double score, std::string_view ele, int in_flags, int* out_flags,
+                       double* newscore) {
   // does not take ownership over ele.
   DCHECK(!isnan(score));
 
-  // TODO: to introduce AddOrFind in score_map.
-  ScoreSds obj = score_map->FindObj(ele);
+  ScoreSds obj = nullptr;
+  bool added = false;
 
-  if (obj == nullptr) {
-    // Adding a new element.
-    if (in_flags & ZADD_IN_XX) {
+  if (in_flags & ZADD_IN_XX) {
+    obj = score_map->FindObj(ele);
+    if (obj == nullptr) {
       *out_flags = ZADD_OUT_NOP;
       return 1;
     }
+  } else {
+    tie(obj, added) = score_map->AddOrSkip(ele, score);
+  }
 
-    obj = score_map->AddUnique(string_view{ele, sdslen(ele)}, score);
+  if (added) {
+    // Adding a new element.
+    DCHECK_EQ(in_flags & ZADD_IN_XX, 0);
 
     *out_flags = ZADD_OUT_ADDED;
     *newscore = score;
@@ -302,7 +308,7 @@ bool SortedMap::InsertNew(double score, std::string_view member) {
   return true;
 }
 
-optional<unsigned> SortedMap::GetRank(sds ele, bool reverse) const {
+optional<unsigned> SortedMap::GetRank(std::string_view ele, bool reverse) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj == nullptr)
     return std::nullopt;
@@ -777,7 +783,8 @@ bool SortedMap::DefragIfNeeded(float ratio) {
   return reallocated;
 }
 
-std::optional<SortedMap::RankAndScore> SortedMap::GetRankAndScore(sds ele, bool reverse) const {
+std::optional<SortedMap::RankAndScore> SortedMap::GetRankAndScore(std::string_view ele,
+                                                                  bool reverse) const {
   ScoreSds obj = score_map->FindObj(ele);
   if (obj == nullptr)
     return std::nullopt;
