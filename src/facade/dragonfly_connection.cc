@@ -79,6 +79,10 @@ ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
           "Maximum multi-bulk (array) length that is "
           "allowed to be accepted when parsing RESP protocol");
 
+ABSL_FLAG(uint64_t, max_bulk_len, 2u << 30,
+          "Maximum bulk length that is "
+          "allowed to be accepted when parsing RESP protocol");
+
 ABSL_FLAG(size_t, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
 
@@ -600,7 +604,9 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   switch (protocol) {
     case Protocol::REDIS:
-      redis_parser_.reset(new RedisParser(GetFlag(FLAGS_max_multi_bulk_len)));
+      redis_parser_.reset(new RedisParser(RedisParser::Mode::SERVER,
+                                          GetFlag(FLAGS_max_multi_bulk_len),
+                                          GetFlag(FLAGS_max_bulk_len)));
       break;
     case Protocol::MEMCACHE:
       memcache_parser_.reset(new MemcacheParser);

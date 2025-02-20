@@ -97,7 +97,7 @@ class ProtocolClient {
     return server_context_;
   }
 
-  void ResetParser(bool server_mode);
+  void ResetParser(facade::RedisParser::Mode mode);
 
   auto& LastResponseArgs() {
     return resp_args_;
