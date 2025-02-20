@@ -84,8 +84,6 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   void Cancel() {
-    // We don't care about errors during cancel
-    cntx_.SwitchErrorHandler([](auto ge) {});
     // Close socket for clean disconnect.
     CloseSocket();
     streamer_.Cancel();
@@ -247,7 +245,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     OnAllShards([this](auto& migration) { migration->PrepareFlow(cf_->MyID()); });
-    if (cntx_.IsError()) {
+    if (!cntx_.IsRunning()) {
       continue;
     }
 
@@ -258,13 +256,13 @@ void OutgoingMigration::SyncFb() {
       OnAllShards([](auto& migration) { migration->PrepareSync(); });
     }
 
-    if (cntx_.IsError()) {
+    if (!cntx_.IsRunning()) {
       continue;
     }
 
     OnAllShards([](auto& migration) { migration->RunSync(); });
 
-    if (cntx_.IsError()) {
+    if (!cntx_.IsRunning()) {
       continue;
     }
 
@@ -274,7 +272,7 @@ void OutgoingMigration::SyncFb() {
       VLOG(1) << "Waiting for migration to finalize...";
       ThisFiber::SleepFor(500ms);
     }
-    if (cntx_.IsError()) {
+    if (!cntx_.IsRunning()) {
       continue;
     }
     break;
@@ -289,7 +287,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   LOG(INFO) << "Finalize migration for " << cf_->MyID() << " : " << migration_info_.node_info.id
             << " attempt " << attempt;
   if (attempt > 1) {
-    if (cntx_.IsError()) {
+    if (!cntx_.IsRunning()) {
       return true;
     }
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;

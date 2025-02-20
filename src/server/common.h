@@ -234,6 +234,7 @@ using AggregateGenericError = AggregateValue<GenericError>;
 // actions When report an error, only the first is stored, the next ones will be ignored. Then a
 // special error handler is run, if present, and the ExecutionState is ERROR. The error handler is
 // run in a separate handler to free up the caller.
+// If the state is CANCELLED all errors are ignored
 //
 // ReportCancelError() reporting an `errc::operation_canceled` error.
 class ExecutionState {
@@ -246,7 +247,8 @@ class ExecutionState {
 
   ~ExecutionState();
 
-  // Cancels the context by submitting an `errc::operation_canceled` error.
+  // Report a cancel error the context by submitting an `errc::operation_canceled` error.
+  // If the state is CANCELLED does nothing
   void ReportCancelError();
 
   bool IsRunning() const {
@@ -270,6 +272,7 @@ class ExecutionState {
   // Report an error by submitting arguments for GenericError.
   // If this is the first error that occured, then the error handler is run
   // and the context state set to ERROR.
+  // If the state is CANCELLED does nothing
   template <typename... T> GenericError ReportError(T... ts) {
     return ReportErrorInternal(GenericError{std::forward<T>(ts)...});
   }

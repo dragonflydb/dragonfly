@@ -350,7 +350,7 @@ GenericError ExecutionState::GetError() const {
 }
 
 void ExecutionState::ReportCancelError() {
-  ReportError(std::make_error_code(errc::operation_canceled), "Context cancelled");
+  ReportError(std::make_error_code(errc::operation_canceled), "ExecutionState cancelled");
 }
 
 void ExecutionState::Reset(ErrHandler handler) {
@@ -384,6 +384,10 @@ void ExecutionState::JoinErrorHandler() {
 }
 
 GenericError ExecutionState::ReportErrorInternal(GenericError&& err) {
+  if (IsCancelled()) {
+    LOG_IF(INFO, err != errc::operation_canceled) << err.Format();
+    return {};
+  }
   lock_guard lk{err_mu_};
   if (err_)
     return err_;
