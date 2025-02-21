@@ -4,6 +4,7 @@
 
 #include "base/init.h"
 #include "facade/conn_context.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/service_interface.h"
 #include "util/accept_server.h"
@@ -44,7 +45,11 @@ class OkService : public ServiceInterface {
 
 void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   OkService service;
-  pool->Await([](auto*) { tl_facade_stats = new FacadeStats; });
+
+  Connection::Init(pool->size());
+  pool->Await([](auto*) {
+    tl_facade_stats = new FacadeStats;
+  });
 
   acceptor->AddListener(GetFlag(FLAGS_port), new Listener{Protocol::REDIS, &service});
 
