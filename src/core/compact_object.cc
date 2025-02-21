@@ -597,13 +597,6 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
 }
 
 int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
-  // copied from zsetAdd for listpack only.
-  /* Turn options into simple to check vars. */
-  bool incr = (in_flags & ZADD_IN_INCR) != 0;
-  bool nx = (in_flags & ZADD_IN_NX) != 0;
-  bool xx = (in_flags & ZADD_IN_XX) != 0;
-  bool gt = (in_flags & ZADD_IN_GT) != 0;
-  bool lt = (in_flags & ZADD_IN_LT) != 0;
   *out_flags = 0; /* We'll return our response flags. */
   double curscore;
 
@@ -615,6 +608,13 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
 
   /* Update the sorted set according to its encoding. */
   if (encoding_ == OBJ_ENCODING_LISTPACK) {
+    /* Turn options into simple to check vars. */
+    bool incr = (in_flags & ZADD_IN_INCR) != 0;
+    bool nx = (in_flags & ZADD_IN_NX) != 0;
+    bool xx = (in_flags & ZADD_IN_XX) != 0;
+    bool gt = (in_flags & ZADD_IN_GT) != 0;
+    bool lt = (in_flags & ZADD_IN_LT) != 0;
+
     unsigned char* eptr;
     uint8_t* lp = (uint8_t*)inner_obj_;
 
@@ -678,7 +678,8 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
 
   CHECK_EQ(encoding_, OBJ_ENCODING_SKIPLIST);
   SortedMap* ss = (SortedMap*)inner_obj_;
-  return ss->Add(score, ele, in_flags, out_flags, newscore);
+  string_view elem(ele, sdslen(ele));
+  return ss->AddElem(score, elem, in_flags, out_flags, newscore);
 }
 
 void RobjWrapper::ReallocateString(MemoryResource* mr) {

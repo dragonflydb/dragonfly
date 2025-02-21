@@ -1227,14 +1227,14 @@ OpResult<RankResult> OpRank(const OpArgs& op_args, string_view key, string_view 
   RankResult res{};
 
   if (with_score) {
-    auto rankAndScore = ss->GetRankAndScore(WrapSds(member), reverse);
+    auto rankAndScore = ss->GetRankAndScore(member, reverse);
     if (!rankAndScore) {
       return OpStatus::KEY_NOTFOUND;
     }
     res.rank = rankAndScore->first;
     res.score = rankAndScore->second;
   } else {
-    std::optional<unsigned> rank = ss->GetRank(WrapSds(member), reverse);
+    std::optional<unsigned> rank = ss->GetRank(member, reverse);
     if (!rank) {
       return OpStatus::KEY_NOTFOUND;
     }

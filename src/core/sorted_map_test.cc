@@ -48,21 +48,22 @@ TEST_F(SortedMapTest, Add) {
   int out_flags;
   double new_score;
 
-  sds ele = sdsnew("a");
-  int res = sm_.Add(1.0, ele, 0, &out_flags, &new_score);
+  int res = sm_.AddElem(1.0, "a", 0, &out_flags, &new_score);
   EXPECT_EQ(1, res);
   EXPECT_EQ(ZADD_OUT_ADDED, out_flags);
   EXPECT_EQ(1, new_score);
 
-  res = sm_.Add(2.0, ele, ZADD_IN_NX, &out_flags, &new_score);
+  res = sm_.AddElem(2.0, "a", ZADD_IN_NX, &out_flags, &new_score);
   EXPECT_EQ(1, res);
   EXPECT_EQ(ZADD_OUT_NOP, out_flags);
 
-  res = sm_.Add(2.0, ele, ZADD_IN_INCR, &out_flags, &new_score);
+  res = sm_.AddElem(2.0, "a", ZADD_IN_INCR, &out_flags, &new_score);
   EXPECT_EQ(1, res);
   EXPECT_EQ(ZADD_OUT_UPDATED, out_flags);
   EXPECT_EQ(3, new_score);
+  sds ele = sdsnew("a");
   EXPECT_EQ(3, sm_.GetScore(ele));
+  sdsfree(ele);
 }
 
 TEST_F(SortedMapTest, Scan) {
@@ -285,9 +286,7 @@ TEST_F(SortedMapTest, ReallocIfNeeded) {
     int out_flags;
     double new_val;
     auto str = build_str(i);
-    sds ele = sdsnew(str.c_str());
-    sm_.Add(i, ele, 0, &out_flags, &new_val);
-    sdsfree(ele);
+    sm_.AddElem(i, str, 0, &out_flags, &new_val);
   }
 
   for (size_t i = 0; i < 10'000; i++) {
