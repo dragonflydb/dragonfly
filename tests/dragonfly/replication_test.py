@@ -2820,12 +2820,13 @@ async def test_replicaof_does_not_flush_if_it_fails_to_connect(df_factory):
     c_master = master.client()
     c_replica = replica.client()
 
-    await c_master.execute_comamnd("SET foo bar")
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port()}")
-    await check_all_replicas_finished(c_replica, c_master)
+    await c_master.execute_command("SET foo bar")
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await check_all_replicas_finished([c_replica], c_master)
 
-    res = await c_replica.execute_comamnd("dbsize")
+    res = await c_replica.execute_command("dbsize")
     assert res == 1
-    await c_replica.execute_command(f"REPLICAOF localhost {replica.port()}")
-    res = await c_replica.execute_comamnd("dbsize")
+    with pytest.raises(redis.exceptions.ResponseError):
+        await c_replica.execute_command(f"REPLICAOF localhost {replica.port}")
+    res = await c_replica.execute_command("dbsize")
     assert res == 1

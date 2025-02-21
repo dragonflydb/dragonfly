@@ -2751,8 +2751,8 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
                                           master_replid(), replicaof_args->slot_range);
   error_code ec = add_replica->Start(cmd_cntx.rb);
   if (!ec) {
-    cluster_replicas_.push_back(std::move(add_replica));
     add_replica->StartMainReplicationFiber(cmd_cntx.rb);
+    cluster_replicas_.push_back(std::move(add_replica));
   }
 }
 
