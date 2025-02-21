@@ -226,11 +226,11 @@ void OutgoingMigration::SyncFb() {
     if (!CheckRespIsSimpleReply("OK")) {
       if (CheckRespIsSimpleReply(kUnknownMigration)) {
         LOG(WARNING) << "Target node does not recognize migration; retrying";
-        cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
+        cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
         ThisFiber::SleepFor(1000ms);
       } else {
         LOG(WARNING) << "Unable to initialize migration";
-        cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
+        cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
       }
       continue;
     }

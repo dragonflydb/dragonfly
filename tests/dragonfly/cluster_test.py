@@ -2943,6 +2943,46 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
+    nodes = [df_factory.create(port=next(next_port)) for i in range(2)]
+    df_factory.start_all(nodes)
+
+    c_nodes = [node.client() for node in nodes]
+
+    nodes_info = [(await create_node_info(instance)) for instance in nodes]
+    nodes_info[0].slots = [(0, 16383)]
+    nodes_info[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes_info)), [node.client for node in nodes_info])
+    # channel name kostas crc is at slot 2883 which is part of the first node.
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await c_nodes[1].execute_command("SSUBSCRIBE kostas")
+
+    assert str(moved_error.value) == f"MOVED 2833 127.0.0.1:{nodes[0].port}"
+
+    node_a = ClusterNode("localhost", nodes[0].port)
+    node_b = ClusterNode("localhost", nodes[1].port)
+
+    consumer_client = RedisCluster(startup_nodes=[node_a, node_b])
+    consumer = consumer_client.pubsub()
+    consumer.ssubscribe("kostas")
+
+    await c_nodes[0].execute_command("SPUBLISH kostas hello")
+
+    # Consume subscription message result from above
+    message = consumer.get_sharded_message(target_node=node_a)
+    assert message == {"type": "subscribe", "pattern": None, "channel": b"kostas", "data": 1}
+
+    message = consumer.get_sharded_message(target_node=node_a)
+    assert message == {"type": "message", "pattern": None, "channel": b"kostas", "data": b"hello"}
+
+    consumer.sunsubscribe("kostas")
+    await c_nodes[0].execute_command("SPUBLISH kostas new_message")
+    message = consumer.get_sharded_message(target_node=node_a)
+    assert message == {"type": "unsubscribe", "pattern": None, "channel": b"kostas", "data": 0}
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
 async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
     # create cluster with several nodes and create migrations from one node to others
     # but config propagated only to source node to get errors for migrations
