@@ -8,6 +8,16 @@
 #include <string>
 #include <string_view>
 
+#define FIX_PERFORMANCE_MATCHING
+
+#ifndef FIX_PERFORMANCE_MATCHING
+#ifdef USE_PCRE2
+  #define PCRE2_CODE_UNIT_WIDTH 8
+  #include <pcre2.h>
+#endif
+#endif
+
+
 namespace dfly {
 
 class GlobMatcher {
@@ -16,6 +26,7 @@ class GlobMatcher {
 
  public:
   explicit GlobMatcher(std::string_view pattern, bool case_sensitive);
+  ~GlobMatcher();
 
   bool Matches(std::string_view str) const;
 
@@ -37,10 +48,11 @@ class GlobMatcher {
 
   bool starts_with_star_ = false;
   bool ends_with_star_ = false;
-  bool empty_pattern_ = false;
-#else
-  std::string glob_;
+#elif USE_PCRE2
+  pcre2_code_8* re_ = nullptr;
+  pcre2_match_data_8* match_data_ = nullptr;
 #endif
+  std::string_view glob_;
   bool case_sensitive_;
 };
 
