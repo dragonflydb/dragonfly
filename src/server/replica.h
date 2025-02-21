@@ -59,6 +59,7 @@ class Replica : ProtocolClient {
   // Returns true if initial link with master has been established or
   // false if it has failed.
   std::error_code Start(facade::SinkReplyBuilder* builder);
+  void StartMainReplicationFiber(facade::SinkReplyBuilder* builder);
 
   // Sets the server state to have replication enabled.
   // It is like Start(), but does not attempt to establish

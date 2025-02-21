@@ -2751,6 +2751,7 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
                                           master_replid(), replicaof_args->slot_range);
   error_code ec = add_replica->Start(cmd_cntx.rb);
   if (!ec) {
+    add_replica->StartMainReplicationFiber(cmd_cntx.rb);
     cluster_replicas_.push_back(std::move(add_replica));
   }
 }
@@ -2806,12 +2807,6 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       return;
     }
 
-    // If we are called by "Replicate", tx will be null but we do not need
-    // to flush anything.
-    if (tx) {
-      Drakarys(tx, DbSlice::kDbAll);
-    }
-
     // Create a new replica and assing it
     new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                        master_replid(), replicaof_args->slot_range);
@@ -2830,7 +2825,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
     case ActionOnConnectionFail::kReturnOnError:
       ec = new_replica->Start(builder);
       break;
-    case ActionOnConnectionFail::kContinueReplication:  // set DF to replicate, and forget about it
+    case ActionOnConnectionFail::kContinueReplication:
       new_replica->EnableReplication(builder);
       break;
   };
@@ -2842,6 +2837,17 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
     service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
     SetMasterFlagOnAllThreads(true);
     replica_.reset();
+    return;
+  }
+  // Successfully connected now we flush
+  // If we are called by "Replicate", tx will be null but we do not need
+  // to flush anything.
+  if (tx) {
+    Drakarys(tx, DbSlice::kDbAll);
+  }
+
+  if (on_err == ActionOnConnectionFail::kReturnOnError) {
+    replica_->StartMainReplicationFiber(builder);
   }
 }
 

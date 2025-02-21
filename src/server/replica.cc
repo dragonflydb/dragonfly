@@ -124,11 +124,12 @@ error_code Replica::Start(facade::SinkReplyBuilder* builder) {
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
-  // 4. Spawn main coordination fiber.
-  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
-
-  builder->SendOk();
   return {};
+}
+
+void Replica::StartMainReplicationFiber(facade::SinkReplyBuilder* builder) {
+  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
+  builder->SendOk();
 }
 
 void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
