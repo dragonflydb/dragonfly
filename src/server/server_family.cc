@@ -1518,6 +1518,15 @@ void PrintPrometheusMetrics(uint64_t uptime, const Metrics& m, DflyCmd* dfly_cmd
       absl::StrAppend(&resp->body(), str);
   }
 
+  if (IsClusterEnabled()) {
+    string str;
+    AppendMetricHeader("migration_errors_total", "Total error numbers of current migrations",
+                       MetricType::GAUGE, &str);
+    AppendMetricValue("migration_errors_total", m.migration_errors_total, {"num"},
+                      {"migration errors"}, &str);
+    absl::StrAppend(&resp->body(), str);
+  }
+
   string db_key_metrics;
   string db_key_expire_metrics;
 
@@ -2200,6 +2209,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     util::fb2::LockGuard lk{loading_stats_mu_};
     result.loading_stats = loading_stats_;
   }
+
+  result.migration_errors_total = service_.cluster_family().MigrationsErrorNum();
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
