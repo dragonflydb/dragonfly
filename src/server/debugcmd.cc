@@ -11,6 +11,8 @@ extern "C" {
 #include <absl/random/random.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <lz4frame.h>
+#include <zdict.h>
 #include <zstd.h>
 
 #include <filesystem>
@@ -326,6 +328,160 @@ void DoBuildObjHist(EngineShard* shard, ConnectionContext* cntx, ObjHistMap* obj
   }
 }
 
+void FillDictSamples(CompactObjType obj_type, PrimeTable* table, string* sample_buf,
+                     vector<size_t>* sample_sizes) {
+  PrimeTable::Cursor cursor;
+  unsigned steps = 0;
+  string scratch;
+  constexpr size_t kSampleLen = 4096;
+  do {
+    cursor = table->Traverse(cursor, [&](PrimeIterator it) {
+      unsigned otype = it->second.ObjType();
+      if (otype != obj_type)
+        return;
+      if (otype == OBJ_STRING) {
+        it->second.GetString(&scratch);
+        size_t len = std::min(scratch.size(), kSampleLen);
+        sample_buf->append(scratch.data(), len);
+        sample_sizes->push_back(len);
+        steps += 1;
+      } else if (otype == OBJ_ZSET) {
+        auto cb = [&](container_utils::ContainerEntry entry, double) {
+          steps += 1;
+          if (entry.value) {
+            size_t len = std::min(entry.length, kSampleLen);
+            sample_buf->append(entry.value, len);
+            sample_sizes->push_back(len);
+          }
+          return true;
+        };
+        container_utils::IterateSortedSet(it->second.GetRobjWrapper(), cb);
+      }
+    });
+
+    if (sample_buf->size() > 10_MB)
+      return;
+
+    if (steps >= 20000) {
+      steps = 0;
+      ThisFiber::Yield();
+    }
+  } while (cursor);
+}
+
+struct CompressionStats {
+  size_t compressed_size = 0;
+  size_t src_size = 0;
+
+  CompressionStats& operator+=(const CompressionStats& rhs) {
+    compressed_size += rhs.compressed_size;
+    src_size += rhs.src_size;
+    return *this;
+  }
+};
+
+unsigned DryCompressObject(CompactObjType obj_type, const PrimeValue& pv, LZ4F_cctx* lz4_cntx,
+                           LZ4F_CDict* cdict, CompressionStats* result) {
+  unsigned otype = pv.ObjType();
+  if (otype != obj_type)
+    return 1;
+  string scratch;
+  LZ4F_preferences_t lz4_pref = LZ4F_INIT_PREFERENCES;
+  lz4_pref.compressionLevel = -1;
+  string compressed;
+  unsigned steps = 0;
+
+  if (otype == OBJ_STRING) {
+    pv.GetString(&scratch);
+
+    lz4_pref.frameInfo.contentSize = scratch.size();
+
+    compressed.resize(LZ4F_compressFrameBound(scratch.size(), &lz4_pref));
+    size_t res = LZ4F_compressFrame_usingCDict(lz4_cntx, compressed.data(), compressed.size(),
+                                               scratch.data(), scratch.size(), cdict, &lz4_pref);
+    CHECK(!LZ4F_isError(res));
+    result->compressed_size += res;
+    result->src_size += scratch.size();
+    steps += 1;
+  } else if (otype == OBJ_ZSET) {
+    auto cb = [&](container_utils::ContainerEntry entry, double) {
+      steps += 1;
+      if (entry.value) {
+        lz4_pref.frameInfo.contentSize = entry.length;
+        compressed.resize(LZ4F_compressFrameBound(entry.length, &lz4_pref));
+        size_t res = LZ4F_compressFrame_usingCDict(lz4_cntx, compressed.data(), compressed.size(),
+                                                   entry.value, entry.length, cdict, &lz4_pref);
+        CHECK(!LZ4F_isError(res));
+        result->compressed_size += res;
+        result->src_size += entry.length;
+      }
+      return true;
+    };
+    container_utils::IterateSortedSet(pv.GetRobjWrapper(), cb);
+  }
+  return steps;
+};
+
+CompressionStats DryCompress(CompactObjType obj_type, PrimeTable* table, LZ4F_cctx* lz4_cntx,
+                             LZ4F_CDict* cdict) {
+  string compressed, scratch;
+  CompressionStats result;
+
+  PrimeTable::Cursor cursor;
+  unsigned steps = 0;
+  do {
+    cursor = table->Traverse(cursor, [&](PrimeIterator it) {
+      steps += DryCompressObject(obj_type, it->second, lz4_cntx, cdict, &result);
+    });
+    if (steps >= 20000) {
+      steps = 0;
+      ThisFiber::Yield();
+    }
+  } while (cursor);
+
+  return result;
+}
+
+CompressionStats DoAnalyzeCompression(CompactObjType obj_type, EngineShard* shard,
+                                      ConnectionContext* cntx) {
+  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
+  DbTable* dbt = db_slice.GetDBTable(cntx->db_index());
+  CHECK(dbt);
+
+  string dictionary;
+  {
+    string sample_buf;
+    vector<size_t> sample_sizes;
+    FillDictSamples(obj_type, &dbt->prime, &sample_buf, &sample_sizes);
+
+    if (sample_buf.empty()) {
+      return {};
+    }
+
+    dictionary.resize(128_KB);
+    size_t dict_size =
+        ZDICT_trainFromBuffer(dictionary.data(), dictionary.size(), sample_buf.data(),
+                              sample_sizes.data(), sample_sizes.size());
+    dictionary.resize(dict_size);
+    if (ZSTD_isError(dict_size)) {
+      LOG(ERROR) << "ZDICT_trainFromBuffer failed: " << ZSTD_getErrorName(dict_size);
+      return {};
+    }
+  }
+  VLOG(1) << "Dictionary size: " << dictionary.size();
+
+  // Now test the compression based on the dictionary.
+  LZ4F_cctx* lz4_cntx = nullptr;
+  LZ4F_errorCode_t code = LZ4F_createCompressionContext(&lz4_cntx, LZ4F_VERSION);
+  CHECK(!LZ4F_isError(code));
+
+  LZ4F_CDict* cdict = LZ4F_createCDict(dictionary.data(), dictionary.size());
+  CompressionStats stats = DryCompress(obj_type, &dbt->prime, lz4_cntx, cdict);
+  LZ4F_freeCDict(cdict);
+  LZ4F_freeCompressionContext(lz4_cntx);
+  return stats;
+}
+
 ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
   auto& db_slice = cntx->ns->GetCurrentDbSlice();
   auto db_index = cntx->db_index();
@@ -521,6 +677,8 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    traffic logging is stopped.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
+        "COMPRESSION <type>"
+        "    Estimate the compressability of values of the given type",
         "HELP",
         "    Prints this help.",
     };
@@ -582,6 +740,10 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "RECVSIZE" && args.size() == 2) {
     return RecvSize(ArgS(args, 1), builder);
+  }
+
+  if (subcmd == "COMPRESSION" && args.size() == 2) {
+    return Compression(ArgS(args, 1), builder);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -1123,6 +1285,32 @@ void DebugCmd::RecvSize(string_view param, facade::SinkReplyBuilder* builder) {
   shard_set->pool()->at(tid)->AwaitBrief(
       [&]() { facade::Connection::GetRequestSizeHistogramThreadLocal(&hist); });
   rb->SendVerbatimString(hist);
+}
+
+void DebugCmd::Compression(std::string_view param, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  auto type = ObjTypeFromString(param);
+  if (!type || !(*type == OBJ_STRING || *type == OBJ_ZSET)) {
+    return rb->SendError("Invalid type");
+  }
+
+  CompressionStats result;
+  fb2::Mutex mu;
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    CompressionStats stats = DoAnalyzeCompression(*type, shard, cntx_);
+    std::unique_lock lk(mu);
+    result += stats;
+  });
+
+  rb->StartCollection(3, RedisReplyBuilder::CollectionType::MAP);
+  rb->SendSimpleString("raw_size");
+  rb->SendLong(result.src_size);
+  rb->SendSimpleString("compressed_size");
+  rb->SendLong(result.compressed_size);
+  rb->SendSimpleString("ratio");
+  double ratio =
+      result.src_size > 0 ? static_cast<double>(result.compressed_size) / result.src_size : 0;
+  rb->SendDouble(ratio);
 }
 
 }  // namespace dfly
