@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <memory>
+#include <string_view>
 
 #include "core/heap_size.h"
 #include "facade/acl_commands_def.h"
@@ -33,6 +34,10 @@ class ConnectionContext {
   }
 
   virtual size_t UsedMemory() const;
+
+  // Noop.
+  virtual void Unsubscribe(std::string_view channel) {
+  }
 
   // connection state / properties.
   bool conn_closing : 1;
