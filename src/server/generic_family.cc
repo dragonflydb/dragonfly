@@ -212,6 +212,7 @@ OpResult<DbSlice::AddOrFindResult> RdbRestoreValue::Add(string_view key, string_
     if (pending_read_.remaining > 0) {
       config.streamed = true;
     }
+    config.reserve = pending_read_.reserve;
 
     if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
       // we failed - report and exit
