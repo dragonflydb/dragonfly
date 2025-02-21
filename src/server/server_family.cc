@@ -2642,6 +2642,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", IsClusterEnabledOrEmulated());
+    append("migration_errors_total", service_.cluster_family().MigrationsErrorNum());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);
