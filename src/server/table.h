@@ -65,8 +65,6 @@ struct DbTableStats {
   // Applies for any non-inline objects.
   size_t obj_memory_usage = 0;
 
-  size_t listpack_blob_cnt = 0;
-  size_t listpack_bytes = 0;
   size_t tiered_entries = 0;
   size_t tiered_used_bytes = 0;
 

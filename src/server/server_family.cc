@@ -2329,8 +2329,6 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
     append("num_buckets", total.bucket_count);
     append("num_entries", total.key_count);
     append("inline_keys", total.inline_keys);
-    append("listpack_blobs", total.listpack_blob_cnt);
-    append("listpack_bytes", total.listpack_bytes);
     append("small_string_bytes", m.small_string_bytes);
     append("pipeline_cache_bytes", m.facade_stats.conn_stats.pipeline_cmd_cache_bytes);
     append("dispatch_queue_bytes", m.facade_stats.conn_stats.dispatch_queue_bytes);

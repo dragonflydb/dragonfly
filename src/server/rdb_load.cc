@@ -2171,11 +2171,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     ++keys_loaded;
-    int64_t start = absl::GetCurrentTimeNanos();
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
-    int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
-    LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
-
     settings.Reset();
   }  // main load loop
 
@@ -2648,6 +2644,8 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
 // RDB_TYPE_SET_WITH_EXPIRY support partial reads).
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   std::string key;
+  int64_t start = absl::GetCurrentTimeNanos();
+
   SET_OR_RETURN(ReadKey(), key);
 
   bool streamed = false;
@@ -2715,6 +2713,9 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
       }
     }
   } while (pending_read_.remaining > 0);
+
+  int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+  LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
 
   return kOk;
 }
