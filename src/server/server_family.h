@@ -125,6 +125,8 @@ struct Metrics {
   // Replica reconnect stats on the replica side. Undefined for master
   std::optional<ReplicaInfo> replica_side_info;
 
+  size_t migration_errors_total;
+
   LoadingStats loading_stats;
 };
 

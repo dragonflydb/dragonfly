@@ -195,11 +195,12 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (cntx_.IsError()) {
-      last_error_ = cntx_.GetError();
-      LOG(ERROR) << last_error_;
-      ThisFiber::SleepFor(1000ms);  // wait some time before next retry
+      auto err = cntx_.GetError();
+      LOG(ERROR) << err.Format();
+      ReportError(std::move(err));
+      cntx_.Reset(nullptr);
+      ThisFiber::SleepFor(500ms);  // wait some time before next retry
     }
-    cntx_.Reset(nullptr);
 
     VLOG(1) << "Connecting to target node";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
@@ -223,12 +224,11 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
+      cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
       if (CheckRespIsSimpleReply(kUnknownMigration)) {
-        VLOG(2) << "Target node does not recognize migration; retrying";
-        ThisFiber::SleepFor(1000ms);
+        LOG(WARNING) << "Target node does not recognize migration; retrying";
       } else {
         LOG(WARNING) << "Unable to initialize migration";
-        cntx_.ReportError(GenericError(std::string(ToSV(LastResponseArgs().front().GetBuf()))));
       }
       continue;
     }
