@@ -177,14 +177,9 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   }
   auto& add_res = *op_res;
 
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-
-  size_t lpb = 0;
-
   PrimeValue& pv = add_res.it->second;
   if (add_res.is_new) {
     pv.InitRobj(OBJ_HASH, kEncodingListPack, lpNew(0));
-    stats->listpack_blob_cnt++;
   } else {
     if (pv.ObjType() != OBJ_HASH)
       return OpStatus::WRONG_TYPE;
@@ -193,11 +188,9 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
     if (pv.Encoding() == kEncodingListPack) {
       uint8_t* lp = (uint8_t*)pv.RObjPtr();
-      lpb = lpBytes(lp);
-      stats->listpack_bytes -= lpb;
+      size_t lpb = lpBytes(lp);
 
       if (lpb >= server.max_listpack_map_bytes) {
-        stats->listpack_blob_cnt--;
         StringMap* sm = HSetFamily::ConvertToStrMap(lp);
         pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
       }
@@ -216,7 +209,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
 
     OpStatus status = IncrementValue(res, param);
     if (status != OpStatus::OK) {
-      stats->listpack_bytes += lpb;
       return status;
     }
 
@@ -232,7 +224,6 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     }
 
     pv.SetRObjPtr(lp);
-    stats->listpack_bytes += lpBytes(lp);
   } else {
     DCHECK_EQ(enc, kEncodingStrMap2);
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -357,12 +348,10 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
 
   unsigned deleted = 0;
   bool key_remove = false;
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
   unsigned enc = pv.Encoding();
 
   if (enc == kEncodingListPack) {
     uint8_t* lp = (uint8_t*)pv.RObjPtr();
-    stats->listpack_bytes -= lpBytes(lp);
     for (auto s : values) {
       auto res = LpDelete(lp, ToSV(s));
       if (res.second) {
@@ -397,12 +386,7 @@ OpResult<uint32_t> OpDel(const OpArgs& op_args, string_view key, CmdArgList valu
     op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
 
   if (key_remove) {
-    if (enc == kEncodingListPack) {
-      stats->listpack_blob_cnt--;
-    }
     db_slice.Del(op_args.db_cntx, it_res->it);
-  } else if (enc == kEncodingListPack) {
-    stats->listpack_bytes += lpBytes((uint8_t*)pv.RObjPtr());
   }
 
   return deleted;
@@ -635,8 +619,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-
   uint8_t* lp = nullptr;
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
@@ -645,9 +627,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
     if (op_sp.ttl == UINT32_MAX) {
       lp = lpNew(0);
       pv.InitRobj(OBJ_HASH, kEncodingListPack, lp);
-
-      stats->listpack_blob_cnt++;
-      stats->listpack_bytes += lpBytes(lp);
     } else {
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
     }
@@ -660,10 +639,8 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
 
   if (pv.Encoding() == kEncodingListPack) {
     lp = (uint8_t*)pv.RObjPtr();
-    stats->listpack_bytes -= lpBytes(lp);
 
     if (op_sp.ttl != UINT32_MAX || !IsGoodForListpack(values, lp)) {
-      stats->listpack_blob_cnt--;
       StringMap* sm = HSetFamily::ConvertToStrMap(lp);
       pv.InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
       lp = nullptr;
@@ -684,7 +661,6 @@ OpResult<uint32_t> OpSet(const OpArgs& op_args, string_view key, CmdArgList valu
       created += inserted;
     }
     pv.SetRObjPtr(lp);
-    stats->listpack_bytes += lpBytes(lp);
   } else {
     DCHECK_EQ(kEncodingStrMap2, pv.Encoding());  // Dictionary
     StringMap* sm = GetStringMap(pv, op_args.db_cntx);
@@ -1347,10 +1323,6 @@ vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl
   if (pv->Encoding() == kEncodingListPack) {
     // a valid result can never be a listpack, since it doesnt keep ttl
     uint8_t* lp = (uint8_t*)pv->RObjPtr();
-    auto& db_slice = op_args.GetDbSlice();
-    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-    stats->listpack_bytes -= lpBytes(lp);
-    stats->listpack_blob_cnt--;
     StringMap* sm = HSetFamily::ConvertToStrMap(lp);
     pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
   }
