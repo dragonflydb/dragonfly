@@ -32,7 +32,7 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Run pre-commit checks
-        run:
+        run: |
           source venv/bin/activate
           pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
         shell: bash
@@ -162,6 +162,8 @@ jobs:
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
+
+          ./list_family_test --gtest_filter=*AwakeMulti --gtest_repeat=100
 
           GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
           FLAGS_fiber_safety_margin=4096 FLAGS_list_experimental_v2=true timeout 20m ctest -V -L DFLY -E allocation_tracker_test
