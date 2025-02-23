@@ -30,6 +30,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/json/json_object.h"
+#include "core/overloaded.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -2529,6 +2530,16 @@ void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
   dest->seq = src.seq;
 }
 
+bool RdbLoaderBase::ShouldReuse(const RdbVariant& var) {
+  return visit(
+      Overloaded{[](long long) { return true; },
+                 [](const LzfString& lzf) { return lzf.compressed_blob.capacity() < 1_MB; },
+                 [](const unique_ptr<LoadTrace>& ptr) { return false; },
+                 [](const base::PODArray<char>& arr) { return arr.capacity() < 1_MB; },
+                 [](const RdbSBF& sbf) { return false; }},
+      var);
+}
+
 void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice) {
   PrimeValue pv;
   PrimeValue* pv_ptr = &pv;
@@ -2629,7 +2640,11 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   }
 
   for (auto* item : ib) {
-    item_queue_.Push(item);
+    if (ShouldReuse(item->val.obj)) {
+      item_queue_.Push(item);
+    } else {
+      delete item;
+    }
   }
 }
 

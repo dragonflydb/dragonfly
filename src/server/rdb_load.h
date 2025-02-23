@@ -194,6 +194,9 @@ class RdbLoaderBase {
 
   static void CopyStreamId(const StreamID& src, struct streamID* dest);
 
+  // Should we reuse the object for subsequent parsing?
+  static bool ShouldReuse(const RdbVariant& var);
+
   base::IoBuf* mem_buf_ = nullptr;
   base::IoBuf origin_mem_buf_;
   ::io::Source* src_ = nullptr;
