@@ -210,8 +210,8 @@ jobs:
           dfly-executable: dragonfly
           run-only-on-ubuntu-latest: true
           build-folder-name: build
-          # None release build will not run tests marked as slow or opt_only
-          filter: ${{ matrix.build-type == 'Release' && '' || '(not slow) and (not opt_only)' }}
+          # Non-release build will not run tests marked as slow or opt_only
+          filter: ${{ matrix.build-type == 'Release' && 'not empty' || '(not slow) and (not opt_only)' }}
 
       - name: Upload regression logs on failure
         if: failure()
