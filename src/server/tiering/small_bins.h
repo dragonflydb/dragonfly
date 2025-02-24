@@ -8,13 +8,13 @@
 
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "server/tiering/disk_storage.h"
-#include "server/tx_base.h"
 
 namespace dfly::tiering {
+
+using DbIndex = uint16_t;
 
 // Small bins accumulate small values into larger bins that fill up 4kb pages.
 // SIMPLEST VERSION for now.
@@ -49,8 +49,7 @@ class SmallBins {
   }
 
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
-  std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value,
-                                 io::Bytes footer);
+  std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value);
 
   // Report that a stash succeeeded. Returns list of stored keys with calculated value locations.
   KeySegmentList ReportStashed(BinId id, DiskSegment segment);

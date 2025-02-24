@@ -13,7 +13,6 @@
 #include "core/compact_object.h"
 #include "server/tiering/common.h"
 #include "server/tiering/disk_storage.h"
-#include "server/tx_base.h"
 
 namespace dfly::tiering {
 using namespace std;
@@ -28,10 +27,10 @@ size_t StashedValueSize(string_view value) {
 }  // namespace
 
 std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
-                                                     std::string_view value, io::Bytes footer) {
+                                                     std::string_view value) {
   DCHECK_LT(value.size(), 2_KB);
 
-  size_t value_bytes = StashedValueSize(value) + footer.size();
+  size_t value_bytes = StashedValueSize(value);
 
   std::optional<FilledBin> filled_bin;
   if (2 /* num entries */ + current_bin_bytes_ + value_bytes >= kPageSize) {
@@ -39,11 +38,7 @@ std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_v
   }
 
   current_bin_bytes_ += value_bytes;
-  string blob;
-  blob.reserve(value.size() + footer.size());
-  blob.append(value);
-  blob.append(io::View(footer));
-  auto [it, inserted] = current_bin_.emplace(std::make_pair(dbid, key), std::move(blob));
+  auto [it, inserted] = current_bin_.emplace(std::make_pair(dbid, key), string(value));
   CHECK(inserted);
 
   DVLOG(2) << "current_bin_bytes: " << current_bin_bytes_

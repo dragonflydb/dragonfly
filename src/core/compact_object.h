@@ -355,12 +355,16 @@ class CompactObj {
     return taglen_ == EXTERNAL_TAG;
   }
 
+  // returns true if the value is stored in the cooling storage. Cooling storage has an item both
+  // on disk and in memory.
   bool IsCool() const {
     assert(IsExternal());
     return u_.ext_ptr.is_cool;
   }
 
   void SetExternal(size_t offset, uint32_t sz);
+
+  // Assigns a cooling record to the object together with its external slice.
   void SetCool(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
 
   struct CoolItem {
@@ -368,6 +372,9 @@ class CompactObj {
     size_t serialized_size;
     detail::TieredColdRecord* record;
   };
+
+  // Prerequisite: IsCool() is true.
+  // Returns the external data of the object incuding its ColdRecord.
   CoolItem GetCool() const;
 
   void ImportExternal(const CompactObj& src);
