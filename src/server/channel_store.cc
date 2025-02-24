@@ -39,8 +39,9 @@ auto BuildSender(string_view channel, facade::ArgRange messages, bool unsubscrib
   return [channel, buf = std::move(buf), views = std::move(views), unsubscribe](
              facade::Connection* conn, string pattern) {
     string_view channel_view{buf.get(), channel.size()};
-    for (std::string_view message_view : views)
+    for (std::string_view message_view : views) {
       conn->SendPubMessageAsync({std::move(pattern), buf, channel_view, message_view, unsubscribe});
+    }
   };
 }
 
@@ -215,14 +216,14 @@ void ChannelStore::UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& 
   csu.ApplyAndUnsubscribe();
 }
 
-void ChannelStore::UnsubscribeConnectionsFromDeletedSlots(std::vector<std::string_view> channels,
+void ChannelStore::UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& sub_map,
                                                           uint32_t idx) {
   const bool should_unsubscribe = true;
-  for (auto channel : channels) {
-    facade::ArgSlice slice{std::string_view{}};
-    auto send = BuildSender(channel, slice, should_unsubscribe);
+  for (const auto& [channel, subscribers] : sub_map) {
+    // ignored by pub sub handler because should_unsubscribe is true
+    std::string msg = "__ignore__";
+    auto send = BuildSender(channel, {facade::ArgSlice{msg}}, should_unsubscribe);
 
-    auto subscribers = FetchSubscribers(channel);
     auto it = lower_bound(subscribers.begin(), subscribers.end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
     while (it != subscribers.end() && it->Thread() == idx) {
@@ -366,14 +367,22 @@ void ChannelStoreUpdater::ApplyAndUnsubscribe() {
   cb.most_recent.store(replacement, memory_order_relaxed);
   cb.update_mu.unlock();
 
+  // FetchSubscribers is not thead safe so we need to fetch here before we do the hop below.
+  // Bonus points because now we compute subscribers only once.
+  absl::flat_hash_map<std::string_view, std::vector<ChannelStore::Subscriber>> subs;
+  for (auto channel : ops_) {
+    auto channel_subs = ServerState::tlocal()->channel_store()->FetchSubscribers(channel);
+    DCHECK(!subs.contains(channel));
+    subs[channel] = std::move(channel_subs);
+  }
   // Update thread local references. Readers fetch subscribers via FetchSubscribers,
   // which runs without preemption, and store references to them in self container Subscriber
   // structs. This means that any point on the other thread is safe to update the channel store.
   // Regardless of whether we need to replace, we dispatch to make sure all
   // queued SubscribeMaps in the freelist are no longer in use.
-  shard_set->pool()->AwaitFiberOnAll([this](unsigned idx, util::ProactorBase*) {
+  shard_set->pool()->AwaitFiberOnAll([&subs](unsigned idx, util::ProactorBase*) {
     ServerState::tlocal()->UnsubscribeSlotsAndUpdateChannelStore(
-        ops_, ChannelStore::control_block.most_recent.load(memory_order_relaxed));
+        subs, ChannelStore::control_block.most_recent.load(memory_order_relaxed));
   });
 
   // Delete previous map and channel store.

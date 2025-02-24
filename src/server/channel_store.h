@@ -70,7 +70,9 @@ class ChannelStore {
 
   void UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& deleted_slots);
 
-  void UnsubscribeConnectionsFromDeletedSlots(std::vector<std::string_view> channels, uint32_t idx);
+  using ChannelsSubMap =
+      absl::flat_hash_map<std::string_view, std::vector<ChannelStore::Subscriber>>;
+  void UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& sub_map, uint32_t idx);
 
   // Destroy current instance and delete it.
   static void Destroy();

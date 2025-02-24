@@ -286,9 +286,9 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
   }
 }
 
-void ServerState::UnsubscribeSlotsAndUpdateChannelStore(std::vector<std::string_view> channels,
+void ServerState::UnsubscribeSlotsAndUpdateChannelStore(const ChannelStore::ChannelsSubMap& sub_map,
                                                         ChannelStore* replacement) {
-  channel_store_->UnsubscribeConnectionsFromDeletedSlots(channels, thread_index_);
+  channel_store_->UnsubscribeConnectionsFromDeletedSlots(sub_map, thread_index_);
   channel_store_ = replacement;
 }
 
