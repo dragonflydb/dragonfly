@@ -29,7 +29,7 @@ class StringSet : public DenseSet {
   // Returns true if elem was added.
   bool Add(std::string_view s1, uint32_t ttl_sec = UINT32_MAX);
 
-  template <typename T> unsigned AddMany(absl::Span<T> span, uint32_t ttl_sec);
+  unsigned AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec);
 
   bool Erase(std::string_view str) {
     return EraseInternal(&str, 1);
@@ -122,29 +122,5 @@ class StringSet : public DenseSet {
  private:
   std::pair<sds, bool> DuplicateEntryIfFragmented(void* obj, float ratio);
 };
-
-template <typename T> unsigned StringSet::AddMany(absl::Span<T> span, uint32_t ttl_sec) {
-  std::string_view views[kMaxBatchLen];
-  unsigned res = 0;
-  if (BucketCount() < span.size()) {
-    Reserve(span.size());
-  }
-
-  while (span.size() >= kMaxBatchLen) {
-    for (size_t i = 0; i < kMaxBatchLen; i++)
-      views[i] = span[i];
-
-    span.remove_prefix(kMaxBatchLen);
-    res += AddBatch(absl::MakeSpan(views), ttl_sec);
-  }
-
-  if (span.size()) {
-    for (size_t i = 0; i < span.size(); i++)
-      views[i] = span[i];
-
-    res += AddBatch(absl::MakeSpan(views, span.size()), ttl_sec);
-  }
-  return res;
-}
 
 }  // end namespace dfly

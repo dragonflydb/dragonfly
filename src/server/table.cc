@@ -32,12 +32,10 @@ void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
 
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats) - sizeof(memory_usage_by_type);
-  static_assert(kDbSz == 48);
+  static_assert(kDbSz == 32);
 
   ADD(inline_keys);
   ADD(obj_memory_usage);
-  ADD(listpack_blob_cnt);
-  ADD(listpack_bytes);
   ADD(tiered_entries);
   ADD(tiered_used_bytes);
 

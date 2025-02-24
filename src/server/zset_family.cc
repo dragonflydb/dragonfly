@@ -161,14 +161,12 @@ OpResult<DbSlice::ItAndUpdater> FindZEntry(const ZSetFamily::ZParams& zparams,
 
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
-  DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
   if (add_res.is_new || zparams.override) {
     if (member_len > server.max_map_field_len) {
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_SKIPLIST, CompactObj::AllocateMR<detail::SortedMap>());
     } else {
       unsigned char* lp = lpNew(0);
       pv.InitRobj(OBJ_ZSET, OBJ_ENCODING_LISTPACK, lp);
-      stats->listpack_blob_cnt++;
     }
   } else {
     if (it->second.ObjType() != OBJ_ZSET)
@@ -1990,12 +1988,6 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
       added++;
     if (retflags & ZADD_OUT_UPDATED)
       updated++;
-  }
-
-  // if we migrated to skip_list - update listpack stats.
-  if (is_list_pack && !IsListPack(robj_wrapper)) {
-    DbTableStats* stats = db_slice.MutableStats(op_args.db_cntx.db_index);
-    --stats->listpack_blob_cnt;
   }
 
   if (zparams.flags & ZADD_IN_INCR) {

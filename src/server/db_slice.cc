@@ -1590,12 +1590,6 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
     }
   }  // del_it->first.IsAsyncDelete()
 
-  if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
-    --stats.listpack_blob_cnt;
-  } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
-    --stats.listpack_blob_cnt;
-  }
-
   if (IsClusterEnabled()) {
     SlotId sid = KeySlot(del_it.key());
     table->slots_stats[sid].key_count -= 1;

@@ -51,6 +51,30 @@ bool StringSet::Add(string_view src, uint32_t ttl_sec) {
   return true;
 }
 
+unsigned StringSet::AddMany(absl::Span<std::string_view> span, uint32_t ttl_sec) {
+  std::string_view views[kMaxBatchLen];
+  unsigned res = 0;
+  if (BucketCount() < span.size()) {
+    Reserve(span.size());
+  }
+
+  while (span.size() >= kMaxBatchLen) {
+    for (size_t i = 0; i < kMaxBatchLen; i++)
+      views[i] = span[i];
+
+    span.remove_prefix(kMaxBatchLen);
+    res += AddBatch(absl::MakeSpan(views), ttl_sec);
+  }
+
+  if (span.size()) {
+    for (size_t i = 0; i < span.size(); i++)
+      views[i] = span[i];
+
+    res += AddBatch(absl::MakeSpan(views, span.size()), ttl_sec);
+  }
+  return res;
+}
+
 unsigned StringSet::AddBatch(absl::Span<std::string_view> span, uint32_t ttl_sec) {
   uint64_t hash[kMaxBatchLen];
   bool has_ttl = ttl_sec != UINT32_MAX;

@@ -617,9 +617,12 @@ void BM_AddMany(benchmark::State& state) {
     strs.push_back(str);
   }
   ss.Reserve(elems);
-
+  vector<string_view> svs;
+  for (const auto& str : strs) {
+    svs.push_back(str);
+  }
   while (state.KeepRunning()) {
-    ss.AddMany(absl::MakeSpan(strs), UINT32_MAX);
+    ss.AddMany(absl::MakeSpan(svs), UINT32_MAX);
     state.PauseTiming();
     CHECK_EQ(ss.UpperBoundSize(), elems);
     ss.Clear();
