@@ -11,7 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  image: ghcr.io/dragonflydb/dragonfly-dev
+  image: ghcr.io/abhra303/dragonfly-dev
+  GCS_IMAGE: us-central1-docker.pkg.dev/dragonfly-public/dragonfly
 
 jobs:
   build_and_tag:
@@ -55,8 +56,9 @@ jobs:
         with:
           images: |
             ${{ env.image }}
+            ${{ env.GCS_IMAGE }}
           tags: |
-            type=sha,enable=true,prefix=${{ matrix.flavor}}-,suffix=-${{ matrix.os.arch }},format=short            
+            type=sha,enable=true,prefix=${{ matrix.flavor}}-,suffix=-${{ matrix.os.arch }},format=short
           labels: |
             org.opencontainers.image.vendor=DragonflyDB LTD
             org.opencontainers.image.title=Dragonfly Development Image
@@ -80,10 +82,10 @@ jobs:
           image_tag=${{ steps.metadata.outputs.tags }}
           echo ${{ steps.build.outputs.digest }}
           image_digest=${{ env.image }}@${{ steps.build.outputs.digest }}
-          
+
           # install redis-tools
           sudo apt-get install redis-tools -y
-          
+
           docker image inspect ${image_tag}
           echo "Testing ${{ matrix.flavor }} image"
 
@@ -115,17 +117,30 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
+      - name: Login to GCS Artifact Registry
+        uses: google-github-actions/auth@v2
+        with:
+          service_account_key: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure Docker for GCS Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev
+
+
       - name: Merge and Push
         run: |
             flavor_tag=${{ env.image }}:${{matrix.flavor}}
             sha_tag=${flavor_tag}-${{ needs.build_and_tag.outputs.sha }}
-            
+
             # Create and push the manifest like dragonfly-dev:alpine-<sha>
             docker manifest create ${sha_tag} --amend ${sha_tag}-amd64 --amend ${sha_tag}-arm64
             docker manifest push ${sha_tag}
 
+            gcs_tag="${{ env.GCS_IMAGE }}:alpha-${{ matrix.flavor }}"
+
             # Create and push the manifest like dragonfly-dev:alpine
             docker manifest create ${flavor_tag} --amend ${sha_tag}-amd64 --amend ${sha_tag}-arm64
             docker manifest push ${flavor_tag}
-            
+            docker manifest create ${gcs_tag} --amend ${sha_amd} --amend ${sha_arm}
+            docker manifest push ${gcs_tag}
