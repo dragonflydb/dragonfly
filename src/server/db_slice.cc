@@ -8,6 +8,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/top_keys.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
@@ -285,6 +286,12 @@ int32_t AsyncDeleter::IdleCb() {
   return ProactorBase::kOnIdleMaxLevel;
 };
 
+inline void TouchTopKeysIfNeeded(std::string_view key, TopKeys* top_keys) {
+  if (top_keys) {
+    top_keys->Touch(key);
+  }
+}
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -537,6 +544,8 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     return OpStatus::KEY_NOTFOUND;
   }
 
+  TouchTopKeysIfNeeded(key, db.top_keys);
+
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     return OpStatus::WRONG_TYPE;
   }
@@ -602,9 +611,6 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
   // attribute of the entry in case of value overrides.
   res.it->first.SetTouched(true);
-
-  // We do not use TopKey feature, so disable it until we redesign it.
-  // db.top_keys.Touch(key);
 
   return res;
 }
@@ -728,6 +734,8 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
+
+  TouchTopKeysIfNeeded(key, db.top_keys);
 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
@@ -1540,6 +1548,36 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
   shard_set->pool()->DispatchBrief(std::move(cb));
   // remove this key from the tracking table as the key no longer exists
   client_tracking_map_.erase(key);
+}
+
+void DbSlice::StartSampleTopK(DbIndex db_ind, uint32_t min_freq) {
+  auto& db = *db_arr_[db_ind];
+  if (db.top_keys) {
+    LOG(INFO) << "Sampling already started for db " << db_ind;
+    return;
+  }
+
+  TopKeys::Options opts;
+  opts.min_key_count_to_record = min_freq;
+  db.top_keys = new TopKeys(opts);
+}
+
+auto DbSlice::StopSampleTopK(DbIndex db_ind) -> SamplingResult {
+  auto& db = *db_arr_[db_ind];
+
+  if (!db.top_keys) {
+    LOG(WARNING) << "Sampling not started for db " << db_ind;
+    return {};
+  }
+  auto fmap = db.top_keys->GetTopKeys();
+  delete db.top_keys;
+  db.top_keys = nullptr;
+  SamplingResult result;
+  result.top_keys.reserve(fmap.size());
+  for (auto& [key, count] : fmap) {
+    result.top_keys.emplace_back(move(key), count);
+  }
+  return result;
 }
 
 void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {

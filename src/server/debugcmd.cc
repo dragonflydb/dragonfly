@@ -120,7 +120,7 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
   } else if (type == "ZSET") {
     cid = registry.Find("ZADD");
     for (size_t i = 0; i < elements; ++i) {
-      args.push_back(absl::StrCat((*gen)() % val_size));
+      args.push_back(StrCat((*gen)() % val_size));
       args.push_back(GenerateValue(val_size, random_value, gen));
     }
   } else if (type == "JSON") {
@@ -160,7 +160,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   ConnectionContext local_cntx{cntx, stub_tx.get()};
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
-    string key = absl::StrCat(prefix, ":", batch.index[i]);
+    string key = StrCat(prefix, ":", batch.index[i]);
     uint32_t elements_left = elements;
 
     while (elements_left) {
@@ -500,6 +500,9 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    Prints the stacktraces of all current fibers to the logs.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
+        "TOPK ON [min_freq] | OFF [max_keys]",
+        "    Turns on or off sampling of topk keys. Provides top keys with at least <min_freq> ",
+        "    during the sampling period. The results are returned in descending order of frequency","    when calling TOPK OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
         "TRAFFIC <path> | [STOP]",
@@ -568,6 +571,10 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "RECVSIZE" && args.size() == 2) {
     return RecvSize(ArgS(args, 1), builder);
+  }
+
+  if (subcmd == "TOPK" && args.size() >= 2) {
+    return Topk(args.subspan(1), builder);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -776,7 +783,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   ThisFiber::SetName("populate_range");
   VLOG(1) << "PopulateRange: " << from << "-" << (from + num_of_keys - 1);
 
-  string key = absl::StrCat(options.prefix, ":");
+  string key = StrCat(options.prefix, ":");
   size_t prefsize = key.size();
   DbIndex db_indx = cntx_->db_index();
   EngineShardSet& ess = *shard_set;
@@ -1115,6 +1122,61 @@ void DebugCmd::RecvSize(string_view param, facade::SinkReplyBuilder* builder) {
   shard_set->pool()->at(tid)->AwaitBrief(
       [&]() { facade::Connection::GetRequestSizeHistogramThreadLocal(&hist); });
   rb->SendVerbatimString(hist);
+}
+
+void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  DCHECK_GE(args.size(), 1u);
+
+  string_view subcmd = ArgS(args, 0);
+  if (absl::EqualsIgnoreCase(subcmd, "ON")) {
+    uint32_t min_freq = 100;
+    if (args.size() > 1) {
+      if (!absl::SimpleAtoi(ArgS(args, 1), &min_freq))
+        return rb->SendError(kUintErr);
+    }
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      cntx_->ns->GetDbSlice(es->shard_id()).StartSampleTopK(cntx_->db_index(), min_freq);
+    });
+    return rb->SendOk();
+  }
+
+
+  if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
+    vector<DbSlice::SamplingResult> results(shard_set->size());
+    uint32_t max_keys = 50;
+
+    if (args.size() > 1) {
+      if (!absl::SimpleAtoi(ArgS(args, 1), &max_keys))
+        return rb->SendError(kUintErr);
+    }
+
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      results[es->shard_id()] =
+          cntx_->ns->GetDbSlice(es->shard_id()).StopSampleTopK(cntx_->db_index());
+    });
+
+    vector<pair<uint64_t, string>> items;
+
+    for (const auto& res : results) {
+      for (const auto& k_v : res.top_keys) {
+        items.emplace_back(k_v.second, k_v.first);
+        push_heap(items.begin(), items.end(), std::greater<>());
+        if (items.size() > max_keys) {
+          pop_heap(items.begin(), items.end(), std::greater<>());
+          items.pop_back();
+        }
+      }
+    }
+
+    rb->StartArray(items.size());
+    for (const auto& k_v : items) {
+      rb->SendBulkString(StrCat(k_v.second, ":", k_v.first));
+    }
+    return;
+  }
+
+  return rb->SendError(kSyntaxErr);
 }
 
 }  // namespace dfly
