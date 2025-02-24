@@ -196,9 +196,10 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
 
 struct ObjHist {
   base::Histogram key_len;
-  base::Histogram val_len;    // overall size for the value.
+  base::Histogram val_len;    // overall malloc-used size of the value.
   base::Histogram card;       // for sets, hashmaps etc - it's number of entries.
   base::Histogram entry_len;  // for sets, hashmaps etc - it's the length of each entry.
+  base::Histogram listpack;   // for listpack encodings - the malloc used of the listpack.
 };
 
 // Returns number of O(1) steps executed.
@@ -230,49 +231,31 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
   } else if (pv.ObjType() == OBJ_ZSET) {
     IterateSortedSet(pv.GetRobjWrapper(),
                      [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
-    if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
-      detail::SortedMap* smap = static_cast<detail::SortedMap*>(pv.RObjPtr());
-      val_len = smap->MallocSize();
+    val_len = 0;  // reset - will be calculated below.
+    if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+      hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_SET) {
     IterateSet(pv, per_entry_cb);
-    if (pv.Encoding() == kEncodingStrMap2) {
-      StringSet* ss = static_cast<StringSet*>(pv.RObjPtr());
-      val_len = ss->ObjMallocUsed() + ss->SetMallocUsed();
+    val_len = 0;  // reset - will be calculated below.
+    if (pv.Encoding() == kEncodingIntSet) {
+      hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_HASH) {
+    IterateMap(pv, [&](ContainerEntry key, ContainerEntry value) {
+      hist->entry_len.Add(key.length + value.length);
+      steps += 2;
+      return true;
+    });
     if (pv.Encoding() == kEncodingListPack) {
-      uint8_t intbuf[LP_INTBUF_SIZE];
-      uint8_t* lp = (uint8_t*)pv.RObjPtr();
-      uint8_t* fptr = lpFirst(lp);
-      while (fptr) {
-        size_t entry_len = 0;
-        // field
-        string_view sv = LpGetView(fptr, intbuf);
-        entry_len += sv.size();
-
-        // value
-        fptr = lpNext(lp, fptr);
-        entry_len += sv.size();
-        fptr = lpNext(lp, fptr);
-        hist->entry_len.Add(entry_len);
-        steps += 2;
-      }
-      val_len = lpBytes(lp);
-    } else {
-      StringMap* sm = static_cast<StringMap*>(pv.RObjPtr());
-      for (const auto& k_v : *sm) {
-        hist->entry_len.Add(sdslen(k_v.first) + sdslen(k_v.second) + 2);
-        ++steps;
-      }
-      val_len = sm->ObjMallocUsed() + sm->SetMallocUsed();
+      hist->listpack.Add(pv.MallocUsed());
     }
   }
   // TODO: streams
 
   if (val_len == 0) {
     // Fallback
-    val_len = pv.MallocUsed();
+    val_len = pv.MallocUsed(true);
   }
 
   hist->val_len.Add(val_len);
@@ -283,6 +266,8 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
   return steps;
 }
 
+// ObjType -> ObjHist
+//
 using ObjHistMap = absl::flat_hash_map<unsigned, unique_ptr<ObjHist>>;
 
 void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
@@ -295,6 +280,7 @@ void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
       dest_hist->val_len.Merge(src_hist->val_len);
       dest_hist->card.Merge(src_hist->card);
       dest_hist->entry_len.Merge(src_hist->entry_len);
+      dest_hist->listpack.Merge(src_hist->listpack);
     }
   }
 }
@@ -1024,9 +1010,15 @@ void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
     StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
     StrAppend(&result, "Key length histogram:\n", hist_ptr->key_len.ToString(), "\n");
-    StrAppend(&result, "Value length histogram:\n", hist_ptr->val_len.ToString(), "\n");
-    StrAppend(&result, "Cardinality histogram:\n", hist_ptr->card.ToString(), "\n");
-    StrAppend(&result, "Entry length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    StrAppend(&result, "Values - Total Memory used:\n", hist_ptr->val_len.ToString(), "\n");
+    if (hist_ptr->card.count() > 0) {
+      StrAppend(&result, "Cardinality histogram (number of elements in sets):\n",
+                hist_ptr->card.ToString(), "\n");
+    }
+    StrAppend(&result, "Items length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    if (hist_ptr->listpack.count() > 0) {
+      StrAppend(&result, "Listpack histogram:\n", hist_ptr->listpack.ToString(), "\n");
+    }
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
