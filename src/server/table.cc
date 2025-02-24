@@ -93,6 +93,7 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
 DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
   delete top_keys;
+  delete[] dense_hll;
 }
 
 void DbTable::Clear() {

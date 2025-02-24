@@ -537,6 +537,11 @@ class DbSlice {
   };
   SamplingResult StopSampleTopK(DbIndex db_ind);
 
+  void StartSampleKeys(DbIndex db_ind);
+
+  // Returns number of unique keys sampled.
+  size_t StopSampleKeys(DbIndex db_ind);
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
