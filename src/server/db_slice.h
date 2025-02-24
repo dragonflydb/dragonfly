@@ -530,6 +530,13 @@ class DbSlice {
     return &block_counter_;
   }
 
+  void StartSampleTopK(DbIndex db_ind, uint32_t min_freq);
+
+  struct SamplingResult {
+    std::vector<std::pair<std::string, uint64_t>> top_keys;  // key -> frequency pairs.
+  };
+  SamplingResult StopSampleTopK(DbIndex db_ind);
+
  private:
   void PreUpdate(DbIndex db_ind, Iterator it, std::string_view key);
   void PostUpdate(DbIndex db_ind, Iterator it, std::string_view key, size_t orig_size);
