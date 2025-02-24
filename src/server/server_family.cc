@@ -2495,6 +2495,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 
   if (should_enter("TRANSACTION", true)) {
     append("tx_shard_polls", m.shard_stats.poll_execution_total);
+    append("tx_shard_runs", m.shard_stats.poll_runs_total);
     append("tx_shard_optimistic_total", m.shard_stats.tx_optimistic_total);
     append("tx_shard_ooo_total", m.shard_stats.tx_ooo_total);
     append("tx_global_total", m.coordinator_stats.tx_global_cnt);
