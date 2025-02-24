@@ -2805,7 +2805,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       return;
     }
 
-    // Create a new replica and assing it
+    // Create a new replica and assign it
     new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                        master_replid(), replicaof_args->slot_range);
 
@@ -2831,10 +2831,16 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // If the replication attempt failed, clean up global state. The replica should have stopped
   // internally.
   util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
-  if (ec && replica_ == new_replica) {
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    SetMasterFlagOnAllThreads(true);
-    replica_.reset();
+  // If there was an error above during Start we must not start the main replication fiber.
+  // However, it could be the case that Start() above connected succefully and by the time
+  // we acquire the lock, the context got cancelled because another ReplicaOf command
+  // executed and acquired the replicaof_mu_ before us.
+  if (ec || new_replica->IsContextCancelled()) {
+    if (replica_ == new_replica) {
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      SetMasterFlagOnAllThreads(true);
+      replica_.reset();
+    }
     return;
   }
   // Successfully connected now we flush
@@ -2845,7 +2851,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   }
 
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
-    replica_->StartMainReplicationFiber(builder);
+    new_replica->StartMainReplicationFiber(builder);
   }
 }
 

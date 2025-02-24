@@ -72,6 +72,10 @@ class Replica : ProtocolClient {
 
   std::error_code TakeOver(std::string_view timeout, bool save_flag);
 
+  bool IsContextCancelled() const {
+    return !cntx_.IsRunning();
+  }
+
  private: /* Main standalone mode functions */
   // Coordinate state transitions. Spawned by start.
   void MainReplicationFb();
