@@ -45,6 +45,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: us-central1-docker.pkg.dev
+          username: _json_key
+          password: ${{ secrets.GCP_SA_KEY }}
+
       - name: Get Build Information
         id: build_info
         run: |
@@ -118,15 +126,12 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to GCS Artifact Registry
-        uses: google-github-actions/auth@v2
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          service_account_key: ${{ secrets.GCP_SA_KEY }}
-
-      - name: Configure Docker for GCS Artifact Registry
-        run: |
-          gcloud auth configure-docker us-central1-docker.pkg.dev
-
+          registry: us-central1-docker.pkg.dev
+          username: _json_key
+          password: ${{ secrets.GCP_SA_KEY }}
 
       - name: Merge and Push
         run: |
