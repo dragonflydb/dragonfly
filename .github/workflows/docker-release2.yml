@@ -22,6 +22,7 @@ env:
   TAG_NAME: ${{ github.event.inputs.TAG_NAME || github.event.release.tag_name }}
   IS_PRERELEASE: ${{ github.event.release.prerelease || github.event.inputs.PRERELEASE }}
   IMAGE: ghcr.io/dragonflydb/dragonfly
+  GCS_IMAGE: us-central1-docker.pkg.dev/dragonfly-public/dragonfly
 
 jobs:
   build_and_tag:
@@ -80,6 +81,7 @@ jobs:
         with:
           images: |
             ${{ env.IMAGE }}
+            ${{ env.GCS_IMAGE}}
           flavor: |
             latest=false
             prefix=${{ matrix.flavor}}-
@@ -136,6 +138,15 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Login to GCS Artifact Registry
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure Docker for GCS Artifact Registry
+        run: |
+          gcloud auth configure-docker us-central1-docker.pkg.dev
+
       - name: Merge and Push
         run: |
             sha_amd=${{ env.IMAGE }}@${{ needs.build_and_tag.outputs.sha_amd }}
@@ -147,17 +158,28 @@ jobs:
               tag="${{ env.IMAGE }}:alpha-${{ matrix.flavor }}"
               docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
               docker manifest push ${tag}
+
+              gcs_tag="${{ env.GCS_IMAGE }}:alpha-${{ matrix.flavor }}"
+              docker manifest create ${gcs_tag} --amend ${sha_amd} --amend ${sha_arm}
+              docker manifest push ${gcs_tag}
             elif [[ "${{matrix.flavor}}" == 'ubuntu' ]]; then
               tag="${{ env.IMAGE }}:latest"
               # Create and push the manifest like dragonfly:latest
               docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
               docker manifest push ${tag}
+              gcs_tag="${{ env.GCS_IMAGE }}:latest"
+              docker manifest create ${gcs_tag} --amend ${sha_amd} --amend ${sha_arm}
+              docker manifest push ${gcs_tag}
             fi
 
             # Create and push the manifest like dragonfly:v1.26.4
             tag=${{ env.IMAGE }}:${{ env.TAG_NAME }}
             docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
             docker manifest push ${tag}
+
+            gcs_tag=${{ env.GCS_IMAGE }}:${{ env.TAG_NAME }}
+            docker manifest create ${gcs_tag} --amend ${sha_amd} --amend ${sha_arm}
+            docker manifest push ${gcs_tag}
   release_helm_and_notify:
     needs: [merge_manifest]
     runs-on: ubuntu-latest
