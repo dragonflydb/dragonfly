@@ -502,7 +502,11 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
         "TOPK ON [min_freq] | OFF [max_keys]",
         "    Turns on or off sampling of topk keys. Provides top keys with at least <min_freq> ",
-        "    during the sampling period. The results are returned in descending order of frequency","    when calling TOPK OFF command.",
+        "    during the sampling period. The results are returned in descending order of frequency",
+        "    when calling TOPK OFF command.",
+        "KEYS ON | OFF",
+        "    Turns on/off counting of unique keys. Results are returned when calling ",
+        "    KEYS OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
         "TRAFFIC <path> | [STOP]",
@@ -575,6 +579,10 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "TOPK" && args.size() >= 2) {
     return Topk(args.subspan(1), builder);
+  }
+
+  if (subcmd == "KEYS" && args.size() >= 2) {
+    return Keys(args.subspan(1), builder);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -1141,7 +1149,6 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
     return rb->SendOk();
   }
 
-
   if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
     vector<DbSlice::SamplingResult> results(shard_set->size());
     uint32_t max_keys = 50;
@@ -1177,6 +1184,29 @@ void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
   }
 
   return rb->SendError(kSyntaxErr);
+}
+
+void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  string_view subcmd = ArgS(args, 0);
+
+  if (absl::EqualsIgnoreCase(subcmd, "ON")) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      cntx_->ns->GetDbSlice(es->shard_id()).StartSampleKeys(cntx_->db_index());
+    });
+    return builder->SendOk();
+  }
+
+  if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
+    atomic_uint64_t total_keys = 0;
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      size_t res = cntx_->ns->GetDbSlice(es->shard_id()).StopSampleKeys(cntx_->db_index());
+      total_keys.fetch_add(res, memory_order_relaxed);
+    });
+
+    return builder->SendLong(total_keys.load());
+  }
+
+  return builder->SendError(kSyntaxErr);
 }
 
 }  // namespace dfly

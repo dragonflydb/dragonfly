@@ -130,6 +130,8 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   ExpireTable::Cursor expire_cursor;
 
   TopKeys* top_keys = nullptr;
+  uint8_t* dense_hll = nullptr;
+
   DbIndex index;
   uint32_t thread_index;
 

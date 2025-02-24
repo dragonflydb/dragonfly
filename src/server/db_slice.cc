@@ -4,6 +4,10 @@
 
 #include "server/db_slice.h"
 
+extern "C" {
+#include "redis/hyperloglog.h"
+}
+
 #include <absl/cleanup/cleanup.h>
 
 #include "base/flags.h"
@@ -286,9 +290,18 @@ int32_t AsyncDeleter::IdleCb() {
   return ProactorBase::kOnIdleMaxLevel;
 };
 
-inline void TouchTopKeysIfNeeded(std::string_view key, TopKeys* top_keys) {
+inline void TouchTopKeysIfNeeded(string_view key, TopKeys* top_keys) {
   if (top_keys) {
     top_keys->Touch(key);
+  }
+}
+
+inline void TouchHllIfNeeded(string_view key, uint8_t* hll) {
+  if (hll) {
+    HllBufferPtr hll_buf;
+    hll_buf.size = getDenseHllSize();
+    hll_buf.hll = hll;
+    pfadd_dense(hll_buf, reinterpret_cast<const uint8_t*>(key.data()), key.size());
   }
 }
 
@@ -545,6 +558,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   }
 
   TouchTopKeysIfNeeded(key, db.top_keys);
+  TouchHllIfNeeded(key, db.dense_hll);
 
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     return OpStatus::WRONG_TYPE;
@@ -736,6 +750,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   it.SetVersion(NextVersion());
 
   TouchTopKeysIfNeeded(key, db.top_keys);
+  TouchHllIfNeeded(key, db.dense_hll);
 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
@@ -1578,6 +1593,38 @@ auto DbSlice::StopSampleTopK(DbIndex db_ind) -> SamplingResult {
     result.top_keys.emplace_back(move(key), count);
   }
   return result;
+}
+
+void DbSlice::StartSampleKeys(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  if (db.dense_hll) {
+    LOG(INFO) << "Sampling already started for db " << db_ind;
+    return;
+  }
+
+  HllBufferPtr hll_buf;
+  hll_buf.size = getDenseHllSize();
+  db.dense_hll = new uint8_t[hll_buf.size];
+  hll_buf.hll = db.dense_hll;
+  CHECK_EQ(0, createDenseHll(hll_buf));
+}
+
+// Returns number of unique keys sampled.
+size_t DbSlice::StopSampleKeys(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  if (!db.dense_hll) {
+    LOG(INFO) << "Keys sampling not started for db " << db_ind;
+    return 0;
+  }
+  HllBufferPtr hll_buf;
+  hll_buf.hll = db.dense_hll;
+  hll_buf.size = getDenseHllSize();
+  int64_t count = pfcountSingle(hll_buf);
+
+  delete[] db.dense_hll;
+  db.dense_hll = nullptr;
+
+  return count;
 }
 
 void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
