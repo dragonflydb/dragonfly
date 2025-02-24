@@ -8,6 +8,8 @@
 
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "server/cluster/slot_set.h"
+#include "server/cluster_support.h"
 #include "server/engine_shard_set.h"
 #include "server/server_state.h"
 
@@ -17,7 +19,7 @@ using namespace std;
 namespace {
 
 // Build functor for sending messages to connection
-auto BuildSender(string_view channel, facade::ArgRange messages) {
+auto BuildSender(string_view channel, facade::ArgRange messages, bool unsubscribe = false) {
   absl::FixedArray<string_view, 1> views(messages.Size());
   size_t messages_size = accumulate(messages.begin(), messages.end(), 0,
                                     [](int sum, string_view str) { return sum + str.size(); });
@@ -34,11 +36,12 @@ auto BuildSender(string_view channel, facade::ArgRange messages) {
     }
   }
 
-  return [channel, buf = std::move(buf), views = std::move(views)](facade::Connection* conn,
-                                                                   string pattern) {
+  return [channel, buf = std::move(buf), views = std::move(views), unsubscribe](
+             facade::Connection* conn, string pattern) {
     string_view channel_view{buf.get(), channel.size()};
-    for (std::string_view message_view : views)
-      conn->SendPubMessageAsync({std::move(pattern), buf, channel_view, message_view});
+    for (std::string_view message_view : views) {
+      conn->SendPubMessageAsync({std::move(pattern), buf, channel_view, message_view, unsubscribe});
+    }
   };
 }
 
@@ -144,7 +147,6 @@ unsigned ChannelStore::SendMessages(std::string_view channel, facade::ArgRange m
     auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
     while (it != subscribers_ptr->end() && it->Thread() == idx) {
-      // if ptr->cntx() is null, a connection might have closed or be in the process of closing
       if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr)
         send(ptr, it->pattern);
       it++;
@@ -194,6 +196,45 @@ std::vector<string> ChannelStore::ListChannels(const string_view pattern) const 
 
 size_t ChannelStore::PatternCount() const {
   return patterns_->size();
+}
+
+void ChannelStore::UnsubscribeAfterClusterSlotMigration(const cluster::SlotSet& deleted_slots) {
+  if (deleted_slots.Empty()) {
+    return;
+  }
+
+  const uint32_t tid = util::ProactorBase::me()->GetPoolIndex();
+  ChannelStoreUpdater csu(false, false, nullptr, tid);
+
+  for (const auto& [channel, _] : *channels_) {
+    auto channel_slot = KeySlot(channel);
+    if (deleted_slots.Contains(channel_slot)) {
+      csu.Record(channel);
+    }
+  }
+
+  csu.ApplyAndUnsubscribe();
+}
+
+void ChannelStore::UnsubscribeConnectionsFromDeletedSlots(const ChannelsSubMap& sub_map,
+                                                          uint32_t idx) {
+  const bool should_unsubscribe = true;
+  for (const auto& [channel, subscribers] : sub_map) {
+    // ignored by pub sub handler because should_unsubscribe is true
+    std::string msg = "__ignore__";
+    auto send = BuildSender(channel, {facade::ArgSlice{msg}}, should_unsubscribe);
+
+    auto it = lower_bound(subscribers.begin(), subscribers.end(), idx,
+                          ChannelStore::Subscriber::ByThreadId);
+    while (it != subscribers.end() && it->Thread() == idx) {
+      // if ptr->cntx() is null, a connection might have closed or be in the process of closing
+      if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr) {
+        DCHECK(it->pattern.empty());
+        send(ptr, it->pattern);
+      }
+      ++it;
+    }
+  }
 }
 
 ChannelStoreUpdater::ChannelStoreUpdater(bool pattern, bool to_add, ConnectionContext* cntx,
@@ -290,6 +331,63 @@ void ChannelStoreUpdater::Apply() {
     delete (pattern_ ? store->patterns_ : store->channels_);
     delete store;
   }
+
+  for (auto ptr : freelist_)
+    delete ptr;
+}
+
+void ChannelStoreUpdater::ApplyAndUnsubscribe() {
+  DCHECK(to_add_ == false);
+  DCHECK(pattern_ == false);
+  DCHECK(cntx_ == nullptr);
+
+  if (ops_.empty()) {
+    return;
+  }
+
+  // Wait for other updates to finish, lock the control block and update store pointer.
+  auto& cb = ChannelStore::control_block;
+  cb.update_mu.lock();
+  auto* store = cb.most_recent.load(memory_order_relaxed);
+
+  // Deep copy, we will remove channels
+  auto* target = new ChannelStore::ChannelMap{*store->channels_};
+
+  for (auto key : ops_) {
+    auto it = target->find(key);
+    freelist_.push_back(it->second.Get());
+    target->erase(it);
+    continue;
+  }
+
+  // Prepare replacement.
+  auto* replacement = new ChannelStore{target, store->patterns_};
+
+  // Update control block and unlock it.
+  cb.most_recent.store(replacement, memory_order_relaxed);
+  cb.update_mu.unlock();
+
+  // FetchSubscribers is not thead safe so we need to fetch here before we do the hop below.
+  // Bonus points because now we compute subscribers only once.
+  absl::flat_hash_map<std::string_view, std::vector<ChannelStore::Subscriber>> subs;
+  for (auto channel : ops_) {
+    auto channel_subs = ServerState::tlocal()->channel_store()->FetchSubscribers(channel);
+    DCHECK(!subs.contains(channel));
+    subs[channel] = std::move(channel_subs);
+  }
+  // Update thread local references. Readers fetch subscribers via FetchSubscribers,
+  // which runs without preemption, and store references to them in self container Subscriber
+  // structs. This means that any point on the other thread is safe to update the channel store.
+  // Regardless of whether we need to replace, we dispatch to make sure all
+  // queued SubscribeMaps in the freelist are no longer in use.
+  shard_set->pool()->AwaitFiberOnAll([&subs](unsigned idx, util::ProactorBase*) {
+    ServerState::tlocal()->UnsubscribeSlotsAndUpdateChannelStore(
+        subs, ChannelStore::control_block.most_recent.load(memory_order_relaxed));
+  });
+
+  // Delete previous map and channel store.
+  delete store->channels_;
+  delete store;
 
   for (auto ptr : freelist_)
     delete ptr;
