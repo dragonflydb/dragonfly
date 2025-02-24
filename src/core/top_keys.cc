@@ -31,7 +31,7 @@ void TopKeys::Touch(std::string_view key) {
   uint64_t fingerprint = XXH3_64bits(key.data(), key.size());
   constexpr uint64_t kPrime = 0xff51afd7ed558ccd;
   for (uint64_t id = 0; id < options_.depth; ++id) {
-    const int bucket = fingerprint % options_.buckets;
+    const unsigned bucket = fingerprint % options_.buckets;
     fingerprint *= kPrime;
     Cell& cell = GetCell(id, bucket);
     if (cell.count == 0) {
@@ -62,8 +62,8 @@ void TopKeys::Touch(std::string_view key) {
 
 absl::flat_hash_map<std::string, uint64_t> TopKeys::GetTopKeys() const {
   absl::flat_hash_map<std::string, uint64_t> results;
-  for (uint64_t array = 0; array < options_.depth; ++array) {
-    for (uint64_t bucket = 0; bucket < options_.buckets; ++bucket) {
+  for (unsigned array = 0; array < options_.depth; ++array) {
+    for (unsigned bucket = 0; bucket < options_.buckets; ++bucket) {
       const Cell& cell = GetCell(array, bucket);
       if (!cell.key.empty()) {
         auto [it, added] = results.emplace(cell.key, cell.count);
@@ -76,16 +76,16 @@ absl::flat_hash_map<std::string, uint64_t> TopKeys::GetTopKeys() const {
   return results;
 }
 
-TopKeys::Cell& TopKeys::GetCell(uint64_t array, uint64_t bucket) {
-  DCHECK(array < options_.depth);
+TopKeys::Cell& TopKeys::GetCell(uint32_t d, uint32_t bucket) {
+  DCHECK(d < options_.depth);
   DCHECK(bucket < options_.buckets);
-  return fingerprints_[array * options_.buckets + bucket];
+  return fingerprints_[d * options_.buckets + bucket];
 }
 
-const TopKeys::Cell& TopKeys::GetCell(uint64_t array, uint64_t bucket) const {
-  DCHECK(array < options_.depth);
+const TopKeys::Cell& TopKeys::GetCell(uint32_t d, uint32_t bucket) const {
+  DCHECK(d < options_.depth);
   DCHECK(bucket < options_.buckets);
-  return fingerprints_[array * options_.buckets + bucket];
+  return fingerprints_[d * options_.buckets + bucket];
 }
 
 }  // end of namespace dfly

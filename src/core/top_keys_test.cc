@@ -79,7 +79,7 @@ TEST(TopKeysTest, BucketCollision) {
 }
 
 TEST(TopKeysTest, BucketCollisionAggressiveDecay) {
-  TopKeys top_keys({.buckets = 1, .decay_base = 1.0, .min_key_count_to_record = 1});
+  TopKeys top_keys({.buckets = 1, .min_key_count_to_record = 2, .decay_base = 1.0});
   for (int i = 0; i < 5; ++i) {
     top_keys.Touch("key1");
   }
@@ -92,7 +92,7 @@ TEST(TopKeysTest, BucketCollisionAggressiveDecay) {
 }
 
 TEST(TopKeysTest, BucketCollisionHesitantDecay) {
-  TopKeys top_keys({.buckets = 1, .decay_base = 1000.0, .min_key_count_to_record = 1});
+  TopKeys top_keys({.buckets = 1, .min_key_count_to_record = 2, .decay_base = 1000.0});
   for (int i = 0; i < 5; ++i) {
     top_keys.Touch("key1");
   }
@@ -116,7 +116,7 @@ TEST(TopKeysTest, SavedByMultipleArrays) {
   std::string collision_key;
 
   TopKeys::Options options(
-      {.buckets = 2, .depth = 1, .decay_base = 1, .min_key_count_to_record = 2});
+      {.buckets = 2, .depth = 1, .min_key_count_to_record = 2, .decay_base = 1});
   {
     TopKeys top_keys(options);
 

@@ -37,13 +37,14 @@ class TopKeys {
     // HeavyKeeper options
     uint32_t buckets = 1 << 16;
     uint32_t depth = 4;
-    double decay_base = 1.08;
 
     // What is the minimum times Touch() has to be called for a given key in order for the key to be
     // saved. Use lower values when load is low, or higher values when load is high. The cost of a
     // low value for high load is frequent string copying and memory allocation.
     // Min value: 2
     uint32_t min_key_count_to_record = 50;
+
+    double decay_base = 1.08;
   };
 
   explicit TopKeys(Options options);
@@ -59,8 +60,8 @@ class TopKeys {
     uint64_t count = 0;
     std::string key;
   };
-  Cell& GetCell(uint64_t array, uint64_t bucket);
-  const Cell& GetCell(uint64_t array, uint64_t bucket) const;
+  Cell& GetCell(uint32_t d, uint32_t bucket);
+  const Cell& GetCell(uint32_t d, uint32_t bucket) const;
 
   Options options_;
   base::Xoroshiro128p bitgen_;

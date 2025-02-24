@@ -286,6 +286,12 @@ int32_t AsyncDeleter::IdleCb() {
   return ProactorBase::kOnIdleMaxLevel;
 };
 
+inline void TouchTopKeysIfNeeded(std::string_view key, TopKeys* top_keys) {
+  if (top_keys) {
+    top_keys->Touch(key);
+  }
+}
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -538,9 +544,7 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     return OpStatus::KEY_NOTFOUND;
   }
 
-  if (db.top_keys) {
-    db.top_keys->Touch(key);
-  }
+  TouchTopKeysIfNeeded(key, db.top_keys);
 
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     return OpStatus::WRONG_TYPE;
@@ -731,9 +735,7 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
 
-  if (db.top_keys) {
-    db.top_keys->Touch(key);
-  }
+  TouchTopKeysIfNeeded(key, db.top_keys);
 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();

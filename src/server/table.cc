@@ -94,9 +94,7 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
 
 DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
-  if (top_keys) {
-    delete top_keys;
-  }
+  delete top_keys;
 }
 
 void DbTable::Clear() {
