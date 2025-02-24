@@ -15,6 +15,8 @@
 namespace dfly::tiering {
 
 // Disk storage controlled by asynchronous operations.
+// Provides Random Access Read/Stash asynchronous interface around low level linux file.
+// Handles ranges management and file growth via underlying ExternalAllocator.
 class DiskStorage {
  public:
   struct Stats {
@@ -44,7 +46,7 @@ class DiskStorage {
   // grow backing file. Returns error code if operation failed  immediately (most likely it failed
   // to grow the backing file) or passes an empty segment if the final write operation failed.
   // Bytes are copied and can be dropped before cb is resolved
-  std::error_code Stash(io::Bytes bytes, io::Bytes footer, StashCb cb);
+  std::error_code Stash(io::Bytes bytes, StashCb cb);
 
   Stats GetStats() const;
 
