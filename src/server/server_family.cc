@@ -935,6 +935,8 @@ void ServerFamily::JoinSnapshotSchedule() {
 void ServerFamily::Shutdown() {
   VLOG(1) << "ServerFamily::Shutdown";
 
+  client_pause_fb_.JoinIfNeeded();
+
   load_fiber_.JoinIfNeeded();
 
   JoinSnapshotSchedule();
@@ -3224,10 +3226,11 @@ void ServerFamily::ClientPauseCmd(CmdArgList args, SinkReplyBuilder* builder,
            chrono::steady_clock::now() < end_time && client_pause_.load(std::memory_order_relaxed);
   };
 
+  std::unique_lock lk(client_pause_mu_);
   if (auto pause_fb_opt =
           Pause(listeners, cntx->ns, cntx->conn(), pause_state, std::move(is_pause_in_progress));
       pause_fb_opt) {
-    std::unique_lock lk(client_pause_mu_);
+    client_pause_fb_.JoinIfNeeded();
     client_pause_.store(true, std::memory_order_relaxed);
     client_pause_fb_ = std::move(*pause_fb_opt);
     builder->SendOk();
