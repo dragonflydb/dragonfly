@@ -670,11 +670,10 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     assert (await c_nodes[0].get("KEY0")) == "value"
 
     # Make sure that "KEY1" is not owned by node1
-    try:
+    with pytest.raises(redis.exceptions.ResponseError) as e:
         await c_nodes[1].set("KEY1", "value")
-        assert False, "Should not be able to set key on non-owner cluster node"
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == f"MOVED 5259 localhost:{nodes[0].port}"
+
+    assert e.value.args[0] == f"MOVED 5259 localhost:{nodes[0].port}"
 
     # And that node1 only has 1 key ("KEY2")
     assert await c_nodes[1].execute_command("DBSIZE") == 1
@@ -694,11 +693,10 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     assert await c_nodes[1].execute_command("DBSIZE") == 1
 
     # Now node0 should reply with MOVED for "KEY1"
-    try:
+    with pytest.raises(redis.exceptions.ResponseError) as e:
         await c_nodes[0].set("KEY1", "value")
-        assert False, "Should not be able to set key on non-owner cluster node"
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == f"MOVED 5259 localhost:{nodes[1].port}"
+
+    assert e.value.args[0] == f"MOVED 5259 localhost:{nodes[1].port}"
 
     # And node1 should own it and allow using it
     assert await c_nodes[1].set("KEY1", "value")
@@ -826,11 +824,11 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
         assert await c_replica.execute_command("dbsize") == 2
 
         # The replica should still reply with MOVED, despite having that key.
-        try:
+        with pytest.raises(redis.exceptions.ResponseError) as e:
             await c_replica.get("key2")
             assert False, "Should not be able to get key on non-owner cluster node"
-        except redis.exceptions.ResponseError as e:
-            assert re.match(r"MOVED \d+ localhost:1111", e.args[0])
+
+        assert re.match(r"MOVED \d+ localhost:1111", e.value.args[0])
 
         await push_config(replica_config, [c_master_admin])
         await asyncio.sleep(0.5)

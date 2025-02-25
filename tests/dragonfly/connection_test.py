@@ -13,7 +13,7 @@ import redis as base_redis
 import hiredis
 from redis.cache import CacheConfig
 
-from redis.exceptions import ConnectionError as redis_conn_error, ResponseError
+from redis.exceptions import ConnectionError, ResponseError
 
 import async_timeout
 from dataclasses import dataclass
@@ -505,7 +505,7 @@ async def test_keyspace_events(async_client: aioredis.Redis):
 
 async def test_keyspace_events_config_set(async_client: aioredis.Redis):
     # nonsense does not make sense as argument, we only accept ex or empty string
-    with pytest.raises((ResponseError)):
+    with pytest.raises(ResponseError):
         await async_client.config_set("notify_keyspace_events", "nonsense")
 
     await async_client.config_set("notify_keyspace_events", "ex")
@@ -520,12 +520,9 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
 
     keys = await produce_expiring_keys(async_client)
     await async_client.config_set("notify_keyspace_events", "")
-    try:
+    with pytest.raises(asyncio.TimeoutError):
         async with async_timeout.timeout(1):
             await collect_expiring_events(pclient, keys)
-        assert False
-    except:
-        pass
 
 
 @pytest.mark.exclude_epoll
@@ -787,7 +784,7 @@ async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factor
     server.start()
 
     client = server.client(password="XXX")
-    with pytest.raises((ResponseError)):
+    with pytest.raises(ResponseError):
         await client.dbsize()
     await client.aclose()
 
@@ -822,7 +819,7 @@ async def test_tls_reject(
     await client.aclose()
 
     client = server.client(**with_tls_client_args)
-    with pytest.raises(redis_conn_error):
+    with pytest.raises(ConnectionError):
         await client.ping()
 
 

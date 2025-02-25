@@ -36,11 +36,10 @@ async def test_access_json_value_as_string(async_client: aioredis.Redis):
     the_type = await async_client.type(key_name)
     assert the_type == "ReJSON-RL"
     # you cannot access this key as string
-    try:
+    with pytest.raises(redis.exceptions.ResponseError) as e:
         result = await async_client.get(key_name)
-        assert False, "should not be able to access JSON value as string"
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == "WRONGTYPE Operation against a key holding the wrong kind of value"
+
+    assert e.value.args[0] == "WRONGTYPE Operation against a key holding the wrong kind of value"
 
 
 async def test_reset_key_to_string(async_client: aioredis.Redis):
@@ -78,11 +77,10 @@ async def test_update_value(async_client: aioredis.Redis):
     # Ensure that after we're changing this into STRING type, it will no longer work
     await async_client.set(key_name, "some random value")
     assert await async_client.type(key_name) == "string"
-    try:
+    with pytest.raises(redis.exceptions.ResponseError) as e:
         await get_set_json(async_client, value="0", key=key_name, path="$.a.*")
-        assert False, "should not be able to modify JSON value as string"
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == "WRONGTYPE Operation against a key holding the wrong kind of value"
+
+    assert e.value.args[0] == "WRONGTYPE Operation against a key holding the wrong kind of value"
     assert await async_client.type(key_name) == "string"
 
 
