@@ -92,7 +92,7 @@ error_code Replica::Start(facade::SinkReplyBuilder* builder) {
   CHECK(mythread);
 
   auto check_connection_error = [this, builder](error_code ec, const char* msg) -> error_code {
-    if (cntx_.IsCancelled()) {
+    if (!cntx_.IsRunning()) {
       builder->SendError("replication cancelled");
       return std::make_error_code(errc::operation_canceled);
     }
@@ -124,11 +124,12 @@ error_code Replica::Start(facade::SinkReplyBuilder* builder) {
   ec = Greet();
   RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
-  // 4. Spawn main coordination fiber.
-  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
-
-  builder->SendOk();
   return {};
+}
+
+void Replica::StartMainReplicationFiber(facade::SinkReplyBuilder* builder) {
+  sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
+  builder->SendOk();
 }
 
 void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
@@ -273,7 +274,7 @@ void Replica::MainReplicationFb() {
 }
 
 error_code Replica::Greet() {
-  ResetParser(false);
+  ResetParser(RedisParser::Mode::CLIENT);
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommandAndReadResponse("PING"));  // optional.
@@ -578,7 +579,7 @@ error_code Replica::InitiateDflySync() {
   sync_block->Wait();
 
   // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
+  if (!cntx_.IsRunning())
     return cntx_.GetError();
 
   RdbLoader::PerformPostLoad(&service_);
@@ -605,7 +606,7 @@ error_code Replica::ConsumeRedisStream() {
 
   // we never reply back on the commands.
   facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};
-  ResetParser(true);
+  ResetParser(RedisParser::Mode::SERVER);
 
   // Master waits for this command in order to start sending replication stream.
   RETURN_ON_ERR(SendCommand("REPLCONF ACK 0"));
@@ -753,7 +754,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(BlockingCounter sb, ExecutionSt
     absl::StrAppend(&cmd, " ", *lsn);
   }
 
-  ResetParser(/*server_mode=*/false);
+  ResetParser(RedisParser::Mode::CLIENT);
   leftover_buf_.emplace(128);
   RETURN_ON_ERR_T(make_unexpected, SendCommand(cmd));
   auto read_resp = ReadRespReply(&*leftover_buf_);
@@ -865,7 +866,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
 
   acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
 
-  while (!cntx->IsCancelled()) {
+  while (cntx->IsRunning()) {
     auto tx_data = tx_reader.NextTxData(&reader, cntx);
     if (!tx_data)
       break;
@@ -893,7 +894,7 @@ void Replica::RedisStreamAcksFb() {
   std::string ack_cmd;
   auto next_ack_tp = std::chrono::steady_clock::now();
 
-  while (!cntx_.IsCancelled()) {
+  while (cntx_.IsRunning()) {
     VLOG(2) << "Sending an ACK with offset=" << repl_offs_;
     ack_cmd = absl::StrCat("REPLCONF ACK ", repl_offs_);
     next_ack_tp = std::chrono::steady_clock::now() + ack_time_max_interval;
@@ -904,7 +905,7 @@ void Replica::RedisStreamAcksFb() {
     ack_offs_ = repl_offs_;
 
     replica_waker_.await_until(
-        [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || cntx_.IsCancelled(); },
+        [&]() { return repl_offs_ > ack_offs_ + kAckRecordMaxInterval || (!cntx_.IsRunning()); },
         next_ack_tp);
   }
 }
@@ -919,7 +920,7 @@ void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
   auto next_ack_tp = std::chrono::steady_clock::now();
 
   uint64_t current_offset;
-  while (!cntx->IsCancelled()) {
+  while (cntx->IsRunning()) {
     // Handle ACKs with the master. PING opcodes from the master mean we should immediately
     // answer.
     current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
@@ -937,7 +938,7 @@ void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
         [&]() {
           return journal_rec_executed_.load(std::memory_order_relaxed) >
                      ack_offs_ + kAckRecordMaxInterval ||
-                 force_ping_ || cntx->IsCancelled();
+                 force_ping_ || (!cntx->IsRunning());
         },
         next_ack_tp);
   }
@@ -961,7 +962,7 @@ DflyShardReplica::~DflyShardReplica() {
 }
 
 void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
-  if (cntx->IsCancelled()) {
+  if (!cntx->IsRunning()) {
     return;
   }
 
@@ -982,7 +983,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // and replica recieved all the commands from all shards.
   multi_shard_data.block->Wait();
   // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
+  if (!cntx_.IsRunning())
     return;
   VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
 
@@ -990,7 +991,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // Wait until all shards flows get to execution step of this transaction.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
+  if (!cntx_.IsRunning())
     return;
   // Global command will be executed only from one flow fiber. This ensure corectness of data in
   // replica.
@@ -1001,7 +1002,7 @@ void DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // executed.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.
-  if (cntx_.IsCancelled())
+  if (!cntx_.IsRunning())
     return;
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.

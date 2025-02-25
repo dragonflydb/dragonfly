@@ -621,15 +621,24 @@ async def test_send_delay_metric(df_server: DflyInstance):
 
     await client.config_set("pipeline_queue_limit", 100)
     reader, writer = await asyncio.open_connection("localhost", df_server.port)
-    for j in range(1000000):
-        writer.write(f"GET key-{j % 10}\n".encode())
+
+    async def send_data_noread():
+        for j in range(500000):
+            writer.write(f"GET key-{j % 10}\n".encode())
+            await writer.drain()
+
+    t1 = asyncio.create_task(send_data_noread())
 
     @assert_eventually
     async def wait_for_large_delay():
         info = await client.info("clients")
         assert int(info["send_delay_ms"]) > 100
 
+    # Check that the delay metric indeed increases as we have a connection
+    # that is not reading the data.
     await wait_for_large_delay()
+    t1.cancel()
+    writer.close()
 
 
 async def test_match_http(df_server: DflyInstance):

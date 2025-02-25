@@ -2,7 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
-#include "server/top_keys.h"
+#include "core/top_keys.h"
 
 #include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
@@ -16,15 +16,17 @@ using ::testing::UnorderedElementsAre;
 namespace dfly {
 
 TEST(TopKeysTest, Basic) {
-  TopKeys top_keys({.min_key_count_to_record = 1});
+  TopKeys top_keys({.min_key_count_to_record = 2});
   top_keys.Touch("key1");
-  EXPECT_THAT(top_keys.GetTopKeys(), UnorderedElementsAre(Pair("key1", 1)));
+  top_keys.Touch("key1");
+  top_keys.Touch("key2");
+  EXPECT_THAT(top_keys.GetTopKeys(), UnorderedElementsAre(Pair("key1", 2)));
 }
 
 TEST(TopKeysTest, MultiTouch) {
-  TopKeys top_keys({.min_key_count_to_record = 1});
+  TopKeys top_keys({.min_key_count_to_record = 2});
   top_keys.Touch("key1");
-  EXPECT_THAT(top_keys.GetTopKeys(), UnorderedElementsAre(Pair("key1", 1)));
+  EXPECT_THAT(top_keys.GetTopKeys(), UnorderedElementsAre());
   top_keys.Touch("key1");
   EXPECT_THAT(top_keys.GetTopKeys(), UnorderedElementsAre(Pair("key1", 2)));
   top_keys.Touch("key1");
@@ -46,10 +48,13 @@ TEST(TopKeysTest, MinKeyCountToRecord) {
 }
 
 TEST(TopKeysTest, MultiKeys) {
-  TopKeys top_keys({.min_key_count_to_record = 1});
-  top_keys.Touch("key1");
-  top_keys.Touch("key2");
-  EXPECT_THAT(top_keys.GetTopKeys(), UnorderedElementsAre(Pair("key1", 1), Pair("key2", 1)));
+  TopKeys top_keys({.min_key_count_to_record = 2});
+  for (int i = 0; i < 2; ++i) {
+    top_keys.Touch("key1");
+    top_keys.Touch("key2");
+  }
+  top_keys.Touch("key3");
+  EXPECT_THAT(top_keys.GetTopKeys(), UnorderedElementsAre(Pair("key1", 2), Pair("key2", 2)));
 }
 
 TEST(TopKeysTest, BucketCollision) {
@@ -74,7 +79,7 @@ TEST(TopKeysTest, BucketCollision) {
 }
 
 TEST(TopKeysTest, BucketCollisionAggressiveDecay) {
-  TopKeys top_keys({.buckets = 1, .decay_base = 1.0, .min_key_count_to_record = 1});
+  TopKeys top_keys({.buckets = 1, .min_key_count_to_record = 2, .decay_base = 1.0});
   for (int i = 0; i < 5; ++i) {
     top_keys.Touch("key1");
   }
@@ -87,7 +92,7 @@ TEST(TopKeysTest, BucketCollisionAggressiveDecay) {
 }
 
 TEST(TopKeysTest, BucketCollisionHesitantDecay) {
-  TopKeys top_keys({.buckets = 1, .decay_base = 1000.0, .min_key_count_to_record = 1});
+  TopKeys top_keys({.buckets = 1, .min_key_count_to_record = 2, .decay_base = 1000.0});
   for (int i = 0; i < 5; ++i) {
     top_keys.Touch("key1");
   }
@@ -111,7 +116,7 @@ TEST(TopKeysTest, SavedByMultipleArrays) {
   std::string collision_key;
 
   TopKeys::Options options(
-      {.buckets = 2, .arrays = 1, .decay_base = 1, .min_key_count_to_record = 1});
+      {.buckets = 2, .depth = 1, .min_key_count_to_record = 2, .decay_base = 1});
   {
     TopKeys top_keys(options);
 
@@ -131,7 +136,7 @@ TEST(TopKeysTest, SavedByMultipleArrays) {
     }
   }
 
-  options.arrays = 10;
+  options.depth = 10;
   {
     TopKeys top_keys(options);
 
@@ -141,8 +146,9 @@ TEST(TopKeysTest, SavedByMultipleArrays) {
 
     // Insert collision key, expect result to be present
     top_keys.Touch(collision_key);
+    top_keys.Touch(collision_key);
     EXPECT_THAT(top_keys.GetTopKeys(),
-                UnorderedElementsAre(Pair("key", 2), Pair(collision_key, 1)));
+                UnorderedElementsAre(Pair("key", 2), Pair(collision_key, 2)));
   }
 }
 

@@ -55,7 +55,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
-    ResetParser(/*server_mode=*/false);
+    ResetParser(RedisParser::Mode::CLIENT);
 
     std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", node_id, " ", shard_id);
     VLOG(1) << "cmd: " << cmd;
@@ -194,13 +194,12 @@ void OutgoingMigration::SyncFb() {
       break;
     }
 
-    last_error_ = cntx_.GetError();
-    cntx_.Reset(nullptr);
-
-    if (last_error_) {
-      LOG(ERROR) << last_error_.Format();
+    if (cntx_.IsError()) {
+      last_error_ = cntx_.GetError();
+      LOG(ERROR) << last_error_;
       ThisFiber::SleepFor(1000ms);  // wait some time before next retry
     }
+    cntx_.Reset(nullptr);
 
     VLOG(1) << "Connecting to target node";
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;
@@ -211,7 +210,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     VLOG(1) << "Migration initiating";
-    ResetParser(false);
+    ResetParser(RedisParser::Mode::CLIENT);
     auto cmd = absl::StrCat("DFLYMIGRATE INIT ", cf_->MyID(), " ", slot_migrations_.size());
     for (const auto& s : migration_info_.slot_ranges) {
       absl::StrAppend(&cmd, " ", s.start, " ", s.end);
@@ -246,7 +245,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     OnAllShards([this](auto& migration) { migration->PrepareFlow(cf_->MyID()); });
-    if (cntx_.GetError()) {
+    if (!cntx_.IsRunning()) {
       continue;
     }
 
@@ -257,13 +256,13 @@ void OutgoingMigration::SyncFb() {
       OnAllShards([](auto& migration) { migration->PrepareSync(); });
     }
 
-    if (cntx_.GetError()) {
+    if (!cntx_.IsRunning()) {
       continue;
     }
 
     OnAllShards([](auto& migration) { migration->RunSync(); });
 
-    if (cntx_.GetError()) {
+    if (!cntx_.IsRunning()) {
       continue;
     }
 
@@ -273,7 +272,7 @@ void OutgoingMigration::SyncFb() {
       VLOG(1) << "Waiting for migration to finalize...";
       ThisFiber::SleepFor(500ms);
     }
-    if (cntx_.GetError()) {
+    if (!cntx_.IsRunning()) {
       continue;
     }
     break;
@@ -288,7 +287,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   LOG(INFO) << "Finalize migration for " << cf_->MyID() << " : " << migration_info_.node_info.id
             << " attempt " << attempt;
   if (attempt > 1) {
-    if (cntx_.GetError()) {
+    if (!cntx_.IsRunning()) {
       return true;
     }
     auto timeout = absl::GetFlag(FLAGS_slot_migration_connection_timeout_ms) * 1ms;

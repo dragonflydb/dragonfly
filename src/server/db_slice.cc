@@ -4,10 +4,15 @@
 
 #include "server/db_slice.h"
 
+extern "C" {
+#include "redis/hyperloglog.h"
+}
+
 #include <absl/cleanup/cleanup.h>
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/top_keys.h"
 #include "search/doc_index.h"
 #include "server/channel_store.h"
 #include "server/engine_shard_set.h"
@@ -285,6 +290,21 @@ int32_t AsyncDeleter::IdleCb() {
   return ProactorBase::kOnIdleMaxLevel;
 };
 
+inline void TouchTopKeysIfNeeded(string_view key, TopKeys* top_keys) {
+  if (top_keys) {
+    top_keys->Touch(key);
+  }
+}
+
+inline void TouchHllIfNeeded(string_view key, uint8_t* hll) {
+  if (hll) {
+    HllBufferPtr hll_buf;
+    hll_buf.size = getDenseHllSize();
+    hll_buf.hll = hll;
+    pfadd_dense(hll_buf, reinterpret_cast<const uint8_t*>(key.data()), key.size());
+  }
+}
+
 }  // namespace
 
 #define ADD(x) (x) += o.x
@@ -537,6 +557,9 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
     return OpStatus::KEY_NOTFOUND;
   }
 
+  TouchTopKeysIfNeeded(key, db.top_keys);
+  TouchHllIfNeeded(key, db.dense_hll);
+
   if (req_obj_type.has_value() && res.it->second.ObjType() != req_obj_type.value()) {
     return OpStatus::WRONG_TYPE;
   }
@@ -602,9 +625,6 @@ OpResult<DbSlice::PrimeItAndExp> DbSlice::FindInternal(const Context& cntx, std:
   // Mark this entry as being looked up. We use key (first) deliberately to preserve the hotness
   // attribute of the entry in case of value overrides.
   res.it->first.SetTouched(true);
-
-  // We do not use TopKey feature, so disable it until we redesign it.
-  // db.top_keys.Touch(key);
 
   return res;
 }
@@ -728,6 +748,9 @@ OpResult<DbSlice::AddOrFindResult> DbSlice::AddOrFindInternal(const Context& cnt
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
   it.SetVersion(NextVersion());
+
+  TouchTopKeysIfNeeded(key, db.top_keys);
+  TouchHllIfNeeded(key, db.dense_hll);
 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
@@ -1178,10 +1201,6 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
 
   auto expire_it = db->expire.Find(it->first);
 
-  // TODO: Accept Iterator instead of PrimeIterator, as this might save an allocation below.
-  string scratch;
-  string_view key = it->first.GetSlice(&scratch);
-
   if (IsValid(expire_it)) {
     // TODO: to employ multi-generation update of expire-base and the underlying values.
     time_t expire_time = ExpireTime(expire_it);
@@ -1195,6 +1214,9 @@ DbSlice::PrimeItAndExp DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterato
                << ", expire table size: " << db->expire.size()
                << ", prime table size: " << db->prime.size() << util::fb2::GetStacktrace();
   }
+
+  string scratch;
+  string_view key = it->first.GetSlice(&scratch);
 
   // Replicate expiry
   if (auto journal = owner_->journal(); journal) {
@@ -1289,7 +1311,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   std::string stash;
 
   auto cb = [&](ExpireIterator it) {
-    auto key = it->first.GetSlice(&stash);
+    string_view key = it->first.GetSlice(&stash);
     if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key))
       return;
 
@@ -1297,9 +1319,16 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     time_t ttl = ExpireTime(it) - cntx.time_now_ms;
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
-      CHECK(!prime_it.is_done());
-      result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
-      ExpireIfNeeded(cntx, prime_it);
+      if (prime_it.is_done()) {  // A workaround for the case our tables are inconsistent.
+        LOG(DFATAL) << "Expired key " << key << " not found in prime table, expire_done: "
+                   << it.is_done();
+        if (!it.is_done()) {
+          db.expire.Erase(it->first);
+        }
+      } else {
+        result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
+        ExpireIfNeeded(cntx, prime_it);
+      }
       ++result.deleted;
     } else {
       result.survivor_ttl_sum += ttl;
@@ -1543,6 +1572,68 @@ void DbSlice::SendInvalidationTrackingMessage(std::string_view key) {
   client_tracking_map_.erase(key);
 }
 
+void DbSlice::StartSampleTopK(DbIndex db_ind, uint32_t min_freq) {
+  auto& db = *db_arr_[db_ind];
+  if (db.top_keys) {
+    LOG(INFO) << "Sampling already started for db " << db_ind;
+    return;
+  }
+
+  TopKeys::Options opts;
+  opts.min_key_count_to_record = min_freq;
+  db.top_keys = new TopKeys(opts);
+}
+
+auto DbSlice::StopSampleTopK(DbIndex db_ind) -> SamplingResult {
+  auto& db = *db_arr_[db_ind];
+
+  if (!db.top_keys) {
+    LOG(WARNING) << "Sampling not started for db " << db_ind;
+    return {};
+  }
+  auto fmap = db.top_keys->GetTopKeys();
+  delete db.top_keys;
+  db.top_keys = nullptr;
+  SamplingResult result;
+  result.top_keys.reserve(fmap.size());
+  for (auto& [key, count] : fmap) {
+    result.top_keys.emplace_back(move(key), count);
+  }
+  return result;
+}
+
+void DbSlice::StartSampleKeys(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  if (db.dense_hll) {
+    LOG(INFO) << "Sampling already started for db " << db_ind;
+    return;
+  }
+
+  HllBufferPtr hll_buf;
+  hll_buf.size = getDenseHllSize();
+  db.dense_hll = new uint8_t[hll_buf.size];
+  hll_buf.hll = db.dense_hll;
+  CHECK_EQ(0, createDenseHll(hll_buf));
+}
+
+// Returns number of unique keys sampled.
+size_t DbSlice::StopSampleKeys(DbIndex db_ind) {
+  auto& db = *db_arr_[db_ind];
+  if (!db.dense_hll) {
+    LOG(INFO) << "Keys sampling not started for db " << db_ind;
+    return 0;
+  }
+  HllBufferPtr hll_buf;
+  hll_buf.hll = db.dense_hll;
+  hll_buf.size = getDenseHllSize();
+  int64_t count = pfcountSingle(hll_buf);
+
+  delete[] db.dense_hll;
+  db.dense_hll = nullptr;
+
+  return count;
+}
+
 void DbSlice::PerformDeletion(PrimeIterator del_it, DbTable* table) {
   return PerformDeletion(Iterator::FromPrime(del_it), table);
 }
@@ -1590,12 +1681,6 @@ void DbSlice::PerformDeletion(Iterator del_it, ExpIterator exp_it, DbTable* tabl
       CompactObj::DeleteMR<DenseSet>(ds);
     }
   }  // del_it->first.IsAsyncDelete()
-
-  if (pv.ObjType() == OBJ_HASH && pv.Encoding() == kEncodingListPack) {
-    --stats.listpack_blob_cnt;
-  } else if (pv.ObjType() == OBJ_ZSET && pv.Encoding() == OBJ_ENCODING_LISTPACK) {
-    --stats.listpack_blob_cnt;
-  }
 
   if (IsClusterEnabled()) {
     SlotId sid = KeySlot(del_it.key());

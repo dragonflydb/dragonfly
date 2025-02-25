@@ -120,7 +120,7 @@ tuple<const CommandId*, absl::InlinedVector<string, 5>> GeneratePopulateCommand(
   } else if (type == "ZSET") {
     cid = registry.Find("ZADD");
     for (size_t i = 0; i < elements; ++i) {
-      args.push_back(absl::StrCat((*gen)() % val_size));
+      args.push_back(StrCat((*gen)() % val_size));
       args.push_back(GenerateValue(val_size, random_value, gen));
     }
   } else if (type == "JSON") {
@@ -160,7 +160,7 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
   ConnectionContext local_cntx{cntx, stub_tx.get()};
   absl::InsecureBitGen gen;
   for (unsigned i = 0; i < batch.sz; ++i) {
-    string key = absl::StrCat(prefix, ":", batch.index[i]);
+    string key = StrCat(prefix, ":", batch.index[i]);
     uint32_t elements_left = elements;
 
     while (elements_left) {
@@ -196,9 +196,10 @@ void DoPopulateBatch(string_view type, string_view prefix, size_t val_size, bool
 
 struct ObjHist {
   base::Histogram key_len;
-  base::Histogram val_len;    // overall size for the value.
+  base::Histogram val_len;    // overall malloc-used size of the value.
   base::Histogram card;       // for sets, hashmaps etc - it's number of entries.
   base::Histogram entry_len;  // for sets, hashmaps etc - it's the length of each entry.
+  base::Histogram listpack;   // for listpack encodings - the malloc used of the listpack.
 };
 
 // Returns number of O(1) steps executed.
@@ -230,49 +231,31 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
   } else if (pv.ObjType() == OBJ_ZSET) {
     IterateSortedSet(pv.GetRobjWrapper(),
                      [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
-    if (pv.Encoding() == OBJ_ENCODING_SKIPLIST) {
-      detail::SortedMap* smap = static_cast<detail::SortedMap*>(pv.RObjPtr());
-      val_len = smap->MallocSize();
+    val_len = 0;  // reset - will be calculated below.
+    if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
+      hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_SET) {
     IterateSet(pv, per_entry_cb);
-    if (pv.Encoding() == kEncodingStrMap2) {
-      StringSet* ss = static_cast<StringSet*>(pv.RObjPtr());
-      val_len = ss->ObjMallocUsed() + ss->SetMallocUsed();
+    val_len = 0;  // reset - will be calculated below.
+    if (pv.Encoding() == kEncodingIntSet) {
+      hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_HASH) {
+    IterateMap(pv, [&](ContainerEntry key, ContainerEntry value) {
+      hist->entry_len.Add(key.length + value.length);
+      steps += 2;
+      return true;
+    });
     if (pv.Encoding() == kEncodingListPack) {
-      uint8_t intbuf[LP_INTBUF_SIZE];
-      uint8_t* lp = (uint8_t*)pv.RObjPtr();
-      uint8_t* fptr = lpFirst(lp);
-      while (fptr) {
-        size_t entry_len = 0;
-        // field
-        string_view sv = LpGetView(fptr, intbuf);
-        entry_len += sv.size();
-
-        // value
-        fptr = lpNext(lp, fptr);
-        entry_len += sv.size();
-        fptr = lpNext(lp, fptr);
-        hist->entry_len.Add(entry_len);
-        steps += 2;
-      }
-      val_len = lpBytes(lp);
-    } else {
-      StringMap* sm = static_cast<StringMap*>(pv.RObjPtr());
-      for (const auto& k_v : *sm) {
-        hist->entry_len.Add(sdslen(k_v.first) + sdslen(k_v.second) + 2);
-        ++steps;
-      }
-      val_len = sm->ObjMallocUsed() + sm->SetMallocUsed();
+      hist->listpack.Add(pv.MallocUsed());
     }
   }
   // TODO: streams
 
   if (val_len == 0) {
     // Fallback
-    val_len = pv.MallocUsed();
+    val_len = pv.MallocUsed(true);
   }
 
   hist->val_len.Add(val_len);
@@ -283,6 +266,8 @@ unsigned AddObjHist(PrimeIterator it, ObjHist* hist) {
   return steps;
 }
 
+// ObjType -> ObjHist
+//
 using ObjHistMap = absl::flat_hash_map<unsigned, unique_ptr<ObjHist>>;
 
 void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
@@ -295,6 +280,7 @@ void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
       dest_hist->val_len.Merge(src_hist->val_len);
       dest_hist->card.Merge(src_hist->card);
       dest_hist->entry_len.Merge(src_hist->entry_len);
+      dest_hist->listpack.Merge(src_hist->listpack);
     }
   }
 }
@@ -514,6 +500,13 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
         "    Prints the stacktraces of all current fibers to the logs.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
+        "TOPK ON [min_freq] | OFF [max_keys]",
+        "    Turns on or off sampling of topk keys. Provides top keys with at least <min_freq> ",
+        "    during the sampling period. The results are returned in descending order of frequency",
+        "    when calling TOPK OFF command.",
+        "KEYS ON | OFF",
+        "    Turns on/off counting of unique keys. Results are returned when calling ",
+        "    KEYS OFF command.",
         "TX",
         "    Performs transaction analysis per shard.",
         "TRAFFIC <path> | [STOP]",
@@ -582,6 +575,14 @@ void DebugCmd::Run(CmdArgList args, facade::SinkReplyBuilder* builder) {
 
   if (subcmd == "RECVSIZE" && args.size() == 2) {
     return RecvSize(ArgS(args, 1), builder);
+  }
+
+  if (subcmd == "TOPK" && args.size() >= 2) {
+    return Topk(args.subspan(1), builder);
+  }
+
+  if (subcmd == "KEYS" && args.size() >= 2) {
+    return Keys(args.subspan(1), builder);
   }
 
   string reply = UnknownSubCmd(subcmd, "DEBUG");
@@ -790,7 +791,7 @@ void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
   ThisFiber::SetName("populate_range");
   VLOG(1) << "PopulateRange: " << from << "-" << (from + num_of_keys - 1);
 
-  string key = absl::StrCat(options.prefix, ":");
+  string key = StrCat(options.prefix, ":");
   size_t prefsize = key.size();
   DbIndex db_indx = cntx_->db_index();
   EngineShardSet& ess = *shard_set;
@@ -1024,9 +1025,15 @@ void DebugCmd::ObjHist(facade::SinkReplyBuilder* builder) {
     StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
     StrAppend(&result, "Key length histogram:\n", hist_ptr->key_len.ToString(), "\n");
-    StrAppend(&result, "Value length histogram:\n", hist_ptr->val_len.ToString(), "\n");
-    StrAppend(&result, "Cardinality histogram:\n", hist_ptr->card.ToString(), "\n");
-    StrAppend(&result, "Entry length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    StrAppend(&result, "Values - Total Memory used:\n", hist_ptr->val_len.ToString(), "\n");
+    if (hist_ptr->card.count() > 0) {
+      StrAppend(&result, "Cardinality histogram (number of elements in sets):\n",
+                hist_ptr->card.ToString(), "\n");
+    }
+    StrAppend(&result, "Items length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    if (hist_ptr->listpack.count() > 0) {
+      StrAppend(&result, "Listpack histogram:\n", hist_ptr->listpack.ToString(), "\n");
+    }
   }
 
   absl::StrAppend(&result, "___end object histogram___\n");
@@ -1123,6 +1130,83 @@ void DebugCmd::RecvSize(string_view param, facade::SinkReplyBuilder* builder) {
   shard_set->pool()->at(tid)->AwaitBrief(
       [&]() { facade::Connection::GetRequestSizeHistogramThreadLocal(&hist); });
   rb->SendVerbatimString(hist);
+}
+
+void DebugCmd::Topk(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  auto* rb = static_cast<RedisReplyBuilder*>(builder);
+  DCHECK_GE(args.size(), 1u);
+
+  string_view subcmd = ArgS(args, 0);
+  if (absl::EqualsIgnoreCase(subcmd, "ON")) {
+    uint32_t min_freq = 100;
+    if (args.size() > 1) {
+      if (!absl::SimpleAtoi(ArgS(args, 1), &min_freq))
+        return rb->SendError(kUintErr);
+    }
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      cntx_->ns->GetDbSlice(es->shard_id()).StartSampleTopK(cntx_->db_index(), min_freq);
+    });
+    return rb->SendOk();
+  }
+
+  if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
+    vector<DbSlice::SamplingResult> results(shard_set->size());
+    uint32_t max_keys = 50;
+
+    if (args.size() > 1) {
+      if (!absl::SimpleAtoi(ArgS(args, 1), &max_keys))
+        return rb->SendError(kUintErr);
+    }
+
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      results[es->shard_id()] =
+          cntx_->ns->GetDbSlice(es->shard_id()).StopSampleTopK(cntx_->db_index());
+    });
+
+    vector<pair<uint64_t, string>> items;
+
+    for (const auto& res : results) {
+      for (const auto& k_v : res.top_keys) {
+        items.emplace_back(k_v.second, k_v.first);
+        push_heap(items.begin(), items.end(), std::greater<>());
+        if (items.size() > max_keys) {
+          pop_heap(items.begin(), items.end(), std::greater<>());
+          items.pop_back();
+        }
+      }
+    }
+
+    rb->StartArray(items.size());
+    for (const auto& k_v : items) {
+      rb->SendBulkString(StrCat(k_v.second, ":", k_v.first));
+    }
+    return;
+  }
+
+  return rb->SendError(kSyntaxErr);
+}
+
+void DebugCmd::Keys(CmdArgList args, facade::SinkReplyBuilder* builder) {
+  string_view subcmd = ArgS(args, 0);
+
+  if (absl::EqualsIgnoreCase(subcmd, "ON")) {
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      cntx_->ns->GetDbSlice(es->shard_id()).StartSampleKeys(cntx_->db_index());
+    });
+    return builder->SendOk();
+  }
+
+  if (absl::EqualsIgnoreCase(subcmd, "OFF")) {
+    atomic_uint64_t total_keys = 0;
+    shard_set->RunBriefInParallel([&](EngineShard* es) {
+      size_t res = cntx_->ns->GetDbSlice(es->shard_id()).StopSampleKeys(cntx_->db_index());
+      total_keys.fetch_add(res, memory_order_relaxed);
+    });
+
+    return builder->SendLong(total_keys.load());
+  }
+
+  return builder->SendError(kSyntaxErr);
 }
 
 }  // namespace dfly

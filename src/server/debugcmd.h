@@ -55,6 +55,8 @@ class DebugCmd {
   void Shards(facade::SinkReplyBuilder* builder);
   void LogTraffic(CmdArgList, facade::SinkReplyBuilder* builder);
   void RecvSize(std::string_view param, facade::SinkReplyBuilder* builder);
+  void Topk(CmdArgList args, facade::SinkReplyBuilder* builder);
+  void Keys(CmdArgList args, facade::SinkReplyBuilder* builder);
 
   ServerFamily& sf_;
   cluster::ClusterFamily& cf_;

@@ -30,7 +30,7 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             command_registry.cc  cluster_support.cc
             journal/cmd_serializer.cc journal/tx_executor.cc namespaces.cc
             common.cc journal/journal.cc journal/types.cc journal/journal_slice.cc
-            server_state.cc table.cc  top_keys.cc transaction.cc tx_base.cc
+            server_state.cc table.cc  transaction.cc tx_base.cc
             serializer_commons.cc journal/serializer.cc journal/executor.cc journal/streamer.cc
             ${TX_LINUX_SRCS} acl/acl_log.cc slowlog.cc channel_store.cc)
 
@@ -56,7 +56,7 @@ add_library(dragonfly_lib bloom_family.cc
             detail/snapshot_storage.cc
             set_family.cc stream_family.cc string_family.cc
             zset_family.cc geo_family.cc version.cc bitops_family.cc container_utils.cc
-            top_keys.cc multi_command_squasher.cc hll_family.cc
+            multi_command_squasher.cc hll_family.cc
             ${DF_SEARCH_SRCS}
             ${DF_LINUX_SRCS}
             cluster/cluster_config.cc cluster/cluster_family.cc cluster/incoming_slot_migration.cc
@@ -121,7 +121,6 @@ cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
 cxx_test(json_family_test dfly_test_lib LABELS DFLY)
 cxx_test(journal/journal_test dfly_test_lib LABELS DFLY)
-cxx_test(top_keys_test dfly_test_lib LABELS DFLY)
 cxx_test(hll_family_test dfly_test_lib LABELS DFLY)
 cxx_test(bloom_family_test dfly_test_lib LABELS DFLY)
 cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)

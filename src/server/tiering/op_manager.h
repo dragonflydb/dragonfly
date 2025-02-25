@@ -66,8 +66,8 @@ class OpManager {
   // Delete offloaded entry located at the segment.
   void DeleteOffloaded(DiskSegment segment);
 
-  // Stash (value, footer) to be offloaded. Both arguments are opaque to OpManager.
-  std::error_code Stash(EntryId id, std::string_view value, io::Bytes footer);
+  // Stash value to be offloaded. It is opaque to OpManager.
+  std::error_code Stash(EntryId id, std::string_view value);
 
   Stats GetStats() const;
 

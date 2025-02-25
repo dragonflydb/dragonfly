@@ -88,7 +88,7 @@ bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* r
                    << ", expecting " << shard->journal()->GetLsn();
       return false;
     }
-    if (replica->cntx.IsCancelled()) {
+    if (!replica->cntx.IsRunning()) {
       return false;
     }
     VLOG(1) << "Replica lsn:" << flow->last_acked_lsn

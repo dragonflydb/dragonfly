@@ -2980,3 +2980,51 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
     await c_nodes[0].execute_command("SPUBLISH kostas new_message")
     message = consumer.get_sharded_message(target_node=node_a)
     assert message == {"type": "unsubscribe", "pattern": None, "channel": b"kostas", "data": 0}
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory):
+    instances = [df_factory.create(port=next(next_port)) for i in range(2)]
+    df_factory.start_all(instances)
+
+    c_nodes = [instance.client() for instance in instances]
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    # Setup producer and consumer
+    node_a = ClusterNode("localhost", instances[0].port)
+    node_b = ClusterNode("localhost", instances[1].port)
+
+    consumer_client = RedisCluster(startup_nodes=[node_a, node_b])
+    consumer = consumer_client.pubsub()
+    consumer.ssubscribe("kostas")
+
+    # Push new config
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED")
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    # channel name kostas crc is at slot 2883 which is part of the second now.
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await c_nodes[0].execute_command("SSUBSCRIBE kostas")
+
+    assert str(moved_error.value) == f"MOVED 2833 127.0.0.1:{instances[1].port}"
+
+    # Consume subscription message result from above
+    message = consumer.get_sharded_message(target_node=node_a)
+    assert message == {"type": "subscribe", "pattern": None, "channel": b"kostas", "data": 1}
+    message = consumer.get_sharded_message(target_node=node_a)
+    assert message == {"type": "unsubscribe", "pattern": None, "channel": b"kostas", "data": 0}

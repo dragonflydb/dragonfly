@@ -15,6 +15,7 @@
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/channel_store.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/dflycmd.h"
@@ -506,6 +507,10 @@ void DeleteSlots(const SlotRanges& slots_ranges) {
     namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
   };
   shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+
+  auto* channel_store = ServerState::tlocal()->channel_store();
+  auto deleted = SlotSet(slots_ranges);
+  channel_store->UnsubscribeAfterClusterSlotMigration(deleted);
 }
 
 void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {

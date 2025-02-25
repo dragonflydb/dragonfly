@@ -212,6 +212,7 @@ OpResult<DbSlice::AddOrFindResult> RdbRestoreValue::Add(string_view key, string_
     if (pending_read_.remaining > 0) {
       config.streamed = true;
     }
+    config.reserve = pending_read_.reserve;
 
     if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
       // we failed - report and exit
@@ -575,17 +576,15 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
   return add_res.status();
 }
 
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, string* scratch,
-            StringVec* res) {
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
   auto& db_slice = op_args.GetDbSlice();
 
   DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
   if (prime_it->second.HasExpire()) {
     it = db_slice.ExpireIfNeeded(op_args.db_cntx, it).it;
+    if (!IsValid(it))
+      return false;
   }
-
-  if (!IsValid(it))
-    return false;
 
   bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
 
@@ -596,11 +595,10 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
     return false;
   }
 
-  it->first.GetString(scratch);
-  if (!opts.Matches(*scratch)) {
+  if (!opts.Matches(it.key())) {
     return false;
   }
-  res->push_back(*scratch);
+  res->push_back(string(it.key()));
 
   return true;
 }
@@ -613,9 +611,6 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // we enter the callback in a timing when journaling will not cause preemptions. Otherwise,
   // the bucket might change as we Traverse and yield.
   db_slice.BlockingCounter()->Wait();
-  // Disable flush journal changes to prevent preemtion in traverse.
-  journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
-  util::FiberAtomicGuard guard;
   unsigned cnt = 0;
 
   VLOG(1) << "PrimeTable " << db_slice.shard_id() << "/" << op_args.db_cntx.db_index << " has "
@@ -623,10 +618,22 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
 
   PrimeTable::Cursor cur = *cursor;
   auto [prime_table, expire_table] = db_slice.GetTables(op_args.db_cntx.db_index);
-  string scratch;
+
+  size_t buckets_iterated = 0;
+  // 10k Traverses
+  const size_t limit = 10000;
   do {
-    cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, &scratch, vec); });
+    if (buckets_iterated >= limit) {
+      buckets_iterated = 0;
+      util::ThisFiber::Yield();
+    }
+    {
+      // Disable flush journal changes to prevent preemtion in traverse.
+      journal::JournalFlushGuard journal_flush_guard(op_args.shard->journal());
+      cur = prime_table->Traverse(
+          cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
+    }
+    ++buckets_iterated;
   } while (cur && cnt < scan_opts.limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
@@ -1511,7 +1518,7 @@ void GenericFamily::Restore(CmdArgList args, const CommandContext& cmd_cntx) {
     case OpStatus::OK:
       return builder->SendOk();
     case OpStatus::KEY_EXISTS:
-      return builder->SendError("BUSYKEY Target key name already exists.");
+      return builder->SendError("-BUSYKEY Target key name already exists.");
     case OpStatus::INVALID_VALUE:
       return builder->SendError("Bad data format");
     default:

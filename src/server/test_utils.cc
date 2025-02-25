@@ -569,7 +569,7 @@ RespVec BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   auto s_copy = s;
 
   uint32_t consumed = 0;
-  parser_.reset(new RedisParser{UINT32_MAX, false});  // Client mode.
+  parser_.reset(new RedisParser{RedisParser::Mode::CLIENT});  // Client mode.
   RespVec res;
   RedisParser::Result st = parser_->Parse(buf, &consumed, &res);
 
