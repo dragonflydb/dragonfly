@@ -331,6 +331,7 @@ class RdbLoader : protected RdbLoaderBase {
 
   DbIndex cur_db_index_ = 0;
   bool pause_ = false;
+  bool is_tiered_enabled_ = false;
   AggregateError ec_;
 
   // We use atomics here because shard threads can notify RdbLoader fiber from another thread
