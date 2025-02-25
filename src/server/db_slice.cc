@@ -1311,7 +1311,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
   std::string stash;
 
   auto cb = [&](ExpireIterator it) {
-    auto key = it->first.GetSlice(&stash);
+    string_view key = it->first.GetSlice(&stash);
     if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key))
       return;
 
@@ -1319,9 +1319,16 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     time_t ttl = ExpireTime(it) - cntx.time_now_ms;
     if (ttl <= 0) {
       auto prime_it = db.prime.Find(it->first);
-      CHECK(!prime_it.is_done());
-      result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
-      ExpireIfNeeded(cntx, prime_it);
+      if (prime_it.is_done()) {  // A workaround for the case our tables are inconsistent.
+        LOG(DFATAL) << "Expired key " << key << " not found in prime table, expire_done: "
+                   << it.is_done();
+        if (!it.is_done()) {
+          db.expire.Erase(it->first);
+        }
+      } else {
+        result.deleted_bytes += prime_it->first.MallocUsed() + prime_it->second.MallocUsed();
+        ExpireIfNeeded(cntx, prime_it);
+      }
       ++result.deleted;
     } else {
       result.survivor_ttl_sum += ttl;
