@@ -2835,22 +2835,25 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // However, it could be the case that Start() above connected succefully and by the time
   // we acquire the lock, the context got cancelled because another ReplicaOf command
   // executed and acquired the replicaof_mu_ before us.
-  if (ec || new_replica->IsContextCancelled()) {
+  const bool cancelled = new_replica->IsContextCancelled();
+  if (ec || cancelled) {
     if (replica_ == new_replica) {
       service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
       SetMasterFlagOnAllThreads(true);
       replica_.reset();
+    }
+    // SendError if we got cancelled and Start() above succeeded. Otherwise, if ec,
+    // Start() will call SendError().
+    if (!ec) {
+      builder->SendError("replication cancelled");
     }
     return;
   }
   // Successfully connected now we flush
   // If we are called by "Replicate", tx will be null but we do not need
   // to flush anything.
-  if (tx) {
-    Drakarys(tx, DbSlice::kDbAll);
-  }
-
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
+    Drakarys(tx, DbSlice::kDbAll);
     new_replica->StartMainReplicationFiber(builder);
   }
 }
