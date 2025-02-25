@@ -313,7 +313,7 @@ void SliceSnapshot::SerializeEntry(DbIndex db_indx, const PrimeKey& pk, const Pr
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_indx, pk) : 0;
 
   if (pv.IsExternal()) {
-    // TODO: we loose the stickiness attribute bly cloning like this PrimeKey.
+    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
     SerializeExternal(db_indx, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
   } else {
     io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire_time, mc_flags, db_indx);
