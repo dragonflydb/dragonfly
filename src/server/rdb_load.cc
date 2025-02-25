@@ -2691,6 +2691,9 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     } else {
       // Avoid copying the key if this is the last read of the object.
       item->key = std::move(key);
+      if (rand() % 10 < 2) {
+        continue;
+      }
     }
 
     item->load_config.streamed = streamed;
