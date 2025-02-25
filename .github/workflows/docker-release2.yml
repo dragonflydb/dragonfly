@@ -158,3 +158,71 @@ jobs:
             tag=${{ env.IMAGE }}:${{ env.TAG_NAME }}
             docker manifest create ${tag} --amend ${sha_amd} --amend ${sha_arm}
             docker manifest push ${tag}
+  release_helm_and_notify:
+    needs: [merge_manifest]
+    runs-on: ubuntu-latest
+    steps:
+    - name: print_env
+      run: env
+
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install helm
+      uses: azure/setup-helm@v4
+
+    - name: Setup Go
+      uses: actions/setup-go@v5
+
+    - name: Configure Git
+      if: env.IS_PRERELEASE != 'true'
+      run: |
+        git config user.name "$GITHUB_ACTOR"
+        git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+
+    - name: Update helm chart
+      if: env.IS_PRERELEASE != 'true'
+      run: |
+        git checkout main
+        sed -Ei \
+            -e 's/^(version\:) .*/\1 '${{ env.TAG_NAME }}'/g' \
+            -e 's/^(appVersion\:) .*/\1 "'${{ env.TAG_NAME }}'"/g' \
+            contrib/charts/dragonfly/Chart.yaml
+
+        go test ./contrib/charts/dragonfly/... -update
+
+        git commit \
+          -m 'chore(helm-chart): update to ${{ env.TAG_NAME }}' \
+          contrib/charts/dragonfly/Chart.yaml \
+          contrib/charts/dragonfly/ci || true
+
+    - name: Push Helm chart as OCI to Github
+      if: env.IS_PRERELEASE != 'true'
+      run: |
+        echo "${{ secrets.GITHUB_TOKEN }}" | \
+          helm registry login -u ${{ github.actor }} --password-stdin ghcr.io
+
+        helm package contrib/charts/dragonfly
+
+        helm push dragonfly-${{ env.TAG_NAME }}.tgz oci://ghcr.io/${{ github.repository }}/helm
+
+    - name: GitHub Push
+      uses: CasperWA/push-protected@v2
+      if: env.IS_PRERELEASE != 'true'
+      with:
+        token: ${{ secrets.DRAGONFLY_TOKEN }}
+        branch: main
+
+    - name: Discord notification
+      env:
+        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+      uses: Ilshidur/action-discord@0c4b27844ba47cb1c7bee539c8eead5284ce9fa9
+      with:
+        args: 'DragonflyDB version [${{ env.TAG_NAME }}](https://github.com/dragonflydb/dragonfly/releases/tag/${{ env.TAG_NAME }}) has been released 🎉'
+
+    - name: Re-build Docs
+      if: env.IS_PRERELEASE != 'true'
+      run: |
+        curl -s -X POST '${{ secrets.VERCEL_DOCS_WEBHOOK }}'
