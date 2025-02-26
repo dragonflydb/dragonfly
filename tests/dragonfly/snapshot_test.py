@@ -296,11 +296,8 @@ async def test_path_escapes(df_factory):
     fails because we don't have a much better way to test that."""
 
     df_server = df_factory.create(dbfilename="../../../../etc/passwd")
-    try:
+    with pytest.raises(Exception):
         df_server.start()
-        assert False, "Server should not start correctly"
-    except Exception as e:
-        pass
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-info-persistence"})

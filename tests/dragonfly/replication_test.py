@@ -1176,11 +1176,10 @@ async def test_readonly_script(df_factory):
 
     await c_replica.eval(READONLY_SCRIPT, 3, "A", "B", "WORKS") == "YES"
 
-    try:
+    with pytest.raises(aioredis.ResponseError) as roe:
         await c_replica.eval(WRITE_SCRIPT, 1, "A")
-        assert False
-    except aioredis.ResponseError as roe:
-        assert "READONLY " in str(roe)
+
+    assert "READONLY " in str(roe)
 
 
 take_over_cases = [
