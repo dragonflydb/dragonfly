@@ -2750,10 +2750,11 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
   GenericError ec = add_replica->Start();
   if (ec) {
     cmd_cntx.rb->SendError(ec.Format());
+    return;
   }
   add_replica->StartMainReplicationFiber();
-  cmd_cntx.rb->SendOk();
   cluster_replicas_.push_back(std::move(add_replica));
+  cmd_cntx.rb->SendOk();
 }
 
 void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
