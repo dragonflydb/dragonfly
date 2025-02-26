@@ -3022,11 +3022,5 @@ async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
     await push_config(json.dumps(generate_config(nodes_info)), [c_nodes[0]])
 
     await wait_for_errors_num(c_nodes[0], 1)
-
-    nodes_info[0].migrations.append(
-        MigrationInfo(
-            "127.0.0.1", nodes_info[2].instance.admin_port, [(101, 200)], nodes_info[2].id
-        )
-    )
-
+    # the migration process attempt to start migration in a second so we get more errors
     await wait_for_errors_num(c_nodes[0], 2)
