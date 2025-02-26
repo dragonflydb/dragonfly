@@ -1153,15 +1153,12 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
 
   // Don't interrupt running multi commands or admin connections.
   if (etl.IsPaused() && !dispatching_in_multi && cntx->conn() && !cntx->conn()->IsPrivileged()) {
-    bool has_sub = args.size() == 2;
-    if (cid->name() != "CLIENT" || !has_sub || absl::AsciiStrToUpper(args[1]) != "UNPAUSE") {
-      bool is_write = cid->IsWriteOnly();
-      is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
-      is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
-      cntx->paused = true;
-      etl.AwaitPauseState(is_write);
-      cntx->paused = false;
-    }
+    bool is_write = cid->IsWriteOnly();
+    is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
+    is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+    cntx->paused = true;
+    etl.AwaitPauseState(is_write);
+    cntx->paused = false;
   }
 
   if (auto err = VerifyCommandState(cid, args_no_cmd, *dfly_cntx); err) {
