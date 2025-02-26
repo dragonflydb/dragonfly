@@ -240,6 +240,15 @@ static void BM_MatchGlob2(benchmark::State& state) {
 }
 BENCHMARK(BM_MatchGlob2)->Arg(32)->Arg(1000)->Arg(10000);
 
+// See https://nvd.nist.gov/vuln/detail/cve-2022-36021
+static void BM_MatchGlobExp(benchmark::State& state) {
+  GlobMatcher matcher("a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b", true);
+  while (state.KeepRunning()) {
+    DoNotOptimize(matcher.Matches("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+  }
+}
+BENCHMARK(BM_MatchGlobExp);
+
 static void BM_MatchFindSubstr(benchmark::State& state) {
   string random_val = GetRandomHex(state.range(0));
 
@@ -314,29 +323,67 @@ BENCHMARK(BM_MatchRe2)->Arg(1000)->Arg(10000);
 #endif
 
 #ifdef USE_PCRE2
-static void BM_MatchPcre2Jit(benchmark::State& state) {
-  string random_val = GetRandomHex(state.range(0));
+
+pair<pcre2_code*, pcre2_match_data*> create_pcre2(const char* pattern) {
   int errnum;
   PCRE2_SIZE erroffset;
-  pcre2_code* re = pcre2_compile((PCRE2_SPTR) ".*foobar", PCRE2_ZERO_TERMINATED, 0, &errnum,
-                                 &erroffset, nullptr);
+  pcre2_code* re =
+      pcre2_compile((PCRE2_SPTR)pattern, PCRE2_ZERO_TERMINATED, 0, &errnum, &erroffset, nullptr);
   CHECK(re);
   CHECK_EQ(0, pcre2_jit_compile(re, PCRE2_JIT_COMPLETE));
+
   pcre2_match_data* match_data = pcre2_match_data_create_from_pattern(re, NULL);
-  const char sample[] = "aaaaaaaaaaaaafoobar";
-  int rc = pcre2_jit_match(re, (PCRE2_SPTR)sample, strlen(sample), 0,
+  return {re, match_data};
+}
+
+int pcre2_do_match(string_view str, pcre2_code* re, pcre2_match_data* match_data) {
+  int rc = pcre2_jit_match(re, (PCRE2_SPTR)str.data(), str.size(), 0,
                            PCRE2_ANCHORED | PCRE2_ENDANCHORED, match_data, NULL);
+  return rc;
+}
+
+static void BM_MatchPcre2Jit(benchmark::State& state) {
+  string random_val = GetRandomHex(state.range(0));
+  auto [re, match_data] = create_pcre2(".*foobar.*");
+  const char sample[] = "aaaaaaaaaaaaafoobar";
+  int rc = pcre2_do_match(sample, re, match_data);
   CHECK_EQ(1, rc);
 
   while (state.KeepRunning()) {
-    rc = pcre2_jit_match(re, (PCRE2_SPTR)random_val.c_str(), random_val.size(), 0,
-                         PCRE2_ANCHORED | PCRE2_ENDANCHORED, match_data, NULL);
+    rc = pcre2_do_match(random_val, re, match_data);
     CHECK_EQ(PCRE2_ERROR_NOMATCH, rc);
   }
   pcre2_match_data_free(match_data);
   pcre2_code_free(re);
 }
-BENCHMARK(BM_MatchPcre2Jit)->Arg(1000)->Arg(10000);
+BENCHMARK(BM_MatchPcre2Jit)->Arg(32)->Arg(1000)->Arg(10000);
+
+static void BM_MatchPcre2Jit2(benchmark::State& state) {
+  string random_val = GetRandomHex(state.range(0));
+  auto [re, match_data] = create_pcre2("foo.*bar");
+
+  while (state.KeepRunning()) {
+    int rc = pcre2_do_match(random_val, re, match_data);
+    CHECK_EQ(PCRE2_ERROR_NOMATCH, rc);
+  }
+  pcre2_match_data_free(match_data);
+  pcre2_code_free(re);
+}
+BENCHMARK(BM_MatchPcre2Jit2)->Arg(32)->Arg(1000)->Arg(10000);
+
+static void BM_MatchPcre2JitExp(benchmark::State& state) {
+  string exponent_pattern = "a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*a*b";
+  string str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  auto [re, match_data] = create_pcre2(exponent_pattern.c_str());
+  while (state.KeepRunning()) {
+    int rc = pcre2_do_match(str, re, match_data);
+    CHECK_EQ(PCRE2_ERROR_NOMATCH, rc);
+  }
+  pcre2_match_data_free(match_data);
+  pcre2_code_free(re);
+}
+BENCHMARK(BM_MatchPcre2JitExp);
+
 #endif
 
 }  // namespace dfly

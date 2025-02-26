@@ -6,11 +6,10 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+
+#include "core/top_keys.h"
 #include "server/cluster_support.h"
 #include "server/server_state.h"
-
-ABSL_FLAG(bool, enable_top_keys_tracking, false,
-          "Enables / disables tracking of hot keys debugging feature");
 
 using namespace std;
 namespace dfly {
@@ -32,12 +31,10 @@ void DbTableStats::AddTypeMemoryUsage(unsigned type, int64_t delta) {
 
 DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
   constexpr size_t kDbSz = sizeof(DbTableStats) - sizeof(memory_usage_by_type);
-  static_assert(kDbSz == 48);
+  static_assert(kDbSz == 32);
 
   ADD(inline_keys);
   ADD(obj_memory_usage);
-  ADD(listpack_blob_cnt);
-  ADD(listpack_bytes);
   ADD(tiered_entries);
   ADD(tiered_used_bytes);
 
@@ -80,11 +77,12 @@ void LockTable::Release(uint64_t fp, IntentLock::Mode mode) {
     locks_.erase(it);
 }
 
+[[maybe_unused]] constexpr size_t kSzTable = sizeof(DbTable);
+
 DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       expire(0, detail::ExpireTablePolicy{}, mr),
       mcflag(0, detail::ExpireTablePolicy{}, mr),
-      top_keys({.enabled = absl::GetFlag(FLAGS_enable_top_keys_tracking)}),
       index(db_index) {
   if (IsClusterEnabled()) {
     slots_stats.resize(kMaxSlotNum + 1);
@@ -94,6 +92,8 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
 
 DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
+  delete top_keys;
+  delete[] dense_hll;
 }
 
 void DbTable::Clear() {

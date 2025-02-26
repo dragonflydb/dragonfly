@@ -46,6 +46,8 @@ class RobjWrapper {
   void Free(MemoryResource* mr);
 
   void SetString(std::string_view s, MemoryResource* mr);
+  void ReserveString(size_t size, MemoryResource* mr);
+  void AppendString(std::string_view s, MemoryResource* mr);
   // Used when sz_ is used to denote memory usage
   void SetSize(uint64_t size);
   void Init(unsigned type, unsigned encoding, void* inner);
@@ -321,6 +323,9 @@ class CompactObj {
   void SetString(std::string_view str);
   void GetString(std::string* res) const;
 
+  void ReserveString(size_t size);
+  void AppendString(std::string_view str);
+
   // Will set this to hold OBJ_JSON, after that it is safe to call GetJson
   // NOTE: in order to avid copy which can be expensive in this case,
   // you need to move an object that created with the function JsonFromString
@@ -350,12 +355,16 @@ class CompactObj {
     return taglen_ == EXTERNAL_TAG;
   }
 
+  // returns true if the value is stored in the cooling storage. Cooling storage has an item both
+  // on disk and in memory.
   bool IsCool() const {
     assert(IsExternal());
     return u_.ext_ptr.is_cool;
   }
 
   void SetExternal(size_t offset, uint32_t sz);
+
+  // Assigns a cooling record to the object together with its external slice.
   void SetCool(size_t offset, uint32_t serialized_size, detail::TieredColdRecord* record);
 
   struct CoolItem {
@@ -363,6 +372,9 @@ class CompactObj {
     size_t serialized_size;
     detail::TieredColdRecord* record;
   };
+
+  // Prerequisite: IsCool() is true.
+  // Returns the external data of the object incuding its ColdRecord.
   CoolItem GetCool() const;
 
   void ImportExternal(const CompactObj& src);

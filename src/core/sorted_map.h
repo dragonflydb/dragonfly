@@ -52,8 +52,12 @@ class SortedMap {
   };
 
   bool Reserve(size_t sz);
-  int Add(double score, sds ele, int in_flags, int* out_flags, double* newscore);
-  bool Insert(double score, sds member);
+  int AddElem(double score, std::string_view ele, int in_flags, int* out_flags, double* newscore);
+
+  // Inserts a new element. Returns false if the element already exists.
+  // No score update is performed in this case.
+  bool InsertNew(double score, std::string_view member);
+
   bool Delete(sds ele);
 
   // Upper bound size of the set.
@@ -72,8 +76,8 @@ class SortedMap {
   ScoredArray PopTopScores(unsigned count, bool reverse);
 
   std::optional<double> GetScore(sds ele) const;
-  std::optional<unsigned> GetRank(sds ele, bool reverse) const;
-  std::optional<RankAndScore> GetRankAndScore(sds ele, bool reverse) const;
+  std::optional<unsigned> GetRank(std::string_view ele, bool reverse) const;
+  std::optional<RankAndScore> GetRankAndScore(std::string_view ele, bool reverse) const;
   ScoredArray GetRange(const zrangespec& r, unsigned offs, unsigned len, bool rev) const;
   ScoredArray GetLexRange(const zlexrangespec& r, unsigned o, unsigned l, bool rev) const;
 

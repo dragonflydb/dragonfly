@@ -30,7 +30,7 @@ TEST_F(SmallBinsTest, SimpleStashRead) {
   // Fill single bin
   std::optional<SmallBins::FilledBin> bin;
   for (unsigned i = 0; !bin; i++)
-    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), {});
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
 
   // Verify cut locations point to correct values
   auto segments = bins_.ReportStashed(bin->first, DiskSegment{0, 4_KB});
@@ -47,7 +47,7 @@ TEST_F(SmallBinsTest, SimpleDeleteAbort) {
   std::optional<SmallBins::FilledBin> bin;
   unsigned i = 0;
   for (; !bin; i++)
-    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), {});
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
 
   // Delete all even values
   for (unsigned j = 0; j <= i; j += 2)
@@ -69,7 +69,7 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
   std::optional<SmallBins::FilledBin> bin;
   unsigned i = 0;
   for (; !bin; i++)
-    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i), {});
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
 
   // Delete all even values
   for (unsigned j = 0; j <= i; j += 2)
@@ -103,7 +103,7 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
 TEST_F(SmallBinsTest, UpdateStatsAfterDelete) {
   // caused https://github.com/dragonflydb/dragonfly/issues/3240
   for (unsigned i = 0; i < 10; i++) {
-    auto spilled_bin = bins_.Stash(0, absl::StrCat("k", i), SmallString(128), {});
+    auto spilled_bin = bins_.Stash(0, absl::StrCat("k", i), SmallString(128));
     ASSERT_FALSE(spilled_bin);
   }
 

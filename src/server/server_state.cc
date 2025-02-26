@@ -16,6 +16,7 @@ extern "C" {
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_connection.h"
+#include "server/channel_store.h"
 #include "server/journal/journal.h"
 #include "util/listener_interface.h"
 
@@ -261,8 +262,8 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
         is_replica = dfly_conn->cntx()->replica_conn;
       }
 
-      if ((phase == Phase::READ_SOCKET || dfly_conn->IsSending()) &&
-          !is_replica && dfly_conn->idle_time() > timeout) {
+      if ((phase == Phase::READ_SOCKET || dfly_conn->IsSending()) && !is_replica &&
+          dfly_conn->idle_time() > timeout) {
         conn_refs.push_back(dfly_conn->Borrow());
       }
     };
@@ -283,6 +284,12 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       }
     }
   }
+}
+
+void ServerState::UnsubscribeSlotsAndUpdateChannelStore(const ChannelStore::ChannelsSubMap& sub_map,
+                                                        ChannelStore* replacement) {
+  channel_store_->UnsubscribeConnectionsFromDeletedSlots(sub_map, thread_index_);
+  channel_store_ = replacement;
 }
 
 }  // end of namespace dfly

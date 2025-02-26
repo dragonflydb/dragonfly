@@ -230,7 +230,7 @@ RdbSerializer::~RdbSerializer() {
   VLOG(2) << "compression mode: " << uint32_t(compression_mode_);
   if (compression_stats_) {
     VLOG(2) << "compression not effective: " << compression_stats_->compression_no_effective;
-    VLOG(2) << "small string none compression applied: " << compression_stats_->small_str_count;
+    VLOG(2) << "string compression skipped: " << compression_stats_->size_skip_count;
     VLOG(2) << "compression failed: " << compression_stats_->compression_failed;
     VLOG(2) << "compressed blobs:" << compression_stats_->compressed_blobs;
   }
@@ -467,15 +467,13 @@ error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
     RETURN_ON_ERR(SaveLen(zs->Size()));
     std::error_code ec;
 
-    /* We save the skiplist elements from the greatest to the smallest
-     * (that's trivial since the elements are already ordered in the
-     * skiplist): this improves the load process, since the next loaded
-     * element will always be the smaller, so adding to the skiplist
-     * will always immediately stop at the head, making the insertion
-     * O(1) instead of O(log(N)). */
     const size_t total = zs->Size();
     size_t count = 0;
-    zs->Iterate(0, total, true, [&](sds ele, double score) mutable {
+
+    // Iterate over the sorted map and save the key and score.
+    // The order is important (from smallest to biggest) - so that the loader
+    // will load the entries faster.
+    zs->Iterate(0, total, false, [&](sds ele, double score) mutable {
       ec = SaveString(string_view{ele, sdslen(ele)});
       if (ec)
         return false;
@@ -1572,8 +1570,9 @@ void SerializerBase::CompressBlob() {
   Bytes blob_to_compress = mem_buf_.InputBuffer();
   VLOG(2) << "CompressBlob size " << blob_to_compress.size();
   size_t blob_size = blob_to_compress.size();
-  if (blob_size < kMinStrSizeToCompress) {
-    ++compression_stats_->small_str_count;
+
+  if (blob_size < kMinStrSizeToCompress || blob_size > kMaxStrSizeToCompress) {
+    ++compression_stats_->size_skip_count;
     return;
   }
 

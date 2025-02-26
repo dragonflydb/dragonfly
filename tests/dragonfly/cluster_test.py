@@ -670,11 +670,10 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     assert (await c_nodes[0].get("KEY0")) == "value"
 
     # Make sure that "KEY1" is not owned by node1
-    try:
+    with pytest.raises(redis.exceptions.ResponseError) as e:
         await c_nodes[1].set("KEY1", "value")
-        assert False, "Should not be able to set key on non-owner cluster node"
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == f"MOVED 5259 localhost:{nodes[0].port}"
+
+    assert e.value.args[0] == f"MOVED 5259 localhost:{nodes[0].port}"
 
     # And that node1 only has 1 key ("KEY2")
     assert await c_nodes[1].execute_command("DBSIZE") == 1
@@ -694,11 +693,10 @@ async def test_cluster_slot_ownership_changes(df_factory: DflyInstanceFactory):
     assert await c_nodes[1].execute_command("DBSIZE") == 1
 
     # Now node0 should reply with MOVED for "KEY1"
-    try:
+    with pytest.raises(redis.exceptions.ResponseError) as e:
         await c_nodes[0].set("KEY1", "value")
-        assert False, "Should not be able to set key on non-owner cluster node"
-    except redis.exceptions.ResponseError as e:
-        assert e.args[0] == f"MOVED 5259 localhost:{nodes[1].port}"
+
+    assert e.value.args[0] == f"MOVED 5259 localhost:{nodes[1].port}"
 
     # And node1 should own it and allow using it
     assert await c_nodes[1].set("KEY1", "value")
@@ -826,11 +824,11 @@ async def test_cluster_replica_sets_non_owned_keys(df_factory: DflyInstanceFacto
         assert await c_replica.execute_command("dbsize") == 2
 
         # The replica should still reply with MOVED, despite having that key.
-        try:
+        with pytest.raises(redis.exceptions.ResponseError) as e:
             await c_replica.get("key2")
             assert False, "Should not be able to get key on non-owner cluster node"
-        except redis.exceptions.ResponseError as e:
-            assert re.match(r"MOVED \d+ localhost:1111", e.args[0])
+
+        assert re.match(r"MOVED \d+ localhost:1111", e.value.args[0])
 
         await push_config(replica_config, [c_master_admin])
         await asyncio.sleep(0.5)
@@ -3024,3 +3022,51 @@ async def test_cluster_migration_errors_num(df_factory: DflyInstanceFactory):
     await wait_for_errors_num(c_nodes[0], 1)
     # the migration process attempt to start migration in a second so we get more errors
     await wait_for_errors_num(c_nodes[0], 2)
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
+async def test_cluster_sharded_pub_sub_migration(df_factory: DflyInstanceFactory):
+    instances = [df_factory.create(port=next(next_port)) for i in range(2)]
+    df_factory.start_all(instances)
+
+    c_nodes = [instance.client() for instance in instances]
+
+    nodes = [(await create_node_info(instance)) for instance in instances]
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    # Setup producer and consumer
+    node_a = ClusterNode("localhost", instances[0].port)
+    node_b = ClusterNode("localhost", instances[1].port)
+
+    consumer_client = RedisCluster(startup_nodes=[node_a, node_b])
+    consumer = consumer_client.pubsub()
+    consumer.ssubscribe("kostas")
+
+    # Push new config
+    nodes[0].migrations.append(
+        MigrationInfo("127.0.0.1", nodes[1].instance.port, [(0, 16383)], nodes[1].id)
+    )
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    await wait_for_status(nodes[0].client, nodes[1].id, "FINISHED")
+
+    nodes[0].migrations = []
+    nodes[0].slots = []
+    nodes[1].slots = [(0, 16383)]
+    logging.debug("remove finished migrations")
+    await push_config(json.dumps(generate_config(nodes)), [node.client for node in nodes])
+
+    # channel name kostas crc is at slot 2883 which is part of the second now.
+    with pytest.raises(redis.exceptions.ResponseError) as moved_error:
+        await c_nodes[0].execute_command("SSUBSCRIBE kostas")
+
+    assert str(moved_error.value) == f"MOVED 2833 127.0.0.1:{instances[1].port}"
+
+    # Consume subscription message result from above
+    message = consumer.get_sharded_message(target_node=node_a)
+    assert message == {"type": "subscribe", "pattern": None, "channel": b"kostas", "data": 1}
+    message = consumer.get_sharded_message(target_node=node_a)
+    assert message == {"type": "unsubscribe", "pattern": None, "channel": b"kostas", "data": 0}

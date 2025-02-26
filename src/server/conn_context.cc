@@ -223,6 +223,18 @@ size_t ConnectionContext::UsedMemory() const {
   return facade::ConnectionContext::UsedMemory() + dfly::HeapSize(conn_state);
 }
 
+void ConnectionContext::Unsubscribe(std::string_view channel) {
+  auto* sinfo = conn_state.subscribe_info.get();
+  DCHECK(sinfo);
+  auto erased = sinfo->channels.erase(channel);
+  DCHECK(erased);
+  if (sinfo->IsEmpty()) {
+    conn_state.subscribe_info.reset();
+    DCHECK_GE(subscriptions, 1u);
+    --subscriptions;
+  }
+}
+
 vector<unsigned> ConnectionContext::ChangeSubscriptions(CmdArgList channels, bool pattern,
                                                         bool to_add, bool to_reply) {
   vector<unsigned> result(to_reply ? channels.size() : 0, 0);

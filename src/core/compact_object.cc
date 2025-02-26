@@ -556,6 +556,20 @@ void RobjWrapper::SetString(string_view s, MemoryResource* mr) {
   }
 }
 
+void RobjWrapper::ReserveString(size_t size, MemoryResource* mr) {
+  CHECK_EQ(inner_obj_, nullptr);
+  type_ = OBJ_STRING;
+  encoding_ = OBJ_ENCODING_RAW;
+  MakeInnerRoom(0, size, mr);
+}
+
+void RobjWrapper::AppendString(string_view s, MemoryResource* mr) {
+  size_t cur_cap = InnerObjMallocUsed();
+  CHECK(cur_cap >= sz_ + s.size()) << cur_cap << " " << sz_ << " " << s.size();
+  memcpy(reinterpret_cast<uint8_t*>(inner_obj_) + sz_, s.data(), s.size());
+  sz_ += s.size();
+}
+
 void RobjWrapper::SetSize(uint64_t size) {
   sz_ = size;
 }
@@ -583,13 +597,6 @@ bool RobjWrapper::DefragIfNeeded(float ratio) {
 }
 
 int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, double* newscore) {
-  // copied from zsetAdd for listpack only.
-  /* Turn options into simple to check vars. */
-  bool incr = (in_flags & ZADD_IN_INCR) != 0;
-  bool nx = (in_flags & ZADD_IN_NX) != 0;
-  bool xx = (in_flags & ZADD_IN_XX) != 0;
-  bool gt = (in_flags & ZADD_IN_GT) != 0;
-  bool lt = (in_flags & ZADD_IN_LT) != 0;
   *out_flags = 0; /* We'll return our response flags. */
   double curscore;
 
@@ -601,6 +608,13 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
 
   /* Update the sorted set according to its encoding. */
   if (encoding_ == OBJ_ENCODING_LISTPACK) {
+    /* Turn options into simple to check vars. */
+    bool incr = (in_flags & ZADD_IN_INCR) != 0;
+    bool nx = (in_flags & ZADD_IN_NX) != 0;
+    bool xx = (in_flags & ZADD_IN_XX) != 0;
+    bool gt = (in_flags & ZADD_IN_GT) != 0;
+    bool lt = (in_flags & ZADD_IN_LT) != 0;
+
     unsigned char* eptr;
     uint8_t* lp = (uint8_t*)inner_obj_;
 
@@ -664,7 +678,8 @@ int RobjWrapper::ZsetAdd(double score, sds ele, int in_flags, int* out_flags, do
 
   CHECK_EQ(encoding_, OBJ_ENCODING_SKIPLIST);
   SortedMap* ss = (SortedMap*)inner_obj_;
-  return ss->Add(score, ele, in_flags, out_flags, newscore);
+  string_view elem(ele, sdslen(ele));
+  return ss->AddElem(score, elem, in_flags, out_flags, newscore);
 }
 
 void RobjWrapper::ReallocateString(MemoryResource* mr) {
@@ -974,6 +989,16 @@ void CompactObj::SetString(std::string_view str) {
   }
 
   EncodeString(str);
+}
+
+void CompactObj::ReserveString(size_t size) {
+  uint8_t mask = mask_ & ~kEncMask;
+  SetMeta(ROBJ_TAG, mask);
+  u_.r_obj.ReserveString(size, tl.local_mr);
+}
+
+void CompactObj::AppendString(std::string_view str) {
+  u_.r_obj.AppendString(str, tl.local_mr);
 }
 
 string_view CompactObj::GetSlice(string* scratch) const {

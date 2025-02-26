@@ -12,6 +12,7 @@
 #include "core/interpreter.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/user_registry.h"
+#include "server/channel_store.h"
 #include "server/common.h"
 #include "server/script_mgr.h"
 #include "server/slowlog.h"
@@ -259,6 +260,9 @@ class ServerState {  // public struct - to allow initialization.
   void UpdateChannelStore(ChannelStore* replacement) {
     channel_store_ = replacement;
   }
+
+  void UnsubscribeSlotsAndUpdateChannelStore(const ChannelStore::ChannelsSubMap& sub_map,
+                                             ChannelStore* replacement);
 
   bool ShouldLogSlowCmd(unsigned latency_usec) const;
 

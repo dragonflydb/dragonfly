@@ -199,10 +199,11 @@ class SerializerBase {
   std::unique_ptr<detail::CompressorImpl> compressor_impl_;
 
   static constexpr size_t kMinStrSizeToCompress = 256;
+  static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
   static constexpr double kMinCompressionReductionPrecentage = 0.95;
   struct CompressionStats {
     uint32_t compression_no_effective = 0;
-    uint32_t small_str_count = 0;
+    uint32_t size_skip_count = 0;
     uint32_t compression_failed = 0;
     uint32_t compressed_blobs = 0;
   };

@@ -57,6 +57,8 @@ ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_DECLARE_FLAG(bool, list_experimental_v2);
+ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
+
 namespace dfly {
 
 using namespace std;
@@ -221,7 +223,6 @@ class RdbLoaderBase::OpaqueObjLoader {
 
   void HandleBlob(string_view blob);
 
-  sds ToSds(const RdbVariant& obj);
   string_view ToSV(const RdbVariant& obj);
 
   // Returns whether pv_ has the given object type and encoding. If not ec_
@@ -662,20 +663,17 @@ void RdbLoaderBase::OpaqueObjLoader::CreateZSet(const LoadTrace* ltrace) {
   size_t maxelelen = 0, totelelen = 0;
 
   Iterate(*ltrace, [&](const LoadBlob& blob) {
-    sds sdsele = ToSds(blob.rdb_var);
-    if (!sdsele)
-      return false;
+    string_view sv = ToSV(blob.rdb_var);
 
     double score = blob.score;
 
     /* Don't care about integer-encoded strings. */
-    if (sdslen(sdsele) > maxelelen)
-      maxelelen = sdslen(sdsele);
-    totelelen += sdslen(sdsele);
+    if (sv.size() > maxelelen)
+      maxelelen = sv.size();
+    totelelen += sv.size();
 
-    if (!zs->Insert(score, sdsele)) {
+    if (!zs->InsertNew(score, sv)) {
       LOG(ERROR) << "Duplicate zset fields detected";
-      sdsfree(sdsele);
       ec_ = RdbError(errc::rdb_file_corrupted);
       return false;
     }
@@ -854,7 +852,14 @@ void RdbLoaderBase::OpaqueObjLoader::CreateStream(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   if (rdb_type_ == RDB_TYPE_STRING) {
-    pv_->SetString(blob);
+    if (config_.append) {
+      pv_->AppendString(blob);
+    } else if (config_.reserve) {
+      pv_->ReserveString(config_.reserve);
+      pv_->AppendString(blob);
+    } else {
+      pv_->SetString(blob);
+    }
     return;
   }
 
@@ -999,34 +1004,6 @@ void RdbLoaderBase::OpaqueObjLoader::HandleBlob(string_view blob) {
   }
 }
 
-sds RdbLoaderBase::OpaqueObjLoader::ToSds(const RdbVariant& obj) {
-  if (holds_alternative<long long>(obj)) {
-    return sdsfromlonglong(get<long long>(obj));
-  }
-
-  const base::PODArray<char>* ch_arr = get_if<base::PODArray<char>>(&obj);
-  if (ch_arr) {
-    return sdsnewlen(ch_arr->data(), ch_arr->size());
-  }
-
-  const LzfString* lzf = get_if<LzfString>(&obj);
-  if (lzf) {
-    sds res = sdsnewlen(NULL, lzf->uncompressed_len);
-    if (lzf_decompress(lzf->compressed_blob.data(), lzf->compressed_blob.size(), res,
-                       lzf->uncompressed_len) == 0) {
-      LOG(ERROR) << "Invalid LZF compressed string";
-      ec_ = RdbError(errc::rdb_file_corrupted);
-      sdsfree(res);
-
-      return nullptr;
-    }
-    return res;
-  }
-
-  LOG(FATAL) << "Unexpected variant";
-  return nullptr;
-}
-
 string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj) {
   if (holds_alternative<long long>(obj)) {
     tset_blob_.resize(32);
@@ -1080,7 +1057,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   size_t bytes_read;
 
   size_t to_copy = std::min(mem_buf_->InputLen(), size);
-  DVLOG(2) << "Copying " << to_copy << " bytes";
+  DVLOG(3) << "Copying " << to_copy << " bytes";
 
   ::memcpy(next, mem_buf_->InputBuffer().data(), to_copy);
   mem_buf_->ConsumeInput(to_copy);
@@ -1292,12 +1269,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
   io::Result<OpaqueObj> iores;
 
   switch (rdbtype) {
-    case RDB_TYPE_STRING: {
-      dest->rdb_type = RDB_TYPE_STRING;
-
-      /* Read string value */
-      return ReadStringObj(&dest->obj);
-    }
     case RDB_TYPE_SET:
     case RDB_TYPE_SET_WITH_EXPIRY:
       iores = ReadSet(rdbtype);
@@ -1308,6 +1279,9 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_HASH_ZIPLIST:
     case RDB_TYPE_HASH_LISTPACK:
     case RDB_TYPE_ZSET_LISTPACK:
+    case RDB_TYPE_ZSET_ZIPLIST:
+    case RDB_TYPE_STRING:
+    case RDB_TYPE_JSON:
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
@@ -1318,9 +1292,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_ZSET_2:
       iores = ReadZSet(rdbtype);
       break;
-    case RDB_TYPE_ZSET_ZIPLIST:
-      iores = ReadZSetZL();
-      break;
     case RDB_TYPE_LIST_QUICKLIST:
     case RDB_TYPE_LIST_QUICKLIST_2:
       iores = ReadListQuicklist(rdbtype);
@@ -1330,16 +1301,13 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_STREAM_LISTPACKS_3:
       iores = ReadStreams(rdbtype);
       break;
-    case RDB_TYPE_JSON:
-      iores = ReadJson();
-      break;
     case RDB_TYPE_SET_LISTPACK:
       // We need to deal with protocol versions 9 and older because in these
       // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
       // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
       if (rdb_version_ < 10) {
         // consider it RDB_TYPE_JSON_OLD (20)
-        iores = ReadJson();
+        iores = ReadGeneric(RDB_TYPE_JSON);
       } else {
         iores = ReadGeneric(rdbtype);
       }
@@ -1362,10 +1330,11 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
   return error_code{};
 }
 
-error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest) {
-  bool isencoded;
-  size_t len;
+static const size_t kMaxStringSize = 200_KB;
 
+error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split) {
+  bool isencoded = false;
+  size_t len;
   SET_OR_RETURN(LoadLen(&isencoded), len);
 
   if (isencoded) {
@@ -1393,10 +1362,24 @@ error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest) {
     }
   }
 
+  if (big_string_split && len > kMaxStringSize) {
+    pending_read_.remaining = len - kMaxStringSize;
+    pending_read_.reserve = len;
+    len = kMaxStringSize;
+  }
+
   auto& blob = dest->emplace<base::PODArray<char>>();
   blob.resize(len);
-  error_code ec = FetchBuf(len, blob.data());
-  return ec;
+  return FetchBuf(len, blob.data());
+}
+
+error_code RdbLoaderBase::ReadRemainingString(RdbVariant* dest) {
+  size_t read_len = std::min(pending_read_.remaining, kMaxStringSize);
+  pending_read_.remaining = pending_read_.remaining - read_len;
+
+  auto& blob = dest->emplace<base::PODArray<char>>();
+  blob.resize(read_len);
+  return FetchBuf(read_len, blob.data());
 }
 
 io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
@@ -1494,12 +1477,18 @@ auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
 }
 
 auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
+  bool is_string_type = RDB_TYPE_STRING == rdbtype;
   RdbVariant str_obj;
-  error_code ec = ReadStringObj(&str_obj);
+  error_code ec;
+  if (pending_read_.remaining) {
+    ec = ReadRemainingString(&str_obj);
+  } else {
+    ec = ReadStringObj(&str_obj, is_string_type);
+  }
   if (ec)
     return make_unexpected(ec);
 
-  if (StrLen(str_obj) == 0) {
+  if (!is_string_type && StrLen(str_obj) == 0) {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
@@ -1587,19 +1576,6 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   }
 
   return OpaqueObj{std::move(load_trace), rdbtype};
-}
-
-auto RdbLoaderBase::ReadZSetZL() -> io::Result<OpaqueObj> {
-  RdbVariant str_obj;
-  error_code ec = ReadStringObj(&str_obj);
-  if (ec)
-    return make_unexpected(ec);
-
-  if (StrLen(str_obj) == 0) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
-
-  return OpaqueObj{std::move(str_obj), RDB_TYPE_ZSET_ZIPLIST};
 }
 
 auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
@@ -1834,7 +1810,7 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
         }*/
       }
     }  // while (consumers_num)
-  }    // while (cgroup_num)
+  }  // while (cgroup_num)
 
   return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
 }
@@ -1873,15 +1849,6 @@ auto RdbLoaderBase::ReadRedisJson() -> io::Result<OpaqueObj> {
   if (!opcode || *opcode != RDB_MODULE_OPCODE_EOF) {
     return Unexpected(errc::rdb_file_corrupted);
   }
-
-  return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
-}
-
-auto RdbLoaderBase::ReadJson() -> io::Result<OpaqueObj> {
-  RdbVariant dest;
-  error_code ec = ReadStringObj(&dest);
-  if (ec)
-    return make_unexpected(ec);
 
   return OpaqueObj{std::move(dest), RDB_TYPE_JSON};
 }
@@ -2048,7 +2015,7 @@ error_code RdbLoader::Load(io::Source* src) {
     /* Read type. */
     SET_OR_RETURN(FetchType(), type);
 
-    DVLOG(2) << "Opcode type: " << type;
+    DVLOG(3) << "Opcode type: " << type;
 
     /* Handle special types. */
     if (type == RDB_OPCODE_EXPIRETIME) {
@@ -2129,7 +2096,7 @@ error_code RdbLoader::Load(io::Source* src) {
         return RdbError(errc::bad_db_index);
       }
 
-      VLOG(2) << "Select DB: " << dbid;
+      DVLOG(2) << "Select DB: " << dbid;
       for (unsigned i = 0; i < shard_set->size(); ++i) {
         // we should flush pending items before switching dbid.
         FlushShardAsync(i);
@@ -2140,6 +2107,9 @@ error_code RdbLoader::Load(io::Source* src) {
       }
 
       cur_db_index_ = dbid;
+      if (EngineShard::tlocal()) {  // because we sometimes create entries inline.
+        namespaces->GetDefaultNamespace().GetCurrentDbSlice().ActivateDb(dbid);
+      }
       continue; /* Read next opcode. */
     }
 
@@ -2201,11 +2171,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     ++keys_loaded;
-    int64_t start = absl::GetCurrentTimeNanos();
     RETURN_ON_ERR(LoadKeyValPair(type, &settings));
-    int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
-    LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
-
     settings.Reset();
   }  // main load loop
 
@@ -2518,15 +2484,17 @@ void RdbLoader::FlushShardAsync(ShardId sid) {
     return;
 
   auto cb = [indx = this->cur_db_index_, this, ib = std::move(out_buf)] {
+    auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
+
     // Before we start loading, increment LoadInProgress.
     // This is required because FlushShardAsync dispatches to multiple shards, and those shards
     // might have not yet have their state (load in progress) incremented.
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().IncrLoadInProgress();
+    db_slice.IncrLoadInProgress();
     this->LoadItemsBuffer(indx, ib);
-    namespaces->GetDefaultNamespace().GetCurrentDbSlice().DecrLoadInProgress();
+    db_slice.DecrLoadInProgress();
 
     // Block, if tiered storage is active, but can't keep up
-    while (EngineShard::tlocal()->ShouldThrottleForTiering()) {
+    while (db_slice.shard_owner()->ShouldThrottleForTiering()) {
       this->blocked_shards_.fetch_add(1, memory_order_relaxed);  // stop adding items to shard queue
       ThisFiber::SleepFor(100us);
       this->blocked_shards_.fetch_sub(1, memory_order_relaxed);
@@ -2557,6 +2525,85 @@ void RdbLoaderBase::CopyStreamId(const StreamID& src, struct streamID* dest) {
   dest->seq = src.seq;
 }
 
+void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice) {
+  PrimeValue pv;
+  PrimeValue* pv_ptr = &pv;
+  DbIndex db_ind = db_cntx.db_index;
+
+  auto error_msg = [](const auto* item, auto db_ind) {
+    return absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
+                        item->val.rdb_type);
+  };
+
+  // If we're appending the item to an existing key, first load the
+  // object.
+  if (item->load_config.append) {
+    auto res = db_slice->FindMutable(db_cntx, item->key);
+    if (!IsValid(res.it)) {
+      // If the item has expired we may not find the key. Note if the key
+      // is found, but expired since we started loading, we still append to
+      // avoid an inconsistent state where only part of the key is loaded.
+      if (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms) {
+        LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
+      }
+      return;
+    }
+    pv_ptr = &res.it->second;
+  }
+
+  if (ec_ = FromOpaque(item->val, item->load_config, pv_ptr); ec_) {
+    if ((*ec_).value() == errc::empty_key) {
+      auto error = error_msg(item, db_ind);
+      if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
+        LOG(WARNING) << error;
+      } else {
+        LOG(ERROR) << error;
+      }
+      return;
+    }
+    LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
+    stop_early_ = true;
+    return;
+  }
+
+  if (item->load_config.append) {
+    return;
+  }
+
+  // We need this extra check because we don't return empty_key
+  if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
+    LOG(WARNING) << error_msg(item, db_ind);
+    return;
+  }
+
+  if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
+    VLOG(2) << "Expire key on load: " << item->key;
+    return;
+  }
+
+  auto op_res = db_slice->AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
+  if (!op_res) {
+    LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
+    ec_ = RdbError(errc::out_of_memory);
+    stop_early_ = true;
+    return;
+  }
+
+  auto& res = *op_res;
+  res.it->first.SetSticky(item->is_sticky);
+  if (item->has_mc_flags) {
+    res.it->second.SetFlag(true);
+    db_slice->SetMCFlag(db_cntx.db_index, res.it->first.AsRef(), item->mc_flags);
+  }
+
+  if (!override_existing_keys_ && !res.is_new) {
+    LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
+  }
+
+  if (auto* ts = db_slice->shard_owner()->tiered_storage(); ts)
+    ts->TryStash(db_cntx.db_index, item->key, &res.it->second);
+}
+
 void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
   EngineShard* es = EngineShard::tlocal();
   DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_ind, GetCurrentTimeMs()};
@@ -2564,80 +2611,17 @@ void RdbLoader::LoadItemsBuffer(DbIndex db_ind, const ItemsBuf& ib) {
 
   DCHECK(!db_slice.IsCacheMode());
 
-  auto error_msg = [](const auto* item, auto db_ind) {
-    return absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
-                        item->val.rdb_type);
-  };
+  bool dry_run = absl::GetFlag(FLAGS_rdb_load_dry_run);
 
   for (const auto* item : ib) {
-    PrimeValue pv;
-    PrimeValue* pv_ptr = &pv;
-
-    // If we're appending the item to an existing key, first load the
-    // object.
-    if (item->load_config.append) {
-      auto res = db_slice.FindMutable(db_cntx, item->key);
-      if (!IsValid(res.it)) {
-        // If the item has expired we may not find the key. Note if the key
-        // is found, but expired since we started loading, we still append to
-        // avoid an inconsistent state where only part of the key is loaded.
-        if (item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms) {
-          LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
-        }
-        continue;
-      }
-      pv_ptr = &res.it->second;
-    }
-
-    if (ec_ = FromOpaque(item->val, item->load_config, pv_ptr); ec_) {
-      if ((*ec_).value() == errc::empty_key) {
-        auto error = error_msg(item, db_ind);
-        if (RdbTypeAllowedEmpty(item->val.rdb_type)) {
-          LOG(WARNING) << error;
-        } else {
-          LOG(ERROR) << error;
-        }
-        continue;
-      }
-      LOG(ERROR) << "Could not load value for key '" << item->key << "' in DB " << db_ind;
-      stop_early_ = true;
-      break;
-    }
-    if (item->load_config.append) {
-      continue;
-    }
-    // We need this extra check because we don't return empty_key
-    if (!pv.TagAllowsEmptyValue() && pv.Size() == 0) {
-      LOG(WARNING) << error_msg(item, db_ind);
+    if (dry_run) {
       continue;
     }
 
-    if (item->expire_ms > 0 && db_cntx.time_now_ms >= item->expire_ms) {
-      VLOG(2) << "Expire key on load: " << item->key;
-      continue;
+    CreateObjectOnShard(db_cntx, item, &db_slice);
+    if (stop_early_) {
+      return;
     }
-
-    auto op_res = db_slice.AddOrUpdate(db_cntx, item->key, std::move(pv), item->expire_ms);
-    if (!op_res) {
-      LOG(ERROR) << "OOM failed to add key '" << item->key << "' in DB " << db_ind;
-      ec_ = RdbError(errc::out_of_memory);
-      stop_early_ = true;
-      break;
-    }
-
-    auto& res = *op_res;
-    res.it->first.SetSticky(item->is_sticky);
-    if (item->has_mc_flags) {
-      res.it->second.SetFlag(true);
-      db_slice.SetMCFlag(db_cntx.db_index, res.it->first.AsRef(), item->mc_flags);
-    }
-
-    if (!override_existing_keys_ && !res.is_new) {
-      LOG(WARNING) << "RDB has duplicated key '" << item->key << "' in DB " << db_ind;
-    }
-
-    if (auto* ts = es->tiered_storage(); ts)
-      ts->TryStash(db_cntx.db_index, item->key, &res.it->second);
   }
 
   for (auto* item : ib) {
@@ -2660,6 +2644,8 @@ void RdbLoader::ResizeDb(size_t key_num, size_t expire_num) {
 // RDB_TYPE_SET_WITH_EXPIRY support partial reads).
 error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   std::string key;
+  int64_t start = absl::GetCurrentTimeNanos();
+
   SET_OR_RETURN(ReadKey(), key);
 
   bool streamed = false;
@@ -2684,6 +2670,7 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     // If the key can be discarded, we must still continue to read the
     // object from the RDB so we can read the next key.
     if (ShouldDiscardKey(key, settings)) {
+      pending_read_.reserve = 0;
       continue;
     }
 
@@ -2704,21 +2691,31 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     item->is_sticky = settings->is_sticky;
     item->has_mc_flags = settings->has_mc_flags;
     item->mc_flags = settings->mc_flags;
-
-    ShardId sid = Shard(item->key, shard_set->size());
     item->expire_ms = settings->expiretime;
 
-    auto& out_buf = shard_buf_[sid];
-
-    out_buf.emplace_back(std::move(item));
     std::move(cleanup).Cancel();
+    ShardId sid = Shard(item->key, shard_set->size());
+    EngineShard* es = EngineShard::tlocal();
 
-    constexpr size_t kBufSize = 64;
-    if (out_buf.size() >= kBufSize) {
-      // Despite being async, this function can block if the shard queue is full.
-      FlushShardAsync(sid);
+    if (es && es->shard_id() == sid) {
+      DbContext db_cntx{&namespaces->GetDefaultNamespace(), cur_db_index_, GetCurrentTimeMs()};
+      CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
+      item_queue_.Push(item);
+    } else {
+      auto& out_buf = shard_buf_[sid];
+
+      out_buf.emplace_back(std::move(item));
+
+      constexpr size_t kBufSize = 64;
+      if (out_buf.size() >= kBufSize) {
+        // Despite being async, this function can block if the shard queue is full.
+        FlushShardAsync(sid);
+      }
     }
   } while (pending_read_.remaining > 0);
+
+  int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
+  LOG_IF(INFO, delta_ms > 1000) << "Took " << delta_ms << " ms to load rdb_type " << type;
 
   return kOk;
 }
@@ -2740,7 +2737,7 @@ bool RdbLoader::ShouldDiscardKey(std::string_view key, ObjSettings* settings) co
    * load all the keys as they are, since the log of operations later
    * assume to work in an exact keyspace state. */
   if (ServerState::tlocal()->is_master && settings->has_expired) {
-    VLOG(2) << "Expire key on read: " << key;
+    VLOG(3) << "Expire key on read: " << key;
     return true;
   }
 

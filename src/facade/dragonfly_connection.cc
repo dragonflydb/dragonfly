@@ -79,6 +79,10 @@ ABSL_FLAG(uint32_t, max_multi_bulk_len, 1u << 16,
           "Maximum multi-bulk (array) length that is "
           "allowed to be accepted when parsing RESP protocol");
 
+ABSL_FLAG(uint64_t, max_bulk_len, 2u << 30,
+          "Maximum bulk length that is "
+          "allowed to be accepted when parsing RESP protocol");
+
 ABSL_FLAG(size_t, max_client_iobuf_len, 1u << 16,
           "Maximum io buffer length that is used to read client requests.");
 
@@ -494,6 +498,17 @@ void Connection::AsyncOperations::operator()(const AclUpdateMessage& msg) {
 
 void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
   RedisReplyBuilder* rbuilder = (RedisReplyBuilder*)builder;
+
+  if (pub_msg.should_unsubscribe) {
+    rbuilder->StartCollection(3, RedisReplyBuilder::CollectionType::PUSH);
+    rbuilder->SendBulkString("unsubscribe");
+    rbuilder->SendBulkString(pub_msg.channel);
+    rbuilder->SendLong(0);
+    auto* cntx = self->cntx();
+    cntx->Unsubscribe(pub_msg.channel);
+    return;
+  }
+
   unsigned i = 0;
   array<string_view, 4> arr;
   if (pub_msg.pattern.empty()) {
@@ -502,8 +517,10 @@ void Connection::AsyncOperations::operator()(const PubMessage& pub_msg) {
     arr[i++] = "pmessage";
     arr[i++] = pub_msg.pattern;
   }
+
   arr[i++] = pub_msg.channel;
   arr[i++] = pub_msg.message;
+
   rbuilder->SendBulkStrArr(absl::Span<string_view>{arr.data(), i},
                            RedisReplyBuilder::CollectionType::PUSH);
 }
@@ -600,7 +617,9 @@ Connection::Connection(Protocol protocol, util::HttpListenerBase* http_listener,
 
   switch (protocol) {
     case Protocol::REDIS:
-      redis_parser_.reset(new RedisParser(GetFlag(FLAGS_max_multi_bulk_len)));
+      redis_parser_.reset(new RedisParser(RedisParser::Mode::SERVER,
+                                          GetFlag(FLAGS_max_multi_bulk_len),
+                                          GetFlag(FLAGS_max_bulk_len)));
       break;
     case Protocol::MEMCACHE:
       memcache_parser_.reset(new MemcacheParser);

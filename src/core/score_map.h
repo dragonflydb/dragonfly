@@ -108,9 +108,8 @@ class ScoreMap : public DenseSet {
   /// @return sds
   std::optional<double> Find(std::string_view key);
 
-  // returns the internal object if found, otherwise nullptr.
-  void* FindObj(sds ele) {
-    return FindInternal(ele, Hash(ele, 0), 0);
+  void* FindObj(std::string_view sv) {
+    return FindInternal(&sv, Hash(&sv, 1), 1);
   }
 
   iterator begin() {
