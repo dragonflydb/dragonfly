@@ -1156,6 +1156,7 @@ void Service::DispatchCommand(ArgSlice args, SinkReplyBuilder* builder,
     bool is_write = cid->IsWriteOnly();
     is_write |= cid->name() == "PUBLISH" || cid->name() == "EVAL" || cid->name() == "EVALSHA";
     is_write |= cid->name() == "EXEC" && dfly_cntx->conn_state.exec_info.is_write;
+
     cntx->paused = true;
     etl.AwaitPauseState(is_write);
     cntx->paused = false;
