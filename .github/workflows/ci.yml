@@ -32,7 +32,7 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Run pre-commit checks
-        run:
+        run: |
           source venv/bin/activate
           pre-commit run --show-diff-on-failure --color=always --from-ref HEAD^ --to-ref HEAD
         shell: bash

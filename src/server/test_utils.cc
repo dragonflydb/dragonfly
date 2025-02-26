@@ -265,7 +265,7 @@ void BaseFamilyTest::ResetService() {
       LOG(ERROR) << "Deadlock detected!!!!";
       absl::SetFlag(&FLAGS_alsologtostderr, true);
       fb2::Mutex m;
-      shard_set->pool()->AwaitFiberOnAll([&m](unsigned index, ProactorBase* base) {
+      shard_set->pool()->AwaitFiberOnAll([&m, this](unsigned index, ProactorBase* base) {
         ThisFiber::SetName("Watchdog");
         std::unique_lock lk(m);
         LOG(ERROR) << "Proactor " << index << ":\n";
@@ -292,6 +292,14 @@ void BaseFamilyTest::ResetService() {
                                      .GetDBTable(0)
                                      ->trans_locks) {
             LOG(ERROR) << "Key " << k_v.first << " " << k_v.second;
+          }
+
+          LOG(ERROR) << "Transaction for shard " << es->shard_id();
+          for (auto& conn : connections_) {
+            auto* context = conn.second->cmd_cntx();
+            if (context->transaction && context->transaction->IsActive(es->shard_id())) {
+              LOG(ERROR) << context->transaction->DebugId(es->shard_id());
+            }
           }
         }
       });
