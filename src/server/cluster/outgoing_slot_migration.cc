@@ -221,11 +221,6 @@ void OutgoingMigration::SyncFb() {
 
     if (!CheckRespIsSimpleReply("OK")) {
       cntx_.ReportError(GenericError(LastResponseArgs().front().GetString()));
-      if (CheckRespIsSimpleReply(kUnknownMigration)) {
-        LOG(WARNING) << "Target node does not recognize migration; retrying";
-      } else {
-        LOG(WARNING) << "Unable to initialize migration";
-      }
       continue;
     }
 
