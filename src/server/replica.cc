@@ -121,7 +121,7 @@ GenericError Replica::Start() {
   VLOG(1) << "Greeting";
   state_mask_.store(R_ENABLED | R_TCP_CONNECTED);
   ec = Greet();
-  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not greet master "));
+  RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
 
   return {};
 }

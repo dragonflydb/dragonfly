@@ -339,10 +339,6 @@ std::string GenericError::Format() const {
     return absl::StrCat(ec_.message(), ": ", details_);
 }
 
-std::string GenericError::message() const {
-  return Format();
-}
-
 ExecutionState::~ExecutionState() {
   DCHECK(!err_handler_fb_.IsJoinable());
   err_handler_fb_.JoinIfNeeded();

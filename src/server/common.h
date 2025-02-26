@@ -220,8 +220,6 @@ class GenericError {
   operator bool() const;
 
   std::string Format() const;  // Get string representation of error.
-  // Same as format above, used to mimic std::error_code interface
-  std::string message() const;
 
  private:
   std::error_code ec_;
