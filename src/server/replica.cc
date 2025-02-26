@@ -86,19 +86,18 @@ Replica::~Replica() {
 
 static const char kConnErr[] = "could not connect to master: ";
 
-error_code Replica::Start(facade::SinkReplyBuilder* builder) {
+GenericError Replica::Start() {
   VLOG(1) << "Starting replication";
   ProactorBase* mythread = ProactorBase::me();
   CHECK(mythread);
 
-  auto check_connection_error = [this, builder](error_code ec, const char* msg) -> error_code {
+  auto check_connection_error = [this](error_code ec, const char* msg) -> GenericError {
     if (!cntx_.IsRunning()) {
-      builder->SendError("replication cancelled");
-      return std::make_error_code(errc::operation_canceled);
+      return {std::make_error_code(errc::operation_canceled), "replication cancelled"};
     }
     if (ec) {
-      builder->SendError(absl::StrCat(msg, ec.message()));
       cntx_.ReportCancelError();
+      return {{}, absl::StrCat(msg, ec.message())};
     }
     return ec;
   };
@@ -127,9 +126,8 @@ error_code Replica::Start(facade::SinkReplyBuilder* builder) {
   return {};
 }
 
-void Replica::StartMainReplicationFiber(facade::SinkReplyBuilder* builder) {
+void Replica::StartMainReplicationFiber() {
   sync_fb_ = fb2::Fiber("main_replication", &Replica::MainReplicationFb, this);
-  builder->SendOk();
 }
 
 void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
@@ -137,8 +135,6 @@ void Replica::EnableReplication(facade::SinkReplyBuilder* builder) {
 
   state_mask_.store(R_ENABLED);                             // set replica state to enabled
   sync_fb_ = MakeFiber(&Replica::MainReplicationFb, this);  // call replication fiber
-
-  builder->SendOk();
 }
 
 void Replica::Stop() {

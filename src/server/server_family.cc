@@ -2747,11 +2747,13 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
 
   auto add_replica = make_unique<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                           master_replid(), replicaof_args->slot_range);
-  error_code ec = add_replica->Start(cmd_cntx.rb);
-  if (!ec) {
-    add_replica->StartMainReplicationFiber(cmd_cntx.rb);
-    cluster_replicas_.push_back(std::move(add_replica));
+  GenericError ec = add_replica->Start();
+  if (ec) {
+    cmd_cntx.rb->SendError(ec.Format());
   }
+  add_replica->StartMainReplicationFiber();
+  cmd_cntx.rb->SendOk();
+  cluster_replicas_.push_back(std::move(add_replica));
 }
 
 void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -2818,10 +2820,10 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // We proceed connecting below without the lock to allow interrupting the replica immediately.
   // From this point and onward, it should be highly responsive.
 
-  error_code ec{};
+  GenericError ec{};
   switch (on_err) {
     case ActionOnConnectionFail::kReturnOnError:
-      ec = new_replica->Start(builder);
+      ec = new_replica->Start();
       break;
     case ActionOnConnectionFail::kContinueReplication:
       new_replica->EnableReplication(builder);
@@ -2842,11 +2844,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       SetMasterFlagOnAllThreads(true);
       replica_.reset();
     }
-    // SendError if we got cancelled and Start() above succeeded. Otherwise, if ec,
-    // Start() will call SendError().
-    if (!ec) {
-      builder->SendError("replication cancelled");
-    }
+    builder->SendError(ec ? ec.Format() : "replication cancelled");
     return;
   }
   // Successfully connected now we flush
@@ -2854,8 +2852,9 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // to flush anything.
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
     Drakarys(tx, DbSlice::kDbAll);
-    new_replica->StartMainReplicationFiber(builder);
+    new_replica->StartMainReplicationFiber();
   }
+  builder->SendOk();
 }
 
 void ServerFamily::StopAllClusterReplicas() {
