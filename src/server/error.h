@@ -22,7 +22,7 @@ using facade::kWrongTypeErr;
 
 #define RETURN_ON_ERR_T(T, x)                                          \
   do {                                                                 \
-    std::error_code __ec = (x);                                        \
+    T __ec = (x);                                                      \
     if (__ec) {                                                        \
       DLOG(ERROR) << "Error while calling " #x ": " << __ec.message(); \
       return (T)(__ec);                                                \
@@ -30,6 +30,8 @@ using facade::kWrongTypeErr;
   } while (0)
 
 #define RETURN_ON_ERR(x) RETURN_ON_ERR_T(std::error_code, x)
+
+#define RETURN_ON_GENERIC_ERR(x) RETURN_ON_ERR_T(GenericError, x)
 
 #endif  // RETURN_ON_ERR
 

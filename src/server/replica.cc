@@ -97,7 +97,7 @@ GenericError Replica::Start() {
     }
     if (ec) {
       cntx_.ReportCancelError();
-      return {{}, absl::StrCat(msg, ec.message())};
+      return {absl::StrCat(msg, ec.message())};
     }
     return ec;
   };
@@ -105,23 +105,23 @@ GenericError Replica::Start() {
   // 0. Set basic error handler that is reponsible for cleaning up on errors.
   // Can return an error only if replication was cancelled immediately.
   auto err = cntx_.SwitchErrorHandler([this](const auto& ge) { this->DefaultErrorHandler(ge); });
-  RETURN_ON_ERR(check_connection_error(err, "replication cancelled"));
+  RETURN_ON_GENERIC_ERR(check_connection_error(err, "replication cancelled"));
 
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
   error_code ec = ResolveHostDns();
-  RETURN_ON_ERR(check_connection_error(ec, "could not resolve master dns"));
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not resolve master dns"));
 
   // 2. Connect socket.
   VLOG(1) << "Connecting to master";
   ec = ConnectAndAuth(absl::GetFlag(FLAGS_master_connect_timeout_ms) * 1ms, &cntx_);
-  RETURN_ON_ERR(check_connection_error(ec, kConnErr));
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, kConnErr));
 
   // 3. Greet.
   VLOG(1) << "Greeting";
   state_mask_.store(R_ENABLED | R_TCP_CONNECTED);
   ec = Greet();
-  RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not greet master "));
 
   return {};
 }
