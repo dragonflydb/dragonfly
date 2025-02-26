@@ -53,10 +53,16 @@ class OutgoingMigration : private ProtocolClient {
     return migration_info_;
   }
 
-  void ReportError(dfly::GenericError err) ABSL_LOCKS_EXCLUDED(error_mu_) {
-    error_num_.fetch_add(1, std::memory_order_relaxed);
-    util::fb2::LockGuard lk(error_mu_);
-    last_error_ = std::move(err);
+  void ResetError() ABSL_LOCKS_EXCLUDED(error_mu_) {
+    if (cntx_.IsError()) {
+      errors_count_.fetch_add(1, std::memory_order_relaxed);
+      auto err = cntx_.GetError();
+      {
+        util::fb2::LockGuard lk(error_mu_);
+        last_error_ = std::move(err);
+      }
+      cntx_.Reset(nullptr);
+    }
   }
 
   std::string GetErrorStr() const ABSL_LOCKS_EXCLUDED(error_mu_) {
@@ -64,8 +70,8 @@ class OutgoingMigration : private ProtocolClient {
     return last_error_.Format();
   }
 
-  size_t GetErrorsNum() const {
-    return error_num_.load(std::memory_order_relaxed);
+  size_t GetErrorsCount() const {
+    return errors_count_.load(std::memory_order_relaxed);
   }
 
   size_t GetKeyCount() const ABSL_LOCKS_EXCLUDED(state_mu_);
@@ -95,7 +101,7 @@ class OutgoingMigration : private ProtocolClient {
   ClusterFamily* cf_;
   mutable util::fb2::Mutex error_mu_;
   dfly::GenericError last_error_ ABSL_GUARDED_BY(error_mu_);
-  std::atomic<size_t> error_num_ = 0;
+  std::atomic<size_t> errors_count_ = 0;
 
   util::fb2::Fiber main_sync_fb_;
 

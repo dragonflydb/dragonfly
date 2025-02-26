@@ -47,7 +47,7 @@ class ClusterFamily {
   // Only for debug purpose. Pause/Resume all incoming migrations
   void PauseAllIncomingMigrations(bool pause) ABSL_LOCKS_EXCLUDED(migration_mu_);
 
-  size_t MigrationsErrorNum() const ABSL_LOCKS_EXCLUDED(migration_mu_);
+  size_t MigrationsErrorsCount() const ABSL_LOCKS_EXCLUDED(migration_mu_);
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;

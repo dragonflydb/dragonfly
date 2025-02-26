@@ -1038,17 +1038,17 @@ void ClusterFamily::PauseAllIncomingMigrations(bool pause) {
   }
 }
 
-size_t ClusterFamily::MigrationsErrorNum() const {
+size_t ClusterFamily::MigrationsErrorsCount() const {
   util::fb2::LockGuard lk(migration_mu_);
 
   size_t error_num = 0;
 
   for (const auto& mj : incoming_migrations_jobs_) {
-    error_num += mj->GetErrorsNum();
+    error_num += mj->GetErrorsCount();
   }
 
   for (const auto& mj : outgoing_migration_jobs_) {
-    error_num += mj->GetErrorsNum();
+    error_num += mj->GetErrorsCount();
   }
 
   return error_num;

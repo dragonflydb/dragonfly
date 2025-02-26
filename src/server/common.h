@@ -247,6 +247,8 @@ class ExecutionState {
 
   ~ExecutionState();
 
+  // TODO Remove. This function was created to reduce size of the code that should be refactored
+  // Cancel() method should be used instead of this function
   // Report a cancel error the context by submitting an `errc::operation_canceled` error.
   // If the state is CANCELLED does nothing
   void ReportCancelError();

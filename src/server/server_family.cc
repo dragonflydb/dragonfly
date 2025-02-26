@@ -2210,7 +2210,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns) const {
     result.loading_stats = loading_stats_;
   }
 
-  result.migration_errors_total = service_.cluster_family().MigrationsErrorNum();
+  result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
 
   // Update peak stats. We rely on the fact that GetMetrics is called frequently enough to
   // update peak_stats_ from it.
@@ -2653,7 +2653,7 @@ void ServerFamily::Info(CmdArgList args, const CommandContext& cmd_cntx) {
 
   if (should_enter("CLUSTER")) {
     append("cluster_enabled", IsClusterEnabledOrEmulated());
-    append("migration_errors_total", service_.cluster_family().MigrationsErrorNum());
+    append("migration_errors_total", service_.cluster_family().MigrationsErrorsCount());
   }
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx.rb);
   rb->SendVerbatimString(info);

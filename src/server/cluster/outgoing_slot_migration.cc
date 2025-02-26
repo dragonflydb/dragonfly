@@ -66,9 +66,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     }
 
     if (!CheckRespIsSimpleReply("OK")) {
-      LOG(WARNING) << "Incorrect response for FLOW cmd: "
-                   << ToSV(LastResponseArgs().front().GetBuf());
-      cntx_.ReportError("Incorrect response for FLOW cmd");
+      cntx_.ReportError(absl::StrCat("Incorrect response for FLOW cmd: ",
+                                     ToSV(LastResponseArgs().front().GetBuf())));
       return;
     }
   }
@@ -195,10 +194,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     if (cntx_.IsError()) {
-      auto err = cntx_.GetError();
-      LOG(ERROR) << err.Format();
-      ReportError(std::move(err));
-      cntx_.Reset(nullptr);
+      ResetError();
       ThisFiber::SleepFor(500ms);  // wait some time before next retry
     }
 
