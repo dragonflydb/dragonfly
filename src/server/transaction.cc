@@ -556,6 +556,7 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
     absl::StrAppend(&res, ":", multi_->cmd_seq_num);
   }
   absl::StrAppend(&res, " {id=", trans_id(this));
+  absl::StrAppend(&res, " {cb_ptr=", absl::StrFormat("%p", static_cast<const void*>(cb_ptr_)));
   if (sid) {
     absl::StrAppend(&res, ",mask[", *sid, "]=", int(shard_data_[SidToId(*sid)].local_mask),
                     ",is_armed=", DEBUG_IsArmedInShard(*sid),
@@ -762,7 +763,11 @@ void Transaction::ScheduleInternal() {
 
     ScheduleContext schedule_ctx{this, optimistic_exec};
 
-    if (unique_shard_cnt_ == 1) {
+    // TODO: this optimization is disabled due to a issue #4648 revealing this code can
+    // lead to transaction not being scheduled.
+    // To reproduce the bug remove the false in the condition and run
+    // ./list_family_test --gtest_filter=*AwakeMulti on alpine machine
+    if (false && unique_shard_cnt_ == 1) {
       // Single shard optimization. Note: we could apply the same optimization
       // to multi-shard transactions as well by creating a vector of ScheduleContext.
       schedule_queues[unique_shard_id_].queue.Push(&schedule_ctx);
