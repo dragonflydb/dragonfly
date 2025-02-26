@@ -763,6 +763,10 @@ void Transaction::ScheduleInternal() {
 
     ScheduleContext schedule_ctx{this, optimistic_exec};
 
+    // TODO: this optimization is disabled due to a issue #4648 revealing this code can
+    // lead to transaction not being scheduled.
+    // To reproduce the bug remove the false in the condition and run
+    // ./list_family_test --gtest_filter=*AwakeMulti on alpine machine
     if (false && unique_shard_cnt_ == 1) {
       // Single shard optimization. Note: we could apply the same optimization
       // to multi-shard transactions as well by creating a vector of ScheduleContext.
