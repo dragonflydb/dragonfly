@@ -624,8 +624,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   const size_t limit = 10000;
   do {
     if (buckets_iterated >= limit) {
-      buckets_iterated = 0;
-      util::ThisFiber::Yield();
+      break;
     }
     {
       // Disable flush journal changes to prevent preemtion in traverse.
