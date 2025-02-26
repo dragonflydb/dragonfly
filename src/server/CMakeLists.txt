@@ -18,7 +18,7 @@ if ("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
       tiering/external_alloc.cc)
 
     add_executable(dfly_bench dfly_bench.cc)
-    cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random)
+    cxx_link(dfly_bench dfly_parser_lib fibers2 absl::random_random redis_lib)
     cxx_test(tiering/disk_storage_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/op_manager_test dfly_test_lib LABELS DFLY)
     cxx_test(tiering/small_bins_test dfly_test_lib LABELS DFLY)
