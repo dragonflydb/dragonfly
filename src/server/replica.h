@@ -58,8 +58,8 @@ class Replica : ProtocolClient {
   // Spawns a fiber that runs until link with master is broken or the replication is stopped.
   // Returns true if initial link with master has been established or
   // false if it has failed.
-  std::error_code Start(facade::SinkReplyBuilder* builder);
-  void StartMainReplicationFiber(facade::SinkReplyBuilder* builder);
+  GenericError Start();
+  void StartMainReplicationFiber();
 
   // Sets the server state to have replication enabled.
   // It is like Start(), but does not attempt to establish
@@ -71,6 +71,10 @@ class Replica : ProtocolClient {
   void Pause(bool pause);
 
   std::error_code TakeOver(std::string_view timeout, bool save_flag);
+
+  bool IsContextCancelled() const {
+    return !cntx_.IsRunning();
+  }
 
  private: /* Main standalone mode functions */
   // Coordinate state transitions. Spawned by start.

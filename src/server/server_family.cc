@@ -2747,11 +2747,14 @@ void ServerFamily::AddReplicaOf(CmdArgList args, const CommandContext& cmd_cntx)
 
   auto add_replica = make_unique<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                           master_replid(), replicaof_args->slot_range);
-  error_code ec = add_replica->Start(cmd_cntx.rb);
-  if (!ec) {
-    add_replica->StartMainReplicationFiber(cmd_cntx.rb);
-    cluster_replicas_.push_back(std::move(add_replica));
+  GenericError ec = add_replica->Start();
+  if (ec) {
+    cmd_cntx.rb->SendError(ec.Format());
+    return;
   }
+  add_replica->StartMainReplicationFiber();
+  cluster_replicas_.push_back(std::move(add_replica));
+  cmd_cntx.rb->SendOk();
 }
 
 void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReplyBuilder* builder,
@@ -2805,7 +2808,7 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
       return;
     }
 
-    // Create a new replica and assing it
+    // Create a new replica and assign it
     new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                        master_replid(), replicaof_args->slot_range);
 
@@ -2818,10 +2821,10 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // We proceed connecting below without the lock to allow interrupting the replica immediately.
   // From this point and onward, it should be highly responsive.
 
-  error_code ec{};
+  GenericError ec{};
   switch (on_err) {
     case ActionOnConnectionFail::kReturnOnError:
-      ec = new_replica->Start(builder);
+      ec = new_replica->Start();
       break;
     case ActionOnConnectionFail::kContinueReplication:
       new_replica->EnableReplication(builder);
@@ -2831,22 +2834,28 @@ void ServerFamily::ReplicaOfInternal(CmdArgList args, Transaction* tx, SinkReply
   // If the replication attempt failed, clean up global state. The replica should have stopped
   // internally.
   util::fb2::LockGuard lk(replicaof_mu_);  // Only one REPLICAOF command can run at a time
-  if (ec && replica_ == new_replica) {
-    service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-    SetMasterFlagOnAllThreads(true);
-    replica_.reset();
+  // If there was an error above during Start we must not start the main replication fiber.
+  // However, it could be the case that Start() above connected succefully and by the time
+  // we acquire the lock, the context got cancelled because another ReplicaOf command
+  // executed and acquired the replicaof_mu_ before us.
+  const bool cancelled = new_replica->IsContextCancelled();
+  if (ec || cancelled) {
+    if (replica_ == new_replica) {
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+      SetMasterFlagOnAllThreads(true);
+      replica_.reset();
+    }
+    builder->SendError(ec ? ec.Format() : "replication cancelled");
     return;
   }
   // Successfully connected now we flush
   // If we are called by "Replicate", tx will be null but we do not need
   // to flush anything.
-  if (tx) {
-    Drakarys(tx, DbSlice::kDbAll);
-  }
-
   if (on_err == ActionOnConnectionFail::kReturnOnError) {
-    replica_->StartMainReplicationFiber(builder);
+    Drakarys(tx, DbSlice::kDbAll);
+    new_replica->StartMainReplicationFiber();
   }
+  builder->SendOk();
 }
 
 void ServerFamily::StopAllClusterReplicas() {
