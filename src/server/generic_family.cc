@@ -627,11 +627,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   do {
     cur = prime_table->Traverse(
         cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
-    ++buckets_iterated;
-    if (buckets_iterated >= limit) {
-      break;
-    }
-  } while (cur && cnt < scan_opts.limit);
+  } while (cur && cnt < scan_opts.limit && buckets_iterated++ < limit);
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.value();
   *cursor = cur.value();
