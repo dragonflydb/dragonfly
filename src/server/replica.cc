@@ -93,7 +93,7 @@ GenericError Replica::Start() {
 
   auto check_connection_error = [this](error_code ec, const char* msg) -> GenericError {
     if (!cntx_.IsRunning()) {
-      return {std::make_error_code(errc::operation_canceled), "replication cancelled"};
+      return {"replication cancelled"};
     }
     if (ec) {
       cntx_.ReportCancelError();
